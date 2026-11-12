@@ -627,6 +627,44 @@ pub async fn superagent_source_link_thread(
     link_thread(&store, &source_id, &ticket_id, &subject_key)
 }
 
+/// Authenticated Observe receipts associated with an explicit, same-Team
+/// source-thread link. This is context metadata only: no work admission,
+/// policy changes, private GitHub content or inferred source authority.
+fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<EventDecisionRecord>> {
+    if !(1..=100).contains(&limit) {
+        return Err("Linked source decision page size must be between 1 and 100.".into());
+    }
+    let ticket = super::get_ticket(store, ticket_id)?;
+    let mut stmt = store.db.prepare(
+        "SELECT d.source_id,d.delivery_id,d.actor,d.event_kind,d.subject_key,
+                d.sequence,d.decision,d.policy_revision,d.at
+         FROM sa_source_thread_links l
+         JOIN sa_event_sources s ON s.id=l.source_id
+         JOIN sa_event_decisions d ON d.source_id=l.source_id AND d.subject_key=l.subject_key
+         WHERE l.ticket_id=?1 AND s.orchestration_id=?2
+           AND d.decision='observed_permitted'
+         ORDER BY d.sequence DESC,d.delivery_id DESC LIMIT ?3",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![ticket_id, ticket.orchestration_id, limit], |row| {
+        Ok(EventDecisionRecord {
+            source_id:row.get(0)?, delivery_id:row.get(1)?, actor:row.get(2)?,
+            event_kind:row.get(3)?, subject_key:row.get(4)?, sequence:row.get(5)?,
+            decision:row.get(6)?, policy_revision:row.get(7)?, at:row.get(8)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn superagent_source_thread_activity(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    ticket_id: String, limit: i64,
+) -> Result<Vec<EventDecisionRecord>> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    linked_decisions(&store, &ticket_id, limit)
+}
+
 #[tauri::command]
 pub async fn superagent_source_thread_links(
     window: tauri::WebviewWindow, state: State<'_, AppState>, ticket_id: String,
@@ -932,6 +970,45 @@ mod tests {
         assert!(link_thread(&store,&src.id,"two","pull:52").is_err());
         let count:i64=store.db.query_row("SELECT COUNT(*) FROM sa_source_thread_links",[],|row|row.get(0)).unwrap();
         assert_eq!(count,1);
+    }
+
+    #[test]
+    fn linked_observe_receipts_are_ticket_scoped_deduplicated_and_restart_durable() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "ticket-one", "orch");
+        insert_manual_ticket(&store, "ticket-two", "orch");
+        let off = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        // Before a user authorizes a specific thread link, the native timeline
+        // must not expose a source receipt through any Ticket.
+        observe(&store, &event("linked-1", &on, 1)).unwrap();
+        assert!(linked_decisions(&store, "ticket-one", 50).unwrap().is_empty());
+        link_thread(&store, &on.id, "ticket-one", "issue:42").unwrap();
+        let rows = linked_decisions(&store, "ticket-one", 50).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].delivery_id, "linked-1");
+        assert_eq!(rows[0].subject_key, "issue:42");
+        assert_eq!(rows[0].decision, "observed_permitted");
+        assert!(linked_decisions(&store, "ticket-two", 50).unwrap().is_empty());
+        assert!(observe(&store, &event("linked-1", &on, 1)).unwrap().duplicate);
+        assert_eq!(linked_decisions(&store, "ticket-one", 50).unwrap().len(), 1);
+        let mut wrong_thread = event("different-thread", &on, 2);
+        wrong_thread.subject_key = "pull:42".into();
+        observe(&store, &wrong_thread).unwrap();
+        assert_eq!(linked_decisions(&store, "ticket-one", 50).unwrap().len(), 1);
+        for invalid in [0, 101, -1] {
+            assert!(linked_decisions(&store, "ticket-one", invalid).is_err());
+        }
+        assert!(linked_decisions(&store, "missing-ticket", 50).is_err());
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(linked_decisions(&reopened, "ticket-one", 50).unwrap()[0].delivery_id,
+                   "linked-1");
+        let count: i64 = reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 2, "Observing linked events must not admit a new demand");
     }
 
     #[test]

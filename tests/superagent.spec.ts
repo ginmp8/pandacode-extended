@@ -345,6 +345,11 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
       }] as never;
       if(command==='superagent_source_thread_links')return links.filter(
         link=>link.ticketId===args?.ticketId) as never;
+      if(command==='superagent_source_thread_activity')return [{
+        sourceId:'source-one',deliveryId:'verified-501',eventKind:'issues.opened',
+        subjectKey:'issue:42',decision:'observed_permitted',sequence:501,
+        policyRevision:1,at:Date.now()
+      }] as never;
       if(command==='superagent_source_link_thread'){
         if(args?.sourceId!=='source-one'||args.ticketId!=='ticket-one')throw Error('Wrong scope');
         if(links.some(link=>link.sourceId===args.sourceId&&link.subjectKey===args.subjectKey))
@@ -369,6 +374,10 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
   await host.getByRole('button',{name:'Link thread (context only)'}).click();
   await expect(host.locator('.sa-linked-threads')).toContainText('test/fixture / issue:42');
   await expect(host.locator('.sa-feedback[role="status"]')).toContainText('no task or authorization created');
+  await host.getByRole('button',{name:'Load linked source decisions'}).click();
+  const activity=host.getByRole('region',{name:'Observed linked GitHub activity'});
+  await expect(activity).toContainText('verified-501');
+  await expect(activity).toContainText('observed_permitted');
   await expect(host.getByText('Private fixture')).toBeVisible();
   await expect.poll(()=>page.evaluate(
     ()=>(window as unknown as {saDispatchCount:()=>number}).saDispatchCount())).toBe(0);

@@ -68,6 +68,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let roleRoster: TeamRoster | null = null;
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
+  let linkedDecisions: SourceDecision[] = [], linkedDecisionsLoaded = false;
   const safe = (value: unknown) => escape(String(value ?? ''));
   const current = () => presets.find(item => item.id === selected);
   const botName = (id: string) => bots.find(bot => bot.id === id)?.name ?? 'Missing bot';
@@ -150,6 +151,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         (threadLinks.map(link => '<li>' + safe(link.repository) + ' / ' +
           safe(link.subjectKey) + '</li>').join('') ||
           '<li>No threads linked.</li>') + '</ul>' +
+        '<section class="sa-linked-activity" role="region" aria-label="Observed linked GitHub activity">' +
+        '<h5>Observed linked GitHub activity</h5><p>Read-only, bounded native Observe receipts for explicitly linked threads. ' +
+        'Event text is not loaded and no additional work is inferred.</p>' +
+        '<button type="button" data-sa-load-linked-activity>Load linked source decisions</button>' +
+        (linkedDecisionsLoaded ? '<ol>' +
+          (linkedDecisions.map(entry => '<li>' + safe(activityTime(entry.at)) + ' · ' +
+            safe(entry.eventKind) + ' · ' + safe(entry.subjectKey) + ' · ' +
+            safe(entry.decision) + ' · Delivery ' + safe(entry.deliveryId) +
+            '</li>').join('') || '<li>No authenticated Observe decisions match linked threads.</li>') +
+          '</ol>' : '') + '</section>' +
         (sourcesLoaded && sources.length
           ? '<form data-sa-form="thread-link"><label>Event source<select name="sourceId" required>' +
             sources.map(src => '<option value="' + safe(src.id) + '">' +
@@ -397,6 +408,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (inspectedTicket === id) {
       ticketDetails = snapshot;
       threadLinks = links;
+      linkedDecisions = []; linkedDecisionsLoaded = false;
       // Keep the ticket row and its grant/history pinned to one native revision.
       const index = tickets.findIndex(ticket => ticket.id === id);
       if (index >= 0) tickets[index] = snapshot.ticket;
@@ -416,7 +428,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       bots = known; presets = configs;
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
-        inspectedTicket = ''; threadLinks = []; roleRoster = null;
+        inspectedTicket = ''; threadLinks = [];
+        linkedDecisions = []; linkedDecisionsLoaded = false; roleRoster = null;
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       }
       // A failed native read must not leave old ticket approval controls
@@ -533,6 +546,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         demandObjective = objective;
         preflightObjective = objective;
         preflightMode = coordinated ? 'coordinated' : 'direct';
+      });
+      return;
+    }
+    if (target.hasAttribute('data-sa-load-linked-activity')) {
+      const ticketId = inspectedTicket;
+      if (ticketId && ticketDetails) void work(async () => {
+        const receipts = await call<SourceDecision[]>('superagent_source_thread_activity',
+          {ticketId, limit:50});
+        if (inspectedTicket === ticketId) {
+          linkedDecisions = receipts; linkedDecisionsLoaded = true;
+        }
       });
       return;
     }

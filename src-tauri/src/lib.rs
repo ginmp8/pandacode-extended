@@ -4445,6 +4445,7 @@ pub fn run() {
                 superagent::events::superagent_source_poll_authenticated,
                 superagent::events::superagent_source_link_thread,
                 superagent::events::superagent_source_thread_links,
+                superagent::events::superagent_source_thread_activity,
                 superagent::superagent_list,
                 superagent::roster::superagent_roster,
                 superagent::roster::superagent_roster_update,

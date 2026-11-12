@@ -154,6 +154,11 @@ impl CouncilConfig {
                 return Err("Each Council criterion target must be between 1 and 10.".into());
             }
         }
+        if self.reviewers != 0 && self.reviewer_bot_ids.is_empty()
+            && self.criteria.iter().filter(|criterion| criterion.required).count() > self.reviewers
+        {
+            return Err("Required Council criteria exceed the explicitly fixed reviewer count.".into());
+        }
         if self.criteria.iter().filter(|criterion| criterion.required).count() > self.needed() {
             return Err("Required Council criteria exceed the available reviewer seats.".into());
         }
@@ -201,7 +206,13 @@ impl CouncilConfig {
         Ok(())
     }
     pub(super) fn needed(&self) -> usize {
-        if self.reviewer_bot_ids.is_empty() { self.reviewers.max(MIN_REVIEWERS) } else { self.reviewer_bot_ids.len() }
+        if self.reviewer_bot_ids.is_empty() {
+            // Auto admits enough independent native seats to cover every required
+            // user criterion, without relaxing an explicitly fixed reviewer count.
+            self.reviewers.max(self.criteria.iter().filter(|criterion| criterion.required).count()).max(MIN_REVIEWERS)
+        } else {
+            self.reviewer_bot_ids.len()
+        }
     }
 }
 
@@ -894,7 +905,7 @@ pub(super) fn lead_rules(team: &TeamSnapshot, routed: bool) -> String {
         format!("exactly {} selected configured bots", config.reviewer_bot_ids.len())
     } else {
         match config.reviewers {
-            0 => format!("at least {MIN_REVIEWERS}"),
+            0 => format!("at least {}", config.needed()),
             n => format!("exactly {n}"),
         }
     };

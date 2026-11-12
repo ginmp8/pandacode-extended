@@ -129,6 +129,38 @@ fn user_defined_criteria_reject_unreviewable_rosters() {
 }
 
 #[test]
+fn automatic_council_reserves_real_native_seats_for_every_required_criterion() {
+    let mut config = on(9.0, 3, 0);
+    config.criteria_source = council::CouncilCriteriaSource::User;
+    config.criteria = (0..3).map(|i| council::CouncilCriterion {
+        id: format!("required-{i}"), lens: format!("Requirement {i}"),
+        required: true, target: 9.4, evidence_required: false,
+    }).collect();
+    assert_eq!(config.needed(), 3);
+    assert!(config.validate().is_ok());
+
+    let mut reviewers = (0..3).map(|i| {
+        let mut reviewer = seat(&format!("native-{i}"), 1, Some(9.7), SINCE + i as i64 + 1);
+        reviewer.council.as_mut().unwrap().lens = format!("Requirement {i}");
+        reviewer
+    }).collect::<Vec<_>>();
+    let incomplete = team_with(config.clone(), reviewers[..2].to_vec());
+    assert!(!council::complete(&incomplete, &config, 1));
+    assert_ne!(council::status(&incomplete).unwrap().state, "passed");
+
+    let complete = team_with(config.clone(), std::mem::take(&mut reviewers));
+    assert!(council::complete(&complete, &config, 1));
+    assert_eq!(council::status(&complete).unwrap().state, "passed");
+    assert!(council::lead_rules(&complete, false).contains("at least 3"));
+
+    // A fixed two-reviewer user request cannot be silently enlarged.
+    config.reviewers = 2;
+    assert!(config.validate().unwrap_err().contains("explicitly fixed reviewer count"));
+    // Legacy automatic Council without user anchors still uses two seats.
+    assert_eq!(on(9.0, 3, 0).needed(), 2);
+}
+
+#[test]
 fn optional_reviewer_skills_only_apply_to_explicit_unique_bot_assignments() {
     let mut council = on(9.0, 10, 0);
     council.optional_skill_ids = vec!["optional".into()];

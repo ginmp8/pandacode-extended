@@ -32,6 +32,9 @@ enum Command {
     InspectOrchestrations,
     ListTickets,
     InspectTicket { ticket_id: String },
+    AcceptTicket { ticket_id: String, expected_revision: i64 },
+    RejectTicket { ticket_id: String, expected_revision: i64, reason: String },
+    StopTicket { ticket_id: String },
 }
 
 /// `pandacode serve …`: true when the argument was handled; the process then serves until
@@ -62,7 +65,7 @@ pub fn handle() -> bool {
 fn serve(command: Command, import: Option<PathBuf>) -> ! {
     let app = tauri::Builder::default()
         .setup(move |app| {
-            // A one-shot inspection must precede setup_common: its writable
+            // One-shot inspection and Ticket decisions precede setup_common:
             // Store::open performs restart recovery and could interrupt a
             // healthy concurrently running serve process.
             let inspect = match &command {
@@ -98,6 +101,31 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            let ticket_action = matches!(&command,
+                Command::AcceptTicket { .. } | Command::RejectTicket { .. } | Command::StopTicket { .. });
+            if ticket_action {
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| {
+                        let database = dir.join("kingcode.sqlite3");
+                        match &command {
+                            Command::AcceptTicket { ticket_id, expected_revision } =>
+                                crate::superagent::headless_accept_ticket(&database, ticket_id, *expected_revision),
+                            Command::RejectTicket { ticket_id, expected_revision, reason } =>
+                                crate::superagent::headless_reject_ticket(&database, ticket_id, *expected_revision, reason),
+                            Command::StopTicket { ticket_id } =>
+                                crate::superagent::headless_stop_ticket(&database, ticket_id),
+                            _ => unreachable!(),
+                        }
+                    });
+                match result {
+                    Ok(status) => { println!("{status}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Ticket command failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             let dir = crate::setup_common(app)?;
             // No window on a server: close the one from tauri.conf.json right away; the
             // run loop keeps the process alive (see on_run_event). Users watch from their
@@ -119,7 +147,8 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
 fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import: Option<PathBuf>) {
     match command {
         // Inspection exits before setup_common and must never reach this branch.
-        Command::InspectOrchestrations | Command::ListTickets | Command::InspectTicket { .. } => {
+        Command::InspectOrchestrations | Command::ListTickets | Command::InspectTicket { .. }
+        | Command::AcceptTicket { .. } | Command::RejectTicket { .. } | Command::StopTicket { .. } => {
             eprintln!("SuperAgent inspection must use the read-only startup path.");
             std::process::exit(2)
         }
@@ -507,12 +536,45 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
             "--inspect-ticket" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--inspect-ticket needs a ticket ID.\n\n{}", help()))?;
-                if value.is_empty() || value.len() > 128
-                    || !value.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
-                {
-                    return Err("Provide a bounded alphanumeric ticket ID.".into());
-                }
+                validate_ticket_id(value)?;
                 command = Command::InspectTicket { ticket_id: value.clone() };
+                ops += 1;
+                index += 1;
+            }
+            "--accept-ticket" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--accept-ticket needs a ticket ID.\n\n{}", help()))?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or_else(|| format!("--accept-ticket needs an expected revision.\n\n{}", help()))?;
+                let expected_revision = parse_ticket_revision(revision)?;
+                command = Command::AcceptTicket { ticket_id: ticket_id.clone(), expected_revision };
+                ops += 1;
+                index += 2;
+            }
+            "--reject-ticket" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--reject-ticket needs a ticket ID.\n\n{}", help()))?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or_else(|| format!("--reject-ticket needs an expected revision.\n\n{}", help()))?;
+                let expected_revision = parse_ticket_revision(revision)?;
+                let reason = args.get(index + 3)
+                    .ok_or_else(|| format!("--reject-ticket needs a reason.\n\n{}", help()))?;
+                if reason.trim().is_empty() || reason.starts_with("--") {
+                    return Err("Provide a nonempty rejection reason.".into());
+                }
+                command = Command::RejectTicket {
+                    ticket_id: ticket_id.clone(), expected_revision, reason: reason.clone(),
+                };
+                ops += 1;
+                index += 3;
+            }
+            "--stop-ticket" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--stop-ticket needs a ticket ID.\n\n{}", help()))?;
+                validate_ticket_id(ticket_id)?;
+                command = Command::StopTicket { ticket_id: ticket_id.clone() };
                 ops += 1;
                 index += 1;
             }
@@ -543,11 +605,14 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
     }
     if ops > 1 {
         return Err(format!(
-            "Choose one: --sign-in, --sign-out, --full-access, --no-full-access, --export-bots, --sync-bots, --import-orchestrations, --export-orchestrations, --inspect-orchestrations, --list-tickets, --inspect-ticket.\n\n{}",
+            "Choose one command; Ticket actions cannot be combined with serving or other commands.\n\n{}",
             help()
         ));
     }
     if matches!(command, Command::SyncBots { .. }) && name.is_some() {
+        return Err(format!("--device-name only works with --sign-in.\n\n{}", help()));
+    }
+    if name.is_some() && !sign_in {
         return Err(format!("--device-name only works with --sign-in.\n\n{}", help()));
     }
     // Built at the end, so flags work in any order.
@@ -562,10 +627,28 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
     Ok((command, import))
 }
 
+fn validate_ticket_id(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 128
+        || !value.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+    {
+        return Err("Provide a bounded alphanumeric ticket ID.".into());
+    }
+    Ok(())
+}
+
+fn parse_ticket_revision(value: &str) -> Result<i64, String> {
+    let revision = value.parse::<i64>()
+        .map_err(|_| "Provide a nonnegative expected Ticket revision.".to_string())?;
+    if revision < 0 {
+        return Err("Provide a nonnegative expected Ticket revision.".into());
+    }
+    Ok(revision)
+}
+
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-ticket <id>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-ticket <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -591,7 +674,12 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-orchestrations
                          List native orchestration status without modifying live tasks; exit.
   --list-tickets         List up to 200 redacted native SuperAgent tickets; exit.
-  --inspect-ticket <id>  Inspect redacted native Ticket/mandate/attempt metadata; exit."
+  --inspect-ticket <id>  Inspect redacted native Ticket/mandate/attempt metadata; exit.
+  --accept-ticket <id> <revision>
+                         Accept current worker evidence at the expected Ticket revision; exit.
+  --reject-ticket <id> <revision> <reason>
+                         Reject current worker evidence with a required reason; quote it if it has spaces.
+  --stop-ticket <id>    Revoke a Ticket mandate and stop the Ticket; exit."
         .into()
 }
 
@@ -639,6 +727,24 @@ mod tests {
         assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
         assert_eq!(parsed("--inspect-ticket ticket_123"),
             Ok(Command::InspectTicket { ticket_id: "ticket_123".into() }));
+        assert_eq!(parsed("--accept-ticket ticket_123 4"), Ok(Command::AcceptTicket {
+            ticket_id: "ticket_123".into(), expected_revision: 4,
+        }));
+        assert_eq!(parse(&vec!["--reject-ticket".into(), "ticket_123".into(), "7".into(), "Needs changes".into()]),
+            Ok((Command::RejectTicket {
+                ticket_id: "ticket_123".into(), expected_revision: 7, reason: "Needs changes".into(),
+            }, None)));
+        assert_eq!(parsed("--stop-ticket ticket_123"), Ok(Command::StopTicket {
+            ticket_id: "ticket_123".into(),
+        }));
+        assert!(parsed("--accept-ticket ticket_123").is_err());
+        assert!(parsed("--accept-ticket ticket_123 nope").is_err());
+        assert!(parsed("--accept-ticket ../outside 1").is_err());
+        assert!(parsed("--reject-ticket ticket_123 1").is_err());
+        assert!(parsed("--reject-ticket ticket_123 1 --sign-out").is_err());
+        assert!(parsed("--stop-ticket").is_err());
+        assert!(parsed("--stop-ticket ticket_123 --list-tickets").is_err());
+        assert!(parsed("--accept-ticket ticket_123 1 --import-bots bots.json").is_err());
         assert!(parsed("--inspect-ticket").is_err());
         assert!(parsed("--inspect-ticket ../outside").is_err());
         assert!(parsed("--inspect-ticket x --inspect-orchestrations").is_err());
@@ -684,6 +790,9 @@ mod tests {
             "--inspect-orchestrations",
             "--list-tickets",
             "--inspect-ticket",
+            "--accept-ticket",
+            "--reject-ticket",
+            "--stop-ticket",
             "--sync-bots",
             "xvfb-run",
         ] {

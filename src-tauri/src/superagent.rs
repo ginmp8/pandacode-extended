@@ -585,6 +585,60 @@ pub(crate) fn list_headless_tasks(database_path: &std::path::Path) -> Result<Str
     serde_json::to_string_pretty(&tickets).map_err(|e| e.to_string())
 }
 
+/// Open the live database for one explicitly requested Ticket transition.
+/// Store::open is intentionally unsuitable here: its restart recovery would
+/// interrupt healthy sessions owned by a concurrently running serve process.
+/// This adapter requires the existing schema and opens the database without
+/// create, migration, repair, or recovery behavior.
+fn open_headless_transition_store(database_path: &std::path::Path) -> Result<Store> {
+    let db = rusqlite::Connection::open_with_flags(
+        database_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
+    ).map_err(|e| e.to_string())?;
+    db.busy_timeout(std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?;
+    db.pragma_update(None, "foreign_keys", "ON").map_err(|e| e.to_string())?;
+    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    if version != storage::SCHEMA_VERSION {
+        return Err(format!("Database schema {version} differs from expected {}; open PandaCode to migrate it.", storage::SCHEMA_VERSION));
+    }
+    Ok(Store { db, path: database_path.into() })
+}
+
+fn headless_ticket_status(ticket: &Ticket) -> Result<String> {
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket.id,
+        "state": ticket.state,
+        "revision": ticket.revision,
+    })).map_err(|e| e.to_string())
+}
+
+/// Explicit local CLI acceptance; the native revision guard and audit remain
+/// the same as the desktop action.
+pub(crate) fn headless_accept_ticket(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    headless_ticket_status(&accept(&store, ticket_id, expected_revision)?)
+}
+
+/// Explicit local CLI rejection; the native reason validation, revision guard
+/// and audit remain the same as the desktop action.
+pub(crate) fn headless_reject_ticket(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64, reason: &str,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    headless_ticket_status(&reject(&store, ticket_id, expected_revision, reason)?)
+}
+
+/// Explicit local CLI Stop revokes the mandate in the shared database. A
+/// running serve process may still have a provider call in memory; its late
+/// callback is denied by the existing state/mandate checks in on_run_finished.
+pub(crate) fn headless_stop_ticket(database_path: &std::path::Path, ticket_id: &str) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let (ticket, _session) = stop(&store, ticket_id)?;
+    headless_ticket_status(&ticket)
+}
+
 /// Revoke and interrupt assignments that exceeded the same native attempt
 /// budget used by tool admission. This is called only by the owning serve
 /// process; callers must stop the returned sessions after the transaction.
@@ -2888,6 +2942,65 @@ mod tests {
         assert_eq!(completed.state,"completed");
         assert!(!on_run_finished(&store,&sid,true,"late reply").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"completed");
+    }
+
+    #[test]
+    fn headless_ticket_transitions_use_native_guards_and_deny_stopped_callbacks() {
+        let mut store = fixture();
+        let config = enabled(&store);
+
+        let (accepted, started) = admit(
+            &mut store, &config.id, "Evidence to accept", "headless-accept", false,
+        ).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &accepted.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session, true, "Verified evidence").unwrap());
+        let waiting = get_ticket(&store, &accepted.id).unwrap();
+        let status: serde_json::Value = serde_json::from_str(
+            &headless_accept_ticket(&store.path, &accepted.id, waiting.revision).unwrap(),
+        ).unwrap();
+        assert_eq!(status["state"], "completed");
+        assert_eq!(status["revision"], waiting.revision + 1);
+        assert!(headless_accept_ticket(&store.path, &accepted.id, waiting.revision).is_err(),
+            "stale revision must be denied");
+        let completed = get_ticket(&store, &accepted.id).unwrap();
+        assert!(headless_accept_ticket(&store.path, &accepted.id, completed.revision).is_err(),
+            "terminal state must be denied");
+        assert_eq!(history(&store, &accepted.id, 10).unwrap()[0].kind, "human_accepted");
+
+        let (rejected, started) = admit(
+            &mut store, &config.id, "Evidence to reject", "headless-reject", false,
+        ).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &rejected.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session, true, "Needs review").unwrap());
+        let waiting = get_ticket(&store, &rejected.id).unwrap();
+        assert!(headless_reject_ticket(&store.path, &rejected.id, waiting.revision, "  ").is_err(),
+            "empty reason must be denied without a transition");
+        assert_eq!(get_ticket(&store, &rejected.id).unwrap().state, "waiting_approval");
+        assert!(headless_reject_ticket(&store.path, &rejected.id, waiting.revision - 1, "Needs changes").is_err(),
+            "stale revision must be denied");
+        let status: serde_json::Value = serde_json::from_str(
+            &headless_reject_ticket(&store.path, &rejected.id, waiting.revision, "Needs changes").unwrap(),
+        ).unwrap();
+        assert_eq!(status["state"], "blocked");
+        let audit = history(&store, &rejected.id, 10).unwrap();
+        assert_eq!(audit[0].kind, "human_rejected");
+        assert_eq!(audit[0].detail, "Needs changes");
+
+        let (stopped, started) = admit(
+            &mut store, &config.id, "Stop before callback", "headless-stop", false,
+        ).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &stopped.id).unwrap().unwrap();
+        let status: serde_json::Value = serde_json::from_str(
+            &headless_stop_ticket(&store.path, &stopped.id).unwrap(),
+        ).unwrap();
+        assert_eq!(status["state"], "stopped");
+        assert!(mandate(&store, &stopped.id).unwrap().revoked);
+        assert!(!on_run_finished(&store, &session, true, "Late success after Stop").unwrap());
+        assert_eq!(get_ticket(&store, &stopped.id).unwrap().state, "stopped");
+        assert_eq!(history(&store, &stopped.id, 10).unwrap()[0].kind, "stopped");
     }
 
     #[test]

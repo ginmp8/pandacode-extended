@@ -285,6 +285,11 @@ fn set_mode(store: &Store, id: &str, expected_revision: i64, mode: &str) -> Resu
     if current.policy_revision != expected_revision {
         return Err("Event source policy revision changed; reload before editing.".into());
     }
+    // The GitHub Events endpoint does not deliver check-run completion.
+    // Do not persist an enabled Observe policy whose native adapter cannot poll it.
+    if mode == "observe" && current.event_kind == "check_run.completed" {
+        return Err("GitHub check-run observation requires an authenticated Checks API adapter.".into());
+    }
     if current.mode == mode { return Ok(current); }
     let now = storage::now();
     let updated = store.db.execute(
@@ -702,6 +707,19 @@ mod tests {
             "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0),
         ).unwrap();
         assert_eq!(tickets, 0, "Observe must not launch work from GitHub comments");
+    }
+
+    #[test]
+    fn unsupported_check_run_source_cannot_enable_observe_or_advance_policy() {
+        let (store, _) = fixture();
+        let cfg = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "check_run.completed").unwrap();
+        assert_eq!(cfg.mode, "off");
+        assert!(set_mode(&store, &cfg.id, cfg.policy_revision, "observe").is_err());
+        let unchanged = source(&store, &cfg.id).unwrap();
+        assert_eq!(unchanged.mode, "off");
+        assert_eq!(unchanged.policy_revision, cfg.policy_revision);
+        assert_eq!(unchanged.last_sequence, 0);
     }
 
     #[test]

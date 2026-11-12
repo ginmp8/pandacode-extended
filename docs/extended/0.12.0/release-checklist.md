@@ -324,3 +324,12 @@ No release approval, tag, installer, npm publication or deployment is implied.
 - [x] Record prior SHA `1c9fcc3e` [push](https://github.com/ginmp8/pandacode-extended/actions/runs/43093250270) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/43093260565) CI success, 11/11 jobs each; these results do not validate the new commit.
 - [ ] Check all CI jobs at the exact new published SHA.
 - [ ] Finish contextual review of 81 shared Extended differences and native Settings On/Off, phone access, retry, photo, audio, Connect/MCP, bots, cloud/VM, credentials and installers before release approval.
+
+## Fork HEAD 802fa847 source checkpoint — 2026-11-12
+
+- [x] Pin source `802fa847f6890d729e98bfe4f2f44190cf045861` (tree `52668daa62dd6a20211545bdacd8d0026e8c638f`) and initial destination `2fdacaa7c493d42327ea040814aa75cdb87ecca6`; retrieve both complete nontruncated recursive inventories.
+- [x] Account for all **three** modified source paths: two byte/mode-exact Voice/release documents and one CI workflow reconciliation retaining Extended audit, mobile, pinned actions, APT recovery and macOS 70-minute smoke.
+- [x] Preserve native application version **0.3.111**, planned Extended distribution **0.12.0 DRAFT**, historical upstream release notes, 58 Extended-only files, and zero missing source paths or mode mismatches.
+- [x] Verify previous SHA `2fdacaa7` [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43152555072) and [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43152561038) — **11/11 successful jobs each**.
+- [ ] Independently verify all new exact-SHA CI jobs including Linux x64/ARM64 required release-profile audio smoke; prior green jobs do not cover the new checks.
+- [ ] Finish 81 shared-path semantic hunk/caller reviews and native real-microphone, Settings On/Off, Connect/MCP, bots, cloud/VM, credential, migration and installer acceptance before approving 0.12.0.

@@ -94,3 +94,7 @@ Upstream microphone selection, Windows x64/Linux ARM64 release audio smoke and A
 ## Phone-access clarification from source a2ba4b43 — 2026-11-12
 
 The [upstream release-note correction](https://github.com/ginmp8/pandacode/commit/a2ba4b430951ee2995bdfda140d4f516cb493a78) distinguishes a phone's **Full access level** from the separate desktop **Full access for remote tasks** switch. It changes no permission enforcement code or Extended configuration; current auto/manual updates, Connect master/direct routes, bot pause, external MCP, cloud/VM, credential forwarding and fresh-context Settings remain unchanged. Do not treat upstream release-note wording as proof of successful runtime authorization or native On/Off verification; those tests remain pending.
+
+## Source 802fa847 controls continuity — 2026-11-12
+
+The upstream changes modify only CI and Voice/release documentation, not native product Settings, auto/manual updates, Connect master/direct routes, global bot pause, external MCP, cloud/VM management, credential forwarding or fresh context. The Extended-enabled upstream paths remain in scope; no new control or restrictive default was introduced. This is a **static change-scope finding**, not proof of native On/Off, remote or external-provider behavior. Null ALSA CI setup is not an application microphone request.

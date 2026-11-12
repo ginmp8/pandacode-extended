@@ -139,3 +139,7 @@ The six upstream changed paths do not include application manifests or lockfiles
 ## Source a2ba4b43 dependency continuity — 2026-11-12
 
 The [single source commit](https://github.com/ginmp8/pandacode/commit/a2ba4b430951ee2995bdfda140d4f516cb493a78) edits only `releases/0.3.111.md`. npm/Cargo manifests, lockfiles, overrides, RustSec checks and installed dependency versions do not change; all six native app version fields remain **0.3.111**. No new vulnerability remediation, dependency downgrade or security-audit result is claimed. The new documentation-only destination SHA must be checked separately from previous successful CI.
+
+## Source 802fa847 dependency and CI audit continuity — 2026-11-12
+
+The two new fork commits change `.github/workflows/ci.yml`, `docs/voice-input.md` and `releases/0.3.111.md` only. They do not change package/Cargo manifests, lockfiles, overrides or native application version **0.3.111**. Existing Extended SQLite/dependency remediation, pinned CI actions, npm/mobile/RustSec audit jobs and APT recovery remain intact. Previous SHA `2fdacaa7` passed [push](https://github.com/ginmp8/pandacode-extended/actions/runs/43152555072) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/43152561038) CI (**11/11 each**). New Linux release-profile audio CI and all audit jobs must be verified at the final commit; no new vulnerability remediation or local audit is asserted.

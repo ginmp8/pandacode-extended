@@ -1433,7 +1433,7 @@ fn dispatch_tool(child: bool) -> Value {
         item["replaces"] = json!({"type":"string","description":"Failed worker (or one that failed your check) to replace and abandon. \"auto\" escalates harness or model; max 2 retries, then report. Starts from its changes."});
         item["replaceReason"] = json!({"type":"string","description":"The failed check."});
         item["councilLens"] = json!({"type":"string","description":"Review lens; read-only."});
-        "Start assignments as one parallel batch; returns IDs. profileId "auto"/omitted routes via Panda Router; provider/model only if user named them. Disjoint files parallel; [] reserves checkout; readOnly overlaps; dependsOn IDs.".into()
+        "Start assignments as one parallel batch; returns IDs. profileId \"auto\"/omitted routes via Panda Router; provider/model only if user named them. Disjoint files parallel; [] reserves checkout; readOnly overlaps; dependsOn IDs.".into()
     };
     tool("dispatch_workers",&description,json!({"assignments":{"type":"array","items":{"type":"object","properties":item,"required":["key","name","prompt","files"]}}}),&["assignments"])
 }

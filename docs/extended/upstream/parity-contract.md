@@ -1,5 +1,12 @@
 # Upstream functional parity contract — PandaCode Extended
 
+## Source checkpoint — 2026-11-12, PandaCode 0.3.120
+
+Pinned source [`69155055e1a9`](https://github.com/ginmp8/pandacode/commit/69155055e1a962c0af4b0cf041af0b1f87291588), tree `e6dfbb33ad2d03dc51005b21ae76f873028c7a54`, app **0.3.120**; three source commits/54 changed paths, **49 byte-exact imports, 5 Extended adaptations**. Proposed structural inventory: 2,007 upstream blobs, 2,065 Extended blobs, 1,927 identical shared, 80 divergent shared and 58 Extended-only; no missing upstream files or mode/type mismatch. Previous Extended SHA `e0beb365b279` failed Rust compilation on all CI targets because `architect.rs:1436` contained an unescaped `"auto"` string; staged correction escapes the quotes without changing tool parameters. No new SHA CI, local Rust, Node, native or external On/Off results are claimed. Extended **0.12.0 remains DRAFT**.
+
+The full-tree reconciliation preserves all 49 paths without Extended overlap byte/mode-exact and reconciles the five overlapping upstream files while retaining the manual Extended release gate and npm/Cargo hardening. The independently diagnosed Rust syntax repair does not suppress tests or remove orchestration capabilities. Static parity, semantic compatibility and CI green remain separate claims; this candidate does not authorize packaging or release.
+
+
 ## Mandatory invariant
 
 `ginmp8/pandacode-extended:base/development` is the complete functional counterpart of `ginmp8/pandacode:main`. The fork's **entire tracked source tree** is the integration input: product features, providers, agent harnesses, bots, MCP, schedules, remote/Connect, cloud/VM flows, mobile, tests, documentation, release notes, assets, scripts, lockfiles and build workflows. No feature may be left out or removed because it appears risky, automated, networked, privileged or inconvenient.

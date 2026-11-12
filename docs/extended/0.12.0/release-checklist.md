@@ -1,5 +1,18 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-12 — 0.3.120 parity checkpoint (not approval)
+
+Pinned source [`69155055e1a9`](https://github.com/ginmp8/pandacode/commit/69155055e1a962c0af4b0cf041af0b1f87291588), tree `e6dfbb33ad2d03dc51005b21ae76f873028c7a54`, app **0.3.120**; three source commits/54 changed paths, **49 byte-exact imports, 5 Extended adaptations**. Proposed structural inventory: 2,007 upstream blobs, 2,065 Extended blobs, 1,927 identical shared, 80 divergent shared and 58 Extended-only; no missing upstream files or mode/type mismatch. Previous Extended SHA `e0beb365b279` failed Rust compilation on all CI targets because `architect.rs:1436` contained an unescaped `"auto"` string; staged correction escapes the quotes without changing tool parameters. No new SHA CI, local Rust, Node, native or external On/Off results are claimed. Extended **0.12.0 remains DRAFT**.
+
+- [x] Pin and compare complete nontruncated `main`/`base/development` recursive Git trees, modes and blob IDs
+- [x] Account for every changed upstream path (49 exact, five reconciled) and preserve 58 Extended-only files
+- [x] Keep independent Extended distribution marker at `0.12.0` and original upstream release notes unchanged
+- [x] Diagnose the existing multi-platform Rust syntax CI failure and stage a minimal quote-escape fix
+- [ ] Confirm final published commit SHA/parent/ref with GitHub readback and exact-SHA CI success
+- [ ] Execute full Rust, Node/TypeScript, Expo, release/audit and native On/Off functional acceptance
+- [ ] Review the remaining 80 shared divergent files semantically before claiming complete behavioral parity or release readiness
+
+
 ## 2026-11-12 — 0.3.119 source synchronization evidence, not release approval
 
 Pinned source: [ginmp8/pandacode:main at `b026526122c4`](https://github.com/ginmp8/pandacode/commit/b026526122c45264f389c04f91a4e96010948926), Git tree `ba8cfd56d9eb91fe433abc1e9377cb069a8f848e`, native application version **0.3.119**. Compared with the last synchronized 0.3.117 source, 44 commits changed 132 paths; the reconciled candidate incorporates 109 source-exact paths and 23 Extended-aware adaptations, with zero upstream paths absent or type/mode discrepancies. Its full inventory is 2,002 upstream files, 2,060 Extended files, 1,922 shared byte-exact, 80 shared divergent and 58 Extended-only. Historical shared differences are not yet all behaviorally proven. The Extended distribution stays **0.12.0 DRAFT**; no release, tag or public package is authorized.

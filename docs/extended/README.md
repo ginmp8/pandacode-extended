@@ -1,5 +1,10 @@
 # PandaCode Extended documentation
 
+## 2026-11-12 — upstream 0.3.116 tool activity parity
+
+Fork [upstream 12a0468948c2](https://github.com/ginmp8/pandacode/commit/12a0468948c2ff1c9bc6be0bebf3f85411d73819), tree 1fc1d5aec803b0c6242d6293eceebcfff0982229, declares application **0.3.116**. Against upstream 0.3.115, 86 source paths changed (55 added, 31 modified): 78 source-exact copies and eight non-overlapping three-way adaptations to existing Extended code and dependency manifests. The staged inventory contains 1,960 upstream blobs, 1,879 identical shared files, 81 customized shared files, 58 Extended-only files, **zero upstream files missing**, and no mode differences. Original [0.3.116 notes](../../releases/0.3.116.md) remain byte-exact. The planned Extended distribution remains **0.12.0 DRAFT**, independent of upstream. CI for the eventual published SHA and native integration acceptance are not yet verified.
+
+Inherited tool-row summaries, error and destructive-operation labels, image thumbnails/viewer and local image authorization are not Extended-only features. Existing configurable controls and dependency remediations were retained. [Candidate documentation](0.12.0/README.md).
 ## 2026-11-12 — source 0.3.115 Skills-library parity
 
 Source [`7171e9606e48`](https://github.com/ginmp8/pandacode/commit/7171e9606e48b3645b5c4a1a6aac01386d5a6369) (Git tree `dd913037d13509ca9da764d77f9cb9eea4b1c4a9`) advances two commits from `650537ae` and declares native app **0.3.115**. All 15 upstream-changed paths (14 modified, one new) are mirrored: 11 exact blobs/modes and four version-only manifest adaptations retaining Extended dependency remediation. The upstream `releases/0.3.115.md` is unchanged. The planned Extended distribution remains **0.12.0 DRAFT**, without release or publication. Prior Extended `64cd597d` passed 11/11 push CI jobs and 11/11 PR CI jobs; final integration SHA CI and native acceptance need separate evidence.

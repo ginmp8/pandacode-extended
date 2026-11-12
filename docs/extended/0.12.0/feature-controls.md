@@ -1,5 +1,8 @@
 # Extended 0.12.0 — feature-control continuity
 
+## 2026-11-12 — no new Extended control introduced for upstream 0.3.116
+
+The [upstream 12a0468948c2](https://github.com/ginmp8/pandacode/commit/12a0468948c2ff1c9bc6be0bebf3f85411d73819) tool-activity changes were integrated without changing existing optional Extended controls. The new tool_image command is authorized by existing task/session records and its own local image safeguards; it is not a new global switch that disables MCP, bots, Connect, cloud/VM, credentials or automation. The eight source-overlap adaptations apply exact upstream hunks onto pre-existing Extended files and preserve unrelated Extended modifications, including Settings defaults. Enabled/disabled native flows, resumed bots and external integrations were **not** exercised; code presence is not proof of runtime parity. Planned release remains **0.12.0 DRAFT**.
 ## 2026-11-12 — Skills control compatibility with upstream 0.3.115
 
 Source [`7171e9606e48`](https://github.com/ginmp8/pandacode/commit/7171e9606e48b3645b5c4a1a6aac01386d5a6369) (Git tree `dd913037d13509ca9da764d77f9cb9eea4b1c4a9`) advances two commits from `650537ae` and declares native app **0.3.115**. All 15 upstream-changed paths (14 modified, one new) are mirrored: 11 exact blobs/modes and four version-only manifest adaptations retaining Extended dependency remediation. The upstream `releases/0.3.115.md` is unchanged. The planned Extended distribution remains **0.12.0 DRAFT**, without release or publication. Prior Extended `64cd597d` passed 11/11 push CI jobs and 11/11 PR CI jobs; final integration SHA CI and native acceptance need separate evidence.

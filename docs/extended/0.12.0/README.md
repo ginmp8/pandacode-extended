@@ -1,5 +1,10 @@
 # PandaCode Extended 0.12.0 — incremental development cycle
 
+## 2026-11-12 — inherited tool activity, thumbnail and image-viewer features
+
+Source [upstream 12a0468948c2](https://github.com/ginmp8/pandacode/commit/12a0468948c2ff1c9bc6be0bebf3f85411d73819) (tree 1fc1d5aec803b0c6242d6293eceebcfff0982229, app **0.3.116**) adds readable tool-call summaries for command/file/search/MCP activity, failure and destructive-action indicators, grouped cards, and thumbnails for previously viewed or generated images. The new local tool_image Rust command restricts access to images named by the same task's tool records, rejects network paths and symlinks, checks task/workspace ownership and caps image size. These are inherited upstream capabilities.
+
+All **86** changed upstream paths were incorporated (55 added; 23 exact replacements; eight three-way Extended-preserving adaptations), with original release notes unchanged. The staged recursive comparison found no missing upstream files and no type/mode divergences; 81 historical shared-file differences still require semantic review. No local Node/Rust/Expo tests or installed-app checks were run in this environment. Exact published-SHA CI and real Settings On/Off, Connect, MCP, bots, cloud/VM and credential flow acceptance remain required. Extended **0.12.0 DRAFT** is neither released nor approved.
 ## 2026-11-12 — inherited Skills switching improvements (upstream 0.3.115)
 
 Source [`7171e9606e48`](https://github.com/ginmp8/pandacode/commit/7171e9606e48b3645b5c4a1a6aac01386d5a6369) (Git tree `dd913037d13509ca9da764d77f9cb9eea4b1c4a9`) advances two commits from `650537ae` and declares native app **0.3.115**. All 15 upstream-changed paths (14 modified, one new) are mirrored: 11 exact blobs/modes and four version-only manifest adaptations retaining Extended dependency remediation. The upstream `releases/0.3.115.md` is unchanged. Planned Extended **0.12.0 DRAFT** remains separate. Prior Extended `64cd597d` passed 11/11 push CI jobs and 11/11 PR CI jobs; exact new-SHA CI and native acceptance are still required.

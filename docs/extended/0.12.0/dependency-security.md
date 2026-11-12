@@ -1,5 +1,10 @@
 # Extended 0.12.0 — dependency and security tracking
 
+## 2026-11-12 — source 0.3.116 version and security continuity
+
+The [upstream 12a0468948c2](https://github.com/ginmp8/pandacode/commit/12a0468948c2ff1c9bc6be0bebf3f85411d73819) update (tree 1fc1d5aec803b0c6242d6293eceebcfff0982229) advances the six npm/Cargo/Tauri application version fields to **0.3.116** without changing Extended **0.12.0 DRAFT** distribution planning. Root package.json, package-lock.json root and workspace, src-tauri/Cargo.toml, the application entry in src-tauri/Cargo.lock, and src-tauri/tauri.conf.json are aligned. Existing Extended package constraints, overrides and Cargo dependency remediations are retained by applying only upstream version hunks to customized manifests. No vulnerability remediation is claimed from this import.
+
+Upstream image serving includes task-scoped authorization, safe path constraints and byte/downscale limits; those source safeguards were imported. Native security acceptance, npm audit, RustSec, Rust tests/Clippy and exact published-SHA CI remain unverified here.
 ## 2026-11-12 — upstream 0.3.115 metadata and Skills safeguards
 
 Fork [`7171e9606e48`](https://github.com/ginmp8/pandacode/commit/7171e9606e48b3645b5c4a1a6aac01386d5a6369), full tree `dd913037d13509ca9da764d77f9cb9eea4b1c4a9`, app 0.3.115, 15 source-changed paths (11 exact, four version-only Extended dependency-preserving adaptations). Planned Extended 0.12.0 remains DRAFT. Prior `64cd597d` push and PR CI each passed 11/11 jobs; the new integration commit needs independent exact-SHA CI.

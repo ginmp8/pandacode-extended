@@ -839,9 +839,11 @@ pub(super) mod fail_point {
     thread_local!(static HOOK: RefCell<Option<Hook>> = RefCell::new(None));
     /// Runs `hook` before each in-place write on this thread; an error fails that write after
     /// half its bytes landed.
+    #[cfg(unix)]
     pub fn set(hook: impl FnMut(&Path) -> std::io::Result<()> + 'static) {
         HOOK.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
     }
+    #[cfg(unix)]
     pub fn clear() {
         HOOK.with(|h| *h.borrow_mut() = None);
     }

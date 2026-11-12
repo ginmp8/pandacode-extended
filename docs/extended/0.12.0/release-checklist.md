@@ -1,5 +1,15 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-12 — upstream 0.3.116 synchronization checkpoint
+
+- [x] Pin complete fork source SHA 12a0468948c2ff1c9bc6be0bebf3f85411d73819, Git tree 1fc1d5aec803b0c6242d6293eceebcfff0982229, application version **0.3.116**; recursive Git trees were not truncated.
+- [x] Incorporate all 86 changed upstream paths (55 new exact, 23 modified exact, eight source-patch/Extended-preserving merges), including original upstream release notes and text test fixtures; zero upstream paths missing and no mode differences.
+- [x] Align six npm/Cargo/Tauri app version values while retaining Extended dependency patches and **0.12.0 DRAFT** release planning.
+- [ ] Obtain completed CI statuses for the **published** destination SHA; no green conclusion is presumed.
+- [ ] Execute native Node/TS, Rust/Clippy, Expo/mobile, audits, tool image authorization, screen-reader and browser viewer tests, Settings On/Off and external integrations.
+- [ ] Complete semantic review of 81 historical customized shared paths, preserve required approvals and obtain separate release approval.
+
+The tool rows, local image viewer, task-scoped thumbnail command and error/risk labels are inherited from the fork; they are not newly exclusive Extended features.
 ## 2026-11-12 — upstream 0.3.115 Skills-library checkpoint
 
 - [x] Freeze [fork `main` source](https://github.com/ginmp8/pandacode/commit/7171e9606e48b3645b5c4a1a6aac01386d5a6369) and complete recursive Git tree `dd913037d13509ca9da764d77f9cb9eea4b1c4a9` (not truncated).

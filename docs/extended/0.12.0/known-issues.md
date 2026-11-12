@@ -1,5 +1,10 @@
 # Extended 0.12.0 — known issues and acceptance gaps
 
+## 2026-11-12 — upstream tool-row limitations and outstanding acceptance
+
+The [upstream 0.3.116](https://github.com/ginmp8/pandacode/commit/12a0468948c2ff1c9bc6be0bebf3f85411d73819) image thumbnail feature depends on image paths recorded by a task's own tools and literal script output paths. Images created through piped script input may not be recognized; compound-command descriptions can be heuristic. Source-side authorization rules reject network paths and symlinks and impose size limits; those safeguards were imported but not independently security-tested on a packaged application. No new vulnerability or feature regression is claimed without reproduction.
+
+Snapshot: source 12a0468948c2ff1c9bc6be0bebf3f85411d73819, tree 1fc1d5aec803b0c6242d6293eceebcfff0982229, application 0.3.116. Static parity includes all 86 changed upstream paths; 81 prior customized shared files remain for independent semantic and native acceptance. Local Node, TypeScript, Rust, Clippy, mobile/Expo, npm audit, RustSec, browser, Settings On/Off and external integration tests were not run here. Exact final SHA CI and platform checks must be inspected separately. Extended **0.12.0 DRAFT** remains unapproved.
 ## 2026-11-12 — upstream 0.3.115 known limitations and acceptance
 
 Fork [`7171e9606e48`](https://github.com/ginmp8/pandacode/commit/7171e9606e48b3645b5c4a1a6aac01386d5a6369), full tree `dd913037d13509ca9da764d77f9cb9eea4b1c4a9`, app 0.3.115, 15 source-changed paths (11 exact, four version-only Extended dependency-preserving adaptations). Planned Extended 0.12.0 remains DRAFT. Prior `64cd597d` push and PR CI each passed 11/11 jobs; the new integration commit needs independent exact-SHA CI.

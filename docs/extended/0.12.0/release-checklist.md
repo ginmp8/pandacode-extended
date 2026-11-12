@@ -348,3 +348,11 @@ No release approval, tag, installer, npm publication or deployment is implied.
 - [x] Verify previous SHA `2fdacaa7` [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43152555072) and [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43152561038) — **11/11 successful jobs each**.
 - [ ] Independently verify all new exact-SHA CI jobs including Linux x64/ARM64 required release-profile audio smoke; prior green jobs do not cover the new checks.
 - [ ] Finish 81 shared-path semantic hunk/caller reviews and native real-microphone, Settings On/Off, Connect/MCP, bots, cloud/VM, credential, migration and installer acceptance before approving 0.12.0.
+
+## Source 0.3.112 synchronization — 2026-11-12
+
+- [x] Pin [fork `eb78ef90`](https://github.com/ginmp8/pandacode/commit/eb78ef90df6809219349e23fadf2e659ba00da2c), native app `0.3.112`, source tree `9440057b8012ac1ccd9bbf5a7b5656d488e889c1`; compare complete source/destination recursive trees.
+- [x] Integrate new `quit_guard.rs` and original `releases/0.3.112.md`, native exit path, installer notes and tests, and remaining source paths without removing Extended code or dependency hardening.
+- [x] Align all six app-version fields and Extended source provenance, leaving independent planned release `0.12.0` unchanged.
+- [ ] Confirm CI of the **new exact destination SHA**; the [prior push](https://github.com/ginmp8/pandacode-extended/actions/runs/43173312668) and [prior PR](https://github.com/ginmp8/pandacode-extended/actions/runs/43173319356) passed 11/11 jobs each but do not certify a new commit.
+- [ ] Exercise native quit dialog (Quit/Cancel, repeated requests, local/cloud-only, serve and restart), all Extended Settings On/Off, native platform builds, dependency audits and integration paths; audit remaining customized source hunks before any parity/release approval.

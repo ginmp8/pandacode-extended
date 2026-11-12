@@ -151,3 +151,7 @@ The [single source commit](https://github.com/ginmp8/pandacode/commit/a2ba4b4309
 ## Source 802fa847 dependency and CI audit continuity — 2026-11-12
 
 The two new fork commits change `.github/workflows/ci.yml`, `docs/voice-input.md` and `releases/0.3.111.md` only. They do not change package/Cargo manifests, lockfiles, overrides or native application version **0.3.111**. Existing Extended SQLite/dependency remediation, pinned CI actions, npm/mobile/RustSec audit jobs and APT recovery remain intact. Previous SHA `2fdacaa7` passed [push](https://github.com/ginmp8/pandacode-extended/actions/runs/43152555072) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/43152561038) CI (**11/11 each**). New Linux release-profile audio CI and all audit jobs must be verified at the final commit; no new vulnerability remediation or local audit is asserted.
+
+## Source 0.3.112 dependency checkpoint — 2026-11-12
+
+Native upstream application metadata now declares `0.3.112` in the npm manifest/lock root and package entry, Cargo package/lock application entry, and Tauri configuration. No dependency upgrades were imported in the source delta. Extended remediations (including npm DOMPurify/KaTeX/Vite, and Rust SQLite/Tokio/TLS/ZIP/Updater adjustments) were preserved by modifying only the version fields in the existing Extended manifests and locks. No new vulnerability or remediation is claimed. The prior `17b8d4fa` CI passed npm and RustSec audit jobs; exact new-SHA audits and installed-app compatibility remain unverified at this documentation checkpoint.

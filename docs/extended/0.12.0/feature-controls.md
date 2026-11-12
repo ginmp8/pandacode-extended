@@ -106,3 +106,7 @@ The [upstream release-note correction](https://github.com/ginmp8/pandacode/commi
 ## Source 802fa847 controls continuity — 2026-11-12
 
 The upstream changes modify only CI and Voice/release documentation, not native product Settings, auto/manual updates, Connect master/direct routes, global bot pause, external MCP, cloud/VM management, credential forwarding or fresh context. The Extended-enabled upstream paths remain in scope; no new control or restrictive default was introduced. This is a **static change-scope finding**, not proof of native On/Off, remote or external-provider behavior. Null ALSA CI setup is not an application microphone request.
+
+## Source 0.3.112 compatibility — 2026-11-12
+
+The upstream local-agent exit guard is a native confirmation feature, **not** an Extended capability switch. When quitting with local agents running it asks Quit/Cancel before the existing shutdown and stop path. Cloud-only runs continue remotely; headless serve and updater restart skip the dialog. No existing Extended preferences for update timing, Connect routing, MCP, global bot pause, cloud credential transfer or VM controls were changed. Enabled upstream paths remain available at source integration level; native dialog interactions and combinations with these settings remain untested on installed applications. Do not infer On/Off acceptance from static integration.

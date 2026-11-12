@@ -317,7 +317,7 @@ test('binding an idle composer does no style or layout reads', async () => {
 
 test('the composer and dictation describe the prompt with one shared function', async () => {
   const { readFile } = await import('node:fs/promises');
-  const main = await readFile(new URL('../src/main.ts', import.meta.url), 'utf8');
+  const main = (await readFile(new URL('../src/main.ts', import.meta.url), 'utf8')).replace(/\r\n/g, '\n');
   // Each phrase is written once, in promptDescription, so bot steering and GitHub mentions read the same everywhere.
   for (const phrase of ['Enter to queue for when the agent finishes', 'Shift Enter for a new line', 'steer current work', 'Type @ to mention a project file${']) {
     assert.equal(main.split(phrase).length - 1, 1, phrase);

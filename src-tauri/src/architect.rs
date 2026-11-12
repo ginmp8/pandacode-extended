@@ -1428,12 +1428,12 @@ fn dispatch_tool(child: bool) -> Value {
     let s = json!({"type":"string"});
     let mut item = json!({"key":id,"profileId":id,"provider":s,"model":s,"reasoningEffort":s,"name":s,"prompt":s,"dependsOn":{"type":"array","items":id},"files":files_schema(),"readOnly":{"type":"boolean"}});
     let description = if child {
-        "Sub-workers only for parallel work/model; scoped files (inherit readOnly); dependsOn child IDs; results resume you.".to_string()
+        "Parallel/model jobs; otherwise do it yourself. Scoped files inherit readOnly; dependsOn IDs; results resume you.".to_string()
     } else {
         item["replaces"] = json!({"type":"string","description":"Failed worker (or one that failed your check) to replace and abandon. \"auto\" escalates harness or model; max 2 retries, then report. Starts from its changes."});
         item["replaceReason"] = json!({"type":"string","description":"The failed check."});
         item["councilLens"] = json!({"type":"string","description":"Review lens; read-only."});
-        "Dispatch a parallel batch; returns IDs. profileId names a profile or auto/omitted lets Panda Router pick; provider/model only if user named them. Disjoint files run in parallel; [] reserves checkout; readOnly overlaps; dependsOn returned IDs.".into()
+        "Start assignments as one parallel batch; returns IDs. profileId "auto"/omitted routes via Panda Router; provider/model only if user named them. Disjoint files parallel; [] reserves checkout; readOnly overlaps; dependsOn IDs.".into()
     };
     tool("dispatch_workers",&description,json!({"assignments":{"type":"array","items":{"type":"object","properties":item,"required":["key","name","prompt","files"]}}}),&["assignments"])
 }

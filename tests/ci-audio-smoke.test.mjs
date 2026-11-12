@@ -17,7 +17,8 @@ test('release-profile audio smoke runs the named ignored Rust test exactly', () 
   const exactAudioCommand = 'cargo test --locked --release --manifest-path src-tauri/Cargo.toml --lib voice::tests::real_audio::real_audio_lists_opens_and_records -- --exact --ignored --nocapture';
   assert.equal(ci.split(exactAudioCommand).length - 1, 2, 'both Linux and matrix release jobs select the exact audio test');
   assert.equal(ci.split("grep -q 'test result: ok. 1 passed'").length - 1, 2, 'both release jobs reject an exact filter that runs zero tests');
-  assert.equal((ci.match(/libasound2-plugins/g) || []).length >= 2, true, 'Linux runners install ALSA plugins for JACK fallback');
+  const linuxPluginInstalls = ci.split('\n').filter((line) => line.includes('install -y') && line.includes('libasound2-plugins'));
+  assert.equal(linuxPluginInstalls.length, 2, 'both Linux jobs must install ALSA plugins for JACK fallback');
   assert.doesNotMatch(ci, /--lib real_audio -- --ignored/, 'broad filters could pass after a test rename');
   assert.match(ci, /Acquire::Retries=3/, 'keep upstream apt fetch retry count');
 });

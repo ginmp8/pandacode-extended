@@ -54,13 +54,18 @@ export function createPreviewArchitect(host: PreviewHost) {
   function validCouncil(council: CouncilConfig): CouncilConfig {
     if (!council || typeof council.target !== 'number' || !(council.target > 0 && council.target <= 10)) throw new Error('A council target is between 0 and 10.');
     const ids = council.reviewerBotIds ?? [];
+    const reviewers = integer(council.reviewers, 0, 8, 'Council reviewers');
+    const extras = integer(council.automaticReviewers ?? 0, 0, 8, 'Additional automatic reviewers');
+    if (extras && (!ids.length || reviewers !== 0 || ids.length + extras > 8))
+      throw new Error('Mixed Council needs direct bots, reviewers=0 and at most eight root seats.');
     const permissions = council.reviewPermissions;
     if (permissions && (!ids.length || !/^[a-zA-Z0-9-]{1,128}$/.test(permissions.authorizationId)
         || permissions.grants.length !== 1 || permissions.grants[0].tool !== 'pandacode_open_file'
         || permissions.grants[0].action !== 'call' || permissions.grants[0].resourceArgument !== 'path'
         || !/^[^/:\\]+(?:\u002f[^/:\\]+)*$/.test(permissions.grants[0].resource)
         || permissions.grants[0].resource.split('/').some(part => part === '..' || !part))) throw new Error('Scoped reviewer access requires an exact relative file and native authorization.');
-    if (!Array.isArray(ids) || (ids.length > 0 && (ids.length < 2 || ids.length > 8 || new Set(ids).size !== ids.length || ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(id))))) throw new Error('Select 2 to 8 distinct reviewer bots.');
+    const minimum = extras > 0 ? 1 : 2;
+    if (!Array.isArray(ids) || (ids.length > 0 && (ids.length < minimum || ids.length > 8 || new Set(ids).size !== ids.length || ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(id))))) throw new Error(`Select ${minimum} to 8 distinct reviewer bots.`);
     // Match native Council: optional skill roles are task-scoped and must survive reloads.
     const optionalSkills = council.optionalSkillIds ?? [];
     if (!Array.isArray(optionalSkills) || optionalSkills.length > 32
@@ -75,7 +80,34 @@ export function createPreviewArchitect(host: PreviewHost) {
         || new Set(checks).size !== checks.length) {
       throw new Error('Native check requirements must name unique mandatory selected-bot skills.');
     }
-    return { target: council.target, maxRounds: integer(council.maxRounds, 1, 100, 'Council rounds'), reviewers: integer(council.reviewers, 0, 8, 'Council reviewers'), ...(ids.length ? { reviewerBotIds: [...ids] } : {}), ...(optionalSkills.length ? { optionalSkillIds: [...optionalSkills] } : {}), ...(checks.length ? { requiredCheckSkillIds: [...checks] } : {}), ...(permissions ? { reviewPermissions: permissions } : {}) };
+    // Match native task-scoped criteria. Preview never invents evidence or approval.
+    const criteriaSource = council.criteriaSource ?? 'architect';
+    const rawCriteria = council.criteria ?? [];
+    if (!['architect', 'user', 'hybrid'].includes(criteriaSource) || !Array.isArray(rawCriteria)
+      || rawCriteria.length > 8 || (criteriaSource === 'architect' && rawCriteria.length))
+      throw new Error('Invalid Council criteria source or count.');
+    const criterionIds = new Set<string>(), lenses = new Set<string>();
+    const criteria = rawCriteria.map(item => {
+      if (!item || typeof item.id !== 'string' || typeof item.lens !== 'string'
+        || !/^[a-zA-Z0-9_-]{1,80}$/.test(item.id) || !item.lens.trim() || item.lens.length > 80
+        || [...item.lens].some(ch => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127)
+        || !Number.isFinite(item.target) || item.target < 1 || item.target > 10
+        || criterionIds.has(item.id) || lenses.has(item.lens.trim().toLowerCase()))
+        throw new Error('Council requires unique criterion IDs, lenses and targets from 1 to 10.');
+      criterionIds.add(item.id); lenses.add(item.lens.trim().toLowerCase());
+      return { id: item.id, lens: item.lens, target: item.target,
+        required: item.required !== false, evidenceRequired: item.evidenceRequired === true };
+    });
+    const required = criteria.filter(item => item.required).length;
+    if (criteriaSource !== 'architect' && (!required || required > (ids.length ? ids.length + extras : Math.max(2, reviewers))))
+      throw new Error('Required Council criteria exceed native reviewer seats.');
+    return { target: council.target, maxRounds: integer(council.maxRounds, 1, 100, 'Council rounds'), reviewers,
+      ...(ids.length ? { reviewerBotIds: [...ids] } : {}),
+      ...(extras ? { automaticReviewers: extras } : {}),
+      ...(criteriaSource !== 'architect' ? { criteriaSource, criteria } : {}),
+      ...(optionalSkills.length ? { optionalSkillIds: [...optionalSkills] } : {}),
+      ...(checks.length ? { requiredCheckSkillIds: [...checks] } : {}),
+      ...(permissions ? { reviewPermissions: permissions } : {}) };
   }
   function validate(config: TeamConfig): TeamConfig {
     // Auto teams carry an optional roster (the lead picks models); configured teams name at least one profile.

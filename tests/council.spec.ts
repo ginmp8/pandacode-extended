@@ -102,6 +102,12 @@ test('Council criteria editor saves task-scoped user criteria without altering l
   await expect.poll(async () => (await calls(page)).length).toBe(1);
   expect((await calls(page))[0].criteriaSource).toBe('user');
   expect((await calls(page))[0].criteria).toEqual([{ id: 'security', lens: 'Security', target: 9.8, required: true, evidenceRequired: true }]);
+  await expect.poll(() => panel(page).getByRole('switch', { name: 'Council' }).isChecked()).toBe(true);
+  await page.keyboard.press('Escape');
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Review criteria' }).click();
+  await expect(panel(page).getByLabel('Criteria source')).toHaveValue('user');
+  await expect(panel(page).getByLabel('Review lens')).toHaveValue('Security');
 });
 
 test('Council criteria editor rejects duplicate lenses atomically and supports hybrid anchors', async ({ page }) => {
@@ -189,6 +195,10 @@ test('M3 mixed Council preserves a direct bot plus one explicitly added automati
   expect((await calls(page))[0]).toMatchObject({
     reviewers: 0, automaticReviewers: 1, reviewerBotIds: ['reviewer-alpha'],
   });
+  // A recorded request alone cannot prove native-style preview acceptance.
+  await expect.poll(() => panel(page).getByRole('switch', { name: 'Council' }).isChecked()).toBe(true);
+  await expect(panel(page).getByLabel('Additional automatic Architect reviewers')).toHaveValue('1');
+  await expect(panel(page).getByRole('alert')).toBeHidden();
   await option(page, 'reviewers', 'Auto: the lead picks reviewers for the work').click();
   await expect.poll(async () => (await calls(page)).length).toBe(2);
   expect((await calls(page))[1].automaticReviewers).toBeUndefined();

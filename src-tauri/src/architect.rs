@@ -1585,11 +1585,11 @@ fn dispatch_tool(child: bool) -> Value {
     let description = if child {
         "Sub-workers for parallel tasks/models; otherwise do it yourself. Inherit scopes/access; dependsOn siblings; resume with results.".to_string()
     } else {
-        item["replaces"] = json!({"type":"string","description":"Replace failed worker or failed check; \"auto\" tries other/stronger models at most twice; retains changes."});
+        item["replaces"] = json!({"type":"string","description":"Replace failed worker/check; auto retries other models twice max; keeps edits."});
         item["replaceReason"] = json!({"type":"string","description":"Failed check."});
         item["councilLens"] = json!({"type":"string","description":"Review lens; read-only."});
-        item["councilReviewerSource"] = json!({"type":"string","enum":["automatic","direct_bot"],"description":"Source for mixed A+D Council seats: automatic native reviewer or a selected direct bot; does not authorize extra sources."});
-        "Start assignments as one parallel batch; returns IDs. With profileId \"auto\" or omitted with routing on, Router picks models; select explicit models only when asked. files are repo-relative; [] reserves checkout. Disjoint writers/readOnly can overlap; dependsOn uses returned IDs.".into()
+        item["councilReviewerSource"] = json!({"type":"string","enum":["automatic","direct_bot"],"description":"Mixed Council seat: automatic or selected direct bot only."});
+        "Batch dispatch; returns IDs. Router picks for profileId \"auto\" (or omitted when on); explicit models only if asked. files: repo-relative, [] reserves checkout. Disjoint/readOnly may overlap; dependsOn uses IDs.".into()
     };
     tool("dispatch_workers",&description,json!({"assignments":{"type":"array","items":{"type":"object","properties":item,"required":["key","name","prompt","files"]}}}),&["assignments"])
 }
@@ -1597,9 +1597,9 @@ fn catalog() -> Vec<Value> {
     let id = json!({"type":"string"});
     vec![
         dispatch_tool(false),
-        tool("route_models","Preview Router picks, alternatives (P=success/cost), ladder/difficulty; failed lists past models oldest first.",json!({"tasks":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"files":{"type":"integer"},"failed":{"type":"array","items":{"type":"object","properties":{"provider":{"type":"string"},"model":{"type":"string"}}}}},"required":["text"]}},"mode":{"type":"string","enum":["balanced","cheapest","quality"]}}),&["tasks"]),
+        tool("route_models","Preview Router models, success/cost and difficulty ladder; failures oldest first.",json!({"tasks":{"type":"array","items":{"type":"object","properties":{"text":{"type":"string"},"files":{"type":"integer"},"failed":{"type":"array","items":{"type":"object","properties":{"provider":{"type":"string"},"model":{"type":"string"}}}}},"required":["text"]}},"mode":{"type":"string","enum":["balanced","cheapest","quality"]}}),&["tasks"]),
         tool("list_workers","Worker statuses and summaries.",json!({"offset":{"type":"integer"}}),&[]),
-        tool("read_worker","Read response or checkpoint (checkpoint: true), paged by nextOffset.",json!({"workerId":id,"offset":{"type":"integer"},"checkpoint":{"type":"boolean"}}),&["workerId"]),
+        tool("read_worker","Read response/checkpoint (checkpoint: true) by nextOffset.",json!({"workerId":id,"offset":{"type":"integer"},"checkpoint":{"type":"boolean"}}),&["workerId"]),
         tool("followup_worker","Resume idle worker; omitted files/readOnly inherit.",json!({"workerId":id,"key":id,"prompt":{"type":"string"},"files":files_schema(),"readOnly":{"type":"boolean"}}),&["workerId","key","prompt"]),
         tool("cancel_worker","Abandon and stop a worker, with a reason.",json!({"workerId":id,"reason":{"type":"string"}}),&["workerId","reason"]),
         tool("finish_team","Finish after reviewing completed/abandoned workers; name excluded work.",json!({"summary":{"type":"string"}}),&["summary"]),

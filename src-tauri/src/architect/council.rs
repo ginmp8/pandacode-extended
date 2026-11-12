@@ -370,6 +370,10 @@ pub struct CouncilVerifiedCompletion {
 pub struct CouncilInspection {
     /// Derived root reviewer sources. A non-running nested configuration is never a pass.
     pub mode: &'static str,
+    /// Configuration observed from the same native task, not proof that a phase ran.
+    pub strategy: CouncilExecutionStrategy,
+    pub force_escalation: bool,
+    pub criteria_source: CouncilCriteriaSource,
     pub cycle_started_at: i64,
     pub team_revision: u64,
     pub status: CouncilStatus,
@@ -587,7 +591,8 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
         usage_provenance: "unknown",
     }).collect();
     Some(CouncilInspection {
-        mode: config.mode(),
+        mode: config.mode(), strategy: config.strategy,
+        force_escalation: config.force_escalation, criteria_source: config.criteria_source,
         cycle_started_at: team.council_since, team_revision: team.revision,
         status, verified_pass, verified_completion, criteria: config.criteria.clone(),
         usage: usage_totals(&attempts), attempts,
@@ -1147,13 +1152,29 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
     if config.strategy != CouncilExecutionStrategy::Escalated || !config.force_escalation {
         return true;
     }
-    (1..=view.latest).filter(|&round| {
-        view.complete(round)
-            && !stale(team, round)
-            && lowest(team, round).is_some_and(|score| score >= config.target)
-            && criterion_blockers(team, config, round).is_empty()
-            && unverified_required_skill_checks(team, round).is_empty()
-    }).take(2).count() == 2
+    // Two passing rounds must contain genuinely distinct worker identities. A
+    // duplicated persisted worker cannot masquerade as a fresh independent review.
+    let mut seen = std::collections::HashSet::new();
+    let mut passing_rounds = 0;
+    for round in 1..=view.latest {
+        if !view.complete(round)
+            || stale(team, round)
+            || lowest(team, round).is_none_or(|score| score < config.target)
+            || !criterion_blockers(team, config, round).is_empty()
+            || !unverified_required_skill_checks(team, round).is_empty()
+        {
+            continue;
+        }
+        for (worker, seat) in in_round(team, round)
+            .filter(|(worker, seat)| counts(worker, seat) && !unsettled(&worker.status) && seat.score.is_some())
+        {
+            if !seen.insert(worker.id.as_str()) {
+                return false;
+            }
+        }
+        passing_rounds += 1;
+    }
+    passing_rounds >= 2
 }
 
 /// The verdict from a view the caller already computed.

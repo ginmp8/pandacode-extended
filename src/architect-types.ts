@@ -82,6 +82,8 @@ export interface CouncilUsageTotals {
 }
 export interface CouncilInspection {
   mode: 'm1' | 'm2' | 'm3' | 'm4' | 'm5' | 'm6' | 'm7';
+  /** Configured native policy, not proof that escalation or challenge work ran. */
+  strategy?: CouncilExecutionStrategy; forceEscalation?: boolean; criteriaSource?: CouncilCriteriaSource;
   cycleStartedAt: number; teamRevision: number; status: CouncilStatus;
   verifiedPass: boolean; verifiedCompletion?: CouncilVerifiedCompletion | null;
   criteria: CouncilCriterion[];

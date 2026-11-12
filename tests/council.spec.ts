@@ -80,7 +80,7 @@ test('native Council inspector displays unknown usage and never trusts a display
 
 test('M3 native read-only inspector discloses both reviewer sources without treating stale status as approval', async ({ page }) => {
   const inspection = {
-    mode: 'm3', cycleStartedAt: 1000, teamRevision: 18,
+    mode: 'm3', strategy: 'escalated', forceEscalation: true, criteriaSource: 'hybrid', cycleStartedAt: 1000, teamRevision: 18,
     status: { state: 'passed', round: 1, lowest: 9.5, target: 9, stale: true },
     verifiedPass: true,
     verifiedCompletion: { sessionId: 'task-1', cycleId: 'task-1:1000', teamRevision: 18, round: 1, lowest: 9.5 },
@@ -100,6 +100,9 @@ test('M3 native read-only inspector discloses both reviewer sources without trea
   await panel(page).getByText('Review evidence and usage').click();
   await expect(panel(page).locator('.council-native-mode')).toContainText('Native mode: Bots + Architect');
   await expect(panel(page).locator('.council-native-mode')).toContainText('1 direct bot, 1 automatic');
+  await expect(panel(page).locator('.council-native-strategy')).toContainText('Configured native strategy: Escalated / on-demand');
+  await expect(panel(page).locator('.council-native-strategy')).toContainText('Explicit fresh-round escalation required');
+  await expect(panel(page).locator('.council-native-strategy')).toContainText('Criteria origin: Hybrid');
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
   await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
   await expect(panel(page).getByText('Stale revision', { exact: false })).toBeVisible();

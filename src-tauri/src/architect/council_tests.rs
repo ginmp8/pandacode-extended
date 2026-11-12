@@ -530,11 +530,28 @@ fn native_user_forced_s2_requires_two_fresh_independent_rounds_before_pass() {
     assert_eq!(council::status(&team).unwrap().state, "dispatch");
     assert!(finish_refusal(&team).unwrap().contains("S2 forced escalation"));
     assert_eq!(council::round_for(&team, &config, None).unwrap(), 2);
-    team.workers.extend([
+    // The new round must review the same fixed lenses under fresh worker IDs.
+    let mut wrong_lenses = team.clone();
+    wrong_lenses.workers.extend([
         seat("fresh-a", 2, Some(9.6), SINCE + 3),
         seat("fresh-b", 2, Some(9.8), SINCE + 4),
     ]);
+    assert_ne!(council::status(&wrong_lenses).unwrap().state, "passed",
+        "new identities cannot silently substitute new review criteria");
+    let mut first = seat("fresh-a", 2, Some(9.6), SINCE + 3);
+    first.council.as_mut().unwrap().lens = "lens initial-a".into();
+    let mut second = seat("fresh-b", 2, Some(9.8), SINCE + 4);
+    second.council.as_mut().unwrap().lens = "lens initial-b".into();
+    team.workers.extend([first, second]);
     assert_eq!(council::status(&team).unwrap().state, "passed");
+    let inspected = council::inspection(&team, false).unwrap();
+    assert_eq!(inspected.strategy, council::CouncilExecutionStrategy::Escalated);
+    assert!(inspected.force_escalation);
+    assert_eq!(inspected.criteria_source, council::CouncilCriteriaSource::Architect);
+    let mut replay = team.clone();
+    replay.workers[2].id = "initial-a".into();
+    assert_ne!(council::status(&replay).unwrap().state, "passed",
+        "reusing a reviewer identity cannot satisfy the fresh native S2 round");
     assert!(finish_refusal(&team).is_none());
     // A later artifact change invalidates both phases, not only the last score.
     team.changed_at = SINCE + 5;

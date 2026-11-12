@@ -1,5 +1,5 @@
 import { escape } from './dom';
-import type { CouncilInspection } from './architect-types';
+import type { CouncilCriteriaSource, CouncilExecutionStrategy, CouncilInspection } from './architect-types';
 
 /** Native durations describe app-observed lifecycle only, not token or provider billing time. */
 function observedDuration(label: string, ms: number | null | undefined): string {
@@ -21,6 +21,19 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     m6: 'Mixed bots', m7: 'Mixed bots + Architect',
   };
   const nativeMode = inspection.mode && modeLabels[inspection.mode];
+  const strategyLabels: Record<CouncilExecutionStrategy, string> = {
+    parallel: 'Parallel', escalated: 'Escalated / on-demand', two_phase: 'Two-phase / adversarial',
+  };
+  const criteriaLabels: Record<CouncilCriteriaSource, string> = {
+    architect: 'Architect-defined', user: 'User-defined', hybrid: 'Hybrid',
+  };
+  const strategyName = inspection.strategy && strategyLabels[inspection.strategy];
+  const strategyHtml = strategyName
+    ? '<p class="council-native-strategy">Configured native strategy: ' + escape(strategyName) +
+      (inspection.strategy === 'escalated' && inspection.forceEscalation ? ' · Explicit fresh-round escalation required' : '') +
+      (inspection.criteriaSource && criteriaLabels[inspection.criteriaSource]
+        ? ' · Criteria origin: ' + escape(criteriaLabels[inspection.criteriaSource]) : '') + '</p>'
+    : '';
   const sourceBreakdown = nativeMode
     ? '<p class="council-native-mode">Native mode: ' + escape(nativeMode) +
       ' · Observed attempts (not a passing quorum): ' +
@@ -75,7 +88,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     ': ' + escape(inspection.status.state) + ' · Revision ' + escape(String(inspection.teamRevision)) +
     '</p><p>' + (criteria.length ? 'Required criteria: ' +
       escape(criteria.map(c => c.lens).join(', ')) : 'Criteria: Architect-defined') + '</p>' +
-    completion + sourceBreakdown + usageHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
+    completion + sourceBreakdown + strategyHtml + usageHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
     (attempts || '<p>No reviewer attempts have been admitted.</p>') + findingsHtml + '</div>';
 }
 

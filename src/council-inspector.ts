@@ -67,6 +67,18 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     ? '<section aria-label="Reviewer-reported findings"><h4>Reviewer-reported findings (unverified)</h4><ul>' +
       findings + '</ul></section>'
     : '';
+  const children = (inspection.reservedChildren ?? []).slice(0,8);
+  const childHtml = children.length
+    ? '<section aria-label="Task-owned child Councils" class="council-child-reservations">' +
+      '<h4>Task-owned child Councils (not approvals)</h4>' +
+      '<p>Reservations are not executed reviews or parent Council votes.</p><ul>' +
+      children.map(child => '<li><details><summary>' + escape(child.botId) +
+        ' · ' + escape(child.status.replaceAll('_', ' ')) + '</summary>' +
+        '<p>Configured leaf reviewers: ' + escape(String(child.requiredLeafReviewers)) +
+        ' · Task session: ' + escape(child.childSessionId) +
+        ' · Parent cycle: ' + escape(child.rootCycleId) +
+        '</p></details></li>').join('') + '</ul></section>'
+    : '';
   const hidden = inspection.attempts.length - shown.length;
   const usage = inspection.usage;
   const usageHtml = usage
@@ -89,7 +101,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     '</p><p>' + (criteria.length ? 'Required criteria: ' +
       escape(criteria.map(c => c.lens).join(', ')) : 'Criteria: Architect-defined') + '</p>' +
     completion + sourceBreakdown + strategyHtml + usageHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
-    (attempts || '<p>No reviewer attempts have been admitted.</p>') + findingsHtml + '</div>';
+    (attempts || '<p>No reviewer attempts have been admitted.</p>') + childHtml + findingsHtml + '</div>';
 }
 
 /** Native lookup on demand; closing and reopening always retrieves fresh evidence. */

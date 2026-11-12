@@ -114,12 +114,23 @@ test('Council blocked child state remains non-passing in shared native inspector
     status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: true,
       notice: 'Nested Council requires a task-isolated native child review before any root approval.' },
     verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
+    reservedChildren: [{ botId: '<img src=x onerror=alert(1)>', childSessionId: 'child-session-one',
+      rootCycleId: 'task-1:1000', requiredLeafReviewers: 3, status: 'blocked_until_native_child_review' }],
   };
+  await page.setViewportSize({ width: 360, height: 640 });
   await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
   await button(page).click();
   await panel(page).getByText('Review evidence and usage').click();
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
   await expect(panel(page).getByText('blocked', { exact: false })).toBeVisible();
+  const child = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await expect(child).toContainText('Reservations are not executed reviews');
+  await child.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  await expect(child.getByText('Configured leaf reviewers: 3', { exact: false })).toBeVisible();
+  await expect(child.getByText('child-session-one', { exact: false })).toBeVisible();
+  await expect(child.getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
+  await expect(child.locator('img')).toHaveCount(0);
   await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
 });
 

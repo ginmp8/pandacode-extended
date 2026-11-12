@@ -80,6 +80,11 @@ export interface CouncilUsageTotals {
   tokenCount: number | null; costAmount: number | null; costCurrency: string | null;
   usageProvenance: 'unknown';
 }
+/** Read-only task-owned native reservation, not a child score or authorization to run it. */
+export interface CouncilChildReservation {
+  botId: string; childSessionId: string; rootCycleId: string;
+  requiredLeafReviewers: number; status: string;
+}
 export interface CouncilInspection {
   mode: 'm1' | 'm2' | 'm3' | 'm4' | 'm5' | 'm6' | 'm7';
   /** Configured native policy, not proof that escalation or challenge work ran. */
@@ -91,6 +96,8 @@ export interface CouncilInspection {
   /** Optional for older native builds / existing preview fixtures. */
   usage?: CouncilUsageTotals;
   reportedFindings?: CouncilReportedFinding[];
+  /** Absent on legacy builds; pending children cannot be presented as a passing quorum. */
+  reservedChildren?: CouncilChildReservation[];
 }
 export interface TeamConfig {
   /** The task's own model leads and picks each worker's model (from `workers`, a roster of

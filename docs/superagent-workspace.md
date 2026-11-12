@@ -11,6 +11,11 @@ each independent Demand is a durable Ticket bound to exactly one Team.
   updated native Tickets. Board and List show the same loaded records. The board
   buckets Working, Awaiting decision, Needs attention and Finished or stopped.
   All column counts represent **only the loaded page**, not complete totals.
+- **Review inbox:** a separate native, bounded cross-Team query shows actual
+  `waiting_approval` (human decision) and `waiting_review` (native Council
+  pending, **not** a verified pass) Tickets, even when they fall outside the
+  general Demand index's most recent 200 rows. Open Demand resolves the
+  original Team before offering native task controls.
 - **Open demand:** resolves the original Team, fetches the exact Ticket
   when outside the Team's latest 50, verifies its Team ownership, then offers
   the established native Ticket controls.

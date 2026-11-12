@@ -765,3 +765,63 @@ test('native effect receipt inspection is lazy, task-scoped and cannot dispatch'
   expect(seen.filter(value=>value==='superagent_effect_receipts')).toHaveLength(1);
   expect(seen.some(value=>/submit|dispatch|accept|reserve|acknowledge/.test(value))).toBe(false);
 });
+
+
+test('native cross-Team review inbox exposes pending states without synthetic Council approval', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-global-review-test'; document.body.appendChild(host);
+    const seen:string[]=[];
+    const demands=[
+      {id:'needs-human',orchestrationId:'team-a',objective:'Evidence needs human',
+        state:'waiting_approval',revision:4,updatedAt:1794400000000},
+      {id:'awaits-council',orchestrationId:'team-b',objective:'Real Council unavailable',
+        state:'waiting_review',revision:8,updatedAt:1794400000200}
+    ];
+    mountSuperagent(host, async command => {
+      seen.push(command);
+      if(command==='bots_list') return [
+        {id:'router',name:'Router',paused:false},{id:'worker',name:'Worker',paused:false}
+      ] as never;
+      if(command==='superagent_list') return [
+        {id:'team-a',name:'Economy',coordinatorBotId:'router',
+          workerBotId:'worker',enabled:true,policyRevision:2},
+        {id:'team-b',name:'Security',coordinatorBotId:'router',
+          workerBotId:'worker',enabled:true,policyRevision:2}
+      ] as never;
+      if(command==='superagent_tickets') return [] as never;
+      if(command==='superagent_review_inbox') return demands as never;
+      if(command==='superagent_snapshot') return {
+        ticket:{id:'awaits-council',orchestrationId:'team-b',
+          objective:'Real Council unavailable',state:'waiting_review',
+          revision:8,evidence:null},
+        mandate:{actor:'operator',authorizationId:'manual',policyRevision:2,
+          projectId:'project',expiresAt:1800000000000,revoked:false,
+          allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[],council:null
+      } as never;
+      if(command==='superagent_source_thread_links') return [] as never;
+      throw Error('Unexpected native command: '+command);
+    });
+    (window as unknown as {saReviewCommands:()=>string[]}).saReviewCommands=()=>seen;
+  });
+  const host=page.locator('#sa-global-review-test');
+  await host.getByRole('button',{name:'Review inbox',exact:true}).click();
+  const inbox=host.getByRole('region',{name:'Cross-Team native review inbox'});
+  await inbox.getByRole('button',{name:'Refresh review inbox'}).click();
+  await expect(inbox).toContainText('Human decision');
+  await expect(inbox).toContainText('Awaiting native Council (not approved)');
+  await expect(inbox.locator('[data-sa-accept]')).toHaveCount(0);
+  await inbox.getByRole('button',{name:'Open demand'}).nth(1).click();
+  await expect(host.getByRole('region',{name:'Ticket evidence'}))
+    .toContainText('awaits-council');
+  await expect(host.getByRole('region',{name:'Selected orchestration'}))
+    .toContainText('Security');
+  await expect(host.locator('[data-sa-accept]')).toHaveCount(0);
+  const commands=await page.evaluate(()=>
+    (window as unknown as {saReviewCommands:()=>string[]}).saReviewCommands());
+  expect(commands.filter(c=>c==='superagent_review_inbox')).toHaveLength(1);
+  expect(commands.some(c=>/submit|dispatch|accept|reserve/.test(c))).toBe(false);
+});

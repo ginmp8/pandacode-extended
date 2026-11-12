@@ -61,6 +61,7 @@ interface SourceDecision {
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false;
+  let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false;
   let globalDemandLayout: 'board' | 'list' = 'board';
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
   let workspaceView: 'teams' | 'runs' | 'review' | 'sources' | 'portable' = 'teams';
@@ -398,7 +399,24 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<dt>Current native support</dt><dd>One worker, manual dispatch; scoped writes and automatic GitHub intake unsupported.</dd></dl>' +
         '<button type="button" data-sa-open-runs>Assign demand / Open runs</button></section>'
       : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
-    const reviewPanel = chosen
+    const globalReviewPanel = '<section class="sa-pane sa-cross-team-review" ' +
+      'role="region" aria-label="Cross-Team native review inbox"><header>' +
+      '<h3>Review inbox · All Teams</h3><button type="button" data-sa-load-review-inbox>' +
+      'Refresh review inbox</button></header>' +
+      '<p>Up to 200 recently updated native Tickets requiring human acceptance or ' +
+      'awaiting Council. A waiting Council verdict cannot be manually treated as passed. ' +
+      'Open a Demand to inspect its native Team and revision before deciding.</p>' +
+      (!reviewQueueLoaded ? '<p role="status">Load native review queue to inspect all Teams.</p>' :
+        '<ul class="sa-tickets">' + (reviewQueue.map(item =>
+          '<li><div><strong>' + safe(item.objective) + '</strong><small>' +
+          safe(presets.find(team => team.id === item.orchestrationId)?.name ?? 'Unknown Team') +
+          ' · ' + safe(item.state === 'waiting_approval' ? 'Human decision' :
+            'Awaiting native Council (not approved)') + ' · Revision ' +
+          item.revision + '</small></div><button type="button" data-sa-open-demand="' +
+          safe(item.id) + '">Open demand</button></li>').join('') ||
+          '<li>No native Tickets currently awaiting a decision.</li>') + '</ul>') +
+      '</section>';
+    const selectedTeamReview = chosen
       ? '<section class="sa-pane" aria-label="Review inbox"><h3>Review inbox · ' + safe(chosen.name) +
         '</h3><p>Only native Tickets awaiting explicit human evidence acceptance; advisory Council is not a verified pass.</p>' +
         '<ul class="sa-tickets">' +
@@ -415,6 +433,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<button type="button" data-sa-reject-cancel>Cancel</button></div></form>' : '') +
         details + '</section>'
       : '<section class="sa-pane"><p>Select a Team to inspect its native human review queue.</p></section>';
+    const reviewPanel = globalReviewPanel + selectedTeamReview;
     const navigation = '<nav class="sa-navigation" aria-label="Orchestration views">' +
       ([
         ['teams','Teams'],['runs','Demands / Runs'],['review','Review inbox'],
@@ -503,6 +522,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     // Mutations invalidate the cross-Team index. Never show stale global
     // status as if the native Tickets had already been re-read.
     allDemands = []; allDemandsLoaded = false;
+    reviewQueue = []; reviewQueueLoaded = false;
     demandPreflight = null;
     // Keep updated controls hidden until the mutating operation has settled.
     // Exposing them mid-reload would allow silently discarded submissions.
@@ -653,6 +673,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
+    if (target.hasAttribute('data-sa-load-review-inbox')) {
+      void work(async () => {
+        reviewQueue = []; reviewQueueLoaded = false;
+        reviewQueue = await call<DemandIndex[]>('superagent_review_inbox',{limit:200});
+        reviewQueueLoaded = true;
+      });
+      return;
+    }
     if (target.hasAttribute('data-sa-load-all-demands')) {
       void work(async () => {
         allDemands = [];
@@ -664,9 +692,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       return;
     }
     if (target.dataset.saOpenDemand) {
-      const demand = allDemands.find(item => item.id === target.dataset.saOpenDemand);
+      const demand = allDemands.find(item => item.id === target.dataset.saOpenDemand) ??
+        reviewQueue.find(item => item.id === target.dataset.saOpenDemand);
       if (!demand || !presets.some(item => item.id === demand.orchestrationId)) return;
       selected = demand.orchestrationId;
+      workspaceView = 'runs';
       tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
       inspectedAssignmentId = ''; roleRoster = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];

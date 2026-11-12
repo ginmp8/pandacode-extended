@@ -451,6 +451,26 @@ fn list_all_demands(store: &Store, limit: i64) -> Result<Vec<DemandIndex>> {
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+/// Cross-Team native decision queue, independent of the general 200-row
+/// Demand backlog. Only native states are represented; waiting_review is NOT
+/// human-approvable until an actual task-bound Council verdict is available.
+fn list_review_inbox(store: &Store, limit: i64) -> Result<Vec<DemandIndex>> {
+    if !(1..=200).contains(&limit) {
+        return Err("Review inbox page size must be between 1 and 200.".into());
+    }
+    let mut stmt = store.db.prepare(
+        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at
+         FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
+         WHERE t.state IN ('waiting_approval','waiting_review')
+         ORDER BY t.updated_at DESC,t.id DESC LIMIT ?1",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([limit], |row| Ok(DemandIndex {
+        id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
+        state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
+    })).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
 /// Immutable native assignment history, including completed and failed attempts.
 /// Never infer task success or authorization from an assignment's terminal state.
 #[derive(Debug, Clone, Serialize)]
@@ -1889,6 +1909,15 @@ pub async fn superagent_all_demands(
 }
 
 #[tauri::command]
+pub async fn superagent_review_inbox(
+    window: tauri::WebviewWindow, state: State<'_, AppState>, limit: Option<i64>,
+) -> Result<Vec<DemandIndex>> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    list_review_inbox(&store, limit.unwrap_or(200))
+}
+
+#[tauri::command]
 pub async fn superagent_assignments(window: tauri::WebviewWindow, 
     state: State<'_, AppState>, ticket_id: String, limit: Option<i64>,
 ) -> Result<Vec<Assignment>> {
@@ -2423,6 +2452,50 @@ mod tests {
         assert!(read_only_policy(&store, &sid).is_err());
         assert!(!on_run_finished(&store, &sid, true, "late worker success").unwrap_or(false)
             || get_ticket(&store, &ticket.id).unwrap().state != "waiting_approval");
+    }
+
+    #[test]
+    fn native_review_inbox_separates_human_and_unverified_council_states() {
+        let mut store = fixture();
+        let first = enabled(&store);
+        let second = create_configuration(&store, NewOrchestration {
+            name: "Second native review Team".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&second.id],
+        ).unwrap();
+        let (human, started) = admit(
+            &mut store, &first.id, "Human review only", "review-inbox-human", false,
+        ).unwrap();
+        assert!(started);
+        let session = assignment_session(&store, &human.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session, true, "PRIVATE NATIVE EVIDENCE").unwrap());
+        let (council, started) = admit(
+            &mut store, &second.id, "Council pending", "review-inbox-council", true,
+        ).unwrap();
+        assert!(!started);
+        store.db.execute(
+            "UPDATE sa_tickets SET state='waiting_review',updated_at=updated_at+1 WHERE id=?1",
+            [&council.id],
+        ).unwrap();
+        let pending = list_review_inbox(&store, 200).unwrap();
+        assert_eq!(pending.len(), 2);
+        assert!(pending.iter().any(|row| row.id == human.id
+            && row.state == "waiting_approval" && row.orchestration_id == first.id));
+        assert!(pending.iter().any(|row| row.id == council.id
+            && row.state == "waiting_review" && row.orchestration_id == second.id));
+        let json = serde_json::to_string(&pending).unwrap();
+        assert!(!json.contains("PRIVATE NATIVE EVIDENCE"));
+        assert!(!json.contains("review-inbox-human"));
+        assert!(list_review_inbox(&store, 1).unwrap().len() == 1);
+        assert!(list_review_inbox(&store, 0).is_err());
+        assert!(list_review_inbox(&store, 201).is_err());
+        let path = store.path.clone();
+        drop(store);
+        let read_only = Store::open_read_only(&path).unwrap();
+        assert_eq!(list_review_inbox(&read_only, 200).unwrap().len(), 2);
     }
 
     #[test]

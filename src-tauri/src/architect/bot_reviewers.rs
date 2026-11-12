@@ -291,6 +291,8 @@ fn selection_changed(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> bool 
     let old = team.config.council.as_ref();
     let next = next.as_ref();
     old.map(|c| &c.reviewer_bot_ids) != next.map(|c| &c.reviewer_bot_ids)
+        || old.map(|c| &c.criteria_source) != next.map(|c| &c.criteria_source)
+        || old.map(|c| &c.criteria) != next.map(|c| &c.criteria)
         || old.and_then(|c| c.review_permissions.as_ref()) != next.and_then(|c| c.review_permissions.as_ref())
         || old.map(|c| &c.optional_skill_ids) != next.map(|c| &c.optional_skill_ids)
         || old.map(|c| &c.required_check_skill_ids) != next.map(|c| &c.required_check_skill_ids)
@@ -300,6 +302,15 @@ fn selection_changed(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> bool 
 /// round, while fixed native lenses must remain satisfiable by distinct selected bots.
 pub(super) fn allow_roster_change(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> Result<()> {
     if !selection_changed(team, next) || next.is_none() { return Ok(()); }
+    let criteria_changed = team.config.council.as_ref().is_some_and(|old| {
+        next.as_ref().is_some_and(|config| old.criteria_source != config.criteria_source
+            || old.criteria != config.criteria)
+    });
+    if criteria_changed && team.workers.iter().any(|worker| {
+        worker.created_at >= team.council_since && worker.council.is_some()
+    }) {
+        return Err("Council criteria are frozen after a reviewer seat is issued; start a new Council cycle to revise them.".into());
+    }
     if let Some(config) = next.as_ref().filter(|c| !c.reviewer_bot_ids.is_empty()) {
         let lenses = super::council::fixed_lens_count(team);
         if config.reviewer_bot_ids.len() < lenses {

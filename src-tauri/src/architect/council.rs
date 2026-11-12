@@ -52,6 +52,34 @@ impl PostAcceptanceIssue {
 }
 pub(super) const FAILED_REVIEWER: &str = " A failed Council reviewer is never followed up: cancel it (it has no score) and dispatch a fresh reviewer with councilLens.";
 
+
+/** Source selection changes only how criteria are owned, not reviewer identity. */
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CouncilCriteriaSource {
+    #[default]
+    Architect,
+    User,
+    Hybrid,
+}
+fn architect_criteria(source: &CouncilCriteriaSource) -> bool {
+    *source == CouncilCriteriaSource::Architect
+}
+fn required_criterion() -> bool {
+    true
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CouncilCriterion {
+    pub id: String,
+    pub lens: String,
+    #[serde(default = "required_criterion")]
+    pub required: bool,
+    pub target: f64,
+    #[serde(default)]
+    pub evidence_required: bool,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct CouncilConfig {
@@ -64,6 +92,12 @@ pub struct CouncilConfig {
     /// Persistent bot IDs for task-scoped selected reviewers; empty keeps native Council behavior.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reviewer_bot_ids: Vec<String>,
+    /// Absent preserves original Architect-selected or selected-bot Council behavior.
+    #[serde(default, skip_serializing_if = "architect_criteria")]
+    pub criteria_source: CouncilCriteriaSource,
+    /// Task-owned user-defined criteria. Hybrid may also add Architect lenses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub criteria: Vec<CouncilCriterion>,
     /// Explicitly user-optional bot-assigned skills, frozen per Council task.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub optional_skill_ids: Vec<String>,
@@ -79,7 +113,7 @@ pub struct CouncilConfig {
 }
 impl Default for CouncilConfig {
     fn default() -> Self {
-        Self { target: 9.0, max_rounds: 10, reviewers: 0, reviewer_bot_ids: Vec::new(), optional_skill_ids: Vec::new(), required_check_skill_ids: Vec::new(), review_permissions: None, post_acceptance_issue: None }
+        Self { target: 9.0, max_rounds: 10, reviewers: 0, reviewer_bot_ids: Vec::new(), criteria_source: CouncilCriteriaSource::Architect, criteria: Vec::new(), optional_skill_ids: Vec::new(), required_check_skill_ids: Vec::new(), review_permissions: None, post_acceptance_issue: None }
     }
 }
 impl CouncilConfig {
@@ -92,6 +126,36 @@ impl CouncilConfig {
         }
         if self.reviewers > MAX_REVIEWERS {
             return Err(format!("Council allows at most {MAX_REVIEWERS} reviewers."));
+        }
+        if self.criteria.len() > MAX_REVIEWERS {
+            return Err("Council criteria exceed the eight-seat limit.".into());
+        }
+        if self.criteria_source == CouncilCriteriaSource::Architect && !self.criteria.is_empty() {
+            return Err("Choose user or hybrid criteria source for named criteria.".into());
+        }
+        if self.criteria_source != CouncilCriteriaSource::Architect
+            && !self.criteria.iter().any(|criterion| criterion.required)
+        {
+            return Err("User and hybrid criteria must include a required criterion.".into());
+        }
+        let mut criterion_ids = std::collections::HashSet::new();
+        let mut criterion_lenses = std::collections::HashSet::new();
+        for criterion in &self.criteria {
+            if !super::valid_id(&criterion.id)
+                || criterion.lens.trim().is_empty()
+                || criterion.lens.chars().count() > LENS_CHARS
+                || criterion.lens.chars().any(char::is_control)
+                || !criterion_ids.insert(criterion.id.as_str())
+                || !criterion_lenses.insert(criterion.lens.trim().to_lowercase())
+            {
+                return Err("Council criteria need unique valid IDs and distinct plain lenses.".into());
+            }
+            if !criterion.target.is_finite() || !(1.0..=10.0).contains(&criterion.target) {
+                return Err("Each Council criterion target must be between 1 and 10.".into());
+            }
+        }
+        if self.criteria.iter().filter(|criterion| criterion.required).count() > self.needed() {
+            return Err("Required Council criteria exceed the available reviewer seats.".into());
         }
         if !self.optional_skill_ids.is_empty() {
             if self.reviewer_bot_ids.is_empty() || self.optional_skill_ids.len() > 32 {
@@ -355,6 +419,40 @@ fn lowest(team: &TeamSnapshot, round: usize) -> Option<f64> {
     scored(team, round).reduce(f64::min)
 }
 
+/// A required criterion cannot pass by occupying another lens or by an unscored report.
+fn missing_required_criteria(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> Vec<String> {
+    config.criteria.iter().filter(|criterion| criterion.required)
+        .filter(|criterion| !in_round(team, round).any(|(worker, seat)| {
+            counts(worker, seat) && !unsettled(&worker.status)
+                && seat.score.is_some() && same_lens(&seat.lens, &criterion.lens)
+        }))
+        .map(|criterion| criterion.lens.clone())
+        .collect()
+}
+
+/// Every matching seat must meet the stricter per-criterion target (never the mean).
+fn criterion_blockers(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> Vec<String> {
+    config.criteria.iter().filter(|criterion| criterion.required)
+        .filter_map(|criterion| {
+            let lowest = in_round(team, round)
+                .filter(|(worker, seat)| counts(worker, seat) && !unsettled(&worker.status)
+                    && same_lens(&seat.lens, &criterion.lens))
+                .filter_map(|(_, seat)| seat.score)
+                .reduce(f64::min);
+            let score = lowest?;
+            let target = criterion.target.max(config.target);
+            if score < target {
+                return Some(format!("criterion {} scored {score}, below {target}", criterion.id));
+            }
+            if criterion.evidence_required {
+                // Per-criterion native evidence receipts are not yet implemented.
+                // Never allow a model's claim to satisfy a required native gate.
+                return Some(format!("criterion {} requires independently verified native evidence", criterion.id));
+            }
+            None
+        })
+        .collect()
+}
 /// A score is not evidence that a mandatory reviewer skill was invoked or a
 /// check was actually executed. Only independently verified native receipts
 /// can satisfy those obligations; optional skill pins never impose this gate.
@@ -406,7 +504,7 @@ impl Rounds {
             let seated = in_round(team, round).filter(|(w, seat)| counts(w, seat)).count();
             let count = scored(team, round).count();
             let required = required_reviewers(team, config, round);
-            let complete = !reconfigured(team, round) && count == seated && count >= required && view.missing(team, round).is_empty();
+            let complete = !reconfigured(team, round) && count == seated && count >= required && view.missing(team, round).is_empty() && missing_required_criteria(team, config, round).is_empty();
             view.done.push(complete);
             view.started += usize::from(in_round(team, round).any(|(_, seat)| seat.started_at > 0));
         }
@@ -499,6 +597,9 @@ pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: O
     if let Some(low) = lowest(team, latest).filter(|low| current && *low < config.target) {
         return Err(format!("Council round {latest} scored lowest {low}, below the target {}, and nothing changed since it started. Fix the blockers with workers before convening a new round.", config.target));
     }
+    if current && view.complete(latest) && !criterion_blockers(team, config, latest).is_empty() {
+        return Err("Required Council criteria need correction or independent native evidence before a fresh round.".into());
+    }
     Ok(latest + 1)
 }
 
@@ -525,6 +626,11 @@ pub(super) fn seat_for(team: &TeamSnapshot, lens: Option<&str>, replaces: Option
     let Some(lens) = inherited.or(lens) else {
         return Ok(None);
     };
+    if config.criteria_source == CouncilCriteriaSource::User
+        && !config.criteria.iter().any(|criterion| same_lens(&criterion.lens, lens))
+    {
+        return Err("User-defined Council only admits explicitly named criterion lenses.".into());
+    }
     let round = round_for(team, config, replaces)?;
     let fixed = Rounds::of(team, config).lenses;
     if round == 1 && !config.reviewer_bot_ids.is_empty() && fixed.len() >= config.reviewer_bot_ids.len()
@@ -625,12 +731,23 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
     // The limit is the user's brake: no further round can open. The lead finishes once nothing is live
     // and the last round is complete, out of date, or full; a current round it can still fill comes first.
     if view.at_limit(config) && !live(team, round) && (reconfigured(team, round) || view.complete(round) || stale(team, round) || in_round(team, round).count() >= MAX_REVIEWERS) {
+        if !config.criteria.is_empty()
+            && (!view.complete(round) || stale(team, round)
+                || lowest(team, round).map_or(true, |score| score < config.target)
+                || !criterion_blockers(team, config, round).is_empty())
+        {
+            return Some(("Council required criteria did not pass at the round limit; only explicit attributed user acceptance can close this exception.".into(), false));
+        }
         return None;
     }
     if !view.complete(round) {
         let missing = view.missing(team, round);
         let count = scored(team, round).count();
-        let lenses = if missing.is_empty() { String::new() } else { format!(" It still needs the lenses round 1 seated: {}.", missing.join(", ")) };
+        let mut lenses = if missing.is_empty() { String::new() } else { format!(" It still needs the lenses round 1 seated: {}.", missing.join(", ")) };
+        let required = missing_required_criteria(team, config, round);
+        if !required.is_empty() {
+            lenses.push_str(&format!(" Required criteria awaiting a scored reviewer: {}.", required.join(", ")));
+        }
         // Seats that stopped or failed without a score hold the round until they are cancelled.
         let stopped: Vec<String> = in_round(team, round).filter(|(w, seat)| !w.abandoned && seat.score.is_none() && !unsettled(&w.status)).map(|(w, _)| format!("{} ({})", w.name, w.id)).collect();
         let next = if stopped.is_empty() { "Dispatch the missing reviewers with councilLens, or wait for those still running.".to_string() } else { format!("Cancel the stopped reviewers {}, then dispatch the missing reviewers with councilLens.", stopped.join(", ")) };
@@ -645,6 +762,10 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
             "reviewer_skill_evidence_unverified: Council round {round} has missing mandatory skill input or explicitly required native skill checks without independently verified execution: {}. Native invocation, check and evidence receipts are required; reviewer claims or scores alone do not count.",
             unverified.join(", ")
         ), false));
+    }
+    let blockers = criterion_blockers(team, config, round);
+    if !blockers.is_empty() {
+        return Some((format!("Council required criteria are not satisfied: {}. Fix and re-review the work with independent evidence. {ESCAPE}", blockers.join("; ")), true));
     }
     let low = lowest(team, round)?;
     if low >= config.target {
@@ -686,7 +807,7 @@ fn status_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Coun
         "asking"
     } else if live(team, round) {
         "reviewing"
-    } else if view.complete(round) && !stale && unverified_required_skill_checks(team, round).is_empty() && low.is_some_and(|low| low >= config.target) {
+    } else if view.complete(round) && !stale && unverified_required_skill_checks(team, round).is_empty() && criterion_blockers(team, config, round).is_empty() && low.is_some_and(|low| low >= config.target) {
         "passed"
     } else if view.at_limit(config) {
         "limit"
@@ -783,7 +904,21 @@ pub(super) fn lead_rules(team: &TeamSnapshot, routed: bool) -> String {
     let selected_note = if selected {
         format!(" The user selected persistent reviewer bot IDs: {}. Native Council assigns each fresh reviewer seat to one of those bots, using that bot's frozen model and review persona. Dispatch one unique Council lens per bot; never substitute a worker or claim unavailable bots reviewed. Disclose reduced diversity if distinct bots use the same provider/model. Provider/model/profileId fields in reviewer assignments cannot override the selected bot.", config.reviewer_bot_ids.join(", "))
     } else { String::new() };
-    format!(" Council is on, target {}/10. Before finishing work that changed anything, convene a council: you decide the reviewers, choosing distinct lenses that fit this work (correctness, security, UX, performance, visual quality, pacing, overall senior review, whatever matters here; round 1 fixes the lenses: each sits again in every later round under its name, and no new lens joins later), {count}, dispatched in one batch with councilLens and {models}, after writers settle. Give each reviewer the user's goal, where the work is and its lens; never prior scores, and never the score you want. The bar is every reviewer at or above the target, not the average. After a round below it, read the reports, fix real blockers through workers, verify, and convene FRESH reviewers. {limit} If the user says to accept the current scores, tell them to press Accept and finish on the Council card. End your final message with a table of each lens's first and final score.{selected_note}", config.target)
+    let criteria_note = match config.criteria_source {
+        CouncilCriteriaSource::Architect => String::new(),
+        CouncilCriteriaSource::User | CouncilCriteriaSource::Hybrid => {
+            let anchors = config.criteria.iter().filter(|criterion| criterion.required)
+                .map(|criterion| format!("{} ({}, target {}/10{})", criterion.lens, criterion.id,
+                    criterion.target.max(config.target),
+                    if criterion.evidence_required { ", independent evidence required" } else { "" }))
+                .collect::<Vec<_>>().join("; ");
+            format!(" The user defined immutable required Council criteria: {anchors}. Every required lens must have a fresh scored native seat in each round. Never rename, drop or weaken a user criterion. {}",
+                if config.criteria_source == CouncilCriteriaSource::Hybrid {
+                    "You may add distinct nonduplicative task-relevant lenses with rationale."
+                } else { "Use only these named criteria as reviewer lenses." })
+        }
+    };
+    format!(" Council is on, target {}/10. Before finishing work that changed anything, convene a council: you decide the reviewers, choosing distinct lenses that fit this work (correctness, security, UX, performance, visual quality, pacing, overall senior review, whatever matters here; round 1 fixes the lenses: each sits again in every later round under its name, and no new lens joins later), {count}, dispatched in one batch with councilLens and {models}, after writers settle. Give each reviewer the user's goal, where the work is and its lens; never prior scores, and never the score you want. The bar is every reviewer at or above the target, not the average. After a round below it, read the reports, fix real blockers through workers, verify, and convene FRESH reviewers. {limit} If the user says to accept the current scores, tell them to press Accept and finish on the Council card. End your final message with a table of each lens's first and final score.{selected_note}{criteria_note}", config.target)
 }
 
 /// A reviewer's rules. They never carry the target or earlier scores.

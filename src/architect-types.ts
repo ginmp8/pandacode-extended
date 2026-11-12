@@ -10,7 +10,22 @@ export interface WorkerProfile {
 /** What a council must reach: every reviewer at `target`, within `maxRounds` completed rounds (1-100), with `reviewers` seats (0 = the lead decides). */
 export interface CouncilReviewGrant { tool: string; action: string; resourceArgument: string; resource: string; actionArgument?: string | null }
 export interface CouncilPermissionSelection { authorizationId: string; grants: CouncilReviewGrant[] }
-export interface CouncilConfig { target: number; maxRounds: number; reviewers: number; /** Task-scoped persistent reviewer identities; absent means automatic native workers. */ reviewerBotIds?: string[]; optionalSkillIds?: string[]; requiredCheckSkillIds?: string[]; reviewPermissions?: CouncilPermissionSelection | null; postAcceptanceIssue?: { authorizationId: string; repository: string } | null }
+export type CouncilCriteriaSource = 'architect' | 'user' | 'hybrid';
+export interface CouncilCriterion { id: string; lens: string; required: boolean; target: number; evidenceRequired?: boolean }
+export interface CouncilConfig {
+  target: number;
+  maxRounds: number;
+  reviewers: number;
+  /** Task-scoped persistent reviewer identities; absent means automatic native workers. */
+  reviewerBotIds?: string[];
+  /** Missing source/criteria preserves the original Council semantics. */
+  criteriaSource?: CouncilCriteriaSource;
+  criteria?: CouncilCriterion[];
+  optionalSkillIds?: string[];
+  requiredCheckSkillIds?: string[];
+  reviewPermissions?: CouncilPermissionSelection | null;
+  postAcceptanceIssue?: { authorizationId: string; repository: string } | null;
+}
 /** A worker's seat on the council: the round it reviews, what it looks at, and its score once given. */
 export interface CouncilSeat { round: number; lens: string; score?: number | null; /** First launch; a round begins with its earliest seat. */ startedAt?: number }
 /** `dispatch`: the latest round is open but no seat is live, so it waits on the lead; `asking`: the team rests for the user. */

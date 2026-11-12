@@ -24,6 +24,110 @@ fn post_acceptance_github_action_requires_one_exact_repository_and_user_grant() 
     assert!(config.validate().unwrap_err().contains("user-authorized"));
 }
 
+
+#[test]
+fn user_and_hybrid_criteria_are_versioned_and_reject_invalid_anchors() {
+    let legacy = on(9.0, 10, 0);
+    assert_eq!(serde_json::to_value(&legacy).unwrap(),
+        json!({"target":9.0,"maxRounds":10,"reviewers":0}));
+    let mut config: CouncilConfig = serde_json::from_value(json!({
+        "target": 9.0, "criteriaSource": "hybrid",
+        "criteria": [
+            {"id":"security","lens":"Security","target":9.8},
+            {"id":"quality","lens":"Quality","target":9.5}
+        ]
+    })).unwrap();
+    assert_eq!(config.criteria_source, council::CouncilCriteriaSource::Hybrid);
+    assert_eq!(config.criteria.len(), 2);
+    assert!(config.criteria.iter().all(|criterion| criterion.required));
+    assert!(config.validate().is_ok());
+    let encoded = serde_json::to_value(&config).unwrap();
+    assert_eq!(encoded["criteriaSource"], "hybrid");
+    assert_eq!(encoded["criteria"][0]["id"], "security");
+    config.criteria[1].lens = " security ".into();
+    assert!(config.validate().unwrap_err().contains("distinct"));
+    config.criteria[1].lens = "Quality".into();
+    config.criteria[1].id = "security".into();
+    assert!(config.validate().unwrap_err().contains("unique"));
+    config.criteria[1].id = "quality".into();
+    config.criteria[1].target = 11.0;
+    assert!(config.validate().unwrap_err().contains("between 1 and 10"));
+    config.criteria[1].target = 9.5;
+    config.criteria_source = council::CouncilCriteriaSource::Architect;
+    assert!(config.validate().unwrap_err().contains("criteria source"));
+}
+
+#[test]
+fn required_native_criterion_lens_and_target_are_not_averaged_away() {
+    let mut config = on(9.0, 3, 2);
+    config.criteria_source = council::CouncilCriteriaSource::User;
+    config.criteria = vec![council::CouncilCriterion {
+        id: "security".into(), lens: "Security".into(),
+        required: true, target: 9.8, evidence_required: false,
+    }];
+    assert!(config.validate().is_ok());
+    let mut reviewers = vec![
+        seat("reviewer-a", 1, Some(9.9), SINCE + 1),
+        seat("reviewer-b", 1, Some(10.0), SINCE + 2),
+    ];
+    reviewers[0].council.as_mut().unwrap().lens = "Security".into();
+    reviewers[1].council.as_mut().unwrap().lens = "Security".into();
+    let team = team_with(config.clone(), reviewers);
+    assert!(council::complete(&team, &config, 1));
+    assert_eq!(council::status(&team).unwrap().state, "passed");
+    let mut low = team.clone();
+    low.workers[0].council.as_mut().unwrap().score = Some(9.5);
+    assert_eq!(council::status(&low).unwrap().state, "fixing");
+    assert!(finish_refusal(&low).unwrap().contains("criterion security"));
+    let mut missing = team.clone();
+    for worker in &mut missing.workers {
+        worker.council.as_mut().unwrap().lens = "Unlisted".into();
+    }
+    assert!(!council::complete(&missing, &config, 1));
+    assert_ne!(council::status(&missing).unwrap().state, "passed");
+    assert!(finish_refusal(&missing).unwrap().contains("Required criteria"));
+    assert!(council::seat_for(&team, Some("Unlisted"), None).unwrap_err().contains("User-defined"));
+    let mut evidence = team.clone();
+    evidence.config.council.as_mut().unwrap().criteria[0].evidence_required = true;
+    assert_eq!(council::status(&evidence).unwrap().state, "fixing");
+    assert!(finish_refusal(&evidence).unwrap().contains("native evidence"));
+}
+
+#[test]
+fn criterion_failures_cannot_complete_by_exhausting_round_limit() {
+    let mut config = on(9.0, 1, 2);
+    config.criteria_source = council::CouncilCriteriaSource::User;
+    config.criteria = vec![council::CouncilCriterion {
+        id: "security".into(), lens: "Security".into(),
+        required: true, target: 9.8, evidence_required: false,
+    }];
+    let mut reviewers = vec![
+        seat("reviewer-a", 1, Some(9.6), SINCE + 1),
+        seat("reviewer-b", 1, Some(10.0), SINCE + 2),
+    ];
+    for worker in &mut reviewers {
+        worker.council.as_mut().unwrap().lens = "Security".into();
+    }
+    let team = team_with(config, reviewers);
+    assert_eq!(council::status(&team).unwrap().state, "limit");
+    assert!(finish_refusal(&team).unwrap().contains("round limit"));
+}
+
+#[test]
+fn user_defined_criteria_reject_unreviewable_rosters() {
+    let mut config = on(9.0, 3, 2);
+    config.criteria_source = council::CouncilCriteriaSource::User;
+    config.criteria = (0..3).map(|i| council::CouncilCriterion {
+        id: format!("criterion-{i}"), lens: format!("Criterion {i}"),
+        required: true, target: 9.0, evidence_required: false,
+    }).collect();
+    assert!(config.validate().unwrap_err().contains("available reviewer seats"));
+    config.criteria.truncate(1);
+    assert!(config.validate().is_ok());
+    config.criteria[0].required = false;
+    assert!(config.validate().unwrap_err().contains("required criterion"));
+}
+
 #[test]
 fn optional_reviewer_skills_only_apply_to_explicit_unique_bot_assignments() {
     let mut council = on(9.0, 10, 0);

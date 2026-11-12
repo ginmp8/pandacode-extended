@@ -1999,6 +1999,7 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
     {
         let store = state.store.lock().unwrap();
         let root = store.session(&sid).unwrap();
+        store.db.execute("UPDATE sessions SET mode='full' WHERE id=?1", [&sid]).unwrap();
         for id in ["child-security", "child-architecture"] {
             store.db.execute(
                 "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
@@ -2020,6 +2021,10 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
     let (started, _) = start_state(&state, &sid, "Review the source artifact", None, None).unwrap();
     assert_eq!(council::status(&started).unwrap().state, "blocked");
     assert!(council::finish_refusal(&started).unwrap().contains("child_council_unavailable"));
+    let mut changed = started.config.council.as_ref().unwrap().clone();
+    changed.nested_bot_reviewers[0].child_target = 10.0;
+    assert!(bot_reviewers::allow_roster_change(&started, &Some(changed)).unwrap_err()
+        .contains("Stop the active Council cycle"));
     let child_ids = {
         let store = state.store.lock().unwrap();
         let first = child_council::inspect(&store, &started).unwrap();

@@ -325,6 +325,11 @@ fn selection_changed(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> bool 
 /// round, while fixed native lenses must remain satisfiable by distinct selected bots.
 pub(super) fn allow_roster_change(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> Result<()> {
     if !selection_changed(team, next) || next.is_none() { return Ok(()); }
+    if super::active(&team.status) && team.config.council.as_ref().map(|c| &c.nested_bot_reviewers)
+        != next.as_ref().map(|c| &c.nested_bot_reviewers)
+    {
+        return Err("Stop the active Council cycle before changing its task-owned child reviewer roster.".into());
+    }
     let criteria_changed = team.config.council.as_ref().is_some_and(|old| {
         next.as_ref().is_some_and(|config| old.criteria_source != config.criteria_source
             || old.criteria != config.criteria)

@@ -1009,7 +1009,7 @@ pub(crate) fn council_inspection_state(
     refresh_council(store, &mut team);
     let mut inspection = council::inspection(&team, verified_pass);
     if let Some(result) = inspection.as_mut() {
-        result.reserved_children = child_council::inspect(&store, &team)?;
+        result.reserved_children = child_council::inspect(store, &team)?;
     }
     if issued_seats_are_valid {
         if let Some(result) = inspection.as_mut() {

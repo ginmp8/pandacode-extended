@@ -325,8 +325,11 @@ fn selection_changed(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> bool 
 /// round, while fixed native lenses must remain satisfiable by distinct selected bots.
 pub(super) fn allow_roster_change(team: &TeamSnapshot, next: &Option<CouncilConfig>) -> Result<()> {
     if !selection_changed(team, next) || next.is_none() { return Ok(()); }
-    if super::active(&team.status) && team.config.council.as_ref().map(|c| &c.nested_bot_reviewers)
-        != next.as_ref().map(|c| &c.nested_bot_reviewers)
+    // A running Architect team may enable Council before its first review cycle.
+    // Freeze task-owned nested seats only after the native Council cycle starts.
+    if team.council_since > 0 && super::active(&team.status)
+        && team.config.council.as_ref().map(|c| &c.nested_bot_reviewers)
+            != next.as_ref().map(|c| &c.nested_bot_reviewers)
     {
         return Err("Stop the active Council cycle before changing its task-owned child reviewer roster.".into());
     }

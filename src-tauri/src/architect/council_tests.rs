@@ -1993,6 +1993,27 @@ fn the_leads_own_edits_count_even_on_a_file_a_worker_changed() {
 }
 
 #[test]
+fn nested_council_roster_is_editable_before_cycle_and_frozen_after_start() {
+    let (state, sid) = state_fixture();
+    let store = state.store.lock().unwrap();
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    assert_eq!(team.council_since, 0);
+    let mut config = on(9.0, 3, 0);
+    config.nested_bot_reviewers = ["child-a", "child-b"].iter().map(|id| council::CouncilNestedReviewer {
+        bot_id: (*id).into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
+    }).collect();
+    config.validate().unwrap();
+    assert!(bot_reviewers::allow_roster_change(&team, &Some(config.clone())).is_ok());
+    team.config.council = Some(config.clone());
+    team.council_since = SINCE;
+    let mut modified = config.clone();
+    modified.nested_bot_reviewers[0].child_target = 9.5;
+    assert!(bot_reviewers::allow_roster_change(&team, &Some(modified)).unwrap_err()
+        .contains("Stop the active Council cycle"));
+    assert!(bot_reviewers::allow_roster_change(&team, &Some(config)).is_ok());
+}
+
+#[test]
 fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
     let (state, sid) = state_fixture();
     let mut children = Vec::new();
@@ -2016,6 +2037,9 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
         }).collect();
         assert!(config.validate().is_ok());
         root_team.config.council = Some(config);
+        // The shared fixture is running; only an idle team can start a fresh objective.
+        root_team.status = "ready".into();
+        root_team.round = 0;
         save(&store, &mut root_team).unwrap();
     }
     let (started, _) = start_state(&state, &sid, "Review the source artifact", None, None).unwrap();

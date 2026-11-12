@@ -447,3 +447,25 @@ test('a trailing slash on either scope still overlaps and explains the wait', ()
   assert.equal(workerQueueReason(worker('B', 'queued', ['SRC']), [running], 0), 'Waiting for A to finish editing shared files');
   assert.equal(workerQueueReason(worker('B', 'queued', ['lib//']), [running], 0), undefined);
 });
+
+
+test('architect preview round-trips only admitted native Council strategies without weakening the old default', t => {
+  const { api, host } = fixture(t);
+  api.configure('parent', config());
+  const standard = { target: 9, maxRounds: 3, reviewers: 0 };
+  const legacy = api.setCouncil('parent', standard);
+  assert.equal(legacy.config.council.strategy, undefined);
+  assert.equal(legacy.config.council.forceEscalation, undefined);
+  const escalated = api.setCouncil('parent', { ...standard, strategy: 'escalated', forceEscalation: true });
+  assert.equal(escalated.config.council.strategy, 'escalated');
+  assert.equal(escalated.config.council.forceEscalation, true);
+  const restored = createPreviewArchitect(host).get('parent');
+  assert.equal(restored.config.council.strategy, 'escalated');
+  assert.equal(restored.config.council.forceEscalation, true);
+  assert.throws(() => api.setCouncil('parent', { ...standard, strategy: 'two_phase' }), /two-phase/);
+  assert.throws(() => api.setCouncil('parent', { ...standard, forceEscalation: true }), /requires the escalated/);
+  assert.throws(() => api.setCouncil('parent', { ...standard, maxRounds: 1, strategy: 'escalated', forceEscalation: true }), /at least two/);
+  const parallel = api.setCouncil('parent', { ...standard, strategy: 'parallel', forceEscalation: false });
+  assert.equal(parallel.config.council.strategy, undefined);
+  assert.equal(parallel.config.council.forceEscalation, undefined);
+});

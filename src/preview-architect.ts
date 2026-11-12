@@ -53,6 +53,15 @@ export function createPreviewArchitect(host: PreviewHost) {
   /** Like the native command: a sane range, or a refusal. */
   function validCouncil(council: CouncilConfig): CouncilConfig {
     if (!council || typeof council.target !== 'number' || !(council.target > 0 && council.target <= 10)) throw new Error('A council target is between 0 and 10.');
+    // Preview must round-trip the native task strategy; otherwise a successful S2
+    // configuration is silently displayed as S1 after the native reply.
+    const strategy = council.strategy ?? 'parallel';
+    if (strategy !== 'parallel' && strategy !== 'escalated')
+      throw new Error('Independent two-phase challengers are not available.');
+    if (council.forceEscalation && strategy !== 'escalated')
+      throw new Error('Forced escalation requires the escalated Council strategy.');
+    if (council.forceEscalation && council.maxRounds < 2)
+      throw new Error('Forced Council escalation requires at least two review rounds.');
     const ids = council.reviewerBotIds ?? [];
     const reviewers = integer(council.reviewers, 0, 8, 'Council reviewers');
     const extras = integer(council.automaticReviewers ?? 0, 0, 8, 'Additional automatic reviewers');
@@ -104,6 +113,8 @@ export function createPreviewArchitect(host: PreviewHost) {
     return { target: council.target, maxRounds: integer(council.maxRounds, 1, 100, 'Council rounds'), reviewers,
       ...(ids.length ? { reviewerBotIds: [...ids] } : {}),
       ...(extras ? { automaticReviewers: extras } : {}),
+      ...(strategy !== 'parallel' ? { strategy } : {}),
+      ...(council.forceEscalation ? { forceEscalation: true } : {}),
       ...(criteriaSource !== 'architect' ? { criteriaSource, criteria } : {}),
       ...(optionalSkills.length ? { optionalSkillIds: [...optionalSkills] } : {}),
       ...(checks.length ? { requiredCheckSkillIds: [...checks] } : {}),

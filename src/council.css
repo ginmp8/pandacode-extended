@@ -26,7 +26,13 @@ html[data-theme] .council-panel.floating-menu{background:color-mix(in srgb,var(-
 @media (max-height:480px){
   .council-panel:not([data-compact]){gap:5px;padding-block:6px}
   .council-panel:not([data-compact]) .council-field{gap:2px}
-  .council-panel:not([data-compact]) #council-about{line-height:1.2}
+  /* Preserve the description for assistive technology without sacrificing
+     usable controls to a long introduction in a short desktop viewport. */
+  .council-panel:not([data-compact]) #council-about{
+    position:absolute;inline-size:1px;block-size:1px;padding:0;margin:-1px;
+    overflow:hidden;clip-path:inset(50%);white-space:nowrap;
+  }
+  .council-panel:not([data-compact]) .council-strategy-field select{min-height:24px}
 }
 .council-field{display:grid;gap:5px}
 .council-field>span{color:var(--text);font-weight:var(--weight-medium);font-size:var(--ds-text-meta)}

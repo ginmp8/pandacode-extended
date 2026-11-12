@@ -369,3 +369,15 @@ terminal approval is inferred. A failure during revocation rolls back the
 receipt change as well as the mandate transition. Only independent
 authoritative remote reconciliation can move an uncertain receipt to
 `applied` after verification.
+
+
+### Council-required Tickets never use legacy manual acceptance
+
+When the worker's native Architect team has Council enabled, or its Ticket has
+an immutable native Council review target, the existing Council-Off manual
+Accept action refuses completion. A cached `passed` label, deleted Council team
+or stale artifact never authorizes a terminal result. This is a protective
+fail-closed guard, not a new reviewer invocation or exception workflow. The
+native task-bound reviewer request/verdict and attributed, reason-bound human
+exception remain unimplemented; Council-Off Tickets retain normal manual
+acceptance.

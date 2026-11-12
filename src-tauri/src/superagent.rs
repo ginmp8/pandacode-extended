@@ -1695,6 +1695,17 @@ fn accept_with_pause(
     if !worker_evidence_current {
         return Err("Original worker evidence session is missing or outside its mandate.".into());
     }
+    // A human pressing the legacy Council-Off approval button is NOT an
+    // attributed Council exception. If a worker has any native Council
+    // requirement or previously frozen Council target, do not finalize on
+    // text evidence, a cached passing status, or a missing/removed team.
+    // The #126 task-bound request and verified exception workflow must
+    // explicitly implement their own authorization and terminal gate.
+    if council_adapter::requires_task_review(
+        store, ticket_id, worker_evidence_session.as_deref().unwrap_or_default(),
+    )? {
+        return Err("Native Council review is required; task-bound verified verdict and attributed exception are not available.".into());
+    }
     let now = storage::now();
     let changed = tx.execute(
         "UPDATE sa_tickets SET state='completed',revision=revision+1,updated_at=?3

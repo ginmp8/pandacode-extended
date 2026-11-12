@@ -213,6 +213,8 @@ test('SuperAgent examples only fill names and leave all authorization disabled',
 
 
 test('Off and Observe source controls expose durable native receipts without Auto', async ({page}) => {
+  // Multiple sequential native-control interactions can exceed the default 20s CI budget.
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {
     const {mountSuperagent} = await import('/src/superagent-ui.ts');

@@ -751,6 +751,22 @@ fn an_approved_council_with_no_text_still_posts_one_truthful_final_result() {
         [&delivery_id], |row| row.get(0),
     ).unwrap();
     assert_eq!(status,"completed");
+    assert!(shared_channels::council_callback_allowed(&f.store, &delivery_id).unwrap(),
+        "a task-bound accepted Council remains eligible for its original callback");
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries
+         SET objective='Unapproved replacement objective' WHERE delivery_id=?1",
+        [&delivery_id],
+    ).unwrap();
+    assert!(!shared_channels::council_callback_allowed(&f.store, &delivery_id).unwrap(),
+        "a changed frozen objective revokes callback authority even after delivery settled");
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries
+         SET objective='Please review' WHERE delivery_id=?1",
+        [&delivery_id],
+    ).unwrap();
+    assert!(shared_channels::council_callback_allowed(&f.store, &delivery_id).unwrap(),
+        "restoring the same authorized request does not invent or replay another result");
 }
 
 #[test]

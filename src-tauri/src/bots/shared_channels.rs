@@ -879,6 +879,25 @@ pub(crate) fn council_callback_allowed(store: &Store, delivery_id: &str) -> Resu
     if status != "completed" || !council_scope_active(store, delivery_id)? {
         return Ok(false);
     }
+    // Schema v44 requests pin the task, delivery, source objective and policy.
+    // Older deliveries admitted before v44 have no request and retain the
+    // existing independent native/acceptance gates below.
+    let issued_request: Option<String> = store.db.query_row(
+        "SELECT request_id FROM extended_council_task_requests
+         WHERE delivery_id=?1 AND session_id=?2",
+        params![delivery_id,session_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if let Some(request_id) = issued_request {
+        // Request IDs are not approval tokens. Deny stale or inconsistent
+        // request data before considering the real native Council verdict.
+        let inspection = match crate::architect::council_requests::inspect_channel(
+            store, &request_id, delivery_id, &session_id,
+        ) {
+            Ok(inspection) => inspection,
+            Err(_) => return Ok(false),
+        };
+        if inspection.native.status.stale { return Ok(false); }
+    }
     let Some(team) = crate::architect::load(store, &session_id)? else { return Ok(false) };
     if team.status != "completed" || team.config.council.is_none()
         || frozen_cycle != format!("cycle:{}",team.council_since)

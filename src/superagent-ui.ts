@@ -12,7 +12,7 @@ interface Config {
 }
 interface TeamRoster { orchestrationId:string; policyRevision:number; coordinatorBotId:string;
   workerBotIds:string[]; reviewerBotIds:string[]; executionReady:boolean }
-interface Ticket { id: string; objective: string; state: string; revision: number; evidence: string | null }
+interface Ticket { id: string; orchestrationId: string; objective: string; state: string; revision: number; evidence: string | null }
 interface DemandIndex { id: string; orchestrationId: string; objective: string;
   state: string; revision: number; updatedAt: number }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }

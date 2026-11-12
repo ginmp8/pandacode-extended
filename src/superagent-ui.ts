@@ -285,12 +285,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '" data-sa-next-mode="' + (src.mode === 'off' ? 'observe' : 'off') + '">' +
       (src.mode === 'off' ? 'Enable Observe' : 'Turn Off') + '</button>' +
       (src.mode === 'observe'
-        ? '<button type="button" data-sa-source-poll="' + safe(src.id) +
-          '">Poll authenticated GitHub</button>' : '') +
+        ? (src.eventKind === 'check_run.completed'
+          ? '<label>Check Run ID <input data-sa-check-run-id="' + safe(src.id) +
+            '" inputmode="numeric" pattern="[1-9][0-9]*" maxlength="16" aria-label="Check Run ID" /></label>' +
+            '<button type="button" data-sa-source-check-run="' + safe(src.id) +
+            '">Observe authenticated Check Run</button>'
+          : '<button type="button" data-sa-source-poll="' + safe(src.id) +
+            '">Poll authenticated GitHub</button>') : '') +
       '<button type="button" data-sa-source-decisions="' + safe(src.id) +
       '">View decisions</button></li>').join('');
     const sourcePanel = '<section class="sa-event-sources" aria-label="GitHub event sources">' +
-      '<h4>GitHub event sources</h4><p>Off/Observe only. Explicit authenticated gh Events polling is a bounded read-only snapshot; no webhooks, guaranteed gap-free subscription, Auto tasks or external writes.</p>' +
+      '<h4>GitHub event sources</h4><p>Off/Observe only. Authenticated GitHub Events polling is bounded; Checks API requires an explicit Check Run ID and a unique matching PR head. Neither is a gap-free subscription or an authorization to launch tasks or external writes.</p>' +
       (!sourcesLoaded ? '<button type="button" data-sa-load-sources>Load sources</button>'
         : '<form data-sa-form="source"><div class="sa-grid">' +
           '<label>Repository (owner/name)<input name="repository" maxlength="200" required></label>' +
@@ -866,6 +871,27 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             {sourceId:src.id,expectedRevision:src.policyRevision,mode});
           await reload();
         });
+      return;
+    }
+    if (target.dataset.saSourceCheckRun) {
+      const selected = sources.find(item => item.id === target.dataset.saSourceCheckRun);
+      const input = target.closest('li')?.querySelector<HTMLInputElement>('[data-sa-check-run-id]');
+      const raw = input?.value.trim() || '';
+      if (!selected || selected.mode !== 'observe' || selected.eventKind !== 'check_run.completed') return;
+      const runId = Number(raw);
+      if (!/^[1-9][0-9]{0,15}$/.test(raw) || !Number.isSafeInteger(runId)) {
+        feedback = 'Enter a positive, bounded Check Run ID from the configured repository.';
+        render();
+        return;
+      }
+      void work(async () => {
+        const receipt = await call<{decision:string;duplicate:boolean}>(
+          'superagent_source_observe_check_run', {sourceId:selected.id,checkRunId:runId});
+        feedback = 'Authenticated Checks API: ' + receipt.decision +
+          (receipt.duplicate ? ' (duplicate)' : '') +
+          '. Context receipt only; no task, approval or external effect started.';
+        await reload();
+      });
       return;
     }
     if (target.dataset.saSourcePoll) {

@@ -555,6 +555,65 @@ test('Off source never polls GitHub and Observe only records authenticated nativ
   expect(calls.filter(c=>c==='superagent_submit'||c==='superagent_dispatch_worker')).toHaveLength(0);
 });
 
+test('Check Run observation stays Off until enabled and never launches a Demand', async ({page})=>{
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-check-run';document.body.appendChild(host);
+    const src={id:'check-source',orchestrationId:'preset',repository:'owner/repo',
+      actorFilter:'trusted-bot',eventKind:'check_run.completed',mode:'off',
+      policyRevision:1,lastSequence:0};
+    const calls:{command:string;runId?:number}[]=[];
+    (window as unknown as {saCheckCalls:{command:string;runId?:number}[]}).saCheckCalls=calls;
+    mountSuperagent(host,async(command,args)=>{
+      calls.push({command,runId:Number(args?.checkRunId)});
+      if(command==='bots_list')return [
+        {id:'a',name:'A',paused:false},{id:'b',name:'B',paused:false}
+      ] as never;
+      if(command==='superagent_list')return [{
+        id:'preset',name:'Checks Team',coordinatorBotId:'a',workerBotId:'b',
+        enabled:false,policyRevision:1
+      }] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_source_list')return [src] as never;
+      if(command==='superagent_source_set_mode'){
+        src.mode=String(args?.mode);src.policyRevision+=1;return {...src} as never;
+      }
+      if(command==='superagent_source_observe_check_run'){
+        if(src.mode!=='observe'||args?.checkRunId!==240)
+          throw new Error('Check Run observation attempted without exact native source/input');
+        return {sourceId:src.id,deliveryId:'checkrun_240',decision:'observed_permitted',
+          policyRevision:src.policyRevision,sequence:1,at:Date.now(),duplicate:false} as never;
+      }
+      throw new Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-check-run');
+  await host.getByRole('button',{name:'Sources',exact:true}).click();
+  await host.getByRole('button',{name:'Load sources'}).click();
+  await expect(host.getByRole('button',{name:'Observe authenticated Check Run'})).toHaveCount(0);
+  await host.getByRole('button',{name:'Enable Observe'}).click();
+  await host.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(host.getByRole('button',{name:'Poll authenticated GitHub'})).toHaveCount(0);
+  const input=host.getByRole('textbox',{name:'Check Run ID'});
+  await input.fill('0');
+  await host.getByRole('button',{name:'Observe authenticated Check Run'}).click();
+  await expect(host.getByRole('status')).toContainText('Enter a positive, bounded Check Run ID');
+  await host.getByRole('textbox',{name:'Check Run ID'}).fill('240');
+  await host.getByRole('button',{name:'Observe authenticated Check Run'}).click();
+  await expect(host.getByRole('status')).toContainText('observed_permitted');
+  const calls=await page.evaluate(()=>(window as unknown as {
+    saCheckCalls:{command:string;runId?:number}[]
+  }).saCheckCalls);
+  expect(calls.filter(c=>c.command==='superagent_source_observe_check_run')).toEqual([
+    {command:'superagent_source_observe_check_run',runId:240}
+  ]);
+  expect(calls.filter(c=>c.command==='superagent_submit'||
+    c.command==='superagent_dispatch_worker'||c.command==='superagent_source_poll_authenticated'
+  )).toHaveLength(0);
+});
+
 test('multi-member Team Builder stores native role revisions without launching unapproved work',async({page})=>{
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

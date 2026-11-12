@@ -1,5 +1,5 @@
 //! S4 native Off/Observe decisions and explicit local thread-to-task links.
-//! Authenticated operator-invoked GitHub Events polling is Observe-only.
+//! Authenticated operator-invoked GitHub Events polling and exact Checks API lookups are Observe-only.
 //! No webhook/subscription, inferred worker admission or Auto effects exist.
 //! Public IPC intake still refuses caller-supplied unverified envelopes.
 use super::require_main_window;
@@ -288,11 +288,6 @@ fn set_mode(store: &Store, id: &str, expected_revision: i64, mode: &str) -> Resu
     let current = source(store,id)?;
     if current.policy_revision != expected_revision {
         return Err("Event source policy revision changed; reload before editing.".into());
-    }
-    // The GitHub Events endpoint does not deliver check-run completion.
-    // Do not persist an enabled Observe policy whose native adapter cannot poll it.
-    if mode == "observe" && current.event_kind == "check_run.completed" {
-        return Err("GitHub check-run observation requires an authenticated Checks API adapter.".into());
     }
     if current.mode == mode { return Ok(current); }
     let now = storage::now();
@@ -738,6 +733,144 @@ fn list_decisions(store: &Store, source_id: &str, limit: i64) -> Result<Vec<Even
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+/// Checks API lookup is explicitly operator-driven. Its pull_requests array
+/// identifies PRs currently matching the head, not a proven triggering PR.
+/// Only a unique exact head SHA match is safe to correlate as read-only context.
+fn authenticated_check_run(
+    selected: &EventSource, raw: &serde_json::Value, requested_id: i64, sequence: i64,
+) -> Result<EventEnvelope> {
+    if selected.event_kind != "check_run.completed"
+        || requested_id <= 0
+        || raw.get("id").and_then(serde_json::Value::as_i64) != Some(requested_id)
+        || raw.get("status").and_then(serde_json::Value::as_str) != Some("completed")
+    {
+        return Err("Authenticated Checks API response does not identify the requested completed run.".into());
+    }
+    let conclusion = raw.get("conclusion").and_then(serde_json::Value::as_str)
+        .ok_or("Completed Check Run has no conclusion.")?;
+    if !["success", "failure", "neutral", "cancelled", "skipped",
+          "timed_out", "action_required"].contains(&conclusion) {
+        return Err("Unsupported Check Run conclusion.".into());
+    }
+    let actor = raw.pointer("/app/slug").and_then(serde_json::Value::as_str)
+        .ok_or("Checks API response has no native GitHub App identity.")?;
+    if !token_ok(actor, 80) || !actor.eq_ignore_ascii_case(&selected.actor_filter) {
+        return Err("Check Run app does not match the exact configured source actor.".into());
+    }
+    let sha = raw.get("head_sha").and_then(serde_json::Value::as_str)
+        .ok_or("Check Run head SHA is missing.")?;
+    if sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("Check Run head SHA is invalid.".into());
+    }
+    let prs = raw.get("pull_requests").and_then(serde_json::Value::as_array)
+        .ok_or("Check Run has no verified pull request associations.")?;
+    if prs.len() != 1 {
+        return Err("Check Run does not have exactly one matching pull request; do not infer a thread.".into());
+    }
+    if prs[0].pointer("/head/sha").and_then(serde_json::Value::as_str) != Some(sha) {
+        return Err("Check Run does not match the pull request head SHA.".into());
+    }
+    let number = prs[0].get("number").and_then(serde_json::Value::as_u64)
+        .ok_or("Check Run pull request number is unavailable.")?;
+    if number == 0 || number > 999_999_999_999 {
+        return Err("Check Run pull request number is outside the supported range.".into());
+    }
+    let envelope = EventEnvelope {
+        source_id: selected.id.clone(),
+        delivery_id: format!("checkrun_{requested_id}"),
+        repository: selected.repository.clone(),
+        actor: actor.to_owned(),
+        event_kind: "check_run.completed".into(),
+        subject_key: format!("pull:{number}"),
+        sequence,
+    };
+    if !valid_event(&envelope) {
+        return Err("Check Run observation exceeded native receipt bounds.".into());
+    }
+    Ok(envelope)
+}
+
+/// Unlike the GitHub Events feed, a Check Run ID does not encode completion
+/// ordering. The cursor here is a local monotonic observation count, not a
+/// claim of gap-free provider delivery. Out-of-order explicit lookups remain
+/// observable and replay by the same ID is immutable and idempotent.
+fn observe_authenticated_check_run(
+    store: &Store, expected: &EventSource, requested_id: i64,
+    raw: &serde_json::Value, signed_in: &str,
+) -> Result<EventDecision> {
+    if !token_ok(signed_in, 80) || requested_id <= 0 {
+        return Err("Checks API observation requires a verified operator and positive run ID.".into());
+    }
+    let latest = source(store, &expected.id)?;
+    if latest.mode != "observe" || latest.event_kind != "check_run.completed"
+        || latest.policy_revision != expected.policy_revision {
+        return Err("Checks API source is Off, incompatible or changed during request.".into());
+    }
+    let completed_at = raw.get("completed_at").and_then(serde_json::Value::as_str)
+        .ok_or("Check Run has no completion timestamp.")?;
+    let at = chrono::DateTime::parse_from_rfc3339(completed_at)
+        .map_err(|_| "Check Run completion timestamp is invalid.")?.timestamp_millis();
+    let activated_at: i64 = store.db.query_row(
+        "SELECT updated_at FROM sa_event_sources WHERE id=?1", [&latest.id], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    if at < activated_at || at > storage::now().saturating_add(5 * 60 * 1000) {
+        return Err("Check Run predates Observe activation or has a future completion timestamp.".into());
+    }
+
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let current = source(store, &expected.id)?;
+    if current.mode != "observe" || current.policy_revision != expected.policy_revision {
+        return Err("Checks API source changed before receipt commit.".into());
+    }
+    let delivery_id = format!("checkrun_{requested_id}");
+    let previously_recorded: Option<i64> = tx.query_row(
+        "SELECT sequence FROM sa_event_decisions WHERE source_id=?1 AND delivery_id=?2",
+        params![&current.id, &delivery_id], |r| r.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    let sequence = match previously_recorded {
+        Some(previous) => previous,
+        None => current.last_sequence.checked_add(1)
+            .ok_or("Check Run observation cursor is exhausted.")?,
+    };
+    let envelope = authenticated_check_run(&current, raw, requested_id, sequence)?;
+    let receipt = observe_authenticated_in_tx(&tx, &current, &envelope, signed_in)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(receipt)
+}
+
+/// One operator-requested, authenticated Check Run lookup; no webhook, source
+/// subscription, inferred task, privilege grant, external write or Council pass.
+/// A missing/ambiguous PR association fails closed (including fork checks).
+#[tauri::command]
+pub async fn superagent_source_observe_check_run(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    source_id: String, check_run_id: i64,
+) -> Result<EventDecision> {
+    require_main_window(&window)?;
+    if check_run_id <= 0 {
+        return Err("Provide a positive Check Run ID.".into());
+    }
+    let selected = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let selected = source(&store, &source_id)?;
+        if selected.mode != "observe" || selected.event_kind != "check_run.completed" {
+            return Err("Source is Off or is not configured for Check Runs.".into());
+        }
+        selected
+    };
+    let repository = selected.repository.clone();
+    let response = tokio::task::spawn_blocking(move || {
+        let root = std::env::temp_dir();
+        let user = crate::github::run_gh(&root, &["api", "user"], crate::github::TIMEOUT)?;
+        let signed_in = authenticated_login(&crate::github::json(&user)?)?;
+        let endpoint = format!("repos/{repository}/check-runs/{check_run_id}");
+        let output = crate::github::run_gh(&root, &["api", &endpoint], crate::github::TIMEOUT)?;
+        Ok::<_, String>((signed_in, crate::github::json(&output)?))
+    }).await.map_err(|e| e.to_string())??;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    observe_authenticated_check_run(&store, &selected, check_run_id, &response.1, &response.0)
+}
+
 #[tauri::command]
 pub async fn superagent_source_decisions(
     window: tauri::WebviewWindow, state: State<'_, AppState>,
@@ -1138,16 +1271,83 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_check_run_source_cannot_enable_observe_or_advance_policy() {
+    fn check_run_observe_requires_explicit_enable_and_never_admits_work() {
         let (store, _) = fixture();
-        let cfg = create_source(&store, "orch", "owner/repo", "trusted-bot",
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
             "check_run.completed").unwrap();
-        assert_eq!(cfg.mode, "off");
-        assert!(set_mode(&store, &cfg.id, cfg.policy_revision, "observe").is_err());
-        let unchanged = source(&store, &cfg.id).unwrap();
-        assert_eq!(unchanged.mode, "off");
-        assert_eq!(unchanged.policy_revision, cfg.policy_revision);
-        assert_eq!(unchanged.last_sequence, 0);
+        assert_eq!(off.mode, "off");
+        let sha = "0123456789012345678901234567890123456789";
+        let run = serde_json::json!({
+            "id": 240, "status": "completed", "conclusion": "success",
+            "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
+            "app": {"slug": "trusted-bot"},
+            "pull_requests": [{"number": 42, "head": {"sha": sha}}]
+        });
+        assert!(observe_authenticated_check_run(&store, &off, 240, &run, "operator").is_err());
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        assert!(authenticated_event(&on, &run).unwrap().is_none(),
+            "GitHub Events and Checks API are distinct authenticated adapters");
+        let first = observe_authenticated_check_run(&store, &on, 240, &run, "operator").unwrap();
+        assert_eq!(first.decision, "observed_permitted");
+        assert!(!first.duplicate);
+        assert_eq!(first.sequence, 1);
+        let replay = observe_authenticated_check_run(&store, &on, 240, &run, "operator").unwrap();
+        assert!(replay.duplicate);
+        assert_eq!(replay.sequence, first.sequence);
+        let mut older = run.clone();
+        older["id"] = serde_json::json!(239);
+        let out_of_order = observe_authenticated_check_run(&store, &on, 239, &older, "operator").unwrap();
+        assert_eq!(out_of_order.sequence, 2);
+        assert_eq!(out_of_order.decision, "observed_permitted");
+        assert_eq!(list_decisions(&store, &on.id, 10).unwrap().len(), 2);
+        assert_eq!(source(&store, &on.id).unwrap().last_sequence, 2);
+        let tickets: i64 = store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [], |r| r.get(0)).unwrap();
+        assert_eq!(tickets, 0);
+        let revoked = set_mode(&store, &on.id, on.policy_revision, "off").unwrap();
+        assert_eq!(revoked.mode, "off");
+        assert!(observe_authenticated_check_run(&store, &on, 240, &run, "operator").is_err());
+        assert_eq!(list_decisions(&store, &on.id, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn check_run_correlation_denies_ambiguous_missing_stale_or_changed_payloads() {
+        let (store, _) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "check_run.completed").unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let sha = "0123456789012345678901234567890123456789";
+        let run = serde_json::json!({
+            "id": 390, "status": "completed", "conclusion": "failure",
+            "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
+            "app": {"slug": "trusted-bot"},
+            "pull_requests": [{"number": 42, "head": {"sha": sha}}]
+        });
+        for mutation in 0..9 {
+            let mut bad = run.clone();
+            match mutation {
+                0 => bad["pull_requests"] = serde_json::json!([]),
+                1 => bad["pull_requests"] = serde_json::json!([
+                    {"number": 42, "head": {"sha": sha}},
+                    {"number": 43, "head": {"sha": sha}}]),
+                2 => bad["pull_requests"][0]["head"]["sha"] = serde_json::json!("f".repeat(40)),
+                3 => bad["app"]["slug"] = serde_json::json!("other-app"),
+                4 => bad["status"] = serde_json::json!("in_progress"),
+                5 => bad["id"] = serde_json::json!(391),
+                6 => bad["pull_requests"][0]["number"] = serde_json::json!(0),
+                7 => bad["completed_at"] = serde_json::json!("2019-01-01T00:00:00Z"),
+                _ => bad["conclusion"] = serde_json::json!(null),
+            }
+            assert!(observe_authenticated_check_run(&store, &on, 390, &bad, "operator").is_err(),
+                "invalid Check Run variation {mutation} must be denied");
+        }
+        assert_eq!(source(&store, &on.id).unwrap().last_sequence, 0);
+        assert!(list_decisions(&store, &on.id, 10).unwrap().is_empty());
+        let success = observe_authenticated_check_run(&store, &on, 390, &run, "operator").unwrap();
+        assert_eq!(success.decision, "observed_permitted");
+        let mut conflicting = run.clone();
+        conflicting["pull_requests"][0]["number"] = serde_json::json!(43);
+        assert!(observe_authenticated_check_run(&store, &on, 390, &conflicting, "operator").is_err());
+        assert_eq!(source(&store, &on.id).unwrap().last_sequence, 1);
     }
 
     #[test]

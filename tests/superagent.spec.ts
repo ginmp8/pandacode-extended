@@ -482,7 +482,8 @@ test('Off source never polls GitHub and Observe only records authenticated nativ
       }
       if(command==='superagent_source_poll_authenticated'){
         if(src.mode!=='observe')throw new Error('Poll attempted outside Observe');
-        return {scanned:3,recorded:1,duplicates:2} as never;
+        return {sourceId:src.id,repository:src.repository,scanned:3,recorded:1,duplicates:2,
+          selfIgnored:0,pagesFetched:1,skippedBeforeActivation:0,lastSequence:5,boundedWindow:true} as never;
       }
       throw new Error('Unexpected native command: '+command);
     });
@@ -495,7 +496,7 @@ test('Off source never polls GitHub and Observe only records authenticated nativ
   await host.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(host.getByRole('button',{name:'Poll authenticated GitHub'})).toBeVisible();
   await host.getByRole('button',{name:'Poll authenticated GitHub'}).click();
-  await expect(host.getByRole('status').filter({hasText:'3 scanned, 1 recorded, 2 duplicate'})).toBeVisible();
+  await expect(host.getByRole('status').filter({hasText:'3 scanned across 1 page(s), 1 recorded, 0 self-authored ignored, 2 duplicate'})).toBeVisible();
   const calls=await page.evaluate(()=>(window as unknown as {saPollCalls:string[]}).saPollCalls);
   expect(calls.filter(c=>c==='superagent_source_poll_authenticated')).toHaveLength(1);
   expect(calls.filter(c=>c==='superagent_submit'||c==='superagent_dispatch_worker')).toHaveLength(0);

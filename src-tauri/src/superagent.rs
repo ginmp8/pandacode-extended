@@ -1051,6 +1051,11 @@ fn admit_role(
     if !execution_permitted(config.enabled, crate::feature_controls::get().bots_paused) {
         return Err("Orchestration is disabled or bots are globally paused.".into());
     }
+    // A previously-enabled or externally corrupted multi-role roster cannot
+    // silently fall back to the primary Worker, regardless of UI preflight.
+    if roster::has_additional_members(store, config_id)? {
+        return Err("Multi-member Team requires native scoped role admission; manual dispatch denied.".into());
+    }
     let coordinator = bots::get(store, &config.coordinator_bot_id)?;
     let worker = bots::get(store, &config.worker_bot_id)?;
     if coordinator.paused || worker.paused || worker.project_id != config.project_id {
@@ -2136,6 +2141,9 @@ fn retry_blocked(
     if !config.enabled || crate::feature_controls::get().bots_paused {
         return Err("SuperAgent remains disabled or globally paused.".into());
     }
+    if roster::has_additional_members(store, &config.id)? {
+        return Err("Multi-member Team requires native scoped role admission; manual retry denied.".into());
+    }
     let coordinator=bots::get(store,&config.coordinator_bot_id)?;
     let worker=bots::get(store,&config.worker_bot_id)?;
     if coordinator.paused || worker.paused || worker.id != ticket_worker(store,ticket_id)?
@@ -2222,6 +2230,9 @@ fn prepare_coordinated_worker(
     let config = configuration(store, &ticket.orchestration_id)?;
     if !config.enabled || crate::feature_controls::get().bots_paused {
         return Err("Orchestration or bots are paused; coordinated dispatch denied.".into());
+    }
+    if roster::has_additional_members(store, &config.id)? {
+        return Err("Multi-member Team requires native scoped role admission; coordinated dispatch denied.".into());
     }
     let coordinator = bots::get(store, &config.coordinator_bot_id)?;
     let worker = bots::get(store, &config.worker_bot_id)?;
@@ -3526,6 +3537,60 @@ mod tests {
         assert!(coordinator_packet.contains("\n\nInspect fixture\n\n"));
         assert!(coordinator_packet.contains("Read-only coordinator"));
         assert!(coordinator_packet.len() < 32 * 1024);
+    }
+
+    #[test]
+    fn unsupported_multi_role_team_cannot_bypass_native_admission_or_retry() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        // Leave one blocked ticket and one coordinator-planned ticket before
+        // simulating a stale enabled Team with a newly configured Worker.
+        let (blocked, launched) = admit(
+            &mut store, &config.id, "Pending task", "roster-blocked", true,
+        ).unwrap();
+        assert!(!launched);
+        let (planned, launched) = admit_role(
+            &mut store, &config.id, "Coordinated task", "roster-planned", false, true,
+        ).unwrap();
+        assert!(launched);
+        let coordinator_session = assignment_session(&store, &planned.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &coordinator_session, true, "Read-only plan").unwrap());
+        assert_eq!(get_ticket(&store, &planned.id).unwrap().state, "queued");
+
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('worker-b','Other Worker','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        // Normal roster editing refuses enabled Teams; an inconsistent DB
+        // or concurrent writer still must not gain native execution authority.
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'worker',1,'worker-b')",
+            [&config.id],
+        ).unwrap();
+
+        let advisory = manual_preflight(&store, &config.id, "Fresh task", false, false).unwrap();
+        assert!(!advisory.eligible);
+        assert!(advisory.reason.unwrap().contains("Multi-member"));
+        assert!(admit(&mut store, &config.id, "Fresh task", "roster-denied", false)
+            .unwrap_err().contains("Multi-member"));
+        assert!(retry_blocked(&mut store, &blocked.id, false)
+            .unwrap_err().contains("Multi-member"));
+        assert!(prepare_coordinated_worker(&mut store, &planned.id, false)
+            .unwrap_err().contains("Multi-member"));
+
+        assert_eq!(get_ticket(&store, &blocked.id).unwrap().state, "blocked");
+        assert_eq!(get_ticket(&store, &planned.id).unwrap().state, "queued");
+        let tickets: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(tickets, 2, "unsupported role topology must not create new Tickets");
+        let worker_attempts: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE bot_id='worker-b'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(worker_attempts, 0, "no unsupported Worker may be admitted");
     }
 
     #[test]

@@ -354,11 +354,10 @@ fn observe_authenticated(store: &Store, event: &EventEnvelope, signed_in: &str)
         else if src.mode == "off" { "ignored_off" }
         else if src.repository != event.repository
             || !src.actor_filter.eq_ignore_ascii_case(&event.actor)
-            || src.event_kind != event.event_kind { "ignored_filter" }
-        // Durable denial using the existing policy-denial receipt state: the
-        // current operator's own actions never become inferred work, even
-        // when a source explicitly names that actor. No schema migration.
-        else if event.actor.eq_ignore_ascii_case(signed_in) { "ignored_filter" }
+            || src.event_kind != event.event_kind
+            // The signed-in operator cannot infer work from their own events,
+            // even if the exact source actor filter happens to match.
+            || event.actor.eq_ignore_ascii_case(signed_in) { "ignored_filter" }
         else { "observed_permitted" };
     let at = storage::now();
     tx.execute(

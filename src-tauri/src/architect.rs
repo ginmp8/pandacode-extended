@@ -1510,6 +1510,9 @@ pub(crate) fn control_state(state: &AppState, session_id: &str, action: &str) ->
         let agents = state.agents.lock().map_err(|e| e.to_string())?;
         let store = state.store.lock().map_err(|e| e.to_string())?;
         refuse_mirror(&store, session_id)?;
+        if parent_of(&store, session_id)?.is_some() {
+            return Err("child_council_denied: task-owned reviewer sessions cannot use ordinary Architect controls.".into());
+        }
         // A maintenance command on the lead: Stop ends that run alone, and the team stays as it is.
         if let Some(agent) = agents.get(session_id).filter(|agent| action == "stop" && agent.team_maintenance) {
             store.request_stop(session_id)?;

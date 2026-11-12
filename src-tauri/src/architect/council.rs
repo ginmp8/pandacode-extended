@@ -616,6 +616,9 @@ pub(super) fn set(state: &AppState, session_id: &str, council: Option<CouncilCon
     let agents = state.agents.lock().map_err(|e| e.to_string())?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     super::refuse_mirror(&store, session_id)?;
+    if super::parent_of(&store, session_id)?.is_some() {
+        return Err("child_council_denied: task-owned reviewer sessions cannot change Council authority or acceptance.".into());
+    }
     let mut team = super::load(&store, session_id)?.ok_or("This task has no team.")?;
     super::bot_reviewers::allow_roster_change(&team, &council)?;
     if let Some(config) = &council {
@@ -691,6 +694,9 @@ pub(super) fn accept(state: &AppState, session_id: &str) -> Result<TeamSnapshot>
     let agents = state.agents.lock().map_err(|e| e.to_string())?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     super::refuse_mirror(&store, session_id)?;
+    if super::parent_of(&store, session_id)?.is_some() {
+        return Err("child_council_denied: task-owned reviewer sessions cannot change Council authority or acceptance.".into());
+    }
     let mut team = super::load(&store, session_id)?.ok_or("This task has no team.")?;
     if team.config.council.is_none() {
         return Err("Council is off for this team.".into());

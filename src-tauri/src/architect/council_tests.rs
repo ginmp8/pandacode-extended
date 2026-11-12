@@ -2052,6 +2052,10 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
     for child_id in child_ids {
         let error = start_state(&state, &child_id, "Try to hijack child", None, None).unwrap_err();
         assert!(error.contains("child_council_denied"), "{error}");
+        assert!(control_state(&state, &child_id, "pause").unwrap_err().contains("child_council_denied"));
+        assert!(control_state(&state, &child_id, "resume").unwrap_err().contains("child_council_denied"));
+        assert!(council::set(&state, &child_id, None).unwrap_err().contains("child_council_denied"));
+        assert!(council::accept(&state, &child_id).unwrap_err().contains("child_council_denied"));
     }
     let store = state.store.lock().unwrap();
     assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);

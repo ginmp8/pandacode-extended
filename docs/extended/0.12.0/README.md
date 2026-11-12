@@ -4,6 +4,12 @@
 
 Extended 0.12.0 starts from the completed [0.11.0 source baseline](../0.11.0/README.md). The opening `base/development` commit has `base/hardened` `642b25777b5a3d1600107ff4b9b23604ea90e8a2` as its sole parent. The 0.11.0 `main` has an equivalent Git tree but different rebase commit history. This new cycle introduces documentation scaffolding, **not an upstream source-version bump**.
 
+## 2026-11-12 — inherited microphone smoke-test update
+
+The unreleased [fork `9e5d0988`](https://github.com/ginmp8/pandacode/commit/9e5d0988970785a9302938ecdc8d8848b7d79a7f), Git tree `f82fa609b8f4e74d322729f7c189e783d98e4cad`, updates only `src-tauri/src/voice/tests/real_audio.rs`. Recording-cap assertions now measure meter callback duration, account for unpaced Linux null-ALSA capture and report audio and wall-clock durations. Imported byte/mode-exact; application version remains **0.3.111**. No Settings, production feature, dependency manifest, or Extended control changed. The complete candidate tree has 1,890 upstream paths, 1,948 Extended paths, 1,809 source-identical shared, 81 customized shared and 58 Extended-only, with zero missing paths or type/mode differences. These counts are static, not native behavioral acceptance.
+
+Previous destination `e1cd7e75` [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43165784610) and [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43165792686) each passed 10/11 jobs. The Node/release identity test found an obsolete `0.3.111` original-release-note SHA in Extended's `source-baseline.json`: pinned `ce584235` versus actual upstream and Extended blob `357b3614`. The baseline pin was updated; neither the test nor original upstream notes were weakened or altered. Exact new-SHA CI, native microphone, Settings On/Off and external integrations remain unverified.
+
 ## 2026-11-12 upstream integration
 
 The unreleased fork [`8e5ab59c`](https://github.com/ginmp8/pandacode/commit/8e5ab59cdd22344a08e199dd94e6674af71ac7bd), tree `4fccf8f62aad4a59e3a03005db469819394713f4`, keeps application **0.3.111** unchanged and modifies two source paths. `releases/0.3.111.md` is mirrored exactly; CI is reconciled for the fully qualified ignored release-profile audio test with `--exact` and APT fetch retries `Acquire::Retries=3`, retaining Extended's audits, mobile checks, ARM64 recovery and macOS timeout. The Extended regression test now checks the real Linux/macOS capture requirement and both exact test commands. No upstream product capability or dependency version changed.

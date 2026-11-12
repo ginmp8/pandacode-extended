@@ -22,6 +22,14 @@
 
 - [x] **2026-11-08 source checkpoint:** imported fork [`7134edf5`](https://github.com/ginmp8/pandacode/commit/7134edf501d31acc8bec28ff74be9d1dba171669) (app 0.3.102) as Extended [`7db3e2c4`](https://github.com/ginmp8/pandacode-extended/commit/7db3e2c4ae4c5b5dc48e2de50eed5980d247e8be): 12 upstream paths applied, including original `releases/0.3.102.md`; 0 upstream paths missing, all file modes preserved. Existing 80 modified shared paths still require full hunk-by-hunk acceptance. This checkbox verifies this source integration, **not** full functional parity.
 
+## 2026-11-12 source/test checkpoint
+
+- [x] Pin [fork `9e5d0988`](https://github.com/ginmp8/pandacode/commit/9e5d0988970785a9302938ecdc8d8848b7d79a7f), tree `f82fa609b8f4e74d322729f7c189e783d98e4cad`, destination `e1cd7e7592276b88c7e808836cc053c5ea1e336d`, and full nontruncated inventories; application version unchanged at **0.3.111**.
+- [x] Copy the sole upstream change (`src-tauri/src/voice/tests/real_audio.rs`) byte/mode-exact; preserve 81 customized shared and 58 Extended-only paths.
+- [x] Update the stale Extended baseline hash for the existing upstream `releases/0.3.111.md` blob. Prior push and PR CI each passed 10/11 jobs and failed only the pin-based release fixture.
+- [ ] Verify CI on the newly published exact destination SHA; pending is not success.
+- [ ] Validate native microphone, Settings On/Off, external integrations and full shared-difference semantics.
+
 ## 2026-11-12 synchronization checkpoint
 
 - [x] Pin source [`8e5ab59c`](https://github.com/ginmp8/pandacode/commit/8e5ab59cdd22344a08e199dd94e6674af71ac7bd) and previous destination `e059e9a08623eb9ccf3fbafabde5bdf679136de4`; verify full trees and application **0.3.111**.

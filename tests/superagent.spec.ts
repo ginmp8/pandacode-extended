@@ -368,7 +368,7 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
   await host.getByRole('textbox',{name:'Exact thread key'}).fill('issue:42');
   await host.getByRole('button',{name:'Link thread (context only)'}).click();
   await expect(host.locator('.sa-linked-threads')).toContainText('test/fixture / issue:42');
-  await expect(host.getByRole('status')).toContainText('no task or authorization created');
+  await expect(host.locator('.sa-feedback[role="status"]')).toContainText('no task or authorization created');
   await expect(host.getByText('Private fixture')).toBeVisible();
   await expect.poll(()=>page.evaluate(
     ()=>(window as unknown as {saDispatchCount:()=>number}).saDispatchCount())).toBe(0);

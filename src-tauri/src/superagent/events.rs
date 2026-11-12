@@ -628,7 +628,7 @@ mod tests {
     #[test]
     fn authenticated_event_parser_requires_exact_repo_actor_action_and_subject() {
         let (store, _) = fixture();
-        let selected = create_source(&store, "preset", "owner/repo", "trusted-bot", "issues.opened").unwrap();
+        let selected = create_source(&store, "orch", "owner/repo", "trusted-bot", "issues.opened").unwrap();
         let envelope = serde_json::json!({
             "id":"5000000001", "type":"IssuesEvent", "created_at":"2026-11-12T08:59:00Z",
             "actor":{"login":"trusted-bot"}, "repo":{"name":"owner/repo"},
@@ -657,7 +657,7 @@ mod tests {
     #[test]
     fn authenticated_poll_persists_only_observe_receipts_and_rejects_revocation() {
         let (store, _) = fixture();
-        let off = create_source(&store, "preset", "owner/repo", "trusted-bot", "issues.opened").unwrap();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot", "issues.opened").unwrap();
         let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
         let events = serde_json::json!([{
             "id":"5000000001", "type":"IssuesEvent", "created_at":"2026-11-12T08:59:00Z",

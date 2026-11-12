@@ -374,6 +374,9 @@ test('SuperAgent preset draft survives an asynchronous native list reload', asyn
 
 
 test('SuperAgent links explicit GitHub source threads to the selected Ticket without dispatch', async ({page}) => {
+  // Multiple native-backed tab changes can exceed the default timeout on
+  // loaded CI browsers. Preserve every assertion and side-effect denial.
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {
     const {mountSuperagent} = await import('/src/superagent-ui.ts');

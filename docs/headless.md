@@ -53,6 +53,16 @@ late provider callback cannot approve the task, and the previous session is
 stopped. This is a **stop-and-investigate** safety mechanism, not automatic
 retry or recovery of unverified external work.
 
+A coordinator may legitimately have a different project checkout from the
+Ticket's worker. The watchdog validates an admitted coordinator against that
+coordinator bot's current checkout and its exact native session, while Workers
+remain bound to the Ticket's immutable worker project. A moved, missing or
+unadmitted assignment remains interruptible; valid separate coordinator
+checkouts are not falsely revoked. Coordinated Worker dispatch also repeats
+the native session-aware lease check used by initial admission and retry:
+another Team's active coordinator checkout and missing session records cannot
+silently permit an overlapping Worker before the SQLite lease guard runs.
+
 Headless generic usage-limit resets and message-queue drain explicitly skip
 every session recorded in native SuperAgent assignment history, including
 settled and revoked attempts after process restart. Missing assignment-history

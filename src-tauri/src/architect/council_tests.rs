@@ -155,7 +155,7 @@ fn automatic_council_reserves_real_native_seats_for_every_required_criterion() {
 
     // A fixed two-reviewer user request cannot be silently enlarged.
     config.reviewers = 2;
-    assert!(config.validate().unwrap_err().contains("explicitly fixed reviewer count"));
+    assert!(config.validate().unwrap_err().contains("available reviewer seats"));
     // Legacy automatic Council without user anchors still uses two seats.
     assert_eq!(on(9.0, 3, 0).needed(), 2);
 }

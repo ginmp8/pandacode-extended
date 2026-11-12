@@ -875,9 +875,10 @@ pub(crate) fn headless_stop_ticket(database_path: &std::path::Path, ticket_id: &
 /// process; callers must stop the returned sessions after the transaction.
 /// No attempt is replayed and unresolved effect receipts stay unresolved.
 pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Vec<String>> {
-    // Only the owning serve process calls this. Select a bounded page of
-    // running assignments; unsupported/revoked work is never automatically
-    // retried. The same native ticket revision guard is used at settlement.
+    // Only the owning serve process calls this. Inspect every live assignment:
+    // limiting the SQL page before filtering healthy entries could starve a
+    // later revoked assignment forever. No automatic retry is permitted; the
+    // same ticket revision guard is used at settlement.
     let stopped = {
         let mut stmt = store.db.prepare(
             "SELECT a.id,a.ticket_id,a.session_id,t.revision,
@@ -914,7 +915,7 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
              LEFT JOIN sessions active_session ON active_session.id=a.session_id
              WHERE a.state='running' AND t.state='running'
                AND t.active_assignment_id=a.id
-             ORDER BY a.created_at,a.id LIMIT 200",
+             ORDER BY a.created_at,a.id",
         ).map_err(|e| e.to_string())?;
         let rows = stmt.query_map(
             params![now,MAX_ASSIGNMENT_RUN_MS,i64::from(crate::feature_controls::get().bots_paused)],

@@ -346,6 +346,10 @@ pub struct CouncilSeat {
     /// is checked at settlement; this flag is a conservative trigger, not verified proof.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reported_severe_finding: bool,
+    /// A scored reviewer reported a disagreement; triggers conservative S2 re-review,
+    /// never native verification of the claimed finding.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reported_conflict: bool,
     /// The user explicitly closed this incomplete round by changing its reviewer selection.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub closed_by_selection: bool,
@@ -576,15 +580,28 @@ pub(super) fn reported_findings(store: &storage::Store, team: &TeamSnapshot) -> 
 /// A high-severity claim is admitted only from the same native assistant report
 /// that supplied the reviewer's scored completion. It may require further review
 /// but cannot itself serve as independently verified evidence.
-pub(super) fn report_claims_high_severity(store: &storage::Store, session_id: &str, admitted_score: Option<f64>) -> bool {
-    let Some(score) = admitted_score else { return false };
+/// Only a settled scored native reviewer turn can contribute conservative
+/// escalation triggers. Structured findings remain unverified claims, not approval.
+pub(super) fn report_claims_escalation(
+    store: &storage::Store, session_id: &str, admitted_score: Option<f64>,
+) -> (bool, bool) {
+    let Some(score) = admitted_score else { return (false, false) };
     let report: Option<String> = store.db.query_row(
         "SELECT substr(content,-8192) FROM messages WHERE session_id=?1 AND role='assistant' AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND role IN ('user','coordination')) ORDER BY id DESC LIMIT 1",
         params![session_id], |row| row.get(0),
     ).optional().ok().flatten();
-    report.is_some_and(|report| parse_score(&report) == Some(score)
-        && parse_reported_findings(&report).iter()
-            .any(|finding| matches!(finding.severity.as_str(), "critical" | "high")))
+    let Some(report) = report.filter(|report| parse_score(report) == Some(score)) else {
+        return (false, false);
+    };
+    let findings = parse_reported_findings(&report);
+    (
+        findings.iter().any(|finding| matches!(finding.severity.as_str(), "critical" | "high")),
+        findings.iter().any(|finding| finding.category.eq_ignore_ascii_case("conflict")),
+    )
+}
+
+pub(super) fn report_claims_high_severity(store: &storage::Store, session_id: &str, admitted_score: Option<f64>) -> bool {
+    report_claims_escalation(store, session_id, admitted_score).0
 }
 
 pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<CouncilInspection> {
@@ -831,6 +848,11 @@ fn severe_findings(team: &TeamSnapshot, round: usize) -> bool {
 
 /// A high-severity claim belongs only to its scored native reviewer report.
 /// Across S2 rounds, later scores cannot erase it without an observed edit.
+fn reported_conflicts(team: &TeamSnapshot, round: usize) -> bool {
+    in_round(team, round).any(|(worker, seat)| counts(worker, seat)
+        && worker.status == "completed" && seat.score.is_some() && seat.reported_conflict)
+}
+
 fn latest_severe_report(team: &TeamSnapshot, through_round: usize) -> Option<i64> {
     (1..=through_round)
         .flat_map(|round| in_round(team, round))
@@ -1155,7 +1177,7 @@ pub(super) fn seat_for(team: &TeamSnapshot, lens: Option<&str>, replaces: Option
     if round > 1 && !fixed.is_empty() && !fixed.iter().any(|known| same_lens(known, lens)) {
         return Err(format!("Council lenses are fixed by round 1: {}. Use one of them for {lens:?}.", fixed.join(", ")));
     }
-    Ok(Some(CouncilSeat { round, lens: lens.trim().into(), score: None, started_at: 0, closed_by_selection: false, reported_severe_finding: false }))
+    Ok(Some(CouncilSeat { round, lens: lens.trim().into(), score: None, started_at: 0, closed_by_selection: false, reported_severe_finding: false, reported_conflict: false }))
 }
 
 /// When a new round opens over an incomplete one (changes overtook it), that round's unscored
@@ -1254,6 +1276,7 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
             || !criterion_blockers(team, config, round).is_empty()
             || !unverified_required_skill_checks(team, round).is_empty()
             || severe_findings(team, round)
+            || reported_conflicts(team, round)
         {
             continue;
         }
@@ -1283,6 +1306,7 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
             || !criterion_blockers(team, config, round).is_empty()
             || !unverified_required_skill_checks(team, round).is_empty()
             || severe_findings(team, round)
+            || reported_conflicts(team, round)
     });
     let Some(trigger_round) = last_trigger else { return true };
     if view.latest <= trigger_round || !view.complete(view.latest) {

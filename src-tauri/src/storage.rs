@@ -161,7 +161,8 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 49;
+pub const SCHEMA_VERSION: i64 = 51;
+pub(crate) const COUNCIL_REVIEW_SNAPSHOT_DIRECTORY: &str = "council-review-snapshots";
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -762,6 +763,64 @@ impl Store {
                 migration.execute_batch(crate::superagent::COUNCIL_SCHEMA)
                     .map_err(|e| e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=49;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 50 {
+                // Bind required Council reviews to the authorized workspace
+                // tree, including writes made by the admitted worker.
+                for (table, definition) in [
+                    ("sa_council_requests", "TEXT CHECK(workspace_sha256 IS NULL OR length(workspace_sha256)=64)"),
+                    ("sa_council_finalizations", "TEXT CHECK(workspace_sha256 IS NULL OR length(workspace_sha256)=64)"),
+                ] {
+                    let exists: bool = migration.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name='workspace_sha256')",
+                        [table], |row| row.get(0),
+                    ).map_err(|e| e.to_string())?;
+                    if !exists {
+                        migration.execute_batch(&format!(
+                            "ALTER TABLE {table} ADD COLUMN workspace_sha256 {definition};"
+                        )).map_err(|e| e.to_string())?;
+                    }
+                }
+                // Existing databases already have the S3 trigger without the
+                // workspace field. Recreate it with the complete immutable identity.
+                migration.execute_batch("DROP TRIGGER IF EXISTS sa_council_request_identity_immutable;")
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch(crate::superagent::COUNCIL_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=50;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 51 {
+                // S3 Council reviews bind an app-managed immutable workspace
+                // snapshot identity and digest before reviewer dispatch.
+                for (table, columns) in [
+                    ("sa_council_requests", [
+                        ("workspace_snapshot_id", "TEXT"),
+                        ("workspace_snapshot_sha256", "TEXT CHECK(workspace_snapshot_sha256 IS NULL OR length(workspace_snapshot_sha256)=64)"),
+                    ]),
+                    ("sa_council_finalizations", [
+                        ("workspace_snapshot_id", "TEXT"),
+                        ("workspace_snapshot_sha256", "TEXT CHECK(workspace_snapshot_sha256 IS NULL OR length(workspace_snapshot_sha256)=64)"),
+                    ]),
+                ] {
+                    for (name, definition) in columns {
+                        let exists: bool = migration.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+                            rusqlite::params![table,name], |row| row.get(0),
+                        ).map_err(|e| e.to_string())?;
+                        if !exists {
+                            migration.execute_batch(&format!(
+                                "ALTER TABLE {table} ADD COLUMN {name} {definition};"
+                            )).map_err(|e| e.to_string())?;
+                        }
+                    }
+                }
+                migration.execute_batch("DROP TRIGGER IF EXISTS sa_council_request_identity_immutable;")
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch(crate::superagent::COUNCIL_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=51;")
                     .map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
@@ -1613,10 +1672,26 @@ impl Store {
         if !path.is_dir() {
             return Err(format!("{kind} folder is unavailable."));
         }
-        if is_worktree && !path.join(".git").is_file() {
+        if is_worktree && !path.join(".git").is_file() && !self.is_council_review_snapshot(&path) {
             return Err("Worktree checkout is unavailable. Its Git metadata is missing.".into());
         }
         Ok(path)
+    }
+
+    fn is_council_review_snapshot(&self, path: &Path) -> bool {
+        let Some(id) = path.file_name().and_then(|name| name.to_str()) else { return false };
+        if id.is_empty() || id.len() > 64
+            || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return false;
+        }
+        let Some(database_parent) = self.path.parent().and_then(|parent| parent.canonicalize().ok()) else {
+            return false;
+        };
+        let Ok(snapshot_parent) = database_parent.join(COUNCIL_REVIEW_SNAPSHOT_DIRECTORY).canonicalize() else {
+            return false;
+        };
+        path.parent() == Some(snapshot_parent.as_path())
     }
 
     pub fn create_worktree_session_on(&self, source: &Session, path: &Path, branch: Option<&str>) -> Result<Session> {

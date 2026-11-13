@@ -209,7 +209,7 @@ CREATE TRIGGER IF NOT EXISTS sa_ticket_team_snapshots_no_delete
 "#;
 
 /// Immutable Council request identity for one admitted worker assignment. The
-/// artifact and Council session are filled only after the worker finishes.
+/// worker artifact and workspace snapshot are filled only after the worker finishes.
 pub(crate) const COUNCIL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sa_council_requests (
   id TEXT PRIMARY KEY,
@@ -227,6 +227,9 @@ CREATE TABLE IF NOT EXISTS sa_council_requests (
   council_config_json TEXT NOT NULL CHECK(json_valid(council_config_json)),
   council_config_sha256 TEXT NOT NULL CHECK(length(council_config_sha256)=64),
   artifact_sha256 TEXT,
+  workspace_sha256 TEXT CHECK(workspace_sha256 IS NULL OR length(workspace_sha256)=64),
+  workspace_snapshot_id TEXT,
+  workspace_snapshot_sha256 TEXT CHECK(workspace_snapshot_sha256 IS NULL OR length(workspace_snapshot_sha256)=64),
   bound_at INTEGER,
   native_session_id TEXT UNIQUE,
   state TEXT NOT NULL CHECK(state IN ('admitted','bound','starting','dispatched','passed','human_accepted','blocked')),
@@ -248,6 +251,9 @@ CREATE TABLE IF NOT EXISTS sa_council_finalizations (
   generation INTEGER NOT NULL CHECK(generation > 0),
   native_session_id TEXT NOT NULL,
   artifact_sha256 TEXT NOT NULL CHECK(length(artifact_sha256)=64),
+  workspace_sha256 TEXT CHECK(workspace_sha256 IS NULL OR length(workspace_sha256)=64),
+  workspace_snapshot_id TEXT,
+  workspace_snapshot_sha256 TEXT CHECK(workspace_snapshot_sha256 IS NULL OR length(workspace_snapshot_sha256)=64),
   verdict TEXT NOT NULL CHECK(verdict IN ('passed','human_accepted')),
   actor TEXT NOT NULL,
   reason TEXT,
@@ -273,6 +279,9 @@ CREATE TRIGGER IF NOT EXISTS sa_council_request_identity_immutable
    OR NEW.council_config_sha256 IS NOT OLD.council_config_sha256
    OR (OLD.state<>'admitted' AND NEW.ticket_revision IS NOT OLD.ticket_revision)
    OR (OLD.artifact_sha256 IS NOT NULL AND NEW.artifact_sha256 IS NOT OLD.artifact_sha256)
+   OR (OLD.workspace_sha256 IS NOT NULL AND NEW.workspace_sha256 IS NOT OLD.workspace_sha256)
+   OR (OLD.workspace_snapshot_id IS NOT NULL AND NEW.workspace_snapshot_id IS NOT OLD.workspace_snapshot_id)
+   OR (OLD.workspace_snapshot_sha256 IS NOT NULL AND NEW.workspace_snapshot_sha256 IS NOT OLD.workspace_snapshot_sha256)
    OR (OLD.bound_at IS NOT NULL AND NEW.bound_at IS NOT OLD.bound_at)
    OR (OLD.native_session_id IS NOT NULL AND NEW.native_session_id IS NOT OLD.native_session_id)
  BEGIN SELECT RAISE(ABORT,'SuperAgent Council request identity is immutable'); END;
@@ -878,6 +887,35 @@ fn load_ticket_team_snapshot(db: &Connection, ticket_id: &str) -> Result<TeamSna
         || snapshot.policy.policy_revision != policy_revision
     {
         return Err("Ticket Team snapshot identity or policy does not match its database key.".into());
+    }
+    let (ticket_orchestration_id,ticket_project_id,ticket_worker_bot_id,ticket_policy_revision):
+        (String,String,String,i64) = db.query_row(
+        "SELECT orchestration_id,project_id,worker_bot_id,policy_revision
+         FROM sa_tickets WHERE id=?1",
+        [ticket_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+    ).map_err(|_| "Ticket Team snapshot has no owning Ticket.")?;
+    if ticket_orchestration_id != orchestration_id
+        || snapshot.project_id != ticket_project_id
+        || snapshot.worker_bot_ids.first().map(String::as_str) != Some(ticket_worker_bot_id.as_str())
+        || ticket_policy_revision != policy_revision
+    {
+        return Err("Ticket Team snapshot bindings disagree with its owning Ticket row.".into());
+    }
+    let mut expected_role_bindings = Vec::with_capacity(
+        1 + snapshot.worker_bot_ids.len() + snapshot.reviewer_bot_ids.len(),
+    );
+    expected_role_bindings.push(("coordinator".to_string(),0,snapshot.coordinator_bot_id.clone()));
+    expected_role_bindings.extend(snapshot.worker_bot_ids.iter().enumerate().map(|(ordinal,bot_id)| {
+        ("worker".to_string(),ordinal,bot_id.clone())
+    }));
+    expected_role_bindings.extend(snapshot.reviewer_bot_ids.iter().enumerate().map(|(ordinal,bot_id)| {
+        ("reviewer".to_string(),ordinal,bot_id.clone())
+    }));
+    let role_bindings = snapshot.roles.iter().map(|role| (
+        role.role.clone(),role.ordinal,role.bot_id.clone(),
+    )).collect::<Vec<_>>();
+    if role_bindings != expected_role_bindings {
+        return Err("Ticket Team role bindings disagree with its saved role lists.".into());
     }
     let version = load_team_version_snapshot(db,&orchestration_id,team_version)?;
     if source_kind == "legacy-backfill" {
@@ -3526,6 +3564,87 @@ mod tests {
         assert_eq!(after.activity[0].kind, "stopped");
         assert!(ticket_snapshot(&store, &ticket.id, 0).is_err());
         assert!(ticket_snapshot(&store, &ticket.id, 201).is_err());
+    }
+
+    #[test]
+    fn ticket_team_snapshot_rejects_owner_row_binding_drift() {
+        for binding in ["orchestration_id","project_id","worker_bot_id","policy_revision"] {
+            let mut store=fixture();
+            let config=enabled(&store);
+            let other=create_configuration(&store,NewOrchestration {
+                name:"Other owner".into(),coordinator_bot_id:"router".into(),
+                worker_bot_id:"worker".into(),
+            }).unwrap();
+            let (ticket,launched)=admit(
+                &mut store,&config.id,"Snapshot owner binding","snapshot-owner-binding",true,
+            ).unwrap();
+            assert!(!launched);
+            let valid=ticket_team_snapshot(&store,&ticket.id).unwrap();
+            assert_eq!(valid.provenance,TeamSnapshotProvenance::Native);
+            let snapshot_before: (String,String)=store.db.query_row(
+                "SELECT snapshot_json,snapshot_sha256 FROM sa_ticket_team_snapshots WHERE ticket_id=?1",
+                [&ticket.id],|r|Ok((r.get(0)?,r.get(1)?)),
+            ).unwrap();
+
+            match binding {
+                "orchestration_id" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET orchestration_id=?1 WHERE id=?2",
+                        params![other.id,ticket.id],
+                    ).unwrap();
+                }
+                "project_id" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET project_id='drifted-project' WHERE id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "worker_bot_id" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET worker_bot_id='drifted-worker' WHERE id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "policy_revision" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET policy_revision=policy_revision+1 WHERE id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            assert!(ticket_team_snapshot(&store,&ticket.id).is_err(),
+                "owner binding drift in {binding} must be rejected");
+            let snapshot_after: (String,String)=store.db.query_row(
+                "SELECT snapshot_json,snapshot_sha256 FROM sa_ticket_team_snapshots WHERE ticket_id=?1",
+                [&ticket.id],|r|Ok((r.get(0)?,r.get(1)?)),
+            ).unwrap();
+            assert_eq!(snapshot_after,snapshot_before,"the immutable snapshot must be unchanged");
+        }
+    }
+
+    #[test]
+    fn legacy_unknown_ticket_team_snapshot_remains_loadable_for_its_owner() {
+        let store=fixture();
+        let config=enabled(&store);
+        let ticket_id="legacy-snapshot-owner";
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,
+                project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+             VALUES(?1,?2,?3,?4,?5,'manual',?6,?7,?8,'blocked',?9,?9)",
+            params![ticket_id,config.id,"legacy-snapshot-owner","Historical work","test",
+                config.project_id,config.worker_bot_id,config.policy_revision,now],
+        ).unwrap();
+        let snapshot=legacy_unknown_team_snapshot(
+            &config.id,config.team_version+1,&config.worker_bot_id,&config.project_id,
+            config.policy_revision,
+        ).unwrap();
+        insert_team_version(&store.db,&snapshot).unwrap();
+        insert_ticket_team_snapshot(&store.db,ticket_id,&snapshot,"legacy-backfill").unwrap();
+
+        assert_eq!(ticket_team_snapshot(&store,ticket_id).unwrap(),snapshot);
     }
 
 

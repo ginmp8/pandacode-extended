@@ -729,7 +729,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-ticket <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-ticket <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -896,6 +896,11 @@ mod tests {
     #[test]
     fn help_mentions_every_flag() {
         let text = help();
+        let usage = text
+            .lines()
+            .find(|line| line.starts_with("Usage:"))
+            .unwrap();
+        assert!(usage.contains("--preview-orchestrations <file>"));
         for flag in [
             "--sign-in",
             "--sign-out",
@@ -920,6 +925,137 @@ mod tests {
         ] {
             assert!(text.contains(flag), "{flag}");
         }
+    }
+
+    fn issue_comment_fixture() -> (PathBuf, String) {
+        let path = std::env::temp_dir().join(format!(
+            "pandacode-headless-issue-comment-{}.sqlite3",
+            crate::storage::id()
+        ));
+        let store = crate::storage::Store::open(&path).unwrap();
+        let now = crate::storage::now();
+        // If a regression reaches the real dispatcher, this absent checkout fails before `gh`.
+        let workspace = path.with_extension("no-checkout");
+        store
+            .db
+            .execute(
+                "INSERT INTO projects(id,name,path) VALUES('p','P',?1)",
+                [workspace.to_string_lossy().into_owned()],
+            )
+            .unwrap();
+        for (id, name) in [("co", "Coordinator"), ("wo", "Worker")] {
+            store
+                .db
+                .execute(
+                    "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                     VALUES(?1,?2,'p','codex','default','plan',?3,?3)",
+                    rusqlite::params![id, name, crate::storage::now()],
+                )
+                .unwrap();
+        }
+        store
+            .db
+            .execute(
+                "INSERT INTO sa_orchestrations(id,name,coordinator_bot_id,worker_bot_id,project_id,
+                    enabled,policy_revision,created_at,updated_at)
+                 VALUES('orchestration','Headless issue comment test','co','wo','p',1,1,?1,?1)",
+                [now],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,
+                    project_id,worker_bot_id,policy_revision,state,revision,active_assignment_id,
+                    created_at,updated_at)
+                 VALUES('ticket','orchestration','test','Confirm a GitHub comment','local-user',
+                    'manual','p','wo',1,'running',0,'assignment',?1,?1)",
+                [now],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO sa_mandates(ticket_id,actor,authorization_id,policy_revision,
+                    project_id,expires_at,created_at)
+                 VALUES('ticket','local-user','headless-test-auth',1,'p',?1,?2)",
+                rusqlite::params![now + 600_000, now],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,
+                    created_at,updated_at)
+                 VALUES('assignment','ticket','wo','headless-test-session','running',1,?1,?1)",
+                [now],
+            )
+            .unwrap();
+        drop(store);
+        (path, "ticket".into())
+    }
+
+    #[test]
+    fn first_issue_comment_requires_an_exact_confirmation_before_dispatch() {
+        let (path, ticket_id) = issue_comment_fixture();
+
+        let missing = crate::superagent::headless_issue_comment(
+            &path,
+            &ticket_id,
+            0,
+            "owner/repo",
+            7,
+            "github:comment:7",
+            "reviewed comment",
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            missing.contains("Explicit local confirmation is required"),
+            "{missing}"
+        );
+        assert!(missing.contains("--confirm-issue-comment"), "{missing}");
+
+        let wrong_confirmation = "0".repeat(64);
+        let mismatched = crate::superagent::headless_issue_comment(
+            &path,
+            &ticket_id,
+            0,
+            "owner/repo",
+            7,
+            "github:comment:7",
+            "reviewed comment",
+            Some(&wrong_confirmation),
+        )
+        .unwrap_err();
+        assert_eq!(
+            mismatched,
+            "The issue-comment confirmation hash does not match this exact payload."
+        );
+
+        let store = crate::superagent::effects::open_effect_store(&path).unwrap();
+        let grants: i64 = store
+            .db
+            .query_row("SELECT COUNT(*) FROM sa_effect_grants", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let receipts: i64 = store
+            .db
+            .query_row("SELECT COUNT(*) FROM sa_effect_receipts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            grants, 0,
+            "failed confirmation must not create a native grant"
+        );
+        assert_eq!(
+            receipts, 0,
+            "failed confirmation must not reserve a remote effect receipt"
+        );
+        drop(store);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

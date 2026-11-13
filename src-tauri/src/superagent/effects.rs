@@ -85,13 +85,48 @@ pub(crate) fn open_effect_store(database_path: &Path) -> Result<Store> {
     Ok(Store { db, path: database_path.into() })
 }
 
-/// A cross-process fence around the final live-authority check and the GitHub
-/// write call. Stop uses the same lock before revoking the mandate. This is a
-/// file lock rather than a SQLite transaction so the bounded `gh` wait never
-/// holds a database transaction open. The lock is released automatically if a
-/// process exits unexpectedly.
+/// A cross-process fence ordering effect grants and the final live-authority
+/// check with Stop's mandate revocation. The GitHub write call stays under the
+/// same fence as its final live-authority check. This is a file lock rather
+/// than a SQLite transaction, so the bounded `gh` wait never holds a database
+/// transaction open. The lock is released automatically if a process exits
+/// unexpectedly.
 pub(crate) struct DispatchFence {
     _file: File,
+}
+
+#[cfg(test)]
+std::thread_local! {
+    static DISPATCH_FENCE_ACQUIRED_OBSERVER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+    static DISPATCH_FENCE_WAITING_OBSERVER: std::cell::RefCell<Option<Box<dyn FnOnce()>>> =
+        std::cell::RefCell::new(None);
+}
+
+#[cfg(test)]
+fn observe_next_dispatch_fence_acquired(observer: impl FnOnce() + 'static) {
+    DISPATCH_FENCE_ACQUIRED_OBSERVER.with(|slot| *slot.borrow_mut() = Some(Box::new(observer)));
+}
+
+#[cfg(test)]
+fn observe_next_dispatch_fence_waiting(observer: impl FnOnce() + 'static) {
+    DISPATCH_FENCE_WAITING_OBSERVER.with(|slot| *slot.borrow_mut() = Some(Box::new(observer)));
+}
+
+#[cfg(test)]
+fn notify_dispatch_fence_acquired() {
+    let observer = DISPATCH_FENCE_ACQUIRED_OBSERVER.with(|slot| slot.borrow_mut().take());
+    if let Some(observer) = observer {
+        observer();
+    }
+}
+
+#[cfg(test)]
+fn notify_dispatch_fence_waiting() {
+    let observer = DISPATCH_FENCE_WAITING_OBSERVER.with(|slot| slot.borrow_mut().take());
+    if let Some(observer) = observer {
+        observer();
+    }
 }
 
 pub(crate) fn lock_dispatch(database_path: &Path) -> Result<DispatchFence> {
@@ -113,10 +148,14 @@ pub(crate) fn lock_dispatch_before_wait(
         Ok(()) => {}
         Err(std::fs::TryLockError::WouldBlock) => {
             before_wait();
+            #[cfg(test)]
+            notify_dispatch_fence_waiting();
             file.lock().map_err(|e| e.to_string())?;
         }
         Err(std::fs::TryLockError::Error(error)) => return Err(error.to_string()),
     }
+    #[cfg(test)]
+    notify_dispatch_fence_acquired();
     Ok(DispatchFence { _file: file })
 }
 
@@ -529,6 +568,15 @@ pub(crate) fn has_exact_grant(store: &Store, intent: &IssueCommentIntent) -> Res
 }
 
 pub(crate) fn authorize(store: &Store, intent: &IssueCommentIntent) -> Result<()> {
+    authorize_with_lock_observer(store, intent, || {})
+}
+
+fn authorize_with_lock_observer(
+    store: &Store,
+    intent: &IssueCommentIntent,
+    before_wait: impl FnOnce(),
+) -> Result<()> {
+    let _dispatch_fence = lock_dispatch_before_wait(&store.path, before_wait)?;
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let scope = active_scope(&tx, intent)?;
     let existing: Option<String> = tx
@@ -1077,6 +1125,88 @@ mod tests {
             .execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1", [&id])
             .unwrap();
         assert_eq!(reserve(&store, &intent).unwrap(), Reservation::AlreadyApplied);
+    }
+
+    #[test]
+    fn concurrent_mandate_revocation_precedes_grant_authorization() {
+        let (store, id) = fixture();
+        let intent = make_intent(&id, "race payload");
+        let path = store.path.clone();
+        let revocation_fence = lock_dispatch(&path).unwrap();
+        let (authorize_waiting_tx, authorize_waiting_rx) = mpsc::sync_channel(1);
+        let authorize_intent = intent.clone();
+        let authorizer = thread::spawn(move || {
+            let store = open_effect_store(&path).unwrap();
+            authorize_with_lock_observer(&store, &authorize_intent, || {
+                authorize_waiting_tx.send(()).unwrap();
+            })
+        });
+
+        authorize_waiting_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("grant authorization did not wait behind the revocation fence");
+        store
+            .db
+            .execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1", [&id])
+            .unwrap();
+        drop(revocation_fence);
+
+        let error = authorizer.join().unwrap().unwrap_err();
+        assert_eq!(
+            error,
+            "The Ticket, revision, mandate, or active worker no longer permits this effect."
+        );
+        assert!(!has_exact_grant(&store, &intent).unwrap());
+    }
+
+    #[test]
+    fn production_stop_fences_waiting_grant_authorization() {
+        let (store, id) = fixture();
+        let intent = make_intent(&id, "stop race payload");
+        let stop_path = store.path.clone();
+        let stop_ticket_id = id.clone();
+        let (stop_fenced_tx, stop_fenced_rx) = mpsc::sync_channel(1);
+        let (continue_stop_tx, continue_stop_rx) = mpsc::sync_channel(1);
+        let stopper = thread::spawn(move || {
+            let stop_store = open_effect_store(&stop_path).unwrap();
+            observe_next_dispatch_fence_acquired(move || {
+                stop_fenced_tx.send(()).unwrap();
+                continue_stop_rx.recv().unwrap();
+            });
+            superagent::stop(&stop_store, &stop_ticket_id).map(|(ticket, _)| ticket.state)
+        });
+
+        stop_fenced_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("production Stop did not acquire the dispatch fence");
+
+        let authorize_path = store.path.clone();
+        let authorize_intent = intent.clone();
+        let (authorize_waiting_tx, authorize_waiting_rx) = mpsc::sync_channel(1);
+        let authorizer = thread::spawn(move || {
+            let authorize_store = open_effect_store(&authorize_path).unwrap();
+            observe_next_dispatch_fence_waiting(move || {
+                authorize_waiting_tx.send(()).unwrap();
+            });
+            authorize(&authorize_store, &authorize_intent)
+        });
+
+        authorize_waiting_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("production authorization did not wait behind Stop's dispatch fence");
+
+        continue_stop_tx.send(()).unwrap();
+        assert_eq!(stopper.join().unwrap().unwrap(), "stopped");
+        assert_eq!(
+            authorizer.join().unwrap().unwrap_err(),
+            "The Ticket, revision, mandate, or active worker no longer permits this effect."
+        );
+        assert_eq!(
+            superagent::get_ticket(&store, &id).unwrap().state,
+            "stopped"
+        );
+        assert!(superagent::mandate(&store, &id).unwrap().revoked);
+        assert!(!has_exact_grant(&store, &intent).unwrap());
     }
 
     #[test]

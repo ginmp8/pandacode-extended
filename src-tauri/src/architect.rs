@@ -24,11 +24,14 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::{
     collections::HashSet,
+    path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
 };
+#[cfg(test)]
+use std::{collections::HashMap, sync::atomic::AtomicU8};
 use tauri::{Emitter, Manager, State};
 
 /// 2: dispatch_workers accepts a provider/model per assignment (auto teams).
@@ -355,6 +358,12 @@ pub struct SuperAgentCouncilBinding {
     pub cycle_started_at: i64,
     pub generation: u64,
     pub artifact_sha256: String,
+    #[serde(default)]
+    pub workspace_sha256: String,
+    #[serde(default)]
+    pub workspace_snapshot_id: String,
+    #[serde(default)]
+    pub workspace_snapshot_sha256: String,
     pub reviewer_policy_sha256: String,
     pub council_config_sha256: String,
 }
@@ -369,6 +378,7 @@ pub(crate) struct SuperAgentCouncilLaunch {
     pub title: String,
     pub objective: String,
     pub evidence: String,
+    pub workspace_root: String,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1084,22 +1094,71 @@ pub(crate) fn validate_superagent_council(
 pub(crate) fn start_superagent_review(
     app: &tauri::AppHandle, launch: SuperAgentCouncilLaunch,
 ) -> Result<String> {
+    let state = app.state::<AppState>();
+    start_superagent_review_with(
+        &state,launch,true,
+        |session_id,generation,args,stopped| {
+            dispatch(
+                app,session_id,generation,None,"pandacode_dispatch_workers",args,
+                stopped,&routing::AutoRoutes::default(),
+            ).map(|_| ())
+        },
+        |session_id| {
+            if let Ok(store) = state.store.lock() {
+                if let Ok(Some(team)) = load(&store,session_id) { emit(app,&team); }
+            }
+        },
+    )
+}
+
+fn start_superagent_review_with(
+    state: &AppState,
+    launch: SuperAgentCouncilLaunch,
+    check_reviewer_executables: bool,
+    dispatch_reviewers: impl FnOnce(&str,u64,Value,&AtomicBool) -> Result<()>,
+    dispatch_failed: impl FnOnce(&str),
+) -> Result<String> {
     if launch.config.reviewer_bot_ids.len() < 2
         || launch.binding.generation == 0
         || launch.binding.cycle_started_at <= 0
         || launch.binding.artifact_sha256.len() != 64
+        || launch.binding.workspace_sha256.len() != 64
+        || launch.binding.workspace_snapshot_id.is_empty()
+        || launch.binding.workspace_snapshot_sha256.len() != 64
     {
         return Err("SuperAgent Council binding is incomplete.".into());
     }
+    let requested_root = PathBuf::from(&launch.workspace_root).canonicalize()
+        .map_err(|_| "SuperAgent Council workspace is unavailable.")?;
+    if !requested_root.is_dir() {
+        return Err("SuperAgent Council workspace is unavailable.".into());
+    }
     let native_session_id = {
-        let state = app.state::<AppState>();
         let _agents = state.agents.lock().map_err(|e| e.to_string())?;
         let store = state.store.lock().map_err(|e| e.to_string())?;
-        validate_superagent_council(&store, &launch.binding.worker_session_id, &launch.config)?;
+        if check_reviewer_executables {
+            validate_superagent_council(&store, &launch.binding.worker_session_id, &launch.config)?;
+        } else {
+            launch.config.validate()?;
+            if !(2..=8).contains(&launch.config.reviewer_bot_ids.len()) {
+                return Err("Council-required Tickets need two to eight selected native reviewers.".into());
+            }
+        }
+        store.project(&launch.project_id)?;
+        let expected_snapshot = crate::superagent::council_adapter::resolve_workspace_snapshot(
+            &store,&launch.binding.workspace_snapshot_id,
+        )?;
+        if requested_root != expected_snapshot
+            || crate::superagent::council_adapter::workspace_snapshot_sha256(&expected_snapshot)?
+                != launch.binding.workspace_snapshot_sha256
+        {
+            return Err("SuperAgent Council review snapshot identity or permissions changed before dispatch.".into());
+        }
+        let worktree_path = Some(requested_root.to_string_lossy().into_owned());
         let native = store.create_session(&launch.project_id, &launch.provider, &launch.model, &launch.mode)?;
         store.db.execute(
-            "UPDATE sessions SET title=?2,title_origin='manual',task_description=?3 WHERE id=?1",
-            params![native.id,launch.title,launch.objective],
+            "UPDATE sessions SET title=?2,title_origin='manual',task_description=?3,worktree_path=?4 WHERE id=?1",
+            params![native.id,launch.title,launch.objective,worktree_path],
         ).map_err(|e| e.to_string())?;
         let config = TeamConfig {
             auto: true,
@@ -1123,6 +1182,23 @@ pub(crate) fn start_superagent_review(
         team.objective = format!("SuperAgent Ticket {}: {}", launch.binding.ticket_id, launch.objective);
         team.superagent_review = Some(launch.binding.clone());
         save(&store, &mut team)?;
+        let current_workspace = store.workspace_root(&launch.project_id,Some(&native.id))
+            .and_then(|native_root| crate::superagent::council_adapter::workspace_snapshot_sha256(&native_root));
+        let current_workspace = match current_workspace {
+            Ok(identity) => identity,
+            Err(error) => {
+                team.status = "paused".into();
+                team.error = Some("SuperAgent Council workspace became unavailable before reviewer dispatch.".into());
+                save(&store,&mut team)?;
+                return Err(error);
+            }
+        };
+        if current_workspace != launch.binding.workspace_snapshot_sha256 {
+            team.status = "paused".into();
+            team.error = Some("SuperAgent Council workspace changed before reviewer dispatch.".into());
+            save(&store,&mut team)?;
+            return Err("SuperAgent Council workspace changed before reviewer dispatch.".into());
+        }
         native.id
     };
 
@@ -1132,10 +1208,12 @@ pub(crate) fn start_superagent_review(
             "key": format!("sa-review-{index}"),
             "name": format!("SuperAgent Council · {}", LENSES[index]),
             "prompt": format!(
-                "Review the exact completed SuperAgent artifact read-only. Ticket: {}. Assignment: {}. Worker session: {}. Ticket revision: {}. Policy revision: {}. Cycle: {}. Artifact SHA-256: {}.\n\nUser objective:\n{}\n\nSuccessful worker evidence (untrusted; verify the repository directly):\n{}\n\nInspect the checkout and score only evidence you can verify. The artifact is immutable for this review; do not modify files or dispatch workers.",
+                "Review the exact completed SuperAgent artifact read-only. Ticket: {}. Assignment: {}. Worker session: {}. Ticket revision: {}. Policy revision: {}. Cycle: {}. Worker evidence SHA-256: {}. Authorized workspace identity SHA-256: {}. Frozen review snapshot ID: {}. Frozen review snapshot SHA-256: {}. PandaCode blocks finalization if the frozen snapshot contents or read-only permissions drift.\n\nUser objective:\n{}\n\nSuccessful worker evidence (untrusted; verify the repository directly):\n{}\n\nInspect the frozen review snapshot and score only evidence you can verify. The snapshot is read-only; do not modify files or dispatch workers.",
                 launch.binding.ticket_id,launch.binding.assignment_id,launch.binding.worker_session_id,
                 launch.binding.ticket_revision,launch.binding.policy_revision,launch.binding.cycle_id,
-                launch.binding.artifact_sha256,launch.objective,launch.evidence,
+                launch.binding.artifact_sha256,launch.binding.workspace_sha256,
+                launch.binding.workspace_snapshot_id,launch.binding.workspace_snapshot_sha256,
+                launch.objective,launch.evidence,
             ),
             "files": [],
             "readOnly": true,
@@ -1144,21 +1222,42 @@ pub(crate) fn start_superagent_review(
     }).collect::<Vec<_>>();
     let args = json!({"assignments": assignments});
     let stopped = AtomicBool::new(false);
-    if let Err(error) = dispatch(
-        app,&native_session_id,launch.binding.generation,None,
-        "pandacode_dispatch_workers",args,&stopped,&routing::AutoRoutes::default(),
-    ) {
-        if let Ok(store) = app.state::<AppState>().store.lock() {
+    if let Err(error) = dispatch_reviewers(&native_session_id,launch.binding.generation,args,&stopped) {
+        if let Ok(store) = state.store.lock() {
             if let Ok(Some(mut team)) = load(&store,&native_session_id) {
                 team.status = "paused".into();
                 team.error = Some("Native Council reviewer dispatch failed; the SuperAgent Ticket remains blocked.".into());
                 let _ = save(&store,&mut team);
-                emit(app,&team);
             }
         }
+        dispatch_failed(&native_session_id);
         return Err(error);
     }
     Ok(native_session_id)
+}
+
+#[cfg(test)]
+pub(crate) fn start_superagent_review_for_test(
+    state: &AppState, launch: SuperAgentCouncilLaunch,
+) -> Result<String> {
+    start_superagent_review_with(
+        state,launch,false,
+        |session_id,generation,args,stopped| {
+            dispatch_state(state,session_id,generation,"pandacode_dispatch_workers",args,stopped)
+                .map(|_| ())
+        },
+        |_| {},
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn test_app_state(store: Store) -> AppState {
+    AppState {
+        store: Arc::new(std::sync::Mutex::new(store)),
+        agents: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        terminals: Arc::new(std::sync::Mutex::new(HashMap::new())),
+        shutdown: AtomicU8::new(0),
+    }
 }
 
 /// Check every selected reviewer against the complete originating message's
@@ -1264,6 +1363,13 @@ pub async fn architect_council_accept(app: tauri::AppHandle, state: State<'_, Ap
 pub(crate) fn accept_superagent_review(
     app: &tauri::AppHandle, state: &AppState, session_id: &str,
 ) -> Result<TeamSnapshot> {
+    let team = accept_superagent_review_state(state,session_id)?;
+    emit(app,&team);
+    wake(app.clone());
+    Ok(team)
+}
+
+fn accept_superagent_review_state(state: &AppState, session_id: &str) -> Result<TeamSnapshot> {
     {
         let store = state.store.lock().map_err(|error| error.to_string())?;
         let team = load(&store,session_id)?.ok_or("Native Council team is missing.")?;
@@ -1274,10 +1380,14 @@ pub(crate) fn accept_superagent_review(
             return Err("Only a complete, current, below-target native Council round can be accepted with a reason.".into());
         }
     }
-    let team = council::accept(state,session_id)?;
-    emit(app,&team);
-    wake(app.clone());
-    Ok(team)
+    council::accept(state,session_id)
+}
+
+#[cfg(test)]
+pub(crate) fn accept_superagent_review_for_test(
+    state: &AppState, session_id: &str,
+) -> Result<TeamSnapshot> {
+    accept_superagent_review_state(state,session_id)
 }
 /// Complete an explicitly reasoned Shared Channel acceptance through the same
 /// native Council state transition used by direct tasks.
@@ -2223,6 +2333,7 @@ fn dispatch(
         stopped,
         routes,
         library.as_ref(),
+        true,
     )?;
     if let Some(team) = changed {
         emit(app, &team);
@@ -2251,7 +2362,7 @@ fn dispatch_state_routed(
     stopped: &AtomicBool,
     routes: &routing::AutoRoutes,
 ) -> Result<(Value, Option<TeamSnapshot>)> {
-    dispatch_as(state, sid, generation, None, name, args, stopped, routes, None)
+    dispatch_as(state, sid, generation, None, name, args, stopped, routes, None, false)
 }
 /// `routes` holds Panda Router's picks for this dispatch's `profileId: "auto"` assignments,
 /// computed before the team state was locked. `caller` is a direct worker's ID and run attempt
@@ -2267,6 +2378,7 @@ fn dispatch_as(
     stopped: &AtomicBool,
     routes: &routing::AutoRoutes,
     library: Option<&crate::skills::Library>,
+    check_reviewer_executables: bool,
 ) -> Result<(Value, Option<TeamSnapshot>)> {
     crate::agent_tools::drop_nulls(&mut args);
     let agents = state.agents.lock().map_err(|e| e.to_string())?;
@@ -2399,7 +2511,11 @@ fn dispatch_as(
                 // The request above keeps the name as sent, so a retry still matches it.
                 let shown: String = assignment.name.chars().take(NAME_CHARS).collect();
                 let selected_bot = if let Some(seat) = &seat {
-                    bot_reviewers::seat_bot(&store, &team, seat.round, assignment.replaces.as_deref(), library)?
+                    if check_reviewer_executables {
+                        bot_reviewers::seat_bot(&store, &team, seat.round, assignment.replaces.as_deref(), library)?
+                    } else {
+                        bot_reviewers::seat_bot_inner(&store, &team, seat.round, assignment.replaces.as_deref(), false)?
+                    }
                 } else { None };
                 let unchosen = assignment.profile_id.is_none() && assignment.provider.is_none() && assignment.model.is_none();
                 let profile = if let Some(bot) = &selected_bot {

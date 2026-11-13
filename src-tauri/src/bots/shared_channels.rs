@@ -284,6 +284,26 @@ pub(crate) fn bind_delivery_cycle(store: &Store, session_id: &str, since: i64) -
 /** Recheck frozen per-message authority against current channel members and
  * all message executors on every selected seat, including resumed rounds. */
 pub(crate) fn validate_delivery_reviewers(store: &Store, session_id: &str, selected: &[String]) -> Result<()> {
+    validate_delivery_sources(store, session_id, selected, selected, None)
+}
+
+/// Revalidate the entire frozen Council policy, including nested bot
+/// coordinators, against the originating Shared Channel message. Checking only
+/// direct seats would let a removed nested member keep its task-owned child.
+pub(crate) fn validate_delivery_council(
+    store: &Store, session_id: &str, council: &crate::architect::CouncilConfig,
+) -> Result<()> {
+    let mut selected = council.reviewer_bot_ids.clone();
+    selected.extend(council.nested_bot_reviewers.iter().map(|child| child.bot_id.clone()));
+    validate_delivery_sources(
+        store, session_id, &council.reviewer_bot_ids, &selected, Some(council),
+    )
+}
+
+fn validate_delivery_sources(
+    store: &Store, session_id: &str, direct: &[String], selected: &[String],
+    expected: Option<&crate::architect::CouncilConfig>,
+) -> Result<()> {
     let thread: Option<String> = store.db.query_row(
         "SELECT external_id FROM bot_threads WHERE session_id=?1 AND external_id LIKE 'channel-council:%'",
         [session_id], |row| row.get(0),
@@ -311,7 +331,9 @@ pub(crate) fn validate_delivery_reviewers(store: &Store, session_id: &str, selec
     }
     let request = council_request(store, &message_id)?
         .ok_or("channel_council_scope_missing: original Council opt-in is absent.")?;
-    if request.council.reviewer_bot_ids.as_slice() != selected {
+    if request.council.reviewer_bot_ids.as_slice() != direct
+        || expected.is_some_and(|council| request.council != *council)
+    {
         return Err("channel_council_scope_mismatch: original message reviewer roster changed.".into());
     }
     let mut executors = request.executors;
@@ -326,6 +348,13 @@ pub(crate) fn validate_delivery_reviewers(store: &Store, session_id: &str, selec
         }
         if executors.contains(id) {
             return Err("reviewer_unavailable: a message executor cannot review its channel delivery.".into());
+        }
+        if expected.is_some() {
+            let bot = super::get(store, id)
+                .map_err(|_| "reviewer_unavailable: a selected Council reviewer was removed.")?;
+            if bot.paused {
+                return Err("reviewer_unavailable: a selected Council reviewer is paused.".into());
+            }
         }
     }
     Ok(())
@@ -1214,7 +1243,7 @@ pub async fn bot_shared_channel_council_accept(
             return Err("Council evidence changed after the last native review.".into());
         }
         let config = team.config.council.as_ref().ok_or("Council is disabled.")?;
-        validate_delivery_reviewers(&store, &session_id, &config.reviewer_bot_ids)?;
+        validate_delivery_council(&store, &session_id, config)?;
         let status = team.council_status.as_ref().ok_or("Council has no review.")?;
         if status.round == 0 || status.lowest.is_none() || status.stale
             || !matches!(team.status.as_str(), "running" | "waiting" | "ready" | "completed")
@@ -1243,9 +1272,9 @@ pub async fn bot_shared_channel_council_accept(
         {
             return Err("Council approval no longer matches the current review.".into());
         }
-        let selected = &team.config.council.as_ref()
-            .ok_or("Council is disabled.")?.reviewer_bot_ids;
-        validate_delivery_reviewers(&store, &session_id, selected)?;
+        let council = team.config.council.as_ref()
+            .ok_or("Council is disabled.")?;
+        validate_delivery_council(&store, &session_id, council)?;
         store.db.execute(
             "INSERT OR IGNORE INTO extended_channel_council_acceptances
              (delivery_id,cycle_id,council_since,dispatch_revision,changed_at,actor,reason,accepted_at)

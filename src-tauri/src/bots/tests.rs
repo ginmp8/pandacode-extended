@@ -266,6 +266,85 @@ fn channel_selected_reviewer_scope_is_revalidated_after_membership_and_reassignm
 }
 
 #[test]
+fn channel_nested_council_rechecks_frozen_policy_membership_and_executor() {
+    let f = fixture();
+    upgrade(&f.store.db).unwrap();
+    let executor = bot(&f);
+    let a = create(&f.store, &input("Nested Security"), &f.root).unwrap();
+    let b = create(&f.store, &input("Nested Architecture"), &f.root).unwrap();
+    let channel = shared_channels::create(
+        &f.store, "nested-scope", &[executor.id.clone(), a.id.clone(), b.id.clone()],
+    ).unwrap();
+    let delivery_id = crate::storage::id();
+    let session_id = thread_session(
+        &f.store, &executor, DESKTOP, &format!("channel-council:{delivery_id}"), "Nested",
+    ).unwrap().0;
+    let message_id = crate::storage::id();
+    let config = crate::architect::CouncilConfig {
+        nested_bot_reviewers: [a.id.clone(), b.id.clone()].into_iter()
+            .map(|bot_id| crate::architect::council::CouncilNestedReviewer {
+                bot_id, child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
+            }).collect(),
+        ..Default::default()
+    };
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+         VALUES(?1,?2,'user','Review nested','in_progress',?3)",
+        params![message_id, channel.id, crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO extended_channel_council_requests(message_id,council_json,executor_ids,created_at)
+         VALUES(?1,?2,?3,?4)",
+        params![message_id, serde_json::to_string(&config).unwrap(),
+            serde_json::to_string(&vec![executor.id.clone()]).unwrap(), crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_deliveries(
+            id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,'queued',0,?6,?6)",
+        params![delivery_id, channel.id, message_id, executor.id, session_id, crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO extended_channel_council_deliveries(
+            delivery_id,channel_id,source_message_id,executor_bot_id,cycle_id,objective,artifact_revision,created_at)
+         VALUES(?1,?2,?3,?4,?5,'Review nested','0',?6)",
+        params![delivery_id, channel.id, message_id, executor.id,
+            crate::storage::id(), crate::storage::now()],
+    ).unwrap();
+    // The old direct-only check sees an empty roster and cannot validate N seats.
+    assert!(shared_channels::validate_delivery_reviewers(&f.store, &session_id, &[]).is_ok());
+    assert!(shared_channels::validate_delivery_council(&f.store, &session_id, &config).is_ok());
+    let mut weakened = config.clone();
+    weakened.nested_bot_reviewers[0].child_target = 8.0;
+    assert!(shared_channels::validate_delivery_council(&f.store, &session_id, &weakened)
+        .unwrap_err().contains("roster changed"));
+    f.store.db.execute(
+        "DELETE FROM bot_shared_channel_members WHERE channel_id=?1 AND bot_id=?2",
+        params![channel.id, b.id],
+    ).unwrap();
+    assert!(shared_channels::validate_delivery_council(&f.store, &session_id, &config)
+        .unwrap_err().contains("no longer a channel member"));
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_members(channel_id,bot_id,position) VALUES(?1,?2,2)",
+        params![channel.id, b.id],
+    ).unwrap();
+    f.store.db.execute("UPDATE bots SET paused=1 WHERE id=?1", [&a.id]).unwrap();
+    assert!(shared_channels::validate_delivery_council(&f.store, &session_id, &config)
+        .unwrap_err().contains("paused"));
+    f.store.db.execute("UPDATE bots SET paused=0 WHERE id=?1", [&a.id]).unwrap();
+    let reassigned = crate::storage::id();
+    let other_session = thread_session(&f.store, &a, DESKTOP, DESKTOP, "Reassigned").unwrap().0;
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_deliveries(
+            id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,'queued',0,?6,?6)",
+        params![reassigned, channel.id, message_id, a.id, other_session, crate::storage::now()],
+    ).unwrap();
+    assert!(shared_channels::validate_delivery_council(&f.store, &session_id, &config)
+        .unwrap_err().contains("message executor"));
+}
+
+#[test]
 fn two_channel_council_messages_to_one_bot_use_separate_native_tasks() {
     let f = fixture();
     upgrade(&f.store.db).unwrap();

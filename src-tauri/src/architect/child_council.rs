@@ -144,6 +144,11 @@ pub(super) fn reserve(store: &Store, root: &TeamSnapshot) -> Result<()> {
     let Some(council) = root.config.council.as_ref() else { return Ok(()) };
     if council.nested_bot_reviewers.is_empty() { return Ok(()) }
     council.validate()?;
+    // Membership and the exact message-level policy are authoritative throughout
+    // a Shared Channel delivery. A nested coordinator is a reviewer identity too.
+    crate::bots::shared_channels::validate_delivery_council(
+        store, &root.session_id, council,
+    )?;
     if root.council_since <= 0 || root.objective.trim().is_empty() {
         return Err("child_council_denied: child reservation requires a started root objective.".into());
     }
@@ -196,6 +201,9 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
     if council.nested_bot_reviewers.is_empty() || root.objective.is_empty() {
         return Ok(Vec::new());
     }
+    crate::bots::shared_channels::validate_delivery_council(
+        store, &root.session_id, council,
+    )?;
     council.nested_bot_reviewers.iter().map(|child| {
         let record = read(store, root, child)?
             .ok_or("child_council_stale: expected native child reservation is missing.")?;

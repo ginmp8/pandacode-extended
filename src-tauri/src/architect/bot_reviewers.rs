@@ -267,7 +267,7 @@ pub(super) fn seat_bot_inner_with_skills(store: &Store, team: &TeamSnapshot, rou
 fn seat_bot_with_skills(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, check_executable: bool, library: Option<&crate::skills::Library>) -> Result<Option<SelectedReviewer>> {
     let Some(config) = team.config.council.as_ref() else { return Ok(None) };
     if config.reviewer_bot_ids.is_empty() { return Ok(None); }
-    crate::bots::shared_channels::validate_delivery_reviewers(store, &team.session_id, &config.reviewer_bot_ids)?;
+    crate::bots::shared_channels::validate_delivery_council(store, &team.session_id, config)?;
     let reviewers = round_reviewers(store, team, round, check_executable, library)?;
     let old = replaces.and_then(|id| team.workers.iter().find(|w| w.id == id));
     let inherited = old.and_then(|w| w.reviewer_binding.as_ref()).and_then(|b| b.reviewer_bot_id.as_deref());

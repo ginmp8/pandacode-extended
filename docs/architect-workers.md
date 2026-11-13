@@ -139,6 +139,34 @@ no Council keeps the team's, and removing the team removes it. Council is per ta
   note. The lead's review carries `council`: `round`, `target`, `lowest`, `complete`, `passed`, `roundsLeft`,
   `scores` (the latest round), `firstScores` (each lens's first score this cycle) and `next`.
 
+### Schema v1 composition
+
+`CouncilConfig.composition` is an additive, task-scoped schema. When it is absent, the original automatic-reviewer and selected-bot paths (M1 and M2) keep their existing meaning. The direct Council panel keeps its current entry point and adds a compact composition editor; **Apply composition** sends the full `CouncilConfig` to `architect_set_council`. Team profiles and new-thread defaults do not store this task's composition.
+
+The seven mode labels are derived from the automatic source and each selected bot's branch. They are read-only summaries, not buttons that can make an invalid plan:
+
+| Mode | Reviewer sources |
+| --- | --- |
+| M1 | Automatic Architect reviewers |
+| M2 | Selected direct-review bots |
+| M3 | Selected direct-review bots and automatic reviewers |
+| M4 | Selected bots with child Councils |
+| M5 | Selected bots with child Councils and automatic reviewers |
+| M6 | Selected direct-review bots and bots with child Councils |
+| M7 | Both selected bot branches and automatic reviewers |
+
+Each selected bot is required. Its draft keeps direct and nested settings when the branch is changed or bots are excluded and restored. Native still validates bot identity, availability and the submitted branch before dispatch. The nested editor contains `template`, `childCriteriaSource`, `childReviewerCount`, `target`, `maxRounds` and `escalation`; a missing or unavailable selected bot remains removable, while its saved branch is shown read-only.
+
+`criteriaSource` is `architect`, `user` or `hybrid`. User criteria have a stable ID, lens, description, required flag, target, evidence requirement and `source`. The editor keeps architect and user criteria drafts while switching source. User and hybrid plans need at least one required user criterion. Native verifies criteria and evidence at dispatch; form validation and the visible plan are not runtime proof.
+
+Execution strategy is independent of the A/D/N reviewer-source mode: S1 Parallel, S2 Escalated / on-demand and S3 Two-phase are selectable in the direct and Shared Channel editors and are forwarded with the schema-v1 composition. Native remains authoritative for strategy validation and dispatch. The limits show the fixed `maxDepth: 2` and `maxRootSeats: 8`, plus editable finite limits for concurrent leaves, leaf reviews per round, timeout and estimated cost. The plan preview is explicitly an estimate; native owns admission and completion. Unknown or estimated usage stays labeled as such. An unknown cost is not treated as a zero-cost pass.
+
+The Workers inspector consumes the typed current-cycle arrays on native `ArchitectReadSnapshot` results and `architect-event` snapshots: findings, finding dispositions, child receipts, review receipts and usage. Native projects only records correlated to current issued reviewer bindings; the UI also checks the root cycle ID (`<sessionId>:<councilSince>`) and admits child cycle records only through current-root child receipts or usage records. Finding cards show cycle, round, seat, reviewer and artifact digest. Evidence and location strings remain escaped references; file-shaped references become buttons only after the existing workspace resolver confirms them for the selected task, then open in the authorized file tab. Other references stay plain text, and the UI never queries `architect_requests` itself.
+
+Usage values keep native statuses and units (measured, provider-estimated, calculated-estimated or unknown); estimated cost is shown as an estimate, not a billed amount. Missing fields from an older host are reported explicitly. Legacy Council configurations without a composition plan do not produce finding, receipt or usage ledger rows, while their reviewer scores remain in the existing scorecard.
+
+Shared Channel posts can also carry `CouncilConfig.composition` from the visible schema-v1 editor; the composition is forwarded with that message and does not become a channel or task default. Selected direct or nested reviewers come from the channel's current member bots, and every selected bot is required. Up to eight member bots can be selected. Automatic reviewers can be `Auto` or a fixed count from 1–8; total root seats must be 2–8. A nested reviewer may use 2–8 child reviewers, at a target from 1–10 and 1–100 rounds. Root target is 1–10 and rounds are 1–100. User criteria are capped at 64, with IDs and lenses up to 80 characters and descriptions up to 4,096 characters. The channel plan fixes `maxDepth: 2` (one child level), `maxRootSeats: 8`, `maxConcurrentLeaves: 64`, `maxLeafReviewsPerRound: 128`, `timeoutMs: 86,400,000` (24 hours) and `maxEstimatedCostMicros: 1,000,000`. The selected strategy is forwarded per message, and native revalidates it before scheduling.
+
 ## Saved setups and profiles
 
 **Save setup** remembers the complete team for this task and future tasks, across

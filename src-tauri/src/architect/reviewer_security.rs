@@ -208,6 +208,12 @@ struct ReviewerAuthority {
     artifact_revision: String,
     tool_policy: ReviewerToolPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    delivery_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    composition_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    parent_council: Option<ReviewerParentBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     reviewer_bot_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     bot_context: Option<ReviewerBotContext>,
@@ -225,6 +231,9 @@ pub(crate) fn record_native_authority(store: &Store, parent: &str, binding: &Rev
         seat_id: binding.seat_id.clone(),
         artifact_revision: binding.artifact_revision.clone(),
         tool_policy: binding.snapshot.tool_policy.clone(),
+        delivery_id: binding.delivery_id.clone(),
+        composition_mode: binding.composition_mode.clone(),
+        parent_council: binding.parent_council.clone(),
         reviewer_bot_id: binding.reviewer_bot_id.clone(),
         bot_context: binding.snapshot.bot_context.clone(),
         skills: binding.snapshot.skills.clone(),
@@ -252,6 +261,9 @@ pub(crate) fn validate_issued_authority(store: &Store, parent: &str, binding: &R
                 || original.seat_id != binding.seat_id
                 || original.artifact_revision != binding.artifact_revision
                 || original.tool_policy != binding.snapshot.tool_policy
+                || original.delivery_id != binding.delivery_id
+                || original.composition_mode != binding.composition_mode
+                || original.parent_council != binding.parent_council
                 || original.reviewer_bot_id != binding.reviewer_bot_id
                 || original.bot_context != binding.snapshot.bot_context
                 || original.skills != binding.snapshot.skills
@@ -289,6 +301,9 @@ pub(crate) fn authorize_user_grants(
         seat_id: binding.seat_id.clone(),
         artifact_revision: binding.artifact_revision.clone(),
         tool_policy: binding.snapshot.tool_policy.clone(),
+        delivery_id: binding.delivery_id.clone(),
+        composition_mode: binding.composition_mode.clone(),
+        parent_council: binding.parent_council.clone(),
         reviewer_bot_id: binding.reviewer_bot_id.clone(),
         bot_context: binding.snapshot.bot_context.clone(),
         skills: binding.snapshot.skills.clone(),
@@ -350,12 +365,29 @@ impl ReviewerBotContext {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ReviewerParentBinding {
+    /// The root task which owns a nested review; it is never inferred from a prompt.
+    pub session_id: String,
+    pub council_cycle_id: String,
+    pub artifact_revision: String,
+    pub seat_id: String,
+    pub depth: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ReviewerBinding {
     pub council_cycle_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delivery_id: Option<String>,
     pub round: usize,
     pub seat_id: String,
+    /// Frozen composition routing, absent on persisted legacy M1/M2 seats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composition_mode: Option<String>,
+    /// Present only for a reviewer seat issued by a nested task-owned Council.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_council: Option<ReviewerParentBinding>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reviewer_bot_id: Option<String>,
     /// Frozen seat roster; original council round history is independent of future selection.
@@ -430,10 +462,15 @@ impl ReviewerBinding {
             delivery_id: None,
             round: seat.round,
             seat_id: worker_id.to_owned(),
+            composition_mode: None,
+            parent_council: None,
             reviewer_bot_id: None,
             roster_bot_ids: Vec::new(),
-            // Automatic Council keeps its editable count. Only selected bot rounds pin quorum.
-            required_reviewers: team.config.council.as_ref().filter(|c| !c.reviewer_bot_ids.is_empty()).map(|c| c.needed()),
+            // Composition rounds freeze their source-aware quota. Composition-absent automatic
+            // Council keeps its historic editable count; legacy selected rosters remain pinned.
+            required_reviewers: team.config.council.as_ref()
+                .filter(|c| c.composition.is_some() || !c.reviewer_bot_ids.is_empty())
+                .map(|c| c.needed()),
             artifact_revision: format!("{}:{}:{}:{}", team.council_since, team.dispatch_revision, created_at, worker_id),
             snapshot: ReviewerSnapshot {
                 provider: provider.to_owned(),
@@ -462,8 +499,15 @@ impl ReviewerBinding {
             || self.snapshot.provider != worker.provider
             || self.snapshot.model != worker.model
             || !frozen_revision_matches
-            // S4 delivery identity remains unbound; S2 binds a real bot to a frozen persona.
-            || self.delivery_id.is_some()
+            || self.composition_mode.as_deref().is_some_and(|mode| !matches!(mode, "direct" | "nested"))
+            || self.parent_council.as_ref().is_some_and(|parent| {
+                parent.session_id.is_empty() || parent.session_id == team.session_id
+                    || parent.council_cycle_id.is_empty() || parent.council_cycle_id.len() > 512
+                    || parent.artifact_revision.is_empty() || parent.artifact_revision.len() > 512
+                    || parent.seat_id.is_empty() || parent.depth == 0 || parent.depth > 2
+                    || parent.seat_id == worker.id
+            })
+            || self.delivery_id.as_deref().is_some_and(|id| !super::valid_id(id))
             || self.reviewer_bot_id.is_some() != self.snapshot.bot_context.is_some()
             || self.reviewer_bot_id.as_deref().is_some_and(|id| !super::valid_id(id))
             || self.required_reviewers.is_some_and(|n| !(2..=8).contains(&n))

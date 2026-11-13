@@ -11,9 +11,74 @@ async function showBots(page: Page): Promise<void> {
 
 test.describe('shared bot channels', () => {
 
+  test('shared channel composition derives all seven A/D/N mode readouts', async ({ page }) => {
+    test.setTimeout(120_000);
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' }).check();
+
+    const modes = [
+      { id: 'M1', automatic: true, branches: [] },
+      { id: 'M2', automatic: false, branches: ['direct'] },
+      { id: 'M3', automatic: true, branches: ['direct'] },
+      { id: 'M4', automatic: false, branches: ['nested'] },
+      { id: 'M5', automatic: true, branches: ['nested'] },
+      { id: 'M6', automatic: false, branches: ['direct', 'nested'] },
+      { id: 'M7', automatic: true, branches: ['direct', 'nested'] },
+    ] as const;
+    const automatic = panel.locator('[data-bc-automatic-enabled]');
+    const rows = panel.locator('[data-bc-reviewer-row]');
+    await expect(panel.locator('[data-bc-source-mode]')).toHaveCount(7);
+    for (const mode of modes) {
+      await automatic.setChecked(mode.automatic);
+      for (let index = 0; index < await rows.count(); index++) {
+        const row = rows.nth(index);
+        const reviewer = row.locator('[data-bc-reviewer]');
+        if (await reviewer.isChecked()) await reviewer.uncheck();
+      }
+      for (const [index, branch] of mode.branches.entries()) {
+        const row = rows.nth(index);
+        await row.locator('[data-bc-reviewer]').check();
+        await row.getByRole('combobox', { name: 'Reviewer branch' }).selectOption(branch);
+      }
+
+      const sources = [mode.automatic && 'A', mode.branches.includes('direct') && 'D', mode.branches.includes('nested') && 'N'].filter(Boolean).join(' + ');
+      await expect(panel.locator('[data-bc-source-summary]')).toHaveText(`Sources ${sources} · ${mode.id}`);
+      await expect(panel.locator('[data-bc-source-mode][aria-current="true"]')).toHaveCount(1);
+      await expect(panel.locator(`[data-bc-source-mode="${mode.id}"]`)).toHaveAttribute('aria-current', 'true');
+    }
+  });
+
+  test('shared Council state ignores a higher-revision event from an earlier cycle', async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('pandacode.teamClassic', 'false'));
+    await showBots(page);
+    await expect.poll(() => page.evaluate(() => typeof (window as any).__previewEmit), { timeout: 15_000 }).toBe('function');
+    await expect.poll(() => page.evaluate(() => (window as any).__previewListenerCount?.('architect-event') ?? 0), { timeout: 15_000 }).toBeGreaterThan(0);
+    const sessionId = await page.locator('#prompt').getAttribute('data-session-id');
+    if (!sessionId) throw new Error('Expected the active conversation prompt to identify its session.');
+    const current = {
+      sessionId,
+      config: { workers: [], maxParallel: 0, maxRounds: 1, maxAssignments: 0, workspace: 'shared', summaryLimit: 0, rosterOnly: true, name: 'Current cycle team' },
+      status: 'running', round: 1, revision: 20, workers: [], councilSince: 200, updatedAt: 1_800_000_001_000,
+    };
+    const emit = (snapshot: unknown) => page.evaluate(value => (window as any).__previewEmit('architect-event', value), snapshot);
+    const team = page.locator('#team-trigger');
+    await emit(current);
+    await expect(team).toHaveAttribute('aria-label', 'Current cycle team: on');
+
+    await emit({ ...current, config: { ...current.config, name: 'Stale cycle team' }, status: 'completed', revision: 99, councilSince: 100 });
+    await expect(team).toHaveAttribute('aria-label', 'Current cycle team: on');
+
+    await emit({ ...current, config: { ...current.config, name: 'Next cycle team' }, revision: 100, councilSince: 300 });
+    await expect(team).toHaveAttribute('aria-label', 'Next cycle team: on');
+  });
+
   test('bot collaboration: Council opens from the channel footer, keeps settings in the form and closes with Escape', async ({ page }) => {
     // The full preview initializes channel state before exercising the Council controls.
-    test.setTimeout(60_000);
+    test.setTimeout(120_000);
     await showBots(page);
     await sidebar(page).getByRole('button', { name: '#launch' }).click();
     const composer = page.locator('#shared-channel-composer');
@@ -29,6 +94,11 @@ test.describe('shared bot channels', () => {
     await expect(trigger).toHaveAttribute('aria-expanded', 'true');
     const enabled = panel.getByRole('switch', { name: 'Council' });
     await expect(enabled).toBeFocused();
+    await expect(panel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' })).toBeVisible();
+    await expect(panel.getByRole('radio')).toHaveCount(0);
+    await page.keyboard.press('Tab');
+    await expect(panel.getByRole('button', { name: '7.0', exact: true })).toBeFocused();
+    await enabled.focus();
     await enabled.check();
     await panel.getByRole('button', { name: '8.5', exact: true }).click();
     await panel.getByRole('button', { name: '5', exact: true }).click();
@@ -36,9 +106,9 @@ test.describe('shared bot channels', () => {
     await expect(panel.getByRole('button', { name: '8.5', exact: true })).toHaveAttribute('aria-pressed', 'true');
     const values = await composer.evaluate(form => {
       const data = new FormData(form as HTMLFormElement);
-      return { enabled: data.get('councilEnabled'), target: data.get('councilTarget'), rounds: data.get('councilMaxRounds') };
+      return { enabled: data.get('councilEnabled'), target: data.get('councilTarget'), rounds: data.get('councilMaxRounds'), hasComposition: data.has('councilComposition') };
     });
-    expect(values).toEqual({ enabled: 'on', target: '8.5', rounds: '5' });
+    expect(values).toEqual({ enabled: 'on', target: '8.5', rounds: '5', hasComposition: false });
 
     // The number fields still permit values outside the presets.
     await panel.getByRole('spinbutton', { name: 'Custom target score' }).fill('6.5');
@@ -53,9 +123,107 @@ test.describe('shared bot channels', () => {
     await expect(composer.locator('.bc-council-controls')).toBeHidden();
   });
 
+  test('shared channel submission preserves schema-v1 Council composition', async ({ page }) => {
+    test.setTimeout(120_000);
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    const prompt = page.getByRole('textbox', { name: 'Message channel' });
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    const councilTrigger = composer.locator('.bc-council-trigger');
+    const reviewerRows = panel.locator('[data-bc-reviewer-row]');
+    const reviewers = panel.locator('input[name="councilReviewer"]');
+    const configureComposition = async (strategy: string) => {
+      await panel.getByRole('switch', { name: 'Council' }).check();
+      await panel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' }).check();
+      await panel.getByRole('combobox', { name: 'Automatic reviewer count' }).selectOption('2');
+      await reviewers.nth(0).check();
+      await reviewers.nth(1).check();
+      await reviewerRows.nth(0).getByRole('combobox', { name: 'Reviewer branch' }).selectOption('direct');
+      const nestedPolicy = reviewerRows.nth(1).locator('[data-bc-nested-policy]');
+      await reviewerRows.nth(1).getByRole('combobox', { name: 'Reviewer branch' }).selectOption('nested');
+      await nestedPolicy.getByRole('combobox', { name: 'Task template' }).selectOption('validated_default');
+      await nestedPolicy.getByRole('combobox', { name: 'Child criteria' }).selectOption('hybrid');
+      await nestedPolicy.getByRole('spinbutton', { name: 'Child reviewers' }).fill('3');
+      await nestedPolicy.getByRole('spinbutton', { name: 'Child target' }).fill('8.5');
+      await nestedPolicy.getByRole('spinbutton', { name: 'Child max rounds' }).fill('4');
+      await nestedPolicy.getByRole('combobox', { name: 'Escalation' }).selectOption('on_trigger');
+      await panel.getByRole('combobox', { name: 'Criteria source' }).selectOption('user');
+      const criterion = panel.locator('[data-bc-criterion]').first();
+      await criterion.getByRole('textbox', { name: 'Criterion ID' }).fill('channel-review');
+      await criterion.getByRole('textbox', { name: 'Lens' }).fill('correctness');
+      await criterion.getByRole('textbox', { name: 'Description' }).fill('Check correctness and evidence.');
+      await criterion.getByRole('spinbutton', { name: 'Target' }).fill('8.5');
+      const strategyPicker = panel.getByRole('combobox', { name: 'Execution strategy' });
+      await expect(strategyPicker).toHaveValue('parallel');
+      await expect(panel.getByRole('option', { name: 'S1 · Parallel' })).toBeEnabled();
+      await expect(panel.getByRole('option', { name: 'S2 · Escalated / on-demand' })).toBeEnabled();
+      await expect(panel.getByRole('option', { name: 'S3 · Two-phase' })).toBeEnabled();
+      await strategyPicker.selectOption(strategy);
+      const selectedBotIds = await reviewers.evaluateAll(inputs => inputs.filter(input => (input as HTMLInputElement).checked).map(input => (input as HTMLInputElement).value));
+      return {
+        selectedBotIds,
+        composition: {
+          schemaVersion: 1,
+          automatic: { enabled: true, count: 2 },
+          selected: [
+            { botId: selectedBotIds[0], mode: 'direct', required: true },
+            { botId: selectedBotIds[1], mode: 'nested', required: true, nested: { template: 'validated_default', childCriteriaSource: 'hybrid', childReviewerCount: 3, target: 8.5, maxRounds: 4, escalation: 'on_trigger' } },
+          ],
+          criteriaSource: 'user',
+          criteria: [{ id: 'channel-review', lens: 'correctness', description: 'Check correctness and evidence.', required: true, target: 8.5, evidenceRequired: true, source: 'user' }],
+          strategy,
+          limits: { maxDepth: 2, maxRootSeats: 8, maxConcurrentLeaves: 64, maxLeafReviewsPerRound: 128, timeoutMs: 86_400_000, maxEstimatedCostMicros: 1_000_000 },
+        },
+      };
+    };
+    const posts = () => page.evaluate(() => (window as any).__previewSharedChannelPosts ?? []);
+    for (const [index, value] of ['parallel', 'escalated', 'two_phase'].entries()) {
+      if (index > 0) {
+        await councilTrigger.click();
+        await expect(panel).toBeVisible();
+      }
+      const { selectedBotIds, composition } = await configureComposition(value);
+      await prompt.fill(`Preserve the ${value} Council plan`);
+      await composer.locator('button[type="submit"]').click();
+      await expect(panel).toBeHidden();
+      await expect.poll(async () => (await posts()).length).toBe(index + 1);
+      await expect(composer.locator('button[type="submit"]')).toBeEnabled();
+      expect((await posts())[index]).toEqual({
+        channelId: 'sample-launch',
+        text: `Preserve the ${value} Council plan`,
+        council: { target: 9, maxRounds: 10, reviewers: 2, reviewerBotIds: selectedBotIds, composition: { ...composition, strategy: value } },
+      });
+    }
+  });
+
+  test('shared channel legacy Council submission omits absent composition', async ({ page }) => {
+    test.setTimeout(120_000);
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    const prompt = page.getByRole('textbox', { name: 'Message channel' });
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('button', { name: '8.5', exact: true }).click();
+    await panel.getByRole('button', { name: '5', exact: true }).click();
+    await prompt.fill('Keep the legacy Council payload');
+    await composer.locator('button[type="submit"]').click();
+
+    const posts = () => page.evaluate(() => (window as any).__previewSharedChannelPosts ?? []);
+    await expect.poll(async () => (await posts()).length).toBe(1);
+    expect((await posts())[0]).toEqual({
+      channelId: 'sample-launch',
+      text: 'Keep the legacy Council payload',
+      council: { target: 8.5, maxRounds: 5, reviewers: 0 },
+    });
+  });
+
   test('bot collaboration: Council restores selection after a channel refresh without showing settings inline', async ({ page }) => {
     // The full preview initializes channel state before exercising the Council controls.
-    test.setTimeout(60_000);
+    test.setTimeout(120_000);
     await showBots(page);
     await sidebar(page).getByRole('button', { name: '#launch' }).click();
     const composer = page.locator('#shared-channel-composer');
@@ -63,7 +231,7 @@ test.describe('shared bot channels', () => {
     const panel = composer.getByRole('dialog', { name: 'Council' });
     await panel.getByRole('switch', { name: 'Council' }).check();
     await panel.getByRole('button', { name: '9.5', exact: true }).click();
-    await panel.getByRole('radio', { name: 'Bots' }).check();
+    await panel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' }).check();
     const reviewers = panel.locator('input[name="councilReviewer"]');
     await expect(reviewers.first()).toBeVisible();
     await reviewers.first().check();
@@ -79,7 +247,7 @@ test.describe('shared bot channels', () => {
     const restoredPanel = restored.getByRole('dialog', { name: 'Council' });
     await expect(restoredPanel.getByRole('switch', { name: 'Council' })).toBeChecked();
     await expect(restoredPanel.getByRole('button', { name: '9.5', exact: true })).toHaveAttribute('aria-pressed', 'true');
-    await expect(restoredPanel.getByRole('radio', { name: 'Bots' })).toBeChecked();
+    await expect(restoredPanel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' })).toBeChecked();
     await expect(restoredPanel.locator('input[name="councilReviewer"]').first()).toBeChecked();
   });
 
@@ -163,9 +331,10 @@ test.describe('shared bot channels', () => {
   });
 
   test('creates a channel from the sidebar and opens its settings', async ({ page }) => {
+    test.setTimeout(60_000);
     await showBots(page);
-    await page.getByRole('button', { name: 'Add bot or channel' }).click();
-    await page.getByRole('menu', { name: 'Create' }).getByRole('menuitem', { name: 'New channel' }).click();
+    await page.getByRole('button', { name: 'Bot actions' }).click();
+    await page.getByRole('menu', { name: 'Bot actions' }).getByRole('menuitem', { name: 'New channel' }).click();
 
     const dialog = page.getByRole('dialog', { name: 'New channel' });
     await dialog.getByRole('textbox', { name: 'Channel name' }).fill('release-test');
@@ -182,9 +351,10 @@ test.describe('shared bot channels', () => {
   });
 
   test('an empty channel explains how to start and an archived channel is preview only', async ({ page }) => {
+    test.setTimeout(60_000);
     await showBots(page);
-    await page.getByRole('button', { name: 'Add bot or channel' }).click();
-    await page.getByRole('menu', { name: 'Create' }).getByRole('menuitem', { name: 'New channel' }).click();
+    await page.getByRole('button', { name: 'Bot actions' }).click();
+    await page.getByRole('menu', { name: 'Bot actions' }).getByRole('menuitem', { name: 'New channel' }).click();
     const create = page.getByRole('dialog', { name: 'New channel' });
     await create.getByRole('textbox', { name: 'Channel name' }).fill('notes');
     await create.getByRole('button', { name: 'Create channel' }).click();

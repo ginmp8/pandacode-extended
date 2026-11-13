@@ -52,7 +52,7 @@ const coordinationHistory = (sessionId: string): Message[] => [
 test.afterEach(async ({ page }) => { expect(errors.get(page) ?? []).toEqual([]); });
 
 // Local fixture hooks drive the actual UI event handlers without calling a model.
-async function installArchitect(page: Page, snapshots: Record<string, TeamSnapshot> = {}, taskMessages: Record<string, Message[]> = {}): Promise<void> {
+async function installArchitect(page: Page, snapshots: Record<string, TeamSnapshot> = {}, taskMessages: Record<string, Message[]> = {}, waitForHistory = true): Promise<void> {
   const runtimeErrors: string[] = []; errors.set(page, runtimeErrors);
   // WebKit reports a height change made before paint (a live reply growing) as an error; nothing is lost, the rest arrive next frame.
   page.on('pageerror', error => { if (!error.message.startsWith('ResizeObserver loop')) runtimeErrors.push(error.message); });
@@ -115,7 +115,7 @@ async function installArchitect(page: Page, snapshots: Record<string, TeamSnapsh
   await expect(page.locator('#prompt')).toHaveAttribute('data-session-id', 'session-2');
   // The task ID is rendered before its team loads; wait for the final composer
   // so a pending task load cannot replace the popover's anchor during the click.
-  await expect(transcript(page).getByText('Loading conversation…', { exact: true })).toBeHidden();
+  if (waitForHistory) await expect(transcript(page).getByText('Loading conversation…', { exact: true })).toBeHidden();
 }
 
 async function selectTask(page: Page, id: string, view: View = 'conversation'): Promise<void> {
@@ -165,6 +165,31 @@ async function workerSurface(element: Locator) {
 }
 
 test.describe('architect teams', () => {
+  test('a higher-revision event from an earlier Council cycle cannot replace the current ledger', async ({ page }) => {
+    const currentCycle = 200, rootId = `session-2:${currentCycle}`;
+    const finding = (id: string, cycleId: string, summary: string) => ({
+      id, cycleId, roundId: `${cycleId}:1`, seatId: 'review', artifactDigest: `artifact-${id}`,
+      criterionId: 'security', severity: 'high' as const, category: 'Security', summary, evidenceRefs: [], locationStatus: 'missing' as const,
+    });
+    const current = team('session-2', {
+      status: 'completed', revision: 20, councilSince: currentCycle,
+      config: { ...config(), council: { target: 9.5, maxRounds: 10, reviewers: 0 } },
+      councilStatus: { state: 'passed', round: 1, lowest: 9.5, target: 9.5, stale: false },
+      workers: [worker('review', { status: 'completed', council: { round: 1, lens: 'Security', score: 9.5 }, reviewerBinding: { councilCycleId: rootId } })],
+      councilFindings: [finding('current-finding', rootId, 'Current-cycle finding.')], councilFindingDispositions: [], councilChildReceipts: [], councilReviewReceipts: [], councilUsage: [],
+    });
+    // The history is independent of the Council event being verified; do not wait on its fixture load.
+    await installArchitect(page, { 'session-2': current }, {}, false);
+    await openWorkers(page).click();
+    const summary = panel(page).locator('.council-summary');
+    await expect(summary).toContainText('Current-cycle finding.');
+    const delayed = { ...current, revision: 99, councilSince: 100, councilFindings: [finding('old-finding', 'session-2:100', 'Earlier-cycle finding.') ] };
+    await publish(page, delayed);
+    await nextPaint(page);
+    await expect(summary).toContainText('Current-cycle finding.');
+    await expect(summary).not.toContainText('Earlier-cycle finding.');
+  });
+
   for (const theme of ['light', 'dark'] as const) for (const view of ['conversation', 'board'] as const) {
     test(`workers are one solid surface and keep detail sharp in ${theme} ${view}`, async ({ page, browserName }) => {
       await page.setViewportSize({ width: 1280, height: 820 });
@@ -917,6 +942,30 @@ test.describe('architect teams', () => {
     await expect(row).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
     await toggle.click();
     await expect(row).toBeHidden();
+  });
+
+  test('the Workers inspector shows a saved composition and states when native ledger data is absent', async ({ page }) => {
+    const composition = {
+      schemaVersion: 1 as const, automatic: { enabled: true, count: 'auto' as const }, selected: [],
+      criteriaSource: 'architect' as const, criteria: [], strategy: 'parallel' as const,
+      limits: { maxDepth: 2, maxRootSeats: 8, maxConcurrentLeaves: 64, maxLeafReviewsPerRound: 128, timeoutMs: 86_400_000, maxEstimatedCostMicros: 1_000_000 },
+    };
+    const snapshot = team('session-2', {
+      status: 'running', workers: [worker('review')],
+      config: { ...config(), council: { target: 9, maxRounds: 10, reviewers: 0, composition } },
+      councilStatus: { state: 'waiting', round: 0, lowest: null, target: 9, stale: false },
+    });
+    await page.goto('/');
+    await page.evaluate(async value => {
+      const { ArchitectView } = await import('/src/architect.ts');
+      const view = new ArchitectView({ setup: () => {}, loadModels: async () => [], updated: () => {}, report: () => {} });
+      document.body.append(view.host);
+      view.setTask(value.sessionId, value, []);
+      view.open(false);
+    }, snapshot);
+    const summary = panel(page).locator('.council-summary');
+    await expect(summary).toContainText('Schema v1 · M1 · parallel strategy · architect criteria');
+    await expect(summary.locator('.council-ledger-unavailable')).toHaveText('This host snapshot does not include Council ledger records.');
   });
 
   test('a long worker line never makes a narrow thread scroll sideways', async ({ page }) => {

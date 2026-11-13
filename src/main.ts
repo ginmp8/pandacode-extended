@@ -98,7 +98,7 @@ import { CONNECT_SETUP, LOCAL, behindDialog, behindText, cancelledRemoteStart, c
 import './cloud-agents.css';
 import { SETUP_CHOICE, cloudActionItems, cloudIcon, cloudProvider, cloudStrip, deleteMachineDialog, harnessRefusal, type CloudStage, type CloudTarget } from './cloud-agents';
 import { botsBarHtml, botsListHtml, botsPanelHeadHtml, markAllBotsRead, moveBot, pinnedBots, setBotPinned, storedSidebarView, storeSidebarView, syncSeen, type BotSignals, type SidebarView } from './sidebar-bots';
-import { sharedChannelActionsHtml, sharedChannelComposerHtml, restoreSharedChannelCouncilInputs, bindSharedChannelCouncil, toggleSharedChannelCouncil, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
+import { sharedChannelActionsHtml, sharedChannelComposerHtml, sharedChannelCouncilComposition, sharedChannelCouncilCompositionError, restoreSharedChannelCouncilInputs, bindSharedChannelCouncil, toggleSharedChannelCouncil, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
 import { connectAgentUiActions, type AgentUiAction } from './agent-ui-actions';
 import { createAgentInput, type AgentInput } from './agent-input';
 import { mountSlashCommands, type SlashCommand } from './slash-commands';
@@ -114,7 +114,7 @@ import { createPullView } from './github-pull';
 import { createSearchPanel } from './search-panel';
 import { createTokenSaver } from './token-saver-panel';
 import { createCouncil } from './council-panel';
-import { councilNotice } from './council';
+import { acceptsCouncilSnapshot, councilNotice } from './council';
 import { MAX_IMAGES, mountPromptAttachments, type PromptImage } from './attachments';
 import { attachmentChips, parseAttachments } from './message-attachments';
 import { compactSublines, infoMark, installTooltips } from './tooltip';
@@ -247,14 +247,15 @@ async function ensureArchitectView(): Promise<ArchitectView> {
 function onArchitect(team: TeamEvent): void {
   if (deletedSessions.has(team.sessionId)) return;
   if ('removed' in team) { teams.set(team.sessionId, null); if (team.sessionId === state.sessionId) { architectView?.setTask(team.sessionId, null, state.providers); renderComposer(); } return; }
-  const current = teams.get(team.sessionId);
-  if (current && current.revision > team.revision) return;
+  const current = teams.get(team.sessionId) ?? null;
+  if (!acceptsCouncilSnapshot(team, current, team.sessionId)) return;
   // Pauses and failures the user did not ask for would otherwise only show inside the panel.
   // A Council refusal is written for the lead; the user gets its plain notice (and the card), never the refusal itself.
   // Asking is announced once, by the composer's live region, so it gets no toast as well.
   if (team.sessionId === state.sessionId && team.error && team.error !== current?.error && team.councilStatus?.state !== 'asking' && !/^Team (paused|stopped)\./.test(team.error) && !LEAD_RETRY.test(team.error)) notify(councilNotice(team) ?? team.error);
   const wasActive = teamActive(current);
   teams.set(team.sessionId, team);
+  if (team.sessionId === state.sessionId) syncTeamButton();
   const task = state.sessions.find(s => s.id === team.sessionId), taskState = `${task?.status}:${task?.taskStage}`;
   if (task && teamActive(team)) { task.status = 'running'; task.taskStage = 'in_progress'; }
   if (task && !teamActive(team) && !state.streams.has(task.id)) task.status = 'idle';
@@ -280,6 +281,7 @@ async function loadTeam(id: string): Promise<TeamSnapshot | null> {
   if (deletedSessions.has(id)) return null;
   // An update or a removal that arrived during the fetch is newer than this snapshot.
   if (teams.has(id) !== known || teams.get(id) !== before) return teams.get(id) ?? null;
+  if (loaded && !acceptsCouncilSnapshot(loaded, before ?? null, id)) return before ?? null;
   teams.set(id, loaded);
   if (teams.size > 64) { const old = [...teams].find(([key, value]) => key !== state.sessionId && !teamActive(value)); if (old) teams.delete(old[0]); }
   if (loaded) await ensureArchitectView();
@@ -7335,17 +7337,20 @@ document.addEventListener('submit', event => {
     const channelId = state.sharedChannelId, data = new FormData(form), text = String(data.get('text') ?? '').trim();
     if (!text) return;
     const councilEnabled = data.get('councilEnabled') === 'on';
-    const councilMode = data.get('councilMode');
-    const reviewerBotIds = [...form.querySelectorAll<HTMLInputElement>('input[name=councilReviewer]:checked')].map(input => input.value);
+    const composition = councilEnabled ? sharedChannelCouncilComposition(form) : null;
+    const reviewerBotIds = composition?.selected.map(reviewer => reviewer.botId) ?? [];
     const target = Number(data.get('councilTarget') ?? 9);
     const maxRounds = Number(data.get('councilMaxRounds') ?? 10);
     if (councilEnabled && (!Number.isFinite(target) || target < 1 || target > 10
-      || !Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 100
-      || (councilMode === 'selected' && (reviewerBotIds.length < 2 || reviewerBotIds.length > 8)))) {
-      notify('Set a Council target from 1–10, 1–100 rounds and 2–8 selected reviewers, if selected.');
+      || !Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 100)) {
+      notify('Set a Council target from 1–10 and 1–100 rounds.');
       return;
     }
-    const scopedFile = data.get('councilScopedFile') === 'on' && councilMode === 'selected';
+    if (councilEnabled && composition) {
+      const compositionError = sharedChannelCouncilCompositionError(composition, target);
+      if (compositionError) { notify(compositionError); return; }
+    }
+    const scopedFile = data.get('councilScopedFile') === 'on' && reviewerBotIds.length > 0;
     const filePath = String(data.get('councilFilePath') ?? '').trim();
     const validFilePath = filePath.length > 0 && filePath.length <= 240 && !filePath.startsWith('/')
       && !filePath.startsWith('\\') && !filePath.includes(':')
@@ -7363,7 +7368,9 @@ document.addEventListener('submit', event => {
       return;
     }
     const council = councilEnabled ? {
-      target, maxRounds, reviewers: 0, ...(councilMode === 'selected' ? { reviewerBotIds } : {}),
+      target, maxRounds,
+      reviewers: composition?.automatic.enabled && typeof composition.automatic.count === 'number' ? composition.automatic.count : 0,
+      ...(composition ? { reviewerBotIds, composition } : {}),
       ...(issueEnabled ? { postAcceptanceIssue: { authorizationId: crypto.randomUUID(), repository: issueRepo } } : {}),
       ...(scopedFile ? { reviewPermissions: {
         authorizationId: crypto.randomUUID(),
@@ -7375,7 +7382,7 @@ document.addEventListener('submit', event => {
       const name = sidebarBots.find(bot => bot.id === id)?.name;
       return Boolean(name && new RegExp(`(?:^|\\s)@${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}(?=$|\\s|[^\\p{L}\\p{N}_])`, 'iu').test(text));
     }).slice(0, 2);
-    if (councilEnabled && reviewerBotIds.some(id => recipients.includes(id)) && councilMode === 'selected') {
+    if (councilEnabled && reviewerBotIds.some(id => recipients.includes(id))) {
       notify('A message executor cannot also be one of its Council reviewers.');
       return;
     }

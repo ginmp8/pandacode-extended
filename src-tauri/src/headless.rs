@@ -40,6 +40,7 @@ enum Command {
     InspectTeamReadiness { orchestration_id: String },
     ObserveSource { source_id: String },
     ObserveCheckRun { source_id: String, check_run_id: i64 },
+    QueueDemand { orchestration_id: String, request_key: String, objective_file: PathBuf },
     AcceptTicket { ticket_id: String, expected_revision: i64 },
     RejectTicket { ticket_id: String, expected_revision: i64, reason: String },
     StopTicket { ticket_id: String },
@@ -189,6 +190,34 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::QueueDemand { orchestration_id, request_key, objective_file } = &command {
+                // The objective is a bounded local file, never a command-line
+                // argument or console payload. This command stages but does not run.
+                let result = (|| -> Result<String, String> {
+                    use std::io::Read;
+                    let file = std::fs::File::open(objective_file)
+                        .map_err(|e| format!("Cannot read objective file: {e}"))?;
+                    let mut bytes = Vec::new();
+                    file.take(16 * 1024 + 1).read_to_end(&mut bytes)
+                        .map_err(|e| format!("Cannot read bounded objective: {e}"))?;
+                    if bytes.len() > 16 * 1024 {
+                        return Err("Objective exceeds the native 16 KiB limit.".into());
+                    }
+                    let objective = std::str::from_utf8(&bytes)
+                        .map_err(|_| "Objective file must contain UTF-8 text.")?;
+                    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+                    crate::superagent::headless_queue_demand(
+                        &dir.join("kingcode.sqlite3"), orchestration_id, objective, request_key,
+                    )
+                })();
+                match result {
+                    Ok(status) => { println!("{status}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Demand staging failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             let native_action = matches!(&command,
                 Command::AcceptTicket { .. } | Command::RejectTicket { .. }
                 | Command::StopTicket { .. } | Command::DisableOrchestration { .. });
@@ -243,7 +272,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         Command::InspectOrchestrations | Command::ListTickets | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTicketEffects { .. }
-        | Command::ObserveSource { .. }
+        | Command::ObserveSource { .. } | Command::ObserveCheckRun { .. }
+        | Command::QueueDemand { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
         | Command::StopTicket { .. } | Command::DisableOrchestration { .. } => {
             eprintln!("SuperAgent inspection must use the read-only startup path.");
@@ -728,6 +758,29 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 2;
             }
+            "--queue-demand" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or("--queue-demand needs a Team ID, request key and objective file.")?;
+                validate_orchestration_id(orchestration_id)?;
+                let request_key = args.get(index + 2)
+                    .ok_or("--queue-demand needs a stable request key.")?;
+                if request_key.is_empty() || request_key.len() > 128
+                    || !request_key.bytes().all(|c| c.is_ascii_alphanumeric()
+                        || matches!(c, b'-' | b'_' | b'.')) {
+                    return Err("Provide a bounded alphanumeric request key.".into());
+                }
+                let path = args.get(index + 3)
+                    .ok_or("--queue-demand needs a local UTF-8 objective file.")?;
+                if path.is_empty() || path.starts_with("--") {
+                    return Err("Provide an objective file path, not another command.".into());
+                }
+                command = Command::QueueDemand {
+                    orchestration_id: orchestration_id.clone(),
+                    request_key: request_key.clone(), objective_file: PathBuf::from(path),
+                };
+                ops += 1;
+                index += 3;
+            }
             "--inspect-ticket-effects" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--inspect-ticket-effects needs a Ticket ID.\n\n{}", help()))?;
@@ -873,7 +926,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --inspect-ticket <id> | --inspect-ticket-effects <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-effects <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -911,6 +964,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --observe-check-run <id> <check-run-id>
                          Verify one completed GitHub Checks API result for an Observe source;
                          record a durable receipt, never approve a Ticket or invoke Auto.
+  --queue-demand <team-id> <request-key> <objective-file>
+                         Persist a blocked, read-only manual Ticket from a local UTF-8 file
+                         (max 16 KiB). Does not grant tools or dispatch a provider.
   --inspect-ticket <id>  Inspect redacted native Ticket/mandate/attempt metadata; exit.
   --inspect-ticket-effects <id>
                          List up to 100 native effect receipt keys, payload digests and
@@ -1020,6 +1076,21 @@ mod tests {
             "--observe-check-run source_123 nope",
             "--observe-check-run source_123 9223372036854775808",
             "--observe-check-run source_123 456 --stop-ticket task",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(parsed("--queue-demand team_123 request.1 /tmp/objective.txt"),
+            Ok(Command::QueueDemand {
+                orchestration_id:"team_123".into(), request_key:"request.1".into(),
+                objective_file:PathBuf::from("/tmp/objective.txt"),
+            }));
+        for invalid in [
+            "--queue-demand", "--queue-demand team_123",
+            "--queue-demand team_123 key",
+            "--queue-demand ../other key /tmp/objective.txt",
+            "--queue-demand team_123 ../key /tmp/objective.txt",
+            "--queue-demand team_123 key --stop-ticket",
+            "--queue-demand team_123 key /tmp/objective.txt --stop-ticket ticket",
         ] {
             assert!(parsed(invalid).is_err(), "{invalid}");
         }

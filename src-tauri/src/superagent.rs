@@ -996,6 +996,30 @@ fn headless_ticket_status(ticket: &Ticket) -> Result<String> {
     })).map_err(|e| e.to_string())
 }
 
+/// An operator-issued headless Demand is durable and idempotent but deliberately
+/// blocked: no provider session, inferred launch, additional tools or effects.
+/// The existing native manual retry must independently recheck all admission
+/// conditions before it can dispatch this Ticket.
+pub(crate) fn headless_queue_demand(
+    database_path: &std::path::Path, orchestration_id: &str,
+    objective: &str, request_key: &str,
+) -> Result<String> {
+    let mut store = open_headless_transition_store(database_path)?;
+    let (ticket, launched) = admit_role_with_staging(
+        &mut store, orchestration_id, objective, request_key, true, false, true,
+    )?;
+    debug_assert!(!launched);
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket.id,
+        "state": ticket.state,
+        "revision": ticket.revision,
+        "providerDispatchedByCommand": false,
+        "requiresExplicitNativeDispatch": ticket.state == "blocked",
+        "allowedTools": [],
+        "allowedSideEffects": false,
+    })).map_err(|e| e.to_string())
+}
+
 /// Explicit local CLI acceptance; the native revision guard and audit remain
 /// the same as the desktop action.
 pub(crate) fn headless_accept_ticket(
@@ -1297,6 +1321,15 @@ fn admit_role(
     store: &mut Store, config_id: &str, objective: &str,
     request_key: &str, busy: bool, coordinate: bool,
 ) -> Result<(Ticket, bool)> {
+    admit_role_with_staging(store, config_id, objective, request_key, busy, coordinate, false)
+}
+
+// A detached operator can stage a blocked Ticket but cannot reserve a provider
+// session. This preserves the existing manual admission API and its tests.
+fn admit_role_with_staging(
+    store: &mut Store, config_id: &str, objective: &str,
+    request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
+) -> Result<(Ticket, bool)> {
     let objective = objective.trim();
     if objective.is_empty() || objective.len() > MAX_OBJECTIVE_BYTES || objective.chars().any(|c| c == '\0') {
         return Err("A nonempty, bounded objective is required.".into());
@@ -1325,9 +1358,13 @@ fn admit_role(
             .ok_or("Manual request admission audit missing.")?;
         let originally_coordinated = match admission.as_str() {
             "manual readonly coordinator reserved" => true,
-            "manual readonly worker reserved" | "blocked: worker occupied" => false,
+            "manual readonly worker reserved" | "blocked: worker occupied"
+            | "blocked: explicit headless staging" => false,
             _ => return Err("Manual request admission mode is unknown.".into()),
         };
+        if headless_staging && admission != "blocked: explicit headless staging" {
+            return Err("Request key already belongs to a different manual dispatch mode.".into());
+        }
         if originally_coordinated != coordinate {
             return Err("Manual request key cannot change between direct and coordinated dispatch.".into());
         }
@@ -1354,7 +1391,7 @@ fn admit_role(
     if coordinate && (busy || occupied) {
         return Err("Coordinator is busy; retry this explicit manual request later.".into());
     }
-    let blocked = busy || occupied;
+    let blocked = busy || occupied || headless_staging;
     let ticket_id = storage::id();
     let assignment_id = (!blocked).then(storage::id);
     // Reserve the internal conversation in the SAME SQLite transaction as the
@@ -1388,7 +1425,8 @@ fn admit_role(
     }
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,'admitted',?2,?3)",
-        params![ticket_id, if blocked { "blocked: worker occupied" }
+        params![ticket_id, if headless_staging { "blocked: explicit headless staging" }
+             else if blocked { "blocked: worker occupied" }
              else if coordinate { "manual readonly coordinator reserved" }
              else { "manual readonly worker reserved" },now],
     ).map_err(|e| e.to_string())?;
@@ -1430,7 +1468,8 @@ fn coordinator_plan_current(
             ).map_err(|e| e.to_string())?;
             if !proven { return Ok(false); }
         }
-        Some("manual readonly worker reserved" | "blocked: worker occupied") => {}
+        Some("manual readonly worker reserved" | "blocked: worker occupied"
+            | "blocked: explicit headless staging") => {}
         _ => return Ok(false),
     }
     let invalid: bool = store.db.query_row(
@@ -2792,6 +2831,58 @@ pub async fn superagent_stop(window: tauri::WebviewWindow, app: tauri::AppHandle
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headless_queue_demand_is_durable_idempotent_and_never_dispatches() {
+        let store = fixture();
+        let cfg = enabled(&store);
+        let objective = "Private headless objective";
+        let raw = headless_queue_demand(
+            &store.path, &cfg.id, objective, "operator-key-1",
+        ).unwrap();
+        let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let id = view["ticketId"].as_str().unwrap();
+        assert_eq!(view["state"], "blocked");
+        assert_eq!(view["providerDispatchedByCommand"], false);
+        assert_eq!(view["requiresExplicitNativeDispatch"], true);
+        assert_eq!(view["allowedTools"], serde_json::json!([]));
+        assert!(!raw.contains(objective));
+        assert!(!raw.contains("operator-key-1"));
+        assert!(get_ticket(&store, id).unwrap().active_assignment_id.is_none());
+        assert!(!mandate(&store, id).unwrap().revoked);
+        assert!(coordinator_plan_current(
+            &store, id, "router", &cfg.project_id,
+        ).unwrap());
+        let assignment_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
+            [id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(assignment_count, 0);
+        assert_eq!(raw, headless_queue_demand(
+            &store.path, &cfg.id, objective, "operator-key-1",
+        ).unwrap());
+        assert!(headless_queue_demand(
+            &store.path, &cfg.id, "Changed objective", "operator-key-1",
+        ).is_err());
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets WHERE orchestration_id=?1",
+            [&cfg.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+        assert!(headless_stop_ticket(&store.path, id).unwrap().contains("stopped"));
+        let after: serde_json::Value = serde_json::from_str(&headless_queue_demand(
+            &store.path, &cfg.id, objective, "operator-key-1",
+        ).unwrap()).unwrap();
+        assert_eq!(after["state"], "stopped");
+        assert_eq!(after["requiresExplicitNativeDispatch"], false);
+        assert!(headless_queue_demand(
+            &store.path, "missing-team", objective, "new-key",
+        ).is_err());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, id).unwrap().state, "stopped");
+    }
 
     #[test]
     fn headless_team_readiness_is_redacted_nonmutating_and_never_admits() {

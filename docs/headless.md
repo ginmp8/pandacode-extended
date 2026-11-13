@@ -84,6 +84,28 @@ The existing `--inspect-ticket` and `--inspect-ticket-effects` commands show
 redacted state without touching live sessions. Per-effect dispatch and full
 headless admission/retry still require explicit user-authorized native grants.
 
+### Operator-staged headless Demands
+
+A trusted local operator can persist a blocked, read-only manual Ticket in the
+existing native Ticket/Mandate store, without launching a provider. Use a private
+UTF-8 objective file (up to 16 KiB) to avoid exposing its content in process
+arguments or stdout:
+
+```sh
+pandacode serve --queue-demand <team-id> <stable-request-key> /private/objective.txt
+```
+
+The Team must be enabled, its selected bots available, and its existing native
+single-Worker policy valid. Repeating the stable key with identical content is
+idempotent; changing the content or reusing a desktop-dispatch key is denied.
+The output is redacted and includes the Ticket ID, blocked state and the
+explicit-dispatch requirement. The objective file should only be readable by
+the dedicated headless service account. **Staging is not provider admission**:
+it creates no Assignment/session, never dispatches a bot, and grants no tools or
+external effects. The live native retry/dispatch path must separately recheck
+mandate expiry, revocation, policy revision, project and checkout lease. Stopped
+Tickets cannot be restarted through key replay.
+
 ## First run
 
 ```sh

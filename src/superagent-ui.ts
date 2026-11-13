@@ -26,11 +26,33 @@ interface EffectiveTeam {
   orchestrationId:string; policyRevision:number; enabled:boolean;
   executionReady:boolean; grantsIssued:boolean; members:EffectiveMember[];
 }
+interface TeamSnapshot {
+  [key: string]: unknown;
+  snapshotVersion?: unknown; provenance?: unknown; orchestrationId?: unknown;
+  teamVersion?: unknown; name?: unknown; projectId?: unknown; coordinatorBotId?: unknown;
+  workerBotIds?: unknown; reviewerBotIds?: unknown; policy?: unknown; roles?: unknown;
+}
 interface Ticket { id: string; orchestrationId: string; objective: string; state: string; revision: number; evidence: string | null }
 interface DemandIndex { id: string; orchestrationId: string; objective: string;
   state: string; revision: number; updatedAt: number }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
 interface ImportResult { created: string[]; unchanged: string[]; backupPath?: string }
+interface WorkerWriteDispatchRequest extends Record<string, unknown> {
+  ticketId: string; expectedRevision: number; allowedPaths: string[];
+}
+interface WorkerWriteGrant {
+  id: string; ticketId: string; assignmentId: string; sessionId: string;
+  ticketRevision: number; policyRevision: number; projectId: string; projectRoot: string;
+  allowedPaths: string[]; expiresAt: number; revoked: boolean;
+}
+interface WorkerWriteDispatch { ticket: Ticket; grant: WorkerWriteGrant }
+interface PreviewWorkerWriteDispatch {
+  previewOnly: true; ticket: Ticket; allowedPaths: string[]; message: string;
+}
+type WorkerWriteDispatchResult = WorkerWriteDispatch | PreviewWorkerWriteDispatch;
+function isPreviewWorkerWriteDispatch(result: WorkerWriteDispatchResult): result is PreviewWorkerWriteDispatch {
+  return 'previewOnly' in result && result.previewOnly === true;
+}
 interface Mandate {
   actor: string; authorizationId: string; policyRevision: number; projectId: string;
   expiresAt: number; revoked: boolean; allowedTools: string[]; allowedSideEffects: boolean;
@@ -58,10 +80,17 @@ interface CouncilObservation {
 interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
   attemptInsights?: AssignmentInsight[];
-  activity: Activity[]; council?: CouncilObservation | null;
+  activity: Activity[]; teamSnapshot?: TeamSnapshot | null; council?: CouncilObservation | null;
   finalizationGate?: 'not_pending' | 'native_recheck_required' | 'council_required' | 'effects_unresolved';
   unresolvedExternalEffects?: number;
 }
+interface IssueCommentStatus {
+  ticketId: string; ticketRevision: number; repository: string; issueNumber: number;
+  effectKey: string; payloadSha256: string; state: 'pending' | 'uncertain' | 'applied';
+  reconciliation: string;
+}
+interface PreviewIssueComment { previewOnly: true; message: string }
+type IssueCommentResult = IssueCommentStatus | PreviewIssueComment;
 interface EventSource {
   id: string; orchestrationId: string; repository: string; actorFilter: string;
   eventKind: string; mode: 'off' | 'observe'; policyRevision: number; lastSequence: number;
@@ -84,6 +113,14 @@ interface SourceDecision {
   checkConclusion?: string; checkHeadSha?: string; checkCompletedAt?: number;
 }
 
+async function issueCommentEffectKey(
+  ticketId: string, repository: string, issueNumber: number, comment: string,
+): Promise<string> {
+  const payload = new TextEncoder().encode(JSON.stringify([ticketId, repository, issueNumber, comment]));
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', payload));
+  return 'github-comment:' + Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
@@ -96,6 +133,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let preview: Preview | null = null, inspected: unknown = null;
   let confirm: { message: string; action: () => Promise<void> } | null = null;
   let taskKey = crypto.randomUUID();
+  let writeGrantTicket = '', writeGrantRevision: number | null = null;
+  let writePathsDraft = '', writePathsError = '';
+  let commentRepository = '', commentIssueNumber = '', commentDraft = '';
+  let issueCommentError = '', issueCommentStatus: IssueCommentStatus | null = null;
   let demandObjective = '', demandMode: 'coordinated' | 'direct' = 'coordinated';
   let demandPreflight: ManualPreflight | null = null;
   let preflightObjective = '', preflightMode: 'coordinated' | 'direct' = 'coordinated';
@@ -126,6 +167,51 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         ' · Head ' + safe(entry.checkHeadSha.slice(0, 12)) +
         ' · Completed ' + safe(activityTime(entry.checkCompletedAt))
       : ' · Check outcome unavailable (legacy receipt)';
+  function renderTeamSnapshot(snapshot: TeamSnapshot | null | undefined): string {
+    if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+      return '<section class="sa-pane sa-team-snapshot" aria-label="Saved Team snapshot">' +
+        '<h5>Saved Team snapshot unavailable</h5><p>The native Ticket response did not include <code>teamSnapshot</code>. The current Team configuration was not substituted.</p></section>';
+    }
+    const rawProvenance = typeof snapshot.provenance === 'string' ? snapshot.provenance : '';
+    const provenance = rawProvenance || 'missing';
+    const provenanceNote = rawProvenance === 'native'
+      ? 'Native: this immutable Team snapshot was captured for this Ticket.'
+      : rawProvenance === 'legacy-current'
+        ? 'Legacy-current: backfilled from the mutable Team configuration observed during upgrade; it may not match the exact historical admission state.'
+        : rawProvenance === 'legacy-unknown'
+          ? 'Legacy-unknown: historical role/profile data was not recorded. Placeholder identities and missing profile evidence are not recovered facts or dispatch authority.'
+          : 'Unrecognized or missing provenance. Treat historical Team details as unverified.';
+    const roles = Array.isArray(snapshot.roles) ? snapshot.roles : [];
+    const roleRows = roles.map((entry: unknown) => {
+      const role = entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? entry as Record<string, unknown> : {};
+      const roleName = typeof role.role === 'string' ? role.role : 'Unknown role';
+      const ordinal = typeof role.ordinal === 'number' && Number.isFinite(role.ordinal)
+        ? ' · ordinal ' + role.ordinal : '';
+      const botId = typeof role.botId === 'string' ? role.botId : 'Unknown bot identity';
+      const digest = typeof role.effectiveConfigSha256 === 'string' && role.effectiveConfigSha256
+        ? ' · profile SHA-256 ' + safe(role.effectiveConfigSha256)
+        : role.effectiveConfig === null ? ' · profile evidence unavailable' : '';
+      return '<li><strong>' + safe(roleName) + '</strong>' + safe(ordinal) + ' · ' +
+        safe(botName(botId)) + ' <code>' + safe(botId) + '</code>' + digest + '</li>';
+    }).join('');
+    let payload = 'Unable to serialize the returned snapshot.';
+    try { payload = JSON.stringify(snapshot, null, 2) ?? 'null'; } catch { /* malformed preview only */ }
+    const policy = snapshot.policy && typeof snapshot.policy === 'object' && !Array.isArray(snapshot.policy)
+      ? snapshot.policy as Record<string, unknown> : null;
+    return '<section class="sa-pane sa-team-snapshot" aria-label="Saved Team snapshot">' +
+      '<h5>Saved Team snapshot</h5><p>Exact immutable <code>teamSnapshot</code> returned with this Ticket; the current Team is never substituted.</p>' +
+      '<dl><dt>Provenance</dt><dd>' + safe(provenance) + '</dd>' +
+      '<dt>Team / version</dt><dd>' + safe(snapshot.name ?? 'Unknown Team') + ' / ' +
+      safe(snapshot.teamVersion ?? 'unknown') + ' · snapshot schema ' + safe(snapshot.snapshotVersion ?? 'unknown') + '</dd>' +
+      (policy ? '<dt>Saved policy</dt><dd>Revision ' + safe(policy.policyRevision ?? 'unknown') +
+        ' · Autonomy ' + safe(policy.autonomy ?? 'unknown') + ' · Council ' +
+        safe(policy.councilEnabled ?? 'unknown') + '</dd>' : '') +
+      '</dl><p role="note">' + safe(provenanceNote) + '</p>' +
+      '<h6>Saved role order</h6><ol>' + (roleRows || '<li>No role entries were returned.</li>') +
+      '</ol><details><summary>Inspect exact saved Team payload</summary><pre>' + safe(payload) +
+      '</pre></details></section>';
+  }
   function render(): void {
     if (!host.isConnected) return;
     const roleSummary = (item:Config): string =>
@@ -155,6 +241,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const choices = optionsFor('');
     const chosen = current();
     const inspected = tickets.find(ticket => ticket.id === inspectedTicket);
+    const writeTicket = tickets.find(ticket => ticket.id === writeGrantTicket);
+    const canComment = !!inspected && ticketDetails?.ticket.id === inspected.id &&
+      inspected.state === 'running' && !ticketDetails.mandate.revoked &&
+      ticketDetails.mandate.allowedSideEffects;
+    const commentStatus = issueCommentStatus && inspected &&
+      issueCommentStatus.ticketId === inspected.id &&
+      issueCommentStatus.ticketRevision === inspected.revision ? issueCommentStatus : null;
     const activity = (ticketDetails?.activity ?? []).filter(entry => {
       const needle = activityFilter.trim().toLowerCase();
       return !needle || (entry.kind + ' ' + entry.detail + ' ' + entry.id).toLowerCase().includes(needle);
@@ -205,6 +298,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const details = inspected && ticketDetails
       ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
         '<h4>Ticket evidence</h4><p>Read-only native snapshot. Model output is not task approval.</p>' +
+        renderTeamSnapshot(ticketDetails.teamSnapshot) +
         '<dl><dt>Ticket ID</dt><dd><code>' + safe(inspected.id) + '</code></dd>' +
         '<dt>State / revision</dt><dd>' + safe(inspected.state) + ' / ' + inspected.revision + '</dd>' +
         '<dt>Actor</dt><dd>' + safe(ticketDetails.mandate.actor) + '</dd>' +
@@ -310,7 +404,27 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             safe(ticketDetails.council.nativeStatus) + ' · Round ' +
             safe(ticketDetails.council.nativeRound) +
             (ticketDetails.council.nativeStale ? ' · stale' : '') +
-            '. Not bound to this ticket artifact; cannot authorize SuperAgent completion.</p></section>'
+            '. Council evidence is authoritative only for an exact Ticket, artifact and verified native cycle; unbound or stale results cannot approve a task.</p></section>'
+          : '') +
+        (canComment
+          ? '<section class="sa-effect-editor" aria-label="Explicit GitHub effect"><h5>GitHub issue comment</h5>' +
+            '<p>Available only for this running Ticket’s active side-effect mandate. The native confirmation shows the exact target and comment.</p>' +
+            '<form data-sa-form="issue-comment"><div class="sa-grid">' +
+            '<label>Repository (owner/name)<input name="repository" maxlength="200" required value="' +
+            safe(commentRepository) + '"></label>' +
+            '<label>Issue number<input name="issueNumber" type="number" min="1" step="1" inputmode="numeric" required value="' +
+            safe(commentIssueNumber) + '"></label></div>' +
+            '<label>Comment<textarea name="comment" rows="4" maxlength="60000" required>' +
+            safe(commentDraft) + '</textarea></label>' +
+            (issueCommentError ? '<p role="alert" data-sa-comment-error class="sa-write-path-error">' + safe(issueCommentError) + '</p>' : '') +
+            (commentStatus ? '<p role="status" data-sa-comment-status>Effect ' + safe(commentStatus.state) +
+              ' · ' + safe(commentStatus.reconciliation) + ' · SHA-256 ' +
+              safe(commentStatus.payloadSha256) + '</p>' : '') +
+            '<button type="submit" class="primary-button">' +
+            (commentStatus?.state === 'applied' ? 'Check existing comment' :
+              commentStatus?.state === 'pending' ? 'Check pending comment' :
+                commentStatus?.state === 'uncertain' ? 'Reconcile comment status' :
+                  'Authorize and post comment') + '</button></form></section>'
           : '') +
         '<button type="button" data-sa-close-details>Close evidence</button></section>'
       : '';
@@ -469,11 +583,21 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               ? ' disabled aria-describedby="sa-finalization-blocked"' : '') +
             '>Accept evidence</button>' +
             '<button type="button" data-sa-reject="' + safe(ticket.id) + '">Reject evidence</button>' : '') +
-        (ticket.state === 'queued' ? '<button type="button" data-sa-dispatch="' + safe(ticket.id) + '">Dispatch worker</button>' : '') +
+        (ticket.state === 'queued' ? '<button type="button" data-sa-dispatch="' + safe(ticket.id) + '">Dispatch worker</button>' +
+          '<button type="button" data-sa-write-request="' + safe(ticket.id) + '">Request file writes</button>' : '') +
         (ticket.state === 'blocked' ? '<button type="button" data-sa-retry="' + safe(ticket.id) + '">Retry manually</button>' : '') +
         (!['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)
           ? '<button type="button" data-sa-stop="' + safe(ticket.id) + '">Stop</button>' : '') +
         '</li>').join('') || '<li class="sa-empty">No tickets yet.</li>') + '</ul>' +
+        (writeTicket && writeGrantRevision !== null
+          ? '<section class="sa-write-editor" role="region" aria-label="Scoped write request"><h4>Request scoped file writes</h4>' +
+            '<p>Ticket <code>' + safe(writeTicket.id) + '</code> · Revision ' + writeGrantRevision +
+            '. Submitting opens a native confirmation that lists these exact files; only that dialog can authorize the worker.</p>' +
+            '<form data-sa-form="write-grant"><label>Exact project-relative file paths<textarea data-sa-write-paths name="allowedPaths" rows="5" spellcheck="false">' +
+            safe(writePathsDraft) + '</textarea></label><small>Enter one normalized relative path per line. Blank lines are ignored; path text is preserved exactly. Up to 16 files.</small>' +
+            (writePathsError ? '<p class="sa-write-path-error" role="alert">' + safe(writePathsError) + '</p>' : '') +
+            '<div class="sa-actions"><button type="submit" class="primary-button">Continue to native confirmation</button>' +
+            '<button type="button" data-sa-write-cancel>Cancel</button></div></form></section>' : '') +
         (rejectingTicket ? '<form data-sa-form="reject"><label>Rejection reason<textarea name="reason" maxlength="500" required></textarea></label>' +
           '<div class="sa-actions"><button type="submit" class="primary-button">Submit rejection</button>' +
           '<button type="button" data-sa-reject-cancel>Cancel</button></div></form>' : '') +
@@ -510,7 +634,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       : '';
     const teamRoles = chosen
       ? '<section class="sa-pane" aria-label="Configured Team roles"><h3>Configure Team roles</h3>' +
-        '<p>Roles reuse existing bot identities, models, harnesses and Skills. Additional Workers and optional Reviewers are configuration only until native role admission is implemented.</p>' +
+        '<p>Roles reuse existing bot identities, models, harnesses and Skills. Additional Workers remain unavailable for autonomous parallel dispatch; configured Reviewers can be required through native Council.</p>' +
         (!roleRoster || roleRoster.orchestrationId !== chosen.id
           ? '<button type="button" data-sa-role-load>Load native members</button>'
           : '<p>Coordinator: ' + safe(botName(roleRoster.coordinatorBotId)) +
@@ -538,7 +662,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<dl><dt>Coordinator (read-only)</dt><dd>' + safe(botName(chosen.coordinatorBotId)) + '</dd>' +
         '<dt>Worker</dt><dd>' + safe(botName(chosen.workerBotId)) + '</dd>' +
         '<dt>Configured members</dt><dd>' + safe(roleSummary(chosen)) + '</dd>' +
-        '<dt>Current native support</dt><dd>One worker, manual dispatch; scoped writes and automatic GitHub intake unsupported.</dd></dl>' +
+        '<dt>Current native support</dt><dd>Manual worker dispatch with explicitly authorized scoped writes on supported platforms; authenticated Observe only, no GitHub Auto.</dd></dl>' +
         '<button type="button" data-sa-open-runs>Assign demand / Open runs</button></section>'
       : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
     const globalReviewPanel = '<section class="sa-pane sa-cross-team-review" ' +
@@ -590,7 +714,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         (workspaceView === id ? 'page' : 'false') + '">' + label + '</button>').join('') +
       '</nav>';
     host.innerHTML = '<div class="sa-ui">' +
-      '<p class="sa-intro">A Team is a reusable SuperAgent. All Run actions below use native Ticket and Mandate records; writes, automatic GitHub dispatch and Council verdicts are not yet supported.</p>' +
+      '<p class="sa-intro">A Team is a reusable SuperAgent. All Run actions below use native Ticket and Mandate records; scope-bound worker writes and task Council are native policy-gated; GitHub Auto is not yet supported.</p>' +
       (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
       (error ? '<p role="alert" class="sa-error">' + safe(error) + '</p>' : '') +
       (feedback ? '<p role="status" class="sa-feedback">' + safe(feedback) + '</p>' : '') +
@@ -800,6 +924,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   });
   host.addEventListener('input', event => {
     const target = event.target;
+    if ((target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) &&
+        target.closest('form[data-sa-form="issue-comment"]')) {
+      issueCommentError = '';
+      host.querySelector('[data-sa-comment-error]')?.remove();
+    }
     if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-team-search')) {
       teamSearch = target.value;
       const selection = target.selectionStart;
@@ -1115,6 +1244,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
+    if (target.hasAttribute('data-sa-write-cancel')) {
+      writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = ''; writePathsError = '';
+      render(); return;
+    }
     if (target.hasAttribute('data-sa-close-details')) {
       inspectedTicket = ''; ticketDetails = null; inspectedAssignmentId = '';
       render(); return;
@@ -1146,6 +1279,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       inspectedAssignmentId = inspectedAssignmentId === target.dataset.saInspectAssignment
         ? '' : target.dataset.saInspectAssignment;
       render();
+      return;
+    }
+    if (target.dataset.saWriteRequest) {
+      const ticket = tickets.find(item => item.id === target.dataset.saWriteRequest);
+      if (ticket?.state === 'queued') {
+        writeGrantTicket = ticket.id; writeGrantRevision = ticket.revision;
+        writePathsDraft = ''; writePathsError = ''; error = ''; feedback = '';
+        render();
+        host.querySelector<HTMLTextAreaElement>('[data-sa-write-paths]')?.focus();
+      }
       return;
     }
     if (target.dataset.saInspectTicket) {
@@ -1215,6 +1358,135 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (!(form instanceof HTMLFormElement) || !host.contains(form)) return;
     event.preventDefault();
     const data = new FormData(form);
+    if (form.dataset.saForm === 'write-grant') {
+      const ticketId = writeGrantTicket;
+      const expectedRevision = writeGrantRevision;
+      const ticket = tickets.find(item => item.id === ticketId);
+      writePathsDraft = String(data.get('allowedPaths') ?? '');
+      const paths = writePathsDraft.split(/\r\n?|\n/).filter(path => path.length > 0);
+      let pathError = '';
+      if (paths.length === 0 || paths.length > 16) {
+        pathError = 'Enter between 1 and 16 exact file paths.';
+      } else {
+        const unique = new Set<string>();
+        for (const path of paths) {
+          const invalidSegment = path.split('/').some(part => part === '' || part === '.' || part === '..' ||
+            part.toLowerCase() === '.git' || [...part].some(character => {
+              const code = character.codePointAt(0) ?? 0;
+              return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+            }));
+          if (new TextEncoder().encode(path).length > 4096 || path.includes('\\') || path.includes('\0') ||
+              path.includes(':') || invalidSegment) {
+            pathError = 'Use normalized project-relative paths without traversal, .git, drive prefixes, backslashes, or control characters.';
+            break;
+          }
+          if (unique.has(path)) {
+            pathError = 'A write scope cannot repeat a file path.';
+            break;
+          }
+          unique.add(path);
+        }
+      }
+      if (pathError) {
+        writePathsError = pathError; render(); return;
+      }
+      if (!ticket || ticket.state !== 'queued' || expectedRevision === null ||
+          ticket.revision !== expectedRevision) {
+        writePathsError = 'This Ticket changed after you opened the request. Refresh it and review the paths again.';
+        render(); return;
+      }
+      writePathsError = '';
+      const request: WorkerWriteDispatchRequest = {
+        ticketId, expectedRevision, allowedPaths: paths,
+      };
+      void work(async () => {
+        const result = await call<WorkerWriteDispatchResult>(
+          'superagent_dispatch_worker_with_write_grant', request,
+        );
+        if (isPreviewWorkerWriteDispatch(result)) {
+          writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = '';
+          await reload();
+          feedback = 'Preview only: no native confirmation was shown, no write grant was created, and no worker was dispatched. Requested files for Ticket ' +
+            ticketId + ': ' + paths.join(', ') + '.';
+          return;
+        }
+        if (result.ticket.id !== ticketId || result.grant.ticketId !== ticketId ||
+            result.grant.allowedPaths.length !== paths.length ||
+            result.grant.allowedPaths.some((path, index) => path !== paths[index])) {
+          throw new Error('The native response did not match the requested Ticket and file paths.');
+        }
+        writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = '';
+        await reload();
+        feedback = 'Native confirmation authorized Ticket ' + ticketId + ' at revision ' +
+          expectedRevision + '. Worker state: ' + result.ticket.state + '. Allowed files: ' +
+          result.grant.allowedPaths.join(', ') + '. Grant expires ' + activityTime(result.grant.expiresAt) + '.';
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'issue-comment') {
+      const ticketId = inspectedTicket;
+      const ticket = tickets.find(item => item.id === ticketId);
+      const snapshot = ticketDetails;
+      const repository = String(data.get('repository') ?? '');
+      const issueText = String(data.get('issueNumber') ?? '');
+      const issueNumber = Number(issueText);
+      const comment = String(data.get('comment') ?? '');
+      commentRepository = repository; commentIssueNumber = issueText; commentDraft = comment;
+      const parts = repository.split('/');
+      const validRepository = parts.length === 2 && parts.every(part => part.length > 0 &&
+        part !== '.' && part !== '..' && /^[A-Za-z0-9_.-]+$/.test(part));
+      let validationError = '';
+      if (!validRepository) validationError = 'Enter one exact GitHub repository as owner/name.';
+      else if (!/^[1-9][0-9]*$/.test(issueText) || !Number.isSafeInteger(issueNumber)) {
+        validationError = 'Enter a positive whole issue number.';
+      } else if (!comment.trim() || new TextEncoder().encode(comment).length > 60_000 ||
+          comment.includes('\0') || comment.includes('<!-- pandacode-superagent-effect:')) {
+        validationError = 'Enter a nonempty comment under 60 KB without a PandaCode effect marker.';
+      }
+      if (validationError) {
+        issueCommentError = validationError; render(); return;
+      }
+      if (!ticket || ticket.state !== 'running' || !snapshot || snapshot.ticket.id !== ticketId ||
+          snapshot.ticket.revision !== ticket.revision || snapshot.mandate.revoked ||
+          !snapshot.mandate.allowedSideEffects) {
+        issueCommentError = 'This Ticket has no current side-effect authorization. Refresh evidence before continuing.';
+        render(); return;
+      }
+      const expectedRevision = snapshot.ticket.revision;
+      issueCommentError = '';
+      void work(async () => {
+        await refreshTicketDetails();
+        const refreshed = ticketDetails;
+        const currentTicket = tickets.find(item => item.id === ticketId);
+        if (!refreshed || !currentTicket || refreshed.ticket.revision !== expectedRevision ||
+            currentTicket.revision !== expectedRevision) {
+          throw new Error('This Ticket changed. Review its updated evidence before continuing.');
+        }
+        if (refreshed.ticket.state !== 'running' || refreshed.mandate.revoked ||
+            !refreshed.mandate.allowedSideEffects) {
+          throw new Error('The Ticket is no longer running under an active side-effect mandate.');
+        }
+        const effectKey = await issueCommentEffectKey(ticketId, repository, issueNumber, comment);
+        const result = await call<IssueCommentResult>('superagent_issue_comment', {
+          ticketId, expectedRevision, repository, issueNumber, effectKey, comment,
+        });
+        if ('previewOnly' in result) {
+          issueCommentStatus = null;
+          feedback = result.message;
+          return;
+        }
+        if (result.ticketId !== ticketId || result.ticketRevision !== expectedRevision ||
+            result.repository !== repository || result.issueNumber !== issueNumber ||
+            result.effectKey !== effectKey) {
+          throw new Error('The native effect result did not match this Ticket and exact comment.');
+        }
+        issueCommentStatus = result;
+        feedback = result.state === 'applied' && result.reconciliation === 'exact-readback'
+          ? 'GitHub comment applied and verified by exact read-back.'
+          : 'GitHub comment state: ' + result.state + ' (' + result.reconciliation + '). Repeating the same comment checks its saved receipt and does not blindly post again.';
+      });
+      return;
+    }
     if (form.dataset.saForm === 'roster') {
       const cfg=current();
       if (!cfg || !roleRoster || roleRoster.orchestrationId!==cfg.id) return;

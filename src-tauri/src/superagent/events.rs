@@ -401,7 +401,13 @@ fn valid_event(event: &EventEnvelope) -> bool {
 /// Ticket, launch a provider, publish a reply or claim GitHub authenticity.
 /// A delivery ID is immutable: replay with changed fields is rejected even
 /// after mode changes, restart, or later cursor advancement.
-fn observe(store: &Store, event: &EventEnvelope) -> Result<EventDecision> {
+fn observe_authenticated_in_tx(
+    tx: &rusqlite::Transaction<'_>, src: &EventSource,
+    event: &EventEnvelope, signed_in: &str,
+) -> Result<EventDecision> {
+    if !token_ok(signed_in, 80) {
+        return Err("Signed-in GitHub identity is unavailable; source observation denied.".into());
+    }
     if !valid_event(event) {
         return Err("Invalid, unsupported or unbounded source event envelope.".into());
     }

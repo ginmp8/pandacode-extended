@@ -1,4 +1,25 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
+
+async function openOrchestrationWorkspace(page: Page) {
+  await page.evaluate(async () => { await import('/src/preview-superagent.ts'); });
+  const bar=page.locator('.sidebar-bots-bar');
+  if(await bar.getAttribute('aria-pressed')!=='true')await bar.click();
+  const sidebar=page.getByRole('region',{name:'Bots',exact:true});
+  await expect(sidebar).toBeVisible();
+  await sidebar.getByRole('button',{name:'Bot actions'}).click();
+  await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
+  const workspace=page.locator('#superagent-workspace');
+  await expect(workspace).toBeVisible();
+  await expect(page.getByRole('region',{name:'Orchestrations',exact:true})).toBeVisible();
+  await expect(page.getByRole('dialog',{name:'Orchestrations',exact:true})).toHaveCount(0);
+  await expect(page.locator('#dialog[open]')).toHaveCount(0);
+  await expect(page.locator('.dialog-scrim:visible')).toHaveCount(0);
+  const host=workspace.locator('#superagent-host');
+  await expect(host).toHaveAttribute('aria-busy','false',{timeout:30_000});
+  return host;
+}
+
+
 test('native SuperAgent preset UI stays manual and imports disabled portable configurations', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
@@ -1269,3 +1290,153 @@ test('native Team directory counts configured roles and filters without creating
     (window as unknown as {teamDirectoryCalls:()=>string[]}).teamDirectoryCalls());
   expect(calls.every(command=>['bots_list','superagent_list','superagent_tickets'].includes(command))).toBe(true);
 });
+
+test('SuperAgent scoped-write request validates paths and reports native error and success',async ({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const previous=document.querySelector<HTMLElement>('#superagent-host')!;
+    const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
+    const queued={id:'ticket-queued',objective:'Write two reviewed files',state:'queued',revision:7,evidence:null};
+    let currentTicket=queued,attempts=0;
+    const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [{id:'preset-one',name:'Fixture',
+        coordinatorBotId:'coordinator',workerBotId:'worker',enabled:true,policyRevision:1}] as never;
+      if(command==='superagent_tickets')return [currentTicket] as never;
+      if(command==='superagent_dispatch_worker_with_write_grant'){
+        calls.push({command,args:{...args}});attempts++;
+        if(attempts===1)throw new Error('Native file authorization was cancelled.');
+        currentTicket={...queued,state:'running',revision:8};
+        return {ticket:currentTicket,grant:{id:'grant-one',ticketId:queued.id,
+          assignmentId:'assignment-one',sessionId:'session-one',ticketRevision:8,
+          policyRevision:1,projectId:'project-one',projectRoot:'C:/fixture',
+          allowedPaths:Array.isArray(args?.allowedPaths)?args.allowedPaths as string[]:[],
+          expiresAt:1800000000000,revoked:false}} as never;
+      }
+      throw new Error('Unexpected command: '+command);
+    });
+    (window as unknown as {saWriteCalls:typeof calls}).saWriteCalls=calls;
+  });
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'Request file writes'}).click();
+  const editor=host.getByRole('region',{name:'Scoped write request'});
+  await expect(editor).toContainText('Ticket ticket-queued · Revision 7.');
+  const paths=editor.getByRole('textbox',{name:'Exact project-relative file paths'});
+  await paths.fill('../outside.md');
+  await editor.getByRole('button',{name:'Continue to native confirmation'}).click();
+  await expect(editor.getByRole('alert')).toContainText('normalized project-relative paths');
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {
+    saWriteCalls:Array<unknown>;
+  }).saWriteCalls.length)).toBe(0);
+
+  const exactPaths=['src/notes draft.md','src/config.json'];
+  await paths.fill(exactPaths.join('\n'));
+  await expect(paths).toHaveValue(exactPaths.join('\n'));
+  await editor.getByRole('button',{name:'Continue to native confirmation'}).click();
+  await expect(host.getByRole('alert')).toContainText('Native file authorization was cancelled.');
+  const failedAttempt=await page.evaluate(()=>(window as unknown as {
+    saWriteCalls:Array<{command:string;args?:Record<string,unknown>}>
+  }).saWriteCalls[0]);
+  expect(failedAttempt).toEqual({command:'superagent_dispatch_worker_with_write_grant',args:{
+    ticketId:'ticket-queued',expectedRevision:7,allowedPaths:exactPaths,
+  }});
+
+  await editor.getByRole('button',{name:'Continue to native confirmation'}).click();
+  await expect(host.getByRole('status').filter({hasText:'Native confirmation authorized Ticket ticket-queued at revision 7.'}))
+    .toContainText('Allowed files: src/notes draft.md, src/config.json.');
+  const calls=await page.evaluate(()=>(window as unknown as {
+    saWriteCalls:Array<{command:string;args?:Record<string,unknown>}>
+  }).saWriteCalls);
+  expect(calls).toHaveLength(2);
+  expect(calls[1].args).not.toHaveProperty('user_confirmed');
+});
+
+test('SuperAgent issue comments use a stable receipt and report uncertain state without blind replay',async ({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const previous=document.querySelector<HTMLElement>('#superagent-host')!;
+    const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
+    const ticket={id:'ticket-comment',objective:'Review a GitHub issue',state:'running',revision:4,evidence:null};
+    const snapshot={ticket,teamSnapshot:{snapshotVersion:1,provenance:'native',orchestrationId:'preset-one',
+      teamVersion:2,name:'Issue Team',projectId:'project-one',coordinatorBotId:'coordinator',
+      workerBotIds:['worker','worker-two'],reviewerBotIds:['reviewer'],
+      policy:{policyRevision:3,autonomy:'off',maxConcurrentTasks:1,maxAttemptsPerAssignment:2,councilEnabled:false},
+      roles:[
+        {role:'coordinator',ordinal:0,botId:'coordinator',effectiveConfig:{name:'Coordinator'},effectiveConfigSha256:'coordinator-hash'},
+        {role:'worker',ordinal:0,botId:'worker',effectiveConfig:{name:'Worker'},effectiveConfigSha256:'worker-hash'},
+        {role:'worker',ordinal:1,botId:'worker-two',effectiveConfig:{name:'Worker Two'},effectiveConfigSha256:'worker-two-hash'},
+        {role:'reviewer',ordinal:0,botId:'reviewer',effectiveConfig:{name:'Reviewer'},effectiveConfigSha256:'reviewer-hash'},
+      ]},mandate:{actor:'local-user',authorizationId:'auth-one',
+      policyRevision:3,projectId:'project-one',expiresAt:1800000000000,revoked:false,
+      allowedTools:[],allowedSideEffects:true},assignments:[{id:'assignment-one',botId:'worker',
+      sessionId:'session-one',state:'running',attempt:1}],activity:[]};
+    const calls:Array<{command:string;args?:Record<string,unknown>}> = [];
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [{id:'preset-one',name:'Fixture',
+        coordinatorBotId:'coordinator',workerBotId:'worker',enabled:true,policyRevision:3}] as never;
+      if(command==='superagent_tickets')return [ticket] as never;
+      if(command==='superagent_snapshot')return snapshot as never;
+      if(command==='superagent_source_thread_links')return [] as never;
+      if(command==='superagent_issue_comment'){
+        calls.push({command,args:{...args}});
+        return {ticketId:'ticket-comment',ticketRevision:4,repository:'acme/widget',
+          issueNumber:42,effectKey:args?.effectKey,payloadSha256:'a'.repeat(64),
+          state:'uncertain',reconciliation:'readback-unavailable'} as never;
+      }
+      throw new Error('Unexpected command: '+command);
+    });
+    (window as unknown as {saIssueCommentCalls:typeof calls}).saIssueCommentCalls=calls;
+  });
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const details=host.getByRole('region',{name:'Ticket evidence'});
+  await expect(details).toContainText('Saved Team snapshot');
+  await expect(details).toContainText('Issue Team / 2');
+  await expect(details).toContainText('worker-two');
+  await expect(details).toContainText('reviewer-hash');
+  await details.getByText('Inspect exact saved Team payload').click();
+  await expect(details.locator('pre')).toContainText('"provenance": "native"');
+  const commentForm=details.locator('form[data-sa-form="issue-comment"]');
+  await expect(commentForm).toBeVisible();
+  await commentForm.getByRole('textbox',{name:'Repository (owner/name)'}).fill('acme/widget');
+  await commentForm.getByRole('spinbutton',{name:'Issue number'}).fill('42');
+  const comment=commentForm.getByRole('textbox',{name:'Comment'});
+  await comment.fill('Reviewed; the fix is ready.');
+  await commentForm.getByRole('textbox',{name:'Repository (owner/name)'}).fill(' acme/widget ');
+  await commentForm.getByRole('button',{name:'Authorize and post comment'}).click();
+  await expect(commentForm.getByRole('alert')).toContainText('exact GitHub repository');
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {
+    saIssueCommentCalls:Array<unknown>;
+  }).saIssueCommentCalls.length)).toBe(0);
+  await commentForm.getByRole('textbox',{name:'Repository (owner/name)'}).fill('acme/widget');
+  await expect(commentForm.getByRole('alert')).toHaveCount(0);
+  await commentForm.getByRole('button',{name:'Authorize and post comment'}).click();
+  await expect(host.getByRole('status').filter({hasText:'uncertain · readback-unavailable'})).toBeVisible();
+  await expect(commentForm.getByRole('button',{name:'Reconcile comment status'})).toBeVisible();
+  await commentForm.getByRole('button',{name:'Reconcile comment status'}).click();
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {
+    saIssueCommentCalls:Array<unknown>;
+  }).saIssueCommentCalls.length)).toBe(2);
+  const calls=await page.evaluate(()=>(window as unknown as {
+    saIssueCommentCalls:Array<{command:string;args?:Record<string,unknown>}>
+  }).saIssueCommentCalls);
+  expect(calls[0].args).toMatchObject({ticketId:'ticket-comment',expectedRevision:4,
+    repository:'acme/widget',issueNumber:42,comment:'Reviewed; the fix is ready.'});
+  expect(calls[0].args?.effectKey).toMatch(/^github-comment:[0-9a-f]{64}$/);
+  expect(calls[1].args?.effectKey).toBe(calls[0].args?.effectKey);
+  expect(calls[1].args).toEqual(calls[0].args);
+});
+
+

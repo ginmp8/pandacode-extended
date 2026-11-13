@@ -535,3 +535,32 @@ The response is bounded JSON metadata (`unlinked`, identities,
 bodies. No GitHub call, provider admission, worker or automatic retry occurs.
 The CLI opens the existing storage path without running process-start recovery
 on a concurrently active headless host.
+
+## Explicit SuperAgent GitHub issue-comment effects (integrated)
+
+A local operator may request an exact GitHub issue comment only for a currently
+active, authorized Ticket and its native issue-comment effect policy. The
+headless one-shot interface uses the same Ticket, grant, idempotency and
+cross-process dispatch fence as the desktop. It does not imply GitHub Auto.
+
+```sh
+pandacode serve --issue-comment <ticket-id> <ticket-revision> <owner/repository> <issue-number> <stable-effect-key> "Exact comment body"
+# Review the exact native payload and SHA-256 returned by the first invocation.
+pandacode serve --issue-comment <ticket-id> <ticket-revision> <owner/repository> <issue-number> <stable-effect-key> "Exact comment body" --confirm-issue-comment <sha256>
+```
+
+The first invocation previews the exact authorization and does not post a
+comment. Only the second, matching confirmation may dispatch the grant, subject
+to a fresh native authorization check. A replay with the same key and payload
+inspects the existing receipt; a conflicting payload is rejected. If the
+provider may have accepted a comment before a timeout, the resulting pending
+or uncertain state is reconciled against authoritative GitHub state, or stays
+blocked rather than being posted twice. A stopped/revoked Ticket cannot create
+a new external effect.
+
+The explicit `--observe-source` and `--observe-check-run` operations remain
+bounded, authenticated **Observe** reads. The workspace also exposes native
+source and Check Run receipts. Neither reads nor issue-comment grants implement
+a background GitHub subscription or general Auto mode. See
+[`superagent-unified-integration.md`](superagent-unified-integration.md) for
+source lineage and the outstanding acceptance gates.

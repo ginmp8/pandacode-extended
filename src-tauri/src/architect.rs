@@ -2283,6 +2283,13 @@ fn dispatch_as(
                 let reviewer_source = seat.as_ref().map(|seat| council::reviewer_source_for(
                     &team, seat, assignment.replaces.as_deref(), assignment.council_reviewer_source,
                 )).transpose()?;
+                // The challenge consumes immutable native evidence, not any
+                // phase-one description supplied by the orchestrating model.
+                if let Some(seat) = &seat {
+                    if let Some(handoff) = council::phase_one_challenge_handoff(&store, &team, seat.round)? {
+                        assignment.prompt.push_str(&handoff);
+                    }
+                }
                 if let Some(seat) = &seat {
                     overtaken.extend(council::overtake(&mut team, seat.round));
                 }

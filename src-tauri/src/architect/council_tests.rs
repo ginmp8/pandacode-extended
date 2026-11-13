@@ -751,6 +751,54 @@ fn escalated_native_source_policy_preserves_legacy_modes_and_denies_unimplemente
 }
 
 #[test]
+fn s3_challenge_handoff_requires_genuine_pinned_reports_and_never_transfers_scores() {
+    let (state, sid) = council_state(on(9.0, 3, 2));
+    let store = state.store.lock().unwrap();
+    let parent = store.session(&sid).unwrap();
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    let mut config = on(9.0, 3, 2);
+    config.strategy = council::CouncilExecutionStrategy::TwoPhase;
+    team.config.council = Some(config);
+    let reports = [
+        "Council findings JSON: [{\"severity\":\"medium\",\"category\":\"correctness\",\"title\":\"Missing edge\",\"explanation\":\"The missing edge case requires testing\"}]\nCouncil score: 9.4/10",
+        "Council score: 9.5/10",
+    ];
+    let mut sessions = Vec::new();
+    for (index, report) in reports.iter().enumerate() {
+        let worker_session = store.create_session(&parent.project_id, "codex", "test-model", "plan").unwrap();
+        let mut reviewer = seat(&format!("real-review-{index}"), 1, Some(9.4 + index as f64 * 0.1), team.council_since + index as i64 + 1);
+        reviewer.session_id = worker_session.id.clone();
+        let binding = reviewer_security::ReviewerBinding::native(
+            &team, &reviewer.id, reviewer.created_at, &reviewer.provider,
+            &reviewer.model, reviewer.council.as_ref().unwrap(),
+        );
+        reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+        reviewer.reviewer_binding = Some(binding);
+        store.message(&worker_session.id, "assistant", report).unwrap();
+        sessions.push(worker_session.id);
+        team.workers.push(reviewer);
+    }
+    let payload = council::phase_one_challenge_handoff(&store, &team, 2).unwrap().unwrap();
+    assert!(payload.contains("Missing edge"));
+    assert!(payload.contains("reportMessageId"));
+    assert!(payload.contains("rootCycleId"));
+    assert!(payload.contains("\"evidenceVerified\":false"));
+    assert!(!payload.contains("Council score"));
+    assert!(!payload.contains("9.4"));
+    assert!(!payload.contains("9.5"));
+    assert!(council::phase_one_challenge_handoff(&store, &team, 1).unwrap().is_none());
+    // A later coordination turn is no longer an authenticated scored report,
+    // even if the previous native score remains in the team snapshot.
+    store.message(&sessions[0], "coordination", "New phase-one turn").unwrap();
+    assert!(council::phase_one_challenge_handoff(&store, &team, 2)
+        .unwrap_err().contains("cannot locate"));
+    let mut stale = team.clone();
+    stale.changed_at = team.council_since + 100;
+    assert!(council::phase_one_challenge_handoff(&store, &stale, 2)
+        .unwrap_err().contains("fresh"));
+}
+
+#[test]
 fn native_s3_uses_fresh_read_only_challengers_and_never_passes_phase_one_alone() {
     let mut config = on(9.0, 3, 2);
     config.strategy = council::CouncilExecutionStrategy::TwoPhase;

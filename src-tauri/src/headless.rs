@@ -37,6 +37,7 @@ enum Command {
     },
     InspectTicket { ticket_id: String },
     InspectTicketEffects { ticket_id: String },
+    InspectTicketSource { ticket_id: String },
     InspectTeamReadiness { orchestration_id: String },
     ObserveSource { source_id: String },
     ObserveCheckRun { source_id: String, check_run_id: i64 },
@@ -107,6 +108,21 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(receipts) => { println!("{receipts}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent effect receipt inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectTicketSource { ticket_id } = &command {
+                // No GitHub network, grants, provider launch or startup recovery.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_linked_activity(
+                        &dir.join("kingcode.sqlite3"), ticket_id, 50,
+                    ));
+                match result {
+                    Ok(activity) => { println!("{activity}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent source activity inspection failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -272,6 +288,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         Command::InspectOrchestrations | Command::ListTickets | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTicketEffects { .. }
+        | Command::InspectTicketSource { .. }
         | Command::ObserveSource { .. } | Command::ObserveCheckRun { .. }
         | Command::QueueDemand { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
@@ -781,6 +798,14 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 3;
             }
+            "--inspect-ticket-source" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--inspect-ticket-source needs a Ticket ID.\n\n{}", help()))?;
+                validate_ticket_id(ticket_id)?;
+                command = Command::InspectTicketSource { ticket_id: ticket_id.clone() };
+                ops += 1;
+                index += 1;
+            }
             "--inspect-ticket-effects" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--inspect-ticket-effects needs a Ticket ID.\n\n{}", help()))?;
@@ -926,7 +951,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-effects <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -971,6 +996,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-ticket-effects <id>
                          List up to 100 native effect receipt keys, payload digests and
                          states; never replay or mark applied; exit.
+  --inspect-ticket-source <id>
+                          Read up to 50 verified linked source receipts without GitHub polling,
+                          task execution or startup recovery; exit.
   --accept-ticket <id> <revision>
                          Accept current worker evidence at the expected Ticket revision; exit.
   --reject-ticket <id> <revision> <reason>
@@ -1094,6 +1122,11 @@ mod tests {
         ] {
             assert!(parsed(invalid).is_err(), "{invalid}");
         }
+        assert_eq!(parsed("--inspect-ticket-source ticket_123"),
+            Ok(Command::InspectTicketSource { ticket_id: "ticket_123".into() }));
+        assert!(parsed("--inspect-ticket-source").is_err());
+        assert!(parsed("--inspect-ticket-source ../unsafe").is_err());
+        assert!(parsed("--inspect-ticket-source ticket_123 --stop-ticket ticket_123").is_err());
         assert_eq!(parsed("--inspect-ticket-effects ticket_123"),
             Ok(Command::InspectTicketEffects { ticket_id: "ticket_123".into() }));
         assert!(parsed("--inspect-ticket-effects").is_err());
@@ -1173,6 +1206,7 @@ mod tests {
             "--inspect-team-readiness",
             "--inspect-ticket",
             "--inspect-ticket-effects",
+            "--inspect-ticket-source",
             "--observe-source",
             "--observe-check-run",
             "--accept-ticket",

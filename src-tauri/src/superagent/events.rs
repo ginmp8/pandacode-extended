@@ -1165,6 +1165,15 @@ fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<Ev
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+/// Read-only source receipt inspection without headless startup recovery.
+pub(crate) fn headless_linked_activity(path: &std::path::Path, ticket_id: &str, limit: i64)
+    -> Result<String>
+{
+    let store = super::open_headless_transition_store(path)?;
+    serde_json::to_string_pretty(&linked_decisions(&store, ticket_id, limit)?)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn superagent_source_thread_activity(
     window: tauri::WebviewWindow, state: State<'_, AppState>,
@@ -2115,6 +2124,15 @@ mod tests {
         let restarted = Store::open(&path).unwrap();
         assert_eq!(linked_decisions(&restarted, "ticket-one", 50).unwrap().len(), 3);
         assert!(linked_decisions(&restarted, "ticket-two", 50).unwrap().is_empty());
+        drop(restarted);
+        let result: serde_json::Value = serde_json::from_str(
+            &headless_linked_activity(&path, "ticket-one", 50).unwrap()
+        ).unwrap();
+        assert_eq!(result.as_array().unwrap().len(), 3);
+        assert!(result.as_array().unwrap().iter().all(|row| row["subjectKey"] == "pull:42"));
+        assert_eq!(headless_linked_activity(&path, "ticket-two", 50).unwrap(), "[]");
+        assert!(headless_linked_activity(&path, "ticket-one", 101).is_err());
+        assert!(headless_linked_activity(&path, "unknown-ticket", 50).is_err());
     }
 
     #[test]

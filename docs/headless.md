@@ -493,3 +493,13 @@ sessions are never selected. A failed stop is logged and retried on a later
 tick while the provider remains active; no Ticket or external-effect receipt is
 replayed or reauthorized. The SQLite-side effect and callback gates apply
 immediately, even before the asynchronous provider handle is terminated.
+
+### Inspect linked GitHub source activity without Desktop
+
+`pandacode serve --inspect-ticket-source <ticket-id>` returns up to 50 native
+verified Observe receipt metadata entries for the Ticket's explicitly linked
+repository/issue or PR thread. The query combines same-Team and same-repository
+source classes without duplicating receipts or exposing another Ticket's
+private objective. It never polls GitHub, issues grants, starts Workers,
+replays effects, approves Council or invokes startup recovery against another
+live serve process. An observed Check Run result is not acceptance evidence.

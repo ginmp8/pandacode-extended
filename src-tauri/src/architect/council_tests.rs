@@ -841,6 +841,36 @@ fn native_s3_uses_fresh_read_only_challengers_and_never_passes_phase_one_alone()
 }
 
 #[test]
+fn s3_rejects_a_fresh_worker_that_reuses_a_phase_one_bot_under_a_different_lens() {
+    let mut config = on(9.0, 3, 0);
+    config.reviewer_bot_ids = vec!["reviewer-a".into(), "reviewer-b".into()];
+    config.strategy = council::CouncilExecutionStrategy::TwoPhase;
+    assert!(config.validate().is_ok());
+    let mut first_a = seat("first-a", 1, Some(9.6), SINCE + 1);
+    first_a.council.as_mut().unwrap().lens = "Security".into();
+    let mut first_b = seat("first-b", 1, Some(9.5), SINCE + 2);
+    first_b.council.as_mut().unwrap().lens = "Architecture".into();
+    let mut second_a = seat("second-a", 2, Some(9.7), SINCE + 3);
+    second_a.council.as_mut().unwrap().lens = "Architecture".into();
+    let mut second_b = seat("second-b", 2, Some(9.8), SINCE + 4);
+    second_b.council.as_mut().unwrap().lens = "Security".into();
+    let mut team = team_with(config, vec![first_a, first_b, second_a, second_b]);
+    for (index, bot_id) in ["reviewer-a", "reviewer-b", "reviewer-a", "reviewer-b"].iter().enumerate() {
+        let worker = &team.workers[index];
+        let mut binding = reviewer_security::ReviewerBinding::native(
+            &team, &worker.id, worker.created_at, &worker.provider,
+            &worker.model, worker.council.as_ref().unwrap(),
+        );
+        binding.reviewer_bot_id = Some((*bot_id).into());
+        team.workers[index].reviewer_binding = Some(binding);
+    }
+    assert_eq!(council::phase_one_selected_bot_ids(&team).len(), 2);
+    assert_ne!(council::status(&team).unwrap().state, "passed",
+        "different worker sessions and swapped lenses cannot disguise the same selected bot author");
+    assert!(finish_refusal(&team).unwrap().contains("S3 two-phase"));
+}
+
+#[test]
 fn seven_native_source_combinations_have_distinct_modes_without_unsafe_child_dispatch() {
     let nested = |id: &str| council::CouncilNestedReviewer {
         bot_id: id.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 3,

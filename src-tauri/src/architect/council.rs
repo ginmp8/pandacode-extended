@@ -1373,6 +1373,16 @@ pub(super) fn phase_one_challenge_handoff(
     )))
 }
 
+/// Every selected-bot author whose report reaches an S3 challenger is excluded
+/// from the challenge phase, even when the second round assigns that bot a
+/// different lens. The phase-one handoff includes all original reports.
+pub(super) fn phase_one_selected_bot_ids(team: &TeamSnapshot) -> std::collections::HashSet<&str> {
+    in_round(team, 1)
+        .filter(|(worker, seat)| counts(worker, seat) && seat.score.is_some())
+        .filter_map(|(worker, _)| worker.reviewer_binding.as_ref()?.reviewer_bot_id.as_deref())
+        .collect()
+}
+
 /// The second S3 phase is a real fresh native Council round, not a verdict
 /// inferred from phase one or a fabricated extra reviewer vote. Its reviewers
 /// must be independent, read-only, settled and bound to the same unchanged
@@ -1387,6 +1397,7 @@ fn two_phase_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view: &Round
         return false;
     }
     let mut reviewer_ids = std::collections::HashSet::new();
+    let challenged_bots = phase_one_selected_bot_ids(team);
     for round in 1..=2 {
         if lowest(team, round).is_none_or(|score| score < config.target)
             || !criterion_blockers(team, config, round).is_empty()
@@ -1401,17 +1412,11 @@ fn two_phase_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view: &Round
             {
                 return false;
             }
-            if round == 2 {
-                let earlier = in_round(team, 1).find(|(_, prior)| same_lens(&prior.lens, &seat.lens));
-                if let Some((original, _)) = earlier {
-                    let original_bot = original.reviewer_binding.as_ref()
-                        .and_then(|binding| binding.reviewer_bot_id.as_deref());
-                    let challenger_bot = worker.reviewer_binding.as_ref()
-                        .and_then(|binding| binding.reviewer_bot_id.as_deref());
-                    if original_bot.is_some() && original_bot == challenger_bot {
-                        return false;
-                    }
-                }
+            if round == 2 && worker.reviewer_binding.as_ref()
+                .and_then(|binding| binding.reviewer_bot_id.as_deref())
+                .is_some_and(|bot_id| challenged_bots.contains(bot_id))
+            {
+                return false;
             }
         }
     }

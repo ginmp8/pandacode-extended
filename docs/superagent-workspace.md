@@ -166,3 +166,26 @@ profile metadata. Successful imports remain **disabled and Off** and do not
 install Skills, change existing bots, issue a grant, or prove provider
 availability/Skill invocation. Native execution capability still requires
 independent task-scoped admission checks.
+
+
+### Immutable admitted Team profiles (schema v46; partial DD-13 / S2)
+
+At the point of each native manual/headless Demand admission, the SQLite
+transaction now captures its Team policy revision and a bounded, configuration-only
+profile for the selected Coordinator, ordered Workers and optional Reviewers:
+existing bot identity, project, provider/harness, model, mode, reasoning effort
+and assigned Skill IDs. It saves the profile atomically with the Ticket, Mandate,
+Assignment and admission audit. The task inspector returns the historical
+`admittedProfile` even when bot defaults subsequently change. Existing pre-v46
+Tickets report no profile rather than fabricated historical values.
+
+A **new worker session** initiated by retry or after a coordinated plan must
+match the captured worker profile. If the bot changes, native admission stops
+without dispatching a more privileged or different model; the operator must
+create a new explicitly authorized Demand. Already admitted sessions retain
+their pinned session profiles, and ordinary chats are unaffected. This snapshot
+is **not** a tool grant, a verified Skill invocation, a working multi-worker
+scheduler, or a substitute for native Council/effect-time authorization.
+
+Rust regressions cover replay, changed bot profile denial, fresh-Demand profiles,
+restart persistence and schema-v45 upgrade preserving historical Tickets.

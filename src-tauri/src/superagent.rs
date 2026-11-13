@@ -646,6 +646,10 @@ pub struct TaskSnapshot {
     pub assignments: Vec<Assignment>,
     pub attempt_insights: Vec<AssignmentInsight>,
     pub activity: Vec<AuditEntry>,
+    /// Historical task-effective bot profiles, not permission or execution proof.
+    /// Legacy Tickets admitted before schema v46 report None.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admitted_profile: Option<roster::AdmittedTeamProfile>,
     /// Snapshot explanation only. Provider admission and native acceptance
     /// always recheck their own authority, revision and effect state.
     pub finalization_gate: String,
@@ -699,6 +703,7 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
         assignments: native_assignments,
         attempt_insights,
         activity: history(store, ticket_id, limit)?,
+        admitted_profile: roster::ticket_profile(store, ticket_id)?,
     };
     tx.commit().map_err(|e| e.to_string())?;
     Ok(result)
@@ -1622,6 +1627,7 @@ fn admit_role_with_staging(
         params![ticket_id,config.id,request_key,objective,config.project_id,worker.id,config.policy_revision,
             if blocked { "blocked" } else { "running" }, assignment_id,now],
     ).map_err(|e| e.to_string())?;
+    roster::capture_ticket_profile(store,&ticket_id,&config,now)?;
     tx.execute(
         "INSERT INTO sa_mandates(ticket_id,actor,authorization_id,policy_revision,project_id,expires_at,created_at)
          VALUES(?1,'local-user',?2,?3,?4,?5,?6)",
@@ -2787,6 +2793,7 @@ fn retry_blocked(
     if !coordinator_plan_current(store, ticket_id, &coordinator.id, &coordinator.project_id)? {
         return Err("Coordinator evidence is stale; a worker retry cannot bypass coordination.".into());
     }
+    roster::require_current_profile(store,ticket_id,"worker",&worker.id)?;
     let (attempts, worker_attempts): (i64,i64) = store.db.query_row(
         "SELECT COALESCE(MAX(attempt),0),COUNT(*) FILTER (WHERE bot_id=?2)
          FROM sa_assignments WHERE ticket_id=?1",
@@ -2866,6 +2873,7 @@ fn prepare_coordinated_worker(
     if !coordinator_plan_current(store, ticket_id, &coordinator.id, &coordinator.project_id)? {
         return Err("Coordinator plan or original workspace is no longer current.".into());
     }
+    roster::require_current_profile(store,ticket_id,"worker",&worker.id)?;
     let plan: Option<String> = store.db.query_row(
         "SELECT a.result FROM sa_assignments a
          JOIN sessions coordinator_session ON coordinator_session.id=a.session_id
@@ -3438,6 +3446,82 @@ mod tests {
             [&ticket.id], |row| row.get::<_, String>(0),
         ).unwrap(), "uncertain");
         assert!(inspect_headless_status(&store.path, Some("unknown-ticket")).is_err());
+    }
+
+    #[test]
+    fn admitted_team_profiles_are_immutable_restart_safe_and_recheck_new_attempts() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        store.db.execute(
+            "UPDATE bots SET skills='[\"reviewer-skill\"]',reasoning_effort='high'
+             WHERE id='worker'",[],
+        ).unwrap();
+        let (ticket,started)=admit(&mut store,&cfg.id,"Private scope","profile-pin",true).unwrap();
+        assert!(!started);
+        let original=ticket_snapshot(&store,&ticket.id,10).unwrap()
+            .admitted_profile.expect("new Tickets must capture profiles");
+        assert_eq!(original.policy_revision,cfg.policy_revision);
+        assert_eq!(original.members.len(),2);
+        assert_eq!(original.members[1].role,"worker");
+        assert_eq!(original.members[1].model,"default");
+        assert_eq!(original.members[1].reasoning_effort,"high");
+        assert_eq!(original.members[1].assigned_skill_ids,vec!["reviewer-skill"]);
+        let audit_before:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",[&ticket.id],
+            |r|r.get(0),
+        ).unwrap();
+        store.db.execute(
+            "UPDATE bots SET provider='claude',model='different',mode='full',
+                reasoning_effort='low',skills='[]' WHERE id='worker'",[],
+        ).unwrap();
+        let replay=admit(&mut store,&cfg.id,"Private scope","profile-pin",true).unwrap();
+        assert_eq!(replay.0.id,ticket.id);
+        assert!(!replay.1);
+        let pinned=ticket_snapshot(&store,&ticket.id,10).unwrap()
+            .admitted_profile.unwrap();
+        assert_eq!(pinned.members,original.members);
+        let denied=retry_blocked(&mut store,&ticket.id,false).unwrap_err();
+        assert!(denied.contains("changed after Demand admission"));
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",[&ticket.id],
+            |r|r.get::<_,i64>(0),
+        ).unwrap(),0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",[&ticket.id],
+            |r|r.get::<_,i64>(0),
+        ).unwrap(),audit_before);
+        let (fresh,_) = admit(&mut store,&cfg.id,"New private scope","fresh-profile",true).unwrap();
+        let new_profile=ticket_snapshot(&store,&fresh.id,10).unwrap()
+            .admitted_profile.unwrap();
+        assert_eq!(new_profile.members[1].model,"different");
+        assert_eq!(new_profile.members[1].assigned_skill_ids,Vec::<String>::new());
+        let path=store.path.clone();
+        drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert_eq!(roster::ticket_profile(&reopened,&ticket.id).unwrap().unwrap().members,
+            original.members);
+        assert_eq!(roster::ticket_profile(&reopened,&fresh.id).unwrap().unwrap().members,
+            new_profile.members);
+    }
+
+    #[test]
+    fn v45_upgrade_preserves_historical_ticket_without_fabricating_profile() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (legacy,_) = admit(&mut store,&cfg.id,"Legacy demand","legacy-profile",true).unwrap();
+        store.db.execute_batch(
+            "DROP TABLE sa_ticket_profiles; PRAGMA user_version=45;",
+        ).unwrap();
+        let path=store.path.clone();
+        drop(store);
+        let mut migrated=Store::open(&path).unwrap();
+        assert_eq!(get_ticket(&migrated,&legacy.id).unwrap().state,"blocked");
+        assert!(ticket_snapshot(&migrated,&legacy.id,10).unwrap().admitted_profile.is_none());
+        let (fresh,_) = admit(&mut migrated,&cfg.id,"New demand","migrated-profile",true).unwrap();
+        assert!(ticket_snapshot(&migrated,&fresh.id,10).unwrap().admitted_profile.is_some());
+        assert_eq!(migrated.db.pragma_query_value(None,"user_version",
+            |r|r.get::<_,i64>(0)).unwrap(),storage::SCHEMA_VERSION);
     }
 
     #[test]

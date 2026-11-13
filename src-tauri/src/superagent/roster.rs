@@ -19,6 +19,16 @@ CREATE TABLE IF NOT EXISTS sa_team_roles(
 );
 CREATE INDEX IF NOT EXISTS sa_team_roles_bot ON sa_team_roles(bot_id);
 "#;
+/// Additive v46 sidecar. Stored profiles are admission evidence only, not
+/// executable grants, verified harness capabilities, or Council decisions.
+pub(crate) const TICKET_PROFILE_SCHEMA:&str=r#"
+CREATE TABLE IF NOT EXISTS sa_ticket_profiles(
+    ticket_id TEXT PRIMARY KEY REFERENCES sa_tickets(id) ON DELETE RESTRICT,
+    policy_revision INTEGER NOT NULL CHECK(policy_revision > 0),
+    profiles_json TEXT NOT NULL CHECK(json_valid(profiles_json)),
+    captured_at INTEGER NOT NULL
+);
+"#;
 const MAX_WORKERS:usize=8;
 const MAX_REVIEWERS:usize=4;
 
@@ -38,6 +48,110 @@ pub struct TeamRoster {
     pub reviewer_bot_ids:Vec<String>,
     pub execution_ready:bool,
 }
+/// A bounded, configuration-only snapshot of actual Team member profiles.
+#[derive(Debug,Clone,Serialize,Deserialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase")]
+pub struct AdmittedMemberProfile {
+    pub role:String,
+    pub position:usize,
+    pub bot_id:String,
+    pub project_id:String,
+    pub provider:String,
+    pub model:String,
+    pub mode:String,
+    pub reasoning_effort:String,
+    pub assigned_skill_ids:Vec<String>,
+}
+#[derive(Debug,Clone,Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct AdmittedTeamProfile {
+    pub policy_revision:i64,
+    pub captured_at:i64,
+    pub members:Vec<AdmittedMemberProfile>,
+}
+
+fn member_profile(bot:&bots::Bot,role:&str,position:usize)->AdmittedMemberProfile {
+    AdmittedMemberProfile {
+        role:role.into(),position,bot_id:bot.id.clone(),
+        project_id:bot.project_id.clone(),provider:bot.provider.clone(),
+        model:bot.model.clone(),mode:bot.mode.clone(),
+        reasoning_effort:bot.reasoning_effort.clone(),
+        assigned_skill_ids:bot.skills.clone(),
+    }
+}
+
+/// Called inside the same native SQLite transaction that creates the Ticket,
+/// Mandate, audit and first Assignment. Capturing must fail atomically.
+pub(super) fn capture_ticket_profile(
+    store:&Store,ticket_id:&str,configuration:&super::Orchestration,at:i64,
+)->Result<()> {
+    let roster=read(store,&configuration.id)?;
+    if roster.policy_revision!=configuration.policy_revision {
+        return Err("Team policy changed during task admission.".into());
+    }
+    let mut profiles=Vec::new();
+    let coordinator=bots::get(store,&roster.coordinator_bot_id)?;
+    profiles.push(member_profile(&coordinator,"coordinator",0));
+    for (position,id) in roster.worker_bot_ids.iter().enumerate() {
+        profiles.push(member_profile(&bots::get(store,id)?,"worker",position));
+    }
+    for (position,id) in roster.reviewer_bot_ids.iter().enumerate() {
+        profiles.push(member_profile(&bots::get(store,id)?,"reviewer",position));
+    }
+    let json=serde_json::to_string(&profiles).map_err(|e|e.to_string())?;
+    if json.len()>64*1024 {
+        return Err("Team profile snapshot exceeds the 64 KiB admission limit.".into());
+    }
+    let inserted=store.db.execute(
+        "INSERT INTO sa_ticket_profiles(ticket_id,policy_revision,profiles_json,captured_at)
+         SELECT ?1,?2,?3,?4 FROM sa_tickets
+         WHERE id=?1 AND orchestration_id=?5 AND policy_revision=?2",
+        params![ticket_id,configuration.policy_revision,json,at,configuration.id],
+    ).map_err(|e|e.to_string())?;
+    if inserted!=1 {
+        return Err("Task profile could not be pinned to the admitted Team revision.".into());
+    }
+    Ok(())
+}
+
+pub(super) fn ticket_profile(store:&Store,ticket_id:&str)->Result<Option<AdmittedTeamProfile>> {
+    use rusqlite::OptionalExtension;
+    let row:Option<(i64,String,i64)>=store.db.query_row(
+        "SELECT policy_revision,profiles_json,captured_at FROM sa_ticket_profiles
+         WHERE ticket_id=?1",
+        [ticket_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+    ).optional().map_err(|e|e.to_string())?;
+    row.map(|(policy_revision,json,captured_at)| {
+        let members=serde_json::from_str::<Vec<AdmittedMemberProfile>>(&json)
+            .map_err(|_|"Invalid persisted task-effective Team profile.".to_owned())?;
+        let ticket_revision:i64=store.db.query_row(
+            "SELECT policy_revision FROM sa_tickets WHERE id=?1",
+            [ticket_id],|r|r.get(0),
+        ).map_err(|e|e.to_string())?;
+        if ticket_revision!=policy_revision || members.len()<2 || members.len()>13 {
+            return Err("Admitted Team profile disagrees with immutable Ticket policy.".into());
+        }
+        Ok(AdmittedTeamProfile{policy_revision,captured_at,members})
+    }).transpose()
+}
+
+/// New provider sessions for this Ticket may not silently adopt later
+/// model/mode/Skill edits. Existing admitted sessions keep their own pinned
+/// configuration, and legacy Tickets without this v46 evidence remain legacy.
+pub(super) fn require_current_profile(
+    store:&Store,ticket_id:&str,role:&str,bot_id:&str,
+)->Result<()> {
+    let Some(snapshot)=ticket_profile(store,ticket_id)? else {return Ok(());};
+    let recorded=snapshot.members.iter()
+        .find(|m|m.role==role && m.bot_id==bot_id)
+        .ok_or("Bot role was not captured in the original Demand.")?;
+    let current=member_profile(&bots::get(store,bot_id)?,role,recorded.position);
+    if *recorded!=current {
+        return Err("Bot provider, model, mode, project or Skills changed after Demand admission; create a newly authorized Demand.".into());
+    }
+    Ok(())
+}
+
 pub(super) fn has_additional_members(store:&Store,id:&str)->Result<bool> {
     let count:i64=store.db.query_row(
         "SELECT COUNT(*) FROM sa_team_roles WHERE orchestration_id=?1",[id],|row|row.get(0),

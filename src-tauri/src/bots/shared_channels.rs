@@ -281,12 +281,6 @@ pub(crate) fn bind_delivery_cycle(store: &Store, session_id: &str, since: i64) -
     Ok(())
 }
 
-/** Recheck frozen per-message authority against current channel members and
- * all message executors on every selected seat, including resumed rounds. */
-pub(crate) fn validate_delivery_reviewers(store: &Store, session_id: &str, selected: &[String]) -> Result<()> {
-    validate_delivery_sources(store, session_id, selected, selected, None)
-}
-
 /// Revalidate the entire frozen Council policy, including nested bot
 /// coordinators, against the originating Shared Channel message. Checking only
 /// direct seats would let a removed nested member keep its task-owned child.

@@ -811,6 +811,18 @@ fn severe_findings(team: &TeamSnapshot, round: usize) -> bool {
         && worker.status == "completed" && seat.score.is_some() && seat.reported_severe_finding)
 }
 
+/// A high-severity claim belongs only to its scored native reviewer report.
+/// Across S2 rounds, later scores cannot erase it without an observed edit.
+fn latest_severe_report(team: &TeamSnapshot, through_round: usize) -> Option<i64> {
+    (1..=through_round)
+        .flat_map(|round| in_round(team, round))
+        .filter(|(worker, seat)| counts(worker, seat)
+            && worker.status == "completed" && seat.score.is_some()
+            && seat.reported_severe_finding)
+        .map(|(worker, _)| worker.updated_at)
+        .max()
+}
+
 /// A required criterion cannot pass by occupying another lens or by an unscored report.
 fn missing_required_criteria(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> Vec<String> {
     config.criteria.iter().filter(|criterion| criterion.required)
@@ -1190,6 +1202,13 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
     if config.strategy != CouncilExecutionStrategy::Escalated || !config.force_escalation {
         return true;
     }
+    // Forced escalation is not an exception to severe-finding correction.
+    // Scored severe rounds cannot count as either of the two clean passes.
+    if latest_severe_report(team, view.latest)
+        .is_some_and(|reported_at| !written_since(team, reported_at))
+    {
+        return false;
+    }
     // Two passing rounds must contain genuinely distinct worker identities. A
     // duplicated persisted worker cannot masquerade as a fresh independent review.
     let mut seen = std::collections::HashSet::new();
@@ -1200,6 +1219,7 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
             || lowest(team, round).is_none_or(|score| score < config.target)
             || !criterion_blockers(team, config, round).is_empty()
             || !unverified_required_skill_checks(team, round).is_empty()
+            || severe_findings(team, round)
         {
             continue;
         }
@@ -1237,14 +1257,9 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
     // A severe scored finding requires an observed correction after that
     // reviewer's report. Fresh seats alone cannot convert an unresolved
     // finding into approval, including after a persisted round is restored.
-    let latest_severe_report = (1..=trigger_round)
-        .flat_map(|round| in_round(team, round))
-        .filter(|(worker, seat)| counts(worker, seat)
-            && worker.status == "completed" && seat.score.is_some()
-            && seat.reported_severe_finding)
-        .map(|(worker, _)| worker.updated_at)
-        .max();
-    if latest_severe_report.is_some_and(|reported_at| !written_since(team, reported_at)) {
+    if latest_severe_report(team, trigger_round)
+        .is_some_and(|reported_at| !written_since(team, reported_at))
+    {
         return false;
     }
     let prior_ids: std::collections::HashSet<&str> = (1..=trigger_round)

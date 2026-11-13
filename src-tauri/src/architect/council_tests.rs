@@ -563,6 +563,40 @@ fn native_user_forced_s2_requires_two_fresh_independent_rounds_before_pass() {
 }
 
 #[test]
+fn forced_s2_cannot_approve_uncorrected_high_severity_or_count_severe_rounds() {
+    let mut config = on(9.0, 4, 2);
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    config.force_escalation = true;
+    let mut severe = seat("original-a", 1, Some(9.8), SINCE + 1);
+    severe.council.as_mut().unwrap().reported_severe_finding = true;
+    let mut team = team_with(config, vec![
+        severe,
+        seat("original-b", 1, Some(9.7), SINCE + 2),
+    ]);
+    // Two subsequent clean rounds do not erase an unresolved severe report.
+    for round in 2..=3 {
+        let mut first = seat(&format!("fresh-a-{round}"), round, Some(9.8),
+            SINCE + (round as i64) * 2 + 1);
+        first.council.as_mut().unwrap().lens = "lens original-a".into();
+        let mut second = seat(&format!("fresh-b-{round}"), round, Some(9.9),
+            SINCE + (round as i64) * 2 + 2);
+        second.council.as_mut().unwrap().lens = "lens original-b".into();
+        team.workers.extend([first, second]);
+    }
+    assert_ne!(council::status(&team).unwrap().state, "passed");
+    assert!(finish_refusal(&team).unwrap().contains("S2 forced escalation"));
+    // An actual revision change after the severe report and before both clean
+    // rounds permits two independent clean passes on that corrected revision.
+    team.changed_at = SINCE + 3;
+    assert_eq!(council::status(&team).unwrap().state, "passed");
+    assert!(finish_refusal(&team).is_none());
+    // A severe finding in the second round is again unresolved; high numeric
+    // scores, even in round three, cannot approve without another correction.
+    team.workers[2].council.as_mut().unwrap().reported_severe_finding = true;
+    assert_ne!(council::status(&team).unwrap().state, "passed");
+}
+
+#[test]
 fn native_s2_score_trigger_requires_a_fresh_independent_review_from_the_enabled_source() {
     let mut config = on(9.0, 4, 2);
     config.strategy = council::CouncilExecutionStrategy::Escalated;

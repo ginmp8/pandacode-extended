@@ -96,6 +96,14 @@ export function createPreviewArchitect(host: PreviewHost) {
         integer(child.childMaxRounds, 1, 100, 'Child Council rounds');
       }
     }
+    // Preview must reject configurations the native task admission rejects;
+    // neither check is evidence that a child Council actually executed.
+    const childAttempts = nested.reduce((sum, child) => sum + child.childReviewers * child.childMaxRounds, 0);
+    if (childAttempts > 256) throw new Error('Nested Council exceeds 256 child reviewer attempts per task.');
+    if (nested.length || extras > 0) {
+      const planned = (selectedCount + extras + childAttempts) * integer(council.maxRounds, 1, 100, 'Council rounds');
+      if (planned > 1024) throw new Error('Composed Council exceeds 1024 planned reviewer attempts across root and child rounds.');
+    }
     // Match native Council: optional skill roles are task-scoped and must survive reloads.
     const optionalSkills = council.optionalSkillIds ?? [];
     if (!Array.isArray(optionalSkills) || optionalSkills.length > 32

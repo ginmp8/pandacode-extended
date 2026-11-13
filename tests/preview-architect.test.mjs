@@ -481,6 +481,26 @@ test('architect preview preserves task-scoped nested Council roles without manuf
   assert.equal(original.config.council.nestedBotReviewers, undefined);
 });
 
+test('preview checks native composed review budgets without weakening legacy Councils', t => {
+  const { api } = fixture(t);
+  api.configure('parent', config());
+  const base = { target: 9, maxRounds: 10, reviewers: 0 };
+  const child = (botId, childMaxRounds, childReviewers = 2) => ({ botId, childReviewers, childTarget: 9, childMaxRounds });
+  assert.throws(() => api.setCouncil('parent', {
+    ...base, nestedBotReviewers: [child('a', 30), child('b', 30)],
+  }), /1024 planned reviewer attempts/);
+  assert.equal(api.setCouncil('parent', {
+    ...base, nestedBotReviewers: [child('a', 20), child('b', 20)],
+  }).councilStatus.state, 'waiting');
+  assert.throws(() => api.setCouncil('parent', {
+    ...base, maxRounds: 3, nestedBotReviewers: [child('a', 17, 8), child('b', 17, 8)],
+  }), /256 child reviewer attempts/);
+  assert.equal(api.setCouncil('parent', {
+    ...base, maxRounds: 3, nestedBotReviewers: [child('a', 16, 8), child('b', 16, 8)],
+  }).councilStatus.state, 'waiting');
+  assert.equal(api.setCouncil('parent', { ...base, maxRounds: 100, reviewers: 8 }).councilStatus.state, 'waiting');
+});
+
 test('architect preview round-trips only admitted native Council strategies without weakening the old default', t => {
   const { api, host } = fixture(t);
   api.configure('parent', config());

@@ -43,6 +43,7 @@ const FIELDS: readonly { key: Field; label: string; options: readonly number[]; 
 /** Wide enough that "10.0" keeps clear of its segment's edge. */
 const PANEL_WIDTH = 300;
 const MAX_CHILD_LEAF_ATTEMPTS = 256; // Native Council pre-dispatch cap, shared by every nested bot in this task.
+const MAX_COMPOSED_REVIEW_ATTEMPTS = 1024; // Native worst-case cap across root and child rounds.
 const BUTTON = '.composer-council-button';
 /** A balance: reviewers weighing the work. Its own glyph, apart from the sidebar's Agent usage. */
 const COUNCIL_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v16M8 20h8M5 7h14M5 7l-3 6.5a3 3 0 0 0 6 0zM19 7l-3 6.5a3 3 0 0 0 6 0z"/></svg>';
@@ -133,6 +134,12 @@ export function createCouncil(host: CouncilHost) {
     if (!Number.isInteger(extras) || extras < 0 || extras > 7 || draft.ids.length < minimum || draft.ids.length > 8
       || draft.ids.length + extras > 8 || new Set(draft.ids).size !== draft.ids.length) {
       throw new Error(extras > 0 ? 'Choose at least one selected bot and at most eight combined Council seats.' : 'Select 2 to 8 distinct reviewer bots.');
+    }
+    if (nestedBotReviewers.length || extras > 0) {
+      const plannedAttempts = (draft.ids.length + extras + childAttempts) * council.maxRounds;
+      if (!Number.isSafeInteger(plannedAttempts) || plannedAttempts > MAX_COMPOSED_REVIEW_ATTEMPTS) {
+        throw new Error(`Composed Council exceeds ${MAX_COMPOSED_REVIEW_ATTEMPTS} planned reviewer attempts across root and child rounds.`);
+      }
     }
     const available = reviewerBots.get(sessionId) ?? [];
     const executor = host.executorBotId?.(sessionId);

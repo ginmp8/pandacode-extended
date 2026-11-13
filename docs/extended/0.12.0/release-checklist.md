@@ -1,5 +1,16 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-13 — post-0.3.123 source-fix checkpoint
+
+- [x] Freeze [source `3026a7af132c`](https://github.com/ginmp8/pandacode/commit/3026a7af132c5b7684be414040a2d4f7158f80e4) and tree `e50b17094d98c5631a819b67dd36d49929615546` (one unreleased commit; app version remains 0.3.123).
+- [x] Inventory all 2,046 source and 2,104 destination paths; preserve 58 Extended-only and 80 customized paths, with zero source paths missing or mode/type differences after the four-file import.
+- [x] Import all four upstream changed files byte/mode-exact, including the original revised `releases/0.3.123.md`.
+- [x] Identify [Push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43369851585) / [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43369858494) failures on destination `d3858b2e4462`: two Node timezone assertions and Windows x64/arm64 Clippy unused constant.
+- [ ] Verify complete Push and PR CI results against the newly published destination SHA; pending and previously failed runs are not passing evidence.
+- [ ] Run native crash recovery and Extended Settings ON/OFF, Connect/MCP/bots/cloud/VM/credentials tests on supported installations; review all 80 customizations semantically.
+- [ ] Obtain independent release authorization before any tagging, distribution or deployment. Extended 0.12.0 is DRAFT.
+
+
 ## 2026-11-13 — PandaCode 0.3.123 candidate checklist
 
 Source [`8001e5b98ed3`](https://github.com/ginmp8/pandacode/commit/8001e5b98ed3be0c6fb207fccfeada726d736e3c), tree `6f5a537dbd1c90ecd3e46132a990f974077774db`, app **0.3.123**. **5 source commits**, **69 changed paths: 54 source-exact and 15 Extended-aware**. Full candidate: **2,046 upstream / 2,104 Extended files; 1,966 shared exact / 80 shared customized / 58 Extended-only; 0 missing and 0 type/mode discrepancies**. Original [upstream 0.3.123 note](https://github.com/ginmp8/pandacode/blob/8001e5b98ed3be0c6fb207fccfeada726d736e3c/releases/0.3.123.md) remains byte-identical. Planned **Extended 0.12.0 is DRAFT**; prior [0.3.122 Push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43363128304) passed, and the final new commit requires its own CI.

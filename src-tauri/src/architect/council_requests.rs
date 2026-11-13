@@ -354,11 +354,10 @@ fn native_task_candidate(
     {
         return Err("council_task_denied: an active root Council cycle is required.".into());
     }
-    // A Channel delivery has its own per-message authority and receipt path.
+    // Any Channel-owned task has a different per-message authority boundary,
+    // even when the original channel delivery did not opt into Council.
     let channel_count: i64 = store.db.query_row(
-        "SELECT COUNT(*) FROM extended_channel_council_deliveries c
-         JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
-         WHERE d.session_id=?1",
+        "SELECT COUNT(*) FROM bot_shared_channel_deliveries WHERE session_id=?1",
         [session_id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
     if channel_count != 0 {

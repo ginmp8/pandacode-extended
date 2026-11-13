@@ -2326,6 +2326,57 @@ fn child_council_revocation_and_project_isolation_fail_closed() {
 
 
 #[test]
+fn native_task_admission_denies_channel_sessions_without_council_opt_in() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    council::set(&state, &sid, Some(on(9.0, 3, 2))).unwrap();
+    start_state(&state, &sid, "Review the exact task", None, None).unwrap();
+    let store = state.store.lock().unwrap();
+    let project = store.session(&sid).unwrap().project_id;
+    let now = storage::now();
+    store.db.execute(
+        "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+         VALUES('channel-review-owner','Channel review owner',?1,'codex','default','plan',?2,?2)",
+        rusqlite::params![project, now],
+    ).unwrap();
+    store.db.execute(
+        "INSERT INTO bot_shared_channels(id,name,created_at,updated_at)
+         VALUES('channel-native-scope','Scoped channel',?1,?1)",
+        [now],
+    ).unwrap();
+    store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+         VALUES('channel-native-message','channel-native-scope','user','Review','in_progress',?1)",
+        [now],
+    ).unwrap();
+    store.db.execute(
+        "INSERT INTO bot_shared_channel_deliveries
+         (id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at)
+         VALUES('channel-native-delivery','channel-native-scope','channel-native-message',
+                'channel-review-owner',?1,'queued',0,?2,?2)",
+        rusqlite::params![sid, now],
+    ).unwrap();
+    // No extended_channel_council_deliveries row: the native task boundary
+    // must still reject this Channel-owned session and create no task receipt.
+    let denied = council_requests::admit_native_task(
+        &store, &sid, &project, "channel-assignment", &"a".repeat(64),
+    ).unwrap_err();
+    assert!(denied.contains("Channel reviews require channel-scoped admission"), "{denied}");
+    let records: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_native_task'",
+        [&sid], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(records, 0, "a rejected Channel task cannot mint native task authority");
+}
+
+#[test]
 fn non_channel_native_task_review_request_is_idempotent_and_requires_real_council_proof() {
     // A task configured while already running has not started a new Council
     // cycle. Use the actual ready -> configured -> started lifecycle.

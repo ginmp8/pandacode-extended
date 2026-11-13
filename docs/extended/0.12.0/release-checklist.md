@@ -1,5 +1,15 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-13 — PandaCode 0.3.122 candidate integration checklist
+
+- [x] Pin authenticated `ginmp8/pandacode:main` at `420a163d3b921fd113e3d9ecc8437410a5ff7c6c` (tree `bdca4b5ba5a32b3e54c7beaf38db8c989889584f`) and destination `6f28006424162b3e650cedbe9bb855d6841a3d94`; inspect full recursive nontruncated inventories.
+- [x] Incorporate all **87** source-changing paths (73 exact; 14 hunk-reconciled), including original `releases/0.3.122.md`, new Alibaba provider Rust module and logo; preserve all 58 Extended-only paths and existing modes.
+- [x] Preserve existing Extended controls, remediated dependencies, and the live **0.12.0 DRAFT** selector while aligning six upstream app-version metadata fields to **0.3.122**.
+- [x] Verify the staged candidate's **2,011 source / 2,069 destination** files, zero missing or type/mode mismatches, **1,931 exact / 80 customized / 58 Extended-only**.
+- [ ] Verify final published commit, single parent, fresh source/destination refs, full-tree readback, and all exact-SHA GitHub Actions CI jobs; earlier green runs do not establish this candidate's status.
+- [ ] Run Node/TS and build/release tests, Rust check/test/Clippy, Expo, npm/RustSec, native speed/provider flows, Settings On/Off and external Connect/MCP/bots/cloud/VM/credentials acceptance; review 80 historical shared divergences independently.
+- [ ] Approve an Extended distribution only through its separate release process; do not tag, publish, deploy or modify the planned distribution version in this import.
+
 ## 2026-11-12 — source 0.3.121 candidate integration checklist
 
 - [x] Authenticate GitHub and pin full source `54df768753607f69f42b0c148a4ef665cb0f45a1`, Git tree `503546c881f2b24230ba4a8616e163739dc39db4`, and prior Extended `bf20fce79523`; compare nontruncated recursive trees and the 25-commit / 28-path delta.

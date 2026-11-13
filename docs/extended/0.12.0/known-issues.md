@@ -1,5 +1,13 @@
 # Extended 0.12.0 — known issues and acceptance gaps
 
+## 2026-11-13 — source 0.3.122 limitations and acceptance gaps
+
+Source [`420a163d3b92`](https://github.com/ginmp8/pandacode/commit/420a163d3b921fd113e3d9ecc8437410a5ff7c6c), Git tree `bdca4b5ba5a32b3e54c7beaf38db8c989889584f`, declares application **0.3.122**. Three upstream commits since `54df76875360` modify **87 paths**: **73 source-exact** imports and **14 reviewed hunk-level Extended-aware reconciliations**. Candidate full-tree inventory: **2,011 upstream files / 2,069 Extended files; 1,931 byte/mode-exact shared, 80 previously customized shared, 58 Extended-only; zero missing upstream or type/mode discrepancies**. The original [upstream 0.3.122 note](https://github.com/ginmp8/pandacode/blob/420a163d3b921fd113e3d9ecc8437410a5ff7c6c/releases/0.3.122.md) is preserved byte-for-byte. The planned distribution version remains **Extended 0.12.0 DRAFT**, not a release.
+
+The source documents Alibaba Token Plan as Singapore-endpoint only, local desktop execution (not cloud machines), absent from the mobile provider list, with a placeholder logo. Claude Code speed changes during a running task apply from its next turn. Git tree/hunk checks do **not** prove runtime parity for all 80 customized shared files or native Settings On/Off, remote, MCP, bot and cloud/VM/credential behavior. Local Node, Rust, Clippy, Expo, installed-app and external integration tests were **not executed** in this environment. Check GitHub Actions against the final published Extended commit; CI pending is not success.
+
+These are upstream-declared restrictions, not newly demonstrated Extended regressions. The 80 historical shared divergences still require functional review, especially connected provider authentication and speed controls alongside Extended settings. Do not infer functional parity or released status from static tree equality.
+
 ## 2026-11-12 — upstream 0.3.121 known limitations and acceptance gaps
 
 New upstream [0.3.121 release note](../../../releases/0.3.121.md), pinned to [`54df76875360`](https://github.com/ginmp8/pandacode/commit/54df768753607f69f42b0c148a4ef665cb0f45a1), documents that a phone's lasting-only-permission rejection appears only **after** the user taps **Approve**; the button is not proactively disabled. This is an **inherited upstream limitation**, not an independently proven Extended regression. ZCode lasting-only approvals, remote full-access gating, bot claim atomicity, schedule remote marks and Workers accessibility received upstream fixes in this candidate.

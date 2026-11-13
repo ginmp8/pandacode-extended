@@ -1,5 +1,11 @@
 # Extended 0.12.0 — dependency and security tracking
 
+## 2026-11-13 — source 0.3.122 version and dependency continuity
+
+Source [`420a163d3b92`](https://github.com/ginmp8/pandacode/commit/420a163d3b921fd113e3d9ecc8437410a5ff7c6c), Git tree `bdca4b5ba5a32b3e54c7beaf38db8c989889584f`, declares application **0.3.122**. Three upstream commits since `54df76875360` modify **87 paths**: **73 source-exact** imports and **14 reviewed hunk-level Extended-aware reconciliations**. Candidate full-tree inventory: **2,011 upstream files / 2,069 Extended files; 1,931 byte/mode-exact shared, 80 previously customized shared, 58 Extended-only; zero missing upstream or type/mode discrepancies**. The original [upstream 0.3.122 note](https://github.com/ginmp8/pandacode/blob/420a163d3b921fd113e3d9ecc8437410a5ff7c6c/releases/0.3.122.md) is preserved byte-for-byte. The planned distribution version remains **Extended 0.12.0 DRAFT**, not a release.
+
+The source advances **only the app version** from 0.3.121 to 0.3.122 in root `package.json`, root and `packages[""]` package-lock versions, `src-tauri/Cargo.toml`, the `pandacode` Cargo.lock package and Tauri config; it does **not** introduce a dependency-version change in this delta. Extended's remediated npm/Cargo dependency versions, overrides, vendor patches and lockfile differences were retained in the four overlapping manifest/lock paths. No new vulnerability, remediation, audit pass or release approval is asserted. Native npm/RustSec and build checks must be evaluated at the final commit SHA.
+
 ## 2026-11-12 — upstream 0.3.121 version and dependency continuity
 
 Source [`54df76875360`](https://github.com/ginmp8/pandacode/commit/54df768753607f69f42b0c148a4ef665cb0f45a1) advances the application's declared version from **0.3.120 to 0.3.121** in the root npm manifest/lock (`version` and `packages[""].version`), Rust package/Cargo lock application entry and Tauri config. The source delta contains **no dependency version updates**; the existing Extended npm/Cargo remediations, overrides and vendor patches are retained rather than replaced by source lockfiles. The original upstream release notes and website release-date entry are incorporated exactly. No new vulnerability, remediation, audit pass or distribution approval is claimed.

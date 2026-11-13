@@ -1359,6 +1359,7 @@ impl Store {
             "antigravity",
             "grok",
             "mimo",
+            "alibaba",
             "pi",
             "deepseek",
             "commandcode",
@@ -1545,6 +1546,7 @@ impl Store {
             "antigravity",
             "grok",
             "mimo",
+            "alibaba",
             "pi",
             "deepseek",
             "commandcode",
@@ -2188,7 +2190,7 @@ fn handoff_from_provider(content: &str) -> Option<String> {
                 | "glm"
                 | "antigravity"
                 | "grok"
-                | "mimo"
+                | "mimo" | "alibaba"
                 | "pi"
                 | "deepseek"
                 | "commandcode" | "cline" | "kilo"
@@ -4297,6 +4299,7 @@ mod tests {
                 "antigravity",
                 "grok",
                 "mimo",
+                "alibaba",
                 "pi",
                 "deepseek",
                 "commandcode",

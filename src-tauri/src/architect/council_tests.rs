@@ -2289,6 +2289,19 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
     save(&store, &mut forged_child).unwrap();
     assert!(child_council::inspect(&store, &started).unwrap_err().contains("child_council_stale"));
     forged_child.generation = 0;
+    forged_child.pending_setup = Some(profiles::TeamSetup {
+        architect: profiles::ModelSelection::from_session(&store.session(&child_id).unwrap()),
+        config: forged_child.config.clone(),
+    });
+    save(&store, &mut forged_child).unwrap();
+    assert!(child_council::inspect(&store, &started).unwrap_err()
+        .contains("child_council_stale"));
+    forged_child.pending_setup = None;
+    forged_child.summary = Some("Private context from a different task".into());
+    save(&store, &mut forged_child).unwrap();
+    assert!(child_council::inspect(&store, &started).unwrap_err()
+        .contains("child_council_stale"));
+    forged_child.summary = None;
     save(&store, &mut forged_child).unwrap();
     assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);
     // A reserved child must not inherit ordinary conversation history, even

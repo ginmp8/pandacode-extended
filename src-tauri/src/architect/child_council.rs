@@ -151,6 +151,10 @@ fn read(store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer) -> Re
     }
     if stored.config != config || stored.status != "blocked" || !stored.workers.is_empty()
         || !stored.objective.is_empty() || stored.council_since != 0
+        // A staged setup, prior summary or briefing can rehydrate unrelated
+        // bot context/permissions even though the child still says "blocked".
+        || stored.pending_setup.is_some() || stored.summary.is_some()
+        || !stored.briefings.is_empty()
         || stored.generation != 0 || stored.pending_turn.is_some()
         || stored.council_accepted.is_some()
         || store.session(&child_session_id)?.mode != "plan"

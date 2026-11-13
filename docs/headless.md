@@ -503,3 +503,13 @@ source classes without duplicating receipts or exposing another Ticket's
 private objective. It never polls GitHub, issues grants, starts Workers,
 replays effects, approves Council or invokes startup recovery against another
 live serve process. An observed Check Run result is not acceptance evidence.
+
+### Explicit Team rename with durable history
+
+A trusted local operator can rename a disabled reusable Team without discarding completed Demands or editing their original admission policy:
+
+```bash
+pandacode serve --rename-orchestration <team-id> <expected-policy-revision> "New Team name"
+```
+
+The native write is a CAS-guarded, revisioned **name-only** update through the same SuperAgent policy handler as the desktop. It does not change Coordinator, Workers, Reviewers, project, task grants, history, provider sessions or external effects. Active/reviewable Tickets, running assignments and pending/uncertain external effects reject the action. The live database is opened without startup recovery, so a concurrent server's unrelated sessions are not interrupted. A repeated command with a stale revision fails closed. This is a local operator action, not a GitHub Auto trigger.

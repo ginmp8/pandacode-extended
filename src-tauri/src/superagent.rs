@@ -1028,6 +1028,30 @@ pub(crate) fn headless_queue_demand(
     })).map_err(|e| e.to_string())
 }
 
+/// Explicit local headless Team rename uses the same desktop CAS and guard
+/// without startup recovery. This never changes bot identities, roles, grants
+/// or the historical Ticket snapshot; an active Team is always rejected.
+pub(crate) fn headless_rename_orchestration(
+    database_path: &std::path::Path, orchestration_id: &str,
+    expected_revision: i64, name: &str,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let existing = configuration(&store, orchestration_id)?;
+    let updated = update_configuration(&store, orchestration_id, expected_revision,
+        &NewOrchestration {
+            name: name.to_owned(),
+            coordinator_bot_id: existing.coordinator_bot_id,
+            worker_bot_id: existing.worker_bot_id,
+        })?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": updated.id,
+        "name": updated.name,
+        "enabled": updated.enabled,
+        "policyRevision": updated.policy_revision,
+        "grantIssued": false,
+    })).map_err(|e| e.to_string())
+}
+
 /// Explicit local CLI acceptance; the native revision guard and audit remain
 /// the same as the desktop action.
 pub(crate) fn headless_accept_ticket(
@@ -4583,6 +4607,57 @@ mod tests {
         let renamed=update_configuration(&store,&cfg.id,cfg.policy_revision,&rename).unwrap();
         assert_eq!(renamed.policy_revision,cfg.policy_revision+1);
         assert_eq!(get_ticket(&store,"review-history").unwrap().state,"completed");
+    }
+
+    #[test]
+    fn headless_rename_reuses_native_history_and_revision_guards_without_provider_launch() {
+        let path=std::env::temp_dir().join(format!("sa-headless-rename-{}.sqlite3",storage::id()));
+        let store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('rename-project','Rename','/tmp/sa-headless-rename')",[],
+        ).unwrap();
+        for id in ["rename-lead","rename-worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'rename-project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let cfg=create_configuration(&store,NewOrchestration {
+            name:"Original".into(),coordinator_bot_id:"rename-lead".into(),
+            worker_bot_id:"rename-worker".into(),
+        }).unwrap();
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_tickets(
+                id,orchestration_id,request_key,objective,actor,source,project_id,
+                worker_bot_id,policy_revision,state,created_at,updated_at
+             ) VALUES(
+                'headless-history',?1,'headless-history-key','Private original objective',
+                'local-user','manual','rename-project','rename-worker',?2,'completed',?3,?3)",
+            params![&cfg.id,cfg.policy_revision,now],
+        ).unwrap();
+        let result=headless_rename_orchestration(&path,&cfg.id,cfg.policy_revision,"Renamed Team").unwrap();
+        let json:serde_json::Value=serde_json::from_str(&result).unwrap();
+        assert_eq!(json["name"],"Renamed Team");
+        assert_eq!(json["policyRevision"],cfg.policy_revision+1);
+        assert_eq!(json["grantIssued"],false);
+        assert!(headless_rename_orchestration(&path,&cfg.id,cfg.policy_revision,"Replay")
+            .is_err());
+        let original:(i64,String)=store.db.query_row(
+            "SELECT policy_revision,objective FROM sa_tickets WHERE id='headless-history'",
+            [],|row|Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        assert_eq!(original,(cfg.policy_revision,"Private original objective".into()));
+        assert_eq!(configuration(&store,&cfg.id).unwrap().name,"Renamed Team");
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_assignments",[],
+            |row|row.get::<_,i64>(0)).unwrap(),0);
+        store.db.execute(
+            "UPDATE sa_tickets SET state='waiting_review' WHERE id='headless-history'",[],
+        ).unwrap();
+        assert!(headless_rename_orchestration(&path,&cfg.id,cfg.policy_revision+1,"Unsafe")
+            .is_err());
+        assert_eq!(configuration(&store,&cfg.id).unwrap().name,"Renamed Team");
     }
 
     #[test]

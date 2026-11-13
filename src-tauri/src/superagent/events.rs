@@ -1100,6 +1100,16 @@ fn authenticated_check_run(
     if prs[0].pointer("/head/sha").and_then(serde_json::Value::as_str) != Some(sha) {
         return Err("Check Run does not match the pull request head SHA.".into());
     }
+    // GitHub's Checks API lists PRs with a matching head, not necessarily
+    // the PR that triggered the check. A matching SHA and number alone do
+    // not establish that a PR belongs to this source's repository.
+    let expected_base_repo = format!("https://api.github.com/repos/{}", selected.repository);
+    if !prs[0].pointer("/base/repo/url")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|url| url.eq_ignore_ascii_case(&expected_base_repo))
+    {
+        return Err("Check Run pull request base repository is missing or mismatched.".into());
+    }
     let number = prs[0].get("number").and_then(serde_json::Value::as_u64)
         .ok_or("Check Run pull request number is unavailable.")?;
     if number == 0 || number > 999_999_999_999 {
@@ -1919,7 +1929,8 @@ mod tests {
             "id": 240, "status": "completed", "conclusion": "success",
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
             "app": {"slug": "trusted-bot"},
-            "pull_requests": [{"number": 42, "head": {"sha": sha}}]
+            "pull_requests": [{"number": 42, "head": {"sha": sha},
+                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo"}}}]
         });
         assert!(observe_authenticated_check_run(&store, &off, 240, &run, "operator").is_err());
         let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
@@ -1961,7 +1972,8 @@ mod tests {
             "id": 701, "status": "completed", "conclusion": "failure",
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
             "app": {"slug": "trusted-bot"},
-            "pull_requests": [{"number": 42, "head": {"sha": sha}}]
+            "pull_requests": [{"number": 42, "head": {"sha": sha},
+                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo"}}}]
         });
         let first = observe_authenticated_check_run(&store, &on, 701, &run, "operator").unwrap();
         assert_eq!(first.decision, "observed_permitted");
@@ -2010,7 +2022,8 @@ mod tests {
             "id": 702, "status": "completed", "conclusion": "success",
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
             "app": {"slug": "trusted-bot"},
-            "pull_requests": [{"number": 42, "head": {"sha": sha}}]
+            "pull_requests": [{"number": 42, "head": {"sha": sha},
+                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo"}}}]
         });
         store.db.execute_batch(
             "CREATE TEMP TRIGGER reject_check_outcome BEFORE INSERT ON sa_check_run_results
@@ -2045,9 +2058,10 @@ mod tests {
             "id": 390, "status": "completed", "conclusion": "failure",
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
             "app": {"slug": "trusted-bot"},
-            "pull_requests": [{"number": 42, "head": {"sha": sha}}]
+            "pull_requests": [{"number": 42, "head": {"sha": sha},
+                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo"}}}]
         });
-        for mutation in 0..9 {
+        for mutation in 0..13 {
             let mut bad = run.clone();
             match mutation {
                 0 => bad["pull_requests"] = serde_json::json!([]),
@@ -2060,13 +2074,28 @@ mod tests {
                 5 => bad["id"] = serde_json::json!(391),
                 6 => bad["pull_requests"][0]["number"] = serde_json::json!(0),
                 7 => bad["completed_at"] = serde_json::json!("2019-01-01T00:00:00Z"),
-                _ => bad["conclusion"] = serde_json::json!(null),
+                8 => bad["conclusion"] = serde_json::json!(null),
+                9 => bad["pull_requests"][0]["base"] = serde_json::Value::Null,
+                10 => bad["pull_requests"][0]["base"]["repo"]["url"] =
+                    serde_json::json!("https://api.github.com/repos/other/repo"),
+                11 => bad["pull_requests"][0]["base"]["repo"]["url"] =
+                    serde_json::json!("https://attacker.example/repos/owner/repo"),
+                _ => bad["pull_requests"][0]["base"]["repo"]["url"] =
+                    serde_json::json!("https://api.github.com/repos/owner/repo/other"),
             }
             assert!(observe_authenticated_check_run(&store, &on, 390, &bad, "operator").is_err(),
                 "invalid Check Run variation {mutation} must be denied");
         }
         assert_eq!(source(&store, &on.id).unwrap().last_sequence, 0);
         assert!(list_decisions(&store, &on.id, 10).unwrap().is_empty());
+        let mut case_variant = run.clone();
+        case_variant["pull_requests"][0]["base"]["repo"]["url"] =
+            serde_json::json!("https://api.github.com/repos/OWNER/REPO");
+        assert_eq!(
+            authenticated_check_run(&on, &case_variant, 390, 1).unwrap().subject_key,
+            "pull:42",
+            "GitHub repository paths are case insensitive"
+        );
         let success = observe_authenticated_check_run(&store, &on, 390, &run, "operator").unwrap();
         assert_eq!(success.decision, "observed_permitted");
         let mut conflicting = run.clone();

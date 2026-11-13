@@ -634,7 +634,7 @@ test('Check Run observation stays Off until enabled and never launches a Demand'
   )).toHaveLength(0);
 });
 
-test('multi-member Team Builder stores native role revisions without launching unapproved work',async({page})=>{
+test('multi-member Team Builder updates settled history safely without launching work',async({page})=>{
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   await page.evaluate(async()=>{
@@ -642,7 +642,7 @@ test('multi-member Team Builder stores native role revisions without launching u
     const host=document.createElement('div');host.id='sa-configured-roster';document.body.appendChild(host);
     const calls:string[]=[];(window as unknown as {saRosterCalls:string[]}).saRosterCalls=calls;
     const config={id:'team',name:'Security-critical Team',coordinatorBotId:'coordinator',
-      workerBotId:'worker',policyRevision:1,enabled:false,ticketCount:0};
+      workerBotId:'worker',policyRevision:1,enabled:false,ticketCount:1};
     let roster={orchestrationId:'team',policyRevision:1,coordinatorBotId:'coordinator',
       workerBotIds:['worker'],reviewerBotIds:[],executionReady:true};
     mountSuperagent(host,async(command,args)=>{
@@ -656,7 +656,7 @@ test('multi-member Team Builder stores native role revisions without launching u
         {id:'review-b',name:'Reviewer B',paused:false},
       ] as never;
       if(command==='superagent_list')return [{...config}] as never;
-      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_tickets')return [{id:'settled-ticket',state:'completed',objective:'Previous completed demand',revision:1}] as never;
       if(command==='superagent_roster')return {...roster} as never;
       if(command==='superagent_roster_update') {
         if(args?.expectedRevision!==config.policyRevision)throw Error('Native policy revision mismatch');
@@ -675,6 +675,7 @@ test('multi-member Team Builder stores native role revisions without launching u
   const form=host.locator('form[data-sa-form="roster"]');
   await form.locator('select[name="additionalWorkers"]').selectOption(['worker-b','worker-c']);
   await form.locator('select[name="reviewers"]').selectOption(['review-a','review-b']);
+  await expect(form.getByRole('button',{name:'Save configured roles'})).toBeEnabled();
   await form.getByRole('button',{name:'Save configured roles'}).click();
   await expect(host.getByText('Multi-member execution is disabled',{exact:false})).toBeVisible();
   await expect(host.getByRole('region',{name:'Configured Team roles'}))

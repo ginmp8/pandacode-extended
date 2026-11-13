@@ -518,9 +518,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               roleOptions(roleRoster.workerBotIds.slice(1)) + '</select></label>' +
               '<label>Optional Council Reviewers (up to 4)<select name="reviewers" multiple size="5">' +
               roleOptions(roleRoster.reviewerBotIds) + '</select></label>' +
-              '<p>A bot may have one role only. Workers must share the primary Worker project. Existing Teams with Tickets cannot be reconfigured.</p>' +
+              '<p>A bot may have one role only. Workers must share the primary Worker project. A disabled Team may change roles after all demands settle; active/reviewable work and unresolved effects block native saves.</p>' +
               '<button class="primary-button" type="submit"' +
-                (chosen.enabled || (chosen.ticketCount??0)>0 ? ' disabled' : '') +
+                (chosen.enabled || tickets.some(ticket => !['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)) ? ' disabled' : '') +
                 '>Save configured roles</button></form>' +
               '<p role="status">' + (roleRoster.executionReady ?
                 'Single-worker manual execution available after explicit enable.' :

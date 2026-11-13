@@ -2292,14 +2292,6 @@ fn update_configuration(store: &Store, id: &str, expected_revision: i64, input: 
     if current.policy_revision != expected_revision || current.enabled {
         return Err("Disable the orchestration and reload its policy revision before editing.".into());
     }
-    let used: bool = store.db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
-        [id], |r| r.get(0),
-    ).map_err(|e| e.to_string())?;
-    if used { return Err("A preset with ticket history cannot be reconfigured; create a new preset.".into()); }
-    if roster::has_additional_members(store,id)? {
-        return Err("Clear additional Team roles before editing primary bot identities.".into());
-    }
     let name = input.name.trim();
     if name.is_empty() || name.len()>120 || name.chars().any(char::is_control)
         || input.coordinator_bot_id == input.worker_bot_id
@@ -2308,20 +2300,48 @@ fn update_configuration(store: &Store, id: &str, expected_revision: i64, input: 
     }
     let coordinator = bots::get(store, &input.coordinator_bot_id)?;
     let worker = bots::get(store, &input.worker_bot_id)?;
-    if coordinator.paused || worker.paused {
-        return Err("Paused bots cannot be selected for a new orchestration policy.".into());
+    let identity_changed = current.coordinator_bot_id != coordinator.id
+        || current.worker_bot_id != worker.id || current.project_id != worker.project_id;
+    if identity_changed {
+        if coordinator.paused || worker.paused {
+            return Err("Paused bots cannot be selected for a new orchestration policy.".into());
+        }
+        if roster::has_additional_members(store,id)? {
+            return Err("Clear additional Team roles before changing primary bot identities.".into());
+        }
+        let used: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
+            [id], |r| r.get(0),
+        ).map_err(|e| e.to_string())?;
+        if used {
+            return Err("Ticket history pins primary bot identities; only a settled Team name may change.".into());
+        }
     }
-    if current.name==name && current.coordinator_bot_id==coordinator.id
-        && current.worker_bot_id==worker.id && current.project_id==worker.project_id
-    { return Ok(current); }
+    if current.name==name && !identity_changed { return Ok(current); }
+
+    // A Team is reusable: after every Ticket has settled, changing its display
+    // name is safe without rebinding old Tickets, roles, Mandates or approvals.
+    // Never rename a Team with active/reviewable work or uncertain effects.
+    // The SQL predicate repeats the checks atomically with the revision CAS.
     let changed = store.db.execute(
         "UPDATE sa_orchestrations SET name=?2,coordinator_bot_id=?3,worker_bot_id=?4,
             project_id=?5,policy_revision=policy_revision+1,updated_at=?6
          WHERE id=?1 AND policy_revision=?7 AND enabled=0
-           AND NOT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
-        params![id,name,coordinator.id,worker.id,worker.project_id,storage::now(),expected_revision],
+           AND NOT EXISTS(
+             SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
+               AND (?8=1
+                 OR t.state NOT IN ('completed','failed','stopped','interrupted','inconclusive')
+                 OR EXISTS(SELECT 1 FROM sa_assignments a
+                           WHERE a.ticket_id=t.id AND a.state='running')
+                 OR EXISTS(SELECT 1 FROM sa_effect_receipts e
+                           WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain')))
+           )",
+        params![id,name,coordinator.id,worker.id,worker.project_id,
+                storage::now(),expected_revision,identity_changed],
     ).map_err(|e| e.to_string())?;
-    if changed!=1 { return Err("Orchestration changed before its policy edit.".into()); }
+    if changed!=1 {
+        return Err("Team policy or unsettled work changed before the edit; reload required.".into());
+    }
     configuration(store,id)
 }
 
@@ -4469,6 +4489,100 @@ mod tests {
         assert_eq!(update_configuration(&store,&config.id,2,&input).unwrap().policy_revision,2);
         delete_configuration(&store,&config.id,2).unwrap();
         assert!(configuration(&store,&config.id).is_err());
+    }
+
+    #[test]
+    fn settled_history_allows_rename_without_rebinding_roles_or_original_ticket_policy() {
+        let store=fixture();
+        let cfg=create_configuration(&store,NewOrchestration {
+            name:"Original Team".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('review-bot','Independent Reviewer','project','codex','default','plan',?1,?1)",
+            [now],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'reviewer',0,'review-bot')",[&cfg.id],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_tickets(
+                id,orchestration_id,request_key,objective,actor,source,project_id,
+                worker_bot_id,policy_revision,state,created_at,updated_at
+             ) VALUES(
+                'settled-history',?1,'settled-history-key','Original immutable objective',
+                'local-user','manual','project','worker',?2,'completed',?3,?3
+             )",
+            params![&cfg.id,cfg.policy_revision,now],
+        ).unwrap();
+        let renamed=update_configuration(&store,&cfg.id,cfg.policy_revision,&NewOrchestration {
+            name:"Reusable Team".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        assert_eq!(renamed.policy_revision,cfg.policy_revision+1);
+        assert!(!renamed.enabled);
+        assert_eq!(roster::read(&store,&cfg.id).unwrap().reviewer_bot_ids,vec!["review-bot"]);
+        let original:(i64,String,String)=store.db.query_row(
+            "SELECT policy_revision,worker_bot_id,objective FROM sa_tickets WHERE id='settled-history'",
+            [],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        ).unwrap();
+        assert_eq!(original,(cfg.policy_revision,"worker".into(),
+            "Original immutable objective".into()));
+        assert!(update_configuration(&store,&cfg.id,cfg.policy_revision,&NewOrchestration {
+            name:"Stale update".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).is_err());
+        assert!(delete_configuration(&store,&cfg.id,renamed.policy_revision).is_err());
+    }
+
+    #[test]
+    fn rename_with_history_denies_unsettled_review_effect_and_primary_identity_change() {
+        let store=fixture();
+        let cfg=create_configuration(&store,NewOrchestration {
+            name:"Pinned Team".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_tickets(
+                id,orchestration_id,request_key,objective,actor,source,project_id,
+                worker_bot_id,policy_revision,state,created_at,updated_at
+             ) VALUES(
+                'review-history',?1,'review-history-key','Pinned evidence',
+                'local-user','manual','project','worker',?2,'waiting_review',?3,?3
+             )",
+            params![&cfg.id,cfg.policy_revision,now],
+        ).unwrap();
+        let rename=NewOrchestration {
+            name:"Renamed after settlement".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        };
+        assert!(update_configuration(&store,&cfg.id,cfg.policy_revision,&rename).is_err());
+        store.db.execute("UPDATE sa_tickets SET state='completed' WHERE id='review-history'",[])
+            .unwrap();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts(
+                ticket_id,effect_key,payload_sha256,state,created_at,updated_at
+             ) VALUES('review-history','pending-reply','fixture-digest','uncertain',?1,?1)",
+            [now],
+        ).unwrap();
+        assert!(update_configuration(&store,&cfg.id,cfg.policy_revision,&rename).is_err());
+        store.db.execute(
+            "UPDATE sa_effect_receipts SET state='applied' WHERE ticket_id='review-history'",[],
+        ).unwrap();
+        let swapped=NewOrchestration {
+            name:"Unauthorized rebind".into(),coordinator_bot_id:"worker".into(),
+            worker_bot_id:"router".into(),
+        };
+        assert!(update_configuration(&store,&cfg.id,cfg.policy_revision,&swapped).unwrap_err()
+            .contains("Ticket history pins"));
+        assert_eq!(configuration(&store,&cfg.id).unwrap().policy_revision,cfg.policy_revision);
+        let renamed=update_configuration(&store,&cfg.id,cfg.policy_revision,&rename).unwrap();
+        assert_eq!(renamed.policy_revision,cfg.policy_revision+1);
+        assert_eq!(get_ticket(&store,"review-history").unwrap().state,"completed");
     }
 
     #[test]

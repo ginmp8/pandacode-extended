@@ -131,3 +131,7 @@ refreshing or switching Teams. This is a **read-only configuration inspection**,
 not an admission, task-effective immutable policy snapshot, provider liveness
 proof, positive permission grant, or completed S2-UX wizard. Multi-role execution
 remains disabled until native scoped role admission is implemented.
+
+### Editing reusable Teams after completed demands
+
+Disabled Teams can rename themselves and change their configured additional Worker/Reviewer roster after all previous Tickets reach terminal states and every external-effect receipt is reconciled. These operations increment the native policy revision and retain every historical Ticket's admitted revision, original Worker, objective, audit and evidence. Primary Coordinator/Worker/project identity changes remain forbidden once a Team has Ticket history; create a separate Team to change those identities. The native SQL guards also reject active/reviewable Tickets, running assignments, pending/uncertain effects and stale revisions at the moment of mutation. The UI enables role editing for settled history, but native validation remains authoritative even if the visible list is incomplete. No such edit starts a Worker or grants access.

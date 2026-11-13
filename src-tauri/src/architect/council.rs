@@ -324,6 +324,10 @@ pub struct CouncilSeat {
     pub round: usize,
     pub lens: String,
     pub score: Option<f64>,
+    /// A critical/high finding claimed by this scored report. Native report provenance
+    /// is checked at settlement; this flag is a conservative trigger, not verified proof.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reported_severe_finding: bool,
     /// The user explicitly closed this incomplete round by changing its reviewer selection.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub closed_by_selection: bool,
@@ -549,6 +553,20 @@ pub(super) fn reported_findings(store: &storage::Store, team: &TeamSnapshot) -> 
         }
     }
     findings
+}
+
+/// A high-severity claim is admitted only from the same native assistant report
+/// that supplied the reviewer's scored completion. It may require further review
+/// but cannot itself serve as independently verified evidence.
+pub(super) fn report_claims_high_severity(store: &storage::Store, session_id: &str, admitted_score: Option<f64>) -> bool {
+    let Some(score) = admitted_score else { return false };
+    let report: Option<String> = store.db.query_row(
+        "SELECT substr(content,-8192) FROM messages WHERE session_id=?1 AND role='assistant' AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND role IN ('user','coordination')) ORDER BY id DESC LIMIT 1",
+        params![session_id], |row| row.get(0),
+    ).optional().ok().flatten();
+    report.is_some_and(|report| parse_score(&report) == Some(score)
+        && parse_reported_findings(&report).iter()
+            .any(|finding| matches!(finding.severity.as_str(), "critical" | "high")))
 }
 
 pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<CouncilInspection> {
@@ -787,6 +805,10 @@ fn scored(team: &TeamSnapshot, round: usize) -> impl Iterator<Item = f64> + '_ {
 }
 fn lowest(team: &TeamSnapshot, round: usize) -> Option<f64> {
     scored(team, round).reduce(f64::min)
+}
+fn severe_findings(team: &TeamSnapshot, round: usize) -> bool {
+    in_round(team, round).any(|(worker, seat)| counts(worker, seat)
+        && worker.status == "completed" && seat.score.is_some() && seat.reported_severe_finding)
 }
 
 /// A required criterion cannot pass by occupying another lens or by an unscored report.
@@ -1043,6 +1065,9 @@ pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: O
     if current && view.complete(latest) && !criterion_blockers(team, config, latest).is_empty() {
         return Err("Required Council criteria need correction or independent native evidence before a fresh round.".into());
     }
+    if current && view.complete(latest) && severe_findings(team, latest) {
+        return Err("Council critical/high findings require an observed artifact correction before a new round.".into());
+    }
     Ok(latest + 1)
 }
 
@@ -1084,7 +1109,7 @@ pub(super) fn seat_for(team: &TeamSnapshot, lens: Option<&str>, replaces: Option
     if round > 1 && !fixed.is_empty() && !fixed.iter().any(|known| same_lens(known, lens)) {
         return Err(format!("Council lenses are fixed by round 1: {}. Use one of them for {lens:?}.", fixed.join(", ")));
     }
-    Ok(Some(CouncilSeat { round, lens: lens.trim().into(), score: None, started_at: 0, closed_by_selection: false }))
+    Ok(Some(CouncilSeat { round, lens: lens.trim().into(), score: None, started_at: 0, closed_by_selection: false, reported_severe_finding: false }))
 }
 
 /// When a new round opens over an incomplete one (changes overtook it), that round's unscored
@@ -1203,6 +1228,7 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
             && seat.score.is_some_and(|score| score < config.target))
             || !criterion_blockers(team, config, round).is_empty()
             || !unverified_required_skill_checks(team, round).is_empty()
+            || severe_findings(team, round)
     });
     let Some(trigger_round) = last_trigger else { return true };
     if view.latest <= trigger_round || !view.complete(view.latest) {
@@ -1248,6 +1274,9 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
     // The limit is the user's brake: no further round can open. The lead finishes once nothing is live
     // and the last round is complete, out of date, or full; a current round it can still fill comes first.
     if view.at_limit(config) && !live(team, round) && (reconfigured(team, round) || view.complete(round) || stale(team, round) || in_round(team, round).count() >= MAX_REVIEWERS) {
+        if severe_findings(team, round) {
+            return Some(("Council critical/high findings remain unresolved at the round limit; only explicit attributed user acceptance can close this exception.".into(), false));
+        }
         if !config.criteria.is_empty()
             && (!view.complete(round) || stale(team, round)
                 || lowest(team, round).is_none_or(|score| score < config.target)
@@ -1285,6 +1314,9 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
         return Some((format!("Council required criteria are not satisfied: {}. Fix and re-review the work with independent evidence. {ESCAPE}", blockers.join("; ")), true));
     }
     let low = lowest(team, round)?;
+    if severe_findings(team, round) {
+        return Some(("Council critical/high findings require an observed correction and fresh independent review before approval.".into(), true));
+    }
     if low >= config.target {
         if !forced_escalation_satisfied(team, config, view) {
             return Some(("S2 forced escalation requires a fresh second native Council round from the same enabled reviewer sources; earlier or stale scores are not approval.".into(), false));
@@ -1339,7 +1371,7 @@ fn status_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Coun
         "asking"
     } else if live(team, round) {
         "reviewing"
-    } else if view.complete(round) && !stale && unverified_required_skill_checks(team, round).is_empty() && criterion_blockers(team, config, round).is_empty() && low.is_some_and(|low| low >= config.target)
+    } else if view.complete(round) && !stale && unverified_required_skill_checks(team, round).is_empty() && criterion_blockers(team, config, round).is_empty() && !severe_findings(team, round) && low.is_some_and(|low| low >= config.target)
         && forced_escalation_satisfied(team, config, view)
         && automatic_escalation_satisfied(team, config, view) {
         "passed"

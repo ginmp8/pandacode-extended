@@ -3583,8 +3583,11 @@ fn completed_with_agents(
                         }
                         worker.summary=store.db.query_row("SELECT substr(content,1,?2+1) FROM messages WHERE session_id=?1 AND role='assistant' AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND role IN ('user','coordination')) ORDER BY id DESC LIMIT 1",params![sid,SUMMARY_PREVIEW as i64],|r|r.get::<_,String>(0)).optional().ok().flatten().map(|s|bounded(&s,SUMMARY_PREVIEW)).unwrap_or_default();
                         let settled_status = worker.status == "completed";
+                        let reported_severe_finding = settled_status && worker.council.is_some()
+                            && council::report_claims_high_severity(&store, sid, score);
                         if let Some(seat) = &mut worker.council {
                             seat.score = score.filter(|_| settled_status);
+                            seat.reported_severe_finding = reported_severe_finding && seat.score.is_some();
                         }
                         if !worker.read_only {
                             worker.wrote_at = storage::now();

@@ -29,6 +29,8 @@ fn native_council_finding_projection_reuses_persisted_report_and_invalidates_aft
     save(&store, &mut team).unwrap();
     let report = "Council findings JSON: [{\"severity\":\"high\",\"category\":\"security\",\"title\":\"Route lacks auth\",\"explanation\":\"Unprotected read endpoint\"},{\"severity\":\"medium\",\"category\":\"tests\",\"title\":\"Missing denial test\",\"explanation\":\"No negative request case\"}]\nCouncil score: 6/10";
     store.message(&review_session.id, "assistant", report).unwrap();
+    assert!(council::report_claims_high_severity(&store, &review_session.id, Some(6.0)));
+    assert!(!council::report_claims_high_severity(&store, &review_session.id, Some(9.9)));
     let first = council_inspection_state(&store, &sid).unwrap().unwrap();
     assert_eq!(first.reported_findings.len(), 2);
     assert!(!first.verified_pass);
@@ -41,6 +43,7 @@ fn native_council_finding_projection_reuses_persisted_report_and_invalidates_aft
     assert_eq!(first.reported_findings[0].id,
         council_inspection_state(&store, &sid).unwrap().unwrap().reported_findings[0].id);
     store.message(&review_session.id, "coordination", "A new review turn started").unwrap();
+    assert!(!council::report_claims_high_severity(&store, &review_session.id, Some(6.0)));
     assert!(council_inspection_state(&store, &sid).unwrap().unwrap().reported_findings.is_empty());
 }
 
@@ -589,6 +592,35 @@ fn native_s2_score_trigger_requires_a_fresh_independent_review_from_the_enabled_
 }
 
 #[test]
+fn native_high_severity_report_blocks_pass_and_triggers_fresh_s2_review() {
+    let mut config = on(9.0, 3, 2);
+    let mut team = team_with(config.clone(), vec![
+        seat("reviewer-a", 1, Some(9.7), SINCE + 1),
+        seat("reviewer-b", 1, Some(9.8), SINCE + 2),
+    ]);
+    team.workers[0].council.as_mut().unwrap().reported_severe_finding = true;
+    assert_ne!(council::status(&team).unwrap().state, "passed");
+    assert!(finish_refusal(&team).unwrap().contains("critical/high"));
+    assert!(council::round_for(&team, &config, None).unwrap_err().contains("critical/high"));
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    team.config.council = Some(config);
+    team.changed_at = SINCE + 3;
+    let mut next_a = seat("fresh-a", 2, Some(9.7), SINCE + 4);
+    next_a.council.as_mut().unwrap().lens = "lens reviewer-a".into();
+    let mut next_b = seat("fresh-b", 2, Some(9.8), SINCE + 5);
+    next_b.council.as_mut().unwrap().lens = "lens reviewer-b".into();
+    team.workers.extend([next_a, next_b]);
+    assert_eq!(council::status(&team).unwrap().state, "passed");
+    assert!(finish_refusal(&team).is_none());
+    let mut replay = team.clone();
+    replay.workers[2].id = "reviewer-a".into();
+    assert_ne!(council::status(&replay).unwrap().state, "passed");
+    assert!(finish_refusal(&replay).unwrap().contains("S2 automatic escalation"));
+    team.workers[2].council.as_mut().unwrap().reported_severe_finding = true;
+    assert_ne!(council::status(&team).unwrap().state, "passed");
+}
+
+#[test]
 fn native_s2_missing_mandatory_skill_evidence_requires_a_fresh_verified_review() {
     let mut config = on(9.0, 4, 2);
     config.strategy = council::CouncilExecutionStrategy::Escalated;
@@ -700,7 +732,7 @@ fn seven_native_source_combinations_have_distinct_modes_without_unsafe_child_dis
             assert_eq!(council::status(&team_with(config.clone(), vec![])).unwrap().state, "blocked");
             assert!(council::reviewer_source_for(
                 &team_with(config.clone(), vec![]),
-                &CouncilSeat { round: 1, lens: "Security".into(), score: None, started_at: 0, closed_by_selection: false },
+                &CouncilSeat { round: 1, lens: "Security".into(), score: None, started_at: 0, closed_by_selection: false, reported_severe_finding: false },
                 None, None,
             ).unwrap_err().contains("child_council_unavailable"));
         } else {
@@ -748,7 +780,7 @@ fn mixed_automatic_and_direct_bot_sources_preserve_legacy_defaults_and_capacity(
     assert_eq!(mixed.needed(), 2);
     assert_eq!(serde_json::to_value(&mixed).unwrap()["automaticReviewers"], 1);
     assert!(council::reviewer_source_for(&team_with(mixed.clone(), vec![]),
-        &CouncilSeat { round: 1, lens: "Security".into(), score: None, started_at: 0, closed_by_selection: false },
+        &CouncilSeat { round: 1, lens: "Security".into(), score: None, started_at: 0, closed_by_selection: false, reported_severe_finding: false },
         None, None).unwrap_err().contains("councilReviewerSource"));
     mixed.automatic_reviewers = 8;
     assert!(mixed.validate().unwrap_err().contains("eight top-level"));
@@ -759,7 +791,7 @@ fn mixed_automatic_and_direct_bot_sources_preserve_legacy_defaults_and_capacity(
     direct_only.reviewer_bot_ids = vec!["security-bot".into()];
     assert!(direct_only.validate().unwrap_err().contains("2 to 8"));
     assert_eq!(council::reviewer_source_for(&team_with(on(9.0, 10, 0), vec![]),
-        &CouncilSeat { round: 1, lens: "Security".into(), score: None, started_at: 0, closed_by_selection: false },
+        &CouncilSeat { round: 1, lens: "Security".into(), score: None, started_at: 0, closed_by_selection: false, reported_severe_finding: false },
         None, Some(council::CouncilReviewerSource::DirectBot)).unwrap_err(),
         "Council reviewer source is not enabled for this task.");
 }
@@ -1012,7 +1044,7 @@ fn selected_council_failover_never_changes_its_frozen_provider_or_permissions() 
     let mut team = load(&store, &sid).unwrap().unwrap();
     team.workers[0].status = "failed".into();
     team.workers[0].council = Some(CouncilSeat {
-        round: 1, lens: "security".into(), score: None, started_at: 1, closed_by_selection: false,
+        round: 1, lens: "security".into(), score: None, started_at: 1, closed_by_selection: false, reported_severe_finding: false,
     });
     let worker = &team.workers[0];
     let mut binding = reviewer_security::ReviewerBinding::native(
@@ -1247,7 +1279,7 @@ fn seat(id: &str, round: usize, score: Option<f64>, created: i64) -> Worker {
     reviewer.read_only = true;
     reviewer.created_at = created;
     reviewer.updated_at = created;
-    reviewer.council = Some(CouncilSeat { round, lens: format!("lens {id}"), score, started_at: created, closed_by_selection: false });
+    reviewer.council = Some(CouncilSeat { round, lens: format!("lens {id}"), score, started_at: created, closed_by_selection: false, reported_severe_finding: false });
     reviewer
 }
 fn writer(id: &str, wrote_at: i64) -> Worker {
@@ -1629,7 +1661,7 @@ fn a_replacement_joins_the_seat_it_replaces_and_keeps_its_lens() {
     let team = saved(&state, &sid);
     let new = team.workers.last().unwrap();
     assert!(new.read_only);
-    assert_eq!(new.council, Some(CouncilSeat { round: 1, lens: "lens b".into(), score: None, started_at: 0, closed_by_selection: false }));
+    assert_eq!(new.council, Some(CouncilSeat { round: 1, lens: "lens b".into(), score: None, started_at: 0, closed_by_selection: false, reported_severe_finding: false }));
     assert!(team.workers[2].abandoned);
 }
 
@@ -2189,6 +2221,19 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
     let store = state.store.lock().unwrap();
     assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);
     let child_id = child_council::inspect(&store, &started).unwrap()[0].child_session_id.clone();
+    // No regular Architect turn or generated approval may be smuggled into a
+    // reserved child while its native leaf dispatcher is still unavailable.
+    let mut forged_child = load(&store, &child_id).unwrap().unwrap();
+    forged_child.objective = "unauthorized child execution".into();
+    save(&store, &mut forged_child).unwrap();
+    assert!(child_council::inspect(&store, &started).unwrap_err().contains("child_council_stale"));
+    forged_child.objective.clear();
+    forged_child.generation = 1;
+    save(&store, &mut forged_child).unwrap();
+    assert!(child_council::inspect(&store, &started).unwrap_err().contains("child_council_stale"));
+    forged_child.generation = 0;
+    save(&store, &mut forged_child).unwrap();
+    assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);
     store.db.execute("UPDATE sessions SET model='altered' WHERE id=?1", [&child_id]).unwrap();
     assert!(child_council::inspect(&store, &started).unwrap_err().contains("child_council_stale"));
     store.db.execute("UPDATE sessions SET model='default' WHERE id=?1", [&child_id]).unwrap();

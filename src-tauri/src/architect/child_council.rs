@@ -128,6 +128,9 @@ fn read(store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer) -> Re
     let stored = super::load(store, &child_session_id)?
         .ok_or("child_council_stale: child Architect state is missing.")?;
     if stored.config != config || stored.status != "blocked" || !stored.workers.is_empty()
+        || !stored.objective.is_empty() || stored.council_since != 0
+        || stored.generation != 0 || stored.pending_turn.is_some()
+        || stored.council_accepted.is_some()
         || store.session(&child_session_id)?.mode != "plan"
     {
         return Err("child_council_stale: child state or permissions have changed.".into());

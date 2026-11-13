@@ -86,7 +86,7 @@ interface SourceDecision {
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
-  let demandTeamFilter = '';
+  let demandTeamFilter = '', demandStateFilter = '';
   let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false;
   let globalDemandLayout: 'board' | 'list' = 'board';
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
@@ -377,7 +377,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       presets.map(item => '<option value="' + safe(item.id) + '"' +
         (demandTeamFilter === item.id ? ' selected' : '') + '>' + safe(item.name) + '</option>').join('') +
       '</select></label>' +
+      '<label class="sa-demand-state-filter">Filter by State<select aria-label="Filter Demands by State" data-sa-demand-state-filter>' +
+      '<option value="">All States</option>' +
+      (['queued','running','waiting_approval','waiting_review','blocked','completed',
+        'failed','stopped','interrupted','inconclusive'] as const)
+        .map(state => '<option value="' + state + '"' +
+          (demandStateFilter === state ? ' selected' : '') + '>' +
+          state.split('_').join(' ') + '</option>').join('') +
+      '</select></label>' +
       '<p>Native Tickets ' + (demandTeamFilter ? 'for this Team' : 'across Teams') +
+      (demandStateFilter ? ' in state ' + safe(demandStateFilter) : '') +
       ', loaded 200 at a time in newest-first order. Board counts cover ' +
       'only loaded pages, not all saved Demands. Open a Demand to act within its Team.</p>' +
       (!allDemandsLoaded ? '<p role="status">Load Demands for the selected Team scope.</p>' :
@@ -715,6 +724,28 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       void work(async () => {
         const loaded = await call<DemandIndex[]>('superagent_all_demands',{
           limit:200, orchestrationId:filter || undefined,
+          stateFilter:demandStateFilter || undefined,
+        });
+        allDemands = loaded; allDemandsHasMore = loaded.length === 200;
+        allDemandsLoaded = true;
+      });
+      return;
+    }
+    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-demand-state-filter')) {
+      if (busy) { target.value = demandStateFilter; return; }
+      const filter = target.value;
+      const allowed = ['queued','running','waiting_approval','waiting_review','blocked',
+        'completed','failed','stopped','interrupted','inconclusive'];
+      if (filter && !allowed.includes(filter)) {
+        target.value = demandStateFilter; return;
+      }
+      demandStateFilter = filter;
+      allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
+      render();
+      void work(async () => {
+        const loaded = await call<DemandIndex[]>('superagent_all_demands',{
+          limit:200, orchestrationId:demandTeamFilter || undefined,
+          stateFilter:filter || undefined,
         });
         allDemands = loaded; allDemandsHasMore = loaded.length === 200;
         allDemandsLoaded = true;
@@ -845,6 +876,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         allDemandsLoaded = false; allDemandsHasMore = false;
         const loaded = await call<DemandIndex[]>('superagent_all_demands',{
           limit:200, orchestrationId:demandTeamFilter || undefined,
+          stateFilter:demandStateFilter || undefined,
         });
         allDemands = loaded;
         allDemandsHasMore = loaded.length === 200;
@@ -859,6 +891,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         const loaded = await call<DemandIndex[]>('superagent_all_demands',{
           limit:200, beforeUpdatedAt:last.updatedAt, beforeId:last.id,
           orchestrationId:demandTeamFilter || undefined,
+          stateFilter:demandStateFilter || undefined,
         });
         const seen = new Set(allDemands.map(item => item.id));
         allDemands = [...allDemands, ...loaded.filter(item => !seen.has(item.id))];

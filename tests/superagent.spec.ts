@@ -97,6 +97,11 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();
+  // Wait for the committed Team and navigation before interacting with the edit form.
+  await expect(dialog.locator('.sa-list .sa-item strong'))
+    .toHaveText('Safe default',{timeout:15_000});
+  await expect(dialog.getByRole('button',{name:'Demands / Runs'}))
+    .toHaveAttribute('aria-current','page');
   await dialog.getByRole('textbox',{name:'Preset title'}).fill('Safely renamed');
   await dialog.getByRole('button',{name:'Save preset'}).click();
   await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Safely renamed');
@@ -814,6 +819,9 @@ test('native Team filter pages independently and resets pagination when changing
       if(command==='superagent_tickets')return [] as never;
       if(command==='superagent_all_demands'){
         queries.push({...args});
+        if(args?.stateFilter==='running')return [] as never;
+        if(args?.stateFilter && args.stateFilter!=='blocked')
+          throw Error('Invalid native Demand state');
         if(args?.orchestrationId==='team-b'){
           if(args?.beforeId==='b-199' && args?.beforeUpdatedAt===1801)
             return [demand('b-200','team-b',1800)] as never;
@@ -844,6 +852,11 @@ test('native Team filter pages independently and resets pagination when changing
   await expect(global).not.toContainText('Task b-200');
   await filter.selectOption('');
   await expect(global).toContainText('2 native Demands loaded.');
+  const state=global.getByRole('combobox',{name:'Filter Demands by State'});
+  await state.selectOption('running');
+  await expect(global).toContainText('0 native Demands loaded.');
+  await state.selectOption('blocked');
+  await expect(global).toContainText('2 native Demands loaded.');
   const queries=await page.evaluate(()=>
     (window as unknown as {saFilteredQueries:Record<string,unknown>[]}).saFilteredQueries);
   expect(queries).toMatchObject([
@@ -851,8 +864,10 @@ test('native Team filter pages independently and resets pagination when changing
     {limit:200,orchestrationId:'team-b',beforeId:'b-199',beforeUpdatedAt:1801},
     {limit:200,orchestrationId:'team-a'},
     {limit:200,orchestrationId:undefined},
+    {limit:200,orchestrationId:undefined,stateFilter:'running'},
+    {limit:200,orchestrationId:undefined,stateFilter:'blocked'},
   ]);
-  expect(queries).toHaveLength(4);
+  expect(queries).toHaveLength(6);
 });
 
 test('manual demand preflight shows native read-only scope and never admits work', async ({page}) => {

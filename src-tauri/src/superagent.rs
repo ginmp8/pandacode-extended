@@ -442,6 +442,24 @@ fn list_all_demands_page(
     store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
     orchestration_id: Option<&str>,
 ) -> Result<Vec<DemandIndex>> {
+    list_all_demands_page_filtered(
+        store, limit, before_updated_at, before_id, orchestration_id, None,
+    )
+}
+
+/// Exact native Ticket-state filtering happens in SQLite before keyset paging.
+/// Unknown values fail closed: provider input is never SQL or execution authority.
+fn list_all_demands_page_filtered(
+    store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
+    orchestration_id: Option<&str>, state_filter: Option<&str>,
+) -> Result<Vec<DemandIndex>> {
+    if let Some(state) = state_filter {
+        if !matches!(state, "queued" | "running" | "waiting_approval" |
+            "waiting_review" | "blocked" | "completed" | "failed" |
+            "stopped" | "interrupted" | "inconclusive") {
+            return Err("Demand state filter must be an exact native Ticket state.".into());
+        }
+    }
     if !(1..=200).contains(&limit) {
         return Err("Demand index page size must be between 1 and 200.".into());
     }
@@ -468,9 +486,10 @@ fn list_all_demands_page(
          WHERE (?2 IS NULL OR t.updated_at < ?2
                 OR (t.updated_at=?2 AND t.id < ?3))
            AND (?4 IS NULL OR t.orchestration_id=?4)
+           AND (?5 IS NULL OR t.state=?5)
          ORDER BY t.updated_at DESC,t.id DESC LIMIT ?1",
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id], |row| Ok(DemandIndex {
+    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id,state_filter], |row| Ok(DemandIndex {
         id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
         state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
     })).map_err(|e| e.to_string())?;
@@ -2286,13 +2305,13 @@ pub async fn superagent_tickets(window: tauri::WebviewWindow,
 pub async fn superagent_all_demands(
     window: tauri::WebviewWindow, state: State<'_, AppState>, limit: Option<i64>,
     before_updated_at: Option<i64>, before_id: Option<String>,
-    orchestration_id: Option<String>,
+    orchestration_id: Option<String>, state_filter: Option<String>,
 ) -> Result<Vec<DemandIndex>> {
     require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    list_all_demands_page(
+    list_all_demands_page_filtered(
         &store, limit.unwrap_or(200), before_updated_at, before_id.as_deref(),
-        orchestration_id.as_deref(),
+        orchestration_id.as_deref(), state_filter.as_deref(),
     )
 }
 
@@ -3128,6 +3147,86 @@ mod tests {
         assert!(!serialized.contains("first-demand"));
         assert!(!serialized.contains("authorizationId"));
         assert!(!serialized.contains("sessionId"));
+    }
+
+    #[test]
+    fn native_state_filter_is_bounded_pre_paginated_team_scoped_and_restart_safe() {
+        let store = fixture();
+        let first = create_configuration(&store, NewOrchestration {
+            name:"State filter".into(), coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        let second = create_configuration(&store, NewOrchestration {
+            name:"Other state".into(), coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        for i in 0..205_i64 {
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Filtered native objective','local-user','manual',
+                        ?4,'worker',?5,'blocked',?6,?6)",
+                params![format!("blocked-{i:03}"),first.id,format!("blocked-key-{i:03}"),
+                    first.project_id,first.policy_revision,1000+i/3],
+            ).unwrap();
+        }
+        for i in 0..3_i64 {
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Other state objective','local-user','manual',
+                        ?4,'worker',?5,'running',?6,?6)",
+                params![format!("running-{i}"),first.id,format!("running-key-{i}"),
+                    first.project_id,first.policy_revision,3000+i],
+            ).unwrap();
+        }
+        store.db.execute(
+            "INSERT INTO sa_tickets
+             (id,orchestration_id,request_key,objective,actor,source,project_id,
+              worker_bot_id,policy_revision,state,created_at,updated_at)
+             VALUES('other-blocked',?1,'other-key','Other team objective',
+                    'local-user','manual',?2,'worker',?3,'blocked',4000,4000)",
+            params![second.id,second.project_id,second.policy_revision],
+        ).unwrap();
+        let first_page = list_all_demands_page_filtered(
+            &store,200,None,None,Some(&first.id),Some("blocked"),
+        ).unwrap();
+        assert_eq!(first_page.len(),200);
+        assert!(first_page.iter().all(|t| t.orchestration_id==first.id
+            && t.state=="blocked"));
+        let boundary=first_page.last().unwrap();
+        let last_page=list_all_demands_page_filtered(
+            &store,200,Some(boundary.updated_at),Some(&boundary.id),
+            Some(&first.id),Some("blocked"),
+        ).unwrap();
+        assert_eq!(last_page.len(),5);
+        let ids:std::collections::HashSet<_>=first_page.iter().chain(last_page.iter())
+            .map(|t|t.id.as_str()).collect();
+        assert_eq!(ids.len(),205);
+        assert_eq!(list_all_demands_page_filtered(
+            &store,200,None,None,Some(&first.id),Some("running"),
+        ).unwrap().len(),3);
+        assert_eq!(list_all_demands_page_filtered(
+            &store,200,None,None,Some(&second.id),Some("blocked"),
+        ).unwrap().len(),1);
+        assert_eq!(list_all_demands_page_filtered(
+            &store,200,None,None,None,Some("blocked"),
+        ).unwrap()[0].orchestration_id,second.id);
+        for invalid in ["all","BLOCKED","blocked' OR 1=1 --","", "running "] {
+            assert!(list_all_demands_page_filtered(
+                &store,200,None,None,Some(&first.id),Some(invalid),
+            ).is_err());
+        }
+        assert!(list_all_demands_page_filtered(
+            &store,200,Some(5),None,Some(&first.id),Some("blocked"),
+        ).is_err());
+        let path=store.path.clone(); drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert_eq!(list_all_demands_page_filtered(
+            &reopened,200,None,None,Some(&first.id),Some("running"),
+        ).unwrap().len(),3);
     }
 
     #[test]

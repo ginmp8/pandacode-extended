@@ -389,7 +389,8 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
 fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import: Option<PathBuf>) {
     match command {
         // Inspection exits before setup_common and must never reach this branch.
-        Command::InspectOrchestrations | Command::ListTickets | Command::ListReviewInbox | Command::ListTeamDemands { .. }
+        Command::InspectOrchestrations | Command::ListTickets | Command::ListReviewInbox
+        | Command::ListRecoveryInbox | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
         | Command::InspectTicketEffects { .. }
@@ -1467,6 +1468,7 @@ mod tests {
             "--inspect-orchestrations",
             "--list-tickets",
             "--list-review-inbox",
+            "--list-recovery-inbox",
             "--inspect-team-readiness",
             "--inspect-team-roster",
             "--inspect-ticket",

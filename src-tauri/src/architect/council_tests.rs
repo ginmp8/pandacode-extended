@@ -604,12 +604,16 @@ fn native_high_severity_report_blocks_pass_and_triggers_fresh_s2_review() {
     assert!(council::round_for(&team, &config, None).unwrap_err().contains("critical/high"));
     config.strategy = council::CouncilExecutionStrategy::Escalated;
     team.config.council = Some(config);
-    team.changed_at = SINCE + 3;
     let mut next_a = seat("fresh-a", 2, Some(9.7), SINCE + 4);
     next_a.council.as_mut().unwrap().lens = "lens reviewer-a".into();
     let mut next_b = seat("fresh-b", 2, Some(9.8), SINCE + 5);
     next_b.council.as_mut().unwrap().lens = "lens reviewer-b".into();
     team.workers.extend([next_a, next_b]);
+    // Two independent new identities must not pass before the actual
+    // high-severity finding has been addressed in the reviewed artifact.
+    assert_ne!(council::status(&team).unwrap().state, "passed");
+    assert!(finish_refusal(&team).unwrap().contains("S2 automatic escalation"));
+    team.changed_at = SINCE + 3;
     assert_eq!(council::status(&team).unwrap().state, "passed");
     assert!(finish_refusal(&team).is_none());
     let mut replay = team.clone();

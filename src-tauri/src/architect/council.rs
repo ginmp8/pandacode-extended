@@ -1234,6 +1234,19 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
     if view.latest <= trigger_round || !view.complete(view.latest) {
         return false;
     }
+    // A severe scored finding requires an observed correction after that
+    // reviewer's report. Fresh seats alone cannot convert an unresolved
+    // finding into approval, including after a persisted round is restored.
+    let latest_severe_report = (1..=trigger_round)
+        .flat_map(|round| in_round(team, round))
+        .filter(|(worker, seat)| counts(worker, seat)
+            && worker.status == "completed" && seat.score.is_some()
+            && seat.reported_severe_finding)
+        .map(|(worker, _)| worker.updated_at)
+        .max();
+    if latest_severe_report.is_some_and(|reported_at| !written_since(team, reported_at)) {
+        return false;
+    }
     let prior_ids: std::collections::HashSet<&str> = (1..=trigger_round)
         .flat_map(|round| in_round(team, round).map(|(worker, _)| worker.id.as_str()))
         .collect();

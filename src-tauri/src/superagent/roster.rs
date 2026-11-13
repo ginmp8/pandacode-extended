@@ -101,6 +101,8 @@ pub struct EffectiveMember {
     pub project_id:String,
     pub paused:bool,
     pub skills:Vec<EffectiveSkill>,
+    /// Local, attributable configuration issues; not an execution capability verdict.
+    pub configuration_issues:Vec<String>,
 }
 #[derive(Debug,Clone,Serialize)]
 #[serde(rename_all="camelCase")]
@@ -124,7 +126,7 @@ fn effective_team(
     let mut members=Vec::new();
     let mut add=|role:&str,position:usize,bot_id:&str|->Result<()> {
         let bot=bots::get(store,bot_id)?;
-        let skills=bot.skills.iter().map(|skill_id| {
+        let skills:Vec<EffectiveSkill>=bot.skills.iter().map(|skill_id| {
             let state=library.get(skill_id);
             EffectiveSkill {
                 id:skill_id.clone(),
@@ -134,10 +136,26 @@ fn effective_team(
                 invocation_evidence:"not_verified".into(),
             }
         }).collect();
+        let mut configuration_issues=Vec::new();
+        if bot.paused {
+            configuration_issues.push("Paused bot: resume it in Bots before admission.".into());
+        }
+        for skill in &skills {
+            if skill.library_status=="missing" {
+                configuration_issues.push(format!(
+                    "Assigned Skill {} is missing: install or unassign it in Skills Manager.",skill.id,
+                ));
+            } else if skill.safety_status=="review_required" {
+                configuration_issues.push(format!(
+                    "Assigned Skill {} has unresolved safety findings: review it in Skills Manager.",
+                    skill.id,
+                ));
+            }
+        }
         members.push(EffectiveMember {
             role:role.into(),position,bot_id:bot.id,name:bot.name,
             provider:bot.provider,model:bot.model,mode:bot.mode,
-            project_id:bot.project_id,paused:bot.paused,skills,
+            project_id:bot.project_id,paused:bot.paused,skills,configuration_issues,
         });
         Ok(())
     };
@@ -313,6 +331,18 @@ mod tests {
         assert_eq!(view.members[1].skills[0].harness_eligibility,"not_verified");
         assert_eq!(view.members[1].skills[0].invocation_evidence,"not_verified");
         assert_eq!(view.members[1].skills[1].library_status,"missing");
+        assert_eq!(view.members[1].configuration_issues.len(),2);
+        assert!(view.members[1].configuration_issues.iter().any(|issue|
+            issue.contains("missing") && issue.contains("Skills Manager")));
+        assert!(view.members[1].configuration_issues.iter().any(|issue|
+            issue.contains("unresolved safety findings")));
+        assert!(view.members[0].configuration_issues.is_empty());
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='reviewer'",[]).unwrap();
+        let paused=effective_team(&store,&cfg.id,&library).unwrap();
+        assert_eq!(paused.policy_revision,roster.policy_revision);
+        assert!(paused.members[3].configuration_issues.iter().any(|issue|
+            issue.contains("Paused bot")));
+        assert!(!paused.grants_issued);
         assert!(!view.execution_ready);
         assert!(!view.grants_issued);
         assert_eq!(store.db.query_row(

@@ -20,7 +20,7 @@ interface EffectiveSkill {
 interface EffectiveMember {
   role:string; position:number; botId:string; name:string;
   provider:string; model:string; mode:string; projectId:string;
-  paused:boolean; skills:EffectiveSkill[];
+  paused:boolean; skills:EffectiveSkill[]; configurationIssues?:string[];
 }
 interface EffectiveTeam {
   orchestrationId:string; policyRevision:number; enabled:boolean;
@@ -512,7 +512,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           ' · Harness ' + safe(member.provider) + ' · Model ' + safe(member.model) +
           ' · Bot mode ' + safe(member.mode) + ' · Project ' + safe(member.projectId) +
           (member.paused ? ' · Paused' : ' · Not paused (live availability unverified)') +
-          '<ul>' + (member.skills.map(skill =>
+          '<section class="sa-member-issues" aria-label="Local configuration checks">' +
+          (member.configurationIssues?.length
+            ? '<p>Native configuration issues:</p><ul>' +
+              member.configurationIssues.map(issue => '<li>' + safe(issue) + '</li>').join('') + '</ul>'
+            : '<p>No local configuration issues detected. Harness/tool eligibility unverified.</p>') +
+          '</section><ul>' + (member.skills.map(skill =>
             '<li>Skill ' + safe(skill.id) + ' · Library ' + safe(skill.libraryStatus) +
             ' · Safety ' + safe(skill.safetyStatus) +
             ' · Harness eligibility ' + safe(skill.harnessEligibility) +

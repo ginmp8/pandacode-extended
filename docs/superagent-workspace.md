@@ -122,7 +122,11 @@ The command inspects the **existing PandaCode Skills Library** and each bot's
 assigned skill IDs without importing, installing, activating, executing or granting
 anything. It reports library presence and native package-scan safety state
 (`clean`, `findings_acknowledged` or `review_required`) separately. Missing
-assigned IDs remain visible. **Harness eligibility and actual invocation/evidence
+assigned IDs remain visible. A native, per-member local configuration check
+reports paused bots, missing assigned Skills and unresolved Skill safety findings
+with actionable remediation in the existing Bots / Skills Manager screens.
+These checks do not infer a live provider capability, do not change any stored
+bot or Team policy, and never grant execution rights. **Harness eligibility and actual invocation/evidence
 are explicitly `not_verified`** until a task-bound provider and evidence contract
 can establish them; a known package is not a verified reviewer skill.
 

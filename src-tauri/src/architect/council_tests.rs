@@ -2739,6 +2739,27 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
     let parent_checkout = store.session(&sid).unwrap().worktree_path;
     store.db.execute("UPDATE sessions SET worktree_path=?2 WHERE id=?1", rusqlite::params![child_id, parent_checkout]).unwrap();
     assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);
+    // A duplicate request can claim the other child's session despite the
+    // UNIQUE session ownership row; it must never gain a second composite seat.
+    let second_key = format!("native-council-child:{}:child-architecture", started.council_since);
+    let original: String = store.db.query_row(
+        "SELECT content FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, second_key], |row| row.get(0),
+    ).unwrap();
+    let mut aliased: serde_json::Value = serde_json::from_str(&original).unwrap();
+    let architecture_session = child_council::inspect(&store, &started).unwrap()[1].child_session_id.clone();
+    aliased["childSessionId"] = json!(child_id);
+    store.db.execute(
+        "UPDATE architect_requests SET worker_id=?3,content=?4 WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, second_key, child_id, aliased.to_string()],
+    ).unwrap();
+    let denied = child_council::inspect(&store, &started).unwrap_err();
+    assert!(denied.contains("claimed by multiple Council seats"), "{denied}");
+    store.db.execute(
+        "UPDATE architect_requests SET worker_id=?3,content=?4 WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, second_key, architecture_session, original],
+    ).unwrap();
+    assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);
     store.db.execute(
         "UPDATE architect_requests SET content='{}'
          WHERE parent_session_id=?1 AND kind='council_child'

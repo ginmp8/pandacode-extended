@@ -146,6 +146,18 @@ fn read(store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer) -> Re
         super::parent_of(store, &child_session_id)?.as_deref() != Some(root.session_id.as_str()) {
         return Err("child_council_stale: native child owner or session changed.".into());
     }
+    // An authenticated child session is exactly one composite parent seat.
+    // architect_workers already guarantees unique session ownership, but the
+    // task-scoped requests table has no UNIQUE(worker_id) constraint. Reject a
+    // forged second child record claiming the same session before any leaf work.
+    let claims: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+        params![root.session_id, child_session_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if claims != 1 {
+        return Err("child_council_stale: child session is claimed by multiple Council seats.".into());
+    }
     let config = child_config(root.config.council.as_ref().ok_or("Council is off.")?, child)?;
     if record != frozen(store, root, child, &child_session_id, &config)? {
         return Err("child_council_stale: child policy, objective or parent cycle changed.".into());

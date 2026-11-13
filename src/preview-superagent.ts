@@ -49,8 +49,11 @@ export async function invokeSuperagent<T>(
     const reviewers=(reviewerBotIds as string[]).map(find);
     const ids=[coordinator.id,...workers.map(bot=>bot.id),...reviewers.map(bot=>bot.id)];
     if(new Set(ids).size!==ids.length)throw Error('A bot can have only one role in a Team.');
-    if(ids.some(id=>find(id).projectId!==workers[0].projectId))
-      throw Error('All Team roles must belong to the same project.');
+    // Match native Team admission: each existing bot retains its own project;
+    // only executor Workers must share the scoped checkout. Independent
+    // coordinator and read-only reviewer bots may own different projects.
+    if(workers.some(bot=>bot.projectId!==workers[0].projectId))
+      throw Error('Executor Workers must share one project scope.');
     return {coordinator,workers,reviewers,workerBotIds:[...workerBotIds] as string[],
       reviewerBotIds:[...reviewerBotIds] as string[]};
   };

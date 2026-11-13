@@ -591,6 +591,85 @@ test.describe('shared bot channels', () => {
     await expect(restoredPanel.locator('[data-bc-reviewer]').first()).toBeChecked();
   });
 
+  test('channel Council report shows the same current-cycle hierarchy and resolved evidence as Workers', async ({ page }) => {
+    await page.addInitScript(() => localStorage.setItem('pandacode.teamClassic', 'false'));
+    await page.goto('/?bots=sample&council=ledger');
+    await expect(page.getByRole('textbox', { name: 'Message your coding agent' })).toBeVisible();
+
+    const directCycleId = await page.evaluate(async () => {
+      const { call } = await import('/src/bridge.ts');
+      const snapshot = await call<any>('architect_get', { sessionId: 'session-1' });
+      if (!snapshot) return null;
+      const { ArchitectView } = await import('/src/architect.ts');
+      const view = new ArchitectView({ setup: () => {}, loadModels: async () => [], updated: () => {}, report: () => {} });
+      document.body.append(view.host);
+      view.setTask(snapshot.sessionId, snapshot, []);
+      view.open(false);
+      return document.querySelector('.architect-panel .council-ledger')?.getAttribute('data-cycle-id') ?? null;
+    });
+    expect(directCycleId).toBeTruthy();
+    const directLedger = page.locator('.architect-panel .council-ledger');
+    await expect(directLedger).toBeVisible();
+    await expect(directLedger).toHaveAttribute('data-cycle-id', directCycleId!);
+    const directHierarchy = directLedger.locator('.council-inspector-hierarchy');
+    const directHierarchyText = await directHierarchy.evaluate(node => node.textContent?.replace(/\s+/g, ' ').trim() ?? '');
+    const directRootFinding = directLedger.locator('.council-ledger-finding').filter({ hasText: 'A current root-cycle issue.' });
+    await expect(directRootFinding).toHaveCount(1);
+
+    const botBar = page.locator('.sidebar-bots-bar');
+    if (await botBar.getAttribute('aria-pressed') !== 'true') await botBar.click();
+    const channelButton = page.getByRole('button', { name: '#launch', exact: true });
+    await expect(channelButton).toBeVisible();
+    await channelButton.click();
+    await expect(page.locator('.conversation-pane.channel-thread .bc-channel')).toBeVisible();
+    const channelMarkup = await page.evaluate(async cycleId => {
+      const { sharedChannelThreadHtml } = await import('/src/bot-shared-channels.ts');
+      return sharedChannelThreadHtml({
+        id: 'sample-launch', name: 'launch', memberIds: [], leadBotId: null,
+        archived: false, updatedAt: 1, activeBotIds: [],
+        messages: [{
+          id: 'report-delivery', kind: 'assigned', authorBotId: null,
+          text: 'Council review completed', status: 'Completed', createdAt: 1,
+          council: {
+            cycleId, sessionId: 'session-1', state: 'Passed',
+            round: 1, target: 9.5, lowest: 9.6, artifactRevision: 'preview-revision-1', reviewers: [],
+          },
+        }],
+      }, []);
+    }, directCycleId!);
+    await page.locator('.conversation-pane.channel-thread .bc-channel').evaluate((node, html) => { node.outerHTML = html; }, channelMarkup);
+    await page.getByRole('button', { name: 'View Council report' }).click();
+
+    const dialog = page.getByRole('dialog', { name: 'Council report' });
+    const report = dialog.locator('.bc-council-report');
+    const reportLedger = report.locator('.council-ledger');
+    await expect(reportLedger).toBeVisible();
+    await expect(reportLedger).toHaveAttribute('data-cycle-id', directCycleId!);
+    await expect(reportLedger).not.toContainText('earlier-cycle finding');
+    const reportHierarchy = reportLedger.locator('.council-inspector-hierarchy');
+    const reportHierarchyText = await reportHierarchy.evaluate(node => node.textContent?.replace(/\s+/g, ' ').trim() ?? '');
+    expect(reportHierarchyText).toBe(directHierarchyText);
+    const rootFinding = reportLedger.locator('.council-ledger-finding').filter({ hasText: 'A current root-cycle issue.' });
+    await rootFinding.getByText('Evidence and accepted exceptions', { exact: true }).click();
+    const evidenceButton = rootFinding.getByRole('button', { name: 'src/main.ts', exact: true }).first();
+    await expect(evidenceButton).toHaveClass(/workspace-file-link/);
+
+    const root = reportHierarchy.locator('[data-level="root-council"]');
+    const bot = root.locator('[data-level="bot"]').filter({ hasText: 'Security' }).first();
+    await bot.locator(':scope > summary').click();
+    const child = bot.locator('[data-level="child-council"]');
+    await child.locator(':scope > summary').click();
+    const round = child.locator('[data-level="round"]').first();
+    await round.locator(':scope > summary').click();
+    const reviewer = round.locator('[data-level="reviewer"]').first();
+    await reviewer.locator(':scope > summary').click();
+    await expect(reviewer.locator(':scope > summary')).toContainText('Score Unknown');
+    await expect(reviewer).toContainText('child reviewer scores are not included in this projection');
+    const reviewerEvidence = reviewer.locator('.council-inspector-evidence');
+    await reviewerEvidence.locator(':scope > summary').click();
+    await expect(reviewerEvidence).toContainText('src/main.ts');
+  });
+
   test('renders isolated reviewer skill provenance with keyboard-readable details', async ({ page }) => {
     await page.goto('/?bots=sample');
     const html = await page.evaluate(async () => {

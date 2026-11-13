@@ -390,16 +390,16 @@ export function createCouncil(host: CouncilHost) {
   }
   function compositionNodeSelector(node: HTMLElement): string | null {
     if (node.matches('.council-composition-body')) return '.council-composition-body';
-    const criterionId = node.closest<HTMLElement>('.council-criterion')?.dataset.criterionId;
+    const criterionIndex = node.closest<HTMLElement>('.council-criterion')?.dataset.criterionIndex;
     const attribute = [...node.attributes].find(item => item.name.startsWith('data-composition-')
       && item.name !== 'data-composition-field' && item.name !== 'data-composition-field-error')
       ?? [...node.attributes].find(item => ['data-add-criterion', 'data-remove-criterion', 'data-plan-preview-summary', 'data-plan-preview-details'].includes(item.name));
     if (!attribute) {
-      return node.matches('.council-criterion') && criterionId
-        ? `.council-criterion[data-criterion-id="${CSS.escape(criterionId)}"]` : null;
+      return node.matches('.council-criterion') && criterionIndex !== undefined
+        ? `.council-criterion[data-criterion-index="${CSS.escape(criterionIndex)}"]` : null;
     }
     const value = `[${attribute.name}="${CSS.escape(attribute.value)}"]`;
-    if (criterionId && attribute.name === 'data-composition-criterion') return `.council-criterion[data-criterion-id="${CSS.escape(criterionId)}"] ${value}`;
+    if (criterionIndex !== undefined && attribute.name === 'data-composition-criterion') return `.council-criterion[data-criterion-index="${CSS.escape(criterionIndex)}"] ${value}`;
     const botId = node.dataset.botId;
     if (botId && attribute.name === 'data-composition-nested') return `[data-bot-id="${CSS.escape(botId)}"]${value}`;
     return value;
@@ -495,7 +495,7 @@ export function createCouncil(host: CouncilHost) {
     const shownCriteria = draft.criteria.map((item, index) => ({ item, index })).filter(({ item }) => draft.criteriaSource === 'hybrid' || item.source === criterionSourceFor(draft.criteriaSource));
     const criteriaMarkup = shownCriteria.map(({ item, index }) => {
       const path = (field: string) => `criteria.${index}.${field}`;
-      return `<fieldset class="council-criterion" data-criterion-id="${escape(item.id)}"><legend>${escape(item.lens || item.id || 'Criterion')}</legend><label data-composition-field="${path('id')}">ID<input type="text" data-composition-criterion="id" maxlength="80" value="${escape(item.id)}">${fieldErrorMarkup(path('id'))}</label><label data-composition-field="${path('lens')}">Lens<input type="text" data-composition-criterion="lens" maxlength="80" value="${escape(item.lens)}">${fieldErrorMarkup(path('lens'))}</label><label data-composition-field="${path('description')}">Description<textarea data-composition-criterion="description" maxlength="4096" rows="2">${escape(item.description)}</textarea>${fieldErrorMarkup(path('description'))}</label><label data-composition-field="${path('target')}">Target<input type="number" data-composition-criterion="target" min="1" max="10" step="0.1" value="${item.target}">${fieldErrorMarkup(path('target'))}</label><label><input type="checkbox" data-composition-criterion="required" ${item.required ? 'checked' : ''}> Required</label><label><input type="checkbox" data-composition-criterion="evidenceRequired" ${item.evidenceRequired ? 'checked' : ''}> Evidence required</label><button type="button" class="ds-btn council-remove-criterion" data-remove-criterion="${escape(item.id)}">Remove criterion</button></fieldset>`;
+      return `<fieldset class="council-criterion" data-criterion-index="${index}"><legend>${escape(item.lens || item.id || 'Criterion')}</legend><label data-composition-field="${path('id')}">ID<input type="text" data-composition-criterion="id" maxlength="80" value="${escape(item.id)}">${fieldErrorMarkup(path('id'))}</label><label data-composition-field="${path('lens')}">Lens<input type="text" data-composition-criterion="lens" maxlength="80" value="${escape(item.lens)}">${fieldErrorMarkup(path('lens'))}</label><label data-composition-field="${path('description')}">Description<textarea data-composition-criterion="description" maxlength="4096" rows="2">${escape(item.description)}</textarea>${fieldErrorMarkup(path('description'))}</label><label data-composition-field="${path('target')}">Target<input type="number" data-composition-criterion="target" min="1" max="10" step="0.1" value="${item.target}">${fieldErrorMarkup(path('target'))}</label><label><input type="checkbox" data-composition-criterion="required" ${item.required ? 'checked' : ''}> Required</label><label><input type="checkbox" data-composition-criterion="evidenceRequired" ${item.evidenceRequired ? 'checked' : ''}> Evidence required</label><button type="button" class="ds-btn council-remove-criterion" data-remove-criterion-index="${index}">Remove criterion</button></fieldset>`;
     }).join('');
     const errors = compositionErrors(sessionId);
     const strategyOptions: readonly [CouncilStrategy, string][] = [['parallel','Parallel'], ['escalated','Escalated'], ['two_phase','Two phase']];
@@ -540,8 +540,8 @@ export function createCouncil(host: CouncilHost) {
       return true;
     }
     if (control.hasAttribute('data-composition-criterion')) {
-      const field = control.dataset.compositionCriterion!, criterionId = control.closest<HTMLElement>('.council-criterion')?.dataset.criterionId;
-      const criterion = state.value.criteria.find(item => item.id === criterionId);
+      const field = control.dataset.compositionCriterion!, criterionIndex = Number(control.closest<HTMLElement>('.council-criterion')?.dataset.criterionIndex);
+      const criterion = Number.isInteger(criterionIndex) ? state.value.criteria[criterionIndex] : undefined;
       if (!criterion) return true;
       const raw = field === 'required' || field === 'evidenceRequired' ? (control as HTMLInputElement).checked : input.value;
       (criterion as unknown as Record<string, unknown>)[field] = field === 'target' ? Number(raw) : raw;
@@ -941,14 +941,15 @@ export function createCouncil(host: CouncilHost) {
         const slot = panel?.querySelector<HTMLElement>('.council-composition-slot'); if (slot) replaceCompositionSlot(slot, sessionId);
         return;
       }
-      const remove = target.closest<HTMLButtonElement>('[data-remove-criterion]');
+      const remove = target.closest<HTMLButtonElement>('[data-remove-criterion-index]');
       if (remove) {
         const slot = panel?.querySelector<HTMLElement>('.council-composition-slot');
-        const removeButtons = slot ? [...slot.querySelectorAll<HTMLButtonElement>('[data-remove-criterion]')] : [];
+        const removeButtons = slot ? [...slot.querySelectorAll<HTMLButtonElement>('[data-remove-criterion-index]')] : [];
         const removedIndex = removeButtons.indexOf(remove);
         const fallback = removeButtons[removedIndex + 1] ?? removeButtons[removedIndex - 1] ?? slot?.querySelector<HTMLElement>('[data-add-criterion="user"]');
         const fallbackSelector = fallback ? compositionNodeSelector(fallback) : null;
-        const state = compositionState(sessionId); state.value.criteria = state.value.criteria.filter(item => item.id !== remove.dataset.removeCriterion);
+        const state = compositionState(sessionId), removeIndex = Number(remove.dataset.removeCriterionIndex);
+        if (Number.isInteger(removeIndex) && removeIndex >= 0 && removeIndex < state.value.criteria.length) state.value.criteria.splice(removeIndex, 1);
         if (slot) replaceCompositionSlot(slot, sessionId, fallbackSelector);
         return;
       }
@@ -1154,16 +1155,26 @@ export function councilSummaryHtml(native: TeamSnapshot): string {
   const hasProjection = Boolean(team.councilFindings || team.councilFindingDispositions || team.councilChildReceipts || team.councilReviewReceipts || team.councilUsage);
   if (!progress.rounds.length && !progress.council.composition && !hasProjection) return '';
   const { text, score } = stateLine(progress, team);
-  const ledger = councilLedgerForCurrentCycle(team);
   const composition = progress.council.composition;
   const compositionSummary = composition
     ? `Schema v${composition.schemaVersion} · ${councilCompositionMode(composition) ?? 'Unavailable'} · ${composition.strategy.replaceAll('_', ' ')} strategy · ${composition.criteriaSource} criteria`
     : '';
-  const ledgerHtml = composition || hasProjection
-    ? councilReadOnlyPresenterHtml({ ...ledger, progress, workers: team.workers, status: team.councilStatus,
-      ...(!composition && !hasProjection ? { unavailableMessage: 'This legacy Council configuration does not produce composition findings, receipts or usage.' } : {}) })
-    : '';
+  const ledgerHtml = councilLedgerHtmlForTeam(team);
   return `<section class="council-summary" data-session-id="${escape(team.sessionId)}" aria-label="Council"><p class="council-summary-state"><span>${escape(text)}</span><span class="council-strip-score">${score}</span></p>${compositionSummary ? `<small class="council-summary-composition">${escape(compositionSummary)}</small>` : ''}<div class="council-rows">${rowsHtml(progress, team)}</div>${ledgerHtml}</section>`;
+}
+
+/** The current-cycle read-only ledger shared by Workers and Shared Channel report drilldowns. */
+export function councilLedgerHtmlForTeam(native: TeamSnapshot): string {
+  const team = shownTeam(native), progress = councilProgress(team);
+  const hasProjection = Boolean(team.councilFindings || team.councilFindingDispositions || team.councilChildReceipts || team.councilReviewReceipts || team.councilUsage);
+  const composition = progress?.council.composition;
+  return councilReadOnlyPresenterHtml({
+    ...councilLedgerForCurrentCycle(team),
+    ...(progress ? { progress } : {}),
+    workers: team.workers,
+    status: team.councilStatus,
+    ...(!composition && !hasProjection ? { unavailableMessage: 'This legacy Council configuration does not produce composition findings, receipts or usage.' } : {}),
+  });
 }
 /** The composer's strip: shown while Council is on and the cycle has a round or is asking, until a settled strip is
  *  dismissed. One line (glyph, state, lowest / target, disclosure), the reviewers when expanded, and what to do next. */

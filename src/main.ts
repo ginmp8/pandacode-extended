@@ -104,7 +104,7 @@ import { createAgentInput, type AgentInput } from './agent-input';
 import { mountSlashCommands, type SlashCommand } from './slash-commands';
 import { mountFileMentions, type MentionEntry } from './file-mentions';
 import { createFileTabs } from './file-tabs';
-import { bindFileLinkContext, configureFileLinks, isPreviewableFile, refreshFileLinks, type FileLinkContext, type ResolvedFile } from './file-links';
+import { bindFileLinkContext, configureFileLinks, decorateFileLinks, isPreviewableFile, refreshFileLinks, type FileLinkContext, type ResolvedFile } from './file-links';
 import { createWorktrees } from './worktrees';
 import { createGithub, githubEnabled } from './github';
 import { mountUpdatePill, startAppUpdates } from './app-updates';
@@ -6896,7 +6896,16 @@ function closeSharedChannel(): void {
   render(); renderInspector(); renderBots();
 }
 function sharedChannelUi(): SharedChannelUiOptions {
-  return { call, bots: sidebarBots, modal, closeModal, changed: () => reloadBotProjects(false), openChannel: activateSharedChannel, notify };
+  return {
+    call, bots: sidebarBots, modal, closeModal, changed: () => reloadBotProjects(false), openChannel: activateSharedChannel, notify,
+    loadCouncilSnapshot: loadTeam,
+    bindCouncilEvidence: (host, sessionId) => {
+      const task = state.sessions.find(item => item.id === sessionId);
+      if (!task) return;
+      bindFileLinkContext(host, { projectId: task.projectId, sessionId });
+      decorateFileLinks(host, host);
+    },
+  };
 }
 async function createSharedChannel(): Promise<void> {
   const { openCreateChannel } = await import('./bot-shared-channels');
@@ -7192,8 +7201,8 @@ async function action(name: string, element: HTMLElement): Promise<void> {
       if (!taskId) break;
       if (!state.sessions.some(task => task.id === taskId)) await reloadSessions();
       if (!state.sessions.some(task => task.id === taskId)) { notify('This Council delivery report is unavailable.'); break; }
-      await selectSession(taskId);
-      if (state.sessionId === taskId) (await ensureArchitectView()).open();
+      const { openSharedChannelCouncilReport } = await import('./bot-shared-channels');
+      await openSharedChannelCouncilReport(taskId, sharedChannelUi());
       break;
     }
     case 'bot-settings': if (element.dataset.bot) await showBotSettings(element.dataset.bot, element.dataset.tab as import('./bots').Section | undefined); break;

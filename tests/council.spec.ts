@@ -93,6 +93,26 @@ test('schema v1 derives all seven modes and keeps each bot branch draft when mod
   ]));
 });
 
+test('criterion IDs keep sequential keystrokes in the applied composition', async ({ page }) => {
+  await open(page, '/?council=composition');
+  await button(page).click();
+  const editor = panel(page).locator('.council-composition-editor');
+  await editor.locator('[data-composition-criteria-source]').selectOption('user');
+  await editor.getByRole('button', { name: 'Add user criterion' }).click();
+  const idField = editor.locator('[data-composition-criterion="id"]').first();
+  await expect(idField).toBeVisible();
+  const initialId = await idField.inputValue();
+  await idField.focus();
+  await page.keyboard.press('End');
+  await idField.pressSequentially('-typed');
+  const finalId = initialId + '-typed';
+  await expect(idField).toHaveValue(finalId);
+  await editor.getByRole('button', { name: 'Apply composition' }).click();
+  await expect.poll(async () => (await calls(page)).length).toBeGreaterThan(0);
+  const applied = (await calls(page)).at(-1);
+  expect(applied.composition.criteria).toEqual(expect.arrayContaining([expect.objectContaining({ id: finalId })]));
+});
+
 test('an empty reviewer composition is unavailable and keyboard edits keep focus, selection, scroll and wrap Tab', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 760 });
   await open(page, '/?council=composition');
@@ -339,6 +359,15 @@ test('legacy Council and hosts without projection fields explain why no ledger a
   await page.evaluate(markups => markups.forEach((markup, index) => { const host = document.createElement('section'); host.id = `council-unavailable-${index}`; host.innerHTML = markup; document.body.append(host); }), messages);
   await expect(page.locator('#council-unavailable-0')).toContainText('legacy Council configuration does not produce');
   await expect(page.locator('#council-unavailable-1')).toContainText('host snapshot does not include');
+});
+
+test('legacy Council without composition or projection shows its unavailable state in Workers', async ({ page }) => {
+  await open(page, '/?council=legacy');
+  await page.locator('#agents-toggle').click();
+  const summary = page.locator('.architect-panel .council-summary');
+  await expect(summary).toBeVisible();
+  await expect(summary.locator('.council-ledger')).toBeVisible();
+  await expect(summary.locator('.council-ledger-unavailable')).toHaveText('This legacy Council configuration does not produce composition findings, receipts or usage.');
 });
 
 test('selected configured bots are task-scoped, attributed by ID, and automatic reviewers remain the default', async ({ page }) => {

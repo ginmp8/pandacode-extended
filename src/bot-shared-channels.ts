@@ -2,8 +2,9 @@ import type { Bot } from './bots';
 import { botAvatarHtml } from './bot-avatars';
 import { escape, icon } from './dom';
 import { WORKING_LABELS } from './bot-thread';
-import type { CouncilComposition, CouncilCriteriaSource, CouncilReviewerMode, CouncilStrategy } from './architect-types';
+import type { CouncilComposition, CouncilCriteriaSource, CouncilReviewerMode, CouncilStrategy, TeamSnapshot } from './architect-types';
 import { councilCompositionValidationIssues } from './council';
+import { councilLedgerHtmlForTeam } from './council-panel';
 
 export interface SharedChannelSummary {
   id: string;
@@ -60,6 +61,8 @@ export interface SharedChannelUiOptions {
   changed(): Promise<void>;
   openChannel(channelId: string): void;
   notify(text: string): void;
+  loadCouncilSnapshot?: (sessionId: string) => Promise<TeamSnapshot | null>;
+  bindCouncilEvidence?: (host: HTMLElement, sessionId: string) => void;
 }
 
 const channelName = (name: string) => `#${name.replace(/^#+/, '')}`;
@@ -753,6 +756,25 @@ async function editChannel(options: SharedChannelUiOptions, channel: SharedChann
 
 export async function openSharedChannel(channelId: string, options: SharedChannelUiOptions): Promise<void> {
   options.openChannel(channelId);
+}
+
+/** Use the same current-cycle ledger presenter as the Workers inspector, with no editable controls. */
+export function sharedChannelCouncilReportHtml(team: TeamSnapshot): string {
+  const status = team.councilStatus;
+  const score = status?.lowest == null ? 'lowest score Unknown' : `lowest score ${status.lowest.toFixed(1)} / ${status.target.toFixed(1)}`;
+  return `<section class="bc-council-report" data-session-id="${escape(team.sessionId)}" aria-label="Council report"><p class="bc-council-report-state"><strong>Council: ${escape(status?.state ?? 'Unknown')}</strong> · ${score}</p>${councilLedgerHtmlForTeam(team)}</section>`;
+}
+
+/** Open the report from a channel without leaving its current conversation route. */
+export async function openSharedChannelCouncilReport(sessionId: string, options: SharedChannelUiOptions): Promise<void> {
+  if (!options.loadCouncilSnapshot) { options.notify('This Council delivery report is unavailable.'); return; }
+  let team: TeamSnapshot | null;
+  try { team = await options.loadCouncilSnapshot(sessionId); }
+  catch { options.notify('This Council delivery report is unavailable.'); return; }
+  if (!team || team.sessionId !== sessionId) { options.notify('This Council delivery report is unavailable.'); return; }
+  const dialog = options.modal('Council report', sharedChannelCouncilReportHtml(team), 'bot-shared-dialog');
+  const report = dialog.querySelector<HTMLElement>('.bc-council-report');
+  if (report) options.bindCouncilEvidence?.(report, sessionId);
 }
 
 export async function openSharedChannelSettings(channelId: string, options: SharedChannelUiOptions): Promise<void> {

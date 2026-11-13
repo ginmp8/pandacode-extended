@@ -7,12 +7,12 @@ type Call = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 interface Bot { id: string; name: string; paused: boolean }
 interface Config {
   id: string; name: string; coordinatorBotId: string; workerBotId: string;
-  enabled: boolean; policyRevision: number;
+  enabled: boolean; policyRevision: number; councilRequired?:boolean;
   ticketCount?: number; runningCount?: number; blockedCount?: number; lastActivityAt?: number;
   workerCount?: number; reviewerCount?: number;
 }
 interface TeamRoster { orchestrationId:string; policyRevision:number; coordinatorBotId:string;
-  workerBotIds:string[]; reviewerBotIds:string[]; executionReady:boolean }
+  workerBotIds:string[]; reviewerBotIds:string[]; councilRequired?:boolean; executionReady:boolean }
 interface EffectiveSkill {
   id:string; libraryStatus:string; safetyStatus:string;
   harnessEligibility:string; invocationEvidence:string;
@@ -641,16 +641,22 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             ' · Primary Worker: ' + safe(botName(roleRoster.workerBotIds[0])) +
             ' · Policy revision ' + roleRoster.policyRevision + '</p>' +
             '<form data-sa-form="roster">' +
-              '<label>Additional Workers (up to 7)<select name="additionalWorkers" multiple size="5">' +
+              '<label>Additional Workers (up to 15)<select name="additionalWorkers" multiple size="5">' +
               roleOptions(roleRoster.workerBotIds.slice(1)) + '</select></label>' +
-              '<label>Optional Council Reviewers (up to 4)<select name="reviewers" multiple size="5">' +
+              '<label>Optional Council Reviewers (up to 8)<select name="reviewers" multiple size="5">' +
               roleOptions(roleRoster.reviewerBotIds) + '</select></label>' +
+              '<label><input type="checkbox" name="councilRequired"' +
+              (roleRoster.councilRequired ? ' checked' : '') +
+              '> Require independent native Council review before completion</label>' +
+              '<p>Enabling required Council needs at least two eligible reviewer bots. Each native Ticket freezes its policy and reviewers.</p>' +
               '<p>A bot may have one role only. Workers must share the primary Worker project. A disabled Team may change roles after all demands settle; active/reviewable work and unresolved effects block native saves.</p>' +
               '<button class="primary-button" type="submit"' +
                 (chosen.enabled || tickets.some(ticket => !['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)) ? ' disabled' : '') +
                 '>Save configured roles</button></form>' +
               '<p role="status">' + (roleRoster.executionReady ?
-                'Single-worker manual execution available after explicit enable.' :
+                (roleRoster.councilRequired ?
+                'Single-worker manual execution with mandatory native Council review.' :
+                'Single-worker manual execution available after explicit enable.') :
                 'Multi-member execution is disabled until native scoped admission is available.') + '</p>' +
             '<button type="button" data-sa-effective-load>Inspect effective policy and Skills</button>' +
             effectivePolicy) +
@@ -662,6 +668,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<dl><dt>Coordinator (read-only)</dt><dd>' + safe(botName(chosen.coordinatorBotId)) + '</dd>' +
         '<dt>Worker</dt><dd>' + safe(botName(chosen.workerBotId)) + '</dd>' +
         '<dt>Configured members</dt><dd>' + safe(roleSummary(chosen)) + '</dd>' +
+        '<dt>Review policy</dt><dd>' + (chosen.councilRequired ? 'Native Council required' : 'Council Off') + '</dd>' +
         '<dt>Current native support</dt><dd>Manual worker dispatch with explicitly authorized scoped writes on supported platforms; authenticated Observe only, no GitHub Auto.</dd></dl>' +
         '<button type="button" data-sa-open-runs>Assign demand / Open runs</button></section>'
       : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
@@ -1495,7 +1502,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       void work(async () => {
         roleRoster=await call<TeamRoster>('superagent_roster_update',{
           orchestrationId:cfg.id, expectedRevision:cfg.policyRevision,
-          input:{workerBotIds,reviewerBotIds},
+          input:{workerBotIds,reviewerBotIds,
+            ...(typeof roleRoster.councilRequired === 'boolean'
+              ? {councilRequired:data.has('councilRequired')} : {})},
         });
         await reload();
         workspaceView='teams';

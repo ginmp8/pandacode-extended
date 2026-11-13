@@ -37,11 +37,16 @@ each independent Demand is a durable Ticket bound to exactly one Team.
 
 ## Non-authority and recovery
 
-The views never issue Mandates, spawn sessions, infer task approval, start source
-Auto, execute GitHub effects or authorize tools. Source events do not create
-Demands. Coordinator and Council remain read-only; existing task admission must
-repeat native guards. Unsupported multi-worker execution, scoped writes,
-recursive subagents and production external-effect dispatch remain unavailable.
+Read-only views never issue Mandates, spawn sessions, infer task approval,
+start GitHub Auto, or authorize tools. Source Observe events do not create
+Demands. Explicit Ticket actions may invoke the shared native admission,
+scoped-write grant or authorized issue-comment dispatcher, but inspection and
+model output alone do not authorize either operation. Coordinator and Council
+remain read-only; Worker writes require an exact native grant and a supported
+provider/platform (currently Windows only). Native issue-comment effects
+require an exact, idempotent, versioned grant with uncertain-state read-back.
+Multi-worker autonomous scheduling, GitHub Auto and nested subagents remain
+unsupported.
 Ticket selection is discarded on Team change and when a native reload finds
 the Assignment missing. Board uses ordinary keyboard-focusable native buttons
 and the same theme tokens for desktop, narrow, light and dark views.
@@ -59,8 +64,12 @@ and the same theme tokens for desktop, narrow, light and dark views.
   its calls retain the exact selected native Team and page cursor without admitting work.
 
 These tests must pass at the exact current SHA. This partial feature does not
-close #131 AC-01..31 or #148 UX/SA/DD/NS/EGM acceptance; full native Council,
-source Auto, safely scoped worker writes, headless parity and recovery remain.
+close #131 AC-01..31 or #148 UX/SA/DD/NS/EGM acceptance. The unified branch
+adds native task-bound Council and guarded Worker write paths, but needs
+independent exact-SHA acceptance and platform validation. Source Auto, multi-
+worker autonomous scheduling, complete headless parity and nested subagents
+remain out of scope for this integration checkpoint. See
+[the unified integration contract](superagent-unified-integration.md).
 
 
 ### GitHub Issue lifecycle observation

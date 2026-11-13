@@ -1,7 +1,19 @@
 # Extended SuperAgent orchestration
 
-> **Implementation status:** Incomplete. The persistent Orchestrations workspace, manual read-only Ticket flow, scoped-write candidate, exact-effect candidate and source-policy groundwork exist in the worktree. Team Builder creates and edits ordered worker/reviewer membership for disabled Teams with no Tickets; Ticket evidence displays the native immutable Team snapshot and its provenance. Multi-worker scheduling and reviewer execution/Council binding remain incomplete. The S4 manual one-shot Observe slice fetches bounded metadata for an exact linked thread across six event classes; Auto, all other event classes, durable recovery/headless parity, nested subagents and S6 exact-SHA evidence remain outstanding. S1 writes pass focused Windows checks but are disabled on Unix; one SuperAgent effects restart test fails. No overall acceptance is claimed.
-> **Requested push branch:** feat/issue-148-pe. No commit or push has been made.
+> **Integration status:** PR #153 is a draft semantic reconciliation of PR #150
+> and PR #151, not a completed delivery of issue #148. The main-content
+> Teams/Demands/Review/Sources workspace, versioned Team snapshots, native
+> task-bound Council implementation, authenticated operator-invoked Observe,
+> restricted Worker write grants and exact GitHub issue-comment reconciliation
+> coexist in this branch. Windows-only scoped writes remain guarded; Unix is
+> unsupported. The dependency-aware autonomous scheduler, multi-worker
+> execution, GitHub Auto, nested subagents, full headless parity and complete
+> #131/#148 acceptance evidence remain outstanding.
+>
+> **Integration branch:** `feat/issue-148-superagent-unified`; see
+> [the unified integration contract](superagent-unified-integration.md).
+> Earlier source-PR descriptions, worker-reported checks and historical
+> review packets are not independent proof for the integration HEAD.
 
 **Authoritative specification:** [Issue #148](https://github.com/ginmp8/pandacode-extended/issues/148), extending [Issue #131](https://github.com/ginmp8/pandacode-extended/issues/131). Addenda: [EGM-01–07](https://github.com/ginmp8/pandacode-extended/issues/148#issuecomment-6817527256), [DD-01–14](https://github.com/ginmp8/pandacode-extended/issues/148#issuecomment-6817744113), [SA-01–09](https://github.com/ginmp8/pandacode-extended/issues/148#issuecomment-6817864073), [NS-01–12](https://github.com/ginmp8/pandacode-extended/issues/148#issuecomment-6817979555).
 
@@ -9,7 +21,7 @@
 
 **Working source baseline:** f9efb3a1c7558dcf7d5688bb1687cfff9253f967
 
-**Requested remote branch:** feat/issue-148-pe
+**Current integration branch:** feat/issue-148-superagent-unified
 
 ## Purpose and ownership
 
@@ -44,13 +56,13 @@ The standalone design packet and source map are [here](extended-superagent-desig
 | --- | --- |
 | #148/#131 and EGM/DD/SA/NS | Mapped; S0 independent review pending |
 | S0 source map | Updated for #148 baseline and candidate boundaries |
-| S1 scoped writes | Partial: focused Windows checks pass; Unix disabled; one unrelated effects test fails |
+| S1 scoped writes | Integrated native exact-path grants and provider ToolHost; Windows-supported/Unix-denied boundaries; integration-head tests and effect replay gates pending |
 | S2 UX-P1 persistent workspace | Implemented and browser-verified; preserve non-modal route |
 | S2 multi-role Teams/work graph | Partial: Team Builder supports ordered Workers and Reviewers; Ticket evidence uses the immutable saved Team snapshot. Multi-worker scheduling and reviewer execution remain incomplete. |
-| S3 task-bound Council | Incomplete; adapter is advisory |
-| S4 manual Observe / Auto | One-shot linked-thread metadata intake supports exactly six event classes and has focused native/UI tests added; tests not run in this low-space worktree. Auto and background intake remain unavailable. |
+| S3 task-bound Council | Integrated candidate native independent reviewer start, exact Ticket/artifact correlation and completion callbacks; native acceptance tests and final integration SHA still unverified |
+| S4 manual Observe / Auto | Integrated authenticated bounded operator-invoked GitHub Events polling and Checks API observation, plus exact thread metadata; Auto admission and background subscription remain unavailable |
 | S5 recovery/headless/subagents | Incomplete; Rust validation outstanding |
-| S6 exact-SHA evidence | Not started |
+| S6 exact-SHA evidence | In progress on PR #153; previous branch-specific CI results do not transfer to the integration HEAD |
 | Live GitHub smoke | not_run until a disposable authorized repository is available |
 
 ## Existing safe import and thread behavior

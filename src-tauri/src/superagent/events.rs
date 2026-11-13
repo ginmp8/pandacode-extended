@@ -892,6 +892,74 @@ pub async fn superagent_source_poll_authenticated(
     )
 }
 
+// Per-thread authenticated one-shot fetch receipts, distinct from the
+// bounded repository-wide Observe transaction and its test-only adapter.
+fn observe_linked(store: &Store, event: &EventEnvelope) -> Result<EventDecision> {
+    if !valid_event(event) {
+        return Err("Invalid, unsupported or unbounded source event envelope.".into());
+    }
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let src = source(store, &event.source_id)?;
+    type Existing = (String,String,String,String,i64,String,i64,i64);
+    let existing: Option<Existing> = tx.query_row(
+        "SELECT repository,actor,event_kind,subject_key,sequence,decision,policy_revision,at
+         FROM sa_event_decisions WHERE source_id=?1 AND delivery_id=?2",
+        params![&event.source_id,&event.delivery_id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,
+               r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    if let Some((repository,actor,kind,subject,seq,decision,policy_revision,at)) = existing {
+        if repository != event.repository || actor != event.actor
+            || kind != event.event_kind || subject != event.subject_key || seq != event.sequence
+        {
+            return Err("Reused source delivery ID has a conflicting envelope.".into());
+        }
+        return Ok(EventDecision { source_id:event.source_id.clone(),
+            delivery_id:event.delivery_id.clone(), decision,policy_revision,
+            sequence:seq,at,duplicate:true });
+    }
+    let receipts: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM sa_event_decisions WHERE source_id=?1",
+        [&event.source_id], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    if receipts >= MAX_RECEIPTS { return Err("Source decision receipt limit reached; no event admitted.".into()); }
+
+    // GitHub database IDs are monotonic per event class. Compare each exact
+    // thread independently: a higher ID fetched from another linked thread
+    // must not stale this one. Gaps are expected and accepted; late IDs are
+    // persisted as ignored_stale without moving that thread's order backward.
+    let thread_cursor: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(sequence),0) FROM sa_event_decisions
+         WHERE source_id=?1 AND subject_key=?2",
+        params![&event.source_id,&event.subject_key], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    let decision = if event.sequence <= thread_cursor { "ignored_stale" }
+        else if src.mode == "off" { "ignored_off" }
+        else if src.repository != event.repository || src.actor_filter != event.actor
+            || src.event_kind != event.event_kind { "ignored_filter" }
+        else { "observed_permitted" };
+    let at = storage::now();
+    tx.execute(
+        "INSERT INTO sa_event_decisions(source_id,delivery_id,repository,actor,event_kind,
+          subject_key,sequence,decision,policy_revision,at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10)",
+        params![&event.source_id,&event.delivery_id,&event.repository,&event.actor,
+          &event.event_kind,&event.subject_key,event.sequence,decision,src.policy_revision,at],
+    ).map_err(|e| e.to_string())?;
+    // Advance the source cursor even for Off and ignored filters, preventing
+    // old data from being reclassified as authorized after a mode change.
+    if event.sequence > src.last_sequence {
+        tx.execute(
+            "UPDATE sa_event_sources SET last_sequence=?2 WHERE id=?1 AND last_sequence<?2",
+            params![&event.source_id,event.sequence],
+        ).map_err(|e| e.to_string())?;
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(EventDecision { source_id:event.source_id.clone(),
+        delivery_id:event.delivery_id.clone(),decision:decision.into(),
+        policy_revision:src.policy_revision,sequence:event.sequence,at,duplicate:false })
+}
+
 /// Authorization snapshot for a user-triggered one-shot fetch. This performs
 /// only local reads so Off, unlinked targets, unsupported event classes, and
 /// mismatched thread kinds never invoke `gh`.
@@ -970,7 +1038,7 @@ fn record_fetched_event(
         subject_key: fetched.subject_key,
         sequence: fetched.sequence,
     };
-    observe(store, &event)
+    observe_linked(store, &event)
 }
 
 /// A source-scoped, restart-durable decision timeline. Neither the read nor

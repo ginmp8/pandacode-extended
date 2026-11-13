@@ -882,10 +882,11 @@ fn load_team_version_snapshot(db: &Connection, orchestration_id: &str, version: 
              WHERE orchestration_id=?1 AND team_version=?2
              ORDER BY CASE role WHEN 'coordinator' THEN 0 WHEN 'worker' THEN 1 ELSE 2 END,ordinal",
         ).map_err(|e| e.to_string())?;
-        stmt.query_map(params![orchestration_id,version], |r| Ok((
+        let collected = stmt.query_map(params![orchestration_id,version], |r| Ok((
             r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,
         ))).map_err(|e| e.to_string())?
-            .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+        collected
     };
     let expected = snapshot.roles.iter().map(|role| (
         role.role.clone(),role.ordinal as i64,role.bot_id.clone(),

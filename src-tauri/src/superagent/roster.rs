@@ -18,14 +18,15 @@ CREATE TABLE IF NOT EXISTS sa_team_roles(
 );
 CREATE INDEX IF NOT EXISTS sa_team_roles_bot ON sa_team_roles(bot_id);
 "#;
-const MAX_WORKERS:usize=8;
-const MAX_REVIEWERS:usize=4;
+// Native Team policy owns role limits (1–16 Workers, 0–8 Reviewers).
 
 #[derive(Debug,Clone,Serialize,Deserialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub struct RosterInput {
     pub worker_bot_ids:Vec<String>,
     pub reviewer_bot_ids:Vec<String>,
+    #[serde(default)]
+    pub council_required: Option<bool>,
 }
 #[derive(Debug,Clone,Serialize)]
 #[serde(rename_all="camelCase")]
@@ -35,6 +36,7 @@ pub struct TeamRoster {
     pub coordinator_bot_id:String,
     pub worker_bot_ids:Vec<String>,
     pub reviewer_bot_ids:Vec<String>,
+    pub council_required:bool,
     pub execution_ready:bool,
 }
 pub(super) fn has_additional_members(store: &Store, id: &str) -> Result<bool> {
@@ -52,6 +54,7 @@ pub(crate) fn read(store: &Store, id: &str) -> Result<TeamRoster> {
         orchestration_id: config.id,
         policy_revision: config.policy_revision,
         coordinator_bot_id: config.coordinator_bot_id,
+        council_required: config.council_required,
         execution_ready: config.worker_bot_ids.len() == 1 &&
             (!config.council_required || config.reviewer_bot_ids.len() >= 2),
         worker_bot_ids: config.worker_bot_ids,
@@ -175,7 +178,7 @@ fn set(store: &Store, id: &str, expected: i64, input: &RosterInput) -> Result<Te
     super::update_configuration_roles_with_policy(
         store, id, expected, &draft,
         input.worker_bot_ids.clone(), input.reviewer_bot_ids.clone(),
-        current.council_required,
+        input.council_required.unwrap_or(current.council_required),
     )?;
     read(store, id)
 }
@@ -226,14 +229,12 @@ mod tests {
         assert_eq!(one.members[1].skills[0].library_status,"missing");
         let roster=set(&store,&cfg.id,cfg.policy_revision,&RosterInput {
             worker_bot_ids:vec!["worker".into(),"another-worker".into()],
-            reviewer_bot_ids:vec!["reviewer".into()],
-        }).unwrap_err();
+            reviewer_bot_ids:vec!["reviewer".into()], council_required:None }).unwrap_err();
         assert!(roster.contains("Paused bots"));
         store.db.execute("UPDATE bots SET paused=0 WHERE id='reviewer'",[]).unwrap();
         let roster=set(&store,&cfg.id,cfg.policy_revision,&RosterInput {
             worker_bot_ids:vec!["worker".into(),"another-worker".into()],
-            reviewer_bot_ids:vec!["reviewer".into()],
-        }).unwrap();
+            reviewer_bot_ids:vec!["reviewer".into()], council_required:None }).unwrap();
         let library=HashMap::from([("known".to_string(),LibraryStatus{safety:"review_required"})]);
         let view=effective_team(&store,&cfg.id,&library).unwrap();
         assert_eq!(view.policy_revision,roster.policy_revision);
@@ -249,6 +250,53 @@ mod tests {
         assert!(!view.grants_issued);
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    }
+
+    #[test]
+    fn single_worker_council_policy_is_explicit_versioned_and_requires_two_reviewers() {
+        let path=std::env::temp_dir().join(format!("sa-council-team-{}.sqlite3",storage::id()));
+        let store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('council-project','Fixture','/tmp/sa-council-team')",[],
+        ).unwrap();
+        for id in ["coordinator","worker","reviewer-one","reviewer-two"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'council-project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let cfg=super::super::create_configuration(&store,super::super::NewOrchestration {
+            name:"Council Team".into(),coordinator_bot_id:"coordinator".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        let denied=set(&store,&cfg.id,cfg.policy_revision,&RosterInput {
+            worker_bot_ids:vec!["worker".into()],
+            reviewer_bot_ids:vec!["reviewer-one".into()],
+            council_required:Some(true),
+        }).unwrap_err();
+        assert!(denied.contains("between two and eight"));
+        assert!(!read(&store,&cfg.id).unwrap().council_required);
+
+        let selected=set(&store,&cfg.id,cfg.policy_revision,&RosterInput {
+            worker_bot_ids:vec!["worker".into()],
+            reviewer_bot_ids:vec!["reviewer-one".into(),"reviewer-two".into()],
+            council_required:Some(true),
+        }).unwrap();
+        assert!(selected.council_required);
+        assert!(selected.execution_ready);
+        assert!(!has_additional_members(&store,&cfg.id).unwrap());
+        assert!(super::super::configuration(&store,&cfg.id).unwrap().council_required);
+        assert_eq!(selected.policy_revision,cfg.policy_revision+1);
+
+        // Legacy callers without this field preserve the Team's selected policy.
+        let same=set(&store,&cfg.id,selected.policy_revision,&RosterInput {
+            worker_bot_ids:selected.worker_bot_ids.clone(),
+            reviewer_bot_ids:selected.reviewer_bot_ids.clone(),
+            council_required:None,
+        }).unwrap();
+        assert!(same.council_required);
+        assert_eq!(same.policy_revision,selected.policy_revision);
     }
 
     #[test]
@@ -269,21 +317,21 @@ mod tests {
             name:"Test Team".into(),coordinator_bot_id:"coordinator".into(),
             worker_bot_id:"worker-a".into(),
         }).unwrap();
-        let input=RosterInput{worker_bot_ids:vec!["worker-a".into(),"worker-b".into(),"worker-c".into()],
-            reviewer_bot_ids:vec!["reviewer-a".into(),"reviewer-b".into()]};
+        let input=RosterInput {worker_bot_ids:vec!["worker-a".into(),"worker-b".into(),"worker-c".into()],
+            reviewer_bot_ids:vec!["reviewer-a".into(),"reviewer-b".into()], council_required:None };
         let saved=set(&store,&config.id,config.policy_revision,&input).unwrap();
         assert_eq!(saved.worker_bot_ids,input.worker_bot_ids);
         assert_eq!(saved.reviewer_bot_ids,input.reviewer_bot_ids);
         assert!(!saved.execution_ready);
         assert!(super::super::change_enabled(&store,&config.id,saved.policy_revision,true).is_err());
         assert!(set(&store,&config.id,config.policy_revision,&input).is_err());
-        let duplicate=RosterInput{worker_bot_ids:vec!["worker-a".into(),"worker-b".into()],
-            reviewer_bot_ids:vec!["worker-b".into()]};
+        let duplicate=RosterInput {worker_bot_ids:vec!["worker-a".into(),"worker-b".into()],
+            reviewer_bot_ids:vec!["worker-b".into()], council_required:None };
         assert!(set(&store,&config.id,saved.policy_revision,&duplicate).is_err());
         assert_eq!(read(&store,&config.id).unwrap().policy_revision,saved.policy_revision);
         assert_eq!(set(&store,&config.id,saved.policy_revision,&input)
             .unwrap().policy_revision,saved.policy_revision);
-        let clear=RosterInput{worker_bot_ids:vec!["worker-a".into()],reviewer_bot_ids:vec![]};
+        let clear=RosterInput {worker_bot_ids:vec!["worker-a".into()],reviewer_bot_ids:vec![], council_required:None };
         let reset=set(&store,&config.id,saved.policy_revision,&clear).unwrap();
         assert!(reset.execution_ready);
         assert_eq!(reset.worker_bot_ids,vec!["worker-a"]);
@@ -321,8 +369,7 @@ mod tests {
         ).unwrap();
         let expanded=RosterInput {
             worker_bot_ids:vec!["history-worker".into(),"history-worker-b".into()],
-            reviewer_bot_ids:vec![],
-        };
+            reviewer_bot_ids:vec![], council_required:None };
         // Completed Demand history is retained under its original admission
         // policy even when the reusable Team advances to a new revision.
         let revision=set(&store,&config.id,config.policy_revision,&expanded).unwrap();
@@ -334,7 +381,7 @@ mod tests {
         ).unwrap();
         assert_eq!(original,(config.policy_revision,"history-worker".into(),
             "Original immutable intent".into()));
-        let reset=RosterInput{worker_bot_ids:vec!["history-worker".into()],reviewer_bot_ids:vec![]};
+        let reset=RosterInput {worker_bot_ids:vec!["history-worker".into()],reviewer_bot_ids:vec![], council_required:None };
 
         // A nonterminal review gate must not be invalidated by a roster edit.
         store.db.execute("UPDATE sa_tickets SET state='waiting_review' WHERE id='prior-demand'",[])

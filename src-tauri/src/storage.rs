@@ -2397,6 +2397,72 @@ mod sidebar_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unified_schema_recovers_alternate_v51_council_installation() {
+        let path = std::env::temp_dir().join(format!(
+            "sa-unified-from-pr151-v51-{}.sqlite3", uuid::Uuid::new_v4(),
+        ));
+        {
+            // The updated source #151 reached v51 without the unified
+            // v50 roster and Check Run tables. Verify both are restored.
+            let store = Store::open(&path).unwrap();
+            store.db.execute_batch(
+                "DROP TABLE sa_team_roles;
+                 DROP TABLE sa_check_run_results;
+                 PRAGMA user_version=51;",
+            ).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let version: i64 = store.db.query_row(
+            "PRAGMA user_version", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        for table in ["sa_team_roles", "sa_check_run_results"] {
+            let exists: bool = store.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [table], |row| row.get(0),
+            ).unwrap();
+            assert!(exists, "Missing additive table after alternate v51: {table}");
+        }
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn unified_schema_recovers_alternate_v45_roster_installation() {
+        let path = std::env::temp_dir().join(format!(
+            "sa-unified-from-pr150-v45-{}.sqlite3", uuid::Uuid::new_v4(),
+        ));
+        {
+            // Source #150 used version 45 before the Worker write schema was
+            // created; simulate that table set while retaining its roster.
+            let store = Store::open(&path).unwrap();
+            store.db.execute_batch(
+                "DROP TABLE sa_worker_write_receipts;
+                 DROP TABLE sa_worker_write_grants;
+                 PRAGMA user_version=45;",
+            ).unwrap();
+        }
+        let store = Store::open(&path).unwrap();
+        let version: i64 = store.db.query_row(
+            "PRAGMA user_version", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        let root_column: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_worker_write_grants')
+             WHERE name='project_root')",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert!(root_column);
+        let grant_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_worker_write_grants", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(grant_count, 0, "Migration cannot mint worker grants");
+        drop(store);
+        let _ = std::fs::remove_file(path);
+    }
+
     fn empty_session() -> (Store, Session) {
         let store = Store::open(Path::new(":memory:")).unwrap();
         let project = store.add_project(&std::env::temp_dir()).unwrap();

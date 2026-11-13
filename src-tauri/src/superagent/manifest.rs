@@ -554,8 +554,9 @@ fn export(store: &Store) -> Result<serde_json::Value> {
             extra_worker_bots: workers.into_iter().skip(1).collect(),
             reviewer_bots: reviewers,
             bot_profiles: profiles,
-            // A portable file does not restore the original enablement flag.
-            enabled: None,
+            // Preserve the #150 v3 JSON field for cross-branch consumers,
+            // but never export source Team authority: the import is always Off.
+            enabled: Some(false),
             autonomy: policy.autonomy,
             max_concurrent_tasks: policy.max_concurrent_tasks,
             max_attempts_per_assignment: policy.max_attempts_per_assignment,
@@ -748,7 +749,7 @@ mod tests {
             "Software Development"
         );
         assert_eq!(snapshot["orchestrations"][0]["workerBot"], "Builder");
-        assert!(snapshot["orchestrations"][0].get("enabled").is_none());
+        assert_eq!(snapshot["orchestrations"][0]["enabled"], false);
         let imported_enabled: bool = store
             .db
             .query_row(
@@ -804,7 +805,7 @@ mod tests {
         assert!(imported.reviewer_bot_ids.is_empty());
         let exported = export(&store).unwrap();
         assert_eq!(exported["schemaVersion"], 3);
-        assert!(exported["orchestrations"][0].get("enabled").is_none());
+        assert_eq!(exported["orchestrations"][0]["enabled"], false);
         assert_eq!(exported["orchestrations"][0]["coordinatorBot"], "Router");
         assert_eq!(exported["orchestrations"][0]["workerBot"], "Builder");
         assert_eq!(exported["orchestrations"][0]["reviewerBots"], json!([]));
@@ -870,7 +871,7 @@ mod tests {
             exported["orchestrations"][0]["council"],
             json!({"enabled":false})
         );
-        assert!(exported["orchestrations"][0].get("enabled").is_none());
+        assert_eq!(exported["orchestrations"][0]["enabled"], false);
         assert_eq!(
             apply(&store, &exported, true).unwrap().unchanged,
             vec!["Multi-role Team"]
@@ -1045,7 +1046,7 @@ mod tests {
             )
             .unwrap();
         let old = export(&store).unwrap();
-        assert!(old["orchestrations"][0].get("enabled").is_none());
+        assert_eq!(old["orchestrations"][0]["enabled"], false);
         let result = apply(&store, &document("Issue Resolution"), true).unwrap();
         assert_eq!(result.created.len(), 0);
         let enabled: bool = store
@@ -1177,7 +1178,11 @@ mod tests {
         downgrade["schemaVersion"] = json!(2);
         assert!(preview(&destination, &downgrade).is_err());
 
-        let imported = apply_with_backup(&destination, &root, &portable, true).unwrap();
+        // An older #150 exporter may include enabled=true. Accept its schema
+        // as provenance only; never reactivate an imported Team.
+        let mut legacy_enabled = portable.clone();
+        legacy_enabled["orchestrations"][0]["enabled"] = json!(true);
+        let imported = apply_with_backup(&destination, &root, &legacy_enabled, true).unwrap();
         assert_eq!(imported.created, vec!["Pinned Team"]);
         let config = super::super::configuration(
             &destination, &orchestration_id(&destination, "Pinned Team"),

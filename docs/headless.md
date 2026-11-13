@@ -84,6 +84,26 @@ The existing `--inspect-ticket` and `--inspect-ticket-effects` commands show
 redacted state without touching live sessions. Per-effect dispatch and full
 headless admission/retry still require explicit user-authorized native grants.
 
+### GitHub source cursor diagnostics
+
+Use the trusted local headless inspector to examine a configured GitHub source
+without polling GitHub, granting tools or interrupting another active server:
+
+```sh
+pandacode serve --inspect-source-health <source-id>
+```
+
+The read-only response reports Off/Observe mode, policy revision, receipt count,
+permitted receipt count, stored cursor and highest immutable receipt sequence.
+For GitHub Events the cursor is a verified event-ID high-watermark; for explicit
+Check Runs it is a **local observation counter**, not an upstream event ID.
+Neither value proves a complete provider subscription. When receipt capacity is
+exhausted, operator intervention is necessary. If the cursor is behind durable
+receipts, native Observe fails closed pending reconciliation: it does not reset
+the cursor, delete receipts or reclassify historical observations. The inspector
+redacts event bodies, actor filters and task content, uses no provider credentials
+and never runs startup recovery.
+
 ### Operator-staged headless Demands
 
 A trusted local operator can persist a blocked, read-only manual Ticket in the

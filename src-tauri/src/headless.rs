@@ -40,6 +40,7 @@ enum Command {
     InspectTicketGraph { ticket_id: String },
     InspectTicketEffects { ticket_id: String },
     InspectTicketSource { ticket_id: String },
+    InspectSourceHealth { source_id: String },
     UnlinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
     InspectTeamReadiness { orchestration_id: String },
     InspectTeamRoster { orchestration_id: String },
@@ -144,6 +145,20 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(activity) => { println!("{activity}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent source activity inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectSourceHealth { source_id } = &command {
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_inspect_source_integrity(
+                        &dir.join("kingcode.sqlite3"), source_id,
+                    ));
+                match result {
+                    Ok(status) => { println!("{status}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent source health inspection failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -361,7 +376,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
         | Command::InspectTicketEffects { .. }
-        | Command::InspectTicketSource { .. } | Command::UnlinkSourceThread { .. }
+        | Command::InspectTicketSource { .. } | Command::InspectSourceHealth { .. }
+        | Command::UnlinkSourceThread { .. }
         | Command::ObserveSource { .. } | Command::ObserveCheckRun { .. }
         | Command::QueueDemand { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
@@ -840,6 +856,15 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--inspect-source-health" => {
+                let id = args.get(index + 1)
+                    .ok_or("--inspect-source-health needs a source ID.")?;
+                validate_ticket_id(id)
+                    .map_err(|_| "Provide a bounded source ID.".to_owned())?;
+                command = Command::InspectSourceHealth { source_id: id.clone() };
+                ops += 1;
+                index += 1;
+            }
             "--observe-source" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--observe-source needs a source ID.\n\n{}", help()))?;
@@ -1083,7 +1108,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1121,6 +1146,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-team-readiness <id>
                          Inspect a Team's read-only native manual admission preflight;
                          live sessions and policy must be rechecked on actual admission.
+  --inspect-source-health <id>
+                         Inspect native source cursor, stored receipts and policy without
+                         GitHub access, writes or restart recovery; exit.
   --observe-source <id> Authenticated one-shot GitHub Observe poll for an activated source; exit.
                          No Auto, inferred task, webhook or external write.
   --observe-check-run <id> <check-run-id>
@@ -1200,6 +1228,12 @@ mod tests {
         assert_eq!(parsed("--inspect-orchestrations"), Ok(Command::InspectOrchestrations));
         assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
         assert_eq!(parsed("--list-review-inbox"), Ok(Command::ListReviewInbox));
+        assert_eq!(parsed("--inspect-source-health source_123"),
+            Ok(Command::InspectSourceHealth { source_id: "source_123".into() }));
+        for invalid in ["--inspect-source-health", "--inspect-source-health ../private",
+                        "--inspect-source-health source_123 --observe-source source_123"] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert!(parsed("--list-review-inbox --stop-ticket ticket_1").is_err());
         assert_eq!(parsed("--list-team-demands team_123 blocked"),
             Ok(Command::ListTeamDemands {

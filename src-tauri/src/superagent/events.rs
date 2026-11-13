@@ -398,6 +398,82 @@ fn list_sources(store: &Store, orchestration_id: &str) -> Result<Vec<EventSource
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+/// Native source health distinguishes a verified GitHub Events watermark from
+/// a local Check Run observation count; neither is a subscription guarantee.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceIntegrity {
+    pub source_id: String,
+    pub repository: String,
+    pub mode: String,
+    pub policy_revision: i64,
+    pub cursor_kind: &'static str,
+    pub last_sequence: i64,
+    pub receipt_count: i64,
+    pub permitted_receipt_count: i64,
+    pub max_receipt_sequence: i64,
+    pub cursor_consistent: bool,
+    pub receipt_capacity_reached: bool,
+    pub next_action: &'static str,
+    pub observational_only: bool,
+}
+
+fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceIntegrity> {
+    let selected = source(store, source_id)?;
+    let (receipt_count, permitted_receipt_count, max_receipt_sequence):
+        (i64, i64, i64) = store.db.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN decision='observed_permitted' THEN 1 ELSE 0 END),0),
+                COALESCE(MAX(sequence),0)
+         FROM sa_event_decisions WHERE source_id=?1",
+        [source_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).map_err(|e| e.to_string())?;
+    let cursor_consistent = selected.last_sequence >= max_receipt_sequence;
+    let receipt_capacity_reached = receipt_count >= MAX_RECEIPTS;
+    let next_action = if !cursor_consistent {
+        "investigate_cursor_receipt_mismatch"
+    } else if receipt_capacity_reached {
+        "receipt_limit_requires_operator_intervention"
+    } else if selected.mode == "off" {
+        "source_off_no_poll"
+    } else { "explicit_observe_available" };
+    Ok(SourceIntegrity {
+        source_id:selected.id, repository:selected.repository, mode:selected.mode,
+        policy_revision:selected.policy_revision,
+        cursor_kind:if selected.event_kind == "check_run.completed" {
+            "local_check_run_observation_count"
+        } else { "github_event_identity_high_watermark" },
+        last_sequence:selected.last_sequence, receipt_count, permitted_receipt_count,
+        max_receipt_sequence, cursor_consistent, receipt_capacity_reached,
+        next_action, observational_only:true,
+    })
+}
+
+/// Corrupted cursor records must not reclassify previously stored observations.
+/// The guard runs inside the same transaction as new receipts and cursor writes.
+fn require_source_cursor_integrity(
+    tx: &rusqlite::Transaction<'_>, selected: &EventSource,
+) -> Result<()> {
+    let highest_receipt: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(sequence),0) FROM sa_event_decisions WHERE source_id=?1",
+        [&selected.id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if selected.last_sequence < highest_receipt {
+        return Err("Source cursor is behind durable receipts; observation denied pending reconciliation.".into());
+    }
+    Ok(())
+}
+
+/// Read-only headless inspection must not trigger Store::open recovery while
+/// another server owns the native bot/assignment runtime.
+pub(crate) fn headless_inspect_source_integrity(
+    database_path: &std::path::Path, source_id: &str,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    serde_json::to_string_pretty(&inspect_source_integrity(&store, source_id)?)
+        .map_err(|e| e.to_string())
+}
+
 /// A user creates an exact, non-wildcard source in Off. Reusing the same
 /// config is idempotent, never an implicit enable/revision change.
 fn create_source(
@@ -539,6 +615,7 @@ fn observe_authenticated(store: &Store, event: &EventEnvelope, signed_in: &str)
 {
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let src = source(store, &event.source_id)?;
+    require_source_cursor_integrity(&tx, &src)?;
     let receipt = observe_authenticated_in_tx(&tx, &src, event, signed_in)?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(receipt)
@@ -810,6 +887,7 @@ fn poll_authenticated_events_with_identity(
     if current_policy.mode != "observe" || current_policy.policy_revision != expected.policy_revision {
         return Err("Source mode/revision changed during GitHub request; no event recorded.".into());
     }
+    require_source_cursor_integrity(&tx, &current_policy)?;
     let mut recorded = 0;
     let mut duplicates = 0;
     let mut self_ignored = 0;
@@ -1064,6 +1142,7 @@ fn observe_authenticated_check_run(
     if current.mode != "observe" || current.policy_revision != expected.policy_revision {
         return Err("Checks API source changed before receipt commit.".into());
     }
+    require_source_cursor_integrity(&tx, &current)?;
     let delivery_id = format!("checkrun_{requested_id}");
     let previously_recorded: Option<i64> = tx.query_row(
         "SELECT sequence FROM sa_event_decisions WHERE source_id=?1 AND delivery_id=?2",
@@ -1344,6 +1423,67 @@ pub async fn superagent_source_thread_links(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_cursor_mismatch_denies_authenticated_replay_and_survives_restart() {
+        let (store, path) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "issues.opened").unwrap();
+        let inactive = inspect_source_integrity(&store, &off.id).unwrap();
+        assert_eq!(inactive.next_action, "source_off_no_poll");
+        assert_eq!(inactive.receipt_count, 0);
+        let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let event = |id: &str| serde_json::json!([{
+            "id":id, "type":"IssuesEvent", "created_at":"2026-11-12T08:59:00Z",
+            "actor":{"login":"trusted-bot"}, "repo":{"name":"owner/repo"},
+            "payload":{"action":"opened","issue":{"number":42,
+                       "body":"UNTRUSTED provider text"}}
+        }]);
+        assert_eq!(poll_authenticated_events(&store, &active, 0, &event("5000000201"))
+            .unwrap().recorded, 1);
+        let valid = inspect_source_integrity(&store, &off.id).unwrap();
+        assert_eq!(valid.receipt_count, 1);
+        assert_eq!(valid.permitted_receipt_count, 1);
+        assert!(valid.cursor_consistent);
+        assert_eq!(valid.last_sequence, valid.max_receipt_sequence);
+        assert_eq!(valid.cursor_kind, "github_event_identity_high_watermark");
+
+        store.db.execute("UPDATE sa_event_sources SET last_sequence=0 WHERE id=?1",
+            [&off.id]).unwrap();
+        let damaged = inspect_source_integrity(&store, &off.id).unwrap();
+        assert!(!damaged.cursor_consistent);
+        assert_eq!(damaged.next_action, "investigate_cursor_receipt_mismatch");
+        assert!(poll_authenticated_events(&store, &active, 0, &event("5000000202")).is_err());
+        assert_eq!(list_decisions(&store, &off.id, 10).unwrap().len(), 1);
+        assert_eq!(source(&store, &off.id).unwrap().last_sequence, 0);
+        let redacted = headless_inspect_source_integrity(&path, &off.id).unwrap();
+        assert!(redacted.contains("investigate_cursor_receipt_mismatch"));
+        assert!(!redacted.contains("UNTRUSTED"));
+        assert!(!redacted.contains("trusted-bot"));
+        assert!(headless_inspect_source_integrity(&path, "missing").is_err());
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert!(!inspect_source_integrity(&reopened, &off.id).unwrap().cursor_consistent);
+        assert_eq!(list_decisions(&reopened, &off.id, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn check_run_health_is_a_local_counter_without_provider_or_task_execution() {
+        let (store, path) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "github-actions",
+            "check_run.completed").unwrap();
+        let status = inspect_source_integrity(&store, &off.id).unwrap();
+        assert_eq!(status.cursor_kind, "local_check_run_observation_count");
+        assert_eq!(status.next_action, "source_off_no_poll");
+        let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        assert_eq!(inspect_source_integrity(&store, &active.id).unwrap().next_action,
+            "explicit_observe_available");
+        let json = headless_inspect_source_integrity(&path, &active.id).unwrap();
+        assert!(json.contains("local_check_run_observation_count"));
+        assert!(json.contains("observationalOnly"));
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |r| r.get::<_,i64>(0)).unwrap(), 0);
+    }
 
     #[test]
     fn authenticated_login_and_self_event_filter_are_native_and_restart_durable() {

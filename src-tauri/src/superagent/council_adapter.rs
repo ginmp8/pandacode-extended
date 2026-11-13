@@ -414,6 +414,10 @@ fn private_directory(path: &Path) -> Result<()> {
             return Err("Council review snapshot directory permissions could not be restricted.".into());
         }
     }
+    #[cfg(not(unix))]
+    if fs::metadata(path).is_ok_and(|metadata| metadata.permissions().readonly()) {
+        return Err("Council review snapshot directory is unavailable.".into());
+    }
     Ok(())
 }
 
@@ -661,7 +665,7 @@ fn freeze_workspace_snapshot(store: &Store, source_root: &Path, expected_identit
         snapshot_hasher.update(b"PandaCode SuperAgent Council snapshot v1\0");
         let mut budget = SnapshotBudget::default();
         copy_workspace_directory(
-            &source_root,&source_root,&staging,&staging,&mut source_hasher,
+            &source_root,&source_root,&destination,&staging,&mut source_hasher,
             &mut snapshot_hasher,&mut std::collections::HashSet::new(),&mut budget,
         )?;
         let copied_source_identity = format!("{:x}",source_hasher.finalize());
@@ -674,11 +678,6 @@ fn freeze_workspace_snapshot(store: &Store, source_root: &Path, expected_identit
         }
         freeze_snapshot_tree(&staging,&mut budget)?;
         make_read_only(&staging)?;
-        if workspace_snapshot_sha256(&staging)? != snapshot_digest
-            || started.elapsed() > SNAPSHOT_MAX_DURATION
-        {
-            return Err("Council review snapshot identity or permissions could not be verified.".into());
-        }
         fs::rename(&staging,&destination)
             .map_err(|_| "Council review snapshot could not be finalized.")?;
         let root = resolve_workspace_snapshot(store,&id)?;
@@ -978,6 +977,8 @@ fn start_after_worker_completion_inner(
             block_request(&store,&request.id,"Required Council binding became stale or mismatched before dispatch.")?;
             return Ok(false);
         }
+        let config_sha = sha256(serde_json::to_vec(&config).map_err(|error| error.to_string())?.as_slice());
+        let worker = store.session(worker_session_id)?;
         let frozen = match freeze_workspace_snapshot(&store,&workspace_root,&workspace) {
             Ok(snapshot) => snapshot,
             Err(_) => {
@@ -985,8 +986,6 @@ fn start_after_worker_completion_inner(
                 return Ok(false);
             }
         };
-        let config_sha = sha256(serde_json::to_vec(&config).map_err(|error| error.to_string())?.as_slice());
-        let worker = store.session(worker_session_id)?;
         let binding = architect::SuperAgentCouncilBinding {
             ticket_id: ticket.id.clone(),
             assignment_id: request.assignment_id.clone(),

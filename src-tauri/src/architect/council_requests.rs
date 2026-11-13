@@ -345,6 +345,15 @@ fn native_task_candidate(
     if session.project_id != project_id || session.remote_device.is_some() {
         return Err("council_task_denied: native task owner or project does not match.".into());
     }
+    // Reject missing or non-root Council cycles before examining any Channel
+    // routing state. An idle configured team is not an admitted review task.
+    let team = super::load(store, session_id)?
+        .ok_or("council_task_denied: native Architect task does not exist.")?;
+    if super::parent_of(store, session_id)?.is_some() ||
+        team.council_since <= 0 || team.objective.trim().is_empty()
+    {
+        return Err("council_task_denied: an active root Council cycle is required.".into());
+    }
     // A Channel delivery has its own per-message authority and receipt path.
     let channel_count: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM extended_channel_council_deliveries WHERE session_id=?1",
@@ -352,13 +361,6 @@ fn native_task_candidate(
     ).map_err(|e| e.to_string())?;
     if channel_count != 0 {
         return Err("council_task_denied: Channel reviews require channel-scoped admission.".into());
-    }
-    let team = super::load(store, session_id)?
-        .ok_or("council_task_denied: native Architect task does not exist.")?;
-    if super::parent_of(store, session_id)?.is_some() ||
-        team.council_since <= 0 || team.objective.trim().is_empty()
-    {
-        return Err("council_task_denied: an active root Council cycle is required.".into());
     }
     let config = team.config.council
         .ok_or("council_task_denied: native Council is disabled.")?;
@@ -417,6 +419,12 @@ pub(crate) fn admit_native_task(
     }
     let team = super::load(store, session_id)?
         .ok_or("council_task_denied: root team disappeared.")?;
+    // Admission is prospective: a completed, paused or merely configured
+    // Council must not gain a new task/artefact binding from an old pass.
+    // Existing identical requests remain idempotently inspectable/settleable.
+    if team.status != "running" {
+        return Err("council_task_denied: new requests require an active root Council execution.".into());
+    }
     if team.workers.iter().any(|worker|
         worker.created_at >= team.council_since && worker.council.is_some())
     {

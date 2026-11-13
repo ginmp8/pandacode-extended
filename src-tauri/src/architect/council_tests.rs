@@ -2323,14 +2323,25 @@ fn child_council_revocation_and_project_isolation_fail_closed() {
 
 #[test]
 fn non_channel_native_task_review_request_is_idempotent_and_requires_real_council_proof() {
-    let (state, sid) = council_state(on(9.0, 3, 2));
+    // A task configured while already running has not started a new Council
+    // cycle. Use the actual ready -> configured -> started lifecycle.
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.status = "ready".into();
+        team.round = 0;
+        save(&store, &mut team).unwrap();
+    }
+    council::set(&state, &sid, Some(on(9.0, 3, 2))).unwrap();
     let artifact = "a".repeat(64);
     {
         let store = state.store.lock().unwrap();
         let project = store.session(&sid).unwrap().project_id;
-        assert!(council_requests::admit_native_task(
+        let denied = council_requests::admit_native_task(
             &store, &sid, &project, "assignment-1", &artifact
-        ).unwrap_err().contains("active root Council cycle"));
+        ).unwrap_err();
+        assert!(denied.contains("active root Council execution"), "{denied}");
     }
     start_state(&state, &sid, "Review this exact task objective", None, None).unwrap();
     let store = state.store.lock().unwrap();
@@ -2343,6 +2354,20 @@ fn non_channel_native_task_review_request_is_idempotent_and_requires_real_counci
     ).unwrap();
     assert_eq!(first, repeat);
     assert_eq!(first.schema_version, 1);
+    // A completed root may read its earlier task binding, but cannot mint
+    // a new request against the old Council cycle/proof.
+    let mut completed = load(&store, &sid).unwrap().unwrap();
+    completed.status = "completed".into();
+    save(&store, &mut completed).unwrap();
+    let denied = council_requests::admit_native_task(
+        &store, &sid, &project, "assignment-2", &artifact,
+    ).unwrap_err();
+    assert!(denied.contains("active root Council execution"), "{denied}");
+    assert_eq!(council_requests::admit_native_task(
+        &store, &sid, &project, "assignment-1", &artifact,
+    ).unwrap(), first);
+    completed.status = "running".into();
+    save(&store, &mut completed).unwrap();
     let result = council_requests::inspect_native_task(
         &store, &sid, &project, "assignment-1", &artifact, &first.request_id,
     ).unwrap();

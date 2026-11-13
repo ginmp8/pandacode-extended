@@ -13,6 +13,22 @@ interface Config {
 interface Ticket { id: string; objective: string; state: string; revision: number; evidence: string | null }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
 interface ImportResult { created: string[]; unchanged: string[]; backupPath?: string }
+interface WorkerWriteDispatchRequest extends Record<string, unknown> {
+  ticketId: string; expectedRevision: number; allowedPaths: string[];
+}
+interface WorkerWriteGrant {
+  id: string; ticketId: string; assignmentId: string; sessionId: string;
+  ticketRevision: number; policyRevision: number; projectId: string; projectRoot: string;
+  allowedPaths: string[]; expiresAt: number; revoked: boolean;
+}
+interface WorkerWriteDispatch { ticket: Ticket; grant: WorkerWriteGrant }
+interface PreviewWorkerWriteDispatch {
+  previewOnly: true; ticket: Ticket; allowedPaths: string[]; message: string;
+}
+type WorkerWriteDispatchResult = WorkerWriteDispatch | PreviewWorkerWriteDispatch;
+function isPreviewWorkerWriteDispatch(result: WorkerWriteDispatchResult): result is PreviewWorkerWriteDispatch {
+  return 'previewOnly' in result && result.previewOnly === true;
+}
 interface Mandate {
   actor: string; authorizationId: string; policyRevision: number; projectId: string;
   expiresAt: number; revoked: boolean; allowedTools: string[]; allowedSideEffects: boolean;
@@ -27,6 +43,13 @@ interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
   activity: Activity[]; council?: CouncilObservation | null;
 }
+interface IssueCommentStatus {
+  ticketId: string; ticketRevision: number; repository: string; issueNumber: number;
+  effectKey: string; payloadSha256: string; state: 'pending' | 'uncertain' | 'applied';
+  reconciliation: string;
+}
+interface PreviewIssueComment { previewOnly: true; message: string }
+type IssueCommentResult = IssueCommentStatus | PreviewIssueComment;
 interface EventSource {
   id: string; orchestrationId: string; repository: string; actorFilter: string;
   eventKind: string; mode: 'off' | 'observe'; policyRevision: number; lastSequence: number;
@@ -39,12 +62,24 @@ interface SourceDecision {
   decision: string; sequence: number; policyRevision: number; at: number;
 }
 
+async function issueCommentEffectKey(
+  ticketId: string, repository: string, issueNumber: number, comment: string,
+): Promise<string> {
+  const payload = new TextEncoder().encode(JSON.stringify([ticketId, repository, issueNumber, comment]));
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', payload));
+  return 'github-comment:' + Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
 export function mountSuperagent(host: HTMLElement, call: Call): void {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
   let preview: Preview | null = null, inspected: unknown = null;
   let confirm: { message: string; action: () => Promise<void> } | null = null;
   let taskKey = crypto.randomUUID();
+  let writeGrantTicket = '', writeGrantRevision: number | null = null;
+  let writePathsDraft = '', writePathsError = '';
+  let commentRepository = '', commentIssueNumber = '', commentDraft = '';
+  let issueCommentError = '', issueCommentStatus: IssueCommentStatus | null = null;
   // Persist the user's editable preset draft across asynchronous list refreshes.
   let draftPresetName = '', draftPresetTemplate = '';
   let rejectingTicket = '', inspectedTicket = '';
@@ -76,6 +111,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     const choices = optionsFor('');
     const chosen = current();
     const inspected = tickets.find(ticket => ticket.id === inspectedTicket);
+    const writeTicket = tickets.find(ticket => ticket.id === writeGrantTicket);
+    const canComment = !!inspected && ticketDetails?.ticket.id === inspected.id &&
+      inspected.state === 'running' && !ticketDetails.mandate.revoked &&
+      ticketDetails.mandate.allowedSideEffects;
+    const commentStatus = issueCommentStatus && inspected &&
+      issueCommentStatus.ticketId === inspected.id &&
+      issueCommentStatus.ticketRevision === inspected.revision ? issueCommentStatus : null;
     const details = inspected && ticketDetails
       ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
         '<h4>Ticket evidence</h4><p>Read-only native snapshot. Model output is not task approval.</p>' +
@@ -101,6 +143,26 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         (threadLinks.map(link => '<li>' + safe(link.repository) + ' / ' +
           safe(link.subjectKey) + '</li>').join('') ||
           '<li>No threads linked.</li>') + '</ul>' +
+        (canComment
+          ? '<section class="sa-effect-editor" aria-label="Explicit GitHub effect"><h5>GitHub issue comment</h5>' +
+            '<p>Available only for this running Ticket’s active side-effect mandate. The native confirmation shows the exact target and comment.</p>' +
+            '<form data-sa-form="issue-comment"><div class="sa-grid">' +
+            '<label>Repository (owner/name)<input name="repository" maxlength="200" required value="' +
+            safe(commentRepository) + '"></label>' +
+            '<label>Issue number<input name="issueNumber" type="number" min="1" step="1" inputmode="numeric" required value="' +
+            safe(commentIssueNumber) + '"></label></div>' +
+            '<label>Comment<textarea name="comment" rows="4" maxlength="60000" required>' +
+            safe(commentDraft) + '</textarea></label>' +
+            (issueCommentError ? '<p role="alert" data-sa-comment-error class="sa-write-path-error">' + safe(issueCommentError) + '</p>' : '') +
+            (commentStatus ? '<p role="status" data-sa-comment-status>Effect ' + safe(commentStatus.state) +
+              ' · ' + safe(commentStatus.reconciliation) + ' · SHA-256 ' +
+              safe(commentStatus.payloadSha256) + '</p>' : '') +
+            '<button type="submit" class="primary-button">' +
+            (commentStatus?.state === 'applied' ? 'Check existing comment' :
+              commentStatus?.state === 'pending' ? 'Check pending comment' :
+                commentStatus?.state === 'uncertain' ? 'Reconcile comment status' :
+                  'Authorize and post comment') + '</button></form></section>'
+          : '') +
         (sourcesLoaded && sources.length
           ? '<form data-sa-form="thread-link"><label>Event source<select name="sourceId" required>' +
             sources.map(src => '<option value="' + safe(src.id) + '">' +
@@ -170,16 +232,27 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '<ul class="sa-tickets">' + (tickets.map(ticket =>
         '<li><div><strong>' + safe(ticket.objective) + '</strong><small>' + safe(ticket.state) +
         ' · Revision ' + ticket.revision + '</small></div>' +
-        '<button type="button" data-sa-inspect-ticket="' + safe(ticket.id) +
+        '<div class="sa-ticket-actions"><button type="button" data-sa-inspect-ticket="' + safe(ticket.id) +
         '" aria-expanded="' + (ticket.id === inspectedTicket) + '">View evidence</button>' +
         (ticket.state === 'waiting_approval'
           ? '<button type="button" data-sa-accept="' + safe(ticket.id) + '">Accept evidence</button>' +
             '<button type="button" data-sa-reject="' + safe(ticket.id) + '">Reject evidence</button>' : '') +
-        (ticket.state === 'queued' ? '<button type="button" data-sa-dispatch="' + safe(ticket.id) + '">Dispatch worker</button>' : '') +
+        (ticket.state === 'queued' ? '<button type="button" data-sa-dispatch="' + safe(ticket.id) + '">Dispatch worker</button>' +
+          '<button type="button" data-sa-write-request="' + safe(ticket.id) + '">Request file writes</button>' : '') +
         (ticket.state === 'blocked' ? '<button type="button" data-sa-retry="' + safe(ticket.id) + '">Retry manually</button>' : '') +
         (!['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)
           ? '<button type="button" data-sa-stop="' + safe(ticket.id) + '">Stop</button>' : '') +
+        '</div>' +
         '</li>').join('') || '<li class="sa-empty">No tickets yet.</li>') + '</ul>' +
+        (writeTicket && writeGrantRevision !== null
+          ? '<section class="sa-write-editor" role="region" aria-label="Scoped write request"><h4>Request scoped file writes</h4>' +
+            '<p>Ticket <code>' + safe(writeTicket.id) + '</code> · Revision ' + writeGrantRevision +
+            '. Submitting opens a native confirmation that lists these exact files; only that dialog can authorize the worker.</p>' +
+            '<form data-sa-form="write-grant"><label>Exact project-relative file paths<textarea data-sa-write-paths name="allowedPaths" rows="5" spellcheck="false">' +
+            safe(writePathsDraft) + '</textarea></label><small>Enter one normalized relative path per line. Blank lines are ignored; path text is preserved exactly. Up to 16 files.</small>' +
+            (writePathsError ? '<p class="sa-write-path-error" role="alert">' + safe(writePathsError) + '</p>' : '') +
+            '<div class="sa-actions"><button type="submit" class="primary-button">Continue to native confirmation</button>' +
+            '<button type="button" data-sa-write-cancel>Cancel</button></div></form></section>' : '') +
         (rejectingTicket ? '<form data-sa-form="reject"><label>Rejection reason<textarea name="reason" maxlength="500" required></textarea></label>' +
           '<div class="sa-actions"><button type="submit" class="primary-button">Submit rejection</button>' +
           '<button type="button" data-sa-reject-cancel>Cancel</button></div></form>' : '') +
@@ -226,8 +299,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   async function refreshTicketDetails(): Promise<void> {
     const id = inspectedTicket;
     if (!id || !tickets.some(ticket => ticket.id === id)) {
-      inspectedTicket = ''; ticketDetails = null; threadLinks = []; return;
+      inspectedTicket = ''; ticketDetails = null; threadLinks = []; issueCommentStatus = null; return;
     }
+    const previousRevision = ticketDetails?.ticket.id === id ? ticketDetails.ticket.revision : null;
     // Use existing native read endpoints, not model-generated summaries. A
     // revision change refreshes the snapshot before a later human decision.
     const [snapshot, links] = await Promise.all([
@@ -235,6 +309,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       call<ThreadLink[]>('superagent_source_thread_links', { ticketId:id }),
     ]);
     if (inspectedTicket === id) {
+      if (previousRevision !== null && previousRevision !== snapshot.ticket.revision) issueCommentStatus = null;
       ticketDetails = snapshot;
       threadLinks = links;
       // Keep the ticket row and its grant/history pinned to one native revision.
@@ -306,11 +381,30 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     if (target instanceof HTMLTextAreaElement && target.hasAttribute('data-sa-manifest')) {
       importText = target.value; preview = null; inspected = null;
     }
+    if (target instanceof HTMLTextAreaElement && target.hasAttribute('data-sa-write-paths')) {
+      writePathsDraft = target.value; writePathsError = '';
+    }
+    if (target instanceof HTMLInputElement && target.form?.dataset.saForm === 'issue-comment') {
+      if (target.name === 'repository') commentRepository = target.value;
+      if (target.name === 'issueNumber') commentIssueNumber = target.value;
+      issueCommentError = ''; issueCommentStatus = null;
+      target.form?.querySelector('[data-sa-comment-error]')?.remove();
+      target.form?.querySelector('[data-sa-comment-status]')?.remove();
+    }
+    if (target instanceof HTMLTextAreaElement && target.form?.dataset.saForm === 'issue-comment') {
+      commentDraft = target.value; issueCommentError = ''; issueCommentStatus = null;
+      target.form?.querySelector('[data-sa-comment-error]')?.remove();
+      target.form?.querySelector('[data-sa-comment-status]')?.remove();
+    }
   });
   host.addEventListener('click', event => {
     const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button') : null;
     if (!target || !host.contains(target) || target.disabled) return;
     if (target.hasAttribute('data-sa-cancel')) { confirm = null; render(); return; }
+    if (target.hasAttribute('data-sa-write-cancel')) {
+      writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = ''; writePathsError = '';
+      render(); return;
+    }
     if (target.hasAttribute('data-sa-confirm')) {
       const action = confirm?.action; confirm = null; if (action) void work(action);
       return;
@@ -320,6 +414,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       const next = target.dataset.saSelect;
       selected = next;
       tickets = [];
+      writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = ''; writePathsError = '';
       inspectedTicket = ''; ticketDetails = null; threadLinks = [];
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       void work(async () => {
@@ -372,15 +467,26 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     }
     if (target.hasAttribute('data-sa-refresh')) { void work(reload); return; }
     if (target.hasAttribute('data-sa-close-details')) {
-      inspectedTicket = ''; ticketDetails = null; render(); return;
+      inspectedTicket = ''; ticketDetails = null; issueCommentStatus = null; render(); return;
     }
     if (target.dataset.saInspectTicket) {
       const id = target.dataset.saInspectTicket;
       if (inspectedTicket === id) {
-        inspectedTicket = ''; ticketDetails = null; render();
+        inspectedTicket = ''; ticketDetails = null; issueCommentStatus = null; render();
       } else {
-        inspectedTicket = id; ticketDetails = null;
+        inspectedTicket = id; ticketDetails = null; issueCommentStatus = null;
+        commentRepository = ''; commentIssueNumber = ''; commentDraft = ''; issueCommentError = '';
         void work(refreshTicketDetails);
+      }
+      return;
+    }
+    if (target.dataset.saWriteRequest) {
+      const ticket = tickets.find(item => item.id === target.dataset.saWriteRequest);
+      if (ticket?.state === 'queued') {
+        writeGrantTicket = ticket.id; writeGrantRevision = ticket.revision;
+        writePathsDraft = ''; writePathsError = ''; error = ''; feedback = '';
+        render();
+        host.querySelector<HTMLTextAreaElement>('[data-sa-write-paths]')?.focus();
       }
       return;
     }
@@ -440,6 +546,135 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     if (!(form instanceof HTMLFormElement) || !host.contains(form)) return;
     event.preventDefault();
     const data = new FormData(form);
+    if (form.dataset.saForm === 'write-grant') {
+      const ticketId = writeGrantTicket;
+      const expectedRevision = writeGrantRevision;
+      const ticket = tickets.find(item => item.id === ticketId);
+      writePathsDraft = String(data.get('allowedPaths') ?? '');
+      const paths = writePathsDraft.split(/\r\n?|\n/).filter(path => path.length > 0);
+      let pathError = '';
+      if (paths.length === 0 || paths.length > 16) {
+        pathError = 'Enter between 1 and 16 exact file paths.';
+      } else {
+        const unique = new Set<string>();
+        for (const path of paths) {
+          const invalidSegment = path.split('/').some(part => part === '' || part === '.' || part === '..' ||
+            part.toLowerCase() === '.git' || [...part].some(character => {
+              const code = character.codePointAt(0) ?? 0;
+              return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+            }));
+          if (new TextEncoder().encode(path).length > 4096 || path.includes('\\') || path.includes('\0') ||
+              path.includes(':') || invalidSegment) {
+            pathError = 'Use normalized project-relative paths without traversal, .git, drive prefixes, backslashes, or control characters.';
+            break;
+          }
+          if (unique.has(path)) {
+            pathError = 'A write scope cannot repeat a file path.';
+            break;
+          }
+          unique.add(path);
+        }
+      }
+      if (pathError) {
+        writePathsError = pathError; render(); return;
+      }
+      if (!ticket || ticket.state !== 'queued' || expectedRevision === null ||
+          ticket.revision !== expectedRevision) {
+        writePathsError = 'This Ticket changed after you opened the request. Refresh it and review the paths again.';
+        render(); return;
+      }
+      writePathsError = '';
+      const request: WorkerWriteDispatchRequest = {
+        ticketId, expectedRevision, allowedPaths: paths,
+      };
+      void work(async () => {
+        const result = await call<WorkerWriteDispatchResult>(
+          'superagent_dispatch_worker_with_write_grant', request,
+        );
+        if (isPreviewWorkerWriteDispatch(result)) {
+          writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = '';
+          await reload();
+          feedback = 'Preview only: no native confirmation was shown, no write grant was created, and no worker was dispatched. Requested files for Ticket ' +
+            ticketId + ': ' + paths.join(', ') + '.';
+          return;
+        }
+        if (result.ticket.id !== ticketId || result.grant.ticketId !== ticketId ||
+            result.grant.allowedPaths.length !== paths.length ||
+            result.grant.allowedPaths.some((path, index) => path !== paths[index])) {
+          throw new Error('The native response did not match the requested Ticket and file paths.');
+        }
+        writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = '';
+        await reload();
+        feedback = 'Native confirmation authorized Ticket ' + ticketId + ' at revision ' +
+          expectedRevision + '. Worker state: ' + result.ticket.state + '. Allowed files: ' +
+          result.grant.allowedPaths.join(', ') + '. Grant expires ' + activityTime(result.grant.expiresAt) + '.';
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'issue-comment') {
+      const ticketId = inspectedTicket;
+      const ticket = tickets.find(item => item.id === ticketId);
+      const snapshot = ticketDetails;
+      const repository = String(data.get('repository') ?? '');
+      const issueText = String(data.get('issueNumber') ?? '');
+      const issueNumber = Number(issueText);
+      const comment = String(data.get('comment') ?? '');
+      commentRepository = repository; commentIssueNumber = issueText; commentDraft = comment;
+      const parts = repository.split('/');
+      const validRepository = parts.length === 2 && parts.every(part => part.length > 0 &&
+        part !== '.' && part !== '..' && /^[A-Za-z0-9_.-]+$/.test(part));
+      let validationError = '';
+      if (!validRepository) validationError = 'Enter one exact GitHub repository as owner/name.';
+      else if (!/^[1-9][0-9]*$/.test(issueText) || !Number.isSafeInteger(issueNumber)) {
+        validationError = 'Enter a positive whole issue number.';
+      } else if (!comment.trim() || new TextEncoder().encode(comment).length > 60_000 ||
+          comment.includes('\0') || comment.includes('<!-- pandacode-superagent-effect:')) {
+        validationError = 'Enter a nonempty comment under 60 KB without a PandaCode effect marker.';
+      }
+      if (validationError) {
+        issueCommentError = validationError; render(); return;
+      }
+      if (!ticket || ticket.state !== 'running' || !snapshot || snapshot.ticket.id !== ticketId ||
+          snapshot.ticket.revision !== ticket.revision || snapshot.mandate.revoked ||
+          !snapshot.mandate.allowedSideEffects) {
+        issueCommentError = 'This Ticket has no current side-effect authorization. Refresh evidence before continuing.';
+        render(); return;
+      }
+      const expectedRevision = snapshot.ticket.revision;
+      issueCommentError = '';
+      void work(async () => {
+        await refreshTicketDetails();
+        const refreshed = ticketDetails;
+        const currentTicket = tickets.find(item => item.id === ticketId);
+        if (!refreshed || !currentTicket || refreshed.ticket.revision !== expectedRevision ||
+            currentTicket.revision !== expectedRevision) {
+          throw new Error('This Ticket changed. Review its updated evidence before continuing.');
+        }
+        if (refreshed.ticket.state !== 'running' || refreshed.mandate.revoked ||
+            !refreshed.mandate.allowedSideEffects) {
+          throw new Error('The Ticket is no longer running under an active side-effect mandate.');
+        }
+        const effectKey = await issueCommentEffectKey(ticketId, repository, issueNumber, comment);
+        const result = await call<IssueCommentResult>('superagent_issue_comment', {
+          ticketId, expectedRevision, repository, issueNumber, effectKey, comment,
+        });
+        if ('previewOnly' in result) {
+          issueCommentStatus = null;
+          feedback = result.message;
+          return;
+        }
+        if (result.ticketId !== ticketId || result.ticketRevision !== expectedRevision ||
+            result.repository !== repository || result.issueNumber !== issueNumber ||
+            result.effectKey !== effectKey) {
+          throw new Error('The native effect result did not match this Ticket and exact comment.');
+        }
+        issueCommentStatus = result;
+        feedback = result.state === 'applied' && result.reconciliation === 'exact-readback'
+          ? 'GitHub comment applied and verified by exact read-back.'
+          : 'GitHub comment state: ' + result.state + ' (' + result.reconciliation + '). Repeating the same comment checks its saved receipt and does not blindly post again.';
+      });
+      return;
+    }
     if (form.dataset.saForm === 'thread-link') {
       const ticketId = inspectedTicket;
       const sourceId = String(data.get('sourceId') ?? '');

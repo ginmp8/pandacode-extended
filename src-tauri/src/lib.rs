@@ -2445,14 +2445,24 @@ async fn launch_operation_admitted(
                 config.reviewer_policy.as_ref(),
                 Some(architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly)
             ) {
-                // Read-only reviewers still need the two task-scoped, native skill
-                // retrieval/verification tools. Never expose Architect or bot tools.
-                let host = team.as_ref().and_then(|admission| {
-                    architect::reviewer_skill_host(
-                        app.clone(), session_id.clone(), stopped.clone(), admission,
-                    )
-                });
-                (host, false, None)
+                match superagent::write_grants::host(
+                    app.clone(),session_id.clone(),stopped.clone(),
+                ) {
+                    Err(error) => (None,false,Some(error)),
+                    // A granted SuperAgent worker receives this one app-owned
+                    // tool only; built-in provider tools remain read-only.
+                    Ok(Some(host)) => (Some(host),false,None),
+                    Ok(None) => {
+                        // Ordinary Council reviewers still receive only their
+                        // task-scoped, read-only skill evidence tools.
+                        let host = team.as_ref().and_then(|admission| {
+                            architect::reviewer_skill_host(
+                                app.clone(), session_id.clone(), stopped.clone(), admission,
+                            )
+                        });
+                        (host,false,None)
+                    }
+                }
             } else {
                 (None, false, None)
             };
@@ -4457,9 +4467,12 @@ pub fn run() {
                 superagent::superagent_submit,
                 superagent::superagent_submit_coordinated,
                 superagent::superagent_dispatch_worker,
+                superagent::superagent_dispatch_worker_with_write_grant,
+                superagent::superagent_revoke_worker_write_grant,
                 superagent::superagent_retry,
                 superagent::superagent_accept,
                 superagent::superagent_reject,
+                superagent::superagent_issue_comment,
                 superagent::manifest::superagent_manifest_export,
                 superagent::manifest::superagent_manifest_preview,
                 superagent::manifest::superagent_manifest_import,

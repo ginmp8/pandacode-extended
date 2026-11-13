@@ -35,6 +35,15 @@ enum Command {
     AcceptTicket { ticket_id: String, expected_revision: i64 },
     RejectTicket { ticket_id: String, expected_revision: i64, reason: String },
     StopTicket { ticket_id: String },
+    IssueComment {
+        ticket_id: String,
+        expected_revision: i64,
+        repository: String,
+        issue_number: i64,
+        effect_key: String,
+        comment: String,
+        confirmation_hash: Option<String>,
+    },
 }
 
 /// `pandacode serve …`: true when the argument was handled; the process then serves until
@@ -102,7 +111,8 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 }
             }
             let ticket_action = matches!(&command,
-                Command::AcceptTicket { .. } | Command::RejectTicket { .. } | Command::StopTicket { .. });
+                Command::AcceptTicket { .. } | Command::RejectTicket { .. } | Command::StopTicket { .. }
+                | Command::IssueComment { .. });
             if ticket_action {
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
@@ -115,6 +125,12 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                                 crate::superagent::headless_reject_ticket(&database, ticket_id, *expected_revision, reason),
                             Command::StopTicket { ticket_id } =>
                                 crate::superagent::headless_stop_ticket(&database, ticket_id),
+                            Command::IssueComment { ticket_id, expected_revision, repository,
+                                issue_number, effect_key, comment, confirmation_hash } =>
+                                crate::superagent::headless_issue_comment(
+                                    &database, ticket_id, *expected_revision, repository,
+                                    *issue_number, effect_key, comment, confirmation_hash.as_deref(),
+                                ),
                             _ => unreachable!(),
                         }
                     });
@@ -148,7 +164,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
     match command {
         // Inspection exits before setup_common and must never reach this branch.
         Command::InspectOrchestrations | Command::ListTickets | Command::InspectTicket { .. }
-        | Command::AcceptTicket { .. } | Command::RejectTicket { .. } | Command::StopTicket { .. } => {
+        | Command::AcceptTicket { .. } | Command::RejectTicket { .. } | Command::StopTicket { .. }
+        | Command::IssueComment { .. } => {
             eprintln!("SuperAgent inspection must use the read-only startup path.");
             std::process::exit(2)
         }
@@ -474,6 +491,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
     let mut name: Option<String> = None;
     let mut import: Option<PathBuf> = None;
     let mut sign_in = false;
+    let mut confirmation_hash: Option<String> = None;
     let mut command = Command::Serve;
     let mut ops = 0;
     let mut index = 0;
@@ -578,6 +596,45 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--issue-comment" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--issue-comment needs a Ticket ID.\n\n{}", help()))?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or_else(|| format!("--issue-comment needs an expected revision.\n\n{}", help()))?;
+                let expected_revision = parse_ticket_revision(revision)?;
+                let repository = args.get(index + 3)
+                    .ok_or_else(|| format!("--issue-comment needs an owner/name repository.\n\n{}", help()))?;
+                crate::superagent::effects::validate_repository(repository)?;
+                let issue = args.get(index + 4)
+                    .ok_or_else(|| format!("--issue-comment needs an issue number.\n\n{}", help()))?;
+                let issue_number = parse_issue_number(issue)?;
+                let effect_key = args.get(index + 5)
+                    .ok_or_else(|| format!("--issue-comment needs a stable effect key.\n\n{}", help()))?;
+                crate::superagent::effects::validate_effect_key(effect_key)?;
+                let comment = args.get(index + 6)
+                    .ok_or_else(|| format!("--issue-comment needs the exact comment body.\n\n{}", help()))?;
+                command = Command::IssueComment {
+                    ticket_id: ticket_id.clone(),
+                    expected_revision,
+                    repository: repository.clone(),
+                    issue_number,
+                    effect_key: effect_key.clone(),
+                    comment: comment.clone(),
+                    confirmation_hash: None,
+                };
+                ops += 1;
+                index += 6;
+            }
+            "--confirm-issue-comment" => {
+                if confirmation_hash.is_some() {
+                    return Err("Provide --confirm-issue-comment only once.".into());
+                }
+                let value = args.get(index + 1)
+                    .ok_or_else(|| "--confirm-issue-comment needs the reviewed SHA-256 value.".to_string())?;
+                confirmation_hash = Some(parse_confirmation_hash(value)?);
+                index += 1;
+            }
             "--sync-bots" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--sync-bots needs a source registry path.\n\n{}", help()))?;
@@ -608,6 +665,14 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
             "Choose one command; Ticket actions cannot be combined with serving or other commands.\n\n{}",
             help()
         ));
+    }
+    if let Some(confirmation_hash) = confirmation_hash {
+        match &mut command {
+            Command::IssueComment { confirmation_hash: value, .. } => {
+                *value = Some(confirmation_hash);
+            }
+            _ => return Err("--confirm-issue-comment only works with --issue-comment.".into()),
+        }
     }
     if matches!(command, Command::SyncBots { .. }) && name.is_some() {
         return Err(format!("--device-name only works with --sign-in.\n\n{}", help()));
@@ -645,10 +710,26 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
     Ok(revision)
 }
 
-fn help() -> String {
-    "PandaCode headless host (docs/headless.md)
+fn parse_issue_number(value: &str) -> Result<i64, String> {
+    let number = value.parse::<i64>()
+        .map_err(|_| "Provide a positive GitHub issue number.".to_string())?;
+    if number <= 0 {
+        return Err("Provide a positive GitHub issue number.".into());
+    }
+    Ok(number)
+}
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-ticket <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id>]
+fn parse_confirmation_hash(value: &str) -> Result<String, String> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Provide the 64-character SHA-256 value from the issue-comment preview.".into());
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
+fn help() -> String {
+    "PandaCode headless host
+
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-ticket <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -679,7 +760,15 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          Accept current worker evidence at the expected Ticket revision; exit.
   --reject-ticket <id> <revision> <reason>
                          Reject current worker evidence with a required reason; quote it if it has spaces.
-  --stop-ticket <id>    Revoke a Ticket mandate and stop the Ticket; exit."
+  --stop-ticket <id>    Revoke a Ticket mandate and stop the Ticket; exit.
+  --issue-comment <id> <revision> <owner/name> <issue> <key> <body>
+                         Authorize and post one exact GitHub issue comment. The first
+                         invocation prints the required confirmation SHA-256; rerun with
+                         --confirm-issue-comment <sha256>. Later invocations only reconcile
+                         an existing pending or uncertain effect and never replay it.
+  --confirm-issue-comment <sha256>
+                         Confirm the exact Ticket revision, repository, issue, effect key,
+                         comment body and marker shown by --issue-comment."
         .into()
 }
 
@@ -737,6 +826,33 @@ mod tests {
         assert_eq!(parsed("--stop-ticket ticket_123"), Ok(Command::StopTicket {
             ticket_id: "ticket_123".into(),
         }));
+        let confirmation = "a".repeat(64);
+        assert_eq!(
+            parse(&[
+                "--issue-comment".into(),
+                "ticket_123".into(),
+                "4".into(),
+                "owner/repo".into(),
+                "7".into(),
+                "stable-key".into(),
+                "reviewed comment".into(),
+                "--confirm-issue-comment".into(),
+                confirmation.clone(),
+            ]).unwrap().0,
+            Command::IssueComment {
+                ticket_id: "ticket_123".into(),
+                expected_revision: 4,
+                repository: "owner/repo".into(),
+                issue_number: 7,
+                effect_key: "stable-key".into(),
+                comment: "reviewed comment".into(),
+                confirmation_hash: Some(confirmation),
+            }
+        );
+        assert!(parsed("--issue-comment ticket_123 4 owner/repo 7 stable-key body --confirm-issue-comment short").is_err());
+        assert!(parsed("--issue-comment ticket_123 4 owner/repo 0 stable-key body").is_err());
+        assert!(parsed("--issue-comment ticket_123 4 owner/repo/extra 7 stable-key body").is_err());
+        assert!(parsed("--confirm-issue-comment short").is_err());
         assert!(parsed("--accept-ticket ticket_123").is_err());
         assert!(parsed("--accept-ticket ticket_123 nope").is_err());
         assert!(parsed("--accept-ticket ../outside 1").is_err());
@@ -793,6 +909,8 @@ mod tests {
             "--accept-ticket",
             "--reject-ticket",
             "--stop-ticket",
+            "--issue-comment",
+            "--confirm-issue-comment",
             "--sync-bots",
             "xvfb-run",
         ] {

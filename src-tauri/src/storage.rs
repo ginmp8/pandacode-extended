@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 43;
+pub const SCHEMA_VERSION: i64 = 46;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -691,6 +691,39 @@ impl Store {
                 migration.execute_batch("PRAGMA user_version=43;")
                     .map_err(|e| e.to_string())?;
             }
+            if version < 44 {
+                // Worker file-write grants and per-write receipts are separate
+                // from the immutable read-only mandate. Existing tickets remain
+                // read-only unless a user explicitly grants an active worker.
+                migration.execute_batch(crate::superagent::write_grants::SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=44;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 45 {
+                // Persist the exact canonical checkout captured at grant issue.
+                // Older v44 grants did not bind a root, so revoke them instead
+                // of silently widening them to the path currently on disk.
+                let has_project_root: bool = migration.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_worker_write_grants') WHERE name='project_root')",
+                    [], |row| row.get(0),
+                ).map_err(|e| e.to_string())?;
+                if !has_project_root {
+                    migration.execute_batch(
+                        "ALTER TABLE sa_worker_write_grants ADD COLUMN project_root TEXT NOT NULL DEFAULT '';",
+                    ).map_err(|e| e.to_string())?;
+                }
+                migration.execute_batch(
+                    "UPDATE sa_worker_write_grants SET revoked=1,revoked_at=COALESCE(revoked_at,created_at) WHERE revoked=0 AND project_root='';\n\
+                     PRAGMA user_version=45;",
+                ).map_err(|e| e.to_string())?;
+            }
+            if version < 46 {
+                migration.execute_batch(crate::superagent::effects::GRANT_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=46;")
+                    .map_err(|e| e.to_string())?;
+            }
             migration.commit().map_err(|e| e.to_string())?;
         }
         let recovery = db.transaction().map_err(|e| e.to_string())?;
@@ -735,6 +768,7 @@ impl Store {
             WHERE CASE WHEN json_valid(content) THEN json_extract(content,'$.status') END IN ('running','waiting');").map_err(|e|e.to_string())?;
         // Reconcile SuperAgent-owned running assignments without replaying effects.
         recovery.execute_batch(crate::superagent::RECOVER).map_err(|e| e.to_string())?;
+        recovery.execute_batch(crate::superagent::write_grants::RECOVER).map_err(|e| e.to_string())?;
         recovery.execute_batch(crate::superagent::effects::RECOVER).map_err(|e| e.to_string())?;
         recovery.commit().map_err(|e| e.to_string())?;
         let ranked: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE sidebar_order IS NOT NULL)", [], |r| r.get(0)).map_err(|e| e.to_string())?;

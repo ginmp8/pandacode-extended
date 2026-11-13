@@ -2289,13 +2289,6 @@ fn dispatch_as(
                 let reviewer_source = seat.as_ref().map(|seat| council::reviewer_source_for(
                     &team, seat, assignment.replaces.as_deref(), assignment.council_reviewer_source,
                 )).transpose()?;
-                // The challenge consumes immutable native evidence, not any
-                // phase-one description supplied by the orchestrating model.
-                if let Some(seat) = &seat {
-                    if let Some(handoff) = council::phase_one_challenge_handoff(&store, &team, seat.round)? {
-                        assignment.prompt.push_str(&handoff);
-                    }
-                }
                 if let Some(seat) = &seat {
                     overtaken.extend(council::overtake(&mut team, seat.round));
                 }
@@ -2326,6 +2319,16 @@ fn dispatch_as(
                 // ZCode has no worker-management tool bridge. It can return a
                 // Council score, which needs no Architect host callbacks.
                 validate_worker_role(&profile.provider, seat.is_some())?;
+                // Resolve the selected reviewer identity *before* constructing
+                // its authenticated challenge evidence. A selected bot must
+                // never receive its own scored phase-one findings.
+                if let Some(seat) = &seat {
+                    if let Some(handoff) = council::phase_one_challenge_handoff(
+                        &store, &team, seat.round, selected_bot.as_ref().map(|bot| bot.id.as_str()),
+                    )? {
+                        assignment.prompt.push_str(&handoff);
+                    }
+                }
                 let profile = &profile;
                 let session = store.create_session(
                     &parent.project_id,

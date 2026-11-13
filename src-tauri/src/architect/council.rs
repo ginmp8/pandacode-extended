@@ -1335,10 +1335,20 @@ pub(super) fn phase_one_challenge_handoff(
     store: &storage::Store,
     team: &TeamSnapshot,
     challenge_round: usize,
+    challenge_bot_id: Option<&str>,
 ) -> Result<Option<String>> {
     let Some(config) = team.config.council.as_ref() else { return Ok(None) };
     if config.strategy != CouncilExecutionStrategy::TwoPhase || challenge_round != 2 {
         return Ok(None);
+    }
+    // Direct reviewers may challenge only peer reports. The native source
+    // choice is resolved before constructing any task-scoped handoff.
+    if let Some(bot_id) = challenge_bot_id {
+        if !config.reviewer_bot_ids.iter().any(|selected| selected == bot_id) {
+            return Err("S3 challenge denied: the selected bot is not enabled for this task.".into());
+        }
+    } else if !config.reviewer_bot_ids.is_empty() && config.automatic_reviewers == 0 {
+        return Err("S3 challenge denied: automatic reviewers are not enabled in this mode.".into());
     }
     let view = Rounds::of(team, config);
     if !view.complete(1) || stale(team, 1)
@@ -1350,6 +1360,7 @@ pub(super) fn phase_one_challenge_handoff(
         return Err("S3 challenge handoff requires a fresh, complete, independently verified first phase.".into());
     }
     let mut sources = Vec::new();
+    let mut verified_reports = 0usize;
     for (worker, seat) in in_round(team, 1).filter(|(worker, seat)| counts(worker, seat)) {
         if !worker.read_only || worker.status != "completed" || seat.score.is_none() {
             return Err("S3 challenge handoff requires completed native read-only reports.".into());
@@ -1368,6 +1379,13 @@ pub(super) fn phase_one_challenge_handoff(
         if parse_score(&report) != seat.score {
             return Err("S3 challenge handoff rejected a changed or unscored first-phase report.".into());
         }
+        verified_reports += 1;
+        // Verify *every* phase-one report before filtering; a forged own
+        // report must not disappear from the integrity check. Never expose
+        // a selected bot's prior findings back to that same bot as a challenge.
+        if challenge_bot_id.is_some_and(|id| binding.reviewer_bot_id.as_deref() == Some(id)) {
+            continue;
+        }
         let claims: Vec<Value> = parse_reported_findings(&report).into_iter().map(|finding| json!({
             "severity": finding.severity,
             "category": finding.category,
@@ -1384,8 +1402,11 @@ pub(super) fn phase_one_challenge_handoff(
             "reportedFindings": claims,
         }));
     }
-    if sources.len() < config.needed() {
+    if verified_reports < config.needed() {
         return Err("S3 challenge handoff is missing required first-phase reviewer reports.".into());
+    }
+    if sources.is_empty() {
+        return Err("S3 challenge unavailable: no independent peer report can be challenged.".into());
     }
     let content = serde_json::to_string(&json!({
         "schemaVersion": 1,
@@ -1402,9 +1423,9 @@ pub(super) fn phase_one_challenge_handoff(
     )))
 }
 
-/// Every selected-bot author whose report reaches an S3 challenger is excluded
-/// from the challenge phase, even when the second round assigns that bot a
-/// different lens. The phase-one handoff includes all original reports.
+/// Identity of each selected-bot first-phase author. Every author's report
+/// must have a distinct second-phase challenger; the native handoff filters
+/// each direct bot's own report without silently enabling another source.
 pub(super) fn phase_one_selected_bot_ids(team: &TeamSnapshot) -> std::collections::HashSet<&str> {
     in_round(team, 1)
         .filter(|(worker, seat)| counts(worker, seat) && seat.score.is_some())
@@ -1441,15 +1462,16 @@ fn two_phase_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view: &Round
             {
                 return false;
             }
-            if round == 2 && worker.reviewer_binding.as_ref()
-                .and_then(|binding| binding.reviewer_bot_id.as_deref())
-                .is_some_and(|bot_id| challenged_bots.contains(bot_id))
-            {
-                return false;
-            }
         }
     }
-    true
+    // A previously participating bot may run a *fresh* native session to
+    // challenge a peer, but no first-phase selected bot may be left without
+    // at least one independent second-phase author. This makes D-only S3
+    // executable without silently introducing automatic reviewers.
+    challenged_bots.iter().all(|author| in_round(team, 2)
+        .filter(|(worker, seat)| counts(worker, seat))
+        .any(|(worker, _)| worker.reviewer_binding.as_ref()
+            .and_then(|binding| binding.reviewer_bot_id.as_deref()) != Some(*author)))
 }
 
 /// The verdict from a view the caller already computed.

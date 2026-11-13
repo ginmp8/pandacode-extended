@@ -275,27 +275,15 @@ fn seat_bot_with_skills(store: &Store, team: &TeamSnapshot, round: usize, replac
         return Err("reviewer_session_mismatch: a selected seat cannot replace a native reviewer.".into());
     }
     let occupied = occupied_bot_ids(team, round, replaces);
-    // Every S3 challenger receives the complete first-phase finding handoff.
-    // A selected bot cannot challenge a report it authored under another lens.
-    let challenged_bots = if config.strategy == super::council::CouncilExecutionStrategy::TwoPhase && round == 2 {
-        super::council::phase_one_selected_bot_ids(team)
-    } else {
-        HashSet::new()
-    };
+    // A new native worker session may challenge reports by *other* selected
+    // bots. The per-bot S3 handoff removes its own authenticated phase-one
+    // report; the root verdict requires independent cross-challenge coverage.
     let selected = match inherited {
         Some(id) => id,
-        None => reviewers.iter().find(|bot| !occupied.contains(bot.id.as_str())
-                && !challenged_bots.contains(bot.id.as_str()))
+        None => reviewers.iter().find(|bot| !occupied.contains(bot.id.as_str()))
             .map(|bot| bot.id.as_str())
-            .ok_or(if challenged_bots.is_empty() {
-                "All selected reviewer bots already have a seat in this round."
-            } else {
-                "S3 challenge unavailable: no fresh selected bot remains outside the first-phase reviewer authors."
-            })?,
+            .ok_or("All selected reviewer bots already have a seat in this round.")?,
     };
-    if challenged_bots.contains(selected) {
-        return Err("S3 challenge denied: a selected bot cannot review its own first-phase report, even under another lens.".into());
-    }
     if occupied.contains(selected) {
         return Err("reviewer_session_mismatch: reviewer identity is duplicated or no longer selected.".into());
     }

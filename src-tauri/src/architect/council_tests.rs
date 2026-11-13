@@ -825,7 +825,7 @@ fn s3_challenge_handoff_requires_genuine_pinned_reports_and_never_transfers_scor
         sessions.push(worker_session.id);
         team.workers.push(reviewer);
     }
-    let payload = council::phase_one_challenge_handoff(&store, &team, 2).unwrap().unwrap();
+    let payload = council::phase_one_challenge_handoff(&store, &team, 2, None).unwrap().unwrap();
     assert!(payload.contains("Missing edge"));
     assert!(payload.contains("reportMessageId"));
     assert!(payload.contains("rootCycleId"));
@@ -833,15 +833,15 @@ fn s3_challenge_handoff_requires_genuine_pinned_reports_and_never_transfers_scor
     assert!(!payload.contains("Council score"));
     assert!(!payload.contains("9.4"));
     assert!(!payload.contains("9.5"));
-    assert!(council::phase_one_challenge_handoff(&store, &team, 1).unwrap().is_none());
+    assert!(council::phase_one_challenge_handoff(&store, &team, 1, None).unwrap().is_none());
     // A later coordination turn is no longer an authenticated scored report,
     // even if the previous native score remains in the team snapshot.
     store.message(&sessions[0], "coordination", "New phase-one turn").unwrap();
-    assert!(council::phase_one_challenge_handoff(&store, &team, 2)
+    assert!(council::phase_one_challenge_handoff(&store, &team, 2, None)
         .unwrap_err().contains("cannot locate"));
     let mut stale = team.clone();
     stale.changed_at = team.council_since + 100;
-    assert!(council::phase_one_challenge_handoff(&store, &stale, 2)
+    assert!(council::phase_one_challenge_handoff(&store, &stale, 2, None)
         .unwrap_err().contains("fresh"));
 }
 
@@ -888,7 +888,7 @@ fn native_s3_uses_fresh_read_only_challengers_and_never_passes_phase_one_alone()
 }
 
 #[test]
-fn s3_rejects_a_fresh_worker_that_reuses_a_phase_one_bot_under_a_different_lens() {
+fn s3_selected_bots_can_cross_challenge_only_with_new_native_worker_sessions() {
     let mut config = on(9.0, 3, 0);
     config.reviewer_bot_ids = vec!["reviewer-a".into(), "reviewer-b".into()];
     config.strategy = council::CouncilExecutionStrategy::TwoPhase;
@@ -912,9 +912,67 @@ fn s3_rejects_a_fresh_worker_that_reuses_a_phase_one_bot_under_a_different_lens(
         team.workers[index].reviewer_binding = Some(binding);
     }
     assert_eq!(council::phase_one_selected_bot_ids(&team).len(), 2);
-    assert_ne!(council::status(&team).unwrap().state, "passed",
-        "different worker sessions and swapped lenses cannot disguise the same selected bot author");
-    assert!(finish_refusal(&team).unwrap().contains("S3 two-phase"));
+    assert_eq!(council::status(&team).unwrap().state, "passed",
+        "fresh native worker sessions can challenge each other's reports without adding sources");
+
+    // Reusing the same native worker is never a fresh phase, regardless of
+    // which selected bot or lens it claims to represent.
+    let mut replay = team.clone();
+    replay.workers[3].id = "first-b".into();
+    assert_ne!(council::status(&replay).unwrap().state, "passed");
+
+    // Both challengers claiming one bot leaves that bot's own report without
+    // a distinct challenger, and must not unlock the native gate.
+    team.workers[3].reviewer_binding.as_mut().unwrap().reviewer_bot_id = Some("reviewer-a".into());
+    assert_ne!(council::status(&team).unwrap().state, "passed");
+}
+
+#[test]
+fn s3_selected_challengers_receive_only_authenticated_peer_reports() {
+    let (state, sid) = council_state(on(9.0, 3, 2));
+    let store = state.store.lock().unwrap();
+    let parent = store.session(&sid).unwrap();
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    let mut config = on(9.0, 3, 0);
+    config.strategy = council::CouncilExecutionStrategy::TwoPhase;
+    config.reviewer_bot_ids = vec!["security".into(), "quality".into()];
+    team.config.council = Some(config);
+    let reports = [
+        ("security", "Security", r#"Council findings JSON: [{"severity":"medium","category":"authorization","title":"SECURITY-ONLY","explanation":"Check missing authorization"}]
+Council score: 9.4/10"#),
+        ("quality", "Quality", r#"Council findings JSON: [{"severity":"medium","category":"testing","title":"QUALITY-ONLY","explanation":"Check missing edge test"}]
+Council score: 9.4/10"#),
+    ];
+    for (index, (bot_id, lens, report)) in reports.iter().enumerate() {
+        let session = store.create_session(&parent.project_id, "codex", "test-model", "plan").unwrap();
+        let mut reviewer = seat(&format!("first-{bot_id}"), 1, Some(9.4), team.council_since + index as i64 + 1);
+        reviewer.session_id = session.id.clone();
+        reviewer.council.as_mut().unwrap().lens = (*lens).into();
+        let mut binding = reviewer_security::ReviewerBinding::native(
+            &team, &reviewer.id, reviewer.created_at, &reviewer.provider,
+            &reviewer.model, reviewer.council.as_ref().unwrap(),
+        );
+        binding.reviewer_bot_id = Some((*bot_id).into());
+        binding.roster_bot_ids = vec!["security".into(), "quality".into()];
+        binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+            name: (*bot_id).into(), role: String::new(),
+            instructions: String::new(), goals: String::new(),
+            soul: String::new(), reasoning_effort: String::new(),
+            skill_ids: Vec::new(),
+        });
+        reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+        reviewer.reviewer_binding = Some(binding);
+        store.message(&session.id, "assistant", report).unwrap();
+        team.workers.push(reviewer);
+    }
+    let security = council::phase_one_challenge_handoff(&store, &team, 2, Some("security")).unwrap().unwrap();
+    assert!(security.contains("QUALITY-ONLY"));
+    assert!(!security.contains("SECURITY-ONLY"));
+    let quality = council::phase_one_challenge_handoff(&store, &team, 2, Some("quality")).unwrap().unwrap();
+    assert!(quality.contains("SECURITY-ONLY"));
+    assert!(!quality.contains("QUALITY-ONLY"));
+    assert!(council::phase_one_challenge_handoff(&store, &team, 2, Some("unselected")).unwrap_err().contains("not enabled"));
+    assert!(council::phase_one_challenge_handoff(&store, &team, 2, None).unwrap_err().contains("not enabled"));
 }
 
 #[test]

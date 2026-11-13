@@ -191,6 +191,7 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
     if !valid_thread_key(subject_key) {
         return Err("A source link requires an exact issue:123 or pull:123 thread key.".into());
     }
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let ticket = super::get_ticket(store, ticket_id)?;
     let src = source(store, source_id)?;
     if src.orchestration_id != ticket.orchestration_id {
@@ -201,7 +202,7 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
     {
         return Err("Terminal Tickets cannot gain new source thread links.".into());
     }
-    let current: Option<String> = store.db.query_row(
+    let current: Option<String> = tx.query_row(
         "SELECT ticket_id FROM sa_source_thread_links
          WHERE source_id=?1 AND subject_key=?2",
         params![source_id,subject_key], |row| row.get(0),
@@ -210,7 +211,7 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
     // silently assign that same Team/repository/thread to another Ticket.
     // This check uses only trusted native source configuration and the local
     // operator's explicit thread link, never issue/PR text.
-    let conflicting: Option<String> = store.db.query_row(
+    let conflicting: Option<String> = tx.query_row(
         "SELECT l.ticket_id FROM sa_source_thread_links l
          JOIN sa_event_sources linked ON linked.id=l.source_id
          WHERE linked.orchestration_id=?1 AND linked.repository=?2
@@ -226,24 +227,101 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
             return Err("Source thread is already linked to a different Ticket.".into());
         }
     } else {
-        let count: i64 = store.db.query_row(
+        let count: i64 = tx.query_row(
             "SELECT COUNT(*) FROM sa_source_thread_links WHERE ticket_id=?1",
             [ticket_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
         if count >= MAX_LINKS_PER_TICKET {
             return Err("Ticket source thread link limit reached.".into());
         }
-        store.db.execute(
+        tx.execute(
             "INSERT INTO sa_source_thread_links
              (source_id,subject_key,ticket_id,created_at) VALUES(?1,?2,?3,?4)",
             params![source_id,subject_key,ticket_id,storage::now()],
         ).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'source_thread_linked',?2,?3)",
+            params![ticket_id,format!("{source_id} / {} / {subject_key}",src.repository),
+                storage::now()],
+        ).map_err(|e| e.to_string())?;
     }
+    tx.commit().map_err(|e| e.to_string())?;
     list_thread_links(store, ticket_id)?.into_iter()
         .find(|link| link.source_id == source_id && link.subject_key == subject_key)
         .ok_or_else(|| "Source thread link unavailable after update.".into())
 }
 
+
+/// Operator-asserted issue/PR context only; not proof of a GitHub relationship.
+/// The existing linked issue and the new PR reference must share Team, Ticket
+/// and repository. Both association and audit are atomic and idempotent.
+fn link_issue_to_pull(store: &Store, source_id: &str, ticket_id: &str,
+    issue_key: &str, pull_key: &str) -> Result<SourceThreadLink>
+{
+    if !valid_thread_key(issue_key) || !issue_key.starts_with("issue:")
+        || !valid_thread_key(pull_key) || !pull_key.starts_with("pull:") {
+        return Err("Issue-to-PR association requires exact issue:123 and pull:123 keys.".into());
+    }
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let issue_linked: Option<i64> = tx.query_row(
+        "SELECT 1 FROM sa_source_thread_links l
+         JOIN sa_event_sources initial ON initial.id=l.source_id
+         JOIN sa_event_sources target ON target.id=?1
+         JOIN sa_tickets t ON t.id=l.ticket_id
+         WHERE l.ticket_id=?2 AND l.subject_key=?3
+           AND initial.orchestration_id=t.orchestration_id
+           AND target.orchestration_id=t.orchestration_id
+           AND initial.repository=target.repository LIMIT 1",
+        params![source_id,ticket_id,issue_key], |r| r.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if issue_linked.is_none() {
+        return Err("PR association requires an explicit issue link for this Team, Ticket and repository.".into());
+    }
+    // Reuse every native link admission check and the append-only link audit.
+    // This executes within the same connection's transaction (SQLite savepoint
+    // is not needed; link_thread opens a nested transaction, so do not call it).
+    let ticket = super::get_ticket(store, ticket_id)?;
+    let src = source(store, source_id)?;
+    if ticket.orchestration_id != src.orchestration_id
+        || matches!(ticket.state.as_str(),"completed"|"stopped"|"failed"|"interrupted"|"inconclusive") {
+        return Err("Ticket is terminal or outside the source Team.".into());
+    }
+    let previous: Option<String> = tx.query_row(
+        "SELECT ticket_id FROM sa_source_thread_links WHERE source_id=?1 AND subject_key=?2",
+        params![source_id,pull_key], |r|r.get(0),
+    ).optional().map_err(|e|e.to_string())?;
+    let conflicting: Option<String> = tx.query_row(
+        "SELECT l.ticket_id FROM sa_source_thread_links l
+         JOIN sa_event_sources s ON s.id=l.source_id
+         WHERE s.orchestration_id=?1 AND s.repository=?2
+           AND l.subject_key=?3 AND l.ticket_id<>?4 LIMIT 1",
+        params![&ticket.orchestration_id,&src.repository,pull_key,ticket_id],
+        |r|r.get(0),
+    ).optional().map_err(|e|e.to_string())?;
+    if conflicting.is_some() || previous.as_deref().is_some_and(|id|id!=ticket_id) {
+        return Err("PR thread is already associated with another Ticket.".into());
+    }
+    if previous.is_none() {
+        let count:i64=tx.query_row(
+            "SELECT COUNT(*) FROM sa_source_thread_links WHERE ticket_id=?1",
+            [ticket_id],|r|r.get(0),
+        ).map_err(|e|e.to_string())?;
+        if count>=MAX_LINKS_PER_TICKET { return Err("Ticket source thread link limit reached.".into()); }
+        let at=storage::now();
+        tx.execute("INSERT INTO sa_source_thread_links
+            (source_id,subject_key,ticket_id,created_at) VALUES(?1,?2,?3,?4)",
+            params![source_id,pull_key,ticket_id,at]).map_err(|e|e.to_string())?;
+        tx.execute("INSERT INTO sa_audit(ticket_id,kind,detail,at)
+            VALUES(?1,'source_issue_pull_associated',?2,?3)",
+            params![ticket_id,format!("{issue_key} -> {pull_key} (operator asserted)"),at])
+            .map_err(|e|e.to_string())?;
+    }
+    tx.commit().map_err(|e|e.to_string())?;
+    list_thread_links(store,ticket_id)?.into_iter()
+        .find(|link|link.source_id==source_id && link.subject_key==pull_key)
+        .ok_or_else(||"Source PR link unavailable after association.".into())
+}
 
 /// Revocation affects only the operator's exact Team/Ticket/source/thread
 /// association. Authenticated receipt rows and Ticket evidence remain durable.
@@ -1165,6 +1243,17 @@ pub async fn superagent_source_unlink_thread(
     unlink_thread(&store, &source_id, &ticket_id, &subject_key)
 }
 
+/// Operator-asserted issue-to-PR context; no GitHub verification or authority.
+#[tauri::command]
+pub async fn superagent_source_link_issue_pull(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    source_id: String, ticket_id: String, issue_key: String, pull_key: String,
+) -> Result<SourceThreadLink> {
+    require_main_window(&window)?;
+    let store=state.store.lock().map_err(|e|e.to_string())?;
+    link_issue_to_pull(&store,&source_id,&ticket_id,&issue_key,&pull_key)
+}
+
 /// Authenticated Observe receipts associated with an explicit, same-Team
 /// source-thread link. This is context metadata only: no work admission,
 /// policy changes, private GitHub content or inferred source authority.
@@ -2054,6 +2143,44 @@ mod tests {
         assert_eq!(source(&reopened,&src.id).unwrap().last_sequence,0);
     }
 
+
+    #[test]
+    fn issue_pr_pair_requires_explicit_source_and_rolls_back_failed_audit() {
+        let (store,path)=fixture();
+        insert_manual_ticket(&store,"one","orch");
+        insert_manual_ticket(&store,"two","orch");
+        let issue=create_source(&store,"orch","test/fixture","trusted-bot","issues.opened").unwrap();
+        let pull=create_source(&store,"orch","test/fixture","trusted-bot","pull_request.opened").unwrap();
+        let other=create_source(&store,"orch","elsewhere/repo","trusted-bot","pull_request.opened").unwrap();
+        assert!(link_issue_to_pull(&store,&pull.id,"one","issue:42","pull:99").is_err());
+        link_thread(&store,&issue.id,"one","issue:42").unwrap();
+        assert!(link_issue_to_pull(&store,&pull.id,"two","issue:42","pull:99").is_err());
+        assert!(link_issue_to_pull(&store,&other.id,"one","issue:42","pull:99").is_err());
+        assert!(link_issue_to_pull(&store,&pull.id,"one","pull:42","pull:99").is_err());
+        assert!(link_issue_to_pull(&store,&pull.id,"one","issue:42","issue:99").is_err());
+        store.db.execute_batch("CREATE TEMP TRIGGER fail_pair_audit BEFORE INSERT ON sa_audit
+            WHEN NEW.kind='source_issue_pull_associated'
+            BEGIN SELECT RAISE(ABORT,'test audit rollback'); END;").unwrap();
+        assert!(link_issue_to_pull(&store,&pull.id,"one","issue:42","pull:99").is_err());
+        assert_eq!(list_thread_links(&store,"one").unwrap().len(),1);
+        store.db.execute_batch("DROP TRIGGER fail_pair_audit").unwrap();
+        let first=link_issue_to_pull(&store,&pull.id,"one","issue:42","pull:99").unwrap();
+        assert_eq!(first.subject_key,"pull:99");
+        assert_eq!(link_issue_to_pull(&store,&pull.id,"one","issue:42","pull:99").unwrap().created_at,
+            first.created_at);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_audit
+            WHERE ticket_id='one' AND kind='source_issue_pull_associated'",[],
+            |r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_mandates",[],
+            |r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(source(&store,&pull.id).unwrap().mode,"off");
+        drop(store);
+        let reopened=Store::open(&path).unwrap();
+        assert_eq!(list_thread_links(&reopened,"one").unwrap().len(),2);
+        assert!(list_thread_links(&reopened,"two").unwrap().is_empty());
+        assert_eq!(link_issue_to_pull(&reopened,&pull.id,"one","issue:42","pull:99")
+            .unwrap().created_at,first.created_at);
+    }
 
     #[test]
     fn removing_exact_source_link_revokes_context_without_erasing_receipts_or_task_evidence() {

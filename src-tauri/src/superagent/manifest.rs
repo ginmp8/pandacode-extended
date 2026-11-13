@@ -98,7 +98,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
     }
     let manifest: Manifest = serde_json::from_value(document.clone())
         .map_err(|e| format!("Invalid SuperAgent companion manifest: {e}"))?;
-    if !matches!(manifest.schema_version,1|2|3) || manifest.orchestrations.len() > MAX_PRESETS {
+    if !matches!(manifest.schema_version, 1..=3) || manifest.orchestrations.len() > MAX_PRESETS {
         return Err("Unsupported SuperAgent manifest schema or too many presets.".into());
     }
     let bots = bots::list(store)?;

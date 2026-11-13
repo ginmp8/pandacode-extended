@@ -370,7 +370,12 @@ Use `pandacode serve --list-team-demands <team-id> <state>` to inspect up to
 `all`. JSON includes Ticket ID, state, revision and updated timestamp, but
 not objectives, transcripts, worker results, mandates or authentication data.
 `mayHaveMore` indicates the 200-row cap, not that the next page was verified.
-This is observational only: it reuses the native state/Team filter before
+When present, `nextCursor` supplies `beforeUpdatedAt` (milliseconds) and
+`beforeId` (Ticket ID) for `--list-team-demands <team-id> <state> --before
+<beforeUpdatedAt> <beforeId>`. Use the same Team and state for subsequent pages;
+page reads are live, so a concurrently changing Ticket may move in the index.
+The CLI rejects malformed or unpaired cursor values; without `--before`, the
+existing first-page behavior is unchanged. This is observational only: it reuses the native state/Team filter before
 pagination and opens SQLite read-only without running startup recovery,
 granting permissions, admitting assignments or replaying external effects.
 

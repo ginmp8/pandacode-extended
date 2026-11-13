@@ -1551,7 +1551,7 @@ mod tests {
             "check_run.completed").unwrap();
         assert_eq!(off.mode, "off");
         let sha = "0123456789012345678901234567890123456789";
-        let run = serde_json::json!({
+        let mut run = serde_json::json!({
             "id": 240, "status": "completed", "conclusion": "success",
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
             "app": {"slug": "trusted-bot"},
@@ -1559,6 +1559,9 @@ mod tests {
         });
         assert!(observe_authenticated_check_run(&store, &off, 240, &run, "operator").is_err());
         let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        // A completed Check Run cannot predate activation; freeze the fixture
+        // only after the native source has switched to Observe.
+        run["completed_at"] = serde_json::json!(chrono::Utc::now().to_rfc3339());
         assert!(authenticated_event(&on, &run).unwrap().is_none(),
             "GitHub Events and Checks API are distinct authenticated adapters");
         let first = observe_authenticated_check_run(&store, &on, 240, &run, "operator").unwrap();

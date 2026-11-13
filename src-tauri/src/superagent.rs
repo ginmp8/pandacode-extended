@@ -435,9 +435,9 @@ pub struct DemandIndex {
     pub updated_at: i64,
 }
 
-/// Stable keyset pagination by native updated_at+Ticket ID, not an arbitrary
-/// SQL offset. Each page is a live read; refreshing the first page is required
-/// to see Tickets modified after a paging cursor was issued.
+/// Test-only compatibility helper for pagination oracles; production callers
+/// use the state-filtered native query directly.
+#[cfg(test)]
 fn list_all_demands_page(
     store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
     orchestration_id: Option<&str>,
@@ -913,18 +913,25 @@ pub(crate) fn inspect_headless_effect_receipts(
 /// excludes objectives, results, mandates and private transcripts.
 pub(crate) fn list_headless_team_demands(
     database_path: &std::path::Path, orchestration_id: &str, state: &str,
+    before_updated_at: Option<i64>, before_id: Option<&str>,
 ) -> Result<String> {
     let store = Store::open_read_only(database_path)?;
     let state_filter = if state == "all" { None } else { Some(state) };
     let page = list_all_demands_page_filtered(
-        &store, 200, None, None, Some(orchestration_id), state_filter,
+        &store, 200, before_updated_at, before_id, Some(orchestration_id), state_filter,
     )?;
     let may_have_more = page.len() == 200;
+    let next_cursor = if may_have_more {
+        page.last().map(|item| serde_json::json!({
+            "beforeUpdatedAt": item.updated_at, "beforeId": &item.id
+        }))
+    } else { None };
     serde_json::to_string_pretty(&serde_json::json!({
         "orchestrationId": orchestration_id,
         "stateFilter": state,
         "pageLimit": 200,
         "mayHaveMore": may_have_more,
+        "nextCursor": next_cursor,
         "observationalOnly": true,
         "demands": page.iter().map(|item| serde_json::json!({
             "ticketId": &item.id,
@@ -3397,7 +3404,7 @@ mod tests {
         }
         let path=store.path.clone();
         drop(store);
-        let output=list_headless_team_demands(&path,&team.id,"blocked").unwrap();
+        let output=list_headless_team_demands(&path,&team.id,"blocked",None,None).unwrap();
         let parsed:serde_json::Value=serde_json::from_str(&output).unwrap();
         assert_eq!(parsed["orchestrationId"],team.id);
         assert_eq!(parsed["observationalOnly"],true);
@@ -3408,16 +3415,71 @@ mod tests {
             "worker_bot_id","other-blocked","task-running"] {
             assert!(!output.contains(private), "Leak: {private}");
         }
-        let all=list_headless_team_demands(&path,&team.id,"all").unwrap();
+        let all=list_headless_team_demands(&path,&team.id,"all",None,None).unwrap();
         let parsed:serde_json::Value=serde_json::from_str(&all).unwrap();
         assert_eq!(parsed["demands"].as_array().unwrap().len(),2);
-        assert!(list_headless_team_demands(&path,&team.id,"BLOCKED").is_err());
-        assert!(list_headless_team_demands(&path,&team.id,"blocked' OR 1=1 --").is_err());
-        assert!(list_headless_team_demands(&path,"not-a-Team","all").is_err());
+        assert!(list_headless_team_demands(&path,&team.id,"BLOCKED",None,None).is_err());
+        assert!(list_headless_team_demands(&path,&team.id,"blocked' OR 1=1 --",None,None).is_err());
+        assert!(list_headless_team_demands(&path,"not-a-Team","all",None,None).is_err());
         let verify=Store::open_read_only(&path).unwrap();
         assert_eq!(list_all_demands_page_filtered(
             &verify,200,None,None,Some(&team.id),None,
         ).unwrap().len(),2);
+    }
+
+    #[test]
+    fn headless_team_demand_cursor_is_complete_redacted_and_restart_safe() {
+        let store = fixture();
+        let team = create_configuration(&store, NewOrchestration {
+            name: "Headless paged Team".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        for index in 0..205 {
+            let id = format!("page-{index:03}");
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?1,'PRIVATE CURSOR OBJECTIVE','local-user','manual',
+                        ?3,'worker',?4,'blocked',1000,2000)",
+                params![id,team.id,team.project_id,team.policy_revision],
+            ).unwrap();
+        }
+        let path = store.path.clone();
+        drop(store);
+        let first_raw = list_headless_team_demands(&path,&team.id,"blocked",None,None).unwrap();
+        let first:serde_json::Value = serde_json::from_str(&first_raw).unwrap();
+        assert_eq!(first["demands"].as_array().unwrap().len(),200);
+        assert_eq!(first["mayHaveMore"],true);
+        let time = first["nextCursor"]["beforeUpdatedAt"].as_i64().unwrap();
+        let id = first["nextCursor"]["beforeId"].as_str().unwrap();
+        let next_raw = list_headless_team_demands(
+            &path,&team.id,"blocked",Some(time),Some(id),
+        ).unwrap();
+        let next:serde_json::Value = serde_json::from_str(&next_raw).unwrap();
+        assert_eq!(next["demands"].as_array().unwrap().len(),5);
+        assert_eq!(next["mayHaveMore"],false);
+        assert!(next["nextCursor"].is_null());
+        let ids:std::collections::HashSet<_> = first["demands"].as_array().unwrap()
+            .iter().chain(next["demands"].as_array().unwrap().iter())
+            .map(|item| item["ticketId"].as_str().unwrap().to_owned()).collect();
+        assert_eq!(ids.len(),205);
+        for secret in ["PRIVATE CURSOR OBJECTIVE","request_key","actor","sessionId",
+            "authorizationId","worker_bot_id"] {
+            assert!(!first_raw.contains(secret) && !next_raw.contains(secret));
+        }
+        assert!(list_headless_team_demands(&path,&team.id,"blocked",Some(time),None).is_err());
+        assert!(list_headless_team_demands(&path,&team.id,"blocked",None,Some(id)).is_err());
+        assert!(list_headless_team_demands(&path,&team.id,"blocked",Some(-1),Some(id)).is_err());
+        assert!(list_headless_team_demands(
+            &path,&team.id,"blocked",Some(time),Some("../invalid"),
+        ).is_err());
+        let verify = Store::open_read_only(&path).unwrap();
+        let total:i64 = verify.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets WHERE orchestration_id=?1",
+            [&team.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(total,205);
     }
 
     #[test]

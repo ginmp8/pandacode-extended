@@ -26,3 +26,23 @@ window is not a gap-free subscription. If pagination cannot establish the
 previous boundary, polling fails without advancing the cursor.
 
 Reference: https://docs.github.com/en/rest/using-the-rest-api/github-event-types
+
+## Explicit Ticket thread correlation across sources
+
+An operator can link one exact `issue:<number>` or `pull:<number>` to a native
+Ticket. That link is **context only**, not evidence of a GitHub authorization or
+a task launch. The Ticket's linked activity now combines previously verified
+Observe receipts for that same Team, repository and typed thread across its
+configured issue-comment, PR-review and Check Run source classes. The native
+receipt timeline is sorted by observation time: GitHub Events IDs and local
+Checks counters must not be compared as a shared upstream sequence. A source
+in another Team/repository or an unrelated issue/PR never contributes.
+Multiple event-class links to one thread do not duplicate receipts, and the
+same Team/repository/thread cannot be linked to two different Tickets. These
+relationships remain durable after restart. The operator must still explicitly
+link the relevant PR thread: no title/body, issue reference or review comment
+can infer the issue-to-PR relationship, and no Council/CI approval is implied.
+
+Completed Check Runs use a separate authenticated Checks API lookup, not the
+Events feed. Their result is immutable observed metadata, never a verified
+SuperAgent acceptance gate or permission to execute a Worker.

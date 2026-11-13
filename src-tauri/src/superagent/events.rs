@@ -206,6 +206,21 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
          WHERE source_id=?1 AND subject_key=?2",
         params![source_id,subject_key], |row| row.get(0),
     ).optional().map_err(|e| e.to_string())?;
+    // Different event classes may follow one repository thread, but must not
+    // silently assign that same Team/repository/thread to another Ticket.
+    // This check uses only trusted native source configuration and the local
+    // operator's explicit thread link, never issue/PR text.
+    let conflicting: Option<String> = store.db.query_row(
+        "SELECT l.ticket_id FROM sa_source_thread_links l
+         JOIN sa_event_sources linked ON linked.id=l.source_id
+         WHERE linked.orchestration_id=?1 AND linked.repository=?2
+           AND l.subject_key=?3 AND l.ticket_id<>?4 LIMIT 1",
+        params![&ticket.orchestration_id, &src.repository, subject_key, ticket_id],
+        |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if conflicting.is_some() {
+        return Err("Source repository thread already belongs to another Ticket in this Team.".into());
+    }
     if let Some(existing) = current {
         if existing != ticket_id {
             return Err("Source thread is already linked to a different Ticket.".into());
@@ -1113,18 +1128,30 @@ fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<Ev
         return Err("Linked source decision page size must be between 1 and 100.".into());
     }
     let ticket = super::get_ticket(store, ticket_id)?;
+    // One explicit repository/thread link reveals only bounded receipt
+    // metadata already authenticated for this Team, even if issue comments,
+    // PR reviews and Checks use distinct configured source IDs. EXISTS avoids
+    // multiplying the timeline when the operator links multiple event kinds.
+    // Event sequence numbers are source-local (Checks use a local counter);
+    // sort by native receipt time instead of comparing unrelated cursors.
     let mut stmt = store.db.prepare(
         "SELECT d.source_id,d.delivery_id,d.actor,d.event_kind,d.subject_key,
                 d.sequence,d.decision,d.policy_revision,d.at,
                 checks.conclusion,checks.head_sha,checks.completed_at
-         FROM sa_source_thread_links l
-         JOIN sa_event_sources s ON s.id=l.source_id
-         JOIN sa_event_decisions d ON d.source_id=l.source_id AND d.subject_key=l.subject_key
+         FROM sa_event_decisions d
+         JOIN sa_event_sources observed ON observed.id=d.source_id
          LEFT JOIN sa_check_run_results checks
            ON checks.source_id=d.source_id AND checks.delivery_id=d.delivery_id
-         WHERE l.ticket_id=?1 AND s.orchestration_id=?2
+         WHERE observed.orchestration_id=?2
            AND d.decision='observed_permitted'
-         ORDER BY d.sequence DESC,d.delivery_id DESC LIMIT ?3",
+           AND EXISTS (
+             SELECT 1 FROM sa_source_thread_links l
+             JOIN sa_event_sources linked ON linked.id=l.source_id
+             WHERE l.ticket_id=?1 AND l.subject_key=d.subject_key
+               AND linked.repository=observed.repository
+               AND linked.orchestration_id=observed.orchestration_id
+           )
+         ORDER BY d.at DESC,d.source_id DESC,d.delivery_id DESC LIMIT ?3",
     ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![ticket_id, ticket.orchestration_id, limit], |row| {
         Ok(EventDecisionRecord {
@@ -2023,6 +2050,71 @@ mod tests {
             "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0),
         ).unwrap();
         assert_eq!(count, 2, "Observing linked events must not admit a new demand");
+    }
+
+    #[test]
+    fn explicit_thread_link_correlates_authenticated_source_kinds_without_cross_team_leaks() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "ticket-one", "orch");
+        insert_manual_ticket(&store, "ticket-two", "orch");
+        store.db.execute(
+            "INSERT INTO sa_orchestrations
+             (id,name,coordinator_bot_id,worker_bot_id,project_id,created_at,updated_at)
+             VALUES('other-team','Other','router','worker','fixture',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        insert_manual_ticket(&store, "foreign-ticket", "other-team");
+
+        let comment = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issue_comment.created").unwrap();
+        let review = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request_review.submitted").unwrap();
+        let checks = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "check_run.completed").unwrap();
+        let other_repo = create_source(&store, "orch", "elsewhere/repo", "trusted-bot",
+            "issue_comment.created").unwrap();
+        let other_team = create_source(&store, "other-team", "test/fixture",
+            "trusted-bot", "issue_comment.created").unwrap();
+        let enabled = [comment, review, checks, other_repo, other_team]
+            .into_iter().map(|off| set_mode(&store, &off.id, off.policy_revision, "observe").unwrap())
+            .collect::<Vec<_>>();
+        let make = |src: &EventSource, delivery: &str, subject: &str, sequence: i64|
+            EventEnvelope {
+                source_id: src.id.clone(), delivery_id: delivery.to_owned(),
+                repository: src.repository.clone(), actor: "trusted-bot".into(),
+                event_kind: src.event_kind.clone(), subject_key: subject.to_owned(),
+                sequence,
+            };
+        for (index, src) in enabled.iter().enumerate() {
+            observe(&store, &make(src, &format!("receipt-{index}"), "pull:42", 10)).unwrap();
+        }
+        observe(&store, &make(&enabled[0], "different-subject", "issue:42", 11)).unwrap();
+
+        // No implicit association: other Teams and Tickets still see nothing.
+        assert!(linked_decisions(&store, "ticket-one", 50).unwrap().is_empty());
+        link_thread(&store, &enabled[0].id, "ticket-one", "pull:42").unwrap();
+        let found = linked_decisions(&store, "ticket-one", 50).unwrap();
+        assert_eq!(found.len(), 3, "same Team and repository: comment, review, Check Run");
+        assert!(found.iter().any(|r| r.event_kind == "issue_comment.created"));
+        assert!(found.iter().any(|r| r.event_kind == "pull_request_review.submitted"));
+        assert!(found.iter().any(|r| r.event_kind == "check_run.completed"));
+        assert!(found.iter().all(|r| r.subject_key == "pull:42"));
+        assert!(linked_decisions(&store, "ticket-two", 50).unwrap().is_empty());
+        assert!(linked_decisions(&store, "foreign-ticket", 50).unwrap().is_empty());
+
+        // One thread cannot fork into two Tickets through distinct event classes.
+        assert!(link_thread(&store, &enabled[1].id, "ticket-two", "pull:42").is_err());
+        link_thread(&store, &enabled[1].id, "ticket-one", "pull:42").unwrap();
+        assert_eq!(linked_decisions(&store, "ticket-one", 50).unwrap().len(), 3,
+            "multiple links may not multiply receipts");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |r| r.get::<_, i64>(0)
+        ).unwrap(), 0, "correlation is read-only, not a native grant");
+
+        drop(store);
+        let restarted = Store::open(&path).unwrap();
+        assert_eq!(linked_decisions(&restarted, "ticket-one", 50).unwrap().len(), 3);
+        assert!(linked_decisions(&restarted, "ticket-two", 50).unwrap().is_empty());
     }
 
     #[test]

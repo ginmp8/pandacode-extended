@@ -615,10 +615,10 @@ test('Check Run observation stays Off until enabled and never launches a Demand'
   const input=host.getByRole('textbox',{name:'Check Run ID'});
   await input.fill('0');
   await host.getByRole('button',{name:'Observe authenticated Check Run'}).click();
-  await expect(host.getByRole('status')).toContainText('Enter a positive, bounded Check Run ID');
+  await expect(host.locator('.sa-feedback')).toContainText('Enter a positive, bounded Check Run ID');
   await host.getByRole('textbox',{name:'Check Run ID'}).fill('240');
   await host.getByRole('button',{name:'Observe authenticated Check Run'}).click();
-  await expect(host.getByRole('status')).toContainText('observed_permitted');
+  await expect(host.locator('.sa-feedback')).toContainText('observed_permitted');
   await host.getByRole('button',{name:'View decisions'}).click();
   const timeline=host.getByRole('region',{name:'Source decisions'});
   await expect(timeline).toContainText('Observed Check: failure');

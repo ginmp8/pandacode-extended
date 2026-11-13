@@ -76,6 +76,11 @@ fn frozen(
     let council = root.config.council.as_ref().ok_or("Council is off.")?;
     let parent = store.session(&root.session_id)?;
     let session = store.session(session_id)?;
+    // A reservation must never resume an archived/completed session through a
+    // fresh parent review. This is enforced on every inspection and retry.
+    if session.archived || session.task_stage == "completed" {
+        return Err("child_council_revoked: reserved child task is archived or completed.".into());
+    }
     if session.project_id != parent.project_id || session.worktree_path != parent.worktree_path
         || session.mode != "plan"
     {
@@ -134,6 +139,16 @@ fn read(store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer) -> Re
     }
     let stored = super::load(store, &child_session_id)?
         .ok_or("child_council_stale: child Architect state is missing.")?;
+    // While reservations are blocked, even one ordinary chat message means
+    // this is no longer an isolated, unused child review context. Fail closed
+    // instead of inheriting conversation content when native leaves are enabled.
+    let chat_messages: i64 = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM messages WHERE session_id=?1)",
+        [&child_session_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if chat_messages != 0 {
+        return Err("child_council_stale: reserved child contains unrelated chat history.".into());
+    }
     if stored.config != config || stored.status != "blocked" || !stored.workers.is_empty()
         || !stored.objective.is_empty() || stored.council_since != 0
         || stored.generation != 0 || stored.pending_turn.is_some()

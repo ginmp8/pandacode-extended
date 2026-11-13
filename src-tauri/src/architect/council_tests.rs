@@ -2291,8 +2291,30 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
     forged_child.generation = 0;
     save(&store, &mut forged_child).unwrap();
     assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);
+    // A reserved child must not inherit ordinary conversation history, even
+    // if its team snapshot is still blocked with no reviewers or objective.
+    let injected_message: i64 = store.db.query_row(
+        "INSERT INTO messages(session_id,role,content,created_at)
+         VALUES(?1,'user','unrelated private chat',?2) RETURNING id",
+        rusqlite::params![child_id, storage::now()], |row| row.get(0),
+    ).unwrap();
+    assert!(child_council::inspect(&store, &started).unwrap_err()
+        .contains("child_council_stale"));
+    store.db.execute("DELETE FROM messages WHERE id=?1", [injected_message]).unwrap();
+    assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);
+    store.db.execute("UPDATE sessions SET archived=1 WHERE id=?1", [&child_id]).unwrap();
+    assert!(child_council::inspect(&store, &started).unwrap_err()
+        .contains("child_council_revoked"));
+    store.db.execute("UPDATE sessions SET archived=0 WHERE id=?1", [&child_id]).unwrap();
+    let previous_stage = store.session(&child_id).unwrap().task_stage;
+    store.db.execute("UPDATE sessions SET task_stage='completed' WHERE id=?1", [&child_id]).unwrap();
+    assert!(child_council::inspect(&store, &started).unwrap_err()
+        .contains("child_council_revoked"));
+    store.db.execute("UPDATE sessions SET task_stage=?2 WHERE id=?1",
+        rusqlite::params![child_id, previous_stage]).unwrap();
+    assert_eq!(child_council::inspect(&store, &started).unwrap().len(), 2);
     store.db.execute("UPDATE sessions SET model='altered' WHERE id=?1", [&child_id]).unwrap();
-    assert!(child_council::inspect(&store, &started).unwrap_err().contains("child_council_stale"));
+    assert!(child_council::inspect(&store, &started).unwrap_err().contains("child_council_revoked"));
     store.db.execute("UPDATE sessions SET model='default' WHERE id=?1", [&child_id]).unwrap();
     store.db.execute("UPDATE sessions SET worktree_path='foreign-checkout' WHERE id=?1", [&child_id]).unwrap();
     assert!(child_council::inspect(&store, &started).unwrap_err().contains("child_council_stale"));

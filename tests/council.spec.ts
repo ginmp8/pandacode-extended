@@ -78,6 +78,32 @@ test('native Council inspector displays unknown usage and never trusts a display
   await expect(panel(page).locator('.council-inspection img')).toHaveCount(0);
 });
 
+test('Council inspector displays frozen user criterion targets and evidence requirements without treating configuration as proof', async ({ page }) => {
+  const inspection = {
+    mode: 'm7', strategy: 'two_phase', criteriaSource: 'hybrid',
+    cycleStartedAt: 1000, teamRevision: 8,
+    status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: true },
+    verifiedPass: false, criteria: [
+      { id: 'security', lens: '<img src=x onerror=alert(1)> Security', required: true,
+        target: 9.7, evidenceRequired: true },
+      { id: 'style', lens: 'Maintainability', required: false, target: 7.5, evidenceRequired: false },
+    ], attempts: [],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const criteria = panel(page).getByRole('region', { name: 'Task criteria' });
+  await expect(criteria.locator('li')).toHaveCount(2);
+  await expect(criteria.locator('li').nth(0)).toContainText('Required · Target 9.7/10 · Evidence required · User-defined criterion');
+  await expect(criteria.locator('li').nth(1)).toContainText('Optional · Target 7.5/10 · Evidence not explicitly required');
+  await expect(criteria).toContainText('do not establish reviewer coverage or approval');
+  await expect(criteria.getByText('<img src=x onerror=alert(1)> Security')).toBeVisible();
+  await expect(criteria.locator('img')).toHaveCount(0);
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
 test('M3 native read-only inspector discloses both reviewer sources without treating stale status as approval', async ({ page }) => {
   const inspection = {
     mode: 'm3', strategy: 'escalated', forceEscalation: true, criteriaSource: 'hybrid', cycleStartedAt: 1000, teamRevision: 18,

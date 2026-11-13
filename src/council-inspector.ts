@@ -48,7 +48,21 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     escape(String(f.round)) + ' · ' + escape(f.workerId) + '</small></li>';
   const shown = inspection.attempts.slice(-32);
   const rounds = [...new Set(shown.map(a => a.round))];
-  const criteria = inspection.criteria.filter(c => c.required);
+  const criteria = inspection.criteria ?? [];
+  // A configured target or evidence obligation is not a verified reviewer result.
+  // User and hybrid criteria are user-supplied anchors; other reviewer lenses
+  // may be chosen by the Architect and are shown separately under attempts.
+  const criteriaHtml = criteria.length
+    ? '<section aria-label="Task criteria" class="council-inspection-criteria">' +
+      '<h4>Configured task criteria (not verified results)</h4><ul>' +
+      criteria.map(c => '<li><strong>' + escape(c.lens) + '</strong> · ' +
+        (c.required ? 'Required' : 'Optional') + ' · Target ' +
+        (Number.isFinite(c.target) ? escape(c.target.toFixed(1)) + '/10' : 'unknown') +
+        ' · Evidence ' + (c.evidenceRequired ? 'required' : 'not explicitly required') +
+        ' · ' + (inspection.criteriaSource === 'user' || inspection.criteriaSource === 'hybrid'
+          ? 'User-defined criterion' : 'Configured criterion') + '</li>').join('') +
+      '</ul><p>Targets and evidence obligations do not establish reviewer coverage or approval.</p></section>'
+    : '<p>Criteria: Architect-defined</p>';
   const attempts = rounds.map(round => {
     const entries = shown.filter(a => a.round === round).map(a => {
       const score = a.score === null ? 'No native score' : a.score.toFixed(1) + '/10';
@@ -109,8 +123,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
   return '<div class="council-inspection-detail"><p><strong>' + escape(verdict) +
     '</strong> · ' + (inspection.status.stale ? 'Stale revision' : 'Current native status') +
     ': ' + escape(inspection.status.state) + ' · Revision ' + escape(String(inspection.teamRevision)) +
-    '</p><p>' + (criteria.length ? 'Required criteria: ' +
-      escape(criteria.map(c => c.lens).join(', ')) : 'Criteria: Architect-defined') + '</p>' +
+    '</p>' + criteriaHtml +
     completion + sourceBreakdown + strategyHtml + usageHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
     (attempts || '<p>No reviewer attempts have been admitted.</p>') + childHtml + findingsHtml + '</div>';
 }

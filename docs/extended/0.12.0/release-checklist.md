@@ -1,5 +1,14 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-13 — completed 0.3.124 integration CI verification
+
+- [x] Reconfirm source [fork `fd5942ec358ac3cad0721524284e41904a99218e`](https://github.com/ginmp8/pandacode/commit/fd5942ec358ac3cad0721524284e41904a99218e) and destination [Extended `cd182962990966bea002798c25b2218a1df78956`](https://github.com/ginmp8/pandacode-extended/commit/cd182962990966bea002798c25b2218a1df78956); no upstream file missing in the complete 2,047/2,105-file inventory.
+- [x] Verify [Push CI #43413789980](https://github.com/ginmp8/pandacode-extended/actions/runs/43413789980) and [PR CI #43413799925](https://github.com/ginmp8/pandacode-extended/actions/runs/43413799925) completed **11/11 jobs each** on the exact destination code SHA.
+- [ ] Review all 80 customized shared paths semantically and execute native Settings On/Off and external integration acceptance.
+- [ ] Complete separate release approval; Extended 0.12.0 remains DRAFT.
+
+These checks refer to the code SHA named above, not to a later documentation-only commit.
+
 ## 2026-11-13 — upstream 0.3.124 import verification checklist
 
 - [x] Freeze [source fd5942ec358a](https://github.com/ginmp8/pandacode/commit/fd5942ec358ac3cad0721524284e41904a99218e), tree 675c46eeb3768952b6ca6a296184ec7cad5921ef, app 0.3.124.

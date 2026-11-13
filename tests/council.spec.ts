@@ -377,6 +377,43 @@ test('M3 mixed Council preserves a direct bot plus one explicitly added automati
   expect((await calls(page))[1].reviewerBotIds).toBeUndefined();
 });
 
+test('M4 and M7 task child roles preserve typed native configuration without claiming leaf execution', async ({ page }) => {
+  const bots = [
+    { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false, skills: [] },
+    { id: 'reviewer-beta', name: 'Beta', role: 'Architecture', provider: 'claude', model: 'sonnet', paused: false, skills: [] },
+  ];
+  await open(page, '/', {}, 0, '', {}, { ids: [], bots });
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect.poll(async () => eligibleReviewers(page).count()).toBe(2);
+  await eligibleReviewers(page).nth(0).check();
+  await eligibleReviewers(page).nth(1).check();
+  await panel(page).getByLabel('Review role for Alpha').selectOption('nested');
+  await panel(page).getByLabel('Review role for Beta').selectOption('nested');
+  await expect(panel(page).getByText('Child Council dispatch remains blocked until native leaf reviewers are implemented.')).toHaveCount(2);
+  await panel(page).getByLabel('Child reviewers for Alpha').fill('3');
+  await panel(page).getByLabel('Child reviewers for Alpha').press('Tab');
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  const [m4] = await calls(page);
+  expect(m4.reviewers).toBe(0);
+  expect(m4.reviewerBotIds).toBeUndefined();
+  expect(m4.nestedBotReviewers).toEqual([
+    { botId: 'reviewer-alpha', childReviewers: 3, childTarget: 9, childMaxRounds: 10 },
+    { botId: 'reviewer-beta', childReviewers: 2, childTarget: 9, childMaxRounds: 10 },
+  ]);
+  await expect(panel(page).getByLabel('Review role for Alpha')).toHaveValue('nested');
+  await panel(page).getByLabel('Review role for Beta').selectOption('direct');
+  await expect.poll(async () => (await calls(page)).length).toBeGreaterThanOrEqual(2);
+  await panel(page).getByLabel('Additional automatic Architect reviewers').selectOption('1');
+  await expect.poll(async () => (await calls(page)).at(-1)?.automaticReviewers).toBe(1);
+  const m7 = (await calls(page)).at(-1);
+  expect(m7.reviewerBotIds).toEqual(['reviewer-beta']);
+  expect(m7.nestedBotReviewers).toHaveLength(1);
+  expect(m7.nestedBotReviewers[0].botId).toBe('reviewer-alpha');
+  expect(m7.reviewers).toBe(0);
+});
+
 test('M3 never saves a bot-only zero-quorum configuration as the user changes sources', async ({ page }) => {
   const bots = [{ id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false }];
   await open(page, '/', {}, 0, '', {}, { ids: [], bots });

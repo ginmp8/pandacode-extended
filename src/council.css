@@ -129,6 +129,12 @@ html[data-theme] .council-panel.floating-menu{background:color-mix(in srgb,var(-
 .council-mixed select{width:100%;min-height:28px;padding:4px 8px;border:1px solid var(--border);border-radius:var(--ds-radius-control);background:var(--bg);color:var(--text)}
 .council-mixed select:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 
+.council-child-settings{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:8px;margin:0 4px 10px 14px;padding:8px;border-left:2px solid var(--border);min-width:0}
+.council-child-settings label{display:grid;gap:4px;min-width:0;color:var(--text);font-size:var(--ds-text-meta)}
+.council-child-settings select,.council-child-settings input{width:100%;min-width:0;min-height:28px;padding:4px 6px;border:1px solid var(--border);border-radius:var(--ds-radius-control);background:var(--bg);color:var(--text)}
+.council-child-settings label:first-child,.council-child-settings small{grid-column:1/-1}
+.council-child-settings small{font-size:var(--ds-text-meta);color:var(--muted)}
+.council-child-settings :is(select,input):focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .council-review-permissions{display:grid;gap:5px;border-top:1px solid var(--border);padding-top:8px}
 .council-review-permissions label{display:flex;align-items:center;gap:7px;font-size:var(--ds-text-meta);color:var(--text)}
 .council-review-permissions label:has([data-council-path]){align-items:flex-start;flex-direction:column}

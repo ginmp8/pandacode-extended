@@ -24,6 +24,9 @@ struct FrozenChildReservation {
     /// Digest of the immutable task session's project, checkout and harness identity.
     #[serde(default)]
     session_scope_sha256: String,
+    /// Hashed bot review identity and capability references; no profile or secrets copied.
+    #[serde(default)]
+    bot_profile_sha256: String,
 }
 
 /// Inspection reveals a pending native child, never a synthetic leaf result.
@@ -105,8 +108,15 @@ fn frozen(
         &session.project_id, &session.worktree_path, &session.provider,
         &session.model, &session.reasoning_effort,
     )).map_err(|e| e.to_string())?;
+    // A pending child must never be admitted under an edited coordinator persona,
+    // selected Skills or MCP references. Hash-only pins avoid persisting prompts,
+    // profile contents or credentials in the native reservation record.
+    let profile = serde_json::to_vec(&(
+        &bot.name, &bot.role, &bot.instructions, &bot.goals, &bot.soul,
+        &bot.mode, &bot.skills, &bot.mcp, &bot.backup_models, &bot.fallback_mode,
+    )).map_err(|e| e.to_string())?;
     Ok(FrozenChildReservation {
-        schema_version: 3,
+        schema_version: 4,
         root_session_id: root.session_id.clone(),
         root_cycle_id: format!("{}:{}", root.session_id, root.council_since),
         bot_id: child.bot_id.clone(),
@@ -116,6 +126,7 @@ fn frozen(
         policy_sha256: digest(&serde_json::to_vec(council).map_err(|e| e.to_string())?),
         child_config_sha256: digest(&serde_json::to_vec(child_config).map_err(|e| e.to_string())?),
         session_scope_sha256: digest(&scope),
+        bot_profile_sha256: digest(&profile),
     })
 }
 

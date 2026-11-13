@@ -2537,6 +2537,19 @@ fn child_council_revocation_and_project_isolation_fail_closed() {
     assert!(child_council::inspect(&store, &root).unwrap_err().contains("child_council_revoked"));
     store.db.execute("UPDATE bots SET reasoning_effort=?1 WHERE id='child-security'", [&saved_effort]).unwrap();
     assert_eq!(child_council::inspect(&store, &root).unwrap().len(), 2);
+    // The original profile and scoped capabilities, not only the harness name,
+    // are part of this task's frozen child identity. Child reservations must
+    // fail closed after an ordinary bot-settings or Skills Manager update.
+    store.db.execute("UPDATE bots SET instructions='Changed coordinator persona' WHERE id='child-security'", []).unwrap();
+    assert!(child_council::inspect(&store, &root).unwrap_err().contains("child_council_stale"));
+    store.db.execute("UPDATE bots SET instructions='' WHERE id='child-security'", []).unwrap();
+    store.db.execute("UPDATE bots SET skills='[\"new-skill\"]' WHERE id='child-security'", []).unwrap();
+    assert!(child_council::inspect(&store, &root).unwrap_err().contains("child_council_stale"));
+    store.db.execute("UPDATE bots SET skills='[]' WHERE id='child-security'", []).unwrap();
+    store.db.execute("UPDATE bots SET mcp='[\"unapproved-server\"]' WHERE id='child-security'", []).unwrap();
+    assert!(child_council::inspect(&store, &root).unwrap_err().contains("child_council_stale"));
+    store.db.execute("UPDATE bots SET mcp='[]' WHERE id='child-security'", []).unwrap();
+    assert_eq!(child_council::inspect(&store, &root).unwrap().len(), 2);
     store.db.execute(
         "UPDATE bots SET project_id='foreign-child-project' WHERE id='child-security'",
         [],

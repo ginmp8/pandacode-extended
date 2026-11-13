@@ -223,6 +223,45 @@ mod tests{
     }
 
     #[test]
+    fn headless_reconciliation_indicator_counts_unresolved_effects_beyond_history_page() {
+        let (store, id) = fixture();
+        // The read-only CLI returns at most 100 newest receipts; an older
+        // uncertain effect must still block a false "nothing to reconcile".
+        for index in 0..=100 {
+            let state = if index == 0 { "uncertain" } else { "applied" };
+            let digest = format!("{index:064x}");
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,?4,?5,?5)",
+                params![&id,format!("effect:{index:03}"),digest,state,1_000+index],
+            ).unwrap();
+        }
+        let read = |path: &std::path::Path| -> serde_json::Value {
+            serde_json::from_str(
+                &superagent::inspect_headless_effect_receipts(path, &id).unwrap(),
+            ).unwrap()
+        };
+        let status = read(&store.path);
+        assert_eq!(status["receipts"].as_array().unwrap().len(), 100);
+        assert!(status["receipts"].as_array().unwrap().iter()
+            .all(|receipt| receipt["state"] == "applied"));
+        assert_eq!(status["totalUnresolved"], 1);
+        assert_eq!(status["requiresIndependentRemoteReconciliation"], true);
+        assert_eq!(status["observationalOnly"], true);
+        assert_eq!(status["replayed"], false);
+        let path = store.path.clone();
+        drop(store);
+        // Inspection cannot mutate receipts; a process restart preserves
+        // the older uncertain identity rather than replaying it.
+        let reopened = Store::open(&path).unwrap();
+        let after_restart = read(&path);
+        assert_eq!(after_restart["totalUnresolved"], 1);
+        assert_eq!(after_restart["requiresIndependentRemoteReconciliation"], true);
+        assert_eq!(unresolved_count(&reopened, &id).unwrap(), 1);
+    }
+
+    #[test]
     fn receipt_history_is_bounded_task_owned_and_survives_restart() {
         let (store, id) = fixture();
         assert!(receipt_history(&store, &id, 0).is_err());

@@ -158,6 +158,53 @@ test('native Council findings remain attributed unverified and safe to render', 
   await expect(findings.locator('img')).toHaveCount(0);
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
 });
+test('native inspector attributes reported findings to the exact reviewer and round without promoting their claims', async ({ page }) => {
+  const attempt = (workerId: string, name: string, round: number) => ({
+    workerId, name, round, lens: 'Security', reviewerSource: 'direct_bot',
+    status: 'completed', score: 8, abandoned: false, provider: 'codex', model: 'test-model',
+    attempt: 1, createdAt: 1000, startedAt: 1001, lastUpdatedAt: 1002,
+    tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown',
+  });
+  const finding = (workerId: string, round: number, title: string) => ({
+    schemaVersion: 1, id: workerId + ':' + round, cycleId: 'cycle', round,
+    workerId, reportMessageId: 22, lens: 'Security', severity: 'high',
+    category: 'security', title, explanation: 'Reviewer-reported claim only',
+    artifactRevision: null, verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false,
+  });
+  const inspection = {
+    mode: 'm2', cycleStartedAt: 1000, teamRevision: 9,
+    status: { state: 'fixing', round: 2, lowest: 8, target: 9, stale: false },
+    verifiedPass: false, criteria: [],
+    attempts: [attempt('alice', 'Alice', 1), attempt('bob', 'Bob', 1), attempt('alice', 'Alice', 2)],
+    reportedFindings: [
+      finding('alice', 1, '<img src=x onerror=alert(1)>'),
+      finding('bob', 1, 'Bob claim'),
+      finding('alice', 2, 'Later round claim'),
+      finding('missing-worker', 1, 'Older orphan claim'),
+    ],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const inspector = panel(page).locator('.council-inspection');
+  const firstRound = inspector.getByRole('region', { name: 'Review round 1' });
+  const seats = firstRound.locator(':scope > ul > li');
+  await seats.nth(0).locator('details > summary').click();
+  await expect(seats.nth(0).getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
+  await expect(seats.nth(0).getByText('Bob claim')).toHaveCount(0);
+  await seats.nth(1).locator('details > summary').click();
+  await expect(seats.nth(1).getByText('Bob claim')).toBeVisible();
+  await expect(seats.nth(1).getByText('Later round claim')).toHaveCount(0);
+  const secondRound = inspector.getByRole('region', { name: 'Review round 2' });
+  await secondRound.locator('.council-reviewer-findings > summary').click();
+  await expect(secondRound.getByText('Later round claim')).toBeVisible();
+  const unlinked = inspector.getByRole('region', { name: 'Reviewer-reported findings' });
+  await expect(unlinked.getByText('Older orphan claim')).toBeVisible();
+  await expect(unlinked.getByText('Bob claim')).toHaveCount(0);
+  await expect(inspector.locator('img')).toHaveCount(0);
+  await expect(inspector.getByText('Native pass not verified', { exact: false })).toBeVisible();
+});
+
 test('Council inspector only discloses a verified terminal cycle and escapes its identity', async ({ page }) => {
   const inspection = {
     cycleStartedAt: 1000, teamRevision: 17,

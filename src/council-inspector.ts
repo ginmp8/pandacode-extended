@@ -1,5 +1,5 @@
 import { escape } from './dom';
-import type { CouncilCriteriaSource, CouncilExecutionStrategy, CouncilInspection } from './architect-types';
+import type { CouncilCriteriaSource, CouncilExecutionStrategy, CouncilInspection, CouncilReportedFinding } from './architect-types';
 
 /** Native durations describe app-observed lifecycle only, not token or provider billing time. */
 function observedDuration(label: string, ms: number | null | undefined): string {
@@ -40,6 +40,12 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       escape(String(inspection.attempts.filter(a => a.reviewerSource === 'direct_bot').length)) + ' direct bot, ' +
       escape(String(inspection.attempts.filter(a => a.reviewerSource === 'automatic').length)) + ' automatic</p>'
     : '';
+  const reported = (inspection.reportedFindings ?? []).slice(-32);
+  const findingRow = (f: CouncilReportedFinding): string =>
+    '<li><strong>' + escape(f.severity.toUpperCase() + ' · ' + f.title) +
+    '</strong><p>' + escape(f.category + ' · ' + f.lens + ' · ' + f.explanation) +
+    '</p><small>Reviewer report only; independent evidence unverified · Round ' +
+    escape(String(f.round)) + ' · ' + escape(f.workerId) + '</small></li>';
   const shown = inspection.attempts.slice(-32);
   const rounds = [...new Set(shown.map(a => a.round))];
   const criteria = inspection.criteria.filter(c => c.required);
@@ -50,22 +56,27 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       const cost = a.costAmount === null || !a.costCurrency ? 'Cost unknown' : a.costAmount + ' ' + a.costCurrency;
       const observed = observedDuration('Queue', a.queueWaitMs) + ' · ' +
         observedDuration('Observed span (last update)', a.observedSpanMs);
+      const attributed = reported.filter(f => f.workerId === a.workerId && f.round === a.round);
+      const drilldown = attributed.length
+        ? '<details class="council-reviewer-findings"><summary>' +
+          escape(String(attributed.length)) + ' reviewer-reported finding(s) (unverified)</summary><ul>' +
+          attributed.map(findingRow).join('') + '</ul></details>'
+        : '';
       return '<li><strong>' + escape(a.name + ' — ' + a.lens) + '</strong> ' +
         escape(a.reviewerSource.replace('_', ' ') + ' · ' + a.status + ' · ' + score) +
         '<small>Provider: ' + escape(a.provider + ' / ' + a.model + ' · ' + observed +
-        ' · ' + usage + ' · ' + cost + ' (' + a.usageProvenance + ')') + '</small></li>';
+        ' · ' + usage + ' · ' + cost + ' (' + a.usageProvenance + ')') + '</small>' + drilldown + '</li>';
     }).join('');
     return '<section aria-label="Review round ' + round + '"><h4>Round ' + round +
       '</h4><ul>' + entries + '</ul></section>';
   }).join('');
-  const reported = (inspection.reportedFindings ?? []).slice(-32);
-  const findings = reported.map(f => '<li><strong>' + escape(f.severity.toUpperCase() + ' · ' + f.title) +
-    '</strong><p>' + escape(f.category + ' · ' + f.lens + ' · ' + f.explanation) +
-    '</p><small>Reviewer report only; independent evidence unverified · Round ' +
-    escape(String(f.round)) + ' · ' + escape(f.workerId) + '</small></li>').join('');
-  const findingsHtml = reported.length
-    ? '<section aria-label="Reviewer-reported findings"><h4>Reviewer-reported findings (unverified)</h4><ul>' +
-      findings + '</ul></section>'
+  // Keep older/orphan reports visible when the corresponding attempt is outside
+  // the native 32-attempt display window. Never invent their reviewer linkage.
+  const unlinked = reported.filter(f => !shown.some(a => a.workerId === f.workerId && a.round === f.round));
+  const findingsHtml = unlinked.length
+    ? '<section aria-label="Reviewer-reported findings"><h4>Reviewer-reported findings (unverified)</h4>' +
+      '<p>The matching reviewer attempt is not in this display.</p><ul>' +
+      unlinked.map(findingRow).join('') + '</ul></section>'
     : '';
   const children = (inspection.reservedChildren ?? []).slice(0,8);
   const childHtml = children.length

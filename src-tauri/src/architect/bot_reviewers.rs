@@ -287,7 +287,7 @@ fn seat_bot_with_skills(store: &Store, team: &TeamSnapshot, round: usize, replac
         None => reviewers.iter().find(|bot| !occupied.contains(bot.id.as_str())
                 && !challenged_bots.contains(bot.id.as_str()))
             .map(|bot| bot.id.as_str())
-            .ok_or_else(|| if challenged_bots.is_empty() {
+            .ok_or(if challenged_bots.is_empty() {
                 "All selected reviewer bots already have a seat in this round."
             } else {
                 "S3 challenge unavailable: no fresh selected bot remains outside the first-phase reviewer authors."

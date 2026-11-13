@@ -728,6 +728,61 @@ fn poll_authenticated_events(store: &Store, expected: &EventSource, since: i64,
     poll_authenticated_events_with_identity(store, expected, since, raw, "local-operator", 1)
 }
 
+/// Shared authenticated GitHub Events read for desktop and explicit local
+/// headless Observe. Nothing is persisted until the policy/revision is
+/// revalidated by the existing transactional decision adapter.
+fn fetch_authenticated_github_window(
+    repo: &str, since: i64, prior_cursor: i64,
+) -> Result<(String, serde_json::Value, usize)> {
+    let root = std::env::temp_dir();
+    let user = crate::github::run_gh(
+        &root, &["api", "user"], crate::github::TIMEOUT,
+    )?;
+    let signed_in = authenticated_login(&crate::github::json(&user)?)?;
+    let mut pages = Vec::new();
+    let mut previous_id = None;
+    for page in 1..=GITHUB_MAX_PAGES {
+        let endpoint = format!("repos/{repo}/events?per_page={GITHUB_PAGE_SIZE}&page={page}");
+        let output = crate::github::run_gh(
+            &root, &["api", &endpoint], crate::github::TIMEOUT,
+        )?;
+        let value = crate::github::json(&output)?;
+        let complete = github_page_complete(&value, since, prior_cursor, &mut previous_id)?;
+        pages.push(value);
+        if complete { break; }
+    }
+    let response = combine_github_pages(&pages, since, prior_cursor)?;
+    Ok((signed_in, response, pages.len()))
+}
+
+/// One explicitly operator-requested, authenticated Observe poll from a
+/// headless host. Open the existing schema without Store::open restart recovery:
+/// a separate CLI must not interrupt a healthy concurrent serve owner.
+/// Off, unsupported Checks events and stale policy fail closed before a write.
+pub(crate) fn headless_observe_source(
+    database_path: &std::path::Path, source_id: &str,
+) -> Result<String> {
+    let store = super::open_headless_transition_store(database_path)?;
+    let snapshot = source(&store, source_id)?;
+    if snapshot.mode != "observe" {
+        return Err("Source is Off; authenticated polling is not permitted.".into());
+    }
+    if snapshot.event_kind == "check_run.completed" {
+        return Err("GitHub Events cannot verify Check Runs; use the authenticated Checks adapter.".into());
+    }
+    let since: i64 = store.db.query_row(
+        "SELECT updated_at FROM sa_event_sources WHERE id=?1",
+        [source_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    let (signed_in, response, pages_fetched) = fetch_authenticated_github_window(
+        &snapshot.repository, since, snapshot.last_sequence,
+    )?;
+    let receipt = poll_authenticated_events_with_identity(
+        &store, &snapshot, since, &response, &signed_in, pages_fetched,
+    )?;
+    serde_json::to_string_pretty(&receipt).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn superagent_source_poll_authenticated(
     window: tauri::WebviewWindow, state: State<'_,AppState>, source_id: String,
@@ -755,25 +810,7 @@ pub async fn superagent_source_poll_authenticated(
     // Fetch the complete bounded window before storing even one decision.
     // Any failed page, authentication change or unstable order denies the poll.
     let (signed_in, response, pages_fetched) = tokio::task::spawn_blocking(move || {
-        let root = std::env::temp_dir();
-        let user = crate::github::run_gh(
-            &root, &["api", "user"], crate::github::TIMEOUT,
-        )?;
-        let signed_in = authenticated_login(&crate::github::json(&user)?)?;
-        let mut pages = Vec::new();
-        let mut previous_id = None;
-        for page in 1..=GITHUB_MAX_PAGES {
-            let endpoint = format!("repos/{repo}/events?per_page={GITHUB_PAGE_SIZE}&page={page}");
-            let output = crate::github::run_gh(
-                &root, &["api", &endpoint], crate::github::TIMEOUT,
-            )?;
-            let value = crate::github::json(&output)?;
-            let complete = github_page_complete(&value, since, prior_cursor, &mut previous_id)?;
-            pages.push(value);
-            if complete { break; }
-        }
-        let response = combine_github_pages(&pages, since, prior_cursor)?;
-        Ok::<_, String>((signed_in, response, pages.len()))
+        fetch_authenticated_github_window(&repo, since, prior_cursor)
     }).await.map_err(|e| e.to_string())??;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     poll_authenticated_events_with_identity(
@@ -1697,6 +1734,32 @@ mod tests {
         assert_eq!(list_decisions(&store,&on.id,10).unwrap().len(),1);
         let tasks: i64 = store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [], |r|r.get(0)).unwrap();
         assert_eq!(tasks,0);
+    }
+
+    #[test]
+    fn headless_observe_requires_activated_source_before_any_github_call_or_mutation() {
+        let (store, path) = fixture();
+        let off = create_source(
+            &store, "orch", "test/fixture", "trusted-bot", "issues.opened",
+        ).unwrap();
+        assert!(headless_observe_source(&path, &off.id)
+            .unwrap_err().contains("Source is Off"));
+        assert!(headless_observe_source(&path, "missing-source").is_err());
+        let checks = create_source(
+            &store, "orch", "test/fixture", "trusted-bot", "check_run.completed",
+        ).unwrap();
+        let checks = set_mode(&store, &checks.id, checks.policy_revision, "observe").unwrap();
+        assert!(headless_observe_source(&path, &checks.id)
+            .unwrap_err().contains("cannot verify Check Runs"));
+        let decisions: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_event_decisions", [], |row| row.get(0),
+        ).unwrap();
+        let tickets: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!((decisions, tickets), (0, 0));
+        assert_eq!(source(&store, &off.id).unwrap().mode, "off");
+        assert_eq!(source(&store, &checks.id).unwrap().last_sequence, 0);
     }
 
     fn fixture() -> (Store, std::path::PathBuf) {

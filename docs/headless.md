@@ -306,6 +306,23 @@ Unlike import/export or ordinary serve startup, inspection opens
 nor runs the Store's migration/restart recovery; inspecting a live host must
 not mark a healthy worker as interrupted.
 
+### Authenticated GitHub Observe from headless (local operator)
+
+```sh
+pandacode serve --observe-source <source-id>
+```
+
+An explicit, one-shot CLI invocation polls a previously configured **Observe**
+source through the same authenticated native GitHub Events adapter, bounded
+history validation, policy-revision recheck and transactional decision/cursor
+persistence as the desktop command. It opens only the existing SQLite schema,
+not the migration/restart recovery path, so a concurrently running host is not
+interrupted. The command reports a redacted poll summary, never event bodies.
+An Off source, stale revision, unsupported Check Run source, missing GitHub
+authentication, incomplete Events window or API failure exits nonzero without
+admitting a Ticket. It does **not** register a subscription, run continuously,
+enable Auto, launch a Worker or execute an external effect.
+
 ### Ticket review and stop commands
 
 ```sh

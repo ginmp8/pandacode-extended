@@ -34,6 +34,7 @@ enum Command {
     InspectTicket { ticket_id: String },
     InspectTicketEffects { ticket_id: String },
     InspectTeamReadiness { orchestration_id: String },
+    ObserveSource { source_id: String },
     AcceptTicket { ticket_id: String, expected_revision: i64 },
     RejectTicket { ticket_id: String, expected_revision: i64, reason: String },
     StopTicket { ticket_id: String },
@@ -134,6 +135,22 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::ObserveSource { source_id } = &command {
+                // The same authenticated Events adapter and policy-revision
+                // transaction as desktop, without Webview or startup recovery.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_observe_source(
+                        &dir.join("kingcode.sqlite3"), source_id,
+                    ));
+                match result {
+                    Ok(receipt) => { println!("{receipt}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent source observation failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             let native_action = matches!(&command,
                 Command::AcceptTicket { .. } | Command::RejectTicket { .. }
                 | Command::StopTicket { .. } | Command::DisableOrchestration { .. });
@@ -187,6 +204,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         // Inspection exits before setup_common and must never reach this branch.
         Command::InspectOrchestrations | Command::ListTickets | Command::InspectTicket { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTicketEffects { .. }
+        | Command::ObserveSource { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
         | Command::StopTicket { .. } | Command::DisableOrchestration { .. } => {
             eprintln!("SuperAgent inspection must use the read-only startup path.");
@@ -620,6 +638,14 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--observe-source" => {
+                let value = args.get(index + 1)
+                    .ok_or_else(|| format!("--observe-source needs a source ID.\n\n{}", help()))?;
+                validate_ticket_id(value).map_err(|_| "Provide a bounded alphanumeric source ID.".to_owned())?;
+                command = Command::ObserveSource { source_id: value.clone() };
+                ops += 1;
+                index += 1;
+            }
             "--inspect-ticket-effects" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--inspect-ticket-effects needs a Ticket ID.\n\n{}", help()))?;
@@ -765,7 +791,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-team-readiness <id> | --inspect-ticket <id> | --inspect-ticket-effects <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-team-readiness <id> | --observe-source <id> | --inspect-ticket <id> | --inspect-ticket-effects <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -794,6 +820,8 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-team-readiness <id>
                          Inspect a Team's read-only native manual admission preflight;
                          live sessions and policy must be rechecked on actual admission.
+  --observe-source <id> Authenticated one-shot GitHub Observe poll for an activated source; exit.
+                         No Auto, inferred task, webhook or external write.
   --inspect-ticket <id>  Inspect redacted native Ticket/mandate/attempt metadata; exit.
   --inspect-ticket-effects <id>
                          List up to 100 native effect receipt keys, payload digests and
@@ -856,6 +884,11 @@ mod tests {
         assert!(parsed("--inspect-team-readiness").is_err());
         assert!(parsed("--inspect-team-readiness ../other").is_err());
         assert!(parsed("--inspect-team-readiness team_123 --stop-ticket ticket_123").is_err());
+        assert_eq!(parsed("--observe-source source_123"),
+            Ok(Command::ObserveSource { source_id: "source_123".into() }));
+        assert!(parsed("--observe-source").is_err());
+        assert!(parsed("--observe-source ../untrusted").is_err());
+        assert!(parsed("--observe-source source_123 --stop-ticket ticket_123").is_err());
         assert_eq!(parsed("--inspect-ticket-effects ticket_123"),
             Ok(Command::InspectTicketEffects { ticket_id: "ticket_123".into() }));
         assert!(parsed("--inspect-ticket-effects").is_err());
@@ -935,6 +968,7 @@ mod tests {
             "--inspect-team-readiness",
             "--inspect-ticket",
             "--inspect-ticket-effects",
+            "--observe-source",
             "--accept-ticket",
             "--reject-ticket",
             "--stop-ticket",

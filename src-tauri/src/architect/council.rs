@@ -13,6 +13,9 @@ const MAX_REVIEWERS: usize = 8;
 const MIN_REVIEWERS: usize = 2;
 // Upper bound on reserved child-review attempts per root task, including retries.
 const MAX_CHILD_LEAF_ATTEMPTS: usize = 256;
+// Worst-case task-level cap for new composed modes, across all root rounds
+// and all potential child reviewer rounds. Legacy M1/M2 budgets are unchanged.
+const MAX_COMPOSED_REVIEW_ATTEMPTS: usize = 1024;
 const LENS_CHARS: usize = 80;
 /// Characters read from a report's end for the score line; `summary` is only the report's head.
 const SCORE_TAIL_CHARS: i64 = 8192;
@@ -304,6 +307,21 @@ impl CouncilConfig {
             let required = self.criteria.iter().filter(|criterion| criterion.required).count();
             if self.nested_bot_reviewers.iter().any(|child| child.child_reviewers < required) {
                 return Err("Each child Council must have enough reviewers to cover every required user criterion.".into());
+            }
+        }
+        // Each root round may require an independently restarted child Council
+        // after a revision change or escalation. The per-child 256-attempt cap
+        // alone is not a whole-task bound when the root can run many rounds.
+        // Apply this additive ceiling only to newly composed modes (M3-M7),
+        // preserving previously saved automatic and selected-bot Councils.
+        if !self.nested_bot_reviewers.is_empty() || self.automatic_reviewers > 0 {
+            let child_attempts_per_root_round: usize = self.nested_bot_reviewers.iter()
+                .map(|child| child.child_reviewers * child.child_max_rounds).sum();
+            let planned_attempts = (self.needed() + child_attempts_per_root_round) * self.max_rounds;
+            if planned_attempts > MAX_COMPOSED_REVIEW_ATTEMPTS {
+                return Err(format!(
+                    "Composed Council exceeds {MAX_COMPOSED_REVIEW_ATTEMPTS} planned reviewer attempts across root and child rounds."
+                ));
             }
         }
         Ok(())

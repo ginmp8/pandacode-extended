@@ -1133,6 +1133,36 @@ fn nested_council_bounds_total_leaf_attempts_before_any_child_admission() {
 }
 
 #[test]
+fn composed_council_bounds_root_and_child_rounds_without_changing_legacy_modes() {
+    let child = |id: &str| council::CouncilNestedReviewer {
+        bot_id: id.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 10,
+    };
+    let mut config = on(9.0, 24, 0);
+    config.nested_bot_reviewers = vec![child("security-child"), child("architecture-child")];
+    // Two parent seats and up to 40 fresh child leaf attempts per root round.
+    // 24 * (2 + 40) = 1008, while 25 * (2 + 40) = 1050.
+    for strategy in [
+        council::CouncilExecutionStrategy::Parallel,
+        council::CouncilExecutionStrategy::Escalated,
+        council::CouncilExecutionStrategy::TwoPhase,
+    ] {
+        config.strategy = strategy;
+        assert!(config.validate().is_ok(), "{strategy:?} remains within the task budget");
+        config.max_rounds = 25;
+        assert!(config.validate().unwrap_err().contains("1024 planned reviewer attempts"));
+        config.max_rounds = 24;
+    }
+    config.reviewer_bot_ids.push("direct-reviewer".into());
+    assert!(config.validate().unwrap_err().contains("1024 planned reviewer attempts"),
+        "direct parent seats also consume budget; they cannot be ignored");
+    // Existing M1 and M2 configurations retain their established review limits.
+    assert!(on(9.0, 100, 8).validate().is_ok());
+    let mut selected = on(9.0, 100, 0);
+    selected.reviewer_bot_ids = (0..8).map(|i| format!("legacy-{i}")).collect();
+    assert!(selected.validate().is_ok());
+}
+
+#[test]
 fn mixed_automatic_and_direct_bot_sources_preserve_legacy_defaults_and_capacity() {
     let original = on(9.0, 10, 0);
     assert_eq!(serde_json::to_value(&original).unwrap(),

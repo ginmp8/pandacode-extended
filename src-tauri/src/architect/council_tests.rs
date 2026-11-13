@@ -915,6 +915,15 @@ fn s3_selected_bots_can_cross_challenge_only_with_new_native_worker_sessions() {
     assert_eq!(council::status(&team).unwrap().state, "passed",
         "fresh native worker sessions can challenge each other's reports without adding sources");
 
+    // Neither phase can forge a missing selected bot as an automatic seat.
+    // The status gate enforces native source identity, not only a 2-seat count.
+    let mut wrong_source = team.clone();
+    wrong_source.workers[3].reviewer_binding.as_mut().unwrap().reviewer_bot_id = None;
+    assert_ne!(council::status(&wrong_source).unwrap().state, "passed");
+    let mut wrong_first_source = team.clone();
+    wrong_first_source.workers[0].reviewer_binding.as_mut().unwrap().reviewer_bot_id = None;
+    assert_ne!(council::status(&wrong_first_source).unwrap().state, "passed");
+
     // Reusing the same native worker is never a fresh phase, regardless of
     // which selected bot or lens it claims to represent.
     let mut replay = team.clone();

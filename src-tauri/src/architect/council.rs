@@ -1464,6 +1464,26 @@ fn two_phase_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view: &Round
             }
         }
     }
+    // Direct-bot-only S3 has no authority to add an automatic challenger.
+    // Each phase must retain the exact selected roster, not merely its
+    // headcount. Native dispatch already enforces this; the verdict gate
+    // rechecks it against persisted worker identities before approval.
+    if config.automatic_reviewers == 0 && !config.reviewer_bot_ids.is_empty() {
+        for round in 1..=2 {
+            let identities: Option<Vec<&str>> = in_round(team, round)
+                .filter(|(worker, seat)| counts(worker, seat))
+                .map(|(worker, _)| worker.reviewer_binding.as_ref()
+                    .and_then(|binding| binding.reviewer_bot_id.as_deref()))
+                .collect();
+            let Some(identities) = identities else { return false };
+            let distinct = identities.into_iter().collect::<std::collections::HashSet<_>>();
+            if distinct.len() != config.reviewer_bot_ids.len()
+                || !config.reviewer_bot_ids.iter().all(|id| distinct.contains(id.as_str()))
+            {
+                return false;
+            }
+        }
+    }
     // A previously participating bot may run a *fresh* native session to
     // challenge a peer, but no first-phase selected bot may be left without
     // at least one independent second-phase author. This makes D-only S3

@@ -310,6 +310,7 @@ not mark a healthy worker as interrupted.
 
 ```sh
 pandacode serve --observe-source <source-id>
+pandacode serve --observe-check-run <source-id> <check-run-id>
 ```
 
 An explicit, one-shot CLI invocation polls a previously configured **Observe**
@@ -320,8 +321,14 @@ not the migration/restart recovery path, so a concurrently running host is not
 interrupted. The command reports a redacted poll summary, never event bodies.
 An Off source, stale revision, unsupported Check Run source, missing GitHub
 authentication, incomplete Events window or API failure exits nonzero without
-admitting a Ticket. It does **not** register a subscription, run continuously,
-enable Auto, launch a Worker or execute an external effect.
+admitting a Ticket. For an explicit `check_run.completed` source, the separate
+`--observe-check-run` command reuses desktop's authenticated Checks API
+lookup, immutable result/commit SHA receipt, one-PR correlation, timestamp
+and transactional policy guards. A missing, ambiguous, stale or changed Check
+Run is rejected rather than treated as approval. Both commands return redacted
+receipts and never expose event bodies. They do **not** register a subscription,
+run continuously, enable Auto, launch a Worker, approve a Council review or
+execute an external effect.
 
 ### Ticket review and stop commands
 

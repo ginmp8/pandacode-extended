@@ -983,6 +983,41 @@ fn observe_authenticated_check_run(
 /// One operator-requested, authenticated Check Run lookup; no webhook, source
 /// subscription, inferred task, privilege grant, external write or Council pass.
 /// A missing/ambiguous PR association fails closed (including fork checks).
+/// Read-only GitHub API transport shared by desktop and the local headless
+/// operator. This never uses model-supplied credentials, payloads or actions.
+fn fetch_authenticated_check_run(
+    repository: &str, check_run_id: i64,
+) -> Result<(String, serde_json::Value)> {
+    let root = std::env::temp_dir();
+    let user = crate::github::run_gh(&root, &["api", "user"], crate::github::TIMEOUT)?;
+    let signed_in = authenticated_login(&crate::github::json(&user)?)?;
+    let endpoint = format!("repos/{repository}/check-runs/{check_run_id}");
+    let output = crate::github::run_gh(&root, &["api", &endpoint], crate::github::TIMEOUT)?;
+    Ok((signed_in, crate::github::json(&output)?))
+}
+
+/// Explicit one-shot Checks API observation without a desktop Webview. The
+/// native source and the exact Check Run identity are checked before touching
+/// GitHub. A concurrent policy revision is rechecked transactionally after the
+/// authenticated response; this path never admits a Ticket or runs a Worker.
+pub(crate) fn headless_observe_check_run(
+    database_path: &std::path::Path, source_id: &str, check_run_id: i64,
+) -> Result<String> {
+    if check_run_id <= 0 {
+        return Err("Provide a positive Check Run ID.".into());
+    }
+    let store = super::open_headless_transition_store(database_path)?;
+    let selected = source(&store, source_id)?;
+    if selected.mode != "observe" || selected.event_kind != "check_run.completed" {
+        return Err("Source is Off or is not configured for Check Runs.".into());
+    }
+    let (signed_in, raw) = fetch_authenticated_check_run(&selected.repository, check_run_id)?;
+    let receipt = observe_authenticated_check_run(
+        &store, &selected, check_run_id, &raw, &signed_in,
+    )?;
+    serde_json::to_string_pretty(&receipt).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn superagent_source_observe_check_run(
     window: tauri::WebviewWindow, state: State<'_, AppState>,
@@ -1002,12 +1037,7 @@ pub async fn superagent_source_observe_check_run(
     };
     let repository = selected.repository.clone();
     let response = tokio::task::spawn_blocking(move || {
-        let root = std::env::temp_dir();
-        let user = crate::github::run_gh(&root, &["api", "user"], crate::github::TIMEOUT)?;
-        let signed_in = authenticated_login(&crate::github::json(&user)?)?;
-        let endpoint = format!("repos/{repository}/check-runs/{check_run_id}");
-        let output = crate::github::run_gh(&root, &["api", &endpoint], crate::github::TIMEOUT)?;
-        Ok::<_, String>((signed_in, crate::github::json(&output)?))
+        fetch_authenticated_check_run(&repository, check_run_id)
     }).await.map_err(|e| e.to_string())??;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     observe_authenticated_check_run(&store, &selected, check_run_id, &response.1, &response.0)
@@ -1751,7 +1781,14 @@ mod tests {
         let checks = create_source(
             &store, "orch", "test/fixture", "trusted-bot", "check_run.completed",
         ).unwrap();
+        assert!(headless_observe_check_run(&path, &checks.id, 123)
+            .unwrap_err().contains("Source is Off"));
         let checks = set_mode(&store, &checks.id, checks.policy_revision, "observe").unwrap();
+        assert!(headless_observe_check_run(&path, &checks.id, 0)
+            .unwrap_err().contains("positive Check Run ID"));
+        assert!(headless_observe_check_run(&path, "missing-source", 123).is_err());
+        assert!(headless_observe_check_run(&path, &off.id, 123)
+            .unwrap_err().contains("not configured for Check Runs"));
         assert!(headless_observe_source(&path, &checks.id)
             .unwrap_err().contains("cannot verify Check Runs"));
         let decisions: i64 = store.db.query_row(

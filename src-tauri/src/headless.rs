@@ -39,6 +39,7 @@ enum Command {
     InspectTicketEffects { ticket_id: String },
     InspectTeamReadiness { orchestration_id: String },
     ObserveSource { source_id: String },
+    ObserveCheckRun { source_id: String, check_run_id: i64 },
     AcceptTicket { ticket_id: String, expected_revision: i64 },
     RejectTicket { ticket_id: String, expected_revision: i64, reason: String },
     StopTicket { ticket_id: String },
@@ -170,6 +171,20 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(receipt) => { println!("{receipt}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent source observation failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::ObserveCheckRun { source_id, check_run_id } = &command {
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_observe_check_run(
+                        &dir.join("kingcode.sqlite3"), source_id, *check_run_id,
+                    ));
+                match result {
+                    Ok(receipt) => { println!("{receipt}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Check Run observation failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -700,6 +715,19 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--observe-check-run" => {
+                let source_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--observe-check-run needs a source ID and Check Run ID.\n\n{}", help()))?;
+                validate_ticket_id(source_id)
+                    .map_err(|_| "Provide a bounded alphanumeric source ID.".to_owned())?;
+                let raw_id = args.get(index + 2)
+                    .ok_or("--observe-check-run needs a positive Check Run ID.")?;
+                let check_run_id = raw_id.parse::<i64>().ok().filter(|id| *id > 0)
+                    .ok_or("--observe-check-run needs a positive Check Run ID.")?;
+                command = Command::ObserveCheckRun { source_id: source_id.clone(), check_run_id };
+                ops += 1;
+                index += 2;
+            }
             "--inspect-ticket-effects" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--inspect-ticket-effects needs a Ticket ID.\n\n{}", help()))?;
@@ -845,7 +873,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --observe-source <id> | --inspect-ticket <id> | --inspect-ticket-effects <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --inspect-ticket <id> | --inspect-ticket-effects <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -880,6 +908,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          live sessions and policy must be rechecked on actual admission.
   --observe-source <id> Authenticated one-shot GitHub Observe poll for an activated source; exit.
                          No Auto, inferred task, webhook or external write.
+  --observe-check-run <id> <check-run-id>
+                         Verify one completed GitHub Checks API result for an Observe source;
+                         record a durable receipt, never approve a Ticket or invoke Auto.
   --inspect-ticket <id>  Inspect redacted native Ticket/mandate/attempt metadata; exit.
   --inspect-ticket-effects <id>
                          List up to 100 native effect receipt keys, payload digests and
@@ -978,6 +1009,20 @@ mod tests {
         assert!(parsed("--observe-source").is_err());
         assert!(parsed("--observe-source ../untrusted").is_err());
         assert!(parsed("--observe-source source_123 --stop-ticket ticket_123").is_err());
+        assert_eq!(parsed("--observe-check-run source_123 456"),
+            Ok(Command::ObserveCheckRun { source_id:"source_123".into(), check_run_id:456 }));
+        for invalid in [
+            "--observe-check-run",
+            "--observe-check-run source_123",
+            "--observe-check-run ../outside 456",
+            "--observe-check-run source_123 0",
+            "--observe-check-run source_123 -1",
+            "--observe-check-run source_123 nope",
+            "--observe-check-run source_123 9223372036854775808",
+            "--observe-check-run source_123 456 --stop-ticket task",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert_eq!(parsed("--inspect-ticket-effects ticket_123"),
             Ok(Command::InspectTicketEffects { ticket_id: "ticket_123".into() }));
         assert!(parsed("--inspect-ticket-effects").is_err());
@@ -1058,6 +1103,7 @@ mod tests {
             "--inspect-ticket",
             "--inspect-ticket-effects",
             "--observe-source",
+            "--observe-check-run",
             "--accept-ticket",
             "--reject-ticket",
             "--stop-ticket",

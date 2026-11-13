@@ -895,6 +895,51 @@ pub(crate) fn inspect_headless_team_readiness(
 /// Redacted to native receipt metadata; no external provider call, replay,
 /// model text or recovery mutation. Inspecting a live serve database cannot
 /// open Store::open because startup recovery interrupts active assignments.
+/// Read the persisted roster and existing bot profiles without opening a
+/// provider or relying on a desktop Webview. Unlike a live capability scan,
+/// assigned Skills alone cannot prove installation, harness support or use.
+pub(crate) fn inspect_headless_team_roster(
+    database_path: &std::path::Path, orchestration_id: &str,
+) -> Result<String> {
+    let store=Store::open_read_only(database_path)?;
+    let config=configuration(&store,orchestration_id)?;
+    let roster=roster::read(&store,orchestration_id)?;
+    let mut members=Vec::new();
+    let mut append=|role:&str,position:usize,bot_id:&str| -> Result<()> {
+        let bot=bots::get(&store,bot_id)?;
+        members.push(serde_json::json!({
+            "role":role, "position":position, "botId":bot.id,
+            "name":bot.name, "provider":bot.provider, "model":bot.model,
+            "mode":bot.mode, "paused":bot.paused,
+            "assignedSkillIds":bot.skills,
+            "harnessCapability":"not_verified",
+            "skillLibraryStatus":"not_scanned",
+            "invocationEvidence":"not_verified"
+        }));
+        Ok(())
+    };
+    append("coordinator",0,&roster.coordinator_bot_id)?;
+    for (position,id) in roster.worker_bot_ids.iter().enumerate() {
+        append("worker",position,id)?;
+    }
+    for (position,id) in roster.reviewer_bot_ids.iter().enumerate() {
+        append("reviewer",position,id)?;
+    }
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId":config.id,
+        "policyRevision":config.policy_revision,
+        "enabled":config.enabled,
+        "members":members,
+        "manualSingleWorkerTopology":roster.execution_ready,
+        "multiRoleExecutionAvailable":false,
+        "allowedTools":[],
+        "allowedSideEffects":false,
+        "authorizationIssued":false,
+        "observationalOnly":true,
+        "requiresLiveAdmissionRecheck":true
+    })).map_err(|e|e.to_string())
+}
+
 pub(crate) fn inspect_headless_effect_receipts(
     database_path: &std::path::Path, ticket_id: &str,
 ) -> Result<String> {
@@ -2936,6 +2981,58 @@ mod tests {
         assert_eq!(get_ticket(&reopened, id).unwrap().state, "stopped");
     }
 
+
+    #[test]
+    fn headless_roster_inspection_preserves_multi_role_profiles_without_admission() {
+        let store=fixture();
+        for id in ["additional-worker","reviewer"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        store.db.execute(
+            "UPDATE bots SET skills='[\"scope-skill\"]' WHERE id='additional-worker'",[],
+        ).unwrap();
+        let config=create_configuration(&store,NewOrchestration {
+            name:"Headless roster".into(),
+            coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'worker',1,'additional-worker')",[&config.id],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'reviewer',0,'reviewer')",[&config.id],
+        ).unwrap();
+        let path=store.path.clone();
+        drop(store);
+        let output=inspect_headless_team_roster(&path,&config.id).unwrap();
+        let view:serde_json::Value=serde_json::from_str(&output).unwrap();
+        assert_eq!(view["policyRevision"],config.policy_revision);
+        assert_eq!(view["members"].as_array().unwrap().len(),4);
+        assert_eq!(view["members"][0]["role"],"coordinator");
+        assert_eq!(view["members"][1]["role"],"worker");
+        assert_eq!(view["members"][2]["botId"],"additional-worker");
+        assert_eq!(view["members"][2]["assignedSkillIds"],serde_json::json!(["scope-skill"]));
+        assert_eq!(view["members"][2]["skillLibraryStatus"],"not_scanned");
+        assert_eq!(view["members"][3]["role"],"reviewer");
+        assert_eq!(view["manualSingleWorkerTopology"],false);
+        assert_eq!(view["multiRoleExecutionAvailable"],false);
+        assert_eq!(view["authorizationIssued"],false);
+        assert_eq!(view["allowedTools"],serde_json::json!([]));
+        for sensitive in ["authorizationId","sessionId","PRIVATE OBJECTIVE","worktreePath"] {
+            assert!(!output.contains(sensitive),"Unexpected private field: {sensitive}");
+        }
+        let verified=Store::open_read_only(&path).unwrap();
+        assert_eq!(verified.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(verified.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert!(inspect_headless_team_roster(&path,"not-a-team").is_err());
+    }
     #[test]
     fn headless_team_readiness_is_redacted_nonmutating_and_never_admits() {
         let store = fixture();

@@ -92,7 +92,7 @@ fn failing_over_clears_a_reviewers_nudge_summary_and_score() {
     team.workers[0].status = "failed".into();
     team.workers[0].score_nudged = true;
     team.workers[0].summary = "The old session's report.".into();
-    team.workers[0].council = Some(CouncilSeat { round: 1, lens: "ux".into(), score: Some(3.0), started_at: 1, closed_by_selection: false });
+    team.workers[0].council = Some(CouncilSeat { round: 1, lens: "ux".into(), score: Some(3.0), started_at: 1, closed_by_selection: false, reported_severe_finding: false });
     assert!(fail_over(&store, &mut team, 0, "harness error").unwrap());
     assert!(!team.workers[0].score_nudged);
     assert!(team.workers[0].summary.is_empty());

@@ -11,6 +11,8 @@ use serde_json::{json, Value};
 const MAX_ROUNDS: usize = 100;
 const MAX_REVIEWERS: usize = 8;
 const MIN_REVIEWERS: usize = 2;
+// Upper bound on reserved child-review attempts per root task, including retries.
+const MAX_CHILD_LEAF_ATTEMPTS: usize = 256;
 const LENS_CHARS: usize = 80;
 /// Characters read from a report's end for the score line; `summary` is only the report's head.
 const SCORE_TAIL_CHARS: i64 = 8192;
@@ -279,6 +281,14 @@ impl CouncilConfig {
                 {
                     return Err("Nested Council requires 2 to 8 child reviewers, target 1 to 10 and 1 to 100 rounds.".into());
                 }
+            }
+            // A user cannot reserve thousands of descendant invocations by
+            // combining individually valid children and large round limits.
+            // This pre-dispatch ceiling is independent of eventual metered usage.
+            let child_attempts: usize = self.nested_bot_reviewers.iter()
+                .map(|child| child.child_reviewers * child.child_max_rounds).sum();
+            if child_attempts > MAX_CHILD_LEAF_ATTEMPTS {
+                return Err(format!("Nested Council exceeds {MAX_CHILD_LEAF_ATTEMPTS} child reviewer attempts per task."));
             }
             // The native root can reserve isolated, task-owned child Architect
             // sessions. Root completion remains blocked until verified leaf

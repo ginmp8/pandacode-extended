@@ -807,6 +807,25 @@ fn nested_source_preflight_rejects_identity_aliasing_quorum_and_unsafe_child_lim
 }
 
 #[test]
+fn nested_council_bounds_total_leaf_attempts_before_any_child_admission() {
+    let mut config = on(9.0, 3, 0);
+    config.nested_bot_reviewers = ["security-child", "architecture-child"].into_iter()
+        .map(|id| council::CouncilNestedReviewer {
+            bot_id: id.into(), child_reviewers: 8, child_target: 9.0, child_max_rounds: 16,
+        }).collect();
+    assert_eq!(config.mode(), "m4");
+    assert!(config.validate().is_ok(), "two children at 8 x 16 reach exactly 256 allowed attempts");
+    config.nested_bot_reviewers[0].child_max_rounds = 17;
+    assert!(config.validate().unwrap_err().contains("256 child reviewer attempts"));
+    config.nested_bot_reviewers[0].child_max_rounds = 16;
+    config.nested_bot_reviewers[1].child_max_rounds = 17;
+    assert!(config.validate().unwrap_err().contains("256 child reviewer attempts"));
+    config.nested_bot_reviewers[1].child_max_rounds = 16;
+    config.reviewer_bot_ids.push("direct-reviewer".into());
+    assert!(config.validate().is_ok(), "direct root seats cannot inflate child-attempt accounting");
+}
+
+#[test]
 fn mixed_automatic_and_direct_bot_sources_preserve_legacy_defaults_and_capacity() {
     let original = on(9.0, 10, 0);
     assert_eq!(serde_json::to_value(&original).unwrap(),

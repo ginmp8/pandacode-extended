@@ -417,6 +417,40 @@ test('M4 and M7 task child roles preserve typed native configuration without cla
   await expect(panel(page).getByLabel('Review role for Alpha')).toHaveCount(0);
 });
 
+test('nested Council rejects the combined child review budget before saving and admits the boundary', async ({ page }) => {
+  const bots = [
+    { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false, skills: [] },
+    { id: 'reviewer-beta', name: 'Beta', role: 'Security', provider: 'claude', model: 'sonnet', paused: false, skills: [] },
+  ];
+  await open(page, '/', {}, 0, '', {}, { ids: [], bots });
+  await button(page).click();
+  await panel(page).getByRole('button', { name: 'Selected bots' }).click();
+  await expect.poll(async () => eligibleReviewers(page).count()).toBe(2);
+  await eligibleReviewers(page).nth(0).check();
+  await eligibleReviewers(page).nth(1).check();
+  await panel(page).getByLabel('Review role for Alpha').selectOption('nested');
+  await panel(page).getByLabel('Review role for Beta').selectOption('nested');
+  for (const name of ['Alpha', 'Beta']) {
+    await panel(page).getByLabel(`Child reviewers for ${name}`).fill('8');
+    await panel(page).getByLabel(`Child reviewers for ${name}`).press('Tab');
+    await panel(page).getByLabel(`Child max rounds for ${name}`).fill('17');
+    await panel(page).getByLabel(`Child max rounds for ${name}`).press('Tab');
+  }
+  await toggle(page).click();
+  await expect(panel(page).getByRole('alert')).toContainText('exceeds 256 child reviewer attempts');
+  expect(await calls(page)).toHaveLength(0);
+  for (const name of ['Alpha', 'Beta']) {
+    await panel(page).getByLabel(`Child max rounds for ${name}`).fill('16');
+    await panel(page).getByLabel(`Child max rounds for ${name}`).press('Tab');
+  }
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0].nestedBotReviewers).toEqual([
+    { botId: 'reviewer-alpha', childReviewers: 8, childTarget: 9, childMaxRounds: 16 },
+    { botId: 'reviewer-beta', childReviewers: 8, childTarget: 9, childMaxRounds: 16 },
+  ]);
+});
+
 test('M3 never saves a bot-only zero-quorum configuration as the user changes sources', async ({ page }) => {
   const bots = [{ id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false }];
   await open(page, '/', {}, 0, '', {}, { ids: [], bots });

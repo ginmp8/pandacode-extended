@@ -53,7 +53,12 @@ Issue #147 adds a source-composition contract: the native read-only Council insp
 reports derived modes M1 (automatic), M2 (direct bots), and M3 (direct bots plus
 additional automatic reviewers). The same serialized contract now recognizes
 task-owned nested-bot plans for M4–M7, with distinct bot IDs, two to eight leaf
-reviewers and a bounded target/round budget per child. **Nested plans remain
+reviewers and a bounded target/round budget per child. Native validation also
+rejects a combined reservation above **256 possible child leaf-review attempts
+per root task**, calculated as the sum of each child's reviewer count times its
+maximum rounds. This is a static pre-dispatch ceiling, not a measured token,
+monetary cost or completed-review count. The existing Council modal applies
+the same ceiling before submitting a task. **Nested plans remain
 fail-closed** with `child_council_unavailable` at native configuration and dispatch
 until isolated child Architect sessions, correlated receipts and policy inheritance
 exist. A persisted invalid plan cannot pass from ordinary root reviewer scores;

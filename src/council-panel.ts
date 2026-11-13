@@ -42,6 +42,7 @@ const FIELDS: readonly { key: Field; label: string; options: readonly number[]; 
 ];
 /** Wide enough that "10.0" keeps clear of its segment's edge. */
 const PANEL_WIDTH = 300;
+const MAX_CHILD_LEAF_ATTEMPTS = 256; // Native Council pre-dispatch cap, shared by every nested bot in this task.
 const BUTTON = '.composer-council-button';
 /** A balance: reviewers weighing the work. Its own glyph, apart from the sidebar's Agent usage. */
 const COUNCIL_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v16M8 20h8M5 7h14M5 7l-3 6.5a3 3 0 0 0 6 0zM19 7l-3 6.5a3 3 0 0 0 6 0z"/></svg>';
@@ -124,6 +125,10 @@ export function createCouncil(host: CouncilHost) {
     const extras = draft.automaticReviewers ?? 0;
     const directBotIds = draft.ids.filter(id => !draft.nested[id]);
     const nestedBotReviewers = draft.ids.filter(id => draft.nested[id]).map(id => ({ botId: id, ...draft.nested[id] }));
+    const childAttempts = nestedBotReviewers.reduce((count, child) => count + child.childReviewers * child.childMaxRounds, 0);
+    if (!Number.isSafeInteger(childAttempts) || childAttempts > MAX_CHILD_LEAF_ATTEMPTS) {
+      throw new Error(`Nested Council exceeds ${MAX_CHILD_LEAF_ATTEMPTS} child reviewer attempts per task. Reduce child reviewers or rounds.`);
+    }
     const minimum = extras > 0 ? 1 : 2;
     if (!Number.isInteger(extras) || extras < 0 || extras > 7 || draft.ids.length < minimum || draft.ids.length > 8
       || draft.ids.length + extras > 8 || new Set(draft.ids).size !== draft.ids.length) {

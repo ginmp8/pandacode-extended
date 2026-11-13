@@ -55,6 +55,18 @@ pub fn surface(harness: &str, kind: Kind, scope: Scope, base: &Path) -> Surface 
     }
 }
 
+/// What `id`'s activation for `harness` at `scope` writes in `base`, with whether it is a
+/// folder: the skill's own folder `<surface>/<id>` (plus the old Codex `.codex/skills/<id>` in a
+/// project), or the rule file.
+pub fn targets(harness: &str, kind: Kind, scope: Scope, base: &Path, id: &str) -> Vec<(PathBuf, bool)> {
+    match surface(harness, kind, scope, base) {
+        Surface::Folder(dir) if harness == "codex" && scope == Scope::Project => vec![(dir.join(id), true), (base.join(".codex/skills").join(id), true)],
+        Surface::Folder(dir) => vec![(dir.join(id), true)],
+        Surface::Block(file) => vec![(file, false)],
+        Surface::Prompt => Vec::new(),
+    }
+}
+
 /// Whether `path`, recorded in `id`'s activation for `harness` at `scope` (in `base`), is a
 /// place that activation writes: exactly the rule file for a rule, or a file below the skill's
 /// own folder (`<surface>/<id>/…`, plus the old Codex `.codex/skills/<id>/` in a project).
@@ -128,11 +140,13 @@ pub fn blocks_in(text: &str) -> (Vec<String>, bool) {
 /// Every file is checked ([`check_folder`]) before anything is removed or written. A file
 /// this call creates is created exclusively (a failed one is removed again); one replacing
 /// the previous version is, in project scope, replaced whole, so a failed write leaves the
-/// old file. A write that still fails partway removes the files this call wrote (previous
-/// ones it replaced, or no longer part of the item, stay gone) and returns, with the error,
-/// those of them it had to leave (edited, or behind a link).
-pub fn write_folder(dir: &Path, id: &str, files: &[(String, Vec<u8>)], previous: &[Written], project: Option<&Path>) -> Result<Vec<Written>, (String, Vec<String>)> {
-    check_folder(dir, id, files, previous, project).map_err(|e| (e, Vec::new()))?;
+/// old file. A write that still fails partway removes every file this call created, recorded
+/// path or not (previous ones no longer part of the item stay gone; ones it replaced keep the
+/// new version, for the caller to put back) and returns, with the error, those it had to leave
+/// (edited, or behind a link) and the path it was writing when it failed (None when the checks
+/// refused it): in user scope that file is rewritten in place, so it may be half written.
+pub fn write_folder(dir: &Path, id: &str, files: &[(String, Vec<u8>)], previous: &[Written], project: Option<&Path>) -> Result<Vec<Written>, FolderError> {
+    check_folder(dir, id, files, previous, project).map_err(|e| (e, Vec::new(), None))?;
     let target = dir.join(id);
     // Checked again just before each removal: a link swapped in since stays, like on remove.
     let real_root = project.map(|root| (root, fs::canonicalize(root).ok()));
@@ -143,12 +157,18 @@ pub fn write_folder(dir: &Path, id: &str, files: &[(String, Vec<u8>)], previous:
             continue;
         }
         if real_root.as_ref().is_none_or(|(root, real)| outside_link(root, real.as_deref(), path, Links::Skills).is_none()) {
-            let _ = fs::remove_file(path);
+            // Folders it leaves empty go too, so deactivate can remove the skill's folder.
+            if fs::remove_file(path).is_ok() {
+                remove_empty(path, &target);
+            }
         }
     }
-    let mut out = Vec::new();
+    let mut out: Vec<Written> = Vec::new();
+    // What this call created (nothing was at the path before its write), for a failed write to take back.
+    let mut created: Vec<Written> = Vec::new();
     for (relative, bytes) in files {
         let path = target.join(relative);
+        let replaced = previous.iter().any(|w| Path::new(&w.path) == path) && fs::symlink_metadata(&path).is_ok();
         let wrote = path
             .parent()
             .map_or(Ok(()), |parent| {
@@ -159,23 +179,26 @@ pub fn write_folder(dir: &Path, id: &str, files: &[(String, Vec<u8>)], previous:
                 }
                 fs::create_dir_all(parent).map_err(|e| format!("Could not create {}: {e}", parent.display()))
             })
-            .and_then(|()| {
-                let replaced = previous.iter().any(|w| Path::new(&w.path) == path) && fs::symlink_metadata(&path).is_ok();
-                write_file_as(&path, bytes, project, Links::Skills, !replaced)
-            });
+            .and_then(|()| write_file_as(&path, bytes, project, Links::Skills, !replaced));
         if let Err(e) = wrote {
-            // Only files that still hold what this call wrote go, with folders left empty.
-            let left = remove_folder(&out, project);
-            let mut dir = path.parent();
-            while let Some(empty) = dir.filter(|d| d.starts_with(&target) && fs::remove_dir(d).is_ok()) {
-                dir = empty.parent();
-            }
-            return Err((e, left));
+            // Only files this call created that still hold what it wrote go, with folders left
+            // empty (a recorded file the user had deleted too); one it replaced is left for the
+            // caller to put back.
+            let left = remove_folder(&created, std::slice::from_ref(&target), project);
+            remove_empty(&path, &target);
+            return Err((e, left, Some(path)));
         }
-        out.push(Written { path: path.to_string_lossy().into_owned(), sha256: sha256_hex(bytes) });
+        let written = Written { path: path.to_string_lossy().into_owned(), sha256: sha256_hex(bytes) };
+        if !replaced {
+            created.push(written.clone());
+        }
+        out.push(written);
     }
     Ok(out)
 }
+
+/// A failed [`write_folder`]: the error, the files it had to leave, and the path it was writing.
+pub type FolderError = (String, Vec<String>, Option<PathBuf>);
 
 /// The read-only checks [`write_folder`] makes before it removes or writes anything, so a
 /// caller can run them before changing anything else (the Git exclude list).
@@ -210,6 +233,13 @@ pub fn check_folder(dir: &Path, id: &str, files: &[(String, Vec<u8>)], previous:
     if target.exists() && previous.is_empty() {
         return Err(format!("{} already exists and PandaCode did not create it.", target.display()));
     }
+    // A file the new version adds where the user put their own would fail its exclusive create
+    // halfway through the write; refused here, before anything changes. A recorded file under
+    // another name counts as recorded (`README.md` for `Readme.md` on a case-insensitive disk).
+    let recorded = |path: &Path| previous.iter().any(|w| Path::new(&w.path) == path || same_file(Path::new(&w.path), path));
+    if let Some(path) = files.iter().map(|(relative, _)| target.join(relative)).find(|path| fs::symlink_metadata(path).is_ok() && !recorded(path)) {
+        return Err(format!("{} already exists and PandaCode did not write it; move it away and try again.", path.display()));
+    }
     for written in previous {
         let path = Path::new(&written.path);
         if path.exists() && file_hash(path).as_deref() != Some(written.sha256.as_str()) {
@@ -226,6 +256,21 @@ fn parent_inside(root: &Path, dir: &Path) -> Result<(), String> {
     match fs::canonicalize(root) {
         Ok(real_root) if !real_location(dir).is_some_and(|real| inside_project(&real_root, &real, Links::Skills)) => Err(link_refused(dir)),
         _ => Ok(()),
+    }
+}
+
+/// Whether `a` and `b` name the same file, as two spellings of one name do on a
+/// case-insensitive disk: the same device and inode on unix, elsewhere the same canonical path
+/// ignoring case.
+pub(super) fn same_file(a: &Path, b: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        matches!((fs::symlink_metadata(a), fs::symlink_metadata(b)), (Ok(x), Ok(y)) if x.dev() == y.dev() && x.ino() == y.ino())
+    }
+    #[cfg(not(unix))]
+    {
+        matches!((fs::canonicalize(a), fs::canonicalize(b)), (Ok(x), Ok(y)) if x.to_string_lossy().to_lowercase() == y.to_string_lossy().to_lowercase())
     }
 }
 
@@ -323,7 +368,23 @@ fn write_file_as(path: &Path, bytes: &[u8], project: Option<&Path>, links: Links
     use std::io::Write;
     let failed = |e: std::io::Error| format!("Could not write {}: {e}", path.display());
     let target = match project {
-        None if !new => return fs::write(path, bytes).map_err(failed),
+        // User scope rewrites in place, through links (dotfiles setups), as `fs::write` does.
+        // Opened without blocking (a FIFO there never stalls the library lock) and without
+        // truncating, so anything but a regular file is refused before a byte changes.
+        None if !new => {
+            let mut options = fs::OpenOptions::new();
+            options.write(true).create(true).truncate(false);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.custom_flags(libc::O_NONBLOCK);
+            }
+            let mut file = options.open(path).map_err(failed)?;
+            if !file.metadata().is_ok_and(|meta| meta.is_file()) {
+                return Err(not_regular(path));
+            }
+            return file.set_len(0).and_then(|()| fail_point::before_write(path, &mut file, bytes)).and_then(|()| file.write_all(bytes)).map_err(failed);
+        }
         None => path.to_path_buf(),
         Some(root) => {
             let real_root = fs::canonicalize(root).ok();
@@ -444,8 +505,9 @@ fn create_no_follow(path: &Path, new: bool) -> std::io::Result<fs::File> {
 }
 
 /// Remove the files PandaCode wrote that still match; returns the ones left because they
-/// changed or, in project scope, sit behind a link leading out of the project.
-pub fn remove_folder(written: &[Written], project: Option<&Path>) -> Vec<String> {
+/// changed or, in project scope, sit behind a link leading out of the project. Folders left
+/// empty go too, up to and including the skill's own folder among `folders` that holds the file.
+pub fn remove_folder(written: &[Written], folders: &[PathBuf], project: Option<&Path>) -> Vec<String> {
     let mut kept = Vec::new();
     // A project folder that is gone (deleted or moved) has no links left along it, so its
     // files count as removed; one that cannot be resolved keeps files behind any link.
@@ -461,15 +523,19 @@ pub fn remove_folder(written: &[Written], project: Option<&Path>) -> Vec<String>
             Some(_) => kept.push(file.path.clone()),
             None => {}
         }
-        // Empty folders left behind go too, up to the skill's own folder.
-        let mut parent = path.parent();
-        while let Some(dir) = parent {
-            if fs::remove_dir(dir).is_err() { break }
-            parent = dir.parent();
-            if parent.is_some_and(|p| p.file_name().is_some_and(|n| n == "skills")) { break }
+        if let Some(folder) = folders.iter().find(|folder| path.starts_with(folder)) {
+            remove_empty(path, folder);
         }
     }
     kept
+}
+
+/// Removes the empty folders above `path`, up to and including `folder`.
+fn remove_empty(path: &Path, folder: &Path) {
+    let mut dir = path.parent();
+    while let Some(empty) = dir.filter(|d| d.starts_with(folder) && fs::remove_dir(d).is_ok()) {
+        dir = empty.parent();
+    }
 }
 
 /// Add or update `id`'s block in `file`, leaving everything else in the file alone.
@@ -577,23 +643,33 @@ fn canonical_or_same(path: PathBuf) -> PathBuf {
     fs::canonicalize(&path).unwrap_or(path)
 }
 
-/// The checkout's shared Git folder, only when it is really this checkout's: inside the
-/// repository's top level (which holds `root`), or the main repository of a genuine linked
-/// worktree. A planted `.git` file (`gitdir: /elsewhere/.git`) in a folder that is not a clone
+/// The checkout's shared Git folder, only when it is really this checkout's: the repository's
+/// own `<top level>/.git` (a real folder, not a link to another repository's), or the main repository of a genuine linked worktree, where the top
+/// level holds `root` and is where Git found the repository ([`found_at_top`]). A planted `.git`
+/// file (`gitdir: /elsewhere/.git`, or a `core.worktree` of `/`) in a folder that is not a clone
 /// would otherwise point the exclude update at another repository.
 fn trusted_git_dir(root: &Path) -> Option<PathBuf> {
     let top = canonical_or_same(git_path(root, "--show-toplevel")?);
     let common = canonical_or_same(git_path(root, "--git-common-dir")?);
-    if !canonical_or_same(root.to_path_buf()).starts_with(&top) {
-        return None;
-    }
-    (common.starts_with(&top) || linked_worktree(&top, &common)).then_some(common)
+    let dot_git = top.join(".git");
+    let real_dir = fs::symlink_metadata(&dot_git).is_ok_and(|meta| meta.is_dir());
+    let own = (real_dir && canonical_or_same(dot_git) == common) || linked_worktree(&top, &common);
+    (own && found_at_top(&canonical_or_same(root.to_path_buf()), &top)).then_some(common)
 }
 
-/// Whether `top/.git` is a file naming `<common>/worktrees/<name>`, whose own `gitdir` file
+/// Whether the `.git` nearest `root` (where Git starts looking) is the top level's own. A top
+/// level above a `.git` that sits deeper, inside the project, was moved up by `core.worktree`.
+pub(super) fn found_at_top(root: &Path, top: &Path) -> bool {
+    root.starts_with(top) && root.ancestors().find(|dir| fs::symlink_metadata(dir.join(".git")).is_ok()) == Some(top)
+}
+
+/// Whether `top/.git` is a file (not a link) naming `<common>/worktrees/<name>`, whose own `gitdir` file
 /// names `top/.git` back: what `git worktree add` sets up, and a planted file cannot fake.
 fn linked_worktree(top: &Path, common: &Path) -> bool {
     let dot_git = top.join(".git");
+    if !fs::symlink_metadata(&dot_git).is_ok_and(|meta| meta.is_file()) {
+        return false;
+    }
     let named = |file: &Path, from: &Path| -> Option<PathBuf> {
         let text = read_text(file).ok()?;
         let named = text.trim().strip_prefix("gitdir:").unwrap_or(text.trim()).trim().to_string();
@@ -650,6 +726,20 @@ impl Checkout {
         Some(Self { root: root.to_path_buf(), real_top: fs::canonicalize(top).ok() })
     }
 
+    /// Where `root` sits below the repository's top level (empty at the top level itself).
+    fn prefix(&self) -> Option<PathBuf> {
+        match &self.real_top {
+            Some(real_top) => fs::canonicalize(&self.root).ok()?.strip_prefix(real_top).ok().map(Path::to_path_buf),
+            None => git_output(&self.root, "--show-prefix").map(PathBuf::from),
+        }
+    }
+
+    /// The exclude line for `path` (below `root`) as named, links along it not followed:
+    /// what [`Checkout::entry`] gave at activation for a link since replaced by a real folder.
+    fn plain_entry(&self, path: &Path, folder: bool) -> Option<String> {
+        line_of(&self.prefix()?.join(path.strip_prefix(&self.root).ok()?), folder)
+    }
+
     /// The exclude line for `path` (`/CLAUDE.md`, `/.claude/skills/x/`). Built from where the
     /// files really land, relative to the repository's top level: Git matches exclude patterns
     /// there and does not follow a linked folder (`.agents/skills -> ../.claude/skills`), and
@@ -670,13 +760,19 @@ impl Checkout {
             _ => git_output(&self.root, "--show-prefix").zip(path.strip_prefix(&self.root).ok()).map(|(prefix, rest)| Path::new(&prefix).join(rest)),
         };
         let Some(relative) = relative else { return Ok(None) };
-        let parts: Vec<String> = relative.components().map(|part| part.as_os_str().to_string_lossy().into_owned()).collect();
-        if parts.iter().any(|part| part.chars().any(char::is_control)) {
-            return Err(format!("{:?} has a control character in its path; PandaCode will not add it to the Git exclude list.", path.display().to_string()));
-        }
-        let relative: Vec<String> = parts.iter().map(|part| escape_part(part)).collect();
-        Ok(Some(format!("/{}{}", relative.join("/"), if folder { "/" } else { "" })))
+        line_of(&relative, folder).map(Some).ok_or_else(|| format!("{:?} has a control character in its path; PandaCode will not add it to the Git exclude list.", path.display().to_string()))
     }
+}
+
+/// The exclude line `/a/b` (`/a/b/` for a folder) for `relative` (below the top level), each
+/// part escaped ([`escape_part`]); None when a part holds a control character.
+fn line_of(relative: &Path, folder: bool) -> Option<String> {
+    let parts: Vec<String> = relative.components().map(|part| part.as_os_str().to_string_lossy().into_owned()).collect();
+    if parts.iter().any(|part| part.chars().any(char::is_control)) {
+        return None;
+    }
+    let relative: Vec<String> = parts.iter().map(|part| escape_part(part)).collect();
+    Some(format!("/{}{}", relative.join("/"), if folder { "/" } else { "" }))
 }
 
 /// `part` with gitignore's special characters backslash-escaped: `*`, `?`, `[` and `\`
@@ -700,6 +796,69 @@ pub fn exclude_entry(root: &Path, path: &Path, folder: bool) -> Result<Option<St
         Some(checkout) => checkout.line(path, folder),
         None => Ok(None),
     }
+}
+
+/// Whether `line`, recorded in an activation's exclude list `list`, is one PandaCode builds for
+/// `path` (its skill folder or rule file) in the checkout at `base`. A skill folder's line may
+/// have been built through a link since replaced (`.agents/skills -> ../.claude/skills`, now a
+/// real folder), so for a folder `<skills folder>/<id>` the same id under each project skills
+/// folder ([`SKILL_FOLDERS`]) counts as well; a link into a deeper folder is not followed back.
+/// With `checkout` open: [`Checkout::entry`] for `path`, or the line for any of those folders
+/// built without following links ([`Checkout::plain_entry`]). Once the checkout is gone, the
+/// same lines built from where `base` sat below the top level, derived from `list`
+/// ([`gone_prefix`]); when that cannot be derived (no list recorded, or `base` inside a
+/// removed worktree's subfolder), any line ending in `path` relative to `base`. Builds up to
+/// 0.3.114 wrote `/<path relative to base>` unresolved and unescaped; that line counts too
+/// while `base` is (or was) the top level (from a subfolder it names a path at the repository's
+/// root, maybe the user's own line). A tampered record's other lines (`/src/`) are never
+/// dropped from the user's exclude list.
+pub fn own_line(checkout: Option<&Checkout>, list: Option<&Path>, base: &Path, path: &Path, folder: bool, line: &str) -> bool {
+    let Ok(relative) = path.strip_prefix(base) else { return false };
+    if relative.as_os_str().is_empty() || line.chars().any(char::is_control) {
+        return false;
+    }
+    let legacy = format!("/{}{}", relative.to_string_lossy().replace('\\', "/"), if folder { "/" } else { "" });
+    let named = |path: &Path| -> Vec<PathBuf> {
+        let mut named = vec![path.to_path_buf()];
+        if let (true, Some(id)) = (folder, path.file_name()) {
+            named.extend(SKILL_FOLDERS.iter().map(|dir| base.join(dir).join(id)));
+        }
+        named
+    };
+    if let Some(checkout) = checkout {
+        let prefix = checkout.prefix();
+        return checkout.entry(path, folder).as_deref() == Some(line)
+            || named(path).iter().any(|p| checkout.plain_entry(p, folder).as_deref() == Some(line))
+            || (legacy == line && prefix.is_some_and(|prefix| prefix.as_os_str().is_empty()));
+    }
+    if let Some(prefix) = list.and_then(|list| gone_prefix(list, base)) {
+        return (legacy == line && prefix.as_os_str().is_empty())
+            || named(path).iter().any(|p| p.strip_prefix(base).ok().and_then(|rest| line_of(&prefix.join(rest), folder)).as_deref() == Some(line));
+    }
+    let parts: Vec<String> = relative.components().map(|part| escape_part(&part.as_os_str().to_string_lossy())).collect();
+    let suffix = format!("/{}{}", parts.join("/"), if folder { "/" } else { "" });
+    legacy == line || (line.starts_with('/') && line.ends_with(&suffix))
+}
+
+/// Where the gone checkout `base` sat below its top level, from the exclude list `list` it
+/// used (`<git dir>/info/exclude`): below a linked worktree `list`'s Git folder still registers
+/// (`worktrees/*/gitdir` naming `<top>/.git`), else below the folder holding a Git folder named
+/// `.git`, the main checkout. None when `base` is in neither (a removed worktree's subfolder
+/// whose registration was pruned).
+fn gone_prefix(list: &Path, base: &Path) -> Option<PathBuf> {
+    let git_dir = list.parent()?.parent()?;
+    let bases = [Some(base.to_path_buf()), real_location(base)];
+    let below = |top: &Path| -> Option<PathBuf> {
+        let tops = [Some(top.to_path_buf()), real_location(top)];
+        bases.iter().flatten().find_map(|base| tops.iter().flatten().find_map(|top| base.strip_prefix(top).ok().map(Path::to_path_buf)))
+    };
+    let registered = fs::read_dir(git_dir.join("worktrees")).into_iter().flatten().flatten().filter_map(|entry| {
+        let named = PathBuf::from(read_text(&entry.path().join("gitdir")).ok()?.trim());
+        below(named.parent()?)
+    });
+    // The deepest top level holding `base`: a worktree nested inside the main checkout's folder.
+    let main = (git_dir.file_name()? == ".git").then(|| git_dir.parent().and_then(below)).flatten();
+    registered.chain(main).min_by_key(|prefix| prefix.components().count())
 }
 
 /// Whether the exclude-list `line` is `entry`, ignoring surrounding whitespace except an
@@ -839,11 +998,9 @@ pub(super) mod fail_point {
     thread_local!(static HOOK: RefCell<Option<Hook>> = RefCell::new(None));
     /// Runs `hook` before each in-place write on this thread; an error fails that write after
     /// half its bytes landed.
-    #[cfg_attr(not(unix), allow(dead_code))] // only the Unix-only tests arm it
     pub fn set(hook: impl FnMut(&Path) -> std::io::Result<()> + 'static) {
         HOOK.with(|h| *h.borrow_mut() = Some(Box::new(hook)));
     }
-    #[cfg_attr(not(unix), allow(dead_code))] // only the Unix-only tests arm it
     pub fn clear() {
         HOOK.with(|h| *h.borrow_mut() = None);
     }

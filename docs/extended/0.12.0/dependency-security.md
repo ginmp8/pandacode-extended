@@ -1,5 +1,11 @@
 # Extended 0.12.0 — dependency and security tracking
 
+## 2026-11-13 — 0.3.124 package alignment without hardening rollback
+
+Source [fd5942ec358a](https://github.com/ginmp8/pandacode/commit/fd5942ec358ac3cad0721524284e41904a99218e), tree 675c46eeb3768952b6ca6a296184ec7cad5921ef, app **0.3.124** (six commits after preceding pin), changes 11 upstream paths: seven exact source blobs and four version/lockfile adaptations preserving Extended dependency remediation. Full inventories: 2,047 source files, 2,105 Extended, 1,967 exact shared, 80 divergent shared pending semantic audit, 58 Extended-only, zero missing or mode/type differences. Planned Extended **0.12.0 DRAFT** unchanged.
+
+The source delta changes only version fields in npm/Cargo/Tauri manifests and locks. Extended preserves npm remediations (dompurify 3.4.17, katex 0.18.2, vite 7.3.7 and their resolved locks) and Rust controls (tokio 1.53.3, rusqlite 0.41.1, rustls 0.23.46, zip 9.0.5, updater TLS configuration and resolved lock adjustments). No new vulnerability remediation is claimed. Prior destination f7076cd6b0ae passed [Push CI 11/11](https://github.com/ginmp8/pandacode-extended/actions/runs/43390834157) and [PR CI 11/11](https://github.com/ginmp8/pandacode-extended/actions/runs/43390844083). New SHA CI must be checked after publication. Local Rust/Node/Expo tests not run (no checkout, no Cargo, GitHub DNS unavailable). Native Settings On/Off and external integrations unverified.
+
 ## 2026-11-13 — dependency and CI status following upstream repair
 
 Source [`3026a7af132c`](https://github.com/ginmp8/pandacode/commit/3026a7af132c5b7684be414040a2d4f7158f80e4), tree `e50b17094d98c5631a819b67dd36d49929615546`, has **one additional upstream commit after the 0.3.123 release commit**, without an application-version change. Four existing source-exact paths were updated byte-for-byte: `docs/crash-recovery.md`, `releases/0.3.123.md`, `src-tauri/src/crash_guard/files.rs`, and `tests/crash-recovery.test.mjs`. Full nontruncated inventories: **2,046 upstream / 2,104 Extended tracked files**, **1,966 exact shared / 80 previously customized shared / 58 Extended-only**, **zero missing upstream paths or mode/type mismatches**. No Extended controls, dependency manifests, or app-version fields were changed; **Extended 0.12.0 remains a DRAFT**, separate from inherited app **0.3.123**.

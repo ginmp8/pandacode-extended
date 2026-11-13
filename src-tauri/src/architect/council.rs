@@ -183,6 +183,14 @@ impl CouncilConfig {
         if self.reviewers > MAX_REVIEWERS || self.automatic_reviewers > MAX_REVIEWERS {
             return Err(format!("Council allows at most {MAX_REVIEWERS} reviewers."));
         }
+        // The legacy automatic mode can choose its native quorum with zero,
+        // but an explicit single-seat Council must not approve as a quorum.
+        // Mixed modes reserve their automatic seats separately.
+        if self.reviewer_bot_ids.is_empty() && self.nested_bot_reviewers.is_empty()
+            && self.reviewers == 1
+        {
+            return Err("Council requires at least two distinct top-level reviewer seats.".into());
+        }
         if self.automatic_reviewers > 0 {
             if (self.reviewer_bot_ids.is_empty() && self.nested_bot_reviewers.is_empty()) || self.reviewers != 0 {
                 return Err("Additional automatic Council seats require selected bots and reviewers=0.".into());

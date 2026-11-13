@@ -871,6 +871,25 @@ fn s3_rejects_a_fresh_worker_that_reuses_a_phase_one_bot_under_a_different_lens(
 }
 
 #[test]
+fn automatic_council_rejects_explicit_single_seat_in_all_strategies() {
+    for strategy in [
+        council::CouncilExecutionStrategy::Parallel,
+        council::CouncilExecutionStrategy::Escalated,
+        council::CouncilExecutionStrategy::TwoPhase,
+    ] {
+        let mut config = on(9.0, 3, 1);
+        config.strategy = strategy;
+        assert!(config.validate().unwrap_err().contains("at least two"),
+            "an explicit single reviewer cannot satisfy the root quorum");
+        config.reviewers = 0;
+        assert_eq!(config.needed(), 2);
+        assert!(config.validate().is_ok(), "the original automatic mode remains valid");
+        config.reviewers = 2;
+        assert!(config.validate().is_ok(), "two explicit seats remain valid");
+    }
+}
+
+#[test]
 fn seven_native_source_combinations_have_distinct_modes_without_unsafe_child_dispatch() {
     let nested = |id: &str| council::CouncilNestedReviewer {
         bot_id: id.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 3,
@@ -885,18 +904,32 @@ fn seven_native_source_combinations_have_distinct_modes_without_unsafe_child_dis
         config.automatic_reviewers = automatic;
         assert_eq!(config.mode(), mode);
         assert!(config.needed() >= 2 && config.needed() <= 8);
-        let inspected = council::inspection(&team_with(config.clone(), vec![]), false).unwrap();
-        assert_eq!(inspected.mode, mode);
-        if children > 0 {
-            assert!(config.validate().is_ok(), "isolated child reservations are valid but are not passing reviews");
-            assert_eq!(council::status(&team_with(config.clone(), vec![])).unwrap().state, "blocked");
-            assert!(council::reviewer_source_for(
-                &team_with(config.clone(), vec![]),
-                &CouncilSeat { round: 1, lens: "Security".into(), score: None, started_at: 0, closed_by_selection: false, reported_severe_finding: false },
-                None, None,
-            ).unwrap_err().contains("child_council_unavailable"));
-        } else {
-            assert!(config.validate().is_ok(), "legacy and additive M3 sources remain admissible");
+        // Orthogonal strategy selection must preserve source identity and
+        // fail-closed nested admission in all 21 combinations, never invent
+        // a completed child review or an automatically added reviewer.
+        for strategy in [
+            council::CouncilExecutionStrategy::Parallel,
+            council::CouncilExecutionStrategy::Escalated,
+            council::CouncilExecutionStrategy::TwoPhase,
+        ] {
+            config.strategy = strategy;
+            assert!(config.validate().is_ok(), "{mode}/{strategy:?} preflight");
+            let team = team_with(config.clone(), vec![]);
+            let inspected = council::inspection(&team, false).unwrap();
+            assert_eq!(inspected.mode, mode);
+            assert_eq!(inspected.strategy, strategy);
+            assert!(!inspected.verified_pass, "{mode}/{strategy:?} cannot invent approval");
+            assert!(inspected.attempts.is_empty(), "{mode}/{strategy:?} cannot invent workers");
+            if children > 0 {
+                assert_eq!(council::status(&team).unwrap().state, "blocked");
+                assert!(council::reviewer_source_for(
+                    &team,
+                    &CouncilSeat { round: 1, lens: "Security".into(), score: None, started_at: 0, closed_by_selection: false, reported_severe_finding: false },
+                    None, None,
+                ).unwrap_err().contains("child_council_unavailable"));
+            } else {
+                assert_ne!(inspected.status.state, "passed");
+            }
         }
     }
 }

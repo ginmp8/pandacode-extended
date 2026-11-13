@@ -1,5 +1,11 @@
 # Extended 0.12.0 — feature-control continuity
 
+## 2026-11-12 — upstream 0.3.121 feature controls (candidate)
+
+Source [`54df76875360`](https://github.com/ginmp8/pandacode/commit/54df768753607f69f42b0c148a4ef665cb0f45a1) adds **inherited** checks rather than new Extended switches. In ZCode Full mode, a lasting-only project permission is not silently auto-granted; a human is asked, and team workers decline it. Remote `approval.respond` cannot grant lasting-only permissions without the existing **Full access for remote tasks** authorization (declines remain possible); `/btw` on a side thread that became a team lead rechecks the existing remote team gate. Bots' existing in-chat approval behavior is unchanged. Bot team claims, schedule provenance marks, Workers UI and wake displays are also updated upstream.
+
+These controls coexist with Extended's independently configured update policy, Connect master/direct routing, global bot pause, external MCP, cloud credential transfer and cloud/VM agent management. No Extended control is removed, hard-disabled, or given a new default in this delta. Source-hunk compatibility was checked for the 11 overlap files; installed-app On/Off, existing/new processes, remote clients, approvals and external integrations were **not** exercised here. Extended **0.12.0 remains DRAFT**.
+
 ## 2026-11-12 — inherited 0.3.120 limitation notes
 
 Pinned [upstream `f66e95267701`](https://github.com/ginmp8/pandacode/commit/f66e95267701750696d4a43eabdd6c74f6b56927), source tree `085808f3e028ff6ad4b515d562d65c6485f0b921`, app **0.3.120**. The sole source change since the previous snapshot is a five-bullet addition to the [original release note](https://github.com/ginmp8/pandacode/blob/f66e95267701750696d4a43eabdd6c74f6b56927/releases/0.3.120.md), blob `f49dba032c6236f85ee88642221c35a2a0b25275`. No new application, manifest, lockfile, test, workflow or Extended-control change was introduced. Git trees retain 2,007 upstream paths / 2,065 Extended paths, zero upstream files missing or mode/type mismatch, and 80 previously customized shared paths after this note is mirrored. Extended **0.12.0 remains DRAFT**, not released.

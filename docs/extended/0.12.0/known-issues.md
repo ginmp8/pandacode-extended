@@ -1,5 +1,11 @@
 # Extended 0.12.0 — known issues and acceptance gaps
 
+## 2026-11-12 — upstream 0.3.121 known limitations and acceptance gaps
+
+New upstream [0.3.121 release note](../../../releases/0.3.121.md), pinned to [`54df76875360`](https://github.com/ginmp8/pandacode/commit/54df768753607f69f42b0c148a4ef665cb0f45a1), documents that a phone's lasting-only-permission rejection appears only **after** the user taps **Approve**; the button is not proactively disabled. This is an **inherited upstream limitation**, not an independently proven Extended regression. ZCode lasting-only approvals, remote full-access gating, bot claim atomicity, schedule remote marks and Workers accessibility received upstream fixes in this candidate.
+
+Candidate inventory after reconciling all 28 source-changed paths contains 80 historical shared divergences whose complete semantic legitimacy and native Settings On/Off behavior remain **unverified**. Full local Node/Rust/Clippy/Expo, installed-app acceptance, external Connect/MCP/bot/cloud/VM/credential flows and exact new-SHA CI have not been executed/confirmed here. Prior Extended `bf20fce79523` CI succeeded 11/11 per push/PR workflow; it is not evidence for the new commit. No speculative vulnerability or feature loss is asserted. Planned **Extended 0.12.0 is DRAFT**.
+
 ## 2026-11-12 — inherited 0.3.120 limitation notes
 
 Pinned [upstream `f66e95267701`](https://github.com/ginmp8/pandacode/commit/f66e95267701750696d4a43eabdd6c74f6b56927), source tree `085808f3e028ff6ad4b515d562d65c6485f0b921`, app **0.3.120**. The sole source change since the previous snapshot is a five-bullet addition to the [original release note](https://github.com/ginmp8/pandacode/blob/f66e95267701750696d4a43eabdd6c74f6b56927/releases/0.3.120.md), blob `f49dba032c6236f85ee88642221c35a2a0b25275`. No new application, manifest, lockfile, test, workflow or Extended-control change was introduced. Git trees retain 2,007 upstream paths / 2,065 Extended paths, zero upstream files missing or mode/type mismatch, and 80 previously customized shared paths after this note is mirrored. Extended **0.12.0 remains DRAFT**, not released.

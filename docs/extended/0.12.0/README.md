@@ -1,5 +1,11 @@
 # PandaCode Extended 0.12.0 — incremental development cycle
 
+## 2026-11-12 — inherited upstream 0.3.121 candidate
+
+Source [`54df76875360`](https://github.com/ginmp8/pandacode/commit/54df768753607f69f42b0c148a4ef665cb0f45a1), tree `503546c881f2b24230ba4a8616e163739dc39db4`, application **0.3.121**. All 28 changed upstream paths (17 source-exact / 11 Extended-aware) have candidate Git objects, preserving the original [upstream note](../../../releases/0.3.121.md). Candidate structural counts: 2,008 upstream / 2,066 Extended paths, 1,928 exact shared / 80 customized shared / 58 Extended-only, zero missing and no mode/type mismatches. Existing Extended settings, security dependency remediation and compatibility work are retained; the distribution remains **0.12.0 DRAFT**, independent of app version.
+
+Inherited ZCode, remote access, bot, schedule and Workers behavior is documented in the release notes. Prior Extended `bf20fce79523` CI succeeded (11/11 push and 11/11 PR jobs); exact integration SHA CI and native Settings On/Off, installed-app and external service tests must be checked separately. No approval, tag, release or installer distribution is authorized.
+
 ## 2026-11-12 — 0.3.120 source-note follow-up
 
 Pinned [upstream `f66e95267701`](https://github.com/ginmp8/pandacode/commit/f66e95267701750696d4a43eabdd6c74f6b56927), tree `085808f3e028ff6ad4b515d562d65c6485f0b921`, application **0.3.120**. One unreleased upstream commit updated only the original [0.3.120 release note](https://github.com/ginmp8/pandacode/blob/f66e95267701750696d4a43eabdd6c74f6b56927/releases/0.3.120.md), Git blob `f49dba032c6236f85ee88642221c35a2a0b25275`; it introduces **no new code, package, build or control changes**. Full-source inventory remains 2,007 paths versus 2,065 Extended paths, zero upstream files missing or type/mode differences, and 80 historical shared divergences after restoring the note's exact bytes. Planned Extended **0.12.0 remains DRAFT**.

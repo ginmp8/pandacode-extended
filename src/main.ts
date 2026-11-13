@@ -122,6 +122,8 @@ import { createSearchPanel } from './search-panel';
 import { createTokenSaver } from './token-saver-panel';
 import { createCouncil } from './council-panel';
 import { councilNotice } from './council';
+// No CSS of its own (architect.css arrives with ./architect): safe in the always-loaded bundle.
+import { workerActive } from './architect-worker-list';
 import { MAX_IMAGES, mountPromptAttachments, type PromptImage } from './attachments';
 import { attachmentChips, parseAttachments } from './message-attachments';
 import { compactSublines, infoMark, installTooltips } from './tooltip';
@@ -3093,7 +3095,9 @@ function paintLiveActivity(region: HTMLElement, current: Stream, transcript: HTM
   let narratedAt = -1;
   // Live worker lines follow the call that spawned them, so later activity stays below them.
   // ponytail: anchors every live worker after the turn's first dispatch; a second dispatch's workers join them.
-  const tools = current.tools.filter(tool => !tool.statusOnly), workers = region.parentElement?.querySelector<HTMLElement>(':scope > #team-progress-host') ?? null;
+  const tools = current.tools.filter(tool => !tool.statusOnly);
+  // The host sits after the region, or in the trace once a dispatch placed it there.
+  const workers = region.parentElement?.querySelector<HTMLElement>(':scope > #team-progress-host') ?? host.querySelector<HTMLElement>(':scope > #team-progress-host');
   const dispatch = workers ? tools.findIndex(tool => typeof tool.content !== 'string' && /dispatch_workers/.test(tool.content.name)) : -1;
   const toolRuns = (entries: LiveTool[]) => groupToolRuns(entries, tool => tool.commentary ? undefined : tool.key);
   const runs = dispatch < 0 ? toolRuns(tools) : [...toolRuns(tools.slice(0, dispatch + 1)), null, ...toolRuns(tools.slice(dispatch + 1))];
@@ -5325,9 +5329,7 @@ function onAgent(event: AgentEvent): void {
       // panel's own definition (a worker not yet in any team snapshot counts as active).
       if (event.kind === 'approval' || event.kind === 'input_request') {
         const owner = [...teams.values()].flatMap(team => team?.workers ?? []).find(worker => worker.sessionId === event.sessionId);
-        void import('./architect-worker-list').then(({ workerActive }) => {
-          if (workerActive(owner)) notify(event.kind === 'approval' ? 'A worker needs your approval. Open Architect & workers.' : 'A worker needs your input. Open Architect & workers.', undefined, { important: true });
-        });
+        if (workerActive(owner)) notify(event.kind === 'approval' ? 'A worker needs your approval. Open Architect & workers.' : 'A worker needs your input. Open Architect & workers.', undefined, { important: true });
       }
       if (['approval', 'approval_cancelled', 'input_request', 'input_cancelled', 'done'].includes(event.kind)) refreshTeamProgress();
     }).catch(report);
@@ -5476,7 +5478,10 @@ function onAgent(event: AgentEvent): void {
   // Tokens and tool snapshots do not change task navigation. Four busy agents
   // share one navigation frame only when a running/recency/approval state changes.
   if (firstEvent || becameActive || event.kind === 'approval' || event.kind === 'approval_cancelled' || event.kind === 'input_request' || event.kind === 'input_cancelled') {
-    if (firstEvent && event.sessionId === state.sessionId && !document.hidden) { renderHeader(); if (document.querySelector<HTMLTextAreaElement>('#prompt')?.disabled === false) renderComposer(); }
+    if (firstEvent && event.sessionId === state.sessionId && !document.hidden) { renderHeader();
+      // A prompt held only by the thread's load (its details land after its rows) still shows the run starting.
+      if (document.querySelector<HTMLTextAreaElement>('#prompt')?.disabled === false || threadLoading()) renderComposer();
+    }
     scheduleNavigation();
   }
   if (firstEvent && event.sessionId === state.sessionId && !wakeHolds.has(event.sessionId)) renderTranscript();

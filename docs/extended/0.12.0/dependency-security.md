@@ -1,5 +1,11 @@
 # Extended 0.12.0 — dependency and security tracking
 
+## 2026-11-12 — upstream 0.3.121 version and dependency continuity
+
+Source [`54df76875360`](https://github.com/ginmp8/pandacode/commit/54df768753607f69f42b0c148a4ef665cb0f45a1) advances the application's declared version from **0.3.120 to 0.3.121** in the root npm manifest/lock (`version` and `packages[""].version`), Rust package/Cargo lock application entry and Tauri config. The source delta contains **no dependency version updates**; the existing Extended npm/Cargo remediations, overrides and vendor patches are retained rather than replaced by source lockfiles. The original upstream release notes and website release-date entry are incorporated exactly. No new vulnerability, remediation, audit pass or distribution approval is claimed.
+
+Pre-integration Extended `bf20fce79523` completed 11/11 push and 11/11 PR CI jobs; the **new exact-SHA** npm/RustSec, Node, Rust, Clippy and Expo results are still to be verified. No local native or security audit ran in this environment. Extended **0.12.0 remains DRAFT**.
+
 ## 2026-11-12 — inherited 0.3.120 limitation notes
 
 Pinned [upstream `f66e95267701`](https://github.com/ginmp8/pandacode/commit/f66e95267701750696d4a43eabdd6c74f6b56927), source tree `085808f3e028ff6ad4b515d562d65c6485f0b921`, app **0.3.120**. The sole source change since the previous snapshot is a five-bullet addition to the [original release note](https://github.com/ginmp8/pandacode/blob/f66e95267701750696d4a43eabdd6c74f6b56927/releases/0.3.120.md), blob `f49dba032c6236f85ee88642221c35a2a0b25275`. No new application, manifest, lockfile, test, workflow or Extended-control change was introduced. Git trees retain 2,007 upstream paths / 2,065 Extended paths, zero upstream files missing or mode/type mismatch, and 80 previously customized shared paths after this note is mirrored. Extended **0.12.0 remains DRAFT**, not released.

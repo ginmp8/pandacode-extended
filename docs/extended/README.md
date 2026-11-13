@@ -1,5 +1,11 @@
 # PandaCode Extended documentation
 
+## 2026-11-12 — source 0.3.121 full-tree integration candidate
+
+Pinned fork [`54df76875360`](https://github.com/ginmp8/pandacode/commit/54df768753607f69f42b0c148a4ef665cb0f45a1), tree `503546c881f2b24230ba4a8616e163739dc39db4`, app **0.3.121**, including 25 commits since `f66e95267701` and all **28 changed source paths** (17 exact byte/mode copies, 11 reconciled with Extended controls and remediation). The planned Extended release remains **0.12.0 DRAFT**. Expected complete tree: **2,008 upstream paths / 2,066 Extended paths; 1,928 shared exact / 80 shared divergent / 58 Extended-only; zero missing upstream or mode/type differences**. The original [0.3.121 release note](../../releases/0.3.121.md) is preserved without changes.
+
+Inherited changes include ZCode lasting-only permission handling, remote lasting-approval and team-side-thread checks, atomic bot/schedule state checks, Workers accessibility/tooltip and live-turn persistence, and lead-wake visibility. These are **upstream features and fixes**, not new Extended-only features; the existing Extended Settings and dependency remediations remain. The preceding Extended `bf20fce79523` completed [push](https://github.com/ginmp8/pandacode-extended/actions/runs/43295833034) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/43295845945) CI with 11/11 successful jobs each. The new integration SHA requires its own CI. Local Node/Rust/Clippy/Expo/native On/Off validation was unavailable; the 80 shared divergences still require full behavioral review.
+
 ## 2026-11-12 — 0.3.120 source-note follow-up
 
 Pinned [upstream `f66e95267701`](https://github.com/ginmp8/pandacode/commit/f66e95267701750696d4a43eabdd6c74f6b56927), tree `085808f3e028ff6ad4b515d562d65c6485f0b921`, application **0.3.120**. One unreleased upstream commit updated only the original [0.3.120 release note](https://github.com/ginmp8/pandacode/blob/f66e95267701750696d4a43eabdd6c74f6b56927/releases/0.3.120.md), Git blob `f49dba032c6236f85ee88642221c35a2a0b25275`; it introduces **no new code, package, build or control changes**. Full-source inventory remains 2,007 paths versus 2,065 Extended paths, zero upstream files missing or type/mode differences, and 80 historical shared divergences after restoring the note's exact bytes. Planned Extended **0.12.0 remains DRAFT**.

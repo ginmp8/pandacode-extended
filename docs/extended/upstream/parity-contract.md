@@ -1,5 +1,11 @@
 # Upstream functional parity contract — PandaCode Extended
 
+## Source checkpoint — 2026-11-12, PandaCode 0.3.121 (candidate)
+
+Frozen source [`54df768753607f69f42b0c148a4ef665cb0f45a1`](https://github.com/ginmp8/pandacode/commit/54df768753607f69f42b0c148a4ef665cb0f45a1), Git tree `503546c881f2b24230ba4a8616e163739dc39db4`, declares application **0.3.121**. Since `f66e95267701`, 25 commits change 28 paths; 17 candidates match upstream blobs and modes and 11 integrate source hunks into existing Extended customizations. No source path is deliberately omitted. Candidate complete-tree counts: **2,008 source files / 2,066 Extended; 1,928 identical shared / 80 divergent shared / 58 Extended-only; zero missing or type/mode mismatches**. The original upstream [release note](../../../releases/0.3.121.md) remains byte-exact. The distribution documentation continues at **Extended 0.12.0 DRAFT**.
+
+Upstream changes include permission checks for ZCode lasting-only grants, remote full-access approval/team guards, atomic bot/schedule updates, and better Workers/live-thread accessibility. Extended's opt-in controls, dependency remediation and data compatibility must remain; the 11 intersecting paths are additive hunk reconciliations, not blanket replacements. The preceding `bf20fce79523` passed 11/11 jobs in both [push](https://github.com/ginmp8/pandacode-extended/actions/runs/43295833034) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/43295845945) runs; no final new-SHA CI or installed/native On/Off claim is made here. Shared-divergence semantic verification remains open.
+
 ## Source checkpoint — 2026-11-12, PandaCode 0.3.120 (unreleased documentation delta)
 
 Current pinned fork `ginmp8/pandacode:main` is [`f66e95267701750696d4a43eabdd6c74f6b56927`](https://github.com/ginmp8/pandacode/commit/f66e95267701750696d4a43eabdd6c74f6b56927), Git tree `085808f3e028ff6ad4b515d562d65c6485f0b921`. Its declared application version remains **0.3.120**. Relative to the previous source checkpoint `69155055e1a9`, only the original `releases/0.3.120.md` changed; the Extended copy matches upstream blob `f49dba032c6236f85ee88642221c35a2a0b25275` exactly, including file mode. No new application feature, dependency or Settings modification is attributed to this upstream commit.

@@ -1,5 +1,15 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-12 — source 0.3.121 candidate integration checklist
+
+- [x] Authenticate GitHub and pin full source `54df768753607f69f42b0c148a4ef665cb0f45a1`, Git tree `503546c881f2b24230ba4a8616e163739dc39db4`, and prior Extended `bf20fce79523`; compare nontruncated recursive trees and the 25-commit / 28-path delta.
+- [x] Prepare all 28 changed upstream paths (17 source-exact, 11 Extended-aware), including original `releases/0.3.121.md`; preserve all other source/Extended paths and file modes.
+- [x] Advance only upstream application version metadata to `0.3.121`; retain existing Extended dependency hardening and planned **0.12.0 DRAFT** marker.
+- [x] Carry the inherited remote approval/ZCode, bot, schedule and Workers functionality into intersecting Extended code without deleting configurable settings.
+- [ ] Confirm the final published SHA, single parent, complete candidate inventory and exact-SHA successful CI; prior `bf20fce79523` [push](https://github.com/ginmp8/pandacode-extended/actions/runs/43295833034) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/43295845945) both succeeded 11/11, but do not validate this candidate.
+- [ ] Run or obtain independent Node/TypeScript, build/release, Rust check/test/Clippy, Expo, npm/RustSec, installed-app Settings On/Off and external Connect/MCP/bot/cloud/VM/credential acceptance, then review the 80 historical shared divergences before claiming full functional parity.
+- [ ] Approve an Extended distribution only through its separate release process; do not tag, publish, deploy or alter the planned version in this integration.
+
 ## 2026-11-12 — inherited 0.3.120 limitation notes
 
 Pinned [upstream `f66e95267701`](https://github.com/ginmp8/pandacode/commit/f66e95267701750696d4a43eabdd6c74f6b56927), source tree `085808f3e028ff6ad4b515d562d65c6485f0b921`, app **0.3.120**. The sole source change since the previous snapshot is a five-bullet addition to the [original release note](https://github.com/ginmp8/pandacode/blob/f66e95267701750696d4a43eabdd6c74f6b56927/releases/0.3.120.md), blob `f49dba032c6236f85ee88642221c35a2a0b25275`. No new application, manifest, lockfile, test, workflow or Extended-control change was introduced. Git trees retain 2,007 upstream paths / 2,065 Extended paths, zero upstream files missing or mode/type mismatch, and 80 previously customized shared paths after this note is mirrored. Extended **0.12.0 remains DRAFT**, not released.

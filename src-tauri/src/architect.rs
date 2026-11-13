@@ -1049,6 +1049,45 @@ pub(crate) fn council_inspection_select_state(
     }
 }
 
+
+
+/// Task-owned, non-Channel native Council request/inspection/terminal receipt.
+/// Local UI/approved native consumers may read their existing task. This route
+/// never starts reviewers, calls a provider, or grants tools/external effects.
+/// A digest supplied by a caller is only an identity pin, not verified code.
+#[tauri::command]
+pub async fn architect_council_native_task(
+    state: State<'_, AppState>, session_id: String, project_id: String,
+    assignment_key: String, artifact_sha256: String, action: String,
+    request_id: Option<String>,
+) -> Result<Value> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let req_id = request_id.as_deref().unwrap_or_default();
+    match action.as_str() {
+        "request" if request_id.is_none() => serde_json::to_value(
+            council_requests::admit_native_task(
+                &store, &session_id, &project_id, &assignment_key, &artifact_sha256,
+            )?,
+        ).map_err(|e| e.to_string()),
+        "inspect" if !req_id.is_empty() => serde_json::to_value(
+            council_requests::inspect_native_task(
+                &store, &session_id, &project_id, &assignment_key, &artifact_sha256, req_id,
+            )?,
+        ).map_err(|e| e.to_string()),
+        "settle" if !req_id.is_empty() => serde_json::to_value(
+            council_requests::record_native_terminal(
+                &store, &session_id, &project_id, &assignment_key, &artifact_sha256, req_id,
+            )?,
+        ).map_err(|e| e.to_string()),
+        "receipt" if !req_id.is_empty() => serde_json::to_value(
+            council_requests::read_native_terminal(
+                &store, &session_id, &project_id, &assignment_key, &artifact_sha256, req_id,
+            )?,
+        ).map_err(|e| e.to_string()),
+        _ => Err("council_task_denied: invalid native task action or missing request identity.".into()),
+    }
+}
+
 /// Native read-only inspection for a task or opt-in channel delivery.
 /// Optional cycle/revision selectors reject stale evidence without changing legacy reads.
 #[tauri::command]

@@ -4532,6 +4532,7 @@ pub fn run() {
                 architect::profiles::architect_delete_profile,
                 architect::architect_get,
                 architect::architect_council_inspect,
+                architect::architect_council_native_task,
                 architect::architect_configure,
                 architect::architect_set_council,
                 architect::architect_council_reviewer_options,

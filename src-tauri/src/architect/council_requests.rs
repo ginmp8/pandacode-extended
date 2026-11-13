@@ -277,3 +277,256 @@ pub(crate) fn read_terminal_channel(
     }
     Ok(stored)
 }
+
+
+/// A non-Channel native caller may bind only its own existing root task. The
+/// artifact digest is caller-supplied correlation, NOT proof that files were
+/// checked. No reviewer, tool grant, Council approval or callback is created.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeTaskCouncilRequest {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub session_id: String,
+    pub project_id: String,
+    pub assignment_key: String,
+    pub cycle_id: String,
+    pub artifact_sha256: String,
+    pub objective_sha256: String,
+    pub policy_sha256: String,
+    pub task_scope_sha256: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct NativeTaskCouncilReceipt {
+    pub schema_version: u32,
+    pub request_id: String,
+    pub session_id: String,
+    pub cycle_id: String,
+    pub team_revision: u64,
+    pub outcome: String,
+    pub lowest_verified_score: f64,
+    pub evidence_sha256: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NativeTaskCouncilInspection {
+    pub request: NativeTaskCouncilRequest,
+    pub native: council::CouncilInspection,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct NativeTaskRecord {
+    request: NativeTaskCouncilRequest,
+    receipt: Option<NativeTaskCouncilReceipt>,
+}
+
+fn native_task_key(assignment_key: &str) -> Result<String> {
+    if !super::valid_id(assignment_key) {
+        return Err("council_task_denied: assignment key must be a stable 1-80 byte identifier.".into());
+    }
+    Ok(format!("native-council-task:{assignment_key}"))
+}
+
+fn native_task_candidate(
+    store: &Store, session_id: &str, project_id: &str,
+    assignment_key: &str, artifact_sha256: &str, request_id: String,
+) -> Result<NativeTaskCouncilRequest> {
+    native_task_key(assignment_key)?;
+    if artifact_sha256.len() != 64 ||
+        !artifact_sha256.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err("council_task_denied: artifact digest must be 64 lowercase hex characters.".into());
+    }
+    let session = store.session(session_id)?;
+    if session.project_id != project_id || session.remote_device.is_some() {
+        return Err("council_task_denied: native task owner or project does not match.".into());
+    }
+    // A Channel delivery has its own per-message authority and receipt path.
+    let channel_count: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM extended_channel_council_deliveries WHERE session_id=?1",
+        [session_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if channel_count != 0 {
+        return Err("council_task_denied: Channel reviews require channel-scoped admission.".into());
+    }
+    let team = super::load(store, session_id)?
+        .ok_or("council_task_denied: native Architect task does not exist.")?;
+    if super::parent_of(store, session_id)?.is_some() ||
+        team.council_since <= 0 || team.objective.trim().is_empty()
+    {
+        return Err("council_task_denied: an active root Council cycle is required.".into());
+    }
+    let config = team.config.council
+        .ok_or("council_task_denied: native Council is disabled.")?;
+    let scope = serde_json::to_vec(&(
+        &session.project_id, &session.worktree_path, &session.provider,
+        &session.model, &session.reasoning_effort,
+    )).map_err(|e| e.to_string())?;
+    Ok(NativeTaskCouncilRequest {
+        schema_version: 1, request_id, session_id: session_id.to_owned(),
+        project_id: project_id.to_owned(), assignment_key: assignment_key.to_owned(),
+        cycle_id: format!("{}:{}", session_id, team.council_since),
+        artifact_sha256: artifact_sha256.to_owned(),
+        objective_sha256: digest(team.objective.as_bytes()),
+        policy_sha256: digest(&serde_json::to_vec(&config).map_err(|e| e.to_string())?),
+        task_scope_sha256: digest(&scope),
+    })
+}
+
+fn native_task_record(
+    store: &Store, session_id: &str, assignment_key: &str,
+) -> Result<(String, NativeTaskRecord)> {
+    let key = native_task_key(assignment_key)?;
+    let raw: String = store.db.query_row(
+        "SELECT content FROM architect_requests WHERE parent_session_id=?1
+         AND key=?2 AND kind='council_native_task' AND worker_id=?1",
+        params![session_id, key], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("council_task_denied: this native task request was not admitted.")?;
+    let record = serde_json::from_str(&raw)
+        .map_err(|_| "council_task_denied: native task request record is invalid.")?;
+    Ok((raw, record))
+}
+
+/// Existing architect_requests provides task-scoped, cascade-deleted storage.
+/// This is a native-only operation; it does not launch or grant reviewers.
+pub(crate) fn admit_native_task(
+    store: &Store, session_id: &str, project_id: &str,
+    assignment_key: &str, artifact_sha256: &str,
+) -> Result<NativeTaskCouncilRequest> {
+    let key = native_task_key(assignment_key)?;
+    let candidate = native_task_candidate(
+        store, session_id, project_id, assignment_key, artifact_sha256, storage::id(),
+    )?;
+    let existing: Option<String> = store.db.query_row(
+        "SELECT content FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        params![session_id, key], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if let Some(raw) = existing {
+        let saved: NativeTaskRecord = serde_json::from_str(&raw)
+            .map_err(|_| "council_task_conflict: existing native task record is invalid.")?;
+        let matching = NativeTaskCouncilRequest {
+            request_id: saved.request.request_id.clone(), ..candidate
+        };
+        return if saved.request == matching { Ok(saved.request) }
+            else { Err("council_task_conflict: an assignment cannot be rebound to another Council cycle, objective, policy or artifact.".into()) };
+    }
+    let team = super::load(store, session_id)?
+        .ok_or("council_task_denied: root team disappeared.")?;
+    if team.workers.iter().any(|worker|
+        worker.created_at >= team.council_since && worker.council.is_some())
+    {
+        return Err("council_task_denied: admission after reviewer dispatch is not allowed.".into());
+    }
+    let body = serde_json::to_string(&NativeTaskRecord {
+        request: candidate.clone(), receipt: None,
+    }).map_err(|e| e.to_string())?;
+    store.db.execute(
+        "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+         VALUES(?1,?2,'council_native_task',?3,?1)",
+        params![session_id, key, body],
+    ).map_err(|e| format!("council_task_conflict: {e}"))?;
+    Ok(candidate)
+}
+
+/// The caller must present its task, project, assignment, artifact and request ID.
+/// A request ID alone is never a capability or an approval token.
+pub(crate) fn inspect_native_task(
+    store: &Store, session_id: &str, project_id: &str,
+    assignment_key: &str, artifact_sha256: &str, request_id: &str,
+) -> Result<NativeTaskCouncilInspection> {
+    let (_, record) = native_task_record(store, session_id, assignment_key)?;
+    if record.request.request_id != request_id {
+        return Err("council_task_denied: native request identity mismatch.".into());
+    }
+    let current = native_task_candidate(
+        store, session_id, project_id, assignment_key, artifact_sha256, request_id.to_owned(),
+    )?;
+    if record.request != current {
+        return Err("council_task_stale: native task, cycle, objective, policy or artifact changed.".into());
+    }
+    let native = super::council_inspection_state(store, session_id)?
+        .ok_or("council_task_denied: native Council inspection is unavailable.")?;
+    if format!("{}:{}", session_id, native.cycle_started_at) != current.cycle_id {
+        return Err("council_task_stale: native Council cycle changed.".into());
+    }
+    Ok(NativeTaskCouncilInspection { request: current, native })
+}
+
+fn native_terminal_expected(
+    store: &Store, session_id: &str, project_id: &str,
+    assignment_key: &str, artifact_sha256: &str, request_id: &str,
+) -> Result<NativeTaskCouncilReceipt> {
+    let inspected = inspect_native_task(
+        store, session_id, project_id, assignment_key, artifact_sha256, request_id,
+    )?;
+    let native = &inspected.native;
+    // A user exception is never relabeled "passed"; it needs its own
+    // attributed, reasoned consumer contract before it can be emitted here.
+    if native.status.state != "passed" || native.status.stale || !native.verified_pass {
+        return Err("council_task_denied: no independently verified root Council pass.".into());
+    }
+    let proof = native.verified_completion.as_ref()
+        .ok_or("council_task_denied: native Council has no terminal completion.")?;
+    if proof.session_id != session_id || proof.cycle_id != inspected.request.cycle_id
+        || proof.team_revision != native.team_revision
+    {
+        return Err("council_task_stale: native completion has different ownership.".into());
+    }
+    let evidence = serde_json::to_vec(&(&inspected.request, proof))
+        .map_err(|e| e.to_string())?;
+    Ok(NativeTaskCouncilReceipt {
+        schema_version: 1, request_id: request_id.to_owned(),
+        session_id: session_id.to_owned(), cycle_id: proof.cycle_id.clone(),
+        team_revision: proof.team_revision, outcome: "passed".into(),
+        lowest_verified_score: proof.lowest, evidence_sha256: digest(&evidence),
+    })
+}
+
+/// Durable one-winner terminal result, checked against the live native gate.
+/// This never publishes, approves on behalf of a user or dispatches a callback.
+pub(crate) fn record_native_terminal(
+    store: &Store, session_id: &str, project_id: &str,
+    assignment_key: &str, artifact_sha256: &str, request_id: &str,
+) -> Result<NativeTaskCouncilReceipt> {
+    let expected = native_terminal_expected(
+        store, session_id, project_id, assignment_key, artifact_sha256, request_id,
+    )?;
+    let (raw, mut record) = native_task_record(store, session_id, assignment_key)?;
+    if let Some(stored) = record.receipt {
+        return if stored == expected { Ok(stored) } else {
+            Err("council_task_stale: previous terminal receipt differs from current native proof.".into())
+        };
+    }
+    record.receipt = Some(expected.clone());
+    let updated = serde_json::to_string(&record).map_err(|e| e.to_string())?;
+    let changed = store.db.execute(
+        "UPDATE architect_requests SET content=?1 WHERE parent_session_id=?2
+         AND key=?3 AND kind='council_native_task' AND worker_id=?2 AND content=?4",
+        params![updated, session_id, native_task_key(assignment_key)?, raw],
+    ).map_err(|e| e.to_string())?;
+    if changed != 1 {
+        return Err("council_task_conflict: concurrent terminal settlement changed the request.".into());
+    }
+    Ok(expected)
+}
+
+pub(crate) fn read_native_terminal(
+    store: &Store, session_id: &str, project_id: &str,
+    assignment_key: &str, artifact_sha256: &str, request_id: &str,
+) -> Result<NativeTaskCouncilReceipt> {
+    let (_, record) = native_task_record(store, session_id, assignment_key)?;
+    let stored = record.receipt
+        .ok_or("council_task_denied: no verified terminal receipt is stored.")?;
+    let expected = native_terminal_expected(
+        store, session_id, project_id, assignment_key, artifact_sha256, request_id,
+    )?;
+    if stored != expected {
+        return Err("council_task_stale: terminal receipt no longer matches native evidence.".into());
+    }
+    Ok(stored)
+}

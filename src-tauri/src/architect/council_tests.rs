@@ -2319,3 +2319,61 @@ fn child_council_revocation_and_project_isolation_fail_closed() {
     ).unwrap();
     assert!(child_council::inspect(&store, &root).unwrap_err().contains("child_council_denied"));
 }
+
+
+#[test]
+fn non_channel_native_task_review_request_is_idempotent_and_requires_real_council_proof() {
+    let (state, sid) = council_state(on(9.0, 3, 2));
+    let artifact = "a".repeat(64);
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        assert!(council_requests::admit_native_task(
+            &store, &sid, &project, "assignment-1", &artifact
+        ).unwrap_err().contains("active root Council cycle"));
+    }
+    start_state(&state, &sid, "Review this exact task objective", None, None).unwrap();
+    let store = state.store.lock().unwrap();
+    let project = store.session(&sid).unwrap().project_id;
+    let first = council_requests::admit_native_task(
+        &store, &sid, &project, "assignment-1", &artifact,
+    ).unwrap();
+    let repeat = council_requests::admit_native_task(
+        &store, &sid, &project, "assignment-1", &artifact,
+    ).unwrap();
+    assert_eq!(first, repeat);
+    assert_eq!(first.schema_version, 1);
+    let result = council_requests::inspect_native_task(
+        &store, &sid, &project, "assignment-1", &artifact, &first.request_id,
+    ).unwrap();
+    assert_eq!(result.request, first);
+    assert!(!result.native.verified_pass);
+    assert!(council_requests::record_native_terminal(
+        &store, &sid, &project, "assignment-1", &artifact, &first.request_id,
+    ).unwrap_err().contains("no independently verified"));
+    assert!(council_requests::read_native_terminal(
+        &store, &sid, &project, "assignment-1", &artifact, &first.request_id,
+    ).is_err());
+    assert!(council_requests::inspect_native_task(
+        &store, &sid, "foreign-project", "assignment-1", &artifact, &first.request_id,
+    ).is_err());
+    assert!(council_requests::inspect_native_task(
+        &store, &sid, &project, "assignment-1", &"b".repeat(64), &first.request_id,
+    ).is_err());
+    assert!(council_requests::inspect_native_task(
+        &store, &sid, &project, "assignment-1", &artifact, "forged-request",
+    ).is_err());
+    assert!(council_requests::admit_native_task(
+        &store, &sid, &project, "assignment-1", &"b".repeat(64),
+    ).unwrap_err().contains("council_task_conflict"));
+    assert!(council_requests::admit_native_task(
+        &store, &sid, &project, "bad:key", &artifact,
+    ).is_err());
+
+    let mut changed = load(&store, &sid).unwrap().unwrap();
+    changed.objective.push_str(" changed");
+    save(&store, &mut changed).unwrap();
+    assert!(council_requests::inspect_native_task(
+        &store, &sid, &project, "assignment-1", &artifact, &first.request_id,
+    ).unwrap_err().contains("council_task_stale"));
+}

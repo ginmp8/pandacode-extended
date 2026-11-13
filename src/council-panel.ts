@@ -657,7 +657,7 @@ export function createCouncil(host: CouncilHost) {
         reviewerDraft.set(sessionId, { ...draft, selected: false, ids: [...draft.ids], automaticReviewers: 0 });
       }
       // While Council is off, a reviewer-count click only sets what starts next.
-      if (current) apply(sessionId, { ...current, [key]: value, ...(key === 'reviewers' ? { reviewerBotIds: undefined, automaticReviewers: undefined, optionalSkillIds: undefined, requiredCheckSkillIds: undefined, reviewPermissions: undefined } : {}) }, remember);
+      if (current) apply(sessionId, { ...current, [key]: value, ...(key === 'reviewers' ? { reviewerBotIds: undefined, nestedBotReviewers: undefined, automaticReviewers: undefined, optionalSkillIds: undefined, requiredCheckSkillIds: undefined, reviewPermissions: undefined } : {}) }, remember);
       else { saveCouncilDefaults({ ...councilDefaults(), [key]: value }); paint(sessionId); }
     };
     const onKey = (event: KeyboardEvent) => {

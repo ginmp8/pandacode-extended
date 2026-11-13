@@ -412,6 +412,9 @@ test('M4 and M7 task child roles preserve typed native configuration without cla
   expect(m7.nestedBotReviewers).toHaveLength(1);
   expect(m7.nestedBotReviewers[0].botId).toBe('reviewer-alpha');
   expect(m7.reviewers).toBe(0);
+  await option(page, 'reviewers', 'Auto: the lead picks reviewers for the work').click();
+  await expect.poll(async () => (await calls(page)).at(-1)?.nestedBotReviewers).toBeUndefined();
+  await expect(panel(page).getByLabel('Review role for Alpha')).toHaveCount(0);
 });
 
 test('M3 never saves a bot-only zero-quorum configuration as the user changes sources', async ({ page }) => {

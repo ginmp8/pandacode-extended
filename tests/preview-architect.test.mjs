@@ -449,6 +449,38 @@ test('a trailing slash on either scope still overlaps and explains the wait', ()
 });
 
 
+test('architect preview preserves task-scoped nested Council roles without manufacturing child results', t => {
+  const { api, host } = fixture(t);
+  api.configure('parent', config());
+  const standard = { target: 9, maxRounds: 3, reviewers: 0 };
+  const child = (botId, childReviewers = 2) => ({ botId, childReviewers, childTarget: 9, childMaxRounds: 3 });
+  for (const council of [
+    { ...standard, nestedBotReviewers: [child('a'), child('b')] },
+    { ...standard, nestedBotReviewers: [child('a')], automaticReviewers: 1 },
+    { ...standard, nestedBotReviewers: [child('a')], reviewerBotIds: ['b'] },
+    { ...standard, nestedBotReviewers: [child('a')], reviewerBotIds: ['b'], automaticReviewers: 1 },
+  ]) {
+    const configured = api.setCouncil('parent', council);
+    assert.deepEqual(configured.config.council.nestedBotReviewers, council.nestedBotReviewers);
+    assert.equal(configured.councilStatus.state, 'waiting',
+      'the browser preview must never claim that simulated child reviewers executed');
+    assert.deepEqual(createPreviewArchitect(host).get('parent').config.council.nestedBotReviewers, council.nestedBotReviewers);
+  }
+  assert.throws(() => api.setCouncil('parent', { ...standard, nestedBotReviewers: [child('a')] }), /top-level seats/);
+  assert.throws(() => api.setCouncil('parent', { ...standard, nestedBotReviewers: [child('a'), child('a')] }), /unique/);
+  assert.throws(() => api.setCouncil('parent', { ...standard, nestedBotReviewers: [child('a')], reviewerBotIds: ['a'] }), /distinct/);
+  assert.throws(() => api.setCouncil('parent', { ...standard, nestedBotReviewers: [child('a', 1), child('b')] }), /between 2 and 8/);
+  assert.throws(() => api.setCouncil('parent', { ...standard, reviewers: 2, nestedBotReviewers: [child('a'), child('b')] }), /reviewers=0/);
+  assert.throws(() => api.setCouncil('parent', { ...standard, nestedBotReviewers: [child('a'), child('b'), child('c')],
+    criteriaSource: 'user', criteria: [
+      { id: 'one', lens: 'One', required: true, target: 9 },
+      { id: 'two', lens: 'Two', required: true, target: 9 },
+      { id: 'three', lens: 'Three', required: true, target: 9 },
+    ] }), /Each child Council/);
+  const original = api.setCouncil('parent', standard);
+  assert.equal(original.config.council.nestedBotReviewers, undefined);
+});
+
 test('architect preview round-trips only admitted native Council strategies without weakening the old default', t => {
   const { api, host } = fixture(t);
   api.configure('parent', config());

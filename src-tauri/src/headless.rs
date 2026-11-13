@@ -31,6 +31,7 @@ enum Command {
     ExportOrchestrations { path: PathBuf },
     InspectOrchestrations,
     ListTickets,
+    ListReviewInbox,
     ListTeamDemands {
         orchestration_id: String, state: String,
         before_updated_at: Option<i64>, before_id: Option<String>,
@@ -207,6 +208,22 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if matches!(&command, Command::ListReviewInbox) {
+                // Uses the desktop native review query, redacting objectives
+                // and avoiding startup recovery beside a running host.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::list_headless_review_inbox(
+                        &dir.join("kingcode.sqlite3"),
+                    ));
+                match result {
+                    Ok(inbox) => { println!("{inbox}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent review inbox inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             if let Command::ListTeamDemands {
                 orchestration_id, state, before_updated_at, before_id,
             } = &command {
@@ -340,7 +357,7 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
 fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import: Option<PathBuf>) {
     match command {
         // Inspection exits before setup_common and must never reach this branch.
-        Command::InspectOrchestrations | Command::ListTickets | Command::ListTeamDemands { .. }
+        Command::InspectOrchestrations | Command::ListTickets | Command::ListReviewInbox | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
         | Command::InspectTicketEffects { .. }
@@ -773,6 +790,10 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 command = Command::ListTickets;
                 ops += 1;
             }
+            "--list-review-inbox" => {
+                command = Command::ListReviewInbox;
+                ops += 1;
+            }
             "--list-team-demands" => {
                 let id = args.get(index + 1)
                     .ok_or_else(|| format!("--list-team-demands needs a Team ID and state.\n\n{}", help()))?;
@@ -1062,7 +1083,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1088,6 +1109,8 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-orchestrations
                          List native orchestration status without modifying live tasks; exit.
   --list-tickets         List up to 200 redacted native SuperAgent tickets; exit.
+  --list-review-inbox    List up to 200 pending human/Council decisions across Teams;
+                         redact objectives, never approve or run a reviewer; exit.
   --list-team-demands <id> <state> [--before <ms> <ticket-id>]
                          Page up to 200 native Demands for one Team and exact Ticket state
                          (or all). Next page uses returned nextCursor; no private evidence
@@ -1176,6 +1199,8 @@ mod tests {
             Ok(Command::ExportOrchestrations { path: PathBuf::from("presets.json") }));
         assert_eq!(parsed("--inspect-orchestrations"), Ok(Command::InspectOrchestrations));
         assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
+        assert_eq!(parsed("--list-review-inbox"), Ok(Command::ListReviewInbox));
+        assert!(parsed("--list-review-inbox --stop-ticket ticket_1").is_err());
         assert_eq!(parsed("--list-team-demands team_123 blocked"),
             Ok(Command::ListTeamDemands {
                 orchestration_id:"team_123".into(),state:"blocked".into(),
@@ -1382,6 +1407,7 @@ mod tests {
             "--export-orchestrations",
             "--inspect-orchestrations",
             "--list-tickets",
+            "--list-review-inbox",
             "--inspect-team-readiness",
             "--inspect-team-roster",
             "--inspect-ticket",

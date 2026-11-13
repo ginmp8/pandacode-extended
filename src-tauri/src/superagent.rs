@@ -530,6 +530,39 @@ fn list_review_inbox(store: &Store, limit: i64) -> Result<Vec<DemandIndex>> {
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+/// Bounded read-only headless projection of the same native cross-Team review
+/// states as the desktop. A state is not evidence of Council approval or
+/// permission to accept; a separate, current native revision check is required.
+pub(crate) fn list_headless_review_inbox(database_path: &std::path::Path) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let items = list_review_inbox(&store, 200)?;
+    let may_have_more = items.len() == 200;
+    let entries = items.into_iter().map(|item| {
+        let next_action = if item.state == "waiting_review" {
+            "await_fresh_task_bound_native_council"
+        } else {
+            "inspect_current_revision_before_human_decision"
+        };
+        serde_json::json!({
+            "ticketId": item.id,
+            "orchestrationId": item.orchestration_id,
+            "state": item.state,
+            "revision": item.revision,
+            "updatedAt": item.updated_at,
+            "nextOperatorAction": next_action,
+            "nativeCouncilPassVerifiedByThisCommand": false,
+            "acceptanceAuthorizedByThisCommand": false
+        })
+    }).collect::<Vec<_>>();
+    serde_json::to_string_pretty(&serde_json::json!({
+        "tickets": entries,
+        "limit": 200,
+        "mayHaveMore": may_have_more,
+        "observationalOnly": true,
+        "startupRecoveryPerformed": false
+    })).map_err(|e| e.to_string())
+}
+
 /// Immutable native assignment history, including completed and failed attempts.
 /// Never infer task success or authorization from an assignment's terminal state.
 #[derive(Debug, Clone, Serialize)]
@@ -3449,6 +3482,25 @@ mod tests {
         drop(store);
         let read_only = Store::open_read_only(&path).unwrap();
         assert_eq!(list_review_inbox(&read_only, 200).unwrap().len(), 2);
+        let headless = list_headless_review_inbox(&path).unwrap();
+        let projection:serde_json::Value = serde_json::from_str(&headless).unwrap();
+        let rows = projection["tickets"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|item| item["ticketId"] == human.id
+            && item["state"] == "waiting_approval"
+            && item["nextOperatorAction"] == "inspect_current_revision_before_human_decision"));
+        assert!(rows.iter().any(|item| item["ticketId"] == council.id
+            && item["state"] == "waiting_review"
+            && item["nextOperatorAction"] == "await_fresh_task_bound_native_council"));
+        assert_eq!(projection["observationalOnly"],true);
+        assert_eq!(projection["startupRecoveryPerformed"],false);
+        assert_eq!(projection["mayHaveMore"],false);
+        assert!(!headless.contains("Human review only"));
+        assert!(!headless.contains("Council pending"));
+        assert!(!headless.contains("PRIVATE NATIVE EVIDENCE"));
+        assert!(list_headless_review_inbox(
+            &std::env::temp_dir().join(format!("absent-sa-review-{}.db",storage::id()))
+        ).is_err());
     }
 
     #[test]

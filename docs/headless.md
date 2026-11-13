@@ -356,6 +356,7 @@ execute an external effect.
 
 ```sh
 pandacode serve --list-tickets
+pandacode serve --list-review-inbox
 pandacode serve --list-team-demands <team-id> blocked
 pandacode serve --accept-ticket <ticket-id> <expected-revision>
 pandacode serve --reject-ticket <ticket-id> <expected-revision> "Needs changes"
@@ -389,6 +390,19 @@ callbacks are denied by native mandate/state checks. This is not process
 termination or completed external-effect reconciliation. Use the inspection
 commands above to verify the final native state.
 
+
+### Cross-Team headless review inbox (read-only)
+
+`pandacode serve --list-review-inbox` returns up to 200 actual pending
+`waiting_approval` and `waiting_review` Tickets from the same native query as
+Bots → Orchestrations. Its bounded JSON includes Team ID, Ticket ID, revision,
+state, update time and a distinct next operator action, **not** objective,
+private evidence, worker result, Mandate or review contents. `mayHaveMore` only
+indicates that the cap was reached; it does not certify an additional page.
+A pending native Council review is never represented as a pass. This command
+opens existing SQLite read-only and cannot perform provider dispatch, recovery,
+review acceptance, external effects or policy grants. Use a separate current
+Ticket inspection before any explicitly authorized native human decision.
 
 ### Read-only Team Demand status inspection
 

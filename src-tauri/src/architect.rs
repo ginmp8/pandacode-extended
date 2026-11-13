@@ -2157,6 +2157,12 @@ fn dispatch_as(
     let agents = state.agents.lock().map_err(|e| e.to_string())?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     let mut team = load(&store, sid)?.ok_or("Team unavailable.")?;
+    // A task-owned child cannot borrow the ordinary root tool dispatcher,
+    // even if its blocked TeamSnapshot has been modified to look active.
+    // Native child leaf admission must use a separate correlated authority path.
+    if parent_of(&store, sid)?.is_some() {
+        return Err("child_council_denied: task-owned child sessions cannot use root Architect tools.".into());
+    }
     if stopped.load(Ordering::SeqCst) || !active(&team.status) || team.generation != generation {
         return Err("Team is no longer active.".into());
     }

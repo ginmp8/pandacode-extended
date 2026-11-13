@@ -8,6 +8,8 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+const RESERVATION_DESCRIPTION: &str = "Task-owned read-only Council reservation; reviewer dispatch is not yet enabled.";
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct FrozenChildReservation {
@@ -160,6 +162,30 @@ fn read(store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer) -> Re
     if chat_messages != 0 {
         return Err("child_council_stale: reserved child contains unrelated chat history.".into());
     }
+    // A blocked reservation cannot inherit a forged task description, native
+    // dispatch record or sub-worker ownership. All three must be admitted by
+    // the future task-scoped native child lifecycle, never by a bot chat.
+    let task_description: String = store.db.query_row(
+        "SELECT COALESCE(task_description, '') FROM sessions WHERE id=?1",
+        [&child_session_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if task_description != RESERVATION_DESCRIPTION {
+        return Err("child_council_stale: reserved child task description changed.".into());
+    }
+    let pending_native_requests: i64 = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM architect_requests WHERE parent_session_id=?1)",
+        [&child_session_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if pending_native_requests != 0 {
+        return Err("child_council_stale: reserved child has unrelated native requests.".into());
+    }
+    let unadmitted_subworkers: i64 = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM architect_workers WHERE parent_session_id=?1)",
+        [&child_session_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if unadmitted_subworkers != 0 {
+        return Err("child_council_stale: reserved child has unadmitted sub-workers.".into());
+    }
     if stored.config != config || stored.status != "blocked" || !stored.workers.is_empty()
         || !stored.objective.is_empty() || stored.council_since != 0
         // A staged setup, prior summary or briefing can rehydrate unrelated
@@ -214,7 +240,7 @@ pub(super) fn reserve(store: &Store, root: &TeamSnapshot) -> Result<()> {
         store.db.execute(
             "UPDATE sessions SET title=?2,task_description=?3,worktree_path=?4,reasoning_effort=?5 WHERE id=?1",
             params![session.id, format!("Council child: {}", bot.name),
-                "Task-owned read-only Council reservation; reviewer dispatch is not yet enabled.",
+                RESERVATION_DESCRIPTION,
                 parent.worktree_path, bot.reasoning_effort],
         ).map_err(|e| e.to_string())?;
         store.db.execute(

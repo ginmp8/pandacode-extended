@@ -356,7 +356,9 @@ fn native_task_candidate(
     }
     // A Channel delivery has its own per-message authority and receipt path.
     let channel_count: i64 = store.db.query_row(
-        "SELECT COUNT(*) FROM extended_channel_council_deliveries WHERE session_id=?1",
+        "SELECT COUNT(*) FROM extended_channel_council_deliveries c
+         JOIN bot_shared_channel_deliveries d ON d.id=c.delivery_id
+         WHERE d.session_id=?1",
         [session_id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
     if channel_count != 0 {

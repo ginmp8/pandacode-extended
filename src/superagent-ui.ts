@@ -9,6 +9,7 @@ interface Config {
   id: string; name: string; coordinatorBotId: string; workerBotId: string;
   enabled: boolean; policyRevision: number;
   ticketCount?: number; runningCount?: number; blockedCount?: number; lastActivityAt?: number;
+  workerCount?: number; reviewerCount?: number;
 }
 interface TeamRoster { orchestrationId:string; policyRevision:number; coordinatorBotId:string;
   workerBotIds:string[]; reviewerBotIds:string[]; executionReady:boolean }
@@ -87,6 +88,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
   let demandTeamFilter = '', demandStateFilter = '';
+  let teamSearch = '', teamStatusFilter: 'all' | 'enabled' | 'disabled' = 'all';
   let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false;
   let globalDemandLayout: 'board' | 'list' = 'board';
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
@@ -126,10 +128,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       : ' · Check outcome unavailable (legacy receipt)';
   function render(): void {
     if (!host.isConnected) return;
-    const list = presets.map(item =>
+    const roleSummary = (item:Config): string =>
+      typeof item.workerCount === 'number' && typeof item.reviewerCount === 'number' &&
+      Number.isInteger(item.workerCount) && Number.isInteger(item.reviewerCount) &&
+      item.workerCount >= 1 && item.reviewerCount >= 0
+        ? '1 Coordinator · ' + item.workerCount + ' Workers · ' + item.reviewerCount + ' Reviewers'
+        : 'Member counts unavailable';
+    const visibleTeams = presets.filter(item =>
+      item.name.toLowerCase().includes(teamSearch.trim().toLowerCase()) &&
+      (teamStatusFilter === 'all' || item.enabled === (teamStatusFilter === 'enabled')));
+    const list = visibleTeams.map(item =>
       '<li class="sa-item"><div><strong>' + safe(item.name) + '</strong><small>' +
       safe(botName(item.coordinatorBotId)) + ' / ' + safe(botName(item.workerBotId)) +
-      '</small><small class="sa-counts" aria-label="Task counts">' +
+      '</small><small class="sa-role-counts" aria-label="Configured member counts">' +
+      safe(roleSummary(item)) + '</small><small class="sa-counts" aria-label="Task counts">' +
       (item.ticketCount ?? 0) + ' tasks · ' + (item.runningCount ?? 0) +
       ' running · ' + (item.blockedCount ?? 0) + ' blocked</small>' +
       '<small class="sa-last-activity">Last activity: ' + safe(activityTime(item.lastActivityAt)) +
@@ -522,6 +534,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         ' · Policy revision ' + chosen.policyRevision + '</p>' +
         '<dl><dt>Coordinator (read-only)</dt><dd>' + safe(botName(chosen.coordinatorBotId)) + '</dd>' +
         '<dt>Worker</dt><dd>' + safe(botName(chosen.workerBotId)) + '</dd>' +
+        '<dt>Configured members</dt><dd>' + safe(roleSummary(chosen)) + '</dd>' +
         '<dt>Current native support</dt><dd>One worker, manual dispatch; scoped writes and automatic GitHub intake unsupported.</dd></dl>' +
         '<button type="button" data-sa-open-runs>Assign demand / Open runs</button></section>'
       : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
@@ -583,8 +596,18 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<button class="primary-button" type="button" data-sa-confirm>Confirm</button></div></section>' : '') +
       navigation +
       '<div class="sa-layout"><aside class="sa-directory" aria-label="Teams directory">' +
-      '<section class="sa-pane"><h3>Teams</h3><ul class="sa-list">' +
-      (list || '<li class="sa-empty">No orchestrations created.</li>') + '</ul></section>' +
+      '<section class="sa-pane"><h3>Teams</h3>' +
+      '<label>Search Teams<input type="search" data-sa-team-search value="' +
+      safe(teamSearch) + '" placeholder="Team name"></label>' +
+      '<label>Team status<select data-sa-team-status>' +
+      '<option value="all"' + (teamStatusFilter === 'all' ? ' selected' : '') + '>All statuses</option>' +
+      '<option value="enabled"' + (teamStatusFilter === 'enabled' ? ' selected' : '') + '>Manual enabled</option>' +
+      '<option value="disabled"' + (teamStatusFilter === 'disabled' ? ' selected' : '') + '>Disabled / Off</option>' +
+      '</select></label><p role="status">' + visibleTeams.length + ' of ' +
+      presets.length + ' native Teams displayed. Selection remains open when filtered out.</p>' +
+      '<ul class="sa-list">' + (list || '<li class="sa-empty">' +
+      (presets.length ? 'No Teams match these filters.' : 'No orchestrations created.') +
+      '</li>') + '</ul></section>' +
       '</aside><div class="sa-stage">' +
       (workspaceView === 'teams'
         ? '<section class="sa-pane"><h3>New manual preset</h3><form data-sa-form="create">' +
@@ -712,6 +735,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   // Templates populate editable names only; no bot, tool or task is selected.
   host.addEventListener('change', event => {
     const target = event.target;
+    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-team-status')) {
+      if (!['all','enabled','disabled'].includes(target.value)) return;
+      teamStatusFilter = target.value as typeof teamStatusFilter;
+      render();
+      host.querySelector<HTMLSelectElement>('[data-sa-team-status]')?.focus({preventScroll:true});
+      return;
+    }
     if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-demand-team-filter')) {
       if (busy) { target.value = demandTeamFilter; return; }
       const filter = target.value;
@@ -767,6 +797,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   });
   host.addEventListener('input', event => {
     const target = event.target;
+    if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-team-search')) {
+      teamSearch = target.value;
+      const selection = target.selectionStart;
+      render();
+      const replacement = host.querySelector<HTMLInputElement>('[data-sa-team-search]');
+      replacement?.focus({preventScroll:true});
+      if (replacement && selection !== null) replacement.setSelectionRange(selection, selection);
+      return;
+    }
     if (target instanceof HTMLTextAreaElement && target.name === 'objective' &&
         target.closest<HTMLFormElement>('form[data-sa-form="run"]')) {
       demandObjective = target.value;

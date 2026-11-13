@@ -7,6 +7,12 @@ each independent Demand is a durable Ticket bound to exactly one Team.
 ## Native-backed surfaces
 
 - **Teams:** saved policy revisions, coordinator/worker bot identity and native task counters.
+  The directory shows native correlated member counts (one Coordinator,
+  configured Workers and Reviewers) without inflating Ticket totals when a
+  Team has multiple roles. Search and Off/Manual status filters operate only
+  on the native-loaded Team directory and do not change the selected Team,
+  stored policies, permissions or execution. Older fixtures without counts
+  are marked unavailable rather than inferred.
 - **Demands/Runs:** a read-only native Ticket index with stable 200-row
   cursor pages and an explicit **All Teams / specific Team** filter. The Team
   filter is enforced by the native SQL query **before pagination**, so sparse

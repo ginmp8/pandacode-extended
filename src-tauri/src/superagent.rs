@@ -268,6 +268,8 @@ pub struct OrchestrationOverview {
     pub running_count: i64,
     pub blocked_count: i64,
     pub last_activity_at: i64,
+    pub worker_count: i64,
+    pub reviewer_count: i64,
 }
 
 /// Derive overview counts from durable tickets rather than a page of sessions.
@@ -279,7 +281,11 @@ fn orchestration_overview(store: &Store) -> Result<Vec<OrchestrationOverview>> {
                 COUNT(t.id),
                 COALESCE(SUM(CASE WHEN t.state='running' THEN 1 ELSE 0 END),0),
                 COALESCE(SUM(CASE WHEN t.state='blocked' THEN 1 ELSE 0 END),0),
-                COALESCE(MAX(t.updated_at),o.updated_at)
+                COALESCE(MAX(t.updated_at),o.updated_at),
+                1 + (SELECT COUNT(*) FROM sa_team_roles r
+                     WHERE r.orchestration_id=o.id AND r.role='worker'),
+                (SELECT COUNT(*) FROM sa_team_roles r
+                 WHERE r.orchestration_id=o.id AND r.role='reviewer')
          FROM sa_orchestrations o
          LEFT JOIN sa_tickets t ON t.orchestration_id=o.id
          GROUP BY o.id ORDER BY o.created_at,o.id",
@@ -291,6 +297,8 @@ fn orchestration_overview(store: &Store) -> Result<Vec<OrchestrationOverview>> {
             running_count: row.get(8)?,
             blocked_count: row.get(9)?,
             last_activity_at: row.get(10)?,
+            worker_count: row.get(11)?,
+            reviewer_count: row.get(12)?,
         })
     }).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
@@ -3804,8 +3812,30 @@ mod tests {
             worker_bot_id: "worker".into(),
         }).unwrap();
 
+        // Correlated role counts must not inflate native Ticket aggregates.
+        for id in ["worker-extra", "reviewer-extra"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'worker',1,'worker-extra')", [&other.id],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'reviewer',0,'reviewer-extra')", [&other.id],
+        ).unwrap();
         let before = orchestration_overview(&store).unwrap();
         assert_eq!(before.len(), 2);
+        let first = before.iter().find(|item| item.config.id == config.id).unwrap();
+        let second = before.iter().find(|item| item.config.id == other.id).unwrap();
+        assert_eq!((first.worker_count, first.reviewer_count), (1, 0));
+        assert_eq!((second.worker_count, second.reviewer_count), (2, 1));
+        assert_eq!(serde_json::to_value(second).unwrap()["workerCount"], 2);
+        assert_eq!(serde_json::to_value(second).unwrap()["reviewerCount"], 1);
         for item in &before {
             assert_eq!(item.ticket_count, 0);
             assert_eq!(item.running_count, 0);
@@ -3826,6 +3856,8 @@ mod tests {
         assert_eq!(serialized["coordinatorBotId"], "router");
         assert_eq!(serialized["ticketCount"], 1);
         assert_eq!(serialized["runningCount"], 1);
+        assert_eq!(serialized["workerCount"], 1);
+        assert_eq!(serialized["reviewerCount"], 0);
 
         stop(&store, &active.id).unwrap();
         let (blocked, launched) = admit(

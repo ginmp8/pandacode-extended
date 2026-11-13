@@ -1204,3 +1204,49 @@ test('Team effective policy view is native-backed and never grants or launches t
   expect(calls.filter(c=>c==='superagent_effective_team')).toHaveLength(1);
   expect(calls.some(c=>/submit|dispatch|accept|reserve|enable|activate/.test(c))).toBe(false);
 });
+
+test('native Team directory counts configured roles and filters without creating tasks', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-directory-filter-test'; document.body.appendChild(host);
+    const calls:string[]=[];
+    (window as unknown as {teamDirectoryCalls:()=>string[]}).teamDirectoryCalls=()=>calls;
+    const teams=[
+      {id:'economy',name:'Economy',coordinatorBotId:'lead',workerBotId:'worker',
+        enabled:false,policyRevision:1,workerCount:1,reviewerCount:0},
+      {id:'security',name:'Security critical',coordinatorBotId:'lead',workerBotId:'worker',
+        enabled:true,policyRevision:4,workerCount:3,reviewerCount:2},
+      {id:'balanced',name:'Balanced',coordinatorBotId:'lead',workerBotId:'worker',
+        enabled:false,policyRevision:2,workerCount:2,reviewerCount:1},
+    ];
+    mountSuperagent(host,async(command) => {
+      calls.push(command);
+      if(command==='bots_list') return [
+        {id:'lead',name:'Lead',paused:false},{id:'worker',name:'Worker',paused:false}
+      ] as never;
+      if(command==='superagent_list') return teams as never;
+      if(command==='superagent_tickets') return [] as never;
+      throw Error('Unexpected native call: '+command);
+    });
+  });
+  const host=page.locator('#sa-directory-filter-test');
+  const directory=host.getByRole('complementary',{name:'Teams directory'});
+  await expect(directory.locator('.sa-item')).toHaveCount(3);
+  await expect(directory.locator('.sa-role-counts').nth(1))
+    .toHaveText('1 Coordinator · 3 Workers · 2 Reviewers');
+  const search=directory.getByRole('searchbox',{name:'Search Teams'});
+  await search.fill('SECURITY');
+  await expect(search).toBeFocused();
+  await expect(directory.locator('.sa-item strong')).toHaveText('Security critical');
+  await expect(directory).toContainText('1 of 3 native Teams displayed');
+  await search.fill('');
+  await directory.getByRole('combobox',{name:'Team status'}).selectOption('disabled');
+  await expect(directory.locator('.sa-item strong')).toHaveText(['Economy','Balanced']);
+  await directory.getByRole('combobox',{name:'Team status'}).selectOption('all');
+  await expect(directory.locator('.sa-item')).toHaveCount(3);
+  const calls=await page.evaluate(() =>
+    (window as unknown as {teamDirectoryCalls:()=>string[]}).teamDirectoryCalls());
+  expect(calls.every(command=>['bots_list','superagent_list','superagent_tickets'].includes(command))).toBe(true);
+});

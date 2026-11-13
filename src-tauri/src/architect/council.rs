@@ -600,9 +600,6 @@ pub(super) fn report_claims_escalation(
     )
 }
 
-pub(super) fn report_claims_high_severity(store: &storage::Store, session_id: &str, admitted_score: Option<f64>) -> bool {
-    report_claims_escalation(store, session_id, admitted_score).0
-}
 
 pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<CouncilInspection> {
     let config = team.config.council.as_ref()?;

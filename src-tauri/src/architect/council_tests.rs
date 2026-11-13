@@ -29,8 +29,8 @@ fn native_council_finding_projection_reuses_persisted_report_and_invalidates_aft
     save(&store, &mut team).unwrap();
     let report = "Council findings JSON: [{\"severity\":\"high\",\"category\":\"security\",\"title\":\"Route lacks auth\",\"explanation\":\"Unprotected read endpoint\"},{\"severity\":\"medium\",\"category\":\"tests\",\"title\":\"Missing denial test\",\"explanation\":\"No negative request case\"}]\nCouncil score: 6/10";
     store.message(&review_session.id, "assistant", report).unwrap();
-    assert!(council::report_claims_high_severity(&store, &review_session.id, Some(6.0)));
-    assert!(!council::report_claims_high_severity(&store, &review_session.id, Some(9.9)));
+    assert!(council::report_claims_escalation(&store, &review_session.id, Some(6.0)).0);
+    assert!(!council::report_claims_escalation(&store, &review_session.id, Some(9.9)).0);
     let first = council_inspection_state(&store, &sid).unwrap().unwrap();
     assert_eq!(first.reported_findings.len(), 2);
     assert!(!first.verified_pass);
@@ -43,7 +43,7 @@ fn native_council_finding_projection_reuses_persisted_report_and_invalidates_aft
     assert_eq!(first.reported_findings[0].id,
         council_inspection_state(&store, &sid).unwrap().unwrap().reported_findings[0].id);
     store.message(&review_session.id, "coordination", "A new review turn started").unwrap();
-    assert!(!council::report_claims_high_severity(&store, &review_session.id, Some(6.0)));
+    assert!(!council::report_claims_escalation(&store, &review_session.id, Some(6.0)).0);
     assert!(council_inspection_state(&store, &sid).unwrap().unwrap().reported_findings.is_empty());
 }
 

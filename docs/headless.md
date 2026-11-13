@@ -327,6 +327,7 @@ enable Auto, launch a Worker or execute an external effect.
 
 ```sh
 pandacode serve --list-tickets
+pandacode serve --list-team-demands <team-id> blocked
 pandacode serve --accept-ticket <ticket-id> <expected-revision>
 pandacode serve --reject-ticket <ticket-id> <expected-revision> "Needs changes"
 pandacode serve --stop-ticket <ticket-id>
@@ -359,6 +360,19 @@ callbacks are denied by native mandate/state checks. This is not process
 termination or completed external-effect reconciliation. Use the inspection
 commands above to verify the final native state.
 
+
+### Read-only Team Demand status inspection
+
+Use `pandacode serve --list-team-demands <team-id> <state>` to inspect up to
+200 actual native Tickets for one Team, filtered by an exact Ticket state
+(`queued`, `running`, `waiting_approval`, `waiting_review`, `blocked`,
+`completed`, `failed`, `stopped`, `interrupted`, `inconclusive`) or
+`all`. JSON includes Ticket ID, state, revision and updated timestamp, but
+not objectives, transcripts, worker results, mandates or authentication data.
+`mayHaveMore` indicates the 200-row cap, not that the next page was verified.
+This is observational only: it reuses the native state/Team filter before
+pagination and opens SQLite read-only without running startup recovery,
+granting permissions, admitting assignments or replaying external effects.
 
 ### Read-only Team readiness inspection
 

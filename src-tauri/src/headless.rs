@@ -31,6 +31,7 @@ enum Command {
     ExportOrchestrations { path: PathBuf },
     InspectOrchestrations,
     ListTickets,
+    ListTeamDemands { orchestration_id: String, state: String },
     InspectTicket { ticket_id: String },
     InspectTicketEffects { ticket_id: String },
     InspectTeamReadiness { orchestration_id: String },
@@ -135,6 +136,22 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::ListTeamDemands { orchestration_id, state } = &command {
+                // Read the same source-of-truth Ticket state index as desktop,
+                // without mutating a concurrent live serve process.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::list_headless_team_demands(
+                        &dir.join("kingcode.sqlite3"), orchestration_id, state,
+                    ));
+                match result {
+                    Ok(page) => { println!("{page}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Team Demand inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             if let Command::ObserveSource { source_id } = &command {
                 // The same authenticated Events adapter and policy-revision
                 // transaction as desktop, without Webview or startup recovery.
@@ -202,7 +219,8 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
 fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import: Option<PathBuf>) {
     match command {
         // Inspection exits before setup_common and must never reach this branch.
-        Command::InspectOrchestrations | Command::ListTickets | Command::InspectTicket { .. }
+        Command::InspectOrchestrations | Command::ListTickets | Command::ListTeamDemands { .. }
+        | Command::InspectTicket { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTicketEffects { .. }
         | Command::ObserveSource { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
@@ -630,6 +648,23 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 command = Command::ListTickets;
                 ops += 1;
             }
+            "--list-team-demands" => {
+                let id = args.get(index + 1)
+                    .ok_or_else(|| format!("--list-team-demands needs a Team ID and state.\n\n{}", help()))?;
+                validate_orchestration_id(id)?;
+                let state = args.get(index + 2)
+                    .ok_or_else(|| format!("--list-team-demands needs a state.\n\n{}", help()))?;
+                if !matches!(state.as_str(), "all" | "queued" | "running" |
+                    "waiting_approval" | "waiting_review" | "blocked" | "completed" |
+                    "failed" | "stopped" | "interrupted" | "inconclusive") {
+                    return Err("Choose an exact native Ticket state or all.".into());
+                }
+                command = Command::ListTeamDemands {
+                    orchestration_id: id.clone(), state: state.clone(),
+                };
+                ops += 1;
+                index += 2;
+            }
             "--inspect-team-readiness" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--inspect-team-readiness needs a Team ID.\n\n{}", help()))?;
@@ -791,7 +826,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-team-readiness <id> | --observe-source <id> | --inspect-ticket <id> | --inspect-ticket-effects <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-team-demands <id> <state> | --inspect-team-readiness <id> | --observe-source <id> | --inspect-ticket <id> | --inspect-ticket-effects <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -817,6 +852,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-orchestrations
                          List native orchestration status without modifying live tasks; exit.
   --list-tickets         List up to 200 redacted native SuperAgent tickets; exit.
+  --list-team-demands <id> <state>
+                         Read up to 200 native Demands for one Team and exact Ticket state
+                         (or all), without objectives, effects or startup recovery; exit.
   --inspect-team-readiness <id>
                          Inspect a Team's read-only native manual admission preflight;
                          live sessions and policy must be rechecked on actual admission.
@@ -879,6 +917,19 @@ mod tests {
             Ok(Command::ExportOrchestrations { path: PathBuf::from("presets.json") }));
         assert_eq!(parsed("--inspect-orchestrations"), Ok(Command::InspectOrchestrations));
         assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
+        assert_eq!(parsed("--list-team-demands team_123 blocked"),
+            Ok(Command::ListTeamDemands {
+                orchestration_id:"team_123".into(),state:"blocked".into(),
+            }));
+        assert_eq!(parsed("--list-team-demands team_123 all"),
+            Ok(Command::ListTeamDemands {
+                orchestration_id:"team_123".into(),state:"all".into(),
+            }));
+        assert!(parsed("--list-team-demands").is_err());
+        assert!(parsed("--list-team-demands team_123").is_err());
+        assert!(parsed("--list-team-demands team_123 BLOCKED").is_err());
+        assert!(parsed("--list-team-demands ../unsafe running").is_err());
+        assert!(parsed("--list-team-demands team_123 running --stop-ticket task").is_err());
         assert_eq!(parsed("--inspect-team-readiness team_123"),
             Ok(Command::InspectTeamReadiness { orchestration_id: "team_123".into() }));
         assert!(parsed("--inspect-team-readiness").is_err());

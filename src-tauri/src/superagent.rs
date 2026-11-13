@@ -906,6 +906,35 @@ pub(crate) fn inspect_headless_effect_receipts(
     })).map_err(|e| e.to_string())
 }
 
+
+/// One-shot headless Team Demand inspection. Reuse the desktop's native
+/// state-filtered page; no migration, startup recovery, provider session,
+/// inferred task, authorization or external effect. Operational metadata
+/// excludes objectives, results, mandates and private transcripts.
+pub(crate) fn list_headless_team_demands(
+    database_path: &std::path::Path, orchestration_id: &str, state: &str,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let state_filter = if state == "all" { None } else { Some(state) };
+    let page = list_all_demands_page_filtered(
+        &store, 200, None, None, Some(orchestration_id), state_filter,
+    )?;
+    let may_have_more = page.len() == 200;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": orchestration_id,
+        "stateFilter": state,
+        "pageLimit": 200,
+        "mayHaveMore": may_have_more,
+        "observationalOnly": true,
+        "demands": page.iter().map(|item| serde_json::json!({
+            "ticketId": &item.id,
+            "state": &item.state,
+            "revision": item.revision,
+            "updatedAt": item.updated_at
+        })).collect::<Vec<_>>()
+    })).map_err(|e| e.to_string())
+}
+
 /// Bounded local task index for a one-shot CLI. Keep this read-only so it can
 /// run beside a healthy serve process without invoking Store::open recovery.
 /// Ticket objectives, evidence, assignment results and mandate identities are
@@ -3339,6 +3368,56 @@ mod tests {
         ).unwrap().iter().any(|item| item.id == "page-000"));
         assert_eq!(list_all_demands_page(&store, 1, None, None, None).unwrap()[0].id, "page-000");
         assert!(first.iter().all(|item| item.revision == 0));
+    }
+
+    #[test]
+    fn headless_team_demand_listing_is_native_read_only_redacted_and_state_scoped() {
+        let store = fixture();
+        let team = create_configuration(&store, NewOrchestration {
+            name:"Headless filtered Team".into(),
+            coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
+        }).unwrap();
+        let other = create_configuration(&store, NewOrchestration {
+            name:"Other filtered Team".into(),
+            coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
+        }).unwrap();
+        for (id,owner,state) in [
+            ("task-blocked",&team,"blocked"),
+            ("task-running",&team,"running"),
+            ("other-blocked",&other,"blocked"),
+        ] {
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?1,'PRIVATE OBJECTIVE','local-user','manual',
+                        ?3,'worker',?4,?5,1000,1000)",
+                params![id,owner.id,owner.project_id,owner.policy_revision,state],
+            ).unwrap();
+        }
+        let path=store.path.clone();
+        drop(store);
+        let output=list_headless_team_demands(&path,&team.id,"blocked").unwrap();
+        let parsed:serde_json::Value=serde_json::from_str(&output).unwrap();
+        assert_eq!(parsed["orchestrationId"],team.id);
+        assert_eq!(parsed["observationalOnly"],true);
+        assert_eq!(parsed["mayHaveMore"],false);
+        assert_eq!(parsed["demands"].as_array().unwrap().len(),1);
+        assert_eq!(parsed["demands"][0]["ticketId"],"task-blocked");
+        for private in ["PRIVATE OBJECTIVE","authorizationId","sessionId",
+            "worker_bot_id","other-blocked","task-running"] {
+            assert!(!output.contains(private), "Leak: {private}");
+        }
+        let all=list_headless_team_demands(&path,&team.id,"all").unwrap();
+        let parsed:serde_json::Value=serde_json::from_str(&all).unwrap();
+        assert_eq!(parsed["demands"].as_array().unwrap().len(),2);
+        assert!(list_headless_team_demands(&path,&team.id,"BLOCKED").is_err());
+        assert!(list_headless_team_demands(&path,&team.id,"blocked' OR 1=1 --").is_err());
+        assert!(list_headless_team_demands(&path,"not-a-Team","all").is_err());
+        let verify=Store::open_read_only(&path).unwrap();
+        assert_eq!(list_all_demands_page_filtered(
+            &verify,200,None,None,Some(&team.id),None,
+        ).unwrap().len(),2);
     }
 
     #[test]

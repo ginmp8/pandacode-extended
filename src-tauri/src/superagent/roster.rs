@@ -183,10 +183,20 @@ fn set(store:&Store,id:&str,expected:i64,input:&RosterInput)->Result<TeamRoster>
     if cfg.enabled || cfg.policy_revision!=expected {
         return Err("Disable the Team and reload its policy revision before changing members.".into());
     }
-    let used:bool=store.db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",[id],|row|row.get(0),
+    // A reusable Team may change its roster after previous Demands settle.
+    // Live or reviewable Tickets and uncertain effects still pin their exact
+    // policy: never change that authority while work/reconciliation is open.
+    let unsettled:bool=store.db.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
+              AND (t.state NOT IN ('completed','failed','stopped','interrupted','inconclusive')
+                OR EXISTS(SELECT 1 FROM sa_assignments a
+                          WHERE a.ticket_id=t.id AND a.state='running')
+                OR EXISTS(SELECT 1 FROM sa_effect_receipts e
+                          WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain')))
+         )",[id],|row|row.get(0),
     ).map_err(|e|e.to_string())?;
-    if used {return Err("Team Ticket history prevents roster reconfiguration.".into());}
+    if unsettled {return Err("Active Tickets or unresolved effects prevent Team roster changes.".into());}
     if input.worker_bot_ids.is_empty() || input.worker_bot_ids.len()>MAX_WORKERS
        || input.reviewer_bot_ids.len()>MAX_REVIEWERS
        || input.worker_bot_ids.first()!=Some(&cfg.worker_bot_id) {
@@ -212,7 +222,14 @@ fn set(store:&Store,id:&str,expected:i64,input:&RosterInput)->Result<TeamRoster>
     let changed=tx.execute(
         "UPDATE sa_orchestrations SET policy_revision=policy_revision+1,updated_at=?3
          WHERE id=?1 AND enabled=0 AND policy_revision=?2
-           AND NOT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
+           AND NOT EXISTS(
+             SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
+               AND (t.state NOT IN ('completed','failed','stopped','interrupted','inconclusive')
+                 OR EXISTS(SELECT 1 FROM sa_assignments a
+                           WHERE a.ticket_id=t.id AND a.state='running')
+                 OR EXISTS(SELECT 1 FROM sa_effect_receipts e
+                           WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain')))
+           )",
         params![id,expected,storage::now()],
     ).map_err(|e|e.to_string())?;
     if changed!=1{return Err("Concurrent Team policy change; reload required.".into());}
@@ -341,4 +358,88 @@ mod tests {
         assert!(super::super::change_enabled(&store,&config.id,reset.policy_revision,true)
             .unwrap().enabled);
     }
+    #[test]
+    fn settled_ticket_history_allows_versioned_team_edits_but_live_work_and_effects_block() {
+        let path=std::env::temp_dir().join(format!("sa-roster-history-{}.sqlite3",storage::id()));
+        let store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('history-project','Fixture','/tmp/sa-roster-history')",[],
+        ).unwrap();
+        for id in ["history-coordinator","history-worker","history-worker-b"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'history-project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let config=super::super::create_configuration(&store,super::super::NewOrchestration {
+            name:"Reusable Team".into(),coordinator_bot_id:"history-coordinator".into(),
+            worker_bot_id:"history-worker".into(),
+        }).unwrap();
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_tickets(
+                id,orchestration_id,request_key,objective,actor,source,project_id,
+                worker_bot_id,policy_revision,state,created_at,updated_at
+             ) VALUES(
+                'prior-demand',?1,'prior-request','Original immutable intent','local-user',
+                'manual','history-project','history-worker',?2,'completed',?3,?3
+             )",
+            params![config.id,config.policy_revision,now],
+        ).unwrap();
+        let expanded=RosterInput {
+            worker_bot_ids:vec!["history-worker".into(),"history-worker-b".into()],
+            reviewer_bot_ids:vec![],
+        };
+        // Completed Demand history is retained under its original admission
+        // policy even when the reusable Team advances to a new revision.
+        let revision=set(&store,&config.id,config.policy_revision,&expanded).unwrap();
+        assert_eq!(revision.policy_revision,config.policy_revision+1);
+        assert!(!revision.execution_ready);
+        let original:(i64,String,String)=store.db.query_row(
+            "SELECT policy_revision,worker_bot_id,objective FROM sa_tickets WHERE id='prior-demand'",
+            [],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
+        ).unwrap();
+        assert_eq!(original,(config.policy_revision,"history-worker".into(),
+            "Original immutable intent".into()));
+        let reset=RosterInput{worker_bot_ids:vec!["history-worker".into()],reviewer_bot_ids:vec![]};
+
+        // A nonterminal review gate must not be invalidated by a roster edit.
+        store.db.execute("UPDATE sa_tickets SET state='waiting_review' WHERE id='prior-demand'",[])
+            .unwrap();
+        assert!(set(&store,&config.id,revision.policy_revision,&reset).unwrap_err()
+            .contains("Active Tickets"));
+        assert_eq!(read(&store,&config.id).unwrap().policy_revision,revision.policy_revision);
+        store.db.execute("UPDATE sa_tickets SET state='completed' WHERE id='prior-demand'",[])
+            .unwrap();
+
+        // A terminal Ticket may still own an uncertain provider effect.
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts(
+                ticket_id,effect_key,payload_sha256,state,created_at,updated_at
+             ) VALUES('prior-demand','external-reply','fixture-digest','uncertain',?1,?1)",
+            [now],
+        ).unwrap();
+        assert!(set(&store,&config.id,revision.policy_revision,&reset).unwrap_err()
+            .contains("unresolved effects"));
+        assert_eq!(read(&store,&config.id).unwrap().worker_bot_ids,expanded.worker_bot_ids);
+        store.db.execute(
+            "UPDATE sa_effect_receipts SET state='applied' WHERE ticket_id='prior-demand'",[],
+        ).unwrap();
+        let restored=set(&store,&config.id,revision.policy_revision,&reset).unwrap();
+        assert_eq!(restored.policy_revision,revision.policy_revision+1);
+        assert!(restored.execution_ready);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets WHERE orchestration_id=?1",[&config.id],
+            |r|r.get::<_,i64>(0),
+        ).unwrap(),1);
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert_eq!(read(&reopened,&config.id).unwrap().policy_revision,restored.policy_revision);
+        let original_after:(i64,String)=reopened.db.query_row(
+            "SELECT policy_revision,state FROM sa_tickets WHERE id='prior-demand'",[],
+            |r|Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        assert_eq!(original_after,(config.policy_revision,"completed".into()));
+    }
+
 }

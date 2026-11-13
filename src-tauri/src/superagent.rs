@@ -880,8 +880,12 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
     ).map_err(|e| e.to_string())?;
     let mandate = mandate(store, &ticket.id)?;
     let consistent = if ticket.state == "running" {
-        running > 0 && active_linked == 1
+        // One active native assignment is the current Ticket contract. A
+        // duplicate attempt with a valid active link must still be triaged.
+        running == 1 && active_linked == 1
     } else {
+        // A completed/stopped Ticket with an orphan live assignment is not
+        // healthy, even if its own state is terminal.
         running == 0
     };
     let terminal = matches!(ticket.state.as_str(),
@@ -1074,8 +1078,13 @@ pub(crate) fn list_headless_recovery_inbox(database_path: &std::path::Path) -> R
                                'failed','interrupted','inconclusive')
                 OR EXISTS(SELECT 1 FROM sa_effect_receipts e
                           WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
+                OR (t.state<>'running' AND EXISTS(
+                    SELECT 1 FROM sa_assignments a
+                    WHERE a.ticket_id=t.id AND a.state='running'))
                 OR (t.state='running' AND (
                     t.active_assignment_id IS NULL
+                    OR (SELECT COUNT(*) FROM sa_assignments a
+                        WHERE a.ticket_id=t.id AND a.state='running')<>1
                     OR NOT EXISTS(SELECT 1 FROM sa_assignments a
                                   WHERE a.id=t.active_assignment_id
                                     AND a.ticket_id=t.id AND a.state='running'
@@ -1084,7 +1093,10 @@ pub(crate) fn list_headless_recovery_inbox(database_path: &std::path::Path) -> R
              ORDER BY CASE WHEN EXISTS(
                  SELECT 1 FROM sa_effect_receipts e
                  WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain')
-               ) THEN 0 WHEN t.state='running' THEN 1 ELSE 2 END,
+               ) THEN 0 WHEN EXISTS(
+                   SELECT 1 FROM sa_assignments a
+                   WHERE a.ticket_id=t.id AND a.state='running'
+               ) THEN 1 ELSE 2 END,
                t.updated_at DESC,t.id DESC
              LIMIT 201",
         ).map_err(|e| e.to_string())?;
@@ -3253,6 +3265,57 @@ mod tests {
         ).unwrap();
         assert_eq!(again["items"].as_array().unwrap().len(), 2);
         assert_eq!(again["items"][0]["ticketId"], running.id);
+    }
+
+    #[test]
+    fn headless_recovery_inbox_flags_terminal_ticket_with_orphan_running_assignment() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(&mut store, &cfg.id,
+            "Private output", "recovery-orphan-terminal", false).unwrap();
+        assert!(launched);
+        let healthy: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&store.path).unwrap()
+        ).unwrap();
+        assert!(healthy["items"].as_array().unwrap().is_empty());
+        // Simulate a partial/legacy state transition. Normal native stop
+        // would settle the assignment in the same transaction.
+        store.db.execute(
+            "UPDATE sa_tickets SET state='completed',revision=revision+1 WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let before_audit: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let result: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&store.path).unwrap()
+        ).unwrap();
+        assert_eq!(result["items"].as_array().unwrap().len(), 1);
+        assert_eq!(result["items"][0]["ticketId"], ticket.id);
+        let recovery = &result["items"][0]["recovery"];
+        assert_eq!(recovery["terminal"], true);
+        assert_eq!(recovery["activeNativeAssignments"], 1);
+        assert_eq!(recovery["assignmentStateConsistent"], false);
+        assert_eq!(recovery["nextOperatorAction"], "investigate_native_assignment_state");
+        assert_eq!(result["automaticRecoveryPerformed"], false);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "completed");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), before_audit);
+        let path = store.path.clone();
+        drop(store);
+        // Read-only restart must preserve the anomaly for investigation,
+        // not run Store::open recovery and erase evidence prematurely.
+        let opened = Store::open_read_only(&path).unwrap();
+        assert_eq!(get_ticket(&opened, &ticket.id).unwrap().state, "completed");
+        let again: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap()
+        ).unwrap();
+        assert_eq!(again["items"][0]["recovery"]["assignmentStateConsistent"], false);
+        assert_eq!(again["items"][0]["recovery"]["nextOperatorAction"],
+            "investigate_native_assignment_state");
     }
 
     #[test]

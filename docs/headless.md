@@ -430,9 +430,11 @@ Ticket inspection before any explicitly authorized native human decision.
 `pandacode serve --list-recovery-inbox` returns a native SQLite
 snapshot of up to 200 Tickets needing a decision or recovery investigation:
 queued, blocked, review/approval-pending, failed/interrupted/inconclusive,
-expired or inconsistent running assignments, and even terminal Tickets with
-still-unresolved external-effect receipts. Healthy running assignments and
-settled terminal Tickets are excluded. Unresolved effects are prioritized; the
+expired or inconsistent running assignments, terminal Tickets with
+orphan running assignments, and terminal Tickets with still-unresolved
+external-effect receipts. The current single-active-assignment contract also
+flags duplicate running attempts even when one active link looks valid.
+Healthy running assignments and genuinely settled terminal Tickets are excluded. Unresolved effects are prioritized; the
 returned JSON includes Ticket/Team IDs, revision, state, a redacted native
 recovery assessment, `mayHaveMore`, and an explicit next operator action.
 The cap is not pagination or proof of an additional page.

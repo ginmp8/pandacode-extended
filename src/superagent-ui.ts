@@ -83,6 +83,14 @@ interface SourceDecision {
   decision: string; sequence: number; policyRevision: number; at: number;
   checkConclusion?: string; checkHeadSha?: string; checkCompletedAt?: number;
 }
+interface SourceIntegrity {
+  sourceId: string; repository: string; mode: 'off' | 'observe';
+  policyRevision: number; cursorKind: string; lastSequence: number;
+  receiptCount: number; permittedReceiptCount: number;
+  maxReceiptSequence: number; cursorConsistent: boolean;
+  receiptCapacityReached: boolean; nextAction: string;
+  observationalOnly: boolean;
+}
 
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
@@ -112,6 +120,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let effectiveTeam: EffectiveTeam | null = null;
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
+  let sourceIntegrity: SourceIntegrity | null = null;
   let linkedDecisions: SourceDecision[] = [], linkedDecisionsLoaded = false;
   const safe = (value: unknown) => escape(String(value ?? ''));
   const current = () => presets.find(item => item.id === selected);
@@ -342,7 +351,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           : '<button type="button" data-sa-source-poll="' + safe(src.id) +
             '">Poll authenticated GitHub</button>') : '') +
       '<button type="button" data-sa-source-decisions="' + safe(src.id) +
-      '">View decisions</button></li>').join('');
+      '">View decisions</button>' +
+      '<button type="button" data-sa-source-health="' + safe(src.id) +
+      '">Inspect source health</button></li>').join('');
     const sourcePanel = '<section class="sa-event-sources" aria-label="GitHub event sources">' +
       '<h4>GitHub event sources</h4><p>Off/Observe only. Authenticated GitHub Events polling is bounded; Checks API requires an explicit Check Run ID and a unique matching PR head. Neither is a gap-free subscription or an authorization to launch tasks or external writes.</p>' +
       (!sourcesLoaded ? '<button type="button" data-sa-load-sources>Load sources</button>'
@@ -359,6 +370,26 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '</select></label><button type="submit">Add source (Off)</button></form>' +
           '<ul class="sa-tickets sa-source-list">' +
           (sourceRows || '<li class="sa-empty">No event sources configured.</li>') + '</ul>' +
+          (sourceIntegrity ? '<section role="region" aria-label="Source integrity">' +
+            '<h5>Native source integrity</h5><p>' +
+            safe(sourceIntegrity.repository) + ' · ' + safe(sourceIntegrity.mode) +
+            ' · Revision ' + safe(sourceIntegrity.policyRevision) + '</p>' +
+            '<p>Cursor type: ' +
+            safe(sourceIntegrity.cursorKind === 'local_check_run_observation_count'
+              ? 'Local Check Run observation count' : 'GitHub Events high-watermark') +
+            ' · Stored cursor: ' + safe(sourceIntegrity.lastSequence) +
+            ' · Highest durable receipt: ' + safe(sourceIntegrity.maxReceiptSequence) +
+            '</p><p>Decisions: ' + safe(sourceIntegrity.receiptCount) +
+            ' · Permitted: ' + safe(sourceIntegrity.permittedReceiptCount) +
+            ' · ' + (sourceIntegrity.receiptCapacityReached
+              ? 'Receipt capacity reached — operator intervention required'
+              : 'Receipt capacity available') + '</p>' +
+            '<p>' + (sourceIntegrity.cursorConsistent
+              ? 'Cursor is consistent with stored receipts.'
+              : 'Cursor behind durable receipts — new observations denied until reconciled.') +
+            ' Native next action: ' + safe(sourceIntegrity.nextAction) + '</p>' +
+            '<p>Observation only. No GitHub subscription completeness, worker admission, Council pass, or Auto authorization is implied.</p>' +
+            '</section>' : '') +
           (decisionSourceId ? '<div role="region" aria-label="Source decisions">' +
             '<h5>Recorded decisions</h5><ol>' +
             (decisions.map(d => '<li>' + safe(activityTime(d.at)) + ' · ' +
@@ -712,6 +743,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         inspectedTicket = ''; threadLinks = [];
         linkedDecisions = []; linkedDecisionsLoaded = false; roleRoster = null; effectiveTeam = null;
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
+        sourceIntegrity = null;
       }
       // A failed native read must not leave old ticket approval controls
       // visible underneath a newly selected or reloaded preset.
@@ -732,6 +764,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           decisions = await call<SourceDecision[]>('superagent_source_decisions',
             {sourceId:decisionSourceId,limit:50});
         }
+        // Native policies and cursors are mutable; never keep a prior
+        // scan visible as current after a reload or a Team change.
+        sourceIntegrity = null;
       }
       error = '';
     } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
@@ -980,6 +1015,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
       inspectedAssignmentId = ''; roleRoster = null; effectiveTeam = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
+      sourceIntegrity = null;
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{
           orchestrationId:demand.orchestrationId,limit:50,
@@ -1036,6 +1072,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       inspectedTicket = ''; ticketDetails = null; threadLinks = [];
       inspectedAssignmentId = ''; roleRoster = null; effectiveTeam = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
+      sourceIntegrity = null;
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 });
       });
@@ -1107,6 +1144,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           summary.selfIgnored + ' self-authored ignored, ' + summary.duplicates +
           ' duplicate. No tasks or effects started. This is not a gap-free subscription.';
         await reload();
+      });
+      return;
+    }
+    if (target.dataset.saSourceHealth) {
+      const sourceId = target.dataset.saSourceHealth;
+      if (sources.some(item => item.id === sourceId)) void work(async () => {
+        const diagnosis = await call<SourceIntegrity>('superagent_source_integrity', {sourceId});
+        if (sources.some(item => item.id === sourceId)) sourceIntegrity = diagnosis;
       });
       return;
     }

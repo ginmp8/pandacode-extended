@@ -474,6 +474,16 @@ pub(crate) fn headless_inspect_source_integrity(
         .map_err(|e| e.to_string())
 }
 
+/// Desktop and headless consume the same native receipt/cursor diagnosis.
+#[tauri::command]
+pub async fn superagent_source_integrity(
+    window: tauri::WebviewWindow, state: State<'_, AppState>, source_id: String,
+) -> Result<SourceIntegrity> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    inspect_source_integrity(&store, &source_id)
+}
+
 /// A user creates an exact, non-wildcard source in Off. Reusing the same
 /// config is idempotent, never an implicit enable/revision change.
 fn create_source(

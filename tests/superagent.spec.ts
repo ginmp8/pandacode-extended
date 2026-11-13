@@ -306,6 +306,17 @@ test('Off and Observe source controls expose durable native receipts without Aut
         s.mode=args?.mode; s.policyRevision=Number(s.policyRevision)+1;
         return s as never;
       }
+      if(command==='superagent_source_integrity') {
+        const src = sources.find(item => item.id === args?.sourceId);
+        if (!src) throw new Error('Unknown native source');
+        return {
+          sourceId:src.id,repository:src.repository,mode:src.mode,
+          policyRevision:src.policyRevision,cursorKind:'github_event_identity_high_watermark',
+          lastSequence:src.lastSequence,receiptCount:1,permittedReceiptCount:1,
+          maxReceiptSequence:3,cursorConsistent:false,receiptCapacityReached:false,
+          nextAction:'investigate_cursor_receipt_mismatch',observationalOnly:true
+        } as never;
+      }
       if(command==='superagent_source_decisions') return [{
         sourceId:args?.sourceId,deliveryId:'delivery-2',
         eventKind:'issues.opened',subjectKey:'issue:42',sequence:2,
@@ -334,6 +345,13 @@ test('Off and Observe source controls expose durable native receipts without Aut
   await host.getByRole('button',{name:'Enable Observe'}).click();
   await host.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(host.locator('.sa-source-list')).toContainText('observe');
+  await host.getByRole('button',{name:'Inspect source health'}).click();
+  const integrity = host.getByRole('region',{name:'Source integrity'});
+  await expect(integrity).toContainText('GitHub Events high-watermark');
+  await expect(integrity).toContainText('investigate_cursor_receipt_mismatch');
+  await expect(integrity).toContainText('Cursor behind durable receipts');
+  await expect(integrity).toContainText('Observation only.');
+  await expect(host.locator('[data-sa-next-mode="auto"]')).toHaveCount(0);
   await host.getByRole('button',{name:'View decisions'}).click();
   await expect(host.getByRole('region',{name:'Source decisions'})).toContainText('observed_permitted');
   await expect(host.getByRole('region',{name:'Source decisions'})).toContainText('issue:42');
@@ -344,6 +362,7 @@ test('Off and Observe source controls expose durable native receipts without Aut
   await host.getByRole('button',{name:'Load sources'}).click();
   await expect(host.getByText('No event sources configured.')).toBeVisible();
   await expect(host.getByRole('region',{name:'Source decisions'})).toHaveCount(0);
+  await expect(host.getByRole('region',{name:'Source integrity'})).toHaveCount(0);
 });
 
 

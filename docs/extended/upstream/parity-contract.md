@@ -1,5 +1,14 @@
 # Upstream functional parity contract — PandaCode Extended
 
+## 2026-11-13 — PandaCode 0.3.123 source checkpoint
+
+Source [`8001e5b98ed3`](https://github.com/ginmp8/pandacode/commit/8001e5b98ed3be0c6fb207fccfeada726d736e3c), tree `6f5a537dbd1c90ecd3e46132a990f974077774db`, app **0.3.123**. **5 source commits**, **69 changed paths: 54 source-exact and 15 Extended-aware**. Full candidate: **2,046 upstream / 2,104 Extended files; 1,966 shared exact / 80 shared customized / 58 Extended-only; 0 missing and 0 type/mode discrepancies**. Original [upstream 0.3.123 note](https://github.com/ginmp8/pandacode/blob/8001e5b98ed3be0c6fb207fccfeada726d736e3c/releases/0.3.123.md) remains byte-identical. Planned **Extended 0.12.0 is DRAFT**; prior [0.3.122 Push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43363128304) passed, and the final new commit requires its own CI.
+
+The source tree introduces 35 files and modifies 34 existing paths. All 54 source-exact paths are byte/mode identical; 15 shared Extended-customized files received nonoverlapping upstream changes with 3-way line reconciliation. In `src/bridge.ts`, the source `app-quitting` subscription was added while retaining Extended `queue-changed` delivery metadata. Existing dependency remediation and settings paths remain. This proves **structural inclusion**, not full runtime/behavioral equivalence; the 80 shared divergences need semantic review and real On/Off acceptance.
+
+**Unverified:** local Node/Rust/Clippy/Expo audits/builds, native macOS/Windows/Linux crash handling, Settings On/Off, external integrations and semantic validation of all 80 customized paths. No release approval is implied.
+
+
 ## Source checkpoint — 2026-11-13, PandaCode 0.3.122 (candidate)
 
 Source [`420a163d3b92`](https://github.com/ginmp8/pandacode/commit/420a163d3b921fd113e3d9ecc8437410a5ff7c6c), Git tree `bdca4b5ba5a32b3e54c7beaf38db8c989889584f`, declares application **0.3.122**. Three upstream commits since `54df76875360` modify **87 paths**: **73 source-exact** imports and **14 reviewed hunk-level Extended-aware reconciliations**. Candidate full-tree inventory: **2,011 upstream files / 2,069 Extended files; 1,931 byte/mode-exact shared, 80 previously customized shared, 58 Extended-only; zero missing upstream or type/mode discrepancies**. The original [upstream 0.3.122 note](https://github.com/ginmp8/pandacode/blob/420a163d3b921fd113e3d9ecc8437410a5ff7c6c/releases/0.3.122.md) is preserved byte-for-byte. The planned distribution version remains **Extended 0.12.0 DRAFT**, not a release.

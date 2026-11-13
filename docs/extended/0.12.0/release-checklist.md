@@ -1,5 +1,20 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-13 — PandaCode 0.3.123 candidate checklist
+
+Source [`8001e5b98ed3`](https://github.com/ginmp8/pandacode/commit/8001e5b98ed3be0c6fb207fccfeada726d736e3c), tree `6f5a537dbd1c90ecd3e46132a990f974077774db`, app **0.3.123**. **5 source commits**, **69 changed paths: 54 source-exact and 15 Extended-aware**. Full candidate: **2,046 upstream / 2,104 Extended files; 1,966 shared exact / 80 shared customized / 58 Extended-only; 0 missing and 0 type/mode discrepancies**. Original [upstream 0.3.123 note](https://github.com/ginmp8/pandacode/blob/8001e5b98ed3be0c6fb207fccfeada726d736e3c/releases/0.3.123.md) remains byte-identical. Planned **Extended 0.12.0 is DRAFT**; prior [0.3.122 Push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43363128304) passed, and the final new commit requires its own CI.
+
+- [x] Pin source `8001e5b98ed3be0c6fb207fccfeada726d736e3c` and initial destination `010dbd9b517a6c069c2a903fa6bd67d026105f79`; retrieve full nontruncated recursive trees.
+- [x] Stage all **69** changed upstream paths: **54 exact** and **15 reconciled**; preserve 58 Extended-only paths, original release note and existing Git modes.
+- [x] Verify candidate inventory **2,046 source / 2,104 destination**, **1,966 identical / 80 modified shared / 58 Extended-only**, no missing source paths or mode/type mismatches.
+- [x] Align source-declared application metadata to **0.3.123** while keeping planned Extended **0.12.0 DRAFT**.
+- [ ] Read back the final commit's parent/ref/tree after nonforced expected-SHA publication, and check **every job** of the final-SHA CI; earlier CI is not sufficient.
+- [ ] Run Node/TS, Rust check/test/Clippy, Expo, release/version scripts, npm/RustSec, native crash/restart/drafts and platform-specific On/Off tests, Connect/MCP/bots/cloud/VM/credential integrations.
+- [ ] Complete semantic review of all 80 retained shared divergences and separate release approval. No tag, deploy, public installer or npm publish is authorized.
+
+**Unverified:** local Node/Rust/Clippy/Expo audits/builds, native macOS/Windows/Linux crash handling, Settings On/Off, external integrations and semantic validation of all 80 customized paths. No release approval is implied.
+
+
 ## 2026-11-13 — PandaCode 0.3.122 candidate integration checklist
 
 - [x] Pin authenticated `ginmp8/pandacode:main` at `420a163d3b921fd113e3d9ecc8437410a5ff7c6c` (tree `bdca4b5ba5a32b3e54c7beaf38db8c989889584f`) and destination `6f28006424162b3e650cedbe9bb855d6841a3d94`; inspect full recursive nontruncated inventories.

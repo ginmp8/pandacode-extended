@@ -1,5 +1,14 @@
 # PandaCode Extended documentation
 
+## 2026-11-13 — upstream 0.3.123 integration candidate
+
+Source [`8001e5b98ed3`](https://github.com/ginmp8/pandacode/commit/8001e5b98ed3be0c6fb207fccfeada726d736e3c), tree `6f5a537dbd1c90ecd3e46132a990f974077774db`, declares app **0.3.123**; **5 upstream commits** since `420a163d3b92`, **69 changed paths (54 source-exact, 15 Extended-aware)**. Candidate inventory: **2,046 upstream / 2,104 Extended files; 1,966 identical shared / 80 customized shared / 58 Extended-only; zero upstream missing or mode/type differences**. Original [upstream release note](https://github.com/ginmp8/pandacode/blob/8001e5b98ed3be0c6fb207fccfeada726d736e3c/releases/0.3.123.md) retained byte-exact. Planned **Extended 0.12.0 remains DRAFT**. Prior destination [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43363128304) completed successfully; CI for the new candidate must be checked at its final published SHA.
+
+The source adds crash recovery for desktop and `pandacode serve`: guarded restart after a crash, a visible recovery notice, a way to reopen a quarantined thread, opt-out controls, local crash reports, and restoration of unsent text. The source note discloses plaintext report/draft retention and native-platform testing limits. These are **inherited upstream capabilities**, not new Extended-exclusive controls. The existing Extended Settings and dependency remediation remain; static parity does not establish native On/Off or cross-platform runtime acceptance.
+
+**Validation:** complete Git tree/blob/mode inventory and source-hunk reconciliation only. Local Node/Rust/Clippy/Expo, installed-app macOS/Windows/Linux, crash-dialog, Settings On/Off and external integration tests were not executed in this environment. GitHub CI pending/failed jobs must not be reported as passing.
+
+
 ## 2026-11-13 — upstream 0.3.122 complete-tree integration candidate
 
 Source [`420a163d3b92`](https://github.com/ginmp8/pandacode/commit/420a163d3b921fd113e3d9ecc8437410a5ff7c6c), Git tree `bdca4b5ba5a32b3e54c7beaf38db8c989889584f`, declares application **0.3.122**. Three upstream commits since `54df76875360` modify **87 paths**: **73 source-exact** imports and **14 reviewed hunk-level Extended-aware reconciliations**. Candidate full-tree inventory: **2,011 upstream files / 2,069 Extended files; 1,931 byte/mode-exact shared, 80 previously customized shared, 58 Extended-only; zero missing upstream or type/mode discrepancies**. The original [upstream 0.3.122 note](https://github.com/ginmp8/pandacode/blob/420a163d3b921fd113e3d9ecc8437410a5ff7c6c/releases/0.3.122.md) is preserved byte-for-byte. The planned distribution version remains **Extended 0.12.0 DRAFT**, not a release.

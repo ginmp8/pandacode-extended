@@ -7,7 +7,9 @@
 html .workspace :is(#transcript,.thread-mirror-rows,#stream-region) .turn-card>.turn-activity{margin:0;padding:0}
 
 /* Blank room under the last card after its trace folds (main.ts `tailRoom`), so the thread above holds still. */
-#transcript::after{content:"";display:block;flex:none;height:calc(var(--tail-room,0px) + var(--toast-clear,0px))}
+/* Plus the room a toast takes over the end of the thread: `--toast-clear` for an ordinary toast over the live errors
+   (main.ts makeToastRoom), `--toast-room` for a lasting notice (toast-clearance.ts). Only one is ever set. */
+#transcript::after{content:"";display:block;flex:none;height:calc(var(--tail-room,0px) + var(--toast-clear,0px) + var(--toast-room,0px))}
 
 /* ---------- Header ---------- */
 .turn-card>.turn-activity>.turn-activity-summary,.turn-card-head{display:flex;align-items:center;gap:8px;width:auto;max-width:none;min-height:38px;padding:2px var(--ds-row-pad-x);

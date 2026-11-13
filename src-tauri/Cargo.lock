@@ -3626,7 +3626,7 @@ dependencies = [
 
 [[package]]
 name = "pandacode"
-version = "0.3.122"
+version = "0.3.123"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -3636,6 +3636,7 @@ dependencies = [
  "chrono",
  "cpal",
  "des",
+ "dirs 7.0.0",
  "dunce",
  "flate2",
  "fs4",
@@ -3658,6 +3659,7 @@ dependencies = [
  "portable-pty",
  "regex",
  "reqwest 0.13.5",
+ "rfd",
  "rubato",
  "rusqlite",
  "rustls",

@@ -7,9 +7,19 @@ use crate::{architect, storage::{self, Store}, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use tauri::Manager;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+fn ticket_policy_revision(store: &Store, ticket_id: &str) -> Result<i64> {
+    // Preserve the Ticket's immutable admission revision; a mutable Team or
+    // another Ticket's mandate cannot substitute its Council authority.
+    store.db.query_row(
+        "SELECT policy_revision FROM sa_tickets WHERE id=?1",
+        [ticket_id], |row| row.get(0),
+    ).map_err(|error| error.to_string())
+}
+
 pub struct CouncilObservation {
     /// The verified native worker session has an Architect team with Council
     /// enabled; this is **advisory**, not task approval.
@@ -216,7 +226,7 @@ pub(super) fn bind_required_finished(
         .ok_or("Council-required worker assignment has no frozen review request.")?;
     if !matches!(request.state.as_str(),"admitted")
         || request.worker_session_id != worker_session_id
-        || request.policy_revision != ticket.policy_revision
+        || request.policy_revision != ticket_policy_revision(&store, &ticket.id)?
         || ticket.state != "waiting_review"
         || ticket.revision != request.admitted_ticket_revision.saturating_add(1)
         || ticket.evidence.as_deref().is_none_or(str::is_empty)
@@ -258,7 +268,7 @@ pub(super) fn bind_required_finished(
     Ok(())
 }
 
-pub(super) fn required_worker_session(store: &Store, worker_session_id: &str) -> Result<bool> {
+pub(crate) fn required_worker_session(store: &Store, worker_session_id: &str) -> Result<bool> {
     Ok(request_for_worker(store,worker_session_id)?.is_some_and(|request| {
         request.state == "admitted"
     }))
@@ -294,7 +304,7 @@ fn block_request(store: &Store, request_id: &str, detail: &str) -> Result<()> {
 
 /// Launch only once, only after the successful worker callback atomically bound
 /// this request to the current artifact and Ticket revision.
-pub(super) fn start_after_worker_completion(app: &tauri::AppHandle, worker_session_id: &str) -> Result<bool> {
+pub(crate) fn start_after_worker_completion(app: &tauri::AppHandle, worker_session_id: &str) -> Result<bool> {
     let state = app.state::<crate::AppState>();
     // Serialize reviewer launch with Ticket Stop/restart recovery so a stop
     // cannot win the Ticket CAS while a native review team is being created.
@@ -323,7 +333,7 @@ pub(super) fn start_after_worker_completion(app: &tauri::AppHandle, worker_sessi
             .map_err(|_| "Frozen Council configuration is malformed.")?;
         let policy_ok = request.reviewer_policy_sha256 == sha256(request.reviewer_policy_json.as_bytes())
             && request.council_config_sha256 == sha256(config_bytes)
-            && request.policy_revision == ticket.policy_revision
+            && request.policy_revision == ticket_policy_revision(&store, &ticket.id)?
             && snapshot.policy.council_required
             && snapshot.policy.policy_revision == request.policy_revision
             && snapshot.reviewer_bot_ids == config.reviewer_bot_ids
@@ -513,7 +523,7 @@ fn current_binding_valid(
     Ok(request.state == "dispatched"
         && ticket.id == request.ticket_id && ticket.state == "waiting_review"
         && ticket.revision == request.ticket_revision
-        && ticket.policy_revision == request.policy_revision
+        && ticket_policy_revision(&store, &ticket.id)? == request.policy_revision
         && request.cycle_started_at > 0 && request.generation > 0
         && sha256(evidence.as_bytes()) == artifact
         && sha256(request.reviewer_policy_json.as_bytes()) == request.reviewer_policy_sha256
@@ -606,7 +616,7 @@ fn persist_finalization(
 /// Persist a terminal pass after Architect has saved the exact reviewer seat.
 /// Incomplete work is left waiting; failed, stale, limited or stopped rounds
 /// revoke the Ticket and require an explicit retry.
-pub(super) fn finalize_after_native_run(store: &Store, reviewer_session_id: &str) -> Result<bool> {
+pub(crate) fn finalize_after_native_run(store: &Store, reviewer_session_id: &str) -> Result<bool> {
     let Some(native_session_id) = architect::parent_of(store,reviewer_session_id)? else { return Ok(false) };
     let Some(team) = architect::load(store,&native_session_id)? else { return Ok(false) };
     let Some(binding) = team.superagent_review.as_ref() else { return Ok(false) };

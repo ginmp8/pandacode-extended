@@ -705,7 +705,7 @@ fn superagent_review_round_integrity(store: &Store, team: &TeamSnapshot, expecte
                             .is_some_and(|evidence| evidence.valid_for(pin,&binding.artifact_revision)))
                 })
             }
-            None => binding.snapshot.bot_context.as_ref().is_none_or(|context| context.skills.is_empty()),
+            None => binding.snapshot.bot_context.as_ref().is_none_or(|context| context.skill_ids.is_empty()),
         }
     }) && config.reviewer_bot_ids.iter().all(|id| seen.contains(id))
 }

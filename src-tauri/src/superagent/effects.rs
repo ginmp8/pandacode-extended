@@ -790,7 +790,7 @@ fn reconcile_unresolved(
     store: &Store,
     intent: &IssueCommentIntent,
     root: &Path,
-    run_gh: &mut impl FnMut(&Path, &[&str], Duration) -> Result<crate::workspace::Capture, String>,
+    run_gh: &mut impl FnMut(&Path, &[&str], Duration) -> std::result::Result<crate::workspace::Capture, String>,
 ) -> Result<EffectStatus> {
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     exact_grant_payload(&tx, intent)?;
@@ -861,7 +861,7 @@ pub(crate) fn post_issue_comment(
 fn post_issue_comment_with(
     database_path: &Path,
     intent: &IssueCommentIntent,
-    run_gh: &mut impl FnMut(&Path, &[&str], Duration) -> Result<crate::workspace::Capture, String>,
+    run_gh: &mut impl FnMut(&Path, &[&str], Duration) -> std::result::Result<crate::workspace::Capture, String>,
 ) -> Result<EffectStatus> {
     let store = open_effect_store(database_path)?;
     let project_id = {
@@ -889,7 +889,7 @@ fn post_issue_comment_with(
             let issue = intent.issue_number.to_string();
             let repo_flag = github::flag("repo", &intent.repository);
             let body_flag = github::flag("body", &intent.comment_body);
-            let dispatch = (|| -> Result<Result<crate::workspace::Capture, String>> {
+            let dispatch = (|| -> Result<std::result::Result<crate::workspace::Capture, String>> {
                 let _fence = lock_dispatch(database_path)?;
                 let scope = validate_pending_dispatch(&store, intent)?;
                 let root = store.workspace_root(&scope.project_id, Some(&scope.session_id))?;

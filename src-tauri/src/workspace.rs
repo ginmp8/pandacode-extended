@@ -249,7 +249,7 @@ fn ensure_scoped_write_target_current(target: &ScopedWriteTarget) -> Result<(), 
 fn resolve_scoped_write_target(root: &Path, value: &str) -> Result<ScopedWriteTarget, String> {
     use std::{
         ffi::CString,
-        os::{fd::AsRawFd, unix::ffi::OsStrExt},
+        os::fd::AsRawFd,
     };
 
     let parts = scoped_write_parts(value)?;

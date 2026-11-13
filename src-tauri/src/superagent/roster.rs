@@ -2,10 +2,9 @@
 //! Additional Workers/Reviewers do not become authorized providers or Council seats.
 //! The current native runner remains single-worker until scoped role admission exists.
 use super::{configuration,require_main_window};
-use crate::{bots,storage::{self,Store},AppState,Result};
-use rusqlite::params;
+use crate::{bots,storage::Store,AppState,Result};
 use serde::{Deserialize,Serialize};
-use std::collections::{HashMap,HashSet};
+use std::collections::HashMap;
 use tauri::State;
 
 pub(crate) const SCHEMA:&str=r#"
@@ -195,6 +194,7 @@ pub async fn superagent_roster_update(window:tauri::WebviewWindow,state:State<'_
 mod tests {
     use super::*;
     use crate::storage;
+    use rusqlite::params;
     #[test]
     fn effective_team_reports_actual_roles_models_and_skill_inventory_without_grants() {
         let path=std::env::temp_dir().join(format!("sa-effective-{}.sqlite3",storage::id()));

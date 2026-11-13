@@ -528,7 +528,7 @@ fn valid_team_roles(coordinator: &str, workers: &[String], reviewers: &[String])
         .chain(workers.iter().map(String::as_str))
         .chain(reviewers.iter().map(String::as_str))
     {
-        if !seen.insert(id.as_str()) {
+        if !seen.insert(id) {
             return Err("A bot can have only one role in a Team.".into());
         }
     }
@@ -704,11 +704,11 @@ fn insert_team_version(db: &Connection, snapshot: &TeamSnapshot) -> Result<()> {
     insert_member.execute(params![snapshot.orchestration_id,snapshot.team_version,"coordinator",0,
         snapshot.coordinator_bot_id]).map_err(|e| e.to_string())?;
     for (ordinal, bot_id) in snapshot.worker_bot_ids.iter().enumerate() {
-        insert_member.execute(params![snapshot.orchestration_id,snapshot.team_version,"worker",ordinal,bot_id])
+        insert_member.execute(params![snapshot.orchestration_id,snapshot.team_version,"worker",ordinal as i64,bot_id])
             .map_err(|e| e.to_string())?;
     }
     for (ordinal, bot_id) in snapshot.reviewer_bot_ids.iter().enumerate() {
-        insert_member.execute(params![snapshot.orchestration_id,snapshot.team_version,"reviewer",ordinal,bot_id])
+        insert_member.execute(params![snapshot.orchestration_id,snapshot.team_version,"reviewer",ordinal as i64,bot_id])
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -738,10 +738,11 @@ pub(crate) fn migrate_team_versions(db: &Connection) -> Result<()> {
             "SELECT id,name,coordinator_bot_id,worker_bot_id,project_id,policy_revision
              FROM sa_orchestrations ORDER BY created_at,id",
         ).map_err(|e| e.to_string())?;
-        stmt.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+        let collected = stmt.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,
             r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,i64>(5)?)))
             .map_err(|e| e.to_string())?
-            .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+        collected
     };
     for (id,name,coordinator,worker,project,policy_revision) in configurations {
         let has_versions: bool = db.query_row(
@@ -774,12 +775,13 @@ pub(crate) fn migrate_team_versions(db: &Connection) -> Result<()> {
                 "SELECT id,worker_bot_id,project_id,policy_revision
                  FROM sa_tickets WHERE orchestration_id=?1 ORDER BY created_at,id",
             ).map_err(|e| e.to_string())?;
-            stmt.query_map([&id], |r| Ok((
+            let collected = stmt.query_map([&id], |r| Ok((
                 r.get::<_,String>(0)?,r.get::<_,String>(1)?,
                 r.get::<_,String>(2)?,r.get::<_,i64>(3)?,
             )))
             .map_err(|e| e.to_string())?
-            .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+            collected
         };
         let mut team_version = 1_i64;
         for (ticket_id,worker_id,project_id,ticket_policy_revision) in tickets {
@@ -816,9 +818,10 @@ pub(crate) fn migrate_team_versions(db: &Connection) -> Result<()> {
     let ticket_ids = {
         let mut stmt = db.prepare("SELECT ticket_id FROM sa_ticket_team_snapshots ORDER BY ticket_id")
             .map_err(|e| e.to_string())?;
-        stmt.query_map([], |r| r.get::<_,String>(0))
+        let collected = stmt.query_map([], |r| r.get::<_,String>(0))
             .map_err(|e| e.to_string())?
-            .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+        collected
     };
     for ticket_id in ticket_ids {
         load_ticket_team_snapshot(db,&ticket_id)?;
@@ -849,12 +852,12 @@ fn load_team_version_snapshot(db: &Connection, orchestration_id: &str, version: 
              ORDER BY CASE role WHEN 'coordinator' THEN 0 WHEN 'worker' THEN 1 ELSE 2 END,ordinal",
         ).map_err(|e| e.to_string())?;
         stmt.query_map(params![orchestration_id,version], |r| Ok((
-            r.get::<_,String>(0)?,r.get::<_,usize>(1)?,r.get::<_,String>(2)?,
+            r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,
         ))).map_err(|e| e.to_string())?
             .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
     };
     let expected = snapshot.roles.iter().map(|role| (
-        role.role.clone(),role.ordinal,role.bot_id.clone(),
+        role.role.clone(),role.ordinal as i64,role.bot_id.clone(),
     )).collect::<Vec<_>>();
     if members != expected {
         return Err("Team version memberships disagree with their immutable snapshot.".into());
@@ -2003,7 +2006,7 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
     };
     let mut sessions = Vec::new();
-    for (assignment_id,ticket_id,session_id,revision,reason) in stopped {
+    for (assignment_id,ticket_id,session_id,revision,reason) in expired {
         let Some(reason) = reason else { continue };
         let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
         let changed = tx.execute(
@@ -5672,7 +5675,7 @@ mod tests {
 
     #[test]
     fn team_role_bounds_order_and_cross_role_duplicates_are_validated() {
-        let valid = |workers, reviewers| OrchestrationInput {
+        let valid = |workers: Vec<String>, reviewers: Vec<String>| OrchestrationInput {
             name:"Roles".into(),coordinator_bot_id:"router".into(),
             worker_bot_id:workers.first().cloned().unwrap_or_default(),
             worker_bot_ids:Some(workers),reviewer_bot_ids:Some(reviewers),

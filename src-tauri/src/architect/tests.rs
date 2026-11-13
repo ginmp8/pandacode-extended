@@ -910,6 +910,7 @@ fn fixture() -> (Store, TeamSnapshot) {
         .unwrap();
     let team = TeamSnapshot {
         session_id: parent.id,
+        superagent_review: None,
         tool_catalog_version: TOOL_CATALOG_VERSION,
         config: config(),
         status: "running".into(),

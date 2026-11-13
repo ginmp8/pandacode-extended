@@ -59,7 +59,6 @@ import { call, chooseFolder, chooseSkillZip, preview, subscribe } from './bridge
 import { jjChip, showJjPanel, type JjStatus } from './jj';
 import { $, button, escape, fileIcon, fileIconsReady, icon, isImeKey, markdown, markdownCache, markdownHtml, morph, showsHtml } from './dom';
 import { botAvatarHtml } from './bot-avatars';
-import { mountSuperagent } from './superagent-ui';
 import * as botThread from './bot-thread';
 import type { Activity as BotActivity, FailoverAsk } from './bots';
 import { mountExternalLinks } from './external-links';
@@ -139,7 +138,7 @@ import { applyRestoredDraft, createCommittedDrafts } from './composer-restore';
 /* Visual thesis: calm surfaces, system typography, yellow selection, and bamboo details.
  * Content: project navigation → conversation → contextual source review.
  * Interaction: quick drawer reveals, calm dialog entrances, coalesced text updates. */
-type WorkspaceView = 'conversation' | 'board' | 'github' | 'orchestrations';
+type WorkspaceView = 'conversation' | 'board' | 'github';
 type LiveTool = { key: string; content: string | ToolActivity; statusOnly?: boolean; commentary?: boolean };
 type LiveAccountSwitch = Message & { eventSeen?: boolean };
 type Stream = { body: TailText; thought: TailText; readonly text: string; readonly thinking?: string; retainedMessageKey?: string; tools: LiveTool[]; accountSwitches: LiveAccountSwitch[]; status: string; approvals: Map<string, string>; inputs: Map<string, AgentInput>; revision: number; lastPromptAt?: number; lastResponseAt: number | null; startedAt: number; turnKey: string; omittedActivity: boolean; contextUsage?: ContextUsage; pendingChanges?: TurnChanges; earlier?: LiveEarlier };
@@ -158,7 +157,7 @@ const INSPECTOR_ACTIONS: Record<InspectorView, string> = { files: 'tab-files', s
 const state = {
   projects: [] as Project[], sessions: [] as Session[], providers: [] as Provider[],
   projectId: '', sessionId: '', messages: [] as Message[], messagesLoading: false, messagesError: '', streams: new Map<string, Stream>(),
-  view: (({ board: 'board', github: 'github', orchestrations: 'orchestrations' } as Record<string, WorkspaceView>)[localStorage.getItem('pandacode.view') ?? ''] ?? 'conversation') as WorkspaceView, boardPanel: false,
+  view: (({ board: 'board', github: 'github' } as Record<string, 'board' | 'github'>)[localStorage.getItem('pandacode.view') ?? ''] ?? 'conversation') as WorkspaceView, boardPanel: false,
   sidebarCollapsed: localStorage.getItem('pandacode.sidebarCollapsed') === 'true',
   query: '', inspector: false, inspectorTab: threadDefault(inspectorTabs) as PanelView,
   projectFilter: localStorage.getItem('pandacode.projectFilter') ?? '', collapsedFolders: readCollapsed(localStorage, 'pandacode.collapsedFolders'), expandedFolders: new Set<string>(),
@@ -523,7 +522,7 @@ $app.innerHTML = `<div class="workspace" data-tauri-drag-region>
   </aside>
   <main class="main-pane">
     <header class="workspace-header" data-tauri-drag-region="deep"><div class="header-leading" data-tauri-drag-region>${button('toggle-sidebar', 'Hide sidebar', 'sidebar', 'sidebar-toggle', 'id="sidebar-toggle" aria-controls="workspace-sidebar" aria-expanded="true" aria-keyshortcuts="Meta+B Control+B"')}<span id="view-divider" class="header-divider" aria-hidden="true" hidden></span><div id="breadcrumb" class="breadcrumb" data-tauri-drag-region></div></div><div class="header-actions">${preview ? '<span class="preview-status">Browser preview · sample data</span>' : ''}</div><div id="agents-dock-host"></div><div id="action-dock" class="action-dock" role="toolbar" aria-label="Workspace actions" aria-orientation="vertical" data-tauri-drag-region="false"><div class="action-dock-group" data-group="panels">${button('toggle-inspector', 'Toggle inspector', 'panel', 'active', 'id="inspector-toggle" aria-keyshortcuts="Meta+Shift+B Control+Shift+B"', `Toggle inspector (${shortcut('B', true)})`)}${button('terminal', 'Toggle terminal', 'terminal', '', 'id="terminal-toggle" aria-controls="terminal-drawer" aria-expanded="false" aria-keyshortcuts="Meta+J Control+J"', `Toggle terminal (${shortcut('J')})`)}${button('browser', 'Open browser', 'globe', '', 'id="browser-toggle"')}${button('moodboards', 'Project moodboards', 'images')}<button type="button" id="agents-toggle" class="agents-toggle" aria-label="Agents" aria-haspopup="dialog" aria-expanded="false" aria-controls="agents-flyout" data-dock-notip hidden>${icon('team')}<b class="dock-badge" aria-hidden="true" hidden></b></button></div><div class="action-dock-group" data-group="actions"><button type="button" class="header-run" id="run-project-button" data-action="run-project" aria-label="Run project" title="Run pandacode-run.sh" hidden>${icon('play')}<span>Run</span></button>${button('deploy', 'Deploy', 'upload', '', 'id="deploy-button" aria-haspopup="dialog"')}${button('task-menu', 'Task actions', 'more', '', 'id="task-menu-trigger" aria-haspopup="dialog" aria-expanded="false"')}</div><div class="action-dock-group" data-group="status"><button type="button" id="update-status" class="update-status" hidden>${icon('refresh')}<span>Restart to update</span></button></div></div><div id="agents-flyout" class="agents-flyout" data-tauri-drag-region="false" hidden><div id="subagents-host" class="subagents-host" hidden></div><div id="lineage-host" class="lineage-host"></div></div></header>
-    <div class="work-area"><section id="project-board" class="project-board" aria-label="Project board" hidden></section><section id="github-hub" aria-label="GitHub" hidden></section><section class="conversation-pane"><div id="task-details-heading" class="task-details-heading" hidden></div><aside id="progress-pip" class="progress-pip" aria-label="Visual progress" hidden></aside><div id="transcript" class="transcript" role="log" aria-label="Conversation" aria-live="off"></div><div id="composer-area" class="composer-area"></div><div id="composer-live" class="sr-only" role="status" aria-live="polite"></div><section id="orchestration-workspace" class="orchestration-workspace" role="region" aria-label="Orchestrations" hidden><div id="superagent-host"><p role="status">Loading…</p></div></section></section></div>
+    <div class="work-area"><section id="project-board" class="project-board" aria-label="Project board" hidden></section><section id="github-hub" aria-label="GitHub" hidden></section><section class="conversation-pane"><div id="task-details-heading" class="task-details-heading" hidden></div><aside id="progress-pip" class="progress-pip" aria-label="Visual progress" hidden></aside><div id="transcript" class="transcript" role="log" aria-label="Conversation" aria-live="off"></div><div id="composer-area" class="composer-area"></div><div id="composer-live" class="sr-only" role="status" aria-live="polite"></div></section></div>
     <div id="terminal-drawer" class="terminal-drawer" hidden><div class="drawer-heading"><span>${icon('terminal')}<span id="terminal-project" class="muted"></span></span><div class="terminal-tabs" role="tablist" aria-label="Terminal tabs"></div><div class="terminal-heading-actions"><button class="icon-button" data-terminal-action="new" aria-label="New terminal" title="New terminal">${icon('plus')}</button><button class="icon-button" data-terminal-action="minimize" aria-label="Minimize terminal" title="Minimize terminal">${icon('minimize')}</button><button class="icon-button" data-terminal-action="close" aria-label="Close terminal" title="Close terminal" aria-haspopup="dialog">${icon('close')}</button></div></div><div id="terminal-host"></div></div>
     <section id="superagent-workspace" aria-label="Orchestrations" hidden>
       <header class="sa-workspace-header">
@@ -2971,10 +2970,9 @@ function browserContextText(items: BrowserAttachment[]): string {
 }
 function renderBoardView(): void {
   if (state.view === 'github' && !githubEnabled()) state.view = 'conversation';
-  const board = state.view === 'board', hub = state.view === 'github', orchestrations = state.view === 'orchestrations';
+  const board = state.view === 'board', hub = state.view === 'github';
   $('.workspace').classList.toggle('board-view', board);
   $('.workspace').classList.toggle('github-view', hub);
-  $('.workspace').classList.toggle('orchestrations-view', orchestrations);
   // A thread opened from GitHub sits beside it, laid out like the board's side panel.
   $('.workspace').classList.toggle('side-thread', board || (hub && state.boardPanel));
   renderSidebarVisibility();
@@ -2987,13 +2985,11 @@ function renderBoardView(): void {
   const paneWasHidden = pane.hidden;
   pane.hidden = (hub || board) && !state.boardPanel;
   if (paneWasHidden !== pane.hidden) { inspectorSuppressed = (board || hub) && pane.hidden; renderInspector(); }
-  subagents.setTask(state.sessionId, !pane.hidden && !orchestrations);
+  subagents.setTask(state.sessionId, !pane.hidden);
   syncOrchestration();
-  jevActivity.setTask(pane.hidden || orchestrations ? '' : state.sessionId);
+  jevActivity.setTask(pane.hidden ? '' : state.sessionId);
   if (board || hub) { pane.setAttribute('role', 'region'); pane.setAttribute('aria-label', 'Task details'); }
   else { pane.removeAttribute('role'); pane.removeAttribute('aria-label'); }
-  pane.classList.toggle('orchestrations-open', orchestrations);
-  syncSuperagentWorkspace(orchestrations);
   $('#project-board').hidden = !board;
   $('#task-details-heading').hidden = !board && !(hub && state.boardPanel);
   if (hub && state.boardPanel) renderTaskDetails($('#task-details-heading'), session(), project(), isRunning(), state.messagesLoading || Boolean(state.messagesError));
@@ -3056,18 +3052,18 @@ async function startHubTask({ projectId, prompt, title, link, send: start }: { p
 }
 function renderSidebarVisibility(): void {
   // The board and the GitHub view are full-width; both hide the task sidebar.
-  const fullWidth = state.view === 'board' || state.view === 'github', collapsed = state.sidebarCollapsed;
+  const board = state.view !== 'conversation', collapsed = state.sidebarCollapsed;
   $('.workspace').classList.toggle('sidebar-collapsed', collapsed);
   const sidebar = $('.sidebar'), toggle = $('#sidebar-toggle');
   const toggleFocused = document.activeElement === toggle;
-  if (sidebar.hidden !== (fullWidth || collapsed)) sidebar.hidden = fullWidth || collapsed;
+  if (sidebar.hidden !== (board || collapsed)) sidebar.hidden = board || collapsed;
   const toggleHost = collapsed ? $('.header-leading') : $('.brand');
   if (toggle.parentElement !== toggleHost) {
     toggleHost.prepend(toggle);
-    if (toggleFocused && !fullWidth) toggle.focus({ preventScroll: true });
+    if (toggleFocused && !board) toggle.focus({ preventScroll: true });
   }
-  toggle.hidden = fullWidth;
-  const viewMenu = $('#view-menu'), viewHost = fullWidth || collapsed ? $('.header-leading') : $('.brand');
+  toggle.hidden = board;
+  const viewMenu = $('#view-menu'), viewHost = board || collapsed ? $('.header-leading') : $('.brand');
   if (viewMenu.parentElement !== viewHost) {
     const focused = document.activeElement === viewMenu;
     if (viewHost.classList.contains('brand')) viewHost.append(viewMenu);
@@ -3083,19 +3079,19 @@ function renderSidebarVisibility(): void {
   const label = collapsed ? 'Show sidebar' : 'Hide sidebar';
   toggle.setAttribute('aria-label', label);
   toggle.title = `${label} (${shortcut('B')})`;
-  const utilityHost = fullWidth || collapsed ? $('.header-leading') : $('.sidebar-bottom');
+  const utilityHost = board || collapsed ? $('.header-leading') : $('.sidebar-bottom');
   for (const id of ['support-button', 'agent-usage-button']) {
     const utility = $(`#${id}`);
     if (utility.parentElement !== utilityHost) {
       const focused = document.activeElement === utility;
-      if (fullWidth || collapsed) $('#breadcrumb').before(utility);
+      if (board || collapsed) $('#breadcrumb').before(utility);
       else $('.sidebar-bottom [data-action="settings"]').before(utility);
       if (focused) utility.focus({ preventScroll: true });
     }
   }
 }
 function toggleSidebar(): void {
-  if (state.view === 'board' || state.view === 'github') return;
+  if (state.view !== 'conversation') return;
   const sidebar = $('.sidebar');
   if (!state.sidebarCollapsed && (sidebar.contains(choiceMenuAnchor ?? null) || sidebar.contains(pendingMenuOpen?.anchor ?? null))) closeMenus();
   const moveFocus = !state.sidebarCollapsed && sidebar.contains(document.activeElement);
@@ -3110,7 +3106,7 @@ function toggleSidebar(): void {
   // Refits existing terminals and keeps floating menus/native browser bounds aligned.
   window.dispatchEvent(new Event('resize'));
 }
-const WORKSPACE_VIEWS: { id: WorkspaceView; label: string; icon: string }[] = [{ id: 'conversation', label: 'Conversation', icon: 'thread' }, { id: 'orchestrations', label: 'Orchestrations', icon: 'team' }, { id: 'board', label: 'Board', icon: 'kanban' }, { id: 'github', label: 'GitHub', icon: 'github' }];
+const WORKSPACE_VIEWS: { id: WorkspaceView; label: string; icon: string }[] = [{ id: 'conversation', label: 'Conversation', icon: 'thread' }, { id: 'board', label: 'Board', icon: 'kanban' }, { id: 'github', label: 'GitHub', icon: 'github' }];
 async function showViewMenu(anchor: HTMLElement): Promise<void> {
   // In the sidebar the menu ends at the trigger's right edge, so it stays inside the sidebar; in the header it starts at its left edge.
   if (choiceMenuCleanup && choiceMenuAnchor === anchor) { closeChoiceMenu(); return; }
@@ -7125,7 +7121,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
   // Close Customize only for explicit user navigation, never for asynchronous
   // thread refreshes or no-op workspace view updates.
   if (customizeShown && [
-    'new-task', 'new-chat', 'board-view', 'conversation-view', 'github-view', 'orchestrations',
+    'new-task', 'new-chat', 'board-view', 'conversation-view', 'github-view',
     'board-open', 'select-task', 'select-project', 'open-bot',
     'open-shared-channel', 'bots', 'new-bot', 'settings-page',
   ].includes(name)) closeCustomize(false);
@@ -7487,7 +7483,7 @@ document.addEventListener('change', event => {
 });
 mountTextUndo();
 document.addEventListener('keydown', event => {
-  if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey || isImeKey(event) || event.defaultPrevented || event.code !== 'KeyB' || (state.view !== 'conversation' && state.view !== 'orchestrations') || document.querySelector<HTMLDialogElement>('#dialog')!.open) return;
+  if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey || isImeKey(event) || event.defaultPrevented || event.code !== 'KeyB' || state.view !== 'conversation' || document.querySelector<HTMLDialogElement>('#dialog')!.open) return;
   event.preventDefault(); event.stopPropagation(); toggleSidebar();
 }, true);
 const threadFind = createThreadFind({

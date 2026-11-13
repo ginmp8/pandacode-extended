@@ -4669,9 +4669,18 @@ mod tests {
         let input=NewOrchestration{
             name:"Changed".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
         };
-        assert!(update_configuration(&store,&config.id,disabled.policy_revision,&input).is_err());
-        assert!(delete_configuration(&store,&config.id,disabled.policy_revision).is_err());
+        // A disabled Team with settled Ticket history may be renamed, but
+        // its historical identities and audit remain immutable.
+        let renamed=update_configuration(&store,&config.id,disabled.policy_revision,&input).unwrap();
+        assert_eq!(renamed.name,"Changed");
+        assert_eq!(renamed.policy_revision,disabled.policy_revision+1);
+        let forbidden=NewOrchestration{
+            name:"Rebound".into(),coordinator_bot_id:"worker".into(),worker_bot_id:"router".into(),
+        };
+        assert!(update_configuration(&store,&config.id,renamed.policy_revision,&forbidden).is_err());
+        assert!(delete_configuration(&store,&config.id,renamed.policy_revision).is_err());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().objective,"Immutable history");
+        assert_eq!(configuration(&store,&config.id).unwrap().name,"Changed");
     }
 
     #[test]

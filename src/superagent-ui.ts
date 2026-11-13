@@ -281,7 +281,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         auditContent +
         '<h5>Linked GitHub threads (context references only)</h5><ul class="sa-linked-threads">' +
         (threadLinks.map(link => '<li>' + safe(link.repository) + ' / ' +
-          safe(link.subjectKey) + '</li>').join('') ||
+          safe(link.subjectKey) + ' <button type="button" data-sa-unlink-source="' +
+          safe(link.sourceId) + '" data-sa-unlink-thread="' + safe(link.subjectKey) +
+          '" aria-label="Unlink ' + safe(link.repository) + ' / ' +
+          safe(link.subjectKey) + '">Unlink</button></li>').join('') ||
           '<li>No threads linked.</li>') + '</ul>' +
         '<section class="sa-linked-activity" role="region" aria-label="Observed linked GitHub activity">' +
         '<h5>Observed linked GitHub activity</h5><p>Read-only, bounded native Observe receipts for explicitly linked threads. ' +
@@ -834,6 +837,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target.hasAttribute('data-sa-cancel')) { confirm = null; render(); return; }
     if (target.hasAttribute('data-sa-confirm')) {
       const action = confirm?.action; confirm = null; if (action) void work(action);
+      return;
+    }
+    if (target.dataset.saUnlinkSource && target.dataset.saUnlinkThread) {
+      const sourceId=target.dataset.saUnlinkSource;
+      const subjectKey=target.dataset.saUnlinkThread;
+      const ticketId=inspectedTicket;
+      if (!ticketId || !ticketDetails || !threadLinks.some(link =>
+          link.ticketId===ticketId && link.sourceId===sourceId &&
+          link.subjectKey===subjectKey)) return;
+      ask('Unlink this exact GitHub source thread? Stored authenticated receipts will remain; other explicit links may still show the same thread.', async () => {
+        await call('superagent_source_unlink_thread',{sourceId,ticketId,subjectKey});
+        await refreshTicketDetails();
+        feedback='Source thread unlinked. Stored authenticated receipts were not deleted.';
+      });
       return;
     }
     if (target.dataset.saActivityMode) {

@@ -244,6 +244,41 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
         .ok_or_else(|| "Source thread link unavailable after update.".into())
 }
 
+
+/// Revocation affects only the operator's exact Team/Ticket/source/thread
+/// association. Authenticated receipt rows and Ticket evidence remain durable.
+/// This is a local user action, never a GitHub event or model-issued grant.
+fn unlink_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &str)
+    -> Result<()>
+{
+    if !valid_thread_key(subject_key) {
+        return Err("A source unlink requires an exact issue:123 or pull:123 thread key.".into());
+    }
+    let ticket = super::get_ticket(store, ticket_id)?;
+    let src = source(store, source_id)?;
+    if src.orchestration_id != ticket.orchestration_id {
+        return Err("Event source and Ticket must belong to the same orchestration.".into());
+    }
+    // DELETE and audit commit together. An incorrect Ticket/source pair or
+    // repeated removal is rejected rather than revoking another Ticket's link.
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let removed = tx.execute(
+        "DELETE FROM sa_source_thread_links
+         WHERE source_id=?1 AND ticket_id=?2 AND subject_key=?3",
+        params![source_id,ticket_id,subject_key],
+    ).map_err(|e| e.to_string())?;
+    if removed != 1 {
+        return Err("Source thread link is missing or belongs to another Ticket.".into());
+    }
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'source_thread_unlinked',?2,?3)",
+        params![ticket_id,format!("{} / {}",src.repository,subject_key),storage::now()],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn token_ok(value: &str, max: usize) -> bool {
     !value.is_empty() && value.len() <= max
         && value.is_ascii() && value.bytes().all(|b|
@@ -1120,6 +1155,16 @@ pub async fn superagent_source_link_thread(
     link_thread(&store, &source_id, &ticket_id, &subject_key)
 }
 
+#[tauri::command]
+pub async fn superagent_source_unlink_thread(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    source_id: String, ticket_id: String, subject_key: String,
+) -> Result<()> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    unlink_thread(&store, &source_id, &ticket_id, &subject_key)
+}
+
 /// Authenticated Observe receipts associated with an explicit, same-Team
 /// source-thread link. This is context metadata only: no work admission,
 /// policy changes, private GitHub content or inferred source authority.
@@ -1993,6 +2038,57 @@ mod tests {
         let reopened=Store::open(&path).unwrap();
         assert_eq!(list_thread_links(&reopened,"ticket-one").unwrap()[0].subject_key,"issue:42");
         assert_eq!(source(&reopened,&src.id).unwrap().last_sequence,0);
+    }
+
+
+    #[test]
+    fn removing_exact_source_link_revokes_context_without_erasing_receipts_or_task_evidence() {
+        let (store,path)=fixture();
+        insert_manual_ticket(&store,"ticket-one","orch");
+        insert_manual_ticket(&store,"ticket-two","orch");
+        let off=create_source(&store,"orch","test/fixture","trusted-bot","issues.opened").unwrap();
+        let observed=set_mode(&store,&off.id,off.policy_revision,"observe").unwrap();
+        let other=create_source(&store,"orch","test/fixture","trusted-bot",
+            "issue_comment.created").unwrap();
+        observe(&store,&event("verified-501",&observed,501)).unwrap();
+        link_thread(&store,&observed.id,"ticket-one","issue:42").unwrap();
+        link_thread(&store,&other.id,"ticket-one","issue:42").unwrap();
+        assert_eq!(linked_decisions(&store,"ticket-one",50).unwrap().len(),1);
+        assert!(unlink_thread(&store,&observed.id,"ticket-two","issue:42").is_err());
+        assert!(unlink_thread(&store,&observed.id,"ticket-one","pull:42").is_err());
+        assert!(unlink_thread(&store,&observed.id,"ticket-one","issue:00").is_err());
+        assert_eq!(list_thread_links(&store,"ticket-one").unwrap().len(),2);
+
+        unlink_thread(&store,&observed.id,"ticket-one","issue:42").unwrap();
+        assert_eq!(linked_decisions(&store,"ticket-one",50).unwrap().len(),1,
+            "a second explicit link to the same repository/thread still owns context");
+        unlink_thread(&store,&other.id,"ticket-one","issue:42").unwrap();
+        assert!(linked_decisions(&store,"ticket-one",50).unwrap().is_empty());
+        assert!(unlink_thread(&store,&other.id,"ticket-one","issue:42").is_err());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_event_decisions",[],|r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id='ticket-one'
+             AND kind='source_thread_unlinked'",[],|r|r.get::<_,i64>(0)).unwrap(),2);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert!(linked_decisions(&store,"ticket-two",50).unwrap().is_empty());
+        drop(store);
+
+        let reopened=Store::open(&path).unwrap();
+        assert!(list_thread_links(&reopened,"ticket-one").unwrap().is_empty());
+        assert!(linked_decisions(&reopened,"ticket-one",50).unwrap().is_empty());
+        assert_eq!(list_decisions(&reopened,&observed.id,10).unwrap()[0].delivery_id,
+            "verified-501");
+        link_thread(&reopened,&observed.id,"ticket-one","issue:42").unwrap();
+        assert_eq!(linked_decisions(&reopened,"ticket-one",50).unwrap().len(),1);
+        reopened.db.execute(
+            "UPDATE sa_tickets SET state='completed' WHERE id='ticket-one'",[],
+        ).unwrap();
+        unlink_thread(&reopened,&observed.id,"ticket-one","issue:42").unwrap();
+        assert!(link_thread(&reopened,&observed.id,"ticket-one","issue:42").is_err(),
+            "a terminal Ticket cannot gain a new context link");
+        assert!(linked_decisions(&reopened,"ticket-one",50).unwrap().is_empty());
     }
 
     #[test]

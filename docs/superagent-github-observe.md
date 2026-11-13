@@ -46,3 +46,22 @@ can infer the issue-to-PR relationship, and no Council/CI approval is implied.
 Completed Check Runs use a separate authenticated Checks API lookup, not the
 Events feed. Their result is immutable observed metadata, never a verified
 SuperAgent acceptance gate or permission to execute a Worker.
+
+## Operator revocation of explicit thread context
+
+In the native Ticket inspector the local operator can choose **Unlink** next
+to an exact `issue:<number>` or `pull:<number>` association and confirm its
+removal. The main-window-only native command verifies the Ticket, source,
+Team and precise typed key, then atomically deletes only that association and
+records `source_thread_unlinked` in the Ticket's durable audit. A wrong
+Ticket/source/key or a repeated unlink fails rather than affecting another
+Ticket. Revocation is permitted even for terminal Tickets to correct a link,
+but creating new links to terminal Tickets remains prohibited.
+
+This does not delete verified GitHub Observe receipts or mutate source
+cursors, approvals, Mandates or the Ticket lifecycle. Other explicit links
+for the **same Team/repository/typed thread** can still expose its receipt
+metadata; remove each authorized association to stop correlation. No GitHub
+network operation, worker launch, external effect or Auto authorization
+occurs. The Inspector refreshes links and invalidates its cached observed
+activity after the native transition.

@@ -390,7 +390,7 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
     const configs=[{id:'one',name:'One',coordinatorBotId:'router',
       workerBotId:'worker',enabled:true,policyRevision:1}];
     const ticket={id:'ticket-one',objective:'Private fixture',state:'queued',revision:1,evidence:null};
-    let dispatches=0;
+    let dispatches=0, unlinks=0;
     mountSuperagent(host,async (command,args)=>{
       if(command==='bots_list')return [{id:'router',name:'Router',paused:false},
         {id:'worker',name:'Worker',paused:false}] as never;
@@ -406,11 +406,11 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
       }] as never;
       if(command==='superagent_source_thread_links')return links.filter(
         link=>link.ticketId===args?.ticketId) as never;
-      if(command==='superagent_source_thread_activity')return [{
-        sourceId:'source-one',deliveryId:'verified-501',eventKind:'issues.opened',
-        subjectKey:'issue:42',decision:'observed_permitted',sequence:501,
-        policyRevision:1,at:Date.now()
-      }] as never;
+      if(command==='superagent_source_thread_activity')return (
+        links.some(link=>link.ticketId===args?.ticketId && link.subjectKey==='issue:42')
+          ? [{sourceId:'source-one',deliveryId:'verified-501',eventKind:'issues.opened',
+              subjectKey:'issue:42',decision:'observed_permitted',sequence:501,
+              policyRevision:1,at:Date.now()}] : []) as never;
       if(command==='superagent_source_link_thread'){
         if(args?.sourceId!=='source-one'||args.ticketId!=='ticket-one')throw Error('Wrong scope');
         if(links.some(link=>link.sourceId===args.sourceId&&link.subjectKey===args.subjectKey))
@@ -419,10 +419,19 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
           subjectKey:String(args.subjectKey),createdAt:Date.now()};
         links.push(link);return link as never;
       }
+      if(command==='superagent_source_unlink_thread'){
+        if(args?.sourceId!=='source-one' || args.ticketId!=='ticket-one' ||
+            args.subjectKey!=='issue:42') throw Error('Wrong unlink scope');
+        const index=links.findIndex(link=>link.sourceId===args.sourceId &&
+          link.ticketId===args.ticketId && link.subjectKey===args.subjectKey);
+        if(index<0) throw Error('Missing native link');
+        links.splice(index,1); unlinks++; return undefined as never;
+      }
       dispatches++;
       throw Error('Unexpected side-effect command: '+command);
     });
-    (window as unknown as {saDispatchCount:()=>number}).saDispatchCount=()=>dispatches;
+    (window as unknown as {saDispatchCount:()=>number;saUnlinkCount:()=>number}).saDispatchCount=()=>dispatches;
+    (window as unknown as {saUnlinkCount:()=>number}).saUnlinkCount=()=>unlinks;
   });
   const host=page.locator('#sa-thread-link-test');
   await host.getByRole('button',{name:'Demands / Runs'}).click();
@@ -439,6 +448,15 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
   const activity=host.getByRole('region',{name:'Observed linked GitHub activity'});
   await expect(activity).toContainText('verified-501');
   await expect(activity).toContainText('observed_permitted');
+  await expect(host.getByRole('button',{name:'Unlink test/fixture / issue:42'})).toBeVisible();
+  await host.getByRole('button',{name:'Unlink test/fixture / issue:42'}).click();
+  await expect(host.getByText('Unlink this exact GitHub source thread?',{exact:false})).toBeVisible();
+  await host.getByRole('button',{name:'Confirm'}).click();
+  await expect(host.locator('.sa-linked-threads')).toContainText('No threads linked.');
+  await host.getByRole('button',{name:'Load linked source decisions'}).click();
+  await expect(activity).toContainText('No authenticated Observe decisions match linked threads.');
+  await expect.poll(()=>page.evaluate(
+    ()=>(window as unknown as {saUnlinkCount:()=>number}).saUnlinkCount())).toBe(1);
   await expect(host.getByText('Private fixture')).toBeVisible();
   await expect.poll(()=>page.evaluate(
     ()=>(window as unknown as {saDispatchCount:()=>number}).saDispatchCount())).toBe(0);

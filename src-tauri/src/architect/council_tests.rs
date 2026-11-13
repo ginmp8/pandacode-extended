@@ -1163,6 +1163,38 @@ fn composed_council_bounds_root_and_child_rounds_without_changing_legacy_modes()
 }
 
 #[test]
+fn composed_root_admission_caps_actual_reviewer_attempts_without_legacy_changes() {
+    let mut mixed = on(9.0, 3, 0);
+    mixed.reviewer_bot_ids = vec!["direct-bot".into()];
+    mixed.automatic_reviewers = 1;
+    assert!(mixed.validate().is_ok());
+    let mut team = team_with(mixed, Vec::new());
+    for i in 0..1024 {
+        team.workers.push(seat(&format!("root-attempt-{i}"), 1, None, SINCE + 1));
+    }
+    assert!(council::require_root_attempt_capacity(&team).unwrap_err()
+        .contains("1024 admitted root reviewer attempts"));
+    team.workers.pop();
+    assert!(council::require_root_attempt_capacity(&team).is_ok());
+    // Abandoned/replaced attempts still consume a finite admission budget.
+    team.workers.push(seat("abandoned-attempt", 1, None, SINCE + 1));
+    team.workers.last_mut().unwrap().abandoned = true;
+    assert!(council::require_root_attempt_capacity(&team).is_err());
+    // A preexisting Council cycle must not be counted toward a fresh one.
+    team.workers.last_mut().unwrap().created_at = SINCE - 1;
+    assert!(council::require_root_attempt_capacity(&team).is_ok());
+
+    // This limit is strictly additive: it must not change M1/M2 behavior.
+    let mut auto = team.clone();
+    auto.config.council = Some(on(9.0, 100, 8));
+    assert!(council::require_root_attempt_capacity(&auto).is_ok());
+    auto.config.council.as_mut().unwrap().reviewer_bot_ids =
+        (0..8).map(|i| format!("legacy-{i}")).collect();
+    auto.config.council.as_mut().unwrap().reviewers = 0;
+    assert!(council::require_root_attempt_capacity(&auto).is_ok());
+}
+
+#[test]
 fn mixed_automatic_and_direct_bot_sources_preserve_legacy_defaults_and_capacity() {
     let original = on(9.0, 10, 0);
     assert_eq!(serde_json::to_value(&original).unwrap(),

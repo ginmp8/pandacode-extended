@@ -354,6 +354,26 @@ impl CouncilConfig {
     }
 }
 
+/// Count actually admitted parent Council reviewer attempts, including
+/// replacements, rather than relying only on the configuration-time estimate.
+/// A rejected dispatch cannot create an unbounded stream of fresh seats by
+/// changing assignment keys. Legacy M1/M2 budgets are unchanged.
+pub(super) fn require_root_attempt_capacity(team: &TeamSnapshot) -> Result<()> {
+    let Some(config) = team.config.council.as_ref() else { return Ok(()) };
+    if config.automatic_reviewers == 0 && config.nested_bot_reviewers.is_empty() {
+        return Ok(());
+    }
+    let actual = team.workers.iter()
+        .filter(|worker| worker.council.is_some() && worker.created_at >= team.council_since)
+        .count();
+    if actual >= MAX_COMPOSED_REVIEW_ATTEMPTS {
+        return Err(format!(
+            "Composed Council reached {MAX_COMPOSED_REVIEW_ATTEMPTS} admitted root reviewer attempts; no new reviewers may be dispatched."
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CouncilSeat {

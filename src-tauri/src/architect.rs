@@ -2317,6 +2317,11 @@ fn dispatch_as(
                     }
                 }
                 let seat = council::seat_for(&team, assignment.council_lens.as_deref(), assignment.replaces.as_deref())?;
+                if seat.is_some() {
+                    // The budget covers actual new admissions, not duplicated keys;
+                    // the whole batch is transactional, including earlier seats.
+                    council::require_root_attempt_capacity(&team)?;
+                }
                 let reviewer_source = seat.as_ref().map(|seat| council::reviewer_source_for(
                     &team, seat, assignment.replaces.as_deref(), assignment.council_reviewer_source,
                 )).transpose()?;

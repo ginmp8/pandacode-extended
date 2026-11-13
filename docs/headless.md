@@ -53,6 +53,12 @@ late provider callback cannot approve the task, and the previous session is
 stopped. This is a **stop-and-investigate** safety mechanism, not automatic
 retry or recovery of unverified external work.
 
+The watchdog also treats a mismatched Ticket/Team policy revision, a moved Team
+project, or a persisted tool/effect grant unsupported by the read-only provider
+as an immediate revocation condition. Provider admission and callback settlement
+repeat the policy and project checks: late model responses cannot repair or
+widen an invalidated mandate.
+
 A coordinator may legitimately have a different project checkout from the
 Ticket's worker. The watchdog validates an admitted coordinator against that
 coordinator bot's current checkout and its exact native session, while Workers

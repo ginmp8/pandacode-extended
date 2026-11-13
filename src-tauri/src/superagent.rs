@@ -991,6 +991,7 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
                       WHEN m.ticket_id IS NULL OR m.revoked!=0 OR m.expires_at<=?1
                            OR m.policy_revision!=o.policy_revision
                            OR t.policy_revision!=o.policy_revision
+                           OR m.allowed_side_effects!=0 OR m.allowed_tools!='[]'
                            OR m.project_id!=t.project_id OR o.project_id!=t.project_id
                         THEN 'Mandate expired, revoked or stale; no replay'
                       WHEN coordinator.id IS NULL OR coordinator.paused!=0
@@ -1415,7 +1416,9 @@ pub(crate) fn read_only_policy(
         expiry: i64,
         revoked: bool,
         mandate_version: i64,
+        ticket_version: i64,
         config_version: i64,
+        configuration_project: String,
         enabled: bool,
         bot_id: String,
         coordinator_id: String,
@@ -1433,7 +1436,8 @@ pub(crate) fn read_only_policy(
     let scope: Option<AssignmentPolicyScope> = store.db.query_row(
         "SELECT t.state,a.state,m.expires_at,m.revoked,m.policy_revision,o.policy_revision,o.enabled,
                 a.bot_id,o.coordinator_bot_id,t.worker_bot_id,t.project_id,t.id,a.created_at,
-                m.allowed_side_effects,m.allowed_tools,m.project_id,m.actor,t.actor,a.attempt
+                m.allowed_side_effects,m.allowed_tools,m.project_id,m.actor,t.actor,a.attempt,
+                t.policy_revision,o.project_id
          FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id
          JOIN sa_mandates m ON m.ticket_id=t.id
@@ -1449,13 +1453,16 @@ pub(crate) fn read_only_policy(
             ticket_id: r.get(11)?, started_at: r.get(12)?,
             side_effects: r.get::<_, i64>(13)? != 0, tools_json: r.get(14)?,
             mandate_project: r.get(15)?, mandate_actor: r.get(16)?, ticket_actor: r.get(17)?,
-            attempt: r.get(18)?,
+            attempt: r.get(18)?, ticket_version: r.get(19)?,
+            configuration_project: r.get(20)?,
         }),
     ).optional().map_err(|e| e.to_string())?;
     if let Some(scope) = scope {
         if scope.ticket_state != "running" || scope.assignment_state != "running" || scope.revoked
             || scope.expiry <= storage::now()
             || scope.mandate_version != scope.config_version
+            || scope.ticket_version != scope.config_version
+            || scope.configuration_project != scope.project_id
             || !assignment_within_budget(scope.started_at, storage::now())
             // The current task channel has only native read-only enforcement.
             // A persisted write/tool grant must not be silently treated as a
@@ -1667,6 +1674,7 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         "SELECT m.revoked=0 AND m.expires_at>?2 AND m.policy_revision=o.policy_revision AND o.enabled=1
          AND m.allowed_side_effects=0 AND m.allowed_tools='[]'
          AND m.project_id=t.project_id AND m.actor=t.actor
+         AND t.policy_revision=o.policy_revision AND o.project_id=t.project_id
          AND EXISTS (
            SELECT 1 FROM bots coordinator
            WHERE coordinator.id=o.coordinator_bot_id AND coordinator.paused=0
@@ -3473,6 +3481,108 @@ mod tests {
             assert!(accept(&store, &ticket.id, blocked.revision).is_err());
             assert_eq!(history(&store, &ticket.id, 10).unwrap()[0].kind, "callback_rejected");
             assert!(!on_run_finished(&store, &session, true, "Duplicate").unwrap());
+        }
+    }
+
+    #[test]
+    fn stale_ticket_or_team_project_policy_denies_provider_and_callback_settlement() {
+        for scenario in ["ticket-revision", "team-project"] {
+            let mut store = fixture();
+            let config = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &config.id, "Original scoped read-only task",
+                &format!("policy-drift-{scenario}"), false,
+            ).unwrap();
+            assert!(launched);
+            let sid = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(read_only_policy(&store, &sid).unwrap().is_some());
+
+            if scenario == "ticket-revision" {
+                store.db.execute(
+                    "UPDATE sa_tickets SET policy_revision=policy_revision+1 WHERE id=?1",
+                    [&ticket.id],
+                ).unwrap();
+            } else {
+                store.db.execute(
+                    "INSERT INTO projects(id,name,path) VALUES('moved-team','Moved team','/tmp/sa-moved-team')",
+                    [],
+                ).unwrap();
+                store.db.execute(
+                    "UPDATE sa_orchestrations SET project_id='moved-team' WHERE id=?1",
+                    [&config.id],
+                ).unwrap();
+            }
+
+            assert!(read_only_policy(&store, &sid).is_err(), "{scenario}");
+            assert!(guard_run_admission(&store, &sid, &[]).is_err(), "{scenario}");
+            assert!(on_run_finished(&store, &sid, true, "Stale provider result").unwrap());
+            let blocked = get_ticket(&store, &ticket.id).unwrap();
+            assert_eq!(blocked.state, "blocked", "{scenario}");
+            assert!(accept(&store, &ticket.id, blocked.revision).is_err());
+            assert!(history(&store, &ticket.id, 20).unwrap().iter()
+                .any(|event| event.kind == "callback_rejected"));
+            assert!(!on_run_finished(&store, &sid, true, "Duplicate").unwrap());
+        }
+    }
+
+    #[test]
+    fn watchdog_interrupts_unsupported_grants_and_drift_before_budget_expires() {
+        for scenario in ["tools", "effects", "ticket-revision", "team-project"] {
+            let mut store = fixture();
+            let config = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &config.id, "Watchdog must revoke stale task scope",
+                &format!("watchdog-policy-{scenario}"), false,
+            ).unwrap();
+            assert!(launched);
+            let sid = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(read_only_policy(&store, &sid).unwrap().is_some());
+
+            match scenario {
+                "tools" => {
+                    store.db.execute(
+                        "UPDATE sa_mandates SET allowed_tools='[\"shell\"]' WHERE ticket_id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "effects" => {
+                    store.db.execute(
+                        "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "ticket-revision" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET policy_revision=policy_revision+1 WHERE id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "team-project" => {
+                    store.db.execute(
+                        "INSERT INTO projects(id,name,path) VALUES('moved-team','Moved team','/tmp/sa-moved-team')",
+                        [],
+                    ).unwrap();
+                    store.db.execute(
+                        "UPDATE sa_orchestrations SET project_id='moved-team' WHERE id=?1",
+                        [&config.id],
+                    ).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            assert!(read_only_policy(&store, &sid).is_err(), "{scenario}");
+            let cancelled = watchdog_expired_assignments(&store, storage::now()).unwrap();
+            assert_eq!(cancelled, vec![sid.clone()], "{scenario}");
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+            let revoked: i64 = store.db.query_row(
+                "SELECT revoked FROM sa_mandates WHERE ticket_id=?1",
+                [&ticket.id], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(revoked, 1, "{scenario}");
+            assert!(history(&store, &ticket.id, 10).unwrap().iter()
+                .any(|event| event.kind == "watchdog_interrupted"));
+            assert!(watchdog_expired_assignments(&store, storage::now()).unwrap().is_empty());
+            assert!(!on_run_finished(&store, &sid, true, "Late result").unwrap());
         }
     }
 

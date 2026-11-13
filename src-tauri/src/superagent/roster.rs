@@ -39,7 +39,9 @@ pub struct TeamRoster {
 }
 pub(super) fn has_additional_members(store: &Store, id: &str) -> Result<bool> {
     let config = configuration(store, id)?;
-    Ok(config.worker_bot_ids.len() > 1 || !config.reviewer_bot_ids.is_empty())
+    // Native task Council supports a single Worker with selected Reviewers.
+    // Only an additional executor requires the still-unavailable multi-worker scheduler.
+    Ok(config.worker_bot_ids.len() > 1)
 }
 
 /// View the one authoritative versioned Team roster. The legacy sidecar must
@@ -50,7 +52,8 @@ pub(crate) fn read(store: &Store, id: &str) -> Result<TeamRoster> {
         orchestration_id: config.id,
         policy_revision: config.policy_revision,
         coordinator_bot_id: config.coordinator_bot_id,
-        execution_ready: config.worker_bot_ids.len() == 1 && config.reviewer_bot_ids.is_empty(),
+        execution_ready: config.worker_bot_ids.len() == 1 &&
+            (!config.council_required || config.reviewer_bot_ids.len() >= 2),
         worker_bot_ids: config.worker_bot_ids,
         reviewer_bot_ids: config.reviewer_bot_ids,
     })

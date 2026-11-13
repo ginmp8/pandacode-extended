@@ -9,8 +9,6 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 use tauri::Manager;
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 fn ticket_policy_revision(store: &Store, ticket_id: &str) -> Result<i64> {
     // Preserve the Ticket's immutable admission revision; a mutable Team or
     // another Ticket's mandate cannot substitute its Council authority.
@@ -20,6 +18,8 @@ fn ticket_policy_revision(store: &Store, ticket_id: &str) -> Result<i64> {
     ).map_err(|error| error.to_string())
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CouncilObservation {
     /// The verified native worker session has an Architect team with Council
     /// enabled; this is **advisory**, not task approval.

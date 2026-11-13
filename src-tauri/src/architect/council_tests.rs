@@ -589,6 +589,68 @@ fn native_s2_score_trigger_requires_a_fresh_independent_review_from_the_enabled_
 }
 
 #[test]
+fn native_s2_missing_mandatory_skill_evidence_requires_a_fresh_verified_review() {
+    let mut config = on(9.0, 4, 2);
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    let mut team = team_with(config, vec![
+        seat("original-a", 1, Some(9.5), SINCE + 1),
+        seat("original-b", 1, Some(9.6), SINCE + 2),
+    ]);
+    // These are synthetic test fixtures for native gate transitions, not
+    // independent proof that a live provider performed the mandatory check.
+    let attach = |team: &mut TeamSnapshot, index: usize, verified: bool| {
+        let worker = &team.workers[index];
+        let mut binding = reviewer_security::ReviewerBinding::native(
+            team, &worker.id, worker.created_at, &worker.provider, &worker.model,
+            worker.council.as_ref().unwrap(),
+        );
+        let sha = "e".repeat(64);
+        binding.snapshot.skills = Some(crate::skills::reviewer::ReviewerSkills {
+            pins: vec![crate::skills::reviewer::SkillPin {
+                id: "required-check".into(), source_kind: "folder".into(),
+                source_location: "test".into(), source_ref: None, source_commit: None,
+                content_sha256: sha.clone(), file_sha256: Default::default(),
+                dependencies: vec![], required_for_acceptance: true, check_required: true,
+                delivery_mode: "bounded_prompt".into(), staged_path: None,
+                imported: true, bot_assigned: true, eligible: true, supplied: true,
+                invoked: false, check_executed: false, evidence_verified: false,
+            }],
+            prompt: String::new(), skipped: vec![],
+        });
+        if verified {
+            binding.skill_evidence.insert("required-check".into(),
+                reviewer_skill_evidence::ObservedSkillEvidence {
+                    content_sha256: sha,
+                    artifact_revision: binding.artifact_revision.clone(),
+                    invoked: true, check_executed: true, evidence_verified: true,
+                    check_kind: Some("pinned_input_integrity".into()),
+                });
+        }
+        team.workers[index].reviewer_binding = Some(binding);
+    };
+    attach(&mut team, 0, false);
+    assert_ne!(council::status(&team).unwrap().state, "passed");
+    assert!(finish_refusal(&team).unwrap().contains("reviewer_skill_evidence_unverified"));
+
+    let mut second_a = seat("fresh-a", 2, Some(9.7), SINCE + 3);
+    second_a.council.as_mut().unwrap().lens = "lens original-a".into();
+    let mut second_b = seat("fresh-b", 2, Some(9.8), SINCE + 4);
+    second_b.council.as_mut().unwrap().lens = "lens original-b".into();
+    team.workers.extend([second_a, second_b]);
+    attach(&mut team, 2, true);
+    assert_eq!(council::status(&team).unwrap().state, "passed",
+        "only fresh, independently evidenced review can recover this S2 trigger");
+    let mut replay = team.clone();
+    replay.workers[2].id = "original-a".into();
+    assert_ne!(council::status(&replay).unwrap().state, "passed",
+        "a reused reviewer identity cannot bypass missing native evidence");
+    assert!(finish_refusal(&replay).unwrap().contains("S2 automatic escalation"));
+    team.workers[2].reviewer_binding.as_mut().unwrap().skill_evidence.clear();
+    assert_ne!(council::status(&team).unwrap().state, "passed",
+        "missing evidence on the fresh round also fails the native pass gate");
+}
+
+#[test]
 fn escalated_native_source_policy_preserves_legacy_modes_and_denies_unimplemented_phase_two() {
     let original = on(9.0, 4, 2);
     assert_eq!(serde_json::to_value(&original).unwrap(),

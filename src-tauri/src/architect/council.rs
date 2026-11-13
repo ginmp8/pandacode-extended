@@ -1190,8 +1190,8 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
     passing_rounds >= 2
 }
 
-/// An S2 score/required-criterion failure is a deterministic escalation
-/// trigger. A later passing round must use distinct native worker identities:
+/// An S2 score, required-criterion or mandatory native skill-evidence failure
+/// is a deterministic escalation trigger. A later passing round must use distinct native worker identities:
 /// reusing a scored reviewer is not an independent on-demand review. This
 /// does not add reviewer sources or relax the normal stale/evidence gates.
 fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> bool {
@@ -1202,6 +1202,7 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
         in_round(team, round).any(|(worker, seat)| counts(worker, seat)
             && seat.score.is_some_and(|score| score < config.target))
             || !criterion_blockers(team, config, round).is_empty()
+            || !unverified_required_skill_checks(team, round).is_empty()
     });
     let Some(trigger_round) = last_trigger else { return true };
     if view.latest <= trigger_round || !view.complete(view.latest) {

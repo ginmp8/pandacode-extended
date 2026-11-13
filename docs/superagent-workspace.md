@@ -135,3 +135,22 @@ remains disabled until native scoped role admission is implemented.
 ### Editing reusable Teams after completed demands
 
 Disabled Teams can rename themselves and change their configured additional Worker/Reviewer roster after all previous Tickets reach terminal states and every external-effect receipt is reconciled. These operations increment the native policy revision and retain every historical Ticket's admitted revision, original Worker, objective, audit and evidence. Primary Coordinator/Worker/project identity changes remain forbidden once a Team has Ticket history; create a separate Team to change those identities. The native SQL guards also reject active/reviewable Tickets, running assignments, pending/uncertain effects and stale revisions at the moment of mutation. The UI enables role editing for settled history, but native validation remains authoritative even if the visible list is incomplete. No such edit starts a Worker or grants access.
+
+### Portable bot-profile drift preflight (schema v3, partial S2)
+
+The native companion export now includes schema version 3 and an **ordered,
+configuration-only bot profile** for every Coordinator, Worker and Reviewer:
+portable bot display name, configured provider/harness, model, bot mode and
+assigned Skill IDs. It does **not** export provider credentials, local bot IDs,
+task grants, objectives, session history or Skill contents. Earlier v1/v2
+imports remain accepted under their original conservative policy.
+
+A v3 preview/confirmed import requires the target installation to already
+contain an unambiguous existing bot for each role with the same configuration.
+Missing/changed model, harness, mode or Skill assignment rejects the entire
+preflight **before a private backup or any SQLite mutation**. A destination may
+use different local bot IDs. Version downgrades cannot discard required v3
+profile metadata. Successful imports remain **disabled and Off** and do not
+install Skills, change existing bots, issue a grant, or prove provider
+availability/Skill invocation. Native execution capability still requires
+independent task-scoped admission checks.

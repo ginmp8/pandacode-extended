@@ -30,6 +30,8 @@ struct Preset {
     extra_worker_bots: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     reviewer_bots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    bot_profiles: Vec<BotProfile>,
     enabled: bool,
     autonomy: String,
     max_concurrent_tasks: u8,
@@ -41,6 +43,18 @@ struct Preset {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Council {
     enabled: bool,
+}
+
+/// Portable, non-secret effective bot configuration. This is a drift guard,
+/// not proof that a provider can execute a tool or a Skill in this installation.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BotProfile {
+    bot: String,
+    provider: String,
+    model: String,
+    mode: String,
+    skills: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -84,7 +98,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
     }
     let manifest: Manifest = serde_json::from_value(document.clone())
         .map_err(|e| format!("Invalid SuperAgent companion manifest: {e}"))?;
-    if !matches!(manifest.schema_version,1|2) || manifest.orchestrations.len() > MAX_PRESETS {
+    if !matches!(manifest.schema_version,1|2|3) || manifest.orchestrations.len() > MAX_PRESETS {
         return Err("Unsupported SuperAgent manifest schema or too many presets.".into());
     }
     let bots = bots::list(store)?;
@@ -148,6 +162,35 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
                 return Err("Duplicate or paused Team Reviewer.".into());
             }
             reviewer_ids.push(bot.id.clone());
+        }
+        // Version 3 pins the existing bot profile expectations by ordered role.
+        // Resolve against local bot IDs before taking any backup or inserting a
+        // disabled Team. Import never installs Skills or changes existing bots.
+        if manifest.schema_version < 3 {
+            if !preset.bot_profiles.is_empty() {
+                return Err("Bot profiles require SuperAgent manifest version 3.".into());
+            }
+        } else {
+            let role_names:Vec<&str>=std::iter::once(preset.coordinator_bot.as_str())
+                .chain(std::iter::once(preset.worker_bot.as_str()))
+                .chain(preset.extra_worker_bots.iter().map(String::as_str))
+                .chain(preset.reviewer_bots.iter().map(String::as_str))
+                .collect();
+            if preset.bot_profiles.len()!=role_names.len() {
+                return Err("Version 3 requires an effective profile for every Team role.".into());
+            }
+            for (profile,name) in preset.bot_profiles.iter().zip(role_names.iter()) {
+                let bot=lookup(name)?;
+                if !profile.bot.eq_ignore_ascii_case(name)
+                    || profile.provider!=bot.provider
+                    || profile.model!=bot.model
+                    || profile.mode!=bot.mode
+                    || profile.skills.as_slice()!=bot.skills.as_slice() {
+                    return Err(format!(
+                        "Portable bot profile mismatch for {name}; verify model, harness, mode and assigned Skills."
+                    ));
+                }
+            }
         }
         let existing: Option<Orchestration> = store.db.query_row(
             "SELECT id,name,coordinator_bot_id,worker_bot_id,project_id,enabled,policy_revision
@@ -269,7 +312,6 @@ fn export(store: &Store) -> Result<serde_json::Value> {
         .collect::<rusqlite::Result<Vec<Orchestration>>>()
         .map_err(|e| e.to_string())?;
     let mut presets = Vec::with_capacity(configs.len());
-    let mut any_extra_roles=false;
     for config in configs {
         let roles=super::roster::read(store,&config.id)?;
         let extra_worker_bots=roles.worker_bot_ids.iter().skip(1)
@@ -278,10 +320,18 @@ fn export(store: &Store) -> Result<serde_json::Value> {
         let reviewer_bots=roles.reviewer_bot_ids.iter()
             .map(|id|bots::get(store,id).map(|bot|bot.name))
             .collect::<Result<Vec<_>>>()?;
-        if !extra_worker_bots.is_empty() || !reviewer_bots.is_empty() {
-            any_extra_roles=true;
+        // Export display names and bounded bot configuration only, never local IDs,
+        // runtime sessions, task grants or provider credentials.
+        let mut bot_profiles=Vec::new();
+        for id in std::iter::once(&roles.coordinator_bot_id)
+            .chain(roles.worker_bot_ids.iter())
+            .chain(roles.reviewer_bot_ids.iter()) {
+            let bot=bots::get(store,id)?;
+            bot_profiles.push(BotProfile {
+                bot:bot.name,provider:bot.provider,model:bot.model,
+                mode:bot.mode,skills:bot.skills,
+            });
         }
-        // Export display names, never local IDs, private tasks or authority.
         let coordinator = bots::get(store, &config.coordinator_bot_id)?;
         let worker = bots::get(store, &config.worker_bot_id)?;
         presets.push(Preset {
@@ -290,6 +340,7 @@ fn export(store: &Store) -> Result<serde_json::Value> {
             worker_bot: worker.name,
             extra_worker_bots,
             reviewer_bots,
+            bot_profiles,
             enabled: config.enabled,
             autonomy: "off".into(),
             max_concurrent_tasks: 1,
@@ -298,7 +349,7 @@ fn export(store: &Store) -> Result<serde_json::Value> {
         });
     }
     serde_json::to_value(Manifest {
-        schema_version:if any_extra_roles {2} else {1},orchestrations:presets,
+        schema_version:3,orchestrations:presets,
     })
         .map_err(|e| e.to_string())
 }
@@ -434,7 +485,7 @@ mod tests {
         let snapshot: serde_json::Value = serde_json::from_slice(
             &std::fs::read(path).unwrap(),
         ).unwrap();
-        assert_eq!(snapshot["schemaVersion"], 1);
+        assert_eq!(snapshot["schemaVersion"], 3);
         assert_eq!(snapshot["orchestrations"].as_array().unwrap().len(), 0);
         let repeat = apply_with_backup(&store, &root, &document("Software Development"), true).unwrap();
         assert_eq!(repeat.unchanged, vec!["Software Development"]);
@@ -579,7 +630,7 @@ mod tests {
         assert!(!config.enabled);
         assert!(super::super::change_enabled(&store,&id,config.policy_revision,true).is_err());
         let exported=export(&store).unwrap();
-        assert_eq!(exported["schemaVersion"],2);
+        assert_eq!(exported["schemaVersion"],3);
         assert_eq!(exported["orchestrations"][0]["extraWorkerBots"],json!(["Worker B","Worker C"]));
         assert_eq!(exported["orchestrations"][0]["reviewerBots"],json!(["Reviewer A","Reviewer B"]));
         assert!(!exported.to_string().contains("worker-project"));
@@ -629,5 +680,65 @@ mod tests {
         assert_eq!(count,0,"partial import escaped its SQLite transaction");
         store.db.execute_batch("DROP TRIGGER reject_second").unwrap();
         assert_eq!(apply(&store,&doc,true).unwrap().created.len(),2);
+    }
+
+    #[test]
+    fn portable_v3_profiles_detect_drift_before_backup_and_map_local_bot_ids() {
+        let origin=fixture();
+        origin.db.execute(
+            "UPDATE bots SET skills='[\"required-skill\"]' WHERE id='worker'",[],
+        ).unwrap();
+        apply(&origin,&document("Pinned Team"),true).unwrap();
+        let portable=export(&origin).unwrap();
+        assert_eq!(portable["schemaVersion"],3);
+        assert_eq!(portable["orchestrations"][0]["botProfiles"][1]["skills"],
+            json!(["required-skill"]));
+        let serialized=portable.to_string();
+        for private in ["worker-project","router-project","authorization_id","session_id"] {
+            assert!(!serialized.contains(private),"Leaked local or task identity: {private}");
+        }
+
+        let target=fixture();
+        target.db.execute("UPDATE bots SET id='local-router' WHERE id='router'",[]).unwrap();
+        target.db.execute("UPDATE bots SET id='local-worker' WHERE id='worker'",[]).unwrap();
+        let root=std::env::temp_dir().join(format!(
+            "sa-v3-import-rejected-{}",storage::id(),
+        ));
+        // A missing required Skill must reject even a confirmed import before
+        // creating any backup or orphaned Team.
+        assert!(preview(&target,&portable).is_err());
+        assert!(apply_with_backup(&target,&root,&portable,true).is_err());
+        assert!(!root.join("bot-backups").exists());
+
+        target.db.execute(
+            "UPDATE bots SET skills='[\"required-skill\"]' WHERE id='local-worker'",[],
+        ).unwrap();
+        assert_eq!(preview(&target,&portable).unwrap().would_create,vec!["Pinned Team"]);
+        target.db.execute(
+            "UPDATE bots SET model='different-model' WHERE id='local-worker'",[],
+        ).unwrap();
+        assert!(preview(&target,&portable).unwrap_err().contains("profile mismatch"));
+        target.db.execute(
+            "UPDATE bots SET model='default' WHERE id='local-worker'",[],
+        ).unwrap();
+
+        let mut missing=portable.clone();
+        missing["orchestrations"][0]["botProfiles"]=json!([]);
+        assert!(preview(&target,&missing).is_err());
+        let mut downgraded=portable.clone();
+        downgraded["schemaVersion"]=json!(2);
+        assert!(preview(&target,&downgraded).is_err());
+
+        let imported=apply_with_backup(&target,&root,&portable,true).unwrap();
+        assert_eq!(imported.created,vec!["Pinned Team"]);
+        assert!(imported.backup_path.is_some());
+        let (worker_id,enabled):(String,i64)=target.db.query_row(
+            "SELECT worker_bot_id,enabled FROM sa_orchestrations WHERE name='Pinned Team'",
+            [],|row|Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        assert_eq!(worker_id,"local-worker");
+        assert_eq!(enabled,0);
+        assert_eq!(apply(&target,&portable,true).unwrap().unchanged,vec!["Pinned Team"]);
+        let _=std::fs::remove_dir_all(root);
     }
 }

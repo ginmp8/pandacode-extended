@@ -2351,6 +2351,16 @@ fn child_council_revocation_and_project_isolation_fail_closed() {
     store.db.execute("UPDATE bots SET created_at=created_at+1 WHERE id='child-security'", []).unwrap();
     assert!(child_council::inspect(&store, &root).unwrap_err().contains("child_council_stale"));
     store.db.execute("UPDATE bots SET created_at=created_at-1 WHERE id='child-security'", []).unwrap();
+    store.db.execute("UPDATE bots SET model='changed-model' WHERE id='child-security'", []).unwrap();
+    assert!(child_council::inspect(&store, &root).unwrap_err().contains("child_council_revoked"));
+    store.db.execute("UPDATE bots SET model='default' WHERE id='child-security'", []).unwrap();
+    let saved_effort: String = store.db.query_row(
+        "SELECT reasoning_effort FROM bots WHERE id='child-security'", [], |r| r.get(0),
+    ).unwrap();
+    store.db.execute("UPDATE bots SET reasoning_effort='changed' WHERE id='child-security'", []).unwrap();
+    assert!(child_council::inspect(&store, &root).unwrap_err().contains("child_council_revoked"));
+    store.db.execute("UPDATE bots SET reasoning_effort=?1 WHERE id='child-security'", [&saved_effort]).unwrap();
+    assert_eq!(child_council::inspect(&store, &root).unwrap().len(), 2);
     store.db.execute(
         "UPDATE bots SET project_id='foreign-child-project' WHERE id='child-security'",
         [],

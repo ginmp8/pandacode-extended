@@ -89,6 +89,13 @@ fn frozen(
     if bot.project_id != parent.project_id {
         return Err("child_council_denied: selected nested bot belongs to another project.".into());
     }
+    // A changed bot profile must not silently replace the pinned child harness.
+    // Revocation denies this reservation; it never resumes with broader authority.
+    if bot.provider != session.provider || bot.model != session.model
+        || session.reasoning_effort.as_deref().unwrap_or_default() != bot.reasoning_effort
+    {
+        return Err("child_council_revoked: selected bot review harness changed.".into());
+    }
     let scope = serde_json::to_vec(&(
         &session.project_id, &session.worktree_path, &session.provider,
         &session.model, &session.reasoning_effort,

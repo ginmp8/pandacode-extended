@@ -237,14 +237,16 @@ fn channel_selected_reviewer_scope_is_revalidated_after_membership_and_reassignm
         "INSERT INTO extended_channel_council_deliveries(delivery_id,channel_id,source_message_id,executor_bot_id,cycle_id,objective,artifact_revision,created_at) VALUES(?1,?2,?3,?4,?5,'Review','0',?6)",
         params![delivery_id,channel.id,message_id,executor.id,crate::storage::id(),crate::storage::now()],
     ).unwrap();
-    assert!(shared_channels::validate_delivery_reviewers(&f.store,&session_id,&config.reviewer_bot_ids).is_ok());
-    assert!(shared_channels::validate_delivery_reviewers(&f.store,&session_id,&[])
+    assert!(shared_channels::validate_delivery_council(&f.store,&session_id,&config).is_ok());
+    let mut missing_reviewers = config.clone();
+    missing_reviewers.reviewer_bot_ids.clear();
+    assert!(shared_channels::validate_delivery_council(&f.store,&session_id,&missing_reviewers)
         .unwrap_err().contains("roster changed"));
     f.store.db.execute(
         "DELETE FROM bot_shared_channel_members WHERE channel_id=?1 AND bot_id=?2",
         params![channel.id,b.id],
     ).unwrap();
-    assert!(shared_channels::validate_delivery_reviewers(&f.store,&session_id,&config.reviewer_bot_ids)
+    assert!(shared_channels::validate_delivery_council(&f.store,&session_id,&config)
         .unwrap_err().contains("no longer a channel member"));
     f.store.db.execute(
         "INSERT INTO bot_shared_channel_members(channel_id,bot_id,position) VALUES(?1,?2,2)",
@@ -256,12 +258,12 @@ fn channel_selected_reviewer_scope_is_revalidated_after_membership_and_reassignm
         "INSERT INTO bot_shared_channel_deliveries(id,channel_id,message_id,bot_id,session_id,status,depth,created_at,updated_at) VALUES(?1,?2,?3,?4,?5,'queued',0,?6,?6)",
         params![reassigned,channel.id,message_id,a.id,other_session,crate::storage::now()],
     ).unwrap();
-    assert!(shared_channels::validate_delivery_reviewers(&f.store,&session_id,&config.reviewer_bot_ids)
+    assert!(shared_channels::validate_delivery_council(&f.store,&session_id,&config)
         .unwrap_err().contains("message executor"));
     f.store.db.execute(
         "UPDATE bot_shared_channel_deliveries SET status='stopped' WHERE id=?1",[&delivery_id],
     ).unwrap();
-    assert!(shared_channels::validate_delivery_reviewers(&f.store,&session_id,&config.reviewer_bot_ids)
+    assert!(shared_channels::validate_delivery_council(&f.store,&session_id,&config)
         .unwrap_err().contains("no longer active"));
 }
 
@@ -312,8 +314,10 @@ fn channel_nested_council_rechecks_frozen_policy_membership_and_executor() {
         params![delivery_id, channel.id, message_id, executor.id,
             crate::storage::id(), crate::storage::now()],
     ).unwrap();
-    // The old direct-only check sees an empty roster and cannot validate N seats.
-    assert!(shared_channels::validate_delivery_reviewers(&f.store, &session_id, &[]).is_ok());
+    let mut missing_nested = config.clone();
+    missing_nested.nested_bot_reviewers.clear();
+    assert!(shared_channels::validate_delivery_council(&f.store, &session_id, &missing_nested)
+        .unwrap_err().contains("roster changed"));
     assert!(shared_channels::validate_delivery_council(&f.store, &session_id, &config).is_ok());
     let mut weakened = config.clone();
     weakened.nested_bot_reviewers[0].child_target = 8.0;

@@ -282,9 +282,10 @@ fn channel_nested_council_rechecks_frozen_policy_membership_and_executor() {
     let message_id = crate::storage::id();
     let config = crate::architect::CouncilConfig {
         nested_bot_reviewers: [a.id.clone(), b.id.clone()].into_iter()
-            .map(|bot_id| crate::architect::council::CouncilNestedReviewer {
-                bot_id, child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
-            }).collect(),
+            .map(|bot_id| serde_json::from_value(serde_json::json!({
+                "botId": bot_id, "childReviewers": 2,
+                "childTarget": 9.0, "childMaxRounds": 2,
+            })).unwrap()).collect(),
         ..Default::default()
     };
     f.store.db.execute(

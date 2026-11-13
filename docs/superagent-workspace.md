@@ -7,10 +7,15 @@ each independent Demand is a durable Ticket bound to exactly one Team.
 ## Native-backed surfaces
 
 - **Teams:** saved policy revisions, coordinator/worker bot identity and native task counters.
-- **Demands/Runs:** a read-only cross-Team index limited to the 200 most recently
-  updated native Tickets. Board and List show the same loaded records. The board
-  buckets Working, Awaiting decision, Needs attention and Finished or stopped.
-  All column counts represent **only the loaded page**, not complete totals.
+- **Demands/Runs:** a read-only native Ticket index with stable 200-row
+  cursor pages and an explicit **All Teams / specific Team** filter. The Team
+  filter is enforced by the native SQL query **before pagination**, so sparse
+  Teams are not omitted merely because other Teams have newer Tickets.
+  Changing Team resets the pagination cursor and loaded Board/List rows;
+  refresh queries current native state. The board buckets Working, Awaiting
+  decision, Needs attention and Finished or stopped. All column counts represent
+  **only loaded pages for the selected Team scope**, not complete totals.
+  Unknown or malformed Team IDs fail closed instead of showing false empty results.
 - **Review inbox:** a separate native, bounded cross-Team query shows actual
   `waiting_approval` (human decision) and `waiting_review` (native Council
   pending, **not** a verified pass) Tickets, even when they fall outside the
@@ -42,6 +47,10 @@ and the same theme tokens for desktop, narrow, light and dark views.
   budgets without granting effects.
 - Playwright: cross-Team Demands index checks Board/List presentation while
   opening only the immutable Ticket's original Team.
+- Rust: native_team_filtered_demand_pages_are_complete_isolated_and_restart_safe
+  checks 205-Ticket Team pagination, other-Team isolation, invalid filters and restart reads.
+- Playwright: native Team filter pages independently and resets pagination when changing Teams;
+  its calls retain the exact selected native Team and page cursor without admitting work.
 
 These tests must pass at the exact current SHA. This partial feature does not
 close #131 AC-01..31 or #148 UX/SA/DD/NS/EGM acceptance; full native Council,

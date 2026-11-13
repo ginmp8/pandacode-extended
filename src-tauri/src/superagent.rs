@@ -440,6 +440,7 @@ pub struct DemandIndex {
 /// to see Tickets modified after a paging cursor was issued.
 fn list_all_demands_page(
     store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
+    orchestration_id: Option<&str>,
 ) -> Result<Vec<DemandIndex>> {
     if !(1..=200).contains(&limit) {
         return Err("Demand index page size must be between 1 and 200.".into());
@@ -452,14 +453,24 @@ fn list_all_demands_page(
     {
         return Err("Demand cursor requires a bounded Ticket ID and positive timestamp.".into());
     }
+    if let Some(id) = orchestration_id {
+        if id.is_empty() || id.len() > 128
+            || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_')) {
+            return Err("Demand Team filter requires a bounded native Team ID.".into());
+        }
+        // A deleted or unknown Team must not silently look like an empty board.
+        configuration(store, id)?;
+    }
     let mut stmt = store.db.prepare(
         "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at
          FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
          WHERE (?2 IS NULL OR t.updated_at < ?2
                 OR (t.updated_at=?2 AND t.id < ?3))
+           AND (?4 IS NULL OR t.orchestration_id=?4)
          ORDER BY t.updated_at DESC,t.id DESC LIMIT ?1",
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![limit,before_updated_at,before_id], |row| Ok(DemandIndex {
+    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id], |row| Ok(DemandIndex {
         id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
         state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
     })).map_err(|e| e.to_string())?;
@@ -469,7 +480,7 @@ fn list_all_demands_page(
 // Retain the pre-pagination native oracle only for existing unit coverage.
 #[cfg(test)]
 fn list_all_demands(store: &Store, limit: i64) -> Result<Vec<DemandIndex>> {
-    list_all_demands_page(store, limit, None, None)
+    list_all_demands_page(store, limit, None, None, None)
 }
 
 /// Cross-Team native decision queue, independent of the general 200-row
@@ -2208,10 +2219,14 @@ pub async fn superagent_tickets(window: tauri::WebviewWindow,
 pub async fn superagent_all_demands(
     window: tauri::WebviewWindow, state: State<'_, AppState>, limit: Option<i64>,
     before_updated_at: Option<i64>, before_id: Option<String>,
+    orchestration_id: Option<String>,
 ) -> Result<Vec<DemandIndex>> {
     require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    list_all_demands_page(&store, limit.unwrap_or(200), before_updated_at, before_id.as_deref())
+    list_all_demands_page(
+        &store, limit.unwrap_or(200), before_updated_at, before_id.as_deref(),
+        orchestration_id.as_deref(),
+    )
 }
 
 #[tauri::command]
@@ -2978,6 +2993,72 @@ mod tests {
     }
 
     #[test]
+    fn native_team_filtered_demand_pages_are_complete_isolated_and_restart_safe() {
+        let store = fixture();
+        let first_team = create_configuration(&store, NewOrchestration {
+            name: "Economy Team".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let second_team = create_configuration(&store, NewOrchestration {
+            name: "Performance Team".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        for index in 0..205_i64 {
+            let id = format!("economy-{index:03}");
+            let key = format!("economy-request-{index:03}");
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Private native objective','local-user','manual',
+                        ?4,'worker',?5,'queued',?6,?6)",
+                params![id,first_team.id,key,first_team.project_id,
+                    first_team.policy_revision,1_000 + index / 3],
+            ).unwrap();
+        }
+        for index in 0..3_i64 {
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Other Team private demand','local-user','manual',
+                        ?4,'worker',?5,'queued',?6,?6)",
+                params![format!("performance-{index}"),second_team.id,
+                    format!("performance-request-{index}"),second_team.project_id,
+                    second_team.policy_revision,2_000 + index],
+            ).unwrap();
+        }
+        let first = list_all_demands_page(
+            &store, 200, None, None, Some(&first_team.id),
+        ).unwrap();
+        assert_eq!(first.len(), 200);
+        assert!(first.iter().all(|ticket| ticket.orchestration_id == first_team.id));
+        let last = first.last().unwrap();
+        let next = list_all_demands_page(
+            &store, 200, Some(last.updated_at), Some(&last.id),
+            Some(&first_team.id),
+        ).unwrap();
+        assert_eq!(next.len(), 5);
+        let ids: std::collections::HashSet<_> = first.iter().chain(next.iter())
+            .map(|ticket| ticket.id.as_str()).collect();
+        assert_eq!(ids.len(), 205, "Pagination must not skip or duplicate Team Tickets");
+        let other = list_all_demands_page(
+            &store, 200, None, None, Some(&second_team.id),
+        ).unwrap();
+        assert_eq!(other.len(), 3);
+        assert!(other.iter().all(|ticket| ticket.orchestration_id == second_team.id));
+        assert_eq!(list_all_demands_page(&store, 200, None, None, None).unwrap().len(), 200);
+        assert!(list_all_demands_page(&store, 200, None, None, Some("../escape")).is_err());
+        assert!(list_all_demands_page(&store, 200, None, None, Some("unknown-team")).is_err());
+        let path = store.path.clone();
+        drop(store);
+        let readonly = Store::open_read_only(&path).unwrap();
+        assert_eq!(list_all_demands_page(
+            &readonly, 200, None, None, Some(&second_team.id)
+        ).unwrap().len(), 3);
+    }
+
+    #[test]
     fn cross_team_demand_pages_preserve_order_ties_and_durable_history() {
         let store = fixture();
         let team = enabled(&store);
@@ -2995,31 +3076,31 @@ mod tests {
                 params![id,team.id,key,objective,team.project_id,team.policy_revision,at],
             ).unwrap();
         }
-        let first = list_all_demands_page(&store, 200, None, None).unwrap();
+        let first = list_all_demands_page(&store, 200, None, None, None).unwrap();
         assert_eq!(first.len(), 200);
         assert_eq!(first[0].id, "page-204");
         let boundary = first.last().unwrap();
         let second = list_all_demands_page(
-            &store, 200, Some(boundary.updated_at), Some(&boundary.id)
+            &store, 200, Some(boundary.updated_at), Some(&boundary.id), None
         ).unwrap();
         assert_eq!(second.len(), 5);
         assert_eq!(second.last().unwrap().id, "page-000");
         let all_ids: std::collections::HashSet<_> = first.iter().chain(second.iter())
             .map(|item| item.id.clone()).collect();
         assert_eq!(all_ids.len(), 205, "No skipped or repeated Ticket at timestamp ties");
-        assert!(list_all_demands_page(&store, 10, Some(1), None).is_err());
-        assert!(list_all_demands_page(&store, 10, None, Some("page-000")).is_err());
-        assert!(list_all_demands_page(&store, 10, Some(-1), Some("page-000")).is_err());
-        assert!(list_all_demands_page(&store, 10, Some(1000), Some("../leak")).is_err());
-        assert!(list_all_demands_page(&store, 201, None, None).is_err());
+        assert!(list_all_demands_page(&store, 10, Some(1), None, None).is_err());
+        assert!(list_all_demands_page(&store, 10, None, Some("page-000"), None).is_err());
+        assert!(list_all_demands_page(&store, 10, Some(-1), Some("page-000"), None).is_err());
+        assert!(list_all_demands_page(&store, 10, Some(1000), Some("../leak"), None).is_err());
+        assert!(list_all_demands_page(&store, 201, None, None, None).is_err());
         // A newer update cannot enter a page requested with an older cursor.
         store.db.execute(
             "UPDATE sa_tickets SET updated_at=9999 WHERE id='page-000'", []
         ).unwrap();
         assert!(!list_all_demands_page(
-            &store, 200, Some(boundary.updated_at), Some(&boundary.id)
+            &store, 200, Some(boundary.updated_at), Some(&boundary.id), None
         ).unwrap().iter().any(|item| item.id == "page-000"));
-        assert_eq!(list_all_demands_page(&store, 1, None, None).unwrap()[0].id, "page-000");
+        assert_eq!(list_all_demands_page(&store, 1, None, None, None).unwrap()[0].id, "page-000");
         assert!(first.iter().all(|item| item.revision == 0));
     }
 

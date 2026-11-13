@@ -86,6 +86,7 @@ interface SourceDecision {
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
+  let demandTeamFilter = '';
   let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false;
   let globalDemandLayout: 'board' | 'list' = 'board';
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
@@ -370,10 +371,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         }).join('') + '</div>';
     const globalDemands = '<section class="sa-pane sa-global-demands" aria-label="All Demands across Teams">' +
       '<header><h3>All Demands / Runs</h3><button type="button" data-sa-load-all-demands>' +
-      'Refresh all Teams</button></header>' +
-      '<p>Native Tickets across Teams, loaded 200 at a time in newest-first order. Board counts cover ' +
+      (demandTeamFilter ? 'Refresh selected Team' : 'Refresh all Teams') + '</button></header>' +
+      '<label class="sa-demand-team-filter">Filter by Team<select aria-label="Filter Demands by Team" data-sa-demand-team-filter>' +
+      '<option value="">All Teams</option>' +
+      presets.map(item => '<option value="' + safe(item.id) + '"' +
+        (demandTeamFilter === item.id ? ' selected' : '') + '>' + safe(item.name) + '</option>').join('') +
+      '</select></label>' +
+      '<p>Native Tickets ' + (demandTeamFilter ? 'for this Team' : 'across Teams') +
+      ', loaded 200 at a time in newest-first order. Board counts cover ' +
       'only loaded pages, not all saved Demands. Open a Demand to act within its Team.</p>' +
-      (!allDemandsLoaded ? '<p role="status">Load all Teams to see cross-Team demands.</p>' :
+      (!allDemandsLoaded ? '<p role="status">Load Demands for the selected Team scope.</p>' :
         '<div class="sa-demand-layout-toggle" role="group" aria-label="Demand presentation">' +
         (['board','list'] as const).map(layout =>
           '<button type="button" data-sa-global-demand-layout="' + layout +
@@ -646,6 +653,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     try {
       const [known, configs] = await Promise.all([call<Bot[]>('bots_list'), call<Config[]>('superagent_list')]);
       bots = known; presets = configs;
+      if (demandTeamFilter && !presets.some(config => config.id === demandTeamFilter)) {
+        demandTeamFilter = '';
+      }
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
         inspectedTicket = ''; threadLinks = [];
@@ -693,6 +703,24 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   // Templates populate editable names only; no bot, tool or task is selected.
   host.addEventListener('change', event => {
     const target = event.target;
+    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-demand-team-filter')) {
+      if (busy) { target.value = demandTeamFilter; return; }
+      const filter = target.value;
+      if (filter && !presets.some(item => item.id === filter)) {
+        target.value = demandTeamFilter; return;
+      }
+      demandTeamFilter = filter;
+      allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
+      render();
+      void work(async () => {
+        const loaded = await call<DemandIndex[]>('superagent_all_demands',{
+          limit:200, orchestrationId:filter || undefined,
+        });
+        allDemands = loaded; allDemandsHasMore = loaded.length === 200;
+        allDemandsLoaded = true;
+      });
+      return;
+    }
     if (target instanceof HTMLSelectElement && target.name === 'mode' &&
         target.closest<HTMLFormElement>('form[data-sa-form="run"]')) {
       demandMode = target.value === 'direct' ? 'direct' : 'coordinated';
@@ -815,7 +843,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       void work(async () => {
         allDemands = [];
         allDemandsLoaded = false; allDemandsHasMore = false;
-        const loaded = await call<DemandIndex[]>('superagent_all_demands',{limit:200});
+        const loaded = await call<DemandIndex[]>('superagent_all_demands',{
+          limit:200, orchestrationId:demandTeamFilter || undefined,
+        });
         allDemands = loaded;
         allDemandsHasMore = loaded.length === 200;
         allDemandsLoaded = true;
@@ -828,6 +858,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       void work(async () => {
         const loaded = await call<DemandIndex[]>('superagent_all_demands',{
           limit:200, beforeUpdatedAt:last.updatedAt, beforeId:last.id,
+          orchestrationId:demandTeamFilter || undefined,
         });
         const seen = new Set(allDemands.map(item => item.id));
         allDemands = [...allDemands, ...loaded.filter(item => !seen.has(item.id))];

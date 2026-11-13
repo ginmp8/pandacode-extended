@@ -789,6 +789,72 @@ test('cross-Team native Demand pages load older Tickets without inferring new wo
   expect(cursors[1]).toMatchObject({limit:200,beforeUpdatedAt:1801,beforeId:'demand-199'});
 });
 
+test('native Team filter pages independently and resets pagination when changing Teams', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div'); host.id='sa-filtered-demands';
+    document.body.appendChild(host);
+    const queries:Record<string,unknown>[]=[];
+    (window as unknown as {saFilteredQueries:Record<string,unknown>[]}).saFilteredQueries=queries;
+    const demand=(id:string,team:string,at:number)=>({
+      id,orchestrationId:team,objective:'Task '+id,state:'blocked',revision:1,updatedAt:at,
+    });
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return [
+        {id:'lead',name:'Lead',paused:false},{id:'worker',name:'Worker',paused:false}
+      ] as never;
+      if(command==='superagent_list')return [
+        {id:'team-a',name:'Economy',coordinatorBotId:'lead',workerBotId:'worker',
+          enabled:true,policyRevision:2},
+        {id:'team-b',name:'Performance',coordinatorBotId:'lead',workerBotId:'worker',
+          enabled:true,policyRevision:2},
+      ] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_all_demands'){
+        queries.push({...args});
+        if(args?.orchestrationId==='team-b'){
+          if(args?.beforeId==='b-199' && args?.beforeUpdatedAt===1801)
+            return [demand('b-200','team-b',1800)] as never;
+          if(!args?.beforeId)return Array.from({length:200},(_,i)=>
+            demand('b-'+i,'team-b',2000-i)) as never;
+        }
+        if(args?.orchestrationId==='team-a' && !args?.beforeId)
+          return [demand('a-0','team-a',1900)] as never;
+        if(!args?.orchestrationId && !args?.beforeId)
+          return [demand('a-0','team-a',1900),demand('b-0','team-b',2000)] as never;
+        throw Error('Invalid native Team-scoped cursor');
+      }
+      throw Error('Unexpected native read: '+command);
+    });
+  });
+  const global=page.locator('#sa-filtered-demands')
+    .getByRole('region',{name:'All Demands across Teams'});
+  await page.locator('#sa-filtered-demands')
+    .getByRole('button',{name:'Demands / Runs'}).click();
+  const filter=global.getByRole('combobox',{name:'Filter Demands by Team'});
+  await filter.selectOption('team-b');
+  await expect(global).toContainText('200 native Demands loaded.');
+  await global.getByRole('button',{name:'Load older Demands'}).click();
+  await expect(global).toContainText('201 native Demands loaded.');
+  await filter.selectOption('team-a');
+  await expect(global).toContainText('1 native Demands loaded.');
+  await expect(global).toContainText('Task a-0');
+  await expect(global).not.toContainText('Task b-200');
+  await filter.selectOption('');
+  await expect(global).toContainText('2 native Demands loaded.');
+  const queries=await page.evaluate(()=>
+    (window as unknown as {saFilteredQueries:Record<string,unknown>[]}).saFilteredQueries);
+  expect(queries).toMatchObject([
+    {limit:200,orchestrationId:'team-b'},
+    {limit:200,orchestrationId:'team-b',beforeId:'b-199',beforeUpdatedAt:1801},
+    {limit:200,orchestrationId:'team-a'},
+    {limit:200,orchestrationId:undefined},
+  ]);
+  expect(queries).toHaveLength(4);
+});
+
 test('manual demand preflight shows native read-only scope and never admits work', async ({page}) => {
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {

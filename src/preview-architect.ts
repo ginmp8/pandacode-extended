@@ -53,11 +53,13 @@ export function createPreviewArchitect(host: PreviewHost) {
   /** Like the native command: a sane range, or a refusal. */
   function validCouncil(council: CouncilConfig): CouncilConfig {
     if (!council || typeof council.target !== 'number' || !(council.target > 0 && council.target <= 10)) throw new Error('A council target is between 0 and 10.');
-    // Preview must round-trip the native task strategy; otherwise a successful S2
-    // configuration is silently displayed as S1 after the native reply.
+    // Preview round-trips native strategy configuration without simulating a
+    // completed review. In particular, S3 is never proof of real challengers.
     const strategy = council.strategy ?? 'parallel';
-    if (strategy !== 'parallel' && strategy !== 'escalated')
-      throw new Error('Independent two-phase challengers are not available.');
+    if (strategy !== 'parallel' && strategy !== 'escalated' && strategy !== 'two_phase')
+      throw new Error('Unknown Council review strategy.');
+    if (strategy === 'two_phase' && council.maxRounds < 2)
+      throw new Error('S3 two-phase Council requires at least two review rounds.');
     if (council.forceEscalation && strategy !== 'escalated')
       throw new Error('Forced escalation requires the escalated Council strategy.');
     if (council.forceEscalation && council.maxRounds < 2)

@@ -494,7 +494,12 @@ test('architect preview round-trips only admitted native Council strategies with
   const restored = createPreviewArchitect(host).get('parent');
   assert.equal(restored.config.council.strategy, 'escalated');
   assert.equal(restored.config.council.forceEscalation, true);
-  assert.throws(() => api.setCouncil('parent', { ...standard, strategy: 'two_phase' }), /two-phase/);
+  const twoPhase = api.setCouncil('parent', { ...standard, strategy: 'two_phase' });
+  assert.equal(twoPhase.config.council.strategy, 'two_phase');
+  assert.equal(twoPhase.config.council.forceEscalation, undefined);
+  assert.equal(createPreviewArchitect(host).get('parent').config.council.strategy, 'two_phase');
+  assert.throws(() => api.setCouncil('parent', { ...standard, strategy: 'two_phase', maxRounds: 1 }), /at least two/);
+  assert.throws(() => api.setCouncil('parent', { ...standard, strategy: 'untrusted' }), /Unknown Council review strategy/);
   assert.throws(() => api.setCouncil('parent', { ...standard, forceEscalation: true }), /requires the escalated/);
   assert.throws(() => api.setCouncil('parent', { ...standard, maxRounds: 1, strategy: 'escalated', forceEscalation: true }), /at least two/);
   const parallel = api.setCouncil('parent', { ...standard, strategy: 'parallel', forceEscalation: false });

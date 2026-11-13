@@ -87,7 +87,7 @@ export function createCouncil(host: CouncilHost) {
   const reviewerLoads = new Map<string, string>();
   const reviewerDraft = new Map<string, ReviewerSelection>();
   // Strategy is task-scoped; a pre-enable selection must not become a global default.
-  const strategyDraft = new Map<string, 'parallel' | 'escalated'>();
+  const strategyDraft = new Map<string, 'parallel' | 'escalated' | 'two_phase'>();
   const selection = (sessionId: string): ReviewerSelection => {
     let draft = reviewerDraft.get(sessionId);
     const persisted = shownConfig(sessionId);

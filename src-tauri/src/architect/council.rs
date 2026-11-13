@@ -417,6 +417,10 @@ pub struct CouncilInspection {
     pub attempts: Vec<CouncilInspectionAttempt>,
     /// Summed native observations, not wall-clock elapsed time or a provider billing receipt.
     pub usage: CouncilUsageTotals,
+    /// Root-only native observations grouped by round and reviewer source. Each worker ID
+    /// contributes to at most one group; unexecuted child reservations contribute nothing.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub usage_by_round_source: Vec<CouncilUsageGroup>,
     /// Attributed excerpts from durable reviewer messages. Claims are NOT verified evidence.
     pub reported_findings: Vec<CouncilReportedFinding>,
 }
@@ -433,6 +437,27 @@ pub struct CouncilUsageTotals {
     pub cost_amount: Option<f64>,
     pub cost_currency: Option<String>,
     pub usage_provenance: &'static str,
+}
+/// Group root reviewer observations without counting replayed worker IDs twice,
+/// even when corrupt/historical rows attribute an ID to two different rounds.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CouncilUsageGroup {
+    pub round: usize,
+    pub reviewer_source: &'static str,
+    pub usage: CouncilUsageTotals,
+}
+fn usage_by_round_source(attempts: &[CouncilInspectionAttempt]) -> Vec<CouncilUsageGroup> {
+    let mut seen = std::collections::HashSet::new();
+    let mut groups = std::collections::BTreeMap::<(usize, &'static str), Vec<CouncilInspectionAttempt>>::new();
+    for attempt in attempts {
+        if seen.insert(attempt.worker_id.as_str()) {
+            groups.entry((attempt.round, attempt.reviewer_source)).or_default().push(attempt.clone());
+        }
+    }
+    groups.into_iter().map(|((round, reviewer_source), entries)| CouncilUsageGroup {
+        round, reviewer_source, usage: usage_totals(&entries),
+    }).collect()
 }
 fn usage_totals(attempts: &[CouncilInspectionAttempt]) -> CouncilUsageTotals {
     let mut ids = std::collections::HashSet::new();
@@ -652,6 +677,7 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
         force_escalation: config.force_escalation, criteria_source: config.criteria_source,
         cycle_started_at: team.council_since, team_revision: team.revision,
         status, verified_pass, verified_completion, criteria: config.criteria.clone(),
+        usage_by_round_source: usage_by_round_source(&attempts),
         usage: usage_totals(&attempts), attempts,
         reserved_children: Vec::new(), reported_findings: Vec::new(),
     })

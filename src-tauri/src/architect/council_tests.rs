@@ -122,6 +122,44 @@ fn native_usage_totals_dedupe_attempt_ids_and_never_treat_absent_receipts_as_zer
 }
 
 #[test]
+fn native_root_usage_breakdown_counts_each_attempt_once_across_rounds() {
+    let mut first = seat("same-id", 1, Some(9.2), SINCE + 1);
+    first.council.as_mut().unwrap().started_at = SINCE + 3;
+    first.updated_at = SINCE + 9;
+    let mut duplicate = first.clone();
+    duplicate.council.as_mut().unwrap().round = 2;
+    let mut second = seat("second", 2, Some(8.0), SINCE + 10);
+    second.council.as_mut().unwrap().started_at = SINCE + 12;
+    second.updated_at = SINCE + 19;
+    let mut queued = seat("queued", 2, None, SINCE + 15);
+    queued.council.as_mut().unwrap().started_at = 0;
+    queued.status = "queued".into();
+
+    let inspected = council::inspection(
+        &team_with(on(9.0, 3, 2), vec![first, duplicate, second, queued]), false,
+    ).unwrap();
+    assert_eq!(inspected.usage.unique_attempts, 3);
+    assert_eq!(inspected.usage_by_round_source.len(), 2);
+    assert_eq!(inspected.usage_by_round_source[0].round, 1);
+    assert_eq!(inspected.usage_by_round_source[0].usage.unique_attempts, 1);
+    assert_eq!(inspected.usage_by_round_source[1].round, 2);
+    assert_eq!(inspected.usage_by_round_source[1].usage.unique_attempts, 2);
+    assert_eq!(inspected.usage_by_round_source.iter()
+        .map(|group| group.usage.unique_attempts).sum::<usize>(), inspected.usage.unique_attempts);
+    assert_eq!(inspected.usage.cumulative_queue_wait_ms, Some(4));
+    assert_eq!(inspected.usage.cumulative_observed_span_ms, Some(13));
+    assert_eq!(inspected.usage_by_round_source[1].usage.span_measured_attempts, 1);
+    for group in &inspected.usage_by_round_source {
+        assert_eq!(group.reviewer_source, "automatic");
+        assert!(group.usage.token_count.is_none());
+        assert!(group.usage.cost_amount.is_none());
+    }
+    let json = serde_json::to_value(&inspected).unwrap();
+    assert_eq!(json["usageByRoundSource"][0]["usage"]["usageProvenance"], "unknown");
+    assert!(!inspected.verified_pass);
+}
+
+#[test]
 fn native_completed_council_projection_requires_a_verified_terminal_pass() {
     let mut team = team_with(on(9.0, 3, 2), vec![
         seat("reviewer-a", 1, Some(9.8), SINCE + 1),

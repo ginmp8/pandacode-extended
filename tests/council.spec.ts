@@ -78,6 +78,49 @@ test('native Council inspector displays unknown usage and never trusts a display
   await expect(panel(page).locator('.council-inspection img')).toHaveCount(0);
 });
 
+test('Council inspector shows disjoint root usage per round/source without claiming child billing', async ({ page }) => {
+  const usage = (count: number, queue: number | null, span: number | null) => ({
+    uniqueAttempts: count, queueMeasuredAttempts: queue === null ? 0 : count,
+    spanMeasuredAttempts: span === null ? 0 : count,
+    cumulativeQueueWaitMs: queue, cumulativeObservedSpanMs: span,
+    tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown',
+  });
+  const inspection = {
+    mode: 'm7', cycleStartedAt: 1000, teamRevision: 8,
+    status: { state: 'blocked', round: 2, lowest: null, target: 9, stale: false },
+    verifiedPass: false, criteria: [],
+    attempts: [
+      { workerId: 'direct', name: 'Security bot', round: 1, lens: 'Security', reviewerSource: 'direct_bot',
+        status: 'completed', score: 8, abandoned: false, provider: 'codex', model: 'test', attempt: 1,
+        createdAt: 1000, startedAt: 1300, lastUpdatedAt: 2300, queueWaitMs: 300, observedSpanMs: 1000,
+        tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+      { workerId: 'auto', name: 'Architecture', round: 2, lens: 'Architecture', reviewerSource: 'automatic',
+        status: 'queued', score: null, abandoned: false, provider: 'claude', model: 'test', attempt: 1,
+        createdAt: 2300, startedAt: 0, lastUpdatedAt: 2300, queueWaitMs: null, observedSpanMs: null,
+        tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+    ],
+    usage: usage(2, 300, 1000),
+    usageByRoundSource: [
+      { round: 1, reviewerSource: 'direct_bot', usage: usage(1, 300, 1000) },
+      { round: 2, reviewerSource: 'automatic', usage: usage(1, null, null) },
+    ],
+    reservedChildren: [{ botId: 'nested-bot', childSessionId: 'child-one', rootCycleId: 'task:1000',
+      requiredLeafReviewers: 3, status: 'blocked_until_native_child_review' }],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const groups = panel(page).getByRole('region', { name: 'Root usage by round and source' });
+  await expect(groups.locator('li')).toHaveCount(2);
+  await expect(groups.locator('li').first()).toContainText('Round 1 · direct bot · Native attempts 1 · Queue 300 ms');
+  await expect(groups.locator('li').nth(1)).toContainText('Round 2 · automatic · Native attempts 1 · Queue unknown');
+  await expect(groups).toContainText('Child reservations are excluded');
+  await expect(groups).toContainText('provider tokens and cost remain unknown without receipts');
+  await expect(panel(page).locator('.council-usage-totals')).toContainText('Native attempts: 2');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+});
+
 test('Council inspector displays frozen user criterion targets and evidence requirements without treating configuration as proof', async ({ page }) => {
   const inspection = {
     mode: 'm7', strategy: 'two_phase', criteriaSource: 'hybrid',

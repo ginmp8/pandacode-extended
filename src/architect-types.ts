@@ -80,6 +80,10 @@ export interface CouncilUsageTotals {
   tokenCount: number | null; costAmount: number | null; costCurrency: string | null;
   usageProvenance: 'unknown';
 }
+/** Root-only native usage; groups have disjoint attempt IDs and exclude child reservations. */
+export interface CouncilUsageGroup {
+  round: number; reviewerSource: 'automatic' | 'direct_bot'; usage: CouncilUsageTotals;
+}
 /** Read-only task-owned native reservation, not a child score or authorization to run it. */
 export interface CouncilChildReservation {
   botId: string; childSessionId: string; rootCycleId: string;
@@ -95,6 +99,8 @@ export interface CouncilInspection {
   attempts: CouncilInspectionAttempt[];
   /** Optional for older native builds / existing preview fixtures. */
   usage?: CouncilUsageTotals;
+  /** Absent in older builds; all groups together count each root worker ID at most once. */
+  usageByRoundSource?: CouncilUsageGroup[];
   reportedFindings?: CouncilReportedFinding[];
   /** Absent on legacy builds; pending children cannot be presented as a passing quorum. */
   reservedChildren?: CouncilChildReservation[];

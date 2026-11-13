@@ -36,6 +36,7 @@ enum Command {
         before_updated_at: Option<i64>, before_id: Option<String>,
     },
     InspectTicket { ticket_id: String },
+    InspectTicketGraph { ticket_id: String },
     InspectTicketEffects { ticket_id: String },
     InspectTicketSource { ticket_id: String },
     UnlinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
@@ -97,6 +98,22 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(status) => { println!("{status}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectTicketGraph { ticket_id } = &command {
+                // The same durable, bounded native Ticket/Assignment graph as the
+                // workspace. Do not run Store::open recovery beside a live host.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::inspect_headless_ticket_graph(
+                        &dir.join("kingcode.sqlite3"), ticket_id,
+                    ));
+                match result {
+                    Ok(graph) => { println!("{graph}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent graph inspection failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -324,7 +341,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
     match command {
         // Inspection exits before setup_common and must never reach this branch.
         Command::InspectOrchestrations | Command::ListTickets | Command::ListTeamDemands { .. }
-        | Command::InspectTicket { .. }
+        | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
         | Command::InspectTicketEffects { .. }
         | Command::InspectTicketSource { .. } | Command::UnlinkSourceThread { .. }
@@ -881,6 +898,14 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--inspect-ticket-graph" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--inspect-ticket-graph needs a Ticket ID.\n\n{}", help()))?;
+                validate_ticket_id(ticket_id)?;
+                command = Command::InspectTicketGraph { ticket_id: ticket_id.clone() };
+                ops += 1;
+                index += 1;
+            }
             "--inspect-ticket" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--inspect-ticket needs a ticket ID.\n\n{}", help()))?;
@@ -1037,7 +1062,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1082,6 +1107,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          Persist a blocked, read-only manual Ticket from a local UTF-8 file
                          (max 16 KiB). Does not grant tools or dispatch a provider.
   --inspect-ticket <id>  Inspect redacted native Ticket/mandate/attempt metadata; exit.
+  --inspect-ticket-graph <id>
+                         Inspect bounded native Ticket/attempt topology without task
+                         objectives, results, inferred subagents or Council verdicts; exit.
   --inspect-ticket-effects <id>
                          List up to 100 native effect receipt keys, payload digests and
                          states; never replay or mark applied; exit.
@@ -1258,6 +1286,15 @@ mod tests {
         assert!(parsed("--inspect-ticket-effects").is_err());
         assert!(parsed("--inspect-ticket-effects ../unsafe").is_err());
         assert!(parsed("--inspect-ticket-effects ticket_123 --stop-ticket ticket_123").is_err());
+        assert_eq!(parsed("--inspect-ticket-graph ticket_123"),
+            Ok(Command::InspectTicketGraph { ticket_id: "ticket_123".into() }));
+        for invalid in [
+            "--inspect-ticket-graph",
+            "--inspect-ticket-graph ../outside",
+            "--inspect-ticket-graph ticket_123 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert_eq!(parsed("--inspect-ticket ticket_123"),
             Ok(Command::InspectTicket { ticket_id: "ticket_123".into() }));
         assert_eq!(parsed("--accept-ticket ticket_123 4"), Ok(Command::AcceptTicket {
@@ -1348,6 +1385,7 @@ mod tests {
             "--inspect-team-readiness",
             "--inspect-team-roster",
             "--inspect-ticket",
+            "--inspect-ticket-graph",
             "--inspect-ticket-effects",
             "--inspect-ticket-source",
             "--unlink-source-thread",

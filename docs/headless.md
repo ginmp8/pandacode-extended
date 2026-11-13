@@ -549,3 +549,23 @@ It does not perform a Skills Library scan: `skillLibraryStatus=not_scanned`,
 `harnessCapability=not_verified`, `invocationEvidence=not_verified`.
 `multiRoleExecutionAvailable=false` remains explicit; all execution
 requires a separate task-scoped native authorization and live recheck.
+
+### Read-only headless Ticket execution graph
+
+Use `pandacode serve --inspect-ticket-graph <ticket-id>` to retrieve the same
+bounded native Ticket/Assignment graph used by the Orchestrations workspace.
+The result is JSON containing `graph.ticketId`, `graph.ticketRevision`,
+`graph.nodes`, `graph.edges` and `graph.truncatedAttempts`. Up to the most
+recent 50 durable assignment attempts are represented; the graph distinguishes
+exactly 50 attempts from a truncated history.
+
+This command is **observational only**: it opens SQLite read-only beside a
+running headless or desktop host, does not run startup recovery, and never
+admits a provider, replays external effects or grants permissions. Its graph
+contains no objectives, tool outputs, worker results, private evidence or
+transcripts. Assignment edges mean **Ticket owns attempt**, not a verified
+dynamic subagent hierarchy. The response sets
+`dynamicSubagentsRepresented: false` and
+`councilVerdictIncluded: false`; a pending-review node is **not** a Council
+pass. Native authorization, live state and independent review still require
+the corresponding guarded operations.

@@ -753,6 +753,25 @@ fn run_graph(store: &Store, ticket_id: &str) -> Result<RunGraph> {
     })
 }
 
+/// Headless parity with the workspace's native, revisioned Ticket execution
+/// graph. This is an observation of durable attempts, NOT a record of
+/// dynamic subagents, native Council verdicts or live provider handles.
+/// Opening read-only must not run restart recovery beside an active host.
+pub(crate) fn inspect_headless_ticket_graph(
+    database_path: &std::path::Path, ticket_id: &str,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let graph = run_graph(&store, ticket_id)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "graph": graph,
+        "observationalOnly": true,
+        "dynamicSubagentsRepresented": false,
+        "councilVerdictIncluded": false,
+        "providerDispatchedByCommand": false,
+        "recoveryPerformed": false
+    })).map_err(|e| e.to_string())
+}
+
 /// A one-shot local CLI inspector is deliberately read-only: it must not run
 /// Store::open's migration/restart settlement behind a live serve process.
 /// Return bounded operational metadata, never the task objective, worker result,
@@ -3180,6 +3199,55 @@ mod tests {
         assert_eq!(stopped.attempt_insights[0].remaining_run_budget_ms, None);
     }
 
+
+    #[test]
+    fn headless_run_graph_is_durable_redacted_and_never_recovers_a_live_task() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, admitted) = admit(
+            &mut store, &config.id, "Private headless graph objective",
+            "headless-graph-1", false,
+        ).unwrap();
+        assert!(admitted);
+        let before_audit: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let before_mandates: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get(0),
+        ).unwrap();
+        let output = inspect_headless_ticket_graph(&store.path, &ticket.id).unwrap();
+        let view: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(view["graph"]["ticketId"], ticket.id);
+        assert_eq!(view["graph"]["ticketRevision"], ticket.revision);
+        assert_eq!(view["graph"]["nodes"][0]["kind"], "ticket");
+        assert_eq!(view["graph"]["nodes"][1]["kind"], "assignment");
+        assert_eq!(view["graph"]["nodes"][1]["active"], true);
+        assert_eq!(view["graph"]["edges"][0]["relation"], "owns_attempt");
+        assert_eq!(view["observationalOnly"], true);
+        assert_eq!(view["dynamicSubagentsRepresented"], false);
+        assert_eq!(view["councilVerdictIncluded"], false);
+        assert_eq!(view["providerDispatchedByCommand"], false);
+        assert_eq!(view["recoveryPerformed"], false);
+        for private in ["Private headless graph objective", "headless-graph-1",
+            "authorizationId", "private provider result"] {
+            assert!(!output.contains(private), "Graph disclosed {private}");
+        }
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), before_audit);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), before_mandates);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = inspect_headless_ticket_graph(&path, &ticket.id).unwrap();
+        let after: serde_json::Value = serde_json::from_str(&reopened).unwrap();
+        assert_eq!(after["graph"], view["graph"]);
+        assert!(inspect_headless_ticket_graph(&path, "missing-ticket").is_err());
+    }
 
     #[test]
     fn native_run_graph_uses_only_durable_ticket_attempt_edges_and_is_redacted() {

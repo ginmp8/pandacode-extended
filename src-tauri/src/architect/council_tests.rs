@@ -2143,3 +2143,65 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
     ).unwrap();
     assert!(child_council::inspect(&store, &started).unwrap_err().contains("child_council_stale"));
 }
+
+#[test]
+fn child_council_revocation_and_project_isolation_fail_closed() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let parent = store.session(&sid).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('foreign-child-project','Foreign','/tmp/foreign-council-child')",
+            [],
+        ).unwrap();
+        for id in ["child-security", "child-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![id, parent.project_id, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.nested_bot_reviewers = ["child-security", "child-architecture"].iter()
+            .map(|id| council::CouncilNestedReviewer {
+                bot_id: (*id).into(), child_reviewers: 2,
+                child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+        store.db.execute(
+            "UPDATE bots SET project_id='foreign-child-project' WHERE id='child-security'",
+            [],
+        ).unwrap();
+    }
+    let denied = start_state(&state, &sid, "Review the task", None, None).unwrap_err();
+    assert!(denied.contains("child_council_denied"), "{denied}");
+    {
+        let store = state.store.lock().unwrap();
+        let reserved: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1 AND kind='council_child'",
+            [&sid], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(reserved, 0, "a foreign child must roll back the admission");
+        let parent = store.session(&sid).unwrap();
+        store.db.execute("UPDATE bots SET project_id=?2 WHERE id=?1",
+            rusqlite::params!["child-security", parent.project_id]).unwrap();
+    }
+    let (root, _) = start_state(&state, &sid, "Review the task", None, None).unwrap();
+    let store = state.store.lock().unwrap();
+    assert_eq!(child_council::inspect(&store, &root).unwrap().len(), 2);
+    store.db.execute("UPDATE bots SET paused=1 WHERE id='child-security'", []).unwrap();
+    assert!(child_council::inspect(&store, &root).unwrap_err().contains("child_council_revoked"));
+    store.db.execute("UPDATE bots SET paused=0 WHERE id='child-security'", []).unwrap();
+    store.db.execute("UPDATE bots SET created_at=created_at+1 WHERE id='child-security'", []).unwrap();
+    assert!(child_council::inspect(&store, &root).unwrap_err().contains("child_council_stale"));
+    store.db.execute("UPDATE bots SET created_at=created_at-1 WHERE id='child-security'", []).unwrap();
+    store.db.execute(
+        "UPDATE bots SET project_id='foreign-child-project' WHERE id='child-security'",
+        [],
+    ).unwrap();
+    assert!(child_council::inspect(&store, &root).unwrap_err().contains("child_council_denied"));
+}

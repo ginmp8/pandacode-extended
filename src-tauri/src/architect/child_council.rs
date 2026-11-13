@@ -15,6 +15,8 @@ struct FrozenChildReservation {
     root_session_id: String,
     root_cycle_id: String,
     bot_id: String,
+    // Prevent a deleted and recreated bot ID from inheriting task authority.
+    bot_created_at: i64,
     child_session_id: String,
     objective_sha256: String,
     policy_sha256: String,
@@ -79,15 +81,24 @@ fn frozen(
     {
         return Err("child_council_stale: child project, checkout or permission mode changed.".into());
     }
+    let bot = bots::get(store, &child.bot_id)
+        .map_err(|_| "child_council_revoked: selected nested bot was removed.")?;
+    if bot.paused {
+        return Err("child_council_revoked: selected nested bot is paused.".into());
+    }
+    if bot.project_id != parent.project_id {
+        return Err("child_council_denied: selected nested bot belongs to another project.".into());
+    }
     let scope = serde_json::to_vec(&(
         &session.project_id, &session.worktree_path, &session.provider,
         &session.model, &session.reasoning_effort,
     )).map_err(|e| e.to_string())?;
     Ok(FrozenChildReservation {
-        schema_version: 2,
+        schema_version: 3,
         root_session_id: root.session_id.clone(),
         root_cycle_id: format!("{}:{}", root.session_id, root.council_since),
         bot_id: child.bot_id.clone(),
+        bot_created_at: bot.created_at,
         child_session_id: session_id.to_owned(),
         objective_sha256: digest(root.objective.as_bytes()),
         policy_sha256: digest(&serde_json::to_vec(council).map_err(|e| e.to_string())?),
@@ -145,6 +156,9 @@ pub(super) fn reserve(store: &Store, root: &TeamSnapshot) -> Result<()> {
         if read(store, root, child)?.is_some() { continue; }
         let bot = bots::get(store, &child.bot_id)
             .map_err(|_| "child_council_unavailable: selected bot no longer exists.")?;
+        if bot.project_id != parent.project_id {
+            return Err("child_council_denied: selected nested bot belongs to another project.".into());
+        }
         if bot.paused || bot.provider == "zcode" || bot.model.is_empty() {
             return Err("child_council_unavailable: selected bot cannot coordinate this child.".into());
         }

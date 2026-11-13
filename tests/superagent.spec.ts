@@ -713,7 +713,8 @@ test('multi-member Team Builder updates settled history safely without launching
       if(command==='superagent_roster_update') {
         if(args?.expectedRevision!==config.policyRevision)throw Error('Native policy revision mismatch');
         const input=args?.input as {workerBotIds:string[];reviewerBotIds:string[]};
-        if(input.workerBotIds.length!==3||input.reviewerBotIds.length!==2)throw Error('Role validation failed');
+        if(input.workerBotIds.join(',')!=='worker,worker-c,worker-b' ||
+          input.reviewerBotIds.length!==2)throw Error('Role order validation failed');
         config.policyRevision++;
         roster={...roster,workerBotIds:input.workerBotIds,reviewerBotIds:input.reviewerBotIds,
           policyRevision:config.policyRevision,executionReady:false};
@@ -726,12 +727,15 @@ test('multi-member Team Builder updates settled history safely without launching
   await host.getByRole('button',{name:'Load native members'}).click();
   const form=host.locator('form[data-sa-form="roster"]');
   await form.locator('select[name="additionalWorkers"]').selectOption(['worker-b','worker-c']);
+  await form.getByRole('button',{name:'Move Worker C up'}).click();
+  await expect(form.locator('.sa-worker-order li').first()).toContainText('Worker C');
   await form.locator('select[name="reviewers"]').selectOption(['review-a','review-b']);
   await expect(form.getByRole('button',{name:'Save configured roles'})).toBeEnabled();
   await form.getByRole('button',{name:'Save configured roles'}).click();
   await expect(host.getByText('Multi-member execution is disabled',{exact:false})).toBeVisible();
   await expect(host.getByRole('region',{name:'Configured Team roles'}))
     .toContainText('Policy revision 2');
+  await expect(host.locator('.sa-worker-order li').first()).toContainText('Worker C');
   const calls=await page.evaluate(()=>(window as unknown as {saRosterCalls:string[]}).saRosterCalls);
   expect(calls.filter(value=>value==='superagent_roster_update')).toHaveLength(1);
   expect(calls.filter(value=>value==='superagent_submit' || value==='superagent_set_enabled')).toHaveLength(0);

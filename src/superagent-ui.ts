@@ -117,6 +117,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let effectReceipts: EffectReceipt[] = [], effectReceiptsLoaded = false;
   let runGraph: RunGraph | null = null, runGraphLoaded = false;
   let roleRoster: TeamRoster | null = null;
+  // Draft order is committed only by the native revision-guarded roster update.
+  let workerOrder: string[] = [];
   let effectiveTeam: EffectiveTeam | null = null;
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
@@ -564,8 +566,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             ' · Primary Worker: ' + safe(botName(roleRoster.workerBotIds[0])) +
             ' · Policy revision ' + roleRoster.policyRevision + '</p>' +
             '<form data-sa-form="roster">' +
-              '<label>Additional Workers (up to 7)<select name="additionalWorkers" multiple size="5">' +
-              roleOptions(roleRoster.workerBotIds.slice(1)) + '</select></label>' +
+              '<label>Additional Workers (up to 7)<select name="additionalWorkers" data-sa-worker-select multiple size="5">' +
+              roleOptions(workerOrder) + '</select></label>' +
+              '<ol class="sa-worker-order" aria-label="Additional Worker order">' +
+              workerOrder.map((id,index) => '<li><span>' + (index + 2) + '. ' + safe(botName(id)) +
+                '</span><button type="button" data-sa-worker-move="' + safe(id) +
+                '" data-sa-direction="up" aria-label="Move ' + safe(botName(id)) +
+                ' up"' + (index === 0 || chosen.enabled ? ' disabled' : '') + '>Up</button>' +
+                '<button type="button" data-sa-worker-move="' + safe(id) +
+                '" data-sa-direction="down" aria-label="Move ' + safe(botName(id)) +
+                ' down"' + (index === workerOrder.length - 1 || chosen.enabled ? ' disabled' : '') +
+                '>Down</button></li>').join('') + '</ol>' +
               '<label>Optional Council Reviewers (up to 4)<select name="reviewers" multiple size="5">' +
               roleOptions(roleRoster.reviewerBotIds) + '</select></label>' +
               '<p>A bot may have one role only. Workers must share the primary Worker project. A disabled Team may change roles after all demands settle; active/reviewable work and unresolved effects block native saves.</p>' +
@@ -741,7 +752,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
         inspectedTicket = ''; threadLinks = [];
-        linkedDecisions = []; linkedDecisionsLoaded = false; roleRoster = null; effectiveTeam = null;
+        linkedDecisions = []; linkedDecisionsLoaded = false; roleRoster = null; workerOrder = []; effectiveTeam = null;
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
         sourceIntegrity = null;
       }
@@ -753,6 +764,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       await refreshTicketDetails();
       if (roleRoster && selected) {
         roleRoster = await call<TeamRoster>('superagent_roster',{orchestrationId:selected});
+        workerOrder = roleRoster.workerBotIds.slice(1);
       }
       // Any native refresh invalidates this non-authoritative, time-bound scan.
       effectiveTeam = null;
@@ -789,6 +801,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   // Templates populate editable names only; no bot, tool or task is selected.
   host.addEventListener('change', event => {
     const target = event.target;
+    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-worker-select')) {
+      if (busy || !roleRoster || roleRoster.orchestrationId !== selected) return;
+      const next = Array.from(target.selectedOptions, option => option.value);
+      workerOrder = [...workerOrder.filter(id => next.includes(id)),
+        ...next.filter(id => !workerOrder.includes(id))];
+      render();
+      return;
+    }
     if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-team-status')) {
       if (!['all','enabled','disabled'].includes(target.value)) return;
       teamStatusFilter = target.value as typeof teamStatusFilter;
@@ -885,6 +905,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   host.addEventListener('click', event => {
     const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button') : null;
     if (!target || !host.contains(target) || target.disabled) return;
+    if (target.dataset.saWorkerMove) {
+      if (busy || roleRoster?.orchestrationId !== selected || current()?.enabled) return;
+      const index = workerOrder.indexOf(target.dataset.saWorkerMove);
+      const offset = target.dataset.saDirection === 'up' ? -1 : 1;
+      const next = index + offset;
+      if (index < 0 || next < 0 || next >= workerOrder.length) return;
+      [workerOrder[index], workerOrder[next]] = [workerOrder[next], workerOrder[index]];
+      const movedId = target.dataset.saWorkerMove, direction = target.dataset.saDirection;
+      render();
+      Array.from(host.querySelectorAll<HTMLButtonElement>('[data-sa-worker-move]'))
+        .find(button => button.dataset.saWorkerMove === movedId &&
+          button.dataset.saDirection === direction)?.focus({preventScroll:true});
+      return;
+    }
     if (target.hasAttribute('data-sa-cancel')) { confirm = null; render(); return; }
     if (target.hasAttribute('data-sa-confirm')) {
       const action = confirm?.action; confirm = null; if (action) void work(action);
@@ -1013,7 +1047,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       selected = demand.orchestrationId;
       workspaceView = 'runs';
       tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
-      inspectedAssignmentId = ''; roleRoster = null; effectiveTeam = null;
+      inspectedAssignmentId = ''; roleRoster = null; workerOrder = []; effectiveTeam = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       sourceIntegrity = null;
       void work(async () => {
@@ -1040,6 +1074,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target.hasAttribute('data-sa-role-load')) {
       if (selected) void work(async () => {
         roleRoster=await call<TeamRoster>('superagent_roster',{orchestrationId:selected});
+        workerOrder=roleRoster.workerBotIds.slice(1);
       });
       return;
     }
@@ -1279,7 +1314,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (form.dataset.saForm === 'roster') {
       const cfg=current();
       if (!cfg || !roleRoster || roleRoster.orchestrationId!==cfg.id) return;
-      const workerBotIds=[cfg.workerBotId,...data.getAll('additionalWorkers').map(String)];
+      const workerBotIds=[cfg.workerBotId,...workerOrder];
       const reviewerBotIds=data.getAll('reviewers').map(String);
       void work(async () => {
         roleRoster=await call<TeamRoster>('superagent_roster_update',{

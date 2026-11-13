@@ -140,6 +140,13 @@ fn effective_team(
         if bot.paused {
             configuration_issues.push("Paused bot: resume it in Bots before admission.".into());
         }
+        // Worker project drift can occur after configuring a reusable Team.
+        // Coordinator projects may differ; Workers own the execution scope.
+        if role == "worker" && bot.project_id != config.project_id {
+            configuration_issues.push(
+                "Worker project differs from the Team execution project: restore its project or reconfigure this disabled Team.".into(),
+            );
+        }
         for skill in &skills {
             if skill.library_status=="missing" {
                 configuration_issues.push(format!(
@@ -337,6 +344,19 @@ mod tests {
         assert!(view.members[1].configuration_issues.iter().any(|issue|
             issue.contains("unresolved safety findings")));
         assert!(view.members[0].configuration_issues.is_empty());
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('moved-project','Moved','/tmp/sa-moved')",[],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE bots SET project_id='moved-project' WHERE id='another-worker'",[],
+        ).unwrap();
+        let reopened=Store::open_read_only(&path).unwrap();
+        let drift=effective_team(&reopened,&cfg.id,&library).unwrap();
+        assert_eq!(drift.policy_revision,roster.policy_revision);
+        assert!(drift.members[2].configuration_issues.iter().any(|issue|
+            issue.contains("Worker project differs from the Team execution project")));
+        assert!(drift.members[0].configuration_issues.is_empty());
+        assert!(!drift.grants_issued);
         store.db.execute("UPDATE bots SET paused=1 WHERE id='reviewer'",[]).unwrap();
         let paused=effective_team(&store,&cfg.id,&library).unwrap();
         assert_eq!(paused.policy_revision,roster.policy_revision);

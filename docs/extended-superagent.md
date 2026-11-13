@@ -1,6 +1,6 @@
 # Extended SuperAgent orchestration
 
-> **Implementation status:** Incomplete. The persistent Orchestrations workspace, manual read-only Ticket flow, scoped-write candidate, exact-effect candidate and source-policy groundwork exist in the worktree. S1 writes pass focused Windows checks but are disabled on Unix; one SuperAgent effects restart test fails. Full multi-role Teams, task-bound Council, authenticated intake/Auto, durable recovery/headless parity, nested subagents and S6 exact-SHA evidence remain outstanding. No overall acceptance is claimed.
+> **Implementation status:** Incomplete. The persistent Orchestrations workspace, manual read-only Ticket flow, scoped-write candidate, exact-effect candidate and source-policy groundwork exist in the worktree. Team Builder creates and edits ordered worker/reviewer membership for disabled Teams with no Tickets; Ticket evidence displays the native immutable Team snapshot and its provenance. Multi-worker scheduling and reviewer execution/Council binding remain incomplete. The S4 manual one-shot Observe slice fetches bounded metadata for an exact linked thread across six event classes; Auto, all other event classes, durable recovery/headless parity, nested subagents and S6 exact-SHA evidence remain outstanding. S1 writes pass focused Windows checks but are disabled on Unix; one SuperAgent effects restart test fails. No overall acceptance is claimed.
 > **Requested push branch:** feat/issue-148-pe. No commit or push has been made.
 
 **Authoritative specification:** [Issue #148](https://github.com/ginmp8/pandacode-extended/issues/148), extending [Issue #131](https://github.com/ginmp8/pandacode-extended/issues/131). Addenda: [EGM-01–07](https://github.com/ginmp8/pandacode-extended/issues/148#issuecomment-6817527256), [DD-01–14](https://github.com/ginmp8/pandacode-extended/issues/148#issuecomment-6817744113), [SA-01–09](https://github.com/ginmp8/pandacode-extended/issues/148#issuecomment-6817864073), [NS-01–12](https://github.com/ginmp8/pandacode-extended/issues/148#issuecomment-6817979555).
@@ -25,7 +25,7 @@ The standalone design packet and source map are [here](extended-superagent-desig
 | S1 — Native authority/leases | Durable Demand/Mandate/Run, manual admission, exact scoped writes, project/resource leases, correlated callbacks, stop/revoke and settlement. Unsupported OS/harness remains disabled. |
 | S2 — Teams/Demands/Runs | Versioned Teams; Coordinator, multiple Workers, optional native Reviewers; role policy/Skills/budget snapshots; work graph/scheduler; compatible manifest and UX-01–24. |
 | S3 — Council | Bind Team, Ticket, WorkItem/Run, assignment, artifact, cycle/round and reviewer policy; require a fresh native verdict or attributed human exception. |
-| S4 — Sources/Auto | Authenticated local-gh intake, Off/Observe/Auto, allowlists, cursor/dedup, source-to-Team routing, revocation and privacy disclosure. Auto stays unavailable until S1/S5 gates pass. |
+| S4 — Sources/Auto | Manual authenticated local-gh Observe for one exact linked thread, Off/Observe, allowlists, per-thread cursor/dedup and privacy disclosure. Polling, source-to-Team routing and Auto remain unavailable until S1/S5 gates pass. |
 | S5 — Recovery/effects/headless/subagents | Restart/checkpoints, CAS effect claims/read-back, stop races, budgets/watchdogs, serve parity and policy-bound nested-child lineage. |
 | S6 — Exact-SHA verification | Trace AC-01–31, UX-01–24, EGM-01–07, DD-01–14, SA-01–09 and NS-01–12 to tests, exact SHA, CI, screenshots and residual risk. |
 
@@ -46,9 +46,9 @@ The standalone design packet and source map are [here](extended-superagent-desig
 | S0 source map | Updated for #148 baseline and candidate boundaries |
 | S1 scoped writes | Partial: focused Windows checks pass; Unix disabled; one unrelated effects test fails |
 | S2 UX-P1 persistent workspace | Implemented and browser-verified; preserve non-modal route |
-| S2 multi-role Teams/work graph | Incomplete |
+| S2 multi-role Teams/work graph | Partial: Team Builder supports ordered Workers and Reviewers; Ticket evidence uses the immutable saved Team snapshot. Multi-worker scheduling and reviewer execution remain incomplete. |
 | S3 task-bound Council | Incomplete; adapter is advisory |
-| S4 authenticated intake/Auto | Incomplete and fail-closed |
+| S4 manual Observe / Auto | One-shot linked-thread metadata intake supports exactly six event classes and has focused native/UI tests added; tests not run in this low-space worktree. Auto and background intake remain unavailable. |
 | S5 recovery/headless/subagents | Incomplete; Rust validation outstanding |
 | S6 exact-SHA evidence | Not started |
 | Live GitHub smoke | not_run until a disposable authorized repository is available |
@@ -64,7 +64,80 @@ never enables an orchestration. Restore requires a new preview and confirmation.
 Ticket templates only fill names; both existing bot IDs must be selected
 explicitly. They do not create profiles, enable a policy, grant tools or start work.
 
+## Team Builder and Ticket role evidence
+
+Team Builder creates a disabled manual Team with one Coordinator, 1–16 ordered
+Workers and up to 8 ordered Reviewers. It can update a Team only while disabled
+and before its first Ticket; the native command remains the final revision and
+eligibility check. `workerBotId` is retained as the first ordered Worker for
+compatibility. Every changed Team edit creates a new immutable Team version.
+
+Ticket evidence reads `teamSnapshot` from that Ticket's native snapshot response
+and exposes its provenance, ordered roles and the exact returned payload. The UI
+does not substitute the current Team if a saved snapshot is absent. `legacy-current`
+means the mutable Team row observed during upgrade; it may not represent the
+historical admission state. `legacy-unknown` preserves only older saved identity
+evidence; synthetic placeholders and missing profile data are labeled as
+unknown, not reconstructed. Reviewer membership is descriptive only until the
+S3 native Council adapter is bound to a Ticket. The multi-role editor does not
+claim parallel worker scheduling or reviewer execution; the S2 work graph and
+scheduler are still incomplete.
+
 The trusted local Ticket detail can link an exact issue:NUMBER or pull:NUMBER to
 a same-orchestration Off/Observe source. SQLite v42 stores up to 16 references,
 rejects foreign tasks/conflicting owners and preserves links across restart.
 This is manual context metadata, not authenticated delivery, Auto or write authority.
+
+## Manual GitHub Observe intake
+
+An event source starts Off with an exact repository, actor and event class. The
+user can switch it to Observe, then click **Fetch once** beside an already-linked
+issue or pull request in Ticket evidence. The click names the exact repository
+and thread and performs one read: `gh auth status`, followed by one bounded
+GraphQL request to `api.github.com/graphql` through the user's local `gh` CLI.
+It uses the permissions already granted to that CLI and asks for no new GitHub
+access. There is no polling, subscription or request on app launch or page load.
+
+This slice supports exactly these six event classes:
+
+- `issues.opened`: issue database ID and author login.
+- `issues.edited`: the latest issue `UserContentEdit` node ID, editor login and
+  `editedAt`. The node ID is hashed for the receipt key; the timestamp in
+  milliseconds is used as the thread cursor. No title, body or edit diff is read.
+- `issue_comment.created`: latest comment database ID and author login.
+- `pull_request.opened`: pull request database ID and author login.
+- `pull_request_review.submitted`: latest review database ID and author login.
+  It also reads `submittedAt` only to reject pending drafts; the timestamp is
+  not retained.
+- `check_run.completed`: latest check run in the latest check suite on the exact
+  pull request's latest commit, only when GraphQL reports `COMPLETED` and a
+  completion timestamp. The check run database ID is its receipt/cursor value;
+  the owning GitHub App slug is its actor allowlist identity.
+
+Every other GitHub class or action is unsupported. This includes other
+`issues.*`, `issue_comment.*`, `pull_request.*`, `pull_request_review.*` and
+`check_run.*` actions, plus all `check_suite.*`, `workflow_run.*`, commit status,
+push, release and other webhook classes. This is a manual snapshot of the
+latest matching metadata, not a subscription or a complete event history. It
+does not request issue or PR titles/bodies, comment or review text, edit diffs,
+check names/conclusions/output or model text. A missing CLI, failed
+`gh auth status`, API or GraphQL error, truncated response, missing actor/ID or timestamp,
+unfinished check run, or unexpected repository/thread fails closed.
+
+The native side verifies the source is still Observe, the exact thread is linked
+to that source's orchestration, and the repository/event/actor match the saved
+allowlists. It rechecks the source revision and thread link after the request;
+turning the source Off or changing its revision during the request prevents a
+receipt from being recorded. Event data is untrusted metadata and cannot start
+or launch a Ticket, change policy, grant tools or enter a worker prompt.
+
+The existing SQLite decision table stores the source, stable event ID, returned
+repository, actor, event class, exact thread key, event-specific sequence,
+decision, source revision and local record time. Check run sequence values are
+GitHub database IDs; issue edit sequence values are edit timestamps in
+milliseconds. No GitHub text or response body is retained. Receipts are capped
+at 10,000 per source and remain in local app data until that data is removed.
+Replays return the original decision; each linked thread has its own monotonic
+cursor, gaps are accepted, and older out-of-order values are recorded as
+ignored. Turning a source Off blocks the next fetch before even
+`gh auth status`, so Off sends no request.

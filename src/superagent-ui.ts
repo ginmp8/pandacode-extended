@@ -7,10 +7,20 @@ type Call = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 interface Bot { id: string; name: string; paused: boolean }
 interface Config {
   id: string; name: string; coordinatorBotId: string; workerBotId: string;
+  workerBotIds?: string[]; reviewerBotIds?: string[]; teamVersion?: number;
   enabled: boolean; policyRevision: number;
   ticketCount?: number; runningCount?: number; blockedCount?: number; lastActivityAt?: number;
 }
 interface Ticket { id: string; objective: string; state: string; revision: number; evidence: string | null }
+interface TeamSnapshot {
+  [key: string]: unknown;
+  snapshotVersion?: unknown; provenance?: unknown; orchestrationId?: unknown;
+  teamVersion?: unknown; name?: unknown; projectId?: unknown; coordinatorBotId?: unknown;
+  workerBotIds?: unknown; reviewerBotIds?: unknown; policy?: unknown; roles?: unknown;
+}
+interface TeamDraft {
+  name: string; coordinatorBotId: string; workerBotIds: string[]; reviewerBotIds: string[];
+}
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
 interface ImportResult { created: string[]; unchanged: string[]; backupPath?: string }
 interface WorkerWriteDispatchRequest extends Record<string, unknown> {
@@ -41,7 +51,7 @@ interface CouncilObservation {
 }
 interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
-  activity: Activity[]; council?: CouncilObservation | null;
+  activity: Activity[]; teamSnapshot?: TeamSnapshot | null; council?: CouncilObservation | null;
 }
 interface IssueCommentStatus {
   ticketId: string; ticketRevision: number; repository: string; issueNumber: number;
@@ -55,12 +65,22 @@ interface EventSource {
   eventKind: string; mode: 'off' | 'observe'; policyRevision: number; lastSequence: number;
 }
 interface ThreadLink {
-  sourceId: string; ticketId: string; repository: string; subjectKey: string; createdAt: number;
+  sourceId: string; ticketId: string; repository: string; subjectKey: string;
+  actorFilter: string; eventKind: string; mode: 'off' | 'observe'; createdAt: number;
 }
 interface SourceDecision {
-  sourceId: string; deliveryId: string; eventKind: string; subjectKey: string;
+  sourceId: string; deliveryId: string; actor: string; eventKind: string; subjectKey: string;
   decision: string; sequence: number; policyRevision: number; at: number;
 }
+interface ObserveFetchDecision { decision: string; duplicate: boolean }
+interface PreviewObserveFetch { previewOnly: true; message: string }
+const OBSERVE_EVENT_KINDS = [
+  'issues.opened','issues.edited','issue_comment.created','pull_request.opened',
+  'pull_request_review.submitted','check_run.completed',
+] as const;
+const OBSERVE_FETCH_KINDS = new Set<string>(OBSERVE_EVENT_KINDS);
+const MAX_TEAM_WORKERS = 16;
+const MAX_TEAM_REVIEWERS = 8;
 
 async function issueCommentEffectKey(
   ticketId: string, repository: string, issueNumber: number, comment: string,
@@ -81,9 +101,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   let commentRepository = '', commentIssueNumber = '', commentDraft = '';
   let issueCommentError = '', issueCommentStatus: IssueCommentStatus | null = null;
   // Persist the user's editable preset draft across asynchronous list refreshes.
-  let draftPresetName = '', draftPresetTemplate = '';
   let rejectingTicket = '', inspectedTicket = '';
   let ticketDetails: TicketDetails | null = null;
+  let draftPresetName = '', draftPresetTemplate = '', draftCoordinatorBotId = '';
+  let draftWorkerBotIds = [''], draftReviewerBotIds: string[] = [];
+  const editTeamDrafts = new Map<string, TeamDraft>();
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
   const safe = (value: unknown) => escape(String(value ?? ''));
@@ -92,11 +114,94 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   const activityTime = (timestamp?: number): string => typeof timestamp === 'number' &&
     Number.isFinite(timestamp) && timestamp > 0
     ? new Date(timestamp).toLocaleString() : 'Unavailable';
+  const readTeamDraft = (form: HTMLFormElement): TeamDraft => {
+    const data = new FormData(form);
+    return {
+      name: String(data.get('name') ?? '').trim(),
+      coordinatorBotId: String(data.get('coordinatorBotId') ?? ''),
+      workerBotIds: data.getAll('workerBotIds').map(String),
+      reviewerBotIds: data.getAll('reviewerBotIds').map(String),
+    };
+  };
+  const rememberTeamDraft = (form: HTMLFormElement, draft: TeamDraft): void => {
+    if (form.dataset.saForm === 'create') {
+      draftPresetName = draft.name;
+      draftCoordinatorBotId = draft.coordinatorBotId;
+      draftWorkerBotIds = draft.workerBotIds.length ? draft.workerBotIds : [''];
+      draftReviewerBotIds = draft.reviewerBotIds;
+    } else if (form.dataset.saForm === 'edit' && form.dataset.orchestrationId) {
+      editTeamDrafts.set(form.dataset.orchestrationId, draft);
+    }
+  };
+  const validateTeamDraft = (draft: TeamDraft): TeamDraft => {
+    if (!draft.name || !draft.coordinatorBotId || !draft.workerBotIds.length ||
+        draft.workerBotIds.some(id => !id) || draft.reviewerBotIds.some(id => !id)) {
+      throw new Error('Choose a Team name, one coordinator, and at least one worker.');
+    }
+    if (draft.workerBotIds.length > MAX_TEAM_WORKERS || draft.reviewerBotIds.length > MAX_TEAM_REVIEWERS) {
+      throw new Error('A Team supports up to 16 workers and 8 reviewers.');
+    }
+    const roleIds = [draft.coordinatorBotId, ...draft.workerBotIds, ...draft.reviewerBotIds];
+    if (new Set(roleIds).size !== roleIds.length) throw new Error('A bot can have only one role in a Team.');
+    return draft;
+  };
+  function renderTeamSnapshot(snapshot: TeamSnapshot | null | undefined): string {
+    if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+      return '<section class="sa-pane sa-team-snapshot" aria-label="Saved Team snapshot">' +
+        '<h5>Saved Team snapshot unavailable</h5><p>The native Ticket response did not include <code>teamSnapshot</code>. The current Team configuration was not substituted.</p></section>';
+    }
+    const rawProvenance = typeof snapshot.provenance === 'string' ? snapshot.provenance : '';
+    const provenance = rawProvenance || 'missing';
+    const provenanceNote = rawProvenance === 'native'
+      ? 'Native: this immutable Team snapshot was captured for this Ticket.'
+      : rawProvenance === 'legacy-current'
+        ? 'Legacy-current: backfilled from the mutable Team configuration observed during upgrade; it may not match the exact historical admission state.'
+        : rawProvenance === 'legacy-unknown'
+          ? 'Legacy-unknown: historical role/profile data was not recorded. Placeholder identities and missing profile evidence are not recovered facts or dispatch authority.'
+          : 'Unrecognized or missing provenance. Treat historical Team details as unverified.';
+    const roles = Array.isArray(snapshot.roles) ? snapshot.roles : [];
+    const roleRows = roles.map((entry: unknown) => {
+      const role = entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? entry as Record<string, unknown> : {};
+      const roleName = typeof role.role === 'string' ? role.role : 'Unknown role';
+      const ordinal = typeof role.ordinal === 'number' && Number.isFinite(role.ordinal)
+        ? ' · ordinal ' + role.ordinal : '';
+      const botId = typeof role.botId === 'string' ? role.botId : 'Unknown bot identity';
+      const digest = typeof role.effectiveConfigSha256 === 'string' && role.effectiveConfigSha256
+        ? ' · profile SHA-256 ' + safe(role.effectiveConfigSha256)
+        : role.effectiveConfig === null ? ' · profile evidence unavailable' : '';
+      return '<li><strong>' + safe(roleName) + '</strong>' + safe(ordinal) + ' · ' +
+        safe(botName(botId)) + ' <code>' + safe(botId) + '</code>' + digest + '</li>';
+    }).join('');
+    let payload = 'Unable to serialize the returned snapshot.';
+    try { payload = JSON.stringify(snapshot, null, 2) ?? 'null'; } catch { /* malformed preview only */ }
+    const policy = snapshot.policy && typeof snapshot.policy === 'object' && !Array.isArray(snapshot.policy)
+      ? snapshot.policy as Record<string, unknown> : null;
+    return '<section class="sa-pane sa-team-snapshot" aria-label="Saved Team snapshot">' +
+      '<h5>Saved Team snapshot</h5><p>Exact immutable <code>teamSnapshot</code> returned with this Ticket; the current Team is never substituted.</p>' +
+      '<dl><dt>Provenance</dt><dd>' + safe(provenance) + '</dd>' +
+      '<dt>Team / version</dt><dd>' + safe(snapshot.name ?? 'Unknown Team') + ' / ' +
+      safe(snapshot.teamVersion ?? 'unknown') + ' · snapshot schema ' + safe(snapshot.snapshotVersion ?? 'unknown') + '</dd>' +
+      (policy ? '<dt>Saved policy</dt><dd>Revision ' + safe(policy.policyRevision ?? 'unknown') +
+        ' · Autonomy ' + safe(policy.autonomy ?? 'unknown') + ' · Council ' +
+        safe(policy.councilEnabled ?? 'unknown') + '</dd>' : '') +
+      '</dl><p role="note">' + safe(provenanceNote) + '</p>' +
+      '<h6>Saved role order</h6><ol>' + (roleRows || '<li>No role entries were returned.</li>') +
+      '</ol><details><summary>Inspect exact saved Team payload</summary><pre>' + safe(payload) +
+      '</pre></details></section>';
+  }
   function render(): void {
     if (!host.isConnected) return;
     const list = presets.map(item =>
-      '<li class="sa-item"><div><strong>' + safe(item.name) + '</strong><small>' +
-      safe(botName(item.coordinatorBotId)) + ' / ' + safe(botName(item.workerBotId)) +
+      {
+      const workerIds = item.workerBotIds?.length ? item.workerBotIds : [item.workerBotId];
+      const reviewerIds = item.reviewerBotIds ?? [];
+      const canEdit = !item.enabled && (item.ticketCount ?? 0) === 0;
+      const roles = safe(botName(item.coordinatorBotId)) + ' · Workers: ' +
+        safe(workerIds.map(botName).join(', ')) + (reviewerIds.length
+          ? ' · Reviewers: ' + safe(reviewerIds.map(botName).join(', ')) : '');
+      return '<li class="sa-item"><div><strong>' + safe(item.name) + '</strong><small>' +
+      roles +
       '</small><small class="sa-counts" aria-label="Task counts">' +
       (item.ticketCount ?? 0) + ' tasks · ' + (item.runningCount ?? 0) +
       ' running · ' + (item.blockedCount ?? 0) + ' blocked</small>' +
@@ -104,12 +209,41 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '</small></div><span>' +
       (item.enabled ? 'Manual' : 'Off') + '</span>' +
       '<button type="button" data-sa-select="' + safe(item.id) + '" aria-current="' +
-      (item.id === selected) + '">Details</button></li>').join('');
+      (item.id === selected) + '">Details</button>' + (canEdit
+        ? '<button type="button" data-sa-edit-team="' + safe(item.id) + '">Edit Team</button>' : '') +
+      '</li>';
+      }
+    ).join('');
     const optionsFor = (botId: string) => bots.map(bot => '<option value="' + safe(bot.id) + '"' +
       (bot.paused ? ' disabled' : '') + (bot.id === botId ? ' selected' : '') + '>' + safe(bot.name) +
       (bot.paused ? ' (paused)' : '') + '</option>').join('');
-    const choices = optionsFor('');
+    const roleEditor = (kind: 'worker' | 'reviewer', ids: string[]) => {
+      const title = kind === 'worker' ? 'Workers (ordered)' : 'Reviewers (ordered)';
+      const max = kind === 'worker' ? MAX_TEAM_WORKERS : MAX_TEAM_REVIEWERS;
+      const rows = ids.map((id, index) => {
+        const label = kind === 'worker' ? 'Worker ' + (index + 1) : 'Reviewer ' + (index + 1);
+        const name = kind === 'worker' ? 'workerBotIds' : 'reviewerBotIds';
+        return '<li><label>' + label + '<select name="' + name + '" data-sa-team-role="' + kind + '" required>' +
+          '<option value="">Choose bot</option>' + optionsFor(id) + '</select></label><div class="sa-actions">' +
+          '<button type="button" data-sa-role-action="up" data-sa-role="' + kind + '" data-sa-role-index="' + index + '" aria-label="Move ' +
+          label.toLowerCase() + ' up"' + (index === 0 ? ' disabled' : '') + '>Move up</button>' +
+          '<button type="button" data-sa-role-action="down" data-sa-role="' + kind + '" data-sa-role-index="' + index + '" aria-label="Move ' +
+          label.toLowerCase() + ' down"' + (index === ids.length - 1 ? ' disabled' : '') + '>Move down</button>' +
+          (kind === 'worker' && ids.length === 1 ? '' : '<button type="button" data-sa-role-action="remove" data-sa-role="' +
+            kind + '" data-sa-role-index="' + index + '" aria-label="Remove ' + label.toLowerCase() + '">Remove</button>') +
+          '</div></li>';
+      }).join('');
+      return '<div class="sa-team-role-editor" role="group" aria-label="' + title + '"><h4>' + title + '</h4><ol>' +
+        (rows || '<li>No reviewers selected.</li>') + '</ol><button type="button" data-sa-role-add="' + kind + '"' +
+        (ids.length >= max ? ' disabled' : '') + '>Add ' + kind + '</button></div>';
+    };
     const chosen = current();
+    const selectedTeamDraft = chosen ? editTeamDrafts.get(chosen.id) ?? {
+      name: chosen.name,
+      coordinatorBotId: chosen.coordinatorBotId,
+      workerBotIds: chosen.workerBotIds?.length ? chosen.workerBotIds : [chosen.workerBotId],
+      reviewerBotIds: chosen.reviewerBotIds ?? [],
+    } : null;
     const inspected = tickets.find(ticket => ticket.id === inspectedTicket);
     const writeTicket = tickets.find(ticket => ticket.id === writeGrantTicket);
     const canComment = !!inspected && ticketDetails?.ticket.id === inspected.id &&
@@ -121,6 +255,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     const details = inspected && ticketDetails
       ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
         '<h4>Ticket evidence</h4><p>Read-only native snapshot. Model output is not task approval.</p>' +
+        renderTeamSnapshot(ticketDetails.teamSnapshot) +
         '<dl><dt>Ticket ID</dt><dd><code>' + safe(inspected.id) + '</code></dd>' +
         '<dt>State / revision</dt><dd>' + safe(inspected.state) + ' / ' + inspected.revision + '</dd>' +
         '<dt>Actor</dt><dd>' + safe(ticketDetails.mandate.actor) + '</dd>' +
@@ -139,9 +274,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         (ticketDetails.activity.map(entry => '<li>' + safe(activityTime(entry.at)) + ' · ' +
           safe(entry.kind) + ' · ' + safe(entry.detail) + '</li>').join('') ||
           '<li>No activity recorded.</li>') +
-        '</ol><h5>Linked GitHub threads (context references only)</h5><ul class="sa-linked-threads">' +
-        (threadLinks.map(link => '<li>' + safe(link.repository) + ' / ' +
-          safe(link.subjectKey) + '</li>').join('') ||
+        '</ol><h5>Linked GitHub threads</h5><ul class="sa-linked-threads">' +
+        (threadLinks.map(link => '<li><span>' + safe(link.repository) + ' / ' +
+          safe(link.subjectKey) + ' · ' + safe(link.eventKind) + ' · actor ' +
+          safe(link.actorFilter) + '</span>' + (link.mode === 'observe'
+            ? (OBSERVE_FETCH_KINDS.has(link.eventKind)
+              ? '<button type="button" data-sa-fetch-thread="' + safe(link.sourceId) +
+              '" data-sa-subject-key="' + safe(link.subjectKey) + '" aria-label="Fetch one latest matching GitHub event for ' +
+                safe(link.repository) + ' ' + safe(link.subjectKey) + '">Fetch once</button>'
+              : '<small>Manual fetch unavailable for this event class.</small>')
+            : '<small>Off · no GitHub request</small>') + '</li>').join('') ||
           '<li>No threads linked.</li>') + '</ul>' +
         (canComment
           ? '<section class="sa-effect-editor" aria-label="Explicit GitHub effect"><h5>GitHub issue comment</h5>' +
@@ -192,14 +334,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '<button type="button" data-sa-source-decisions="' + safe(src.id) +
       '">View decisions</button></li>').join('');
     const sourcePanel = '<section class="sa-event-sources" aria-label="GitHub event sources">' +
-      '<h4>GitHub event sources</h4><p>Off/Observe only. No authenticated GitHub intake, Auto tasks or external writes.</p>' +
+      '<h4>GitHub event sources</h4><p>Off/Observe only. Fetch once is a user-clicked read of one linked thread using your signed-in <code>gh</code> CLI. No polling, Auto tasks or external writes; Off makes no request.</p>' +
       (!sourcesLoaded ? '<button type="button" data-sa-load-sources>Load sources</button>'
         : '<form data-sa-form="source"><div class="sa-grid">' +
           '<label>Repository (owner/name)<input name="repository" maxlength="200" required></label>' +
           '<label>Exact actor<input name="actorFilter" maxlength="80" required></label></div>' +
+          '<p>For <code>check_run.completed</code>, use the owning GitHub App slug as the actor.</p>' +
           '<label>Event class<select name="eventKind">' +
-          ['issues.opened','issues.edited','issue_comment.created','pull_request.opened',
-            'pull_request_review.submitted','check_run.completed']
+          OBSERVE_EVENT_KINDS
             .map(kind => '<option value="' + kind + '">' + kind + '</option>').join('') +
           '</select></label><button type="submit">Add source (Off)</button></form>' +
           '<ul class="sa-tickets sa-source-list">' +
@@ -207,7 +349,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
           (decisionSourceId ? '<div role="region" aria-label="Source decisions">' +
             '<h5>Recorded decisions</h5><ol>' +
             (decisions.map(d => '<li>' + safe(activityTime(d.at)) + ' · ' +
-              safe(d.decision) + ' · ' + safe(d.eventKind) + ' · ' +
+              safe(d.decision) + ' · ' + safe(d.eventKind) + ' · actor ' + safe(d.actor) + ' · ' +
               safe(d.subjectKey) + ' · Delivery ' + safe(d.deliveryId) +
               ' · Revision ' + d.policyRevision + '</li>').join('') ||
               '<li>No recorded events.</li>') + '</ol></div>' : '')) + '</section>';
@@ -216,12 +358,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       safe(chosen.id) + '">' + (chosen.enabled ? 'Disable' : 'Enable manual') +
       '</button><button type="button" data-sa-delete="' + safe(chosen.id) + '"' +
       (chosen.enabled ? ' disabled' : '') + '>Delete unused</button></div></header>' +
-      '<form data-sa-form="edit"><label>Preset title<input name="name" required maxlength="120" value="' + safe(chosen.name) + '"></label>' +
-      '<div class="sa-grid"><label>Edit coordinator<select name="coordinatorBotId" required>' +
-      optionsFor(chosen.coordinatorBotId) + '</select></label>' +
-      '<label>Edit worker<select name="workerBotId" required>' + optionsFor(chosen.workerBotId) +
-      '</select></label></div><button class="primary-button" type="submit"' +
-      (chosen.enabled ? ' disabled' : '') + '>Save preset</button></form>' +
+      '<form data-sa-form="edit" data-orchestration-id="' + safe(chosen.id) + '"><label>Team name<input name="name" required maxlength="120" value="' + safe(selectedTeamDraft?.name) + '"></label>' +
+      '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" required>' +
+      '<option value="">Choose bot</option>' + optionsFor(selectedTeamDraft?.coordinatorBotId ?? '') + '</select></label></div>' +
+      roleEditor('worker', selectedTeamDraft?.workerBotIds ?? []) + roleEditor('reviewer', selectedTeamDraft?.reviewerBotIds ?? []) +
+      '<button class="primary-button" type="submit"' +
+      (chosen.enabled || (chosen.ticketCount ?? 0) > 0 ? ' disabled' : '') + '>Save Team version</button></form>' +
+      (chosen.ticketCount ? '<p>Team roles lock after its first Ticket.</p>' : '') +
       '<p>Policy revision ' + chosen.policyRevision + ' · Native read-only permission until separately authorized.</p>' +
       '<form data-sa-form="run"><label>Task objective<textarea name="objective" rows="3" maxlength="16000" required></textarea></label>' +
       '<label>Dispatch<select name="mode"><option value="coordinated">Coordinator, then worker</option>' +
@@ -267,7 +410,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         '<button class="primary-button" type="button" data-sa-confirm>Confirm</button></div></section>' : '') +
       '<section class="sa-pane"><h3>Orchestrations</h3><ul class="sa-list">' +
       (list || '<li class="sa-empty">No orchestrations created.</li>') + '</ul></section>' +
-      '<section class="sa-pane"><h3>New manual preset</h3><form data-sa-form="create">' +
+      '<section class="sa-pane"><h3>Team Builder</h3>' +
+      '<p>Membership is saved in order. The existing manual dispatch path does not schedule multiple Workers, and Reviewer membership does not run Council review.</p>' +
+      '<form data-sa-form="create">' +
       '<label>Example preset<select data-sa-template aria-label="Example preset">' +
       '<option value="">Custom</option>' +
       '<option value="Software Development"' +
@@ -279,9 +424,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '<label>Name<input name="name" maxlength="120" placeholder="Software Development" value="' +
       safe(draftPresetName) + '" required></label>' +
       '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" required>' +
-      '<option value="">Choose bot</option>' + choices + '</select></label>' +
-      '<label>Worker<select name="workerBotId" required><option value="">Choose bot</option>' +
-      choices + '</select></label></div><button class="primary-button" type="submit"' +
+      '<option value="">Choose bot</option>' + optionsFor(draftCoordinatorBotId) + '</select></label></div>' +
+      roleEditor('worker', draftWorkerBotIds) + roleEditor('reviewer', draftReviewerBotIds) +
+      '<button class="primary-button" type="submit"' +
       (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' +
       active +
       '<section class="sa-pane"><h3>Portable configuration</h3>' +
@@ -366,17 +511,25 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   // Templates populate editable names only; no bot, tool or task is selected.
   host.addEventListener('change', event => {
     const target = event.target;
-    if (!(target instanceof HTMLSelectElement) || !target.hasAttribute('data-sa-template')) return;
-    draftPresetTemplate = target.value;
-    draftPresetName = target.value;
-    const field = target.form?.querySelector<HTMLInputElement>('input[name="name"]');
-    if (field) field.value = draftPresetName;
+    if (!(target instanceof HTMLSelectElement)) return;
+    if (target.hasAttribute('data-sa-template')) {
+      draftPresetTemplate = target.value;
+      draftPresetName = target.value;
+      const field = target.form?.querySelector<HTMLInputElement>('input[name="name"]');
+      if (field) field.value = draftPresetName;
+    }
+    const form = target.closest<HTMLFormElement>('form[data-sa-form="create"],form[data-sa-form="edit"]');
+    if (form) rememberTeamDraft(form, readTeamDraft(form));
   });
   host.addEventListener('input', event => {
     const target = event.target;
-    if (target instanceof HTMLInputElement && target.name === 'name' &&
-        target.closest<HTMLFormElement>('form[data-sa-form="create"]')) {
-      draftPresetName = target.value;
+    if (target instanceof HTMLInputElement && target.name === 'name') {
+      const form = target.closest<HTMLFormElement>('form[data-sa-form="create"],form[data-sa-form="edit"]');
+      if (form) {
+        const draft = readTeamDraft(form);
+        draft.name = target.value.trim();
+        rememberTeamDraft(form, draft);
+      }
     }
     if (target instanceof HTMLTextAreaElement && target.hasAttribute('data-sa-manifest')) {
       importText = target.value; preview = null; inspected = null;
@@ -409,6 +562,33 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       const action = confirm?.action; confirm = null; if (action) void work(action);
       return;
     }
+    if (target.dataset.saRoleAdd || target.dataset.saRoleAction) {
+      const form = target.closest<HTMLFormElement>('form[data-sa-form="create"],form[data-sa-form="edit"]');
+      const kind = target.dataset.saRole ?? target.dataset.saRoleAdd;
+      if (!form || (kind !== 'worker' && kind !== 'reviewer')) return;
+      const draft = readTeamDraft(form);
+      const ids = kind === 'worker' ? draft.workerBotIds : draft.reviewerBotIds;
+      const max = kind === 'worker' ? MAX_TEAM_WORKERS : MAX_TEAM_REVIEWERS;
+      if (target.dataset.saRoleAdd) {
+        if (ids.length < max) ids.push('');
+      } else {
+        const index = Number(target.dataset.saRoleIndex);
+        const action = target.dataset.saRoleAction;
+        if (!Number.isInteger(index) || index < 0 || index >= ids.length) return;
+        if (action === 'remove') {
+          if (kind === 'reviewer' || ids.length > 1) ids.splice(index, 1);
+        } else if (action === 'up' && index > 0) {
+          [ids[index - 1], ids[index]] = [ids[index], ids[index - 1]];
+        } else if (action === 'down' && index < ids.length - 1) {
+          [ids[index + 1], ids[index]] = [ids[index], ids[index + 1]];
+        }
+      }
+      if (kind === 'worker') draft.workerBotIds = ids;
+      else draft.reviewerBotIds = ids;
+      rememberTeamDraft(form, draft);
+      render();
+      return;
+    }
     if (target.dataset.saSelect) {
       if (busy || loading || selected === target.dataset.saSelect) return;
       const next = target.dataset.saSelect;
@@ -420,6 +600,27 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 });
       });
+      return;
+    }
+    if (target.dataset.saEditTeam) {
+      const team = presets.find(item => item.id === target.dataset.saEditTeam);
+      if (!team || team.enabled || (team.ticketCount ?? 0) > 0) return;
+      editTeamDrafts.set(team.id, {
+        name: team.name,
+        coordinatorBotId: team.coordinatorBotId,
+        workerBotIds: team.workerBotIds?.length ? [...team.workerBotIds] : [team.workerBotId],
+        reviewerBotIds: [...(team.reviewerBotIds ?? [])],
+      });
+      if (selected !== team.id) {
+        selected = team.id;
+        tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
+        writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = ''; writePathsError = '';
+        sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
+        void work(async () => {
+          tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:team.id, limit:50 });
+          await refreshTicketDetails();
+        });
+      } else render();
       return;
     }
     if (target.dataset.saEnable) {
@@ -462,6 +663,33 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         const loaded = await call<SourceDecision[]>('superagent_source_decisions',
           {sourceId:id,limit:50});
         decisionSourceId = id; decisions = loaded;
+      });
+      return;
+    }
+    if (target.dataset.saFetchThread) {
+      const sourceId = target.dataset.saFetchThread;
+      const subjectKey = target.dataset.saSubjectKey ?? '';
+      const link = threadLinks.find(item => item.sourceId === sourceId && item.subjectKey === subjectKey);
+      if (!link || link.mode !== 'observe') {
+        feedback = 'This source is Off or the linked thread is no longer available; no GitHub request was made.';
+        render();
+        return;
+      }
+      void work(async () => {
+        const fetched = await call<ObserveFetchDecision | PreviewObserveFetch>(
+          'superagent_source_fetch_thread', {sourceId,subjectKey});
+        if ('previewOnly' in fetched) {
+          feedback = fetched.message;
+          return;
+        }
+        sources = await call<EventSource[]>('superagent_source_list', {orchestrationId:selected});
+        sourcesLoaded = true;
+        decisionSourceId = sourceId;
+        decisions = await call<SourceDecision[]>('superagent_source_decisions',
+          {sourceId,limit:50});
+        feedback = fetched.duplicate
+          ? 'This GitHub event was already recorded. No Ticket was created or launched.'
+          : 'Recorded ' + fetched.decision + ' for this one linked thread. No Ticket was created or launched.';
       });
       return;
     }
@@ -702,28 +930,28 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     }
     if (form.dataset.saForm === 'edit') {
       const existing = current();
-      if (!existing || existing.enabled) return;
-      const input = {
-        name:String(data.get('name') ?? '').trim(),
-        coordinatorBotId:String(data.get('coordinatorBotId') ?? ''),
-        workerBotId:String(data.get('workerBotId') ?? ''),
-      };
+      if (!existing || existing.enabled || (existing.ticketCount ?? 0) > 0) return;
+      const draft = readTeamDraft(form);
       void work(async () => {
+        const team = validateTeamDraft(draft);
+        const input = { ...team, workerBotId:team.workerBotIds[0] };
         await call('superagent_update',{ orchestrationId:existing.id, expectedRevision:existing.policyRevision, input });
+        editTeamDrafts.delete(existing.id);
         await reload();
       });
+      return;
     }
     if (form.dataset.saForm === 'create') {
-      const input = { name:String(data.get('name') ?? '').trim(),
-        coordinatorBotId:String(data.get('coordinatorBotId') ?? ''),
-        workerBotId:String(data.get('workerBotId') ?? '') };
+      const draft = readTeamDraft(form);
       void work(async () => {
-        if (!input.name || !input.coordinatorBotId || !input.workerBotId ||
-          input.coordinatorBotId === input.workerBotId) throw new Error('Choose two different existing bots.');
+        const team = validateTeamDraft(draft);
+        const input = { ...team, workerBotId:team.workerBotIds[0] };
         const created = await call<Config>('superagent_create',{ input });
-        draftPresetName = ''; draftPresetTemplate = '';
+        draftPresetName = ''; draftPresetTemplate = ''; draftCoordinatorBotId = '';
+        draftWorkerBotIds = ['']; draftReviewerBotIds = [];
         selected = created.id; await reload();
       });
+      return;
     }
     if (form.dataset.saForm === 'reject') {
       const ticket = tickets.find(item => item.id === rejectingTicket);

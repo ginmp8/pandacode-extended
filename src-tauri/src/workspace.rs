@@ -313,6 +313,7 @@ fn resolve_scoped_write_target(root: &Path, value: &str) -> Result<ScopedWriteTa
 struct ScopedWriteTarget {
     directories: Vec<File>,
     name: Vec<u16>,
+    existing: Option<File>,
 }
 
 #[cfg(windows)]
@@ -346,6 +347,137 @@ fn nt_status_message(status: i32) -> String {
     }
     let error = unsafe { RtlNtStatusToDosError(status) };
     std::io::Error::from_raw_os_error(error as i32).to_string()
+}
+
+#[cfg(windows)]
+struct WindowsSecurityDescriptor(*mut std::ffi::c_void);
+
+#[cfg(windows)]
+impl Drop for WindowsSecurityDescriptor {
+    fn drop(&mut self) {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn LocalFree(memory: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+        }
+        if !self.0.is_null() {
+            unsafe { LocalFree(self.0) };
+        }
+    }
+}
+
+#[cfg(windows)]
+struct WindowsFileDacl {
+    _descriptor: WindowsSecurityDescriptor,
+    dacl: *mut std::ffi::c_void,
+    protected: bool,
+}
+
+#[cfg(windows)]
+fn windows_file_dacl(file: &File) -> Result<WindowsFileDacl, String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+
+    const SE_FILE_OBJECT: u32 = 1;
+    const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
+    const SE_DACL_PROTECTED: u16 = 0x1000;
+
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn GetSecurityInfo(
+            handle: HANDLE,
+            object_type: u32,
+            security_info: u32,
+            owner: *mut *mut std::ffi::c_void,
+            group: *mut *mut std::ffi::c_void,
+            dacl: *mut *mut std::ffi::c_void,
+            sacl: *mut *mut std::ffi::c_void,
+            security_descriptor: *mut *mut std::ffi::c_void,
+        ) -> u32;
+        fn GetSecurityDescriptorControl(
+            security_descriptor: *mut std::ffi::c_void,
+            control: *mut u16,
+            revision: *mut u32,
+        ) -> i32;
+    }
+
+    let mut descriptor = std::ptr::null_mut();
+    let mut dacl = std::ptr::null_mut();
+    let status = unsafe {
+        GetSecurityInfo(
+            HANDLE(file.as_raw_handle()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::from_raw_os_error(status as i32).to_string());
+    }
+    if descriptor.is_null() {
+        return Err("Windows returned no security descriptor for the scoped target".into());
+    }
+    let descriptor = WindowsSecurityDescriptor(descriptor);
+    let mut control = 0u16;
+    let mut revision = 0u32;
+    if unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) } == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+
+    Ok(WindowsFileDacl {
+        _descriptor: descriptor,
+        dacl,
+        protected: control & SE_DACL_PROTECTED != 0,
+    })
+}
+
+#[cfg(windows)]
+fn preserve_windows_file_dacl(source: &File, destination: &File) -> Result<(), String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+
+    const SE_FILE_OBJECT: u32 = 1;
+    const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
+    const UNPROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x2000_0000;
+    const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
+
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn SetSecurityInfo(
+            handle: HANDLE,
+            object_type: u32,
+            security_info: u32,
+            owner: *mut std::ffi::c_void,
+            group: *mut std::ffi::c_void,
+            dacl: *mut std::ffi::c_void,
+            sacl: *mut std::ffi::c_void,
+        ) -> u32;
+    }
+
+    let source_dacl = windows_file_dacl(source)?;
+    let inheritance = if source_dacl.protected {
+        PROTECTED_DACL_SECURITY_INFORMATION
+    } else {
+        UNPROTECTED_DACL_SECURITY_INFORMATION
+    };
+    let status = unsafe {
+        SetSecurityInfo(
+            HANDLE(destination.as_raw_handle()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | inheritance,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            source_dacl.dacl,
+            std::ptr::null_mut(),
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::from_raw_os_error(status as i32).to_string());
+    }
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -571,13 +703,13 @@ fn resolve_scoped_write_target(root: &Path, value: &str) -> Result<ScopedWriteTa
     let existing = nt_open_relative(
         HANDLE(directories.last().unwrap().as_raw_handle()),
         OsStr::new(parts.last().unwrap()),
-        0x0010_0082, // SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_WRITE_DATA
+        0x0012_0082, // SYNCHRONIZE | READ_CONTROL | FILE_READ_ATTRIBUTES | FILE_WRITE_DATA
         0x7, // share read/write/delete for the leaf while checking it
         1,   // FILE_OPEN
         0x0020_0060, // OPEN_REPARSE_POINT | SYNCHRONOUS_IO_NONALERT | NON_DIRECTORY_FILE
         0,
     );
-    match existing {
+    let existing = match existing {
         Ok(file) => {
             let attributes = windows_file_attributes(&file)?;
             if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
@@ -586,12 +718,13 @@ fn resolve_scoped_write_target(root: &Path, value: &str) -> Result<ScopedWriteTa
             if attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
                 return Err("Scoped write path is not a regular file".into());
             }
+            Some(file)
         }
-        Err(status) if matches!(status as u32, 0xC0000034 | 0xC000000F) => {}
+        Err(status) if matches!(status as u32, 0xC0000034 | 0xC000000F) => None,
         Err(status) => return Err(nt_status_message(status)),
-    }
+    };
 
-    Ok(ScopedWriteTarget { directories, name })
+    Ok(ScopedWriteTarget { directories, name, existing })
 }
 
 /// On platforms without a handle-relative no-follow replacement primitive,
@@ -721,7 +854,7 @@ fn write_scoped_text_at(target: ScopedWriteTarget, text: &str) -> Result<(), Str
     let mut file = nt_open_relative(
         HANDLE(parent.as_raw_handle()),
         OsStr::new(&temp_name),
-        0x0011_0082, // DELETE | SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_WRITE_DATA
+        0x0015_0082, // DELETE | WRITE_DAC | SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_WRITE_DATA
         0x3, // share read/write, deliberately no delete sharing while the temp is installed
         2, // FILE_CREATE; collisions fail closed
         0x0020_0060, // OPEN_REPARSE_POINT | SYNCHRONOUS_IO_NONALERT | NON_DIRECTORY_FILE
@@ -755,6 +888,10 @@ fn write_scoped_text_at(target: ScopedWriteTarget, text: &str) -> Result<(), Str
     }
 
     let mut temp = TempEntry { handle: HANDLE(file.as_raw_handle()), installed: false };
+    if let Some(existing) = target.existing.as_ref() {
+        preserve_windows_file_dacl(existing, &file)
+            .map_err(|error| format!("Could not preserve scoped target permissions: {error}"))?;
+    }
     file.write_all(text.as_bytes()).map_err(|error| error.to_string())?;
     file.sync_all().map_err(|error| error.to_string())?;
 
@@ -2277,6 +2414,149 @@ mod tests {
 
         assert_eq!(fs::read_to_string(f.root.join("src/allowed.txt")).unwrap(), "after");
         assert_eq!(fs::read_to_string(f.root.join("src/new.txt")).unwrap(), "created");
+    }
+
+    #[cfg(windows)]
+    fn set_test_file_dacl(file: &File, sddl: &str) -> Result<(), std::io::Error> {
+        use std::{ffi::c_void, os::windows::io::AsRawHandle};
+        use windows::Win32::Foundation::HANDLE;
+
+        const SDDL_REVISION_1: u32 = 1;
+        const SE_FILE_OBJECT: u32 = 1;
+        const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
+        const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
+
+        #[link(name = "advapi32")]
+        unsafe extern "system" {
+            fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                string_security_descriptor: *const u16,
+                revision: u32,
+                security_descriptor: *mut *mut c_void,
+                size: *mut u32,
+            ) -> i32;
+            fn GetSecurityDescriptorDacl(
+                security_descriptor: *mut c_void,
+                dacl_present: *mut i32,
+                dacl: *mut *mut c_void,
+                dacl_defaulted: *mut i32,
+            ) -> i32;
+            fn SetSecurityInfo(
+                handle: HANDLE,
+                object_type: u32,
+                security_info: u32,
+                owner: *mut c_void,
+                group: *mut c_void,
+                dacl: *mut c_void,
+                sacl: *mut c_void,
+            ) -> u32;
+        }
+
+        let sddl = sddl.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+        let mut raw_descriptor = std::ptr::null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut raw_descriptor,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let descriptor = WindowsSecurityDescriptor(raw_descriptor);
+        let mut dacl_present = 0i32;
+        let mut dacl = std::ptr::null_mut();
+        let mut dacl_defaulted = 0i32;
+        if unsafe {
+            GetSecurityDescriptorDacl(
+                descriptor.0,
+                &mut dacl_present,
+                &mut dacl,
+                &mut dacl_defaulted,
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let status = unsafe {
+            SetSecurityInfo(
+                HANDLE(file.as_raw_handle()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null_mut(),
+            )
+        };
+        if status != 0 {
+            return Err(std::io::Error::from_raw_os_error(status as i32));
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn test_dacl_bytes(dacl: *mut std::ffi::c_void) -> Option<Vec<u8>> {
+        if dacl.is_null() {
+            return None;
+        }
+        let size =
+            unsafe { std::ptr::read_unaligned((dacl.cast::<u8>()).add(2).cast::<u16>()) } as usize;
+        assert!(
+            size >= 8,
+            "Windows ACL header must fit in its declared size"
+        );
+        Some(unsafe { std::slice::from_raw_parts(dacl.cast::<u8>(), size) }.to_vec())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scoped_write_replacement_preserves_target_specific_dacl() {
+        use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
+
+        let f = Fixture::new(false);
+        let target_path = f.root.join("allowed.txt");
+        fs::write(&target_path, "before").unwrap();
+        let mut options = OpenOptions::new();
+        let target_handle = options
+            .access_mode(0x0006_0003) // FILE_READ_DATA | FILE_WRITE_DATA | READ_CONTROL | WRITE_DAC
+            .share_mode(0x7) // share read/write/delete while exercising replacement
+            .open(&target_path);
+        let target_handle = match target_handle {
+            Ok(file) => file,
+            Err(error) if error.raw_os_error() == Some(5) => {
+                eprintln!("Windows target-DACL regression skipped: this process lacks the ACL access needed to set the test DACL");
+                return;
+            }
+            Err(error) => panic!("Could not open target with ACL access: {error}"),
+        };
+        if let Err(error) = set_test_file_dacl(&target_handle, "D:P(A;;FA;;;OW)") {
+            if error.raw_os_error() == Some(5) {
+                eprintln!("Windows target-DACL regression skipped: this process lacks the ACL access needed to set the test DACL");
+                return;
+            }
+            panic!("Could not set target-specific DACL: {error}");
+        }
+        let expected_security = windows_file_dacl(&target_handle).unwrap();
+        assert!(
+            expected_security.protected,
+            "test ACL must not inherit the parent DACL"
+        );
+        let expected_dacl = test_dacl_bytes(expected_security.dacl);
+        drop(expected_security);
+        drop(target_handle);
+
+        write_scoped_text_file(&f.root, "allowed.txt", "after").unwrap();
+
+        let replacement = File::open(&target_path).unwrap();
+        let actual_security = windows_file_dacl(&replacement).unwrap();
+        assert_eq!(test_dacl_bytes(actual_security.dacl), expected_dacl);
+        assert!(
+            actual_security.protected,
+            "replacement must preserve the target DACL protection flag"
+        );
+        assert_eq!(fs::read_to_string(target_path).unwrap(), "after");
     }
 
     #[cfg(unix)]

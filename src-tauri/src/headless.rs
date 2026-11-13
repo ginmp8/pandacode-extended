@@ -764,11 +764,15 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --issue-comment <id> <revision> <owner/name> <issue> <key> <body>
                          Authorize and post one exact GitHub issue comment. The first
                          invocation prints the required confirmation SHA-256; rerun with
-                         --confirm-issue-comment <sha256>. Later invocations only reconcile
-                         an existing pending or uncertain effect and never replay it.
+                         --confirm-issue-comment <sha256>. An exact existing grant lets
+                         later invocations reconcile pending or uncertain effects without
+                         requiring a live assignment or replaying the write. Only an
+                         existing exact receipt may be read back after restart/revocation;
+                         JSON reports bounded uncertainty/readback state and verified
+                         remote comment ID, URL and author when GitHub returns them.
   --confirm-issue-comment <sha256>
-                         Confirm the exact Ticket revision, repository, issue, effect key,
-                         comment body and marker shown by --issue-comment."
+                         Required to create a grant; confirms the exact Ticket revision,
+                         repository, issue, effect key, comment body and marker shown above."
         .into()
 }
 

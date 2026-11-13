@@ -48,7 +48,7 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await expect(workspace.getByText('No orchestrations created.')).toBeVisible();
   await workspace.getByRole('textbox',{name:'Name'}).fill('Software Development');
   const coordinator=workspace.getByRole('combobox',{name:'Coordinator'});
-  const worker=workspace.getByRole('combobox',{name:'Worker'});
+  const worker=workspace.getByRole('combobox',{name:'Worker 1'});
   await coordinator.selectOption({label:'Scout'});
   await worker.selectOption({label:'Writer'});
   await workspace.getByRole('button',{name:'Create disabled preset'}).click();
@@ -76,7 +76,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   const workspace=await openOrchestrationWorkspace(page);
   await workspace.getByRole('textbox',{name:'Name'}).fill('Issue Resolution');
   await workspace.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
-  await workspace.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
+  await workspace.getByRole('combobox',{name:'Worker 1'}).selectOption({label:'Writer'});
   await workspace.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(workspace.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await workspace.getByRole('button',{name:'Enable manual'}).click();
@@ -205,6 +205,46 @@ test('Preview scoped-write adapter is deterministic and creates no grant',async 
   expect(results.effect).toEqual({previewOnly:true,message:'Preview only. No GitHub comment was sent.'});
 });
 
+test('Preview adapter snapshots ordered Team roles at Ticket admission',async ({page})=>{
+  await page.goto('/?bots=sample');
+  const result=await page.evaluate(async()=>{
+    const {invokeSuperagent}=await import('/src/preview-superagent.ts');
+    const listBots=async()=>[
+      {id:'coordinator',name:'Coordinator',paused:false,projectId:'preview-project'},
+      {id:'worker-one',name:'Worker One',paused:false,projectId:'preview-project'},
+      {id:'worker-two',name:'Worker Two',paused:false,projectId:'preview-project'},
+      {id:'reviewer',name:'Reviewer',paused:false,projectId:'preview-project'},
+    ];
+    const created=await invokeSuperagent<{id:string;policyRevision:number}>(
+      'superagent_create',{input:{name:'Preview Team',coordinatorBotId:'coordinator',
+        workerBotId:'worker-one',workerBotIds:['worker-one','worker-two'],reviewerBotIds:['reviewer']}},listBots);
+    const updated=await invokeSuperagent<{policyRevision:number;teamVersion:number;workerBotIds:string[]}>(
+      'superagent_update',{orchestrationId:created.id,expectedRevision:created.policyRevision,
+        input:{name:'Preview Team',coordinatorBotId:'coordinator',workerBotId:'worker-two',
+          workerBotIds:['worker-two','worker-one'],reviewerBotIds:['reviewer']}},listBots);
+    await invokeSuperagent('superagent_set_enabled',{
+      orchestrationId:created.id,expectedRevision:updated.policyRevision,enabled:true,
+    },listBots);
+    const ticket=await invokeSuperagent<{id:string}>(
+      'superagent_submit',{orchestrationId:created.id,objective:'Preview ordered roles'},listBots);
+    const snapshot=await invokeSuperagent<{teamSnapshot:Record<string,any>}>(
+      'superagent_snapshot',{ticketId:ticket.id},listBots);
+    return {updated,snapshot:snapshot.teamSnapshot};
+  });
+  expect(result.updated.teamVersion).toBe(2);
+  expect(result.updated.workerBotIds).toEqual(['worker-two','worker-one']);
+  expect(result.snapshot).toMatchObject({
+    provenance:'native',teamVersion:2,workerBotIds:['worker-two','worker-one'],reviewerBotIds:['reviewer'],
+    roles:[
+      {role:'coordinator',ordinal:0,botId:'coordinator'},
+      {role:'worker',ordinal:0,botId:'worker-two'},
+      {role:'worker',ordinal:1,botId:'worker-one'},
+      {role:'reviewer',ordinal:0,botId:'reviewer'},
+    ],
+  });
+});
+
+
 test('SuperAgent issue comments use a stable receipt and report uncertain state without blind replay',async ({page})=>{
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
@@ -213,7 +253,16 @@ test('SuperAgent issue comments use a stable receipt and report uncertain state 
     const previous=document.querySelector<HTMLElement>('#superagent-host')!;
     const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
     const ticket={id:'ticket-comment',objective:'Review a GitHub issue',state:'running',revision:4,evidence:null};
-    const snapshot={ticket,mandate:{actor:'local-user',authorizationId:'auth-one',
+    const snapshot={ticket,teamSnapshot:{snapshotVersion:1,provenance:'native',orchestrationId:'preset-one',
+      teamVersion:2,name:'Issue Team',projectId:'project-one',coordinatorBotId:'coordinator',
+      workerBotIds:['worker','worker-two'],reviewerBotIds:['reviewer'],
+      policy:{policyRevision:3,autonomy:'off',maxConcurrentTasks:1,maxAttemptsPerAssignment:2,councilEnabled:false},
+      roles:[
+        {role:'coordinator',ordinal:0,botId:'coordinator',effectiveConfig:{name:'Coordinator'},effectiveConfigSha256:'coordinator-hash'},
+        {role:'worker',ordinal:0,botId:'worker',effectiveConfig:{name:'Worker'},effectiveConfigSha256:'worker-hash'},
+        {role:'worker',ordinal:1,botId:'worker-two',effectiveConfig:{name:'Worker Two'},effectiveConfigSha256:'worker-two-hash'},
+        {role:'reviewer',ordinal:0,botId:'reviewer',effectiveConfig:{name:'Reviewer'},effectiveConfigSha256:'reviewer-hash'},
+      ]},mandate:{actor:'local-user',authorizationId:'auth-one',
       policyRevision:3,projectId:'project-one',expiresAt:1800000000000,revoked:false,
       allowedTools:[],allowedSideEffects:true},assignments:[{id:'assignment-one',botId:'worker',
       sessionId:'session-one',state:'running',attempt:1}],activity:[]};
@@ -240,6 +289,12 @@ test('SuperAgent issue comments use a stable receipt and report uncertain state 
   });
   await host.getByRole('button',{name:'View evidence'}).click();
   const details=host.getByRole('region',{name:'Ticket evidence'});
+  await expect(details).toContainText('Saved Team snapshot');
+  await expect(details).toContainText('Issue Team / 2');
+  await expect(details).toContainText('worker-two');
+  await expect(details).toContainText('reviewer-hash');
+  await details.getByText('Inspect exact saved Team payload').click();
+  await expect(details.locator('pre')).toContainText('"provenance": "native"');
   const commentForm=details.locator('form[data-sa-form="issue-comment"]');
   await expect(commentForm).toBeVisible();
   await commentForm.getByRole('textbox',{name:'Repository (owner/name)'}).fill('acme/widget');
@@ -278,7 +333,7 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
   const workspace=await openOrchestrationWorkspace(page);
   await workspace.getByRole('textbox',{name:'Name'}).fill('Safe default');
   await workspace.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
-  await workspace.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
+  await workspace.getByRole('combobox',{name:'Worker 1'}).selectOption({label:'Writer'});
   await workspace.getByRole('button',{name:'Create disabled preset'}).click();
   await workspace.getByRole('textbox',{name:'Preset title'}).fill('Safely renamed');
   await workspace.getByRole('button',{name:'Save preset'}).click();
@@ -354,6 +409,12 @@ test('native Council observation is advisory and never authorizes task completio
       if (command === 'superagent_snapshot') return {
         ticket:{id:'ticket-one',objective:'Review artifact',
           state:'waiting_approval',revision:2,evidence:'worker evidence'},
+        teamSnapshot:{snapshotVersion:1,provenance:'native',orchestrationId:'preset',teamVersion:1,
+          name:'Council example',projectId:'fixture',coordinatorBotId:'router',workerBotIds:['worker'],
+          reviewerBotIds:[],policy:{policyRevision:1,autonomy:'off',maxConcurrentTasks:1,
+            maxAttemptsPerAssignment:2,councilEnabled:false},
+          roles:[{role:'coordinator',ordinal:0,botId:'router',effectiveConfig:null,effectiveConfigSha256:null},
+            {role:'worker',ordinal:0,botId:'worker',effectiveConfig:null,effectiveConfigSha256:null}]},
         mandate:{actor:'local-user',authorizationId:'manual',policyRevision:2,
           projectId:'fixture',expiresAt:1800000000000,revoked:false,
           allowedTools:[],allowedSideEffects:false},
@@ -387,11 +448,287 @@ test('SuperAgent examples only fill names and leave all authorization disabled',
   await example.selectOption('Issue Resolution');
   await expect(name).toHaveValue('Issue Resolution');
   await workspace.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption({label:'Scout'});
-  await workspace.getByRole('combobox',{name:'Worker',exact:true}).selectOption({label:'Writer'});
+  await workspace.getByRole('combobox',{name:'Worker 1',exact:true}).selectOption({label:'Writer'});
   await workspace.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(workspace.locator('.sa-list .sa-item strong')).toHaveText('Issue Resolution');
   await expect(workspace.getByRole('button',{name:'Enable manual'})).toBeVisible();
   await expect(workspace.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
+});
+
+
+test('Team Builder creates and edits ordered worker and reviewer roles', async ({page}) => {
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const previous=document.querySelector<HTMLElement>('#superagent-host')!;
+    const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
+    const bots=[
+      {id:'coordinator',name:'Coordinator',paused:false},
+      {id:'worker-one',name:'Worker One',paused:false},
+      {id:'worker-two',name:'Worker Two',paused:false},
+      {id:'reviewer-one',name:'Reviewer One',paused:false},
+      {id:'reviewer-two',name:'Reviewer Two',paused:false},
+    ];
+    let config:Record<string,any>|null=null;
+    const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return bots as never;
+      if(command==='superagent_list')return config?[{...config,ticketCount:0,runningCount:0,blockedCount:0}] as never:[] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_create'){
+        calls.push({command,args:{...args}});
+        const input=args?.input as Record<string,any>;
+        config={id:'team-one',...input,teamVersion:1,projectId:'project-one',enabled:false,policyRevision:1};
+        return config as never;
+      }
+      if(command==='superagent_update'){
+        calls.push({command,args:{...args}});
+        const input=args?.input as Record<string,any>;
+        config={...config,...input,workerBotId:input.workerBotId,
+          teamVersion:Number(config?.teamVersion)+1,policyRevision:Number(config?.policyRevision)+1};
+        return config as never;
+      }
+      throw new Error('Unexpected Team Builder command: '+command);
+    });
+    (window as unknown as {saTeamCalls:typeof calls}).saTeamCalls=calls;
+  });
+  const team=host;
+  await host.getByRole('textbox',{name:'Name'}).fill('Ordered Team');
+  await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
+  await host.getByRole('combobox',{name:'Worker 1'}).selectOption('worker-one');
+  await host.getByRole('button',{name:'Add worker'}).click();
+  await host.getByRole('combobox',{name:'Worker 2'}).selectOption('worker-two');
+  await host.getByRole('button',{name:'Add reviewer'}).click();
+  await host.getByRole('combobox',{name:'Reviewer 1'}).selectOption('reviewer-one');
+  await host.getByRole('button',{name:'Add reviewer'}).click();
+  await host.getByRole('combobox',{name:'Reviewer 2'}).selectOption('reviewer-two');
+  await host.getByRole('button',{name:'Move worker 2 up'}).click();
+  await host.getByRole('button',{name:'Move reviewer 2 up'}).click();
+  await host.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(team.locator('.sa-list')).toContainText('Worker Two, Worker One');
+  let calls=await page.evaluate(()=>(window as unknown as {
+    saTeamCalls:Array<{command:string;args?:Record<string,any>}>
+  }).saTeamCalls());
+  expect(calls[0].args?.input).toMatchObject({
+    name:'Ordered Team',coordinatorBotId:'coordinator',workerBotId:'worker-two',
+    workerBotIds:['worker-two','worker-one'],reviewerBotIds:['reviewer-two','reviewer-one'],
+  });
+
+  await host.getByRole('button',{name:'Edit Team'}).click();
+  await host.getByRole('button',{name:'Move worker 2 up'}).click();
+  await host.getByRole('button',{name:'Move reviewer 2 up'}).click();
+  await host.getByRole('button',{name:'Save Team version'}).click();
+  await expect(host).toHaveAttribute('aria-busy','false');
+  calls=await page.evaluate(()=>(window as unknown as {
+    saTeamCalls:Array<{command:string;args?:Record<string,any>}>
+  }).saTeamCalls());
+  expect(calls[1]).toMatchObject({command:'superagent_update',args:{
+    orchestrationId:'team-one',expectedRevision:1,input:{
+      workerBotId:'worker-one',workerBotIds:['worker-one','worker-two'],
+      reviewerBotIds:['reviewer-one','reviewer-two'],
+    },
+  }});
+});
+
+test('Team Builder removes worker and reviewer roles while retaining the required worker', async ({page}) => {
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const previous=document.querySelector<HTMLElement>('#superagent-host')!;
+    const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
+    const bots=[
+      {id:'coordinator',name:'Coordinator',paused:false},
+      {id:'worker-one',name:'Worker One',paused:false},
+      {id:'worker-two',name:'Worker Two',paused:false},
+      {id:'reviewer-one',name:'Reviewer One',paused:false},
+      {id:'reviewer-two',name:'Reviewer Two',paused:false},
+    ];
+    let config:Record<string,any>={id:'team-removal',name:'Removable roles',
+      coordinatorBotId:'coordinator',workerBotId:'worker-one',
+      workerBotIds:['worker-one','worker-two'],reviewerBotIds:['reviewer-one','reviewer-two'],
+      enabled:false,policyRevision:4,teamVersion:1};
+    const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return bots as never;
+      if(command==='superagent_list')return [{...config,ticketCount:0,runningCount:0,blockedCount:0}] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_update'){
+        calls.push({command,args:{...args}});
+        const input=args?.input as Record<string,any>;
+        config={...config,...input,teamVersion:Number(config.teamVersion)+1,
+          policyRevision:Number(config.policyRevision)+1};
+        return config as never;
+      }
+      throw new Error('Unexpected Team removal command: '+command);
+    });
+    (window as unknown as {saRemovalCalls:typeof calls}).saRemovalCalls=calls;
+  });
+
+  await host.getByRole('button',{name:'Edit Team'}).click();
+  const workers=host.getByRole('group',{name:'Workers (ordered)'});
+  await workers.getByRole('button',{name:'Remove worker 1'}).click();
+  await expect(workers.getByRole('combobox',{name:'Worker 1'})).toHaveValue('worker-two');
+  await expect(workers.getByRole('button',{name:'Remove worker 1'})).toHaveCount(0);
+
+  const reviewers=host.getByRole('group',{name:'Reviewers (ordered)'});
+  await reviewers.getByRole('button',{name:'Remove reviewer 1'}).click();
+  await reviewers.getByRole('button',{name:'Remove reviewer 1'}).click();
+  await expect(reviewers).toContainText('No reviewers selected.');
+  await host.getByRole('button',{name:'Save Team version'}).click();
+  await expect(host).toHaveAttribute('aria-busy','false');
+
+  const calls=await page.evaluate(()=>(window as unknown as {
+    saRemovalCalls:Array<{command:string;args?:Record<string,any>}>
+  }).saRemovalCalls);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toMatchObject({command:'superagent_update',args:{
+    orchestrationId:'team-removal',expectedRevision:4,input:{
+      workerBotId:'worker-two',workerBotIds:['worker-two'],reviewerBotIds:[],
+    },
+  }});
+});
+
+test('Team Builder keeps an edit draft and shows native rejection feedback', async ({page}) => {
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const previous=document.querySelector<HTMLElement>('#superagent-host')!;
+    const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
+    const bots=[
+      {id:'coordinator',name:'Coordinator',paused:false},
+      {id:'worker-one',name:'Worker One',paused:false},
+      {id:'worker-two',name:'Worker Two',paused:false},
+      {id:'reviewer',name:'Reviewer',paused:false},
+    ];
+    const config={id:'team-native-blocked',name:'Original Team',coordinatorBotId:'coordinator',
+      workerBotId:'worker-one',workerBotIds:['worker-one','worker-two'],reviewerBotIds:['reviewer'],
+      enabled:false,policyRevision:9};
+    const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return bots as never;
+      if(command==='superagent_list')return [{...config,ticketCount:0,runningCount:0,blockedCount:0}] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_update'){
+        calls.push({command,args:{...args}});
+        throw new Error('Native policy blocked this Team update: revision changed.');
+      }
+      throw new Error('Unexpected blocked edit command: '+command);
+    });
+    (window as unknown as {saBlockedEditCalls:typeof calls}).saBlockedEditCalls=calls;
+  });
+
+  await host.getByRole('button',{name:'Edit Team'}).click();
+  const editor=host.locator('form[data-sa-form="edit"]');
+  await editor.getByRole('textbox',{name:'Team name'}).fill('Edited but rejected');
+  await editor.getByRole('button',{name:'Move worker 2 up'}).click();
+  await editor.getByRole('button',{name:'Save Team version'}).click();
+  await expect(host).toHaveAttribute('aria-busy','false');
+  await expect(host.getByRole('alert')).toHaveText('Native policy blocked this Team update: revision changed.');
+  await expect(host.locator('form[data-sa-form="edit"] input[name="name"]')).toHaveValue('Edited but rejected');
+  await expect(host.getByRole('combobox',{name:'Worker 1'})).toHaveValue('worker-two');
+  await expect(host.getByRole('combobox',{name:'Worker 2'})).toHaveValue('worker-one');
+  await expect(host.locator('.sa-list .sa-item strong')).toHaveText('Original Team');
+  const calls=await page.evaluate(()=>(window as unknown as {
+    saBlockedEditCalls:Array<{command:string;args?:Record<string,any>}>
+  }).saBlockedEditCalls);
+  expect(calls).toEqual([{command:'superagent_update',args:{
+    orchestrationId:'team-native-blocked',expectedRevision:9,input:{
+      name:'Edited but rejected',coordinatorBotId:'coordinator',
+      workerBotIds:['worker-two','worker-one'],reviewerBotIds:['reviewer'],workerBotId:'worker-two',
+    },
+  }}]);
+});
+
+test('Ticket evidence reports a missing saved Team snapshot without using the current Team', async ({page}) => {
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const previous=document.querySelector<HTMLElement>('#superagent-host')!;
+    const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
+    const ticket={id:'ticket-without-snapshot',objective:'Inspect saved evidence',
+      state:'queued',revision:1,evidence:null};
+    mountSuperagent(host,async command=>{
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'current-worker',name:'Current Team Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [{id:'team-current',name:'Mutable Current Team',
+        coordinatorBotId:'coordinator',workerBotId:'current-worker',enabled:true,policyRevision:1}] as never;
+      if(command==='superagent_tickets')return [ticket] as never;
+      if(command==='superagent_snapshot')return {
+        ticket,mandate:{actor:'local-user',authorizationId:'manual',policyRevision:1,
+          projectId:'fixture',expiresAt:1800000000000,revoked:false,
+          allowedTools:[],allowedSideEffects:false},assignments:[],activity:[],
+      } as never;
+      if(command==='superagent_source_thread_links')return [] as never;
+      throw new Error('Unexpected missing-snapshot command: '+command);
+    });
+  });
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const details=host.getByRole('region',{name:'Ticket evidence'});
+  const snapshot=details.getByRole('region',{name:'Saved Team snapshot'});
+  await expect(snapshot.getByRole('heading',{name:'Saved Team snapshot unavailable'})).toBeVisible();
+  await expect(snapshot).toContainText('native Ticket response did not include teamSnapshot');
+  await expect(snapshot).toContainText('The current Team configuration was not substituted.');
+  await expect(snapshot).not.toContainText('Mutable Current Team');
+  await expect(snapshot).not.toContainText('current-worker');
+});
+
+test('Preview Ticket evidence labels null profile and hash fields as unavailable', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await openOrchestrationWorkspace(page);
+  const previewRoles=await page.evaluate(async () => {
+    const {invokeSuperagent}=await import('/src/preview-superagent.ts');
+    const bots=[
+      {id:'preview-coordinator',name:'Preview Coordinator',paused:false,projectId:'preview-project'},
+      {id:'preview-worker',name:'Preview Worker',paused:false,projectId:'preview-project'},
+    ];
+    const listBots=async()=>bots;
+    const created=await invokeSuperagent<{id:string;policyRevision:number}>('superagent_create',{
+      input:{name:'Null profile evidence',coordinatorBotId:'preview-coordinator',
+        workerBotId:'preview-worker',workerBotIds:['preview-worker'],reviewerBotIds:[]},
+    },listBots);
+    await invokeSuperagent('superagent_set_enabled',{
+      orchestrationId:created.id,expectedRevision:created.policyRevision,enabled:true,
+    },listBots);
+    const ticket=await invokeSuperagent<{id:string}>('superagent_submit',{
+      orchestrationId:created.id,objective:'Render preview profile evidence',
+    },listBots);
+    const details=await invokeSuperagent<Record<string,any>>('superagent_snapshot',
+      {ticketId:ticket.id},listBots);
+    const configs=await invokeSuperagent<Array<Record<string,any>>>('superagent_list',{},listBots);
+    const previous=document.querySelector<HTMLElement>('#superagent-host')!;
+    const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    mountSuperagent(host,async command=>{
+      if(command==='bots_list')return bots as never;
+      if(command==='superagent_list')return configs as never;
+      if(command==='superagent_tickets')return [ticket] as never;
+      if(command==='superagent_snapshot')return details as never;
+      if(command==='superagent_source_thread_links')return [] as never;
+      throw new Error('Unexpected Preview evidence command: '+command);
+    });
+    return (details.teamSnapshot as {roles:Array<Record<string,unknown>>}).roles;
+  });
+  expect(previewRoles).toEqual([
+    {role:'coordinator',ordinal:0,botId:'preview-coordinator',effectiveConfig:null,effectiveConfigSha256:null},
+    {role:'worker',ordinal:0,botId:'preview-worker',effectiveConfig:null,effectiveConfigSha256:null},
+  ]);
+
+  const host=page.locator('#superagent-host');
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const snapshot=host.getByRole('region',{name:'Saved Team snapshot'});
+  await expect(snapshot.getByRole('heading',{name:'Saved Team snapshot'})).toBeVisible();
+  await expect(snapshot.locator('ol')).toContainText('profile evidence unavailable');
+  await expect(snapshot.locator('ol')).not.toContainText('profile SHA-256');
+  await snapshot.getByText('Inspect exact saved Team payload').click();
+  await expect(snapshot.locator('pre')).toContainText('"effectiveConfig": null');
+  await expect(snapshot.locator('pre')).toContainText('"effectiveConfigSha256": null');
+  await expect(snapshot.locator('pre')).not.toContainText('"effectiveConfigSha256": "');
 });
 
 
@@ -430,17 +767,24 @@ test('Off and Observe source controls expose durable native receipts without Aut
         return s as never;
       }
       if(command==='superagent_source_decisions') return [{
-        sourceId:args?.sourceId,deliveryId:'delivery-2',
-        eventKind:'issues.opened',subjectKey:'issue:42',sequence:2,
+        sourceId:args?.sourceId,deliveryId:'gh-issues-edited-preview',
+        actor:'trusted-bot',
+        eventKind:sources.find(s=>s.id===args?.sourceId)?.eventKind ?? 'issues.edited',
+        subjectKey:'issue:42',sequence:2,
         decision:'observed_permitted',policyRevision:2,at:1794444000000
       }] as never;
       throw new Error('Unexpected command: '+command);
     });
   });
   const host=page.locator('#sa-source-test');
-  await expect(host.getByText('No authenticated GitHub intake',{exact:false})).toBeVisible();
+  await expect(host.getByText('Fetch once is a user-clicked read',{exact:false})).toBeVisible();
   await host.getByRole('button',{name:'Load sources'}).click();
   await expect(host.getByText('No event sources configured.')).toBeVisible();
+  const eventKind=host.getByRole('combobox',{name:'Event class'});
+  const eventKinds=await eventKind.locator('option').evaluateAll(options=>(options as HTMLOptionElement[]).map(option=>option.value));
+  expect(eventKinds).toEqual(['issues.opened','issues.edited','issue_comment.created',
+    'pull_request.opened','pull_request_review.submitted','check_run.completed']);
+  await eventKind.selectOption('issues.edited');
   await host.getByRole('textbox',{name:'Repository (owner/name)'}).fill('test/fixture');
   await host.getByRole('textbox',{name:'Exact actor'}).fill('trusted-bot');
   await host.getByRole('button',{name:'Add source (Off)'}).click();
@@ -497,7 +841,8 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
   await page.evaluate(async () => {
     const {mountSuperagent} = await import('/src/superagent-ui.ts');
     const host=document.createElement('div');host.id='sa-thread-link-test';document.body.appendChild(host);
-    const links:Array<{sourceId:string;ticketId:string;repository:string;subjectKey:string;createdAt:number}>=[];
+    const links:Array<{sourceId:string;ticketId:string;repository:string;subjectKey:string;
+      actorFilter:string;eventKind:string;mode:'off'|'observe';createdAt:number}>=[];
     const configs=[{id:'one',name:'One',coordinatorBotId:'router',
       workerBotId:'worker',enabled:true,policyRevision:1}];
     const ticket={id:'ticket-one',objective:'Private fixture',state:'queued',revision:1,evidence:null};
@@ -508,6 +853,11 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
       if(command==='superagent_list')return configs as never;
       if(command==='superagent_tickets')return [ticket] as never;
       if(command==='superagent_snapshot')return {ticket,
+        teamSnapshot:{snapshotVersion:1,provenance:'native',orchestrationId:'one',teamVersion:1,
+          name:'One',projectId:'fixture',coordinatorBotId:'router',workerBotIds:['worker'],reviewerBotIds:[],
+          policy:{policyRevision:1,autonomy:'off',maxConcurrentTasks:1,maxAttemptsPerAssignment:2,councilEnabled:false},
+          roles:[{role:'coordinator',ordinal:0,botId:'router',effectiveConfig:null,effectiveConfigSha256:null},
+            {role:'worker',ordinal:0,botId:'worker',effectiveConfig:null,effectiveConfigSha256:null}]},
         mandate:{actor:'local-user',authorizationId:'manual',policyRevision:1,projectId:'fixture',
           expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:false},
         assignments:[],activity:[]} as never;
@@ -522,6 +872,7 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
         if(links.some(link=>link.sourceId===args.sourceId&&link.subjectKey===args.subjectKey))
           throw Error('Duplicate reference');
         const link={sourceId:'source-one',ticketId:'ticket-one',repository:'test/fixture',
+          actorFilter:'trusted',eventKind:'issues.opened',mode:'off' as const,
           subjectKey:String(args.subjectKey),createdAt:Date.now()};
         links.push(link);return link as never;
       }
@@ -539,6 +890,120 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
   await expect(host.locator('.sa-linked-threads')).toContainText('test/fixture / issue:42');
   await expect(host.getByRole('status')).toContainText('no task or authorization created');
   await expect(host.getByText('Private fixture')).toBeVisible();
+  await expect(host.getByText('Off · no GitHub request')).toBeVisible();
+  await expect(host.getByRole('button',{name:/Fetch one latest matching GitHub event/})).toHaveCount(0);
   await expect.poll(()=>page.evaluate(
     ()=>(window as unknown as {saDispatchCount:()=>number}).saDispatchCount())).toBe(0);
+});
+
+
+test('manual Observe fetch supports issues.edited and check_run.completed with dedup receipts and no effects', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-observe-fetch-test';document.body.appendChild(host);
+    const sources=[
+      {id:'source-edit',orchestrationId:'one',repository:'test/fixture',actorFilter:'trusted-editor',
+        eventKind:'issues.edited',mode:'observe' as const,policyRevision:2,lastSequence:0},
+      {id:'source-check',orchestrationId:'one',repository:'test/fixture',actorFilter:'trusted-checker',
+        eventKind:'check_run.completed',mode:'observe' as const,policyRevision:2,lastSequence:0},
+    ];
+    const ticket={id:'ticket-one',objective:'Private fixture',state:'queued',revision:1,evidence:null};
+    const links=[
+      {sourceId:'source-edit',ticketId:'ticket-one',repository:'test/fixture',
+        subjectKey:'issue:42',actorFilter:'trusted-editor',eventKind:'issues.edited',mode:'observe',createdAt:1},
+      {sourceId:'source-check',ticketId:'ticket-one',repository:'test/fixture',
+        subjectKey:'pull:43',actorFilter:'trusted-checker',eventKind:'check_run.completed',mode:'observe',createdAt:2},
+    ];
+    const fetchCalls:Array<{sourceId:unknown;subjectKey:unknown}>=[];
+    const seen=new Set<string>();
+    const receipts:Array<Record<string,unknown>>=[];
+    let launches=0;
+    mountSuperagent(host,async (command,args)=>{
+      if(command==='bots_list')return [{id:'router',name:'Router',paused:false},
+        {id:'worker',name:'Worker',paused:false}] as never;
+      if(command==='superagent_list')return [{id:'one',name:'One',coordinatorBotId:'router',
+        workerBotId:'worker',enabled:true,policyRevision:1}] as never;
+      if(command==='superagent_tickets')return [ticket] as never;
+      if(command==='superagent_snapshot')return {ticket,
+        teamSnapshot:{snapshotVersion:1,provenance:'legacy-unknown',orchestrationId:'one',teamVersion:3,
+          name:'Legacy Team (historical configuration unknown)',projectId:'fixture',
+          coordinatorBotId:'legacy-unknown-coordinator:one:3',workerBotIds:['worker-old'],reviewerBotIds:[],
+          policy:{policyRevision:1,autonomy:'unknown',maxConcurrentTasks:1,maxAttemptsPerAssignment:2,councilEnabled:false},
+          roles:[{role:'coordinator',ordinal:0,botId:'legacy-unknown-coordinator:one:3',
+            effectiveConfig:null,effectiveConfigSha256:null},
+            {role:'worker',ordinal:0,botId:'worker-old',effectiveConfig:null,effectiveConfigSha256:null}]},
+        mandate:{actor:'local-user',authorizationId:'manual',policyRevision:1,projectId:'fixture',
+          expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[]} as never;
+      if(command==='superagent_source_thread_links')return links as never;
+      if(command==='superagent_source_list')return sources as never;
+      if(command==='superagent_source_fetch_thread'){
+        fetchCalls.push({sourceId:args?.sourceId,subjectKey:args?.subjectKey});
+        const source=sources.find(item=>item.id===args?.sourceId);
+        if(!source)throw new Error('Unknown source');
+        const subjectKey=String(args?.subjectKey);
+        const key=source.id+':'+subjectKey;
+        const duplicate=seen.has(key);
+        if(!duplicate){
+          seen.add(key);
+          receipts.push({sourceId:source.id,
+            deliveryId:source.eventKind==='issues.edited'?'gh-issues-edited-abc123':'gh-check_run-completed-9876',
+            actor:source.actorFilter,eventKind:source.eventKind,subjectKey,
+            sequence:source.eventKind==='issues.edited'?1738555506789:9876,
+            decision:'observed_permitted',policyRevision:source.policyRevision,at:Date.now()});
+        }
+        return {decision:'observed_permitted',duplicate} as never;
+      }
+      if(command==='superagent_source_decisions')return receipts.filter(row=>row.sourceId===args?.sourceId) as never;
+      launches++;
+      throw new Error('Unexpected launch/effect command: '+command);
+    });
+    (window as unknown as {saObserveSnapshot:()=>unknown;saLaunches:()=>number}).saObserveSnapshot=()=>({fetchCalls,receipts});
+    (window as unknown as {saObserveSnapshot:()=>unknown;saLaunches:()=>number}).saLaunches=()=>launches;
+  });
+  const host=page.locator('#sa-observe-fetch-test');
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const evidence=host.getByRole('region',{name:'Ticket evidence'});
+  await expect(evidence).toContainText('legacy-unknown');
+  await expect(evidence).toContainText('worker-old');
+  await expect(evidence.getByRole('note')).toContainText('not recovered facts');
+  const editFetch=host.getByRole('button',{name:'Fetch one latest matching GitHub event for test/fixture issue:42'});
+  const checkFetch=host.getByRole('button',{name:'Fetch one latest matching GitHub event for test/fixture pull:43'});
+  await expect(editFetch).toBeVisible();
+  await expect(checkFetch).toBeVisible();
+  await editFetch.click();
+  const decisions=host.getByRole('region',{name:'Source decisions'});
+  await expect(decisions).toContainText('issues.edited');
+  await expect(decisions).toContainText('observed_permitted');
+  await editFetch.click();
+  await checkFetch.click();
+  await expect(decisions).toContainText('check_run.completed');
+  await checkFetch.click();
+  const snapshot=await page.evaluate(()=>(window as unknown as {saObserveSnapshot:()=>{
+    fetchCalls:Array<{sourceId:string;subjectKey:string}>;receipts:Array<Record<string,unknown>>
+  }}).saObserveSnapshot());
+  expect(snapshot.fetchCalls).toEqual([
+    {sourceId:'source-edit',subjectKey:'issue:42'},
+    {sourceId:'source-edit',subjectKey:'issue:42'},
+    {sourceId:'source-check',subjectKey:'pull:43'},
+    {sourceId:'source-check',subjectKey:'pull:43'},
+  ]);
+  expect(snapshot.receipts.map(receipt=>receipt.eventKind).sort()).toEqual(['check_run.completed','issues.edited']);
+  expect(snapshot.receipts.map(receipt=>receipt.decision)).toEqual(['observed_permitted','observed_permitted']);
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {saLaunches:()=>number}).saLaunches())).toBe(0);
+});
+
+test('SuperAgent Preview lists manual Observe support without sending or recording events', async ({page}) => {
+  await page.goto('/?bots=sample');
+  const result=await page.evaluate(async()=>{
+    const {invokeSuperagent}=await import('/src/preview-superagent.ts');
+    return await invokeSuperagent<{previewOnly:boolean;message:string}>(
+      'superagent_source_fetch_thread',{},async()=>[]);
+  });
+  expect(result).toMatchObject({previewOnly:true});
+  expect(result.message).toContain('issues.edited');
+  expect(result.message).toContain('check_run.completed');
+  expect(result.message).toContain('No GitHub request was sent');
+  expect(result.message).toContain('no event or decision receipt was stored');
 });

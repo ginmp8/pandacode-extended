@@ -2733,6 +2733,35 @@ async fn launch_operation_admitted(
             architect::completed(&app, &session_id, team.as_ref(), successful, was_stopped, provider_error.as_deref(), registry);
         }
         drop(registry);
+        // Persist a just-finished native Council reviewer result before its
+        // SuperAgent callback inspects the native score and skill receipts.
+        if let Ok(db) = store.lock() {
+            if let Err(error) = superagent::council_adapter::finalize_after_native_run(&db,&session_id) {
+                eprintln!("SuperAgent Council finalization failed: {error}");
+            }
+        }
+        // Successful bot workers have no failover path. Settle their Ticket
+        // synchronously so the exact artifact is frozen before actual native
+        // reviewers are dispatched; the later gateway callback is idempotent.
+        if successful && !was_stopped {
+            let required = store.lock().ok().and_then(|db| {
+                superagent::council_adapter::required_worker_session(&db,&session_id).ok()
+            }).unwrap_or(false);
+            if required {
+                let reply = store.lock().ok().and_then(|db| db.db.query_row(
+                    "SELECT content FROM messages WHERE session_id=?1 AND role='assistant' ORDER BY id DESC LIMIT 1",
+                    [&session_id],|row| row.get::<_,String>(0),
+                ).ok()).unwrap_or_default();
+                let settled = store.lock().ok().and_then(|db| {
+                    superagent::on_run_finished(&db,&session_id,true,&reply).ok()
+                }).unwrap_or(false);
+                if settled {
+                    if let Err(error) = superagent::council_adapter::start_after_worker_completion(&app,&session_id) {
+                        eprintln!("SuperAgent Council dispatch failed: {error}");
+                    }
+                }
+            }
+        }
         // A turn's approval requests expire even if Council is still reviewing
         // or the user stopped the run. This must precede deferred final callbacks.
         bots::gateway::turn_ended(&session_id);
@@ -4452,6 +4481,7 @@ pub fn run() {
                 superagent::events::superagent_source_decisions,
                 superagent::events::superagent_source_set_mode,
                 superagent::events::superagent_source_observe,
+                superagent::events::superagent_source_fetch_thread,
                 superagent::events::superagent_source_link_thread,
                 superagent::events::superagent_source_thread_links,
                 superagent::superagent_list,
@@ -4548,6 +4578,7 @@ pub fn run() {
                 architect::architect_set_council,
                 architect::architect_council_reviewer_options,
                 architect::architect_council_accept,
+                superagent::superagent_accept_council,
                 architect::architect_start,
                 architect::architect_control,
                 architect::architect_worker_messages,

@@ -237,9 +237,9 @@ fn current_grant(
     let (
         id,ticket_id,assignment_id,grant_session,ticket_revision,policy_revision,
         project_id,actor,paths_json,expires_at,revoked,ticket_state,current_revision,
-        active_assignment,assignment_state,bot_id,worker_bot_id,config_revision,
+        active_assignment,assignment_state,bot_id,_legacy_worker_id,_config_revision,
         enabled,mandate_revoked,mandate_project,mandate_actor,ticket_actor,
-        session_project,provider,started_at,attempt,coordinator_id,ticket_project,
+        session_project,provider,started_at,attempt,_legacy_coordinator_id,ticket_project,
         mandate_expiry,mandate_revision,project_root,
     ) = raw;
     if requested_id.is_some_and(|wanted| wanted != id) {
@@ -248,18 +248,20 @@ fn current_grant(
     let paths: Vec<String> = serde_json::from_str(&paths_json)
         .map_err(|_| "write_grant_invalid: stored file scope is malformed.")?;
     validate_paths(&paths)?;
-    let role_current = super::assignment_role_authorized(
-        store,&ticket_id,&bot_id,attempt,&coordinator_id,&worker_bot_id,
-    )?;
+    let snapshot = super::ticket_team_snapshot(store,&ticket_id)?;
+    let role_current = super::assignment_role_authorized(store,&ticket_id,&bot_id,attempt)?;
+    let is_configured_worker = snapshot.worker_bot_ids.iter().any(|id| id == &bot_id);
     let current_root = store.workspace_root(&session_project,Some(session_id))?;
     let root_matches = project_root == current_root.to_string_lossy().into_owned();
     let now = storage::now();
     if revoked != 0 || mandate_revoked != 0 || enabled == 0
         || ticket_state != "running" || assignment_state != "running"
         || active_assignment.as_deref() != Some(assignment_id.as_str())
-        || grant_session != session_id || bot_id != worker_bot_id || bot_id == coordinator_id
+        || grant_session != session_id || !is_configured_worker
+        || bot_id == snapshot.coordinator_bot_id
         || !role_current || ticket_revision != current_revision
-        || policy_revision != config_revision || policy_revision != mandate_revision
+        || policy_revision != snapshot.policy.policy_revision
+        || policy_revision != mandate_revision
         || expires_at <= now || mandate_expiry <= now
         || project_id != ticket_project || project_id != mandate_project
         || project_id != session_project || mandate_actor != ticket_actor
@@ -660,6 +662,66 @@ mod tests {
             assert!(validate_paths(&[path.into()]).is_err(),"{path}");
         }
         assert!(validate_paths(&["src/main.rs".into(),"src/main.rs".into()]).is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn editing_a_future_team_version_keeps_an_active_ticket_snapshot_and_grant_unchanged() {
+        let fixture=Fixture::new();
+        let old_ticket=fixture.queued_ticket(&fixture.config_a,"snapshot-grant-edit");
+        let paths=vec!["src/allowed.txt".to_owned()];
+        let (worker_ticket,session_id,grant_before,old_snapshot) = {
+            let mut store=fixture.store();
+            let old_snapshot=super::super::ticket_team_snapshot(&store,&old_ticket.id).unwrap();
+            let (running,_,_,_)=super::super::prepare_coordinated_worker_inner(
+                &mut store,&old_ticket.id,false,None,Some(&paths),
+            ).unwrap();
+            let session_id=super::super::assignment_session(&store,&running.id).unwrap().unwrap();
+            let grant=summary_for_ticket(&store,&running.id).unwrap();
+            assert!(current_grant(&store,&session_id,Some(&grant.id)).unwrap().is_some());
+            (running,session_id,grant,old_snapshot)
+        };
+        {
+            let store=fixture.store();
+            let (project,provider): (String,String)=store.db.query_row(
+                "SELECT project_id,provider FROM bots WHERE id='worker-a'",[],
+                |r| Ok((r.get(0)?,r.get(1)?)),
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES('worker-extra','Future worker',?1,?2,'default','plan',?3,?3)",
+                params![project,provider,storage::now()],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES('reviewer-extra','Future reviewer',?1,?2,'default','plan',?3,?3)",
+                params![project,provider,storage::now()],
+            ).unwrap();
+            let current=super::super::configuration(&store,&fixture.config_a).unwrap();
+            let updated=super::super::update_configuration_roles(
+                &store,&current.id,current.policy_revision,&super::super::NewOrchestration{
+                    name:"Write fixture A v2".into(),coordinator_bot_id:"router-a".into(),
+                    worker_bot_id:"worker-a".into(),
+                },vec!["worker-a".into(),"worker-extra".into()],vec!["reviewer-extra".into()],
+            ).unwrap();
+            assert_eq!(updated.team_version,2);
+            assert_eq!(updated.worker_bot_ids,vec!["worker-a","worker-extra"]);
+            assert_eq!(updated.reviewer_bot_ids,vec!["reviewer-extra"]);
+            assert_eq!(super::super::ticket_team_snapshot(&store,&worker_ticket.id).unwrap(),old_snapshot);
+            assert_eq!(serde_json::to_value(summary_for_ticket(&store,&worker_ticket.id).unwrap()).unwrap(),
+                serde_json::to_value(&grant_before).unwrap());
+            let active=current_grant(&store,&session_id,Some(&grant_before.id)).unwrap().unwrap();
+            assert_eq!(serde_json::to_value(active.summary).unwrap(),serde_json::to_value(&grant_before).unwrap());
+            let (future,launched)=super::super::admit(
+                &mut store,&fixture.config_a,"Future ticket","snapshot-grant-future",true,
+            ).unwrap();
+            assert!(!launched);
+            let future_snapshot=super::super::ticket_team_snapshot(&store,&future.id).unwrap();
+            assert_eq!(future_snapshot.team_version,2);
+            assert_eq!(future_snapshot.worker_bot_ids,vec!["worker-a","worker-extra"]);
+            assert_eq!(future_snapshot.reviewer_bot_ids,vec!["reviewer-extra"]);
+            assert!(current_grant(&store,&session_id,Some(&grant_before.id)).unwrap().is_some());
+        }
     }
 
     #[cfg(windows)]

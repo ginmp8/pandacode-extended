@@ -1,5 +1,9 @@
 # Upstream functional parity contract — PandaCode Extended
 
+## 2026-11-13 — Extended website security divergence classification
+
+Frozen source [`9739736d134b`](https://github.com/ginmp8/pandacode/commit/9739736d134ba29c6a07d92eca5745c3c4e5999b), app version **0.3.125**, is unchanged. [Extended `7ccbb7c`](https://github.com/ginmp8/pandacode-extended/commit/7ccbb7c45ba039b3a86d224bb47d3eb8038e28a9) adds a justified **EXTENDED_DEPENDENCY** variance in `website/package.json` and updates the already divergent `website/package-lock.json`: Astro 7.4.7 fixes advisories reported against the previous 7.3.3 lock, while preserving Sharp 0.35.5. All 2,048 upstream tracked paths remain represented; among 2,106 Extended paths, 1,967 are source-identical, **81 customized shared** and 58 Extended-only, with no missing paths or mode/type mismatches. Only one more shared path differs from upstream than before this patch. No feature or Setting is intentionally removed or disabled. These are **static path and dependency-graph checks**; native On/Off and 81-path functional equivalence are not established, and exact-new-SHA CI is pending.
+
 ## 2026-11-13 — upstream 0.3.125 reconciliation
 
 Frozen upstream [`9739736d134ba29c6a07d92eca5745c3c4e5999b`](https://github.com/ginmp8/pandacode/commit/9739736d134ba29c6a07d92eca5745c3c4e5999b), tree `275bef5585e153bee54345166f9fafadea2c281e`, application **0.3.125**. Three upstream commits since `fd5942ec358a` changed **15 paths** (11 source-exact and four Extended-aware version/lockfile adaptations; zero deletions). Candidate inventory: **2,048 source / 2,106 Extended files; 1,968 exact shared / 80 customized shared / 58 Extended-only; zero missing source paths or mode/type differences**. Planned Extended **0.12.0 remains DRAFT**. This records a candidate, not exact-new-SHA CI success or native Settings acceptance.

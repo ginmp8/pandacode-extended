@@ -1,5 +1,15 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-13 — website Astro remediation gates (not release approval)
+
+- [x] Freeze current fork source `9739736d134ba29c6a07d92eca5745c3c4e5999b` and preserve native app version 0.3.125.
+- [x] Preserve Extended Sharp 0.35.5 and existing control code in the website patch.
+- [x] Verify nontruncated source/destination inventories: 2,048 source files, 2,106 Extended files, zero missing source paths and zero type/mode mismatches.
+- [ ] Verify `npm ci`, website build and zero findings from the website npm audit on the **new exact destination SHA**, not the preceding failed run.
+- [ ] Verify all required latest-SHA CI jobs; the preceding `ea9dda3` website audit failed and the security patch CI is pending.
+- [ ] Validate native Settings On/Off and Connect/MCP/bots/cloud/VM/credential behavior; review 81 Extended-divergent shared paths semantically.
+- [ ] Obtain separate release authorization. **0.12.0 remains DRAFT**; no tag, GitHub Release or distribution approval is implied.
+
 ## 2026-11-13 — upstream 0.3.125 reconciliation
 
 Frozen upstream [`9739736d134ba29c6a07d92eca5745c3c4e5999b`](https://github.com/ginmp8/pandacode/commit/9739736d134ba29c6a07d92eca5745c3c4e5999b), tree `275bef5585e153bee54345166f9fafadea2c281e`, application **0.3.125**. Three upstream commits since `fd5942ec358a` changed **15 paths** (11 source-exact and four Extended-aware version/lockfile adaptations; zero deletions). Candidate inventory: **2,048 source / 2,106 Extended files; 1,968 exact shared / 80 customized shared / 58 Extended-only; zero missing source paths or mode/type differences**. Planned Extended **0.12.0 remains DRAFT**. This records a candidate, not exact-new-SHA CI success or native Settings acceptance.

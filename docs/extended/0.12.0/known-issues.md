@@ -1,5 +1,9 @@
 # Extended 0.12.0 — known issues and acceptance gaps
 
+## 2026-11-13 — security correction pending fresh CI
+
+The previous Extended [`ea9dda3`](https://github.com/ginmp8/pandacode-extended/commit/ea9dda3db12bd04bf27712b11ced084f99fb9b1c) failed both website npm audit jobs due to Astro 7.3.3 advisories. [`7ccbb7c`](https://github.com/ginmp8/pandacode-extended/commit/7ccbb7c45ba039b3a86d224bb47d3eb8038e28a9) introduces the Astro 7.4.7 candidate, but **fresh CI success is not yet established**; [push run #43507595356](https://github.com/ginmp8/pandacode-extended/actions/runs/43507595356) was pending at documentation authoring. A local `npm ci`, website build and npm audit could not run because registry DNS resolution failed (`EAI_AGAIN`). Native Settings On/Off, Connect, MCP, bots, cloud/VM, credential flows and semantic acceptance of the 81 customized shared files remain open. Do not promote planned Extended 0.12.0 based on static tree parity.
+
 ## 2026-11-13 — upstream 0.3.125 reconciliation
 
 Frozen upstream [`9739736d134ba29c6a07d92eca5745c3c4e5999b`](https://github.com/ginmp8/pandacode/commit/9739736d134ba29c6a07d92eca5745c3c4e5999b), tree `275bef5585e153bee54345166f9fafadea2c281e`, application **0.3.125**. Three upstream commits since `fd5942ec358a` changed **15 paths** (11 source-exact and four Extended-aware version/lockfile adaptations; zero deletions). Candidate inventory: **2,048 source / 2,106 Extended files; 1,968 exact shared / 80 customized shared / 58 Extended-only; zero missing source paths or mode/type differences**. Planned Extended **0.12.0 remains DRAFT**. This records a candidate, not exact-new-SHA CI success or native Settings acceptance.

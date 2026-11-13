@@ -1,5 +1,9 @@
 # PandaCode Extended documentation
 
+## 2026-11-13 — Extended website Astro security correction
+
+The fork remains at [PandaCode 0.3.125 `9739736d`](https://github.com/ginmp8/pandacode/commit/9739736d134ba29c6a07d92eca5745c3c4e5999b), with **no new upstream commits**. The Extended-specific website patch [`7ccbb7c`](https://github.com/ginmp8/pandacode-extended/commit/7ccbb7c45ba039b3a86d224bb47d3eb8038e28a9) changes only `website/package.json` and `website/package-lock.json`: Astro 7.3.3 is replaced with 7.4.7 to address two GitHub security advisories. The upstream website is not changed. The planned **Extended 0.12.0 remains DRAFT**, separate from the inherited application version. The preceding SHA failed the npm website audit; exact-patch-SHA CI was pending at documentation authoring. [Security detail](0.12.0/dependency-security.md).
+
 ## 2026-11-13 — upstream 0.3.125 integration candidate
 
 Frozen upstream [`9739736d134ba29c6a07d92eca5745c3c4e5999b`](https://github.com/ginmp8/pandacode/commit/9739736d134ba29c6a07d92eca5745c3c4e5999b), tree `275bef5585e153bee54345166f9fafadea2c281e`, declares application **0.3.125**. Since `fd5942ec358a`, three upstream commits changed **15 paths: 11 source-exact copies (10 modifications and the original `releases/0.3.125.md`) and four Extended-aware manifest/lockfile version updates**, with no upstream deletions. Expected candidate inventory: **2,048 upstream / 2,106 Extended tracked files; 1,968 identical shared; 80 divergent shared; 58 Extended-only; no missing upstream paths or mode/type conflicts**. The four retained divergences protect Extended dependency remediations. **Planned Extended 0.12.0 remains DRAFT**, independent of the inherited app version. CI for the new destination commit and native control-path acceptance are **not yet available**; prior CI must not be attributed to the new SHA.

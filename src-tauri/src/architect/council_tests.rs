@@ -745,7 +745,51 @@ fn escalated_native_source_policy_preserves_legacy_modes_and_denies_unimplemente
     assert!(direct.validate().unwrap_err().contains("requires the escalated"));
     direct.force_escalation = false;
     direct.strategy = council::CouncilExecutionStrategy::TwoPhase;
-    assert!(direct.validate().unwrap_err().contains("strategy_unavailable"));
+    assert!(direct.validate().is_ok());
+    direct.max_rounds = 1;
+    assert!(direct.validate().unwrap_err().contains("at least two"));
+}
+
+#[test]
+fn native_s3_uses_fresh_read_only_challengers_and_never_passes_phase_one_alone() {
+    let mut config = on(9.0, 3, 2);
+    config.strategy = council::CouncilExecutionStrategy::TwoPhase;
+    assert!(config.validate().is_ok());
+    let mut team = team_with(config.clone(), vec![
+        seat("phase-one-a", 1, Some(9.3), SINCE + 1),
+        seat("phase-one-b", 1, Some(9.6), SINCE + 2),
+    ]);
+    assert_eq!(council::status(&team).unwrap().state, "dispatch");
+    assert!(finish_refusal(&team).unwrap().contains("S3 phase one passed"));
+    assert_eq!(council::round_for(&team, &config, None).unwrap(), 2);
+    let mut second_a = seat("phase-two-a", 2, Some(9.5), SINCE + 3);
+    second_a.council.as_mut().unwrap().lens = "lens phase-one-a".into();
+    let mut second_b = seat("phase-two-b", 2, Some(9.4), SINCE + 4);
+    second_b.council.as_mut().unwrap().lens = "lens phase-one-b".into();
+    team.workers.extend([second_a, second_b]);
+    assert_eq!(council::status(&team).unwrap().state, "passed");
+    assert!(finish_refusal(&team).is_none());
+    assert!(council::round_for(&team, &config, None).unwrap_err().contains("challenge allocation"));
+
+    let mut replay = team.clone();
+    replay.workers[2].id = "phase-one-a".into();
+    assert_ne!(council::status(&replay).unwrap().state, "passed");
+    assert!(finish_refusal(&replay).unwrap().contains("S3 two-phase"));
+
+    let mut writable = team.clone();
+    writable.workers[3].read_only = false;
+    assert_ne!(council::status(&writable).unwrap().state, "passed");
+
+    let mut stale = team.clone();
+    stale.changed_at = SINCE + 5;
+    assert_ne!(council::status(&stale).unwrap().state, "passed");
+
+    let mut below = team.clone();
+    below.workers[3].council.as_mut().unwrap().score = Some(8.3);
+    assert_ne!(council::status(&below).unwrap().state, "passed");
+
+    let only_first = team_with(config, team.workers[..2].to_vec());
+    assert!(finish_refusal(&only_first).unwrap().contains("S3 phase one passed"));
 }
 
 #[test]

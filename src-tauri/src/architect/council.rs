@@ -171,8 +171,8 @@ impl CouncilConfig {
         if !(1..=MAX_ROUNDS).contains(&self.max_rounds) {
             return Err(format!("Council takes 1 to {MAX_ROUNDS} rounds."));
         }
-        if self.strategy == CouncilExecutionStrategy::TwoPhase {
-            return Err("strategy_unavailable: independent native two-phase challengers have not been admitted.".into());
+        if self.strategy == CouncilExecutionStrategy::TwoPhase && self.max_rounds < 2 {
+            return Err("S3 two-phase Council requires at least two bounded review rounds.".into());
         }
         if self.force_escalation && self.strategy != CouncilExecutionStrategy::Escalated {
             return Err("Forced escalation requires the escalated Council strategy.".into());
@@ -1077,6 +1077,22 @@ pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: O
     if current && room && (replaced || !done) {
         return Ok(latest);
     }
+    if config.strategy == CouncilExecutionStrategy::TwoPhase {
+        // S3 uses exactly two native phases for this initial executable path.
+        // A second phase may not precede a complete, fresh first phase; an
+        // invalidated first phase requires a new task cycle, not stale reuse.
+        if latest >= 2 {
+            return Err("S3 two-phase Council has completed its challenge allocation; start a new Council cycle to re-review a changed artifact.".into());
+        }
+        if latest == 1 && (!view.complete(1) || stale(team, 1)
+            || lowest(team, 1).is_none_or(|score| score < config.target)
+            || !criterion_blockers(team, config, 1).is_empty()
+            || !unverified_required_skill_checks(team, 1).is_empty()
+            || severe_findings(team, 1))
+        {
+            return Err("S3 challenge reviewers require a complete, passing, independently evidenced, unchanged first phase.".into());
+        }
+    }
     if view.at_limit(config) {
         return Err(format!("The Council round limit of {} is reached. Finish and report the scores plainly, or ask the user to raise the limit.", config.max_rounds));
     }
@@ -1280,6 +1296,51 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
         .all(|(worker, _)| !prior_ids.contains(worker.id.as_str()))
 }
 
+/// The second S3 phase is a real fresh native Council round, not a verdict
+/// inferred from phase one or a fabricated extra reviewer vote. Its reviewers
+/// must be independent, read-only, settled and bound to the same unchanged
+/// artifact; a selected bot cannot challenge its own prior lens.
+fn two_phase_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> bool {
+    if config.strategy != CouncilExecutionStrategy::TwoPhase {
+        return true;
+    }
+    if view.latest != 2 || !view.complete(1) || !view.complete(2)
+        || stale(team, 1) || stale(team, 2)
+    {
+        return false;
+    }
+    let mut reviewer_ids = std::collections::HashSet::new();
+    for round in 1..=2 {
+        if lowest(team, round).is_none_or(|score| score < config.target)
+            || !criterion_blockers(team, config, round).is_empty()
+            || !unverified_required_skill_checks(team, round).is_empty()
+            || severe_findings(team, round)
+        {
+            return false;
+        }
+        for (worker, seat) in in_round(team, round).filter(|(worker, seat)| counts(worker, seat)) {
+            if !worker.read_only || worker.status != "completed" || seat.score.is_none()
+                || !reviewer_ids.insert(worker.id.as_str())
+            {
+                return false;
+            }
+            if round == 2 {
+                let earlier = in_round(team, 1).find(|(_, prior)| same_lens(&prior.lens, &seat.lens));
+                if let Some((original, _)) = earlier {
+                    let original_bot = original.reviewer_binding.as_ref()
+                        .and_then(|binding| binding.reviewer_bot_id.as_deref());
+                    let challenger_bot = worker.reviewer_binding.as_ref()
+                        .and_then(|binding| binding.reviewer_bot_id.as_deref());
+                    if original_bot.is_some() && original_bot == challenger_bot {
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+    true
+}
+
 /// The verdict from a view the caller already computed.
 fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Option<(String, bool)> {
     if !config.nested_bot_reviewers.is_empty() {
@@ -1292,6 +1353,19 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
     let needed = required_reviewers(team, config, round);
     if round == 0 {
         return has_writer(team).then(|| (format!("No Council round yet. Once writers settle, dispatch at least {needed} reviewers in one batch with councilLens."), false));
+    }
+    if config.strategy == CouncilExecutionStrategy::TwoPhase {
+        if round == 1 && view.complete(1) && !stale(team, 1)
+            && lowest(team, 1).is_some_and(|score| score >= config.target)
+            && criterion_blockers(team, config, 1).is_empty()
+            && unverified_required_skill_checks(team, 1).is_empty()
+            && !severe_findings(team, 1)
+        {
+            return Some(("S3 phase one passed; launch a fresh independent, read-only Council challenge round against the same artifact and first-phase findings before approval.".into(), false));
+        }
+        if round >= 2 && !two_phase_satisfied(team, config, view) {
+            return Some(("S3 two-phase Council cannot pass without two complete, fresh, independent read-only phases on the unchanged artifact, with both criteria and evidence gates satisfied.".into(), false));
+        }
     }
     if reconfigured(team, round) && !view.at_limit(config) {
         return Some((format!("Council round {round} was closed by the user's reviewer selection change. Dispatch a new round with councilLens."), false));
@@ -1411,14 +1485,20 @@ fn status_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Coun
         "reviewing"
     } else if view.complete(round) && !stale && unverified_required_skill_checks(team, round).is_empty() && criterion_blockers(team, config, round).is_empty() && !severe_findings(team, round) && low.is_some_and(|low| low >= config.target)
         && forced_escalation_satisfied(team, config, view)
-        && automatic_escalation_satisfied(team, config, view) {
+        && automatic_escalation_satisfied(team, config, view)
+        && two_phase_satisfied(team, config, view) {
         "passed"
     } else if view.at_limit(config) {
         "limit"
     } else if !view.complete(round) || (config.strategy == CouncilExecutionStrategy::Escalated
         && (!forced_escalation_satisfied(team, config, view)
             || !automatic_escalation_satisfied(team, config, view))
-        && low.is_some_and(|score| score >= config.target) && !stale) {
+        && low.is_some_and(|score| score >= config.target) && !stale)
+        || (config.strategy == CouncilExecutionStrategy::TwoPhase && round == 1
+            && view.complete(1) && !stale && low.is_some_and(|score| score >= config.target)
+            && criterion_blockers(team, config, 1).is_empty()
+            && unverified_required_skill_checks(team, 1).is_empty()
+            && !severe_findings(team, 1)) {
         "dispatch"
     } else {
         "fixing"
@@ -1532,15 +1612,23 @@ pub(super) fn lead_rules(team: &TeamSnapshot, routed: bool) -> String {
                 } else { "Use only these named criteria as reviewer lenses." })
         }
     };
-    format!(" Council is on, target {}/10. Before finishing work that changed anything, convene a council: you decide the reviewers, choosing distinct lenses that fit this work (correctness, security, UX, performance, visual quality, pacing, overall senior review, whatever matters here; round 1 fixes the lenses: each sits again in every later round under its name, and no new lens joins later), {count}, dispatched in one batch with councilLens and {models}, after writers settle. Give each reviewer the user's goal, where the work is and its lens; never prior scores, and never the score you want. The bar is every reviewer at or above the target, not the average. After a round below it, read the reports, fix real blockers through workers, verify, and convene FRESH reviewers. {limit} If the user says to accept the current scores, tell them to press Accept and finish on the Council card. End your final message with a table of each lens's first and final score.{selected_note}{criteria_note}", config.target)
+    let phase_note = if config.strategy == CouncilExecutionStrategy::TwoPhase {
+        " S3 two-phase: finish a complete passing first native Council round, then dispatch a second fresh read-only challenger round with the same lenses and the same frozen artifact. Give phase-two reviewers the first-phase findings and their evidence references, but not earlier scores or a target score. Challenge factual omissions, contradictions and unsupported evidence; no writer may change the artifact between phases. Phase-two reviewers must have new worker identities; selected bots cannot challenge their own earlier lens. Never finish after phase one alone."
+    } else {
+        ""
+    };
+    format!(" Council is on, target {}/10. Before finishing work that changed anything, convene a council: you decide the reviewers, choosing distinct lenses that fit this work (correctness, security, UX, performance, visual quality, pacing, overall senior review, whatever matters here; round 1 fixes the lenses: each sits again in every later round under its name, and no new lens joins later), {count}, dispatched in one batch with councilLens and {models}, after writers settle. Give each reviewer the user's goal, where the work is and its lens; never prior scores, and never the score you want. The bar is every reviewer at or above the target, not the average. After a round below it, read the reports, fix real blockers through workers, verify, and convene FRESH reviewers. {limit} If the user says to accept the current scores, tell them to press Accept and finish on the Council card. End your final message with a table of each lens's first and final score.{selected_note}{criteria_note}{phase_note}", config.target)
 }
 
 /// A reviewer's rules. They never carry the target or earlier scores.
-pub(super) fn reviewer_rules(worker: &Worker) -> String {
+pub(super) fn reviewer_rules(worker: &Worker, strategy: Option<CouncilExecutionStrategy>) -> String {
     let Some(seat) = &worker.council else {
         return String::new();
     };
-    format!(" You are an independent Council reviewer; your lens is {}. Hunt real defects and verify each by inspecting the work itself (code, output, frames, renders) or running checks; skip nitpicks that do not affect the result. Say what would raise the score. Score strictly: 10 means you found nothing worth improving; deduct for each real defect, in proportion to its impact. For actionable defects, optionally include one line starting Council findings JSON: followed by a compact JSON array of objects with severity (critical/high/medium/low/info), category, title and explanation. Do not claim independent evidence verification through that line. End your final report with the exact line `Council score: N/10`.", seat.lens)
+    let challenge = if strategy == Some(CouncilExecutionStrategy::TwoPhase) && seat.round == 2 {
+        " This is the S3 adversarial challenge phase. Inspect the frozen artifact independently, challenge the first-phase findings and evidence in your task, and identify contradictions and omissions. Do not inherit any previous score or claim that an unprovided phase-one report was verified."
+    } else { "" };
+    format!(" You are an independent Council reviewer; your lens is {}. Hunt real defects and verify each by inspecting the work itself (code, output, frames, renders) or running checks; skip nitpicks that do not affect the result. Say what would raise the score. Score strictly: 10 means you found nothing worth improving; deduct for each real defect, in proportion to its impact. For actionable defects, optionally include one line starting Council findings JSON: followed by a compact JSON array of objects with severity (critical/high/medium/low/info), category, title and explanation. Do not claim independent evidence verification through that line.{challenge} End your final report with the exact line `Council score: N/10`.", seat.lens)
 }
 
 /// The read-only rule for a reviewer: it reviews the work its assignment names, and its findings go

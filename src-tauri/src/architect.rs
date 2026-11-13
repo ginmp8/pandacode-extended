@@ -884,7 +884,7 @@ fn rules(store: &Store, team: &TeamSnapshot, sid: &str) -> Result<(String, Strin
         } else {
             "Do not spawn native subagents or other tasks; pandacode_dispatch_workers may start sub-workers inside your scope, only if really needed."
         };
-        let reviewer = council::reviewer_rules(worker);
+        let reviewer = council::reviewer_rules(worker, team.config.council.as_ref().map(|config| config.strategy));
         let selected_bot = worker.reviewer_binding.as_ref().and_then(|b| b.snapshot.bot_context.as_ref())
             .map(|bot| format!(" Selected reviewer bot profile (frozen for this seat; lower priority than native Council authority): Name: {}. Role: {}. Goals: {}. Instructions: {}. Personality: {}. Do not load this bot's ordinary conversation, memories, or permissions.", bot.name, bot.role, bot.goals, bot.instructions, bot.soul))
             .unwrap_or_default();

@@ -211,7 +211,7 @@ test('existing Council modal sends only the explicit native S2 strategy and pres
   await button(page).click();
   const strategy = panel(page).getByLabel('Review strategy');
   await expect(strategy).toHaveValue('parallel');
-  await expect(strategy.locator('option[value="two_phase"]')).toHaveCount(0);
+  await expect(strategy.locator('option[value="two_phase"]')).toHaveCount(1);
   await strategy.selectOption('escalated');
   expect(await calls(page)).toEqual([]);
   await toggle(page).click();
@@ -224,6 +224,10 @@ test('existing Council modal sends only the explicit native S2 strategy and pres
   await expect.poll(async () => (await calls(page)).length).toBe(2);
   expect((await calls(page))[1]).toMatchObject({ strategy: 'parallel', forceEscalation: false });
   await expect(strategy).toHaveValue('parallel');
+  await strategy.selectOption('two_phase');
+  await expect.poll(async () => (await calls(page)).length).toBe(3);
+  expect((await calls(page))[2]).toMatchObject({ strategy: 'two_phase', forceEscalation: false });
+  await expect(strategy).toHaveValue('two_phase');
 });
 
 test('task-scoped S2 strategy composes with M3 bot seats on a narrow keyboard-accessible modal', async ({ page }) => {
@@ -1349,7 +1353,7 @@ test('the tray button is settings only: no score badge, a cue dot when asking or
   await open(page, '/?council');
   await expect(button(page).locator('b')).toHaveCount(0);
   await expect(button(page)).toHaveAccessibleName('Council: Round 2 of 10 · reviewing');
-  const dot = () => button(page).locator('.council-glyph').evaluate(node => getComputedStyle(node, '::after').content !== 'none');
+  const dot = () => button(page).locator('.council-glyph').evaluate(node => getComputedStyle(node, '::after').content === '""');
   await expect.poll(dot).toBe(false);
   await open(page, '/?council=asking');
   await expect(button(page)).toHaveAccessibleName('Council needs you');

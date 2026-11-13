@@ -2555,3 +2555,68 @@ fn non_channel_native_task_review_request_is_idempotent_and_requires_real_counci
         &store, &sid, &project, "assignment-1", &artifact, &first.request_id,
     ).unwrap_err().contains("council_task_stale"));
 }
+
+#[test]
+fn native_task_terminal_requires_real_completed_reviewer_callbacks() {
+    // Exercise the existing worker admission, read-only execution and score
+    // extraction, not fabricated scores or a second Council verdict engine.
+    let (state, sid) = council_state(on(9.0, 3, 2));
+    let (project, artifact, request) = {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.council_since = storage::now();
+        team.objective = "Review the pinned native task artifact".into();
+        save(&store, &mut team).unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        let artifact = "c".repeat(64);
+        let request = council_requests::admit_native_task(
+            &store, &sid, &project, "native-approved-task", &artifact,
+        ).unwrap();
+        (project, artifact, request)
+    };
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [
+            reviewer_assignment("native-security", "security"),
+            reviewer_assignment("native-correctness", "correctness")
+        ]
+    })).unwrap();
+    for (index, score) in [9.4, 9.2].into_iter().enumerate() {
+        let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        let (run, _) = claim(&state, action);
+        assert!(run.config.reviewer_boundary, "reviewer {index} must have native authority");
+        assert_eq!(run.config.mode, "plan");
+        finish(&state, &run, &format!("Independent review evidence.\nCouncil score: {score}/10"), true);
+    }
+    {
+        let store = state.store.lock().unwrap();
+        let inspected = council_requests::inspect_native_task(
+            &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+        ).unwrap();
+        assert_eq!(inspected.native.status.state, "passed");
+        assert!(council_requests::record_native_terminal(
+            &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+        ).is_err(), "a running team has no terminal verified completion");
+    }
+    call(&state, &sid, "pandacode_finish_team", json!({"summary":"Reviewed."})).unwrap();
+    let store = state.store.lock().unwrap();
+    let receipt = council_requests::record_native_terminal(
+        &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+    ).unwrap();
+    assert_eq!(receipt.outcome, "passed");
+    assert_eq!(receipt.lowest_verified_score, 9.2);
+    assert_eq!(receipt.request_id, request.request_id);
+    assert_eq!(receipt.evidence_sha256.len(), 64);
+    assert_eq!(council_requests::record_native_terminal(
+        &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+    ).unwrap(), receipt, "a repeated settlement cannot mint another receipt");
+    assert_eq!(council_requests::read_native_terminal(
+        &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+    ).unwrap(), receipt);
+    // Even a persisted terminal receipt cannot authorize a changed objective.
+    let mut tampered = load(&store, &sid).unwrap().unwrap();
+    tampered.objective.push_str(" after approval");
+    save(&store, &mut tampered).unwrap();
+    assert!(council_requests::read_native_terminal(
+        &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+    ).is_err());
+}

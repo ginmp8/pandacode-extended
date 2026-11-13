@@ -32,6 +32,7 @@ enum Command {
     InspectOrchestrations,
     ListTickets,
     ListReviewInbox,
+    ListRecoveryInbox,
     ListTeamDemands {
         orchestration_id: String, state: String,
         before_updated_at: Option<i64>, before_id: Option<String>,
@@ -219,6 +220,22 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(tasks) => { println!("{tasks}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent task listing failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if matches!(&command, Command::ListRecoveryInbox) {
+                // Recovery planning is read-only even beside a live serve host:
+                // no restart settlement, provider replay, or effect acknowledgment.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::list_headless_recovery_inbox(
+                        &dir.join("kingcode.sqlite3"),
+                    ));
+                match result {
+                    Ok(inbox) => { println!("{inbox}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent recovery inbox inspection failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -806,6 +823,10 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 command = Command::ListTickets;
                 ops += 1;
             }
+            "--list-recovery-inbox" => {
+                command = Command::ListRecoveryInbox;
+                ops += 1;
+            }
             "--list-review-inbox" => {
                 command = Command::ListReviewInbox;
                 ops += 1;
@@ -1108,7 +1129,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1136,6 +1157,8 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --list-tickets         List up to 200 redacted native SuperAgent tickets; exit.
   --list-review-inbox    List up to 200 pending human/Council decisions across Teams;
                          redact objectives, never approve or run a reviewer; exit.
+  --list-recovery-inbox  Prioritize up to 200 actual recovery/decision Tickets across Teams;
+                         identify stale native runs and uncertain remote effects, read-only; exit.
   --list-team-demands <id> <state> [--before <ms> <ticket-id>]
                          Page up to 200 native Demands for one Team and exact Ticket state
                          (or all). Next page uses returned nextCursor; no private evidence
@@ -1228,6 +1251,8 @@ mod tests {
         assert_eq!(parsed("--inspect-orchestrations"), Ok(Command::InspectOrchestrations));
         assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
         assert_eq!(parsed("--list-review-inbox"), Ok(Command::ListReviewInbox));
+        assert_eq!(parsed("--list-recovery-inbox"), Ok(Command::ListRecoveryInbox));
+        assert!(parsed("--list-recovery-inbox --stop-ticket ticket_1").is_err());
         assert_eq!(parsed("--inspect-source-health source_123"),
             Ok(Command::InspectSourceHealth { source_id: "source_123".into() }));
         for invalid in ["--inspect-source-health", "--inspect-source-health ../private",

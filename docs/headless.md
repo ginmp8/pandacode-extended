@@ -377,6 +377,7 @@ execute an external effect.
 ```sh
 pandacode serve --list-tickets
 pandacode serve --list-review-inbox
+pandacode serve --list-recovery-inbox
 pandacode serve --list-team-demands <team-id> blocked
 pandacode serve --accept-ticket <ticket-id> <expected-revision>
 pandacode serve --reject-ticket <ticket-id> <expected-revision> "Needs changes"
@@ -423,6 +424,26 @@ A pending native Council review is never represented as a pass. This command
 opens existing SQLite read-only and cannot perform provider dispatch, recovery,
 review acceptance, external effects or policy grants. Use a separate current
 Ticket inspection before any explicitly authorized native human decision.
+
+### Cross-Team recovery and reconciliation inbox (read-only)
+
+`pandacode serve --list-recovery-inbox` returns a native SQLite
+snapshot of up to 200 Tickets needing a decision or recovery investigation:
+queued, blocked, review/approval-pending, failed/interrupted/inconclusive,
+expired or inconsistent running assignments, and even terminal Tickets with
+still-unresolved external-effect receipts. Healthy running assignments and
+settled terminal Tickets are excluded. Unresolved effects are prioritized; the
+returned JSON includes Ticket/Team IDs, revision, state, a redacted native
+recovery assessment, `mayHaveMore`, and an explicit next operator action.
+The cap is not pagination or proof of an additional page.
+
+The command deliberately does **not** run startup recovery, inspect a live
+provider handle, resend/acknowledge a remote write, resume an assignment,
+issue grants, invoke Council or change Ticket state. An expired assignment is
+reported for investigation, not silently terminated by an inspector. A native
+operator must separately verify the current revision, server state and remote
+effect receipt before any authorized action. Sensitive objectives, results,
+credentials, effect keys and private audit details are not returned.
 
 ### Read-only Team Demand status inspection
 

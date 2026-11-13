@@ -183,6 +183,13 @@ fn workspace_skills_with(
     (brief::skills(&text, &[], &skipped), skipped)
 }
 
+/// Native task sessions cannot silently switch to an ambient bot backup model.
+/// Model/provider fallback needs separately issued task authority, which the
+/// current read-only Mandate does not grant.
+fn bot_model_failover_allowed(channel_id: &str) -> bool {
+    channel_id != crate::superagent::CHANNEL
+}
+
 /// Starts a turn, or queues the message when the task is already working.
 fn steer_while_busy(bot: &Bot, image_ids: &[String], sender_id: &str, fresh: bool) -> bool {
     !fresh && bot.while_working == "steer" && image_ids.is_empty()
@@ -193,7 +200,7 @@ fn image_attachments(image_ids: &[String]) -> Value {
     json!(image_ids.iter().map(|id| json!({"kind": "image", "id": id, "name": "Attached image"})).collect::<Vec<_>>())
 }
 
-async fn start_or_queue(app: &tauri::AppHandle, bot: &Bot, session_id: &str, text: String, image_ids: Option<Vec<String>>, sender_id: &str, force_queue: bool) -> Result<()> {
+async fn start_or_queue(app: &tauri::AppHandle, bot: &Bot, session_id: &str, text: String, image_ids: Option<Vec<String>>, sender_id: &str, channel_id: &str, force_queue: bool) -> Result<()> {
     if crate::feature_controls::get().bots_paused {
         return Err("All bots are paused in Settings > Feature controls.".into());
     }
@@ -223,7 +230,11 @@ async fn start_or_queue(app: &tauri::AppHandle, bot: &Bot, session_id: &str, tex
         return Ok(());
     }
     super::failover::remember_images(session_id, &image_ids);
-    super::failover::before_turn(app, bot, session_id);
+    // A task's frozen native Mandate has not authorized provider/model changes.
+    // Ordinary bot conversations keep their existing failover behavior.
+    if bot_model_failover_allowed(channel_id) {
+        super::failover::before_turn(app, bot, session_id);
+    }
     let (is_team, request) = {
         let store = state.store.lock().map_err(|e| e.to_string())?;
         // The bot message or channel assignment this turn carries is now the one running.
@@ -339,7 +350,7 @@ pub(crate) async fn deliver_with_queue(app: &tauri::AppHandle, inbound: Inbound,
         let briefed = super::brief_version_of(&store, &session_id)?;
         (compose(app, &store, &bot, &session_id, &kind, &inbound.sender_name, &format!("{text}{moodboard}"))?, briefed)
     };
-    if let Err(error) = start_or_queue(app, &bot, &session_id, turn, inbound.image_ids, &inbound.sender_id, force_queue).await {
+    if let Err(error) = start_or_queue(app, &bot, &session_id, turn, inbound.image_ids, &inbound.sender_id, &inbound.channel_id, force_queue).await {
         unbrief(app, &session_id, briefed, bot.memory_version);
         return Err(error);
     }
@@ -366,7 +377,7 @@ pub(crate) async fn run_scheduled(app: &tauri::AppHandle, bot_id: &str, label: &
         let turn = compose(app, &store, &bot, &session, "schedule", "", &format!("{label}\n\n{prompt}"))?;
         (bot, session, turn, briefed)
     };
-    if let Err(error) = start_or_queue(app, &bot, &session_id, turn, None, "schedule", false).await {
+    if let Err(error) = start_or_queue(app, &bot, &session_id, turn, None, "schedule", "schedule", false).await {
         unbrief(app, &session_id, briefed, bot.memory_version);
         return Err(error);
     }
@@ -411,6 +422,12 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
     // A turn that did nothing before a usage limit or provider error moves to a backup model.
     let held = if successful {
         super::failover::completed(session_id);
+        None
+    } else if !bot_model_failover_allowed(&thread.channel_id) {
+        // A failed task turn must settle against its original Assignment.
+        // Never switch to a bot-wide backup model or hold a task for an
+        // ambient approval card, even if that bot has automatic fallback.
+        super::failover::cancel(session_id);
         None
     } else {
         match super::failover::after_failure(app, &bot, session_id).await {
@@ -658,6 +675,14 @@ pub(crate) async fn stop_bot(app: &tauri::AppHandle, bot_id: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn superagent_task_turn_never_inherits_bot_model_failover() {
+        assert!(!bot_model_failover_allowed(crate::superagent::CHANNEL));
+        for channel in [super::super::DESKTOP, "schedule", "telegram", "shared-channel"] {
+            assert!(bot_model_failover_allowed(channel), "ordinary channel changed: {channel}");
+        }
+    }
 
     #[test]
     fn native_superagent_gateway_rejects_bot_wide_commands_and_approval_escalation() {

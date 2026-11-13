@@ -796,9 +796,40 @@ pub(crate) fn migrate_team_versions(db: &Connection) -> Result<()> {
 
         // Keep configuration() and future admissions pinned to the mutable
         // orchestration row as it exists now, never to a historical Ticket.
+        // An installation that used the PR #150 migration may also have a
+        // persisted, ordered multi-worker/reviewer roster. Preserve it as
+        // configured membership rather than silently dropping these roles
+        // while adopting the authoritative versioned Team model.
+        let mut current_workers = vec![worker];
+        let mut current_reviewers = Vec::new();
+        let legacy_roster: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sa_team_roles')",
+            [], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if legacy_roster {
+            let additions = {
+                let mut stmt = db.prepare(
+                    "SELECT role,bot_id FROM sa_team_roles
+                     WHERE orchestration_id=?1
+                     ORDER BY CASE role WHEN 'worker' THEN 0 ELSE 1 END,position",
+                ).map_err(|e| e.to_string())?;
+                let collected = stmt.query_map([&id], |row| {
+                    Ok((row.get::<_, String>(0)?,row.get::<_, String>(1)?))
+                }).map_err(|e| e.to_string())?
+                  .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+                collected
+            };
+            for (role, bot_id) in additions {
+                match role.as_str() {
+                    "worker" => current_workers.push(bot_id),
+                    "reviewer" => current_reviewers.push(bot_id),
+                    _ => return Err("Legacy Team roster contains an unsupported role.".into()),
+                }
+            }
+        }
         let current = make_team_snapshot(
-            db,&id,team_version,&name,&project,policy_revision,&coordinator,&[worker],&[],
-            false,
+            db,&id,team_version,&name,&project,policy_revision,&coordinator,
+            &current_workers,&current_reviewers,false,
             TeamSnapshotProvenance::LegacyCurrent,
         )?;
         insert_team_version(db,&current)?;
@@ -5660,6 +5691,45 @@ mod tests {
              VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
             params![id,storage::now()],
         ).unwrap();
+    }
+
+    #[test]
+    fn legacy_150_sidecar_roles_survive_versioned_team_migration() {
+        let store = fixture();
+        add_worker(&store, "worker-two");
+        add_worker(&store, "reviewer");
+        let team = create_configuration(&store, NewOrchestration {
+            name: "Migrating Team".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        // Recreate the v44/v45 #150 layout in a disposable database:
+        // PR #150 persisted extra roles separately, without Team versions.
+        store.db.execute_batch(
+            "DELETE FROM sa_team_version_members;
+             DELETE FROM sa_team_versions;",
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'worker',0,'worker-two')", [&team.id],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'reviewer',0,'reviewer')", [&team.id],
+        ).unwrap();
+
+        migrate_team_versions(&store.db).unwrap();
+        let restored = configuration(&store, &team.id).unwrap();
+        assert_eq!(restored.worker_bot_ids, vec!["worker", "worker-two"]);
+        assert_eq!(restored.reviewer_bot_ids, vec!["reviewer"]);
+        assert!(!restored.enabled);
+        assert!(!restored.council_required);
+        assert!(roster::has_additional_members(&store, &team.id).unwrap());
+        // Idempotence: a later boot does not overwrite the canonical version.
+        migrate_team_versions(&store.db).unwrap();
+        let again = configuration(&store, &team.id).unwrap();
+        assert_eq!(again.team_version, restored.team_version);
+        assert_eq!(again.worker_bot_ids, restored.worker_bot_ids);
     }
 
     fn enabled(store: &Store) -> Orchestration {

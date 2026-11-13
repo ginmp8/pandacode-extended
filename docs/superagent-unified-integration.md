@@ -20,9 +20,25 @@
 | Council review | Native Architect/Council and `superagent/council_adapter.rs` | Preserve verified task/assignment/artifact binding and native independent reviewer callbacks. Observational Council state alone never authorizes completion. |
 | GitHub input | `superagent/events.rs`, existing `gh` adapter | Retain PR #150's explicitly operator-triggered authenticated Events/Checks Observe and PR #151's exact manual thread fetch. Neither implies an authenticated always-on subscription or Auto admission. |
 | External effect | `superagent/effects.rs` | Preserve PR #151's native issue-comment grants, idempotency, read-back and cross-process fence. Expose PR #150's receipt history as read-only projection of the same authoritative table. |
-| SQLite | `storage.rs` | PR #151 migrations v44–49 remain authoritative; the independent PR #150 roster/check-outcome additions are appended in v50, never substituted for a previous migration. |
+| SQLite | `storage.rs` | PR #151 migrations v44–49 remain authoritative for new installs; v50 adds #150's roster/check-outcome tables. For existing #150 v44/v45 databases, the migration checks actual schema ownership, initializes and revokes missing-root write grants without granting authority, and imports ordered roster members into immutable Team versions. |
 | Experience | `src/superagent-ui.ts` and `src/main.ts` | Preserve PR #150's dedicated Teams/Demands/Review/Sources workspace and inspections; surface PR #151's explicit scoped-write and issue-comment UX under native Ticket authority. |
 | Headless | `headless.rs` | Preserve PR #150's operational read/Observe/Team commands and PR #151's confirmed issue-comment command; no extra unauthenticated network control surface. |
+
+### Prior version 44/45 collision
+
+PR #150 used schema version 44 for `sa_team_roles` and version 45 for
+`sa_check_run_results`. PR #151 independently used these version numbers
+for exact worker grants and checkout-root pinning. `user_version` therefore
+does **not** identify which PR's tables exist. The unified migration inspects
+the actual roster table when upgrading either version, creates the missing
+worker-grant schema with conservative revoked/default permissions, and then
+continues the v46–v50 migrations. Any legacy worker/reviewer sidecar members
+become future-facing versioned Team membership; existing Ticket evidence and
+its recorded original version are never rewritten from the mutable Team.
+
+This migration path must be exercised on copies of both legacy schemas before
+approval. Until its cross-version CI is executed on the exact integration SHA,
+the upgrade contract is **unverified**, not accepted.
 
 ## Safety invariants
 

@@ -691,6 +691,36 @@ impl Store {
                 migration.execute_batch("PRAGMA user_version=43;")
                     .map_err(|e| e.to_string())?;
             }
+            // PR #150 previously used schema versions 44/45 for the Team roster
+            // and observed Check Runs. PR #151 used the same numbers for write
+            // grants. Detect actual schema ownership instead of trusting only
+            // PRAGMA user_version; this migration never authorizes an effect.
+            if (44..=45).contains(&version) {
+                let prior_roster: bool = migration.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='sa_team_roles')",
+                    [], |row| row.get(0),
+                ).map_err(|e| e.to_string())?;
+                if prior_roster {
+                    migration.execute_batch(crate::superagent::write_grants::SCHEMA)
+                        .map_err(|e| e.to_string())?;
+                    let has_root: bool = migration.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_worker_write_grants') WHERE name='project_root')",
+                        [], |row| row.get(0),
+                    ).map_err(|e| e.to_string())?;
+                    if !has_root {
+                        migration.execute_batch(
+                            "ALTER TABLE sa_worker_write_grants ADD COLUMN project_root TEXT NOT NULL DEFAULT '';")
+                            .map_err(|e| e.to_string())?;
+                    }
+                    // Existing read-only Teams must not gain a live file-write
+                    // grant through the migration, even when the table exists.
+                    migration.execute_batch(
+                        "UPDATE sa_worker_write_grants SET revoked=1,
+                         revoked_at=COALESCE(revoked_at,created_at)
+                         WHERE revoked=0 AND project_root='';")
+                        .map_err(|e| e.to_string())?;
+                }
+            }
             if version < 44 {
                 // Worker file-write grants and per-write receipts are separate
                 // from the immutable read-only mandate. Existing tickets remain

@@ -1499,12 +1499,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (!cfg || !roleRoster || roleRoster.orchestrationId!==cfg.id) return;
       const workerBotIds=[cfg.workerBotId,...data.getAll('additionalWorkers').map(String)];
       const reviewerBotIds=data.getAll('reviewers').map(String);
+      // Freeze the visible policy before async work; reload may clear the
+      // selected roster while the native compare-and-swap request is pending.
+      const councilRequired = typeof roleRoster.councilRequired === 'boolean'
+        ? data.has('councilRequired') : undefined;
       void work(async () => {
         roleRoster=await call<TeamRoster>('superagent_roster_update',{
           orchestrationId:cfg.id, expectedRevision:cfg.policyRevision,
           input:{workerBotIds,reviewerBotIds,
-            ...(typeof roleRoster.councilRequired === 'boolean'
-              ? {councilRequired:data.has('councilRequired')} : {})},
+            ...(typeof councilRequired === 'boolean' ? {councilRequired} : {})},
         });
         await reload();
         workspaceView='teams';

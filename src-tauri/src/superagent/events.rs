@@ -515,6 +515,37 @@ fn combine_github_pages(pages: &[serde_json::Value], since: i64, cursor: i64)
     Ok(serde_json::Value::Array(combined))
 }
 
+/// A bounded, verified feed may contain no events matching a narrow source.
+/// Progress the cursor to the newest *verified repository event*, not only
+/// matching deliveries, or a busy repository permanently strands sparse
+/// subscriptions beyond the three-page retention window.
+fn github_feed_watermark(events: &[serde_json::Value], repository: &str) -> Result<Option<i64>> {
+    let mut newest = None;
+    let mut previous = None;
+    for item in events {
+        if item.pointer("/repo/name").and_then(|v| v.as_str()) != Some(repository) {
+            return Err("GitHub Events feed contains a foreign or missing repository; cursor unchanged.".into());
+        }
+        let id = item.get("id").and_then(|v| v.as_str())
+            .ok_or("GitHub Events feed has no numeric identity.")?;
+        if id.is_empty() || id.len() > 19 || !id.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("GitHub Events feed has an invalid identity.".into());
+        }
+        let sequence: i64 = id.parse()
+            .map_err(|_| "GitHub Events feed identity is out of range.")?;
+        if sequence <= 0 || previous.is_some_and(|last| sequence >= last) {
+            return Err("GitHub Events feed order is invalid; cursor unchanged.".into());
+        }
+        let stamp = item.get("created_at").and_then(|v| v.as_str())
+            .ok_or("GitHub Events feed has no timestamp.")?;
+        chrono::DateTime::parse_from_rfc3339(stamp)
+            .map_err(|_| "GitHub Events feed timestamp is invalid.")?;
+        if newest.is_none() { newest = Some(sequence); }
+        previous = Some(sequence);
+    }
+    Ok(newest)
+}
+
 /// Map only GitHub's documented event type + explicit action. Unknown event
 /// shapes must never be guessed from untrusted titles/bodies or action words.
 fn github_kind(value: &serde_json::Value) -> Option<&'static str> {
@@ -557,7 +588,7 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
     if !token_ok(actor, 80) { return Err("Invalid GitHub event actor identity.".into()); }
     // A source's exact actor filter is not a broad account subscription.
     // Do not retain event metadata about other actors in this task source.
-    if actor != source.actor_filter { return Ok(None); }
+    if !actor.eq_ignore_ascii_case(&source.actor_filter) { return Ok(None); }
     let raw_id = raw.get("id").and_then(|v| v.as_str())
         .ok_or("Authenticated GitHub event has no delivery identity.")?;
     if raw_id.is_empty() || raw_id.len() > 19 || !raw_id.bytes().all(|b| b.is_ascii_digit()) {
@@ -626,6 +657,9 @@ fn poll_authenticated_events_with_identity(
     if events.len() > pages_fetched * GITHUB_PAGE_SIZE {
         return Err("Authenticated GitHub poll exceeded its bounded page size.".into());
     }
+    // Verify the complete repository-scoped feed, including unsupported
+    // kinds and actors, before any receipt or high-watermark is persisted.
+    let feed_watermark = github_feed_watermark(events, &source_now.repository)?;
     // Newer-first provider pages are normalized before recording, without
     // claiming that a single finite page is a durable subscription cursor.
     let mut parsed = Vec::new();
@@ -658,6 +692,18 @@ fn poll_authenticated_events_with_identity(
             recorded += 1;
             if event.actor.eq_ignore_ascii_case(signed_in) { self_ignored += 1; }
         }
+    }
+    // This high-watermark is *not* proof of a gap-free subscription: the
+    // bounded page collector already verified the historical boundary.
+    // Commit it atomically with all matching decisions, even when there
+    // were no matching decisions in this verified repository window.
+    if let Some(newest) = feed_watermark {
+        tx.execute(
+            "UPDATE sa_event_sources SET last_sequence=?2
+             WHERE id=?1 AND mode='observe' AND policy_revision=?3
+               AND last_sequence<?2",
+            params![&current_policy.id, newest, current_policy.policy_revision],
+        ).map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     let current = source(store, &expected.id)?;
@@ -1156,6 +1202,86 @@ mod tests {
         let on = set_mode(&store,&off.id,off.policy_revision,"observe").unwrap();
         assert_eq!(source(&store,&on.id).unwrap().last_sequence,0);
         assert!(list_decisions(&store,&on.id,10).unwrap().is_empty());
+    }
+
+
+    #[test]
+    fn sparse_github_observe_advances_only_verified_feed_cursor_without_admitting_work() {
+        let (store, path) = fixture();
+        let off = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.opened",
+        ).unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let unrelated = serde_json::json!([
+            {"id":"5000002002", "type":"WatchEvent",
+             "created_at":"2026-11-12T08:59:00Z", "repo":{"name":"owner/repo"}},
+            {"id":"5000002001", "type":"IssuesEvent", "created_at":"2026-11-12T08:59:00Z",
+             "actor":{"login":"other-bot"}, "repo":{"name":"owner/repo"},
+             "payload":{"action":"opened","issue":{"number":42}}}
+        ]);
+        let first = poll_authenticated_events(&store, &on, 0, &unrelated).unwrap();
+        assert_eq!(first.scanned, 2);
+        assert_eq!(first.recorded, 0);
+        assert_eq!(first.last_sequence, 5_000_002_002);
+        assert!(list_decisions(&store, &on.id, 10).unwrap().is_empty());
+
+        let mut foreign = unrelated.clone();
+        foreign[0]["id"] = serde_json::json!("5000002003");
+        foreign[0]["repo"]["name"] = serde_json::json!("attacker/repo");
+        assert!(poll_authenticated_events(&store, &on, 0, &foreign).is_err());
+        let mut unordered = unrelated.clone();
+        unordered[1]["id"] = serde_json::json!("5000002004");
+        assert!(poll_authenticated_events(&store, &on, 0, &unordered).is_err());
+        assert_eq!(source(&store, &on.id).unwrap().last_sequence, 5_000_002_002);
+
+        // GitHub usernames are case-insensitive; this remains an exact,
+        // configured actor match, never a wildcard or self-event grant.
+        let eligible = serde_json::json!([{
+            "id":"5000002004", "type":"IssuesEvent", "created_at":"2026-11-12T09:00:00Z",
+            "actor":{"login":"TRUSTED-BOT"}, "repo":{"name":"owner/repo"},
+            "payload":{"action":"opened","issue":{"number":99}}
+        }]);
+        let accepted = poll_authenticated_events(&store, &on, 0, &eligible).unwrap();
+        assert_eq!(accepted.recorded, 1);
+        assert_eq!(accepted.last_sequence, 5_000_002_004);
+        assert_eq!(list_decisions(&store, &on.id, 10).unwrap()[0].decision,
+                   "observed_permitted");
+        let replay = poll_authenticated_events(&store, &on, 0, &eligible).unwrap();
+        assert_eq!(replay.duplicates, 1);
+        assert_eq!(replay.recorded, 0);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(source(&reopened, &on.id).unwrap().last_sequence, 5_000_002_004);
+        assert_eq!(list_decisions(&reopened, &on.id, 10).unwrap().len(), 1);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |r| r.get::<_,i64>(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn unmatched_feed_cursor_failure_is_atomic_and_restart_retryable() {
+        let (store, path) = fixture();
+        let off = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.opened",
+        ).unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let unrelated = github_page(5_000_002_100, 2);
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER reject_feed_cursor
+             BEFORE UPDATE ON sa_event_sources
+             WHEN NEW.last_sequence > OLD.last_sequence
+             BEGIN SELECT RAISE(ABORT,'simulated cursor write failure'); END;",
+        ).unwrap();
+        assert!(poll_authenticated_events(&store, &on, 0, &unrelated).is_err());
+        assert_eq!(source(&store, &on.id).unwrap().last_sequence, 0);
+        assert!(list_decisions(&store, &on.id, 10).unwrap().is_empty());
+        store.db.execute_batch("DROP TRIGGER reject_feed_cursor").unwrap();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let result = poll_authenticated_events(&reopened, &on, 0, &unrelated).unwrap();
+        assert_eq!(result.recorded, 0);
+        assert_eq!(result.last_sequence, 5_000_002_100);
+        assert!(list_decisions(&reopened, &on.id, 10).unwrap().is_empty());
     }
 
     #[test]

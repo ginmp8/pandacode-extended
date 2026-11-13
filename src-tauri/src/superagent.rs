@@ -745,6 +745,7 @@ pub(crate) fn inspect_headless_status(
             "activeAssignmentId": &snapshot.ticket.active_assignment_id,
             "hasEvidence": snapshot.ticket.evidence.as_ref().is_some_and(|e| !e.is_empty()),
             "unresolvedExternalEffects": effects::unresolved_count(&store, ticket_id)?,
+            "recovery": headless_recovery_summary(&store, &snapshot.ticket, observed_at)?,
             "mandate": {
                 "revoked": snapshot.mandate.revoked,
                 "policyRevision": snapshot.mandate.policy_revision,
@@ -772,6 +773,64 @@ pub(crate) fn inspect_headless_status(
             .map_err(|e| e.to_string())?
     };
     serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
+}
+
+/// Read-only, bounded recovery classification for a local operator. The CLI
+/// cannot observe another process's live provider handle, and these fields are
+/// never a grant to retry or to acknowledge an external effect.
+fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result<serde_json::Value> {
+    let (running, active_linked): (i64, i64) = store.db.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN id=?2 THEN 1 ELSE 0 END),0)
+         FROM sa_assignments WHERE ticket_id=?1 AND state='running'",
+        params![&ticket.id, ticket.active_assignment_id.as_deref()],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|e| e.to_string())?;
+    let (pending, uncertain): (i64, i64) = store.db.query_row(
+        "SELECT COALESCE(SUM(CASE WHEN state='pending' THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN state='uncertain' THEN 1 ELSE 0 END),0)
+         FROM sa_effect_receipts WHERE ticket_id=?1",
+        [&ticket.id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).map_err(|e| e.to_string())?;
+    let mandate = mandate(store, &ticket.id)?;
+    let consistent = if ticket.state == "running" {
+        running > 0 && active_linked == 1
+    } else {
+        running == 0
+    };
+    let terminal = matches!(ticket.state.as_str(),
+        "completed" | "failed" | "stopped" | "interrupted" | "inconclusive");
+    let next_action = if pending + uncertain > 0 {
+        "reconcile_authoritative_remote_effects"
+    } else if !consistent {
+        "investigate_native_assignment_state"
+    } else if running > 0 {
+        "verify_live_serve_provider_before_intervention"
+    } else if ticket.state == "waiting_review" {
+        "await_fresh_task_bound_native_council"
+    } else if ticket.state == "waiting_approval" {
+        "decide_with_current_ticket_revision"
+    } else if terminal {
+        "do_not_replay_terminal_ticket"
+    } else {
+        "explicit_native_admission_or_operator_review_required"
+    };
+    Ok(serde_json::json!({
+        "observedAt": now,
+        "activeNativeAssignments": running,
+        "activeAssignmentLinked": active_linked == 1,
+        "assignmentStateConsistent": consistent,
+        "pendingExternalEffects": pending,
+        "uncertainExternalEffects": uncertain,
+        "requiresIndependentRemoteReconciliation": pending + uncertain > 0,
+        "requiresLiveHostVerification": running > 0 || pending > 0,
+        "mandateRevoked": mandate.revoked,
+        "mandateExpired": mandate.expires_at <= now,
+        "terminal": terminal,
+        "nextOperatorAction": next_action,
+        "automaticReplayAllowed": false,
+        "observationalOnly": true
+    }))
 }
 
 /// Observe native Team readiness beside a live headless process without
@@ -2713,6 +2772,77 @@ mod tests {
         ).unwrap();
         assert_eq!(paused["worker"]["eligibleAtSnapshot"], false);
         assert_eq!(paused["coordinator"]["eligibleAtSnapshot"], false);
+    }
+
+    #[test]
+    fn headless_recovery_inspection_is_read_only_and_never_replays_uncertain_effects() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private recovery objective",
+            "headless-recovery-inspection", false,
+        ).unwrap();
+        assert!(launched);
+        let before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let running: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&store.path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(running["state"], "running");
+        assert_eq!(running["recovery"]["activeNativeAssignments"], 1);
+        assert_eq!(running["recovery"]["assignmentStateConsistent"], true);
+        assert_eq!(running["recovery"]["nextOperatorAction"],
+            "verify_live_serve_provider_before_intervention");
+        assert_eq!(running["recovery"]["automaticReplayAllowed"], false);
+        assert_eq!(running["recovery"]["observationalOnly"], true);
+        assert!(!serde_json::to_string(&running).unwrap().contains("Private recovery objective"));
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running",
+            "A parallel read-only inspector must not invoke startup recovery");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), before);
+
+        // Simulate a durable external request whose provider outcome is unknown.
+        // Inspection may report it, but may not acknowledge, resend or drop it.
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'remote-effect','0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                    'pending',?2,?2)",
+            params![&ticket.id, storage::now()],
+        ).unwrap();
+        let pending: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&store.path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(pending["recovery"]["pendingExternalEffects"], 1);
+        assert_eq!(pending["recovery"]["requiresIndependentRemoteReconciliation"], true);
+        assert_eq!(pending["recovery"]["nextOperatorAction"],
+            "reconcile_authoritative_remote_effects");
+        assert_eq!(pending["recovery"]["automaticReplayAllowed"], false);
+        assert_eq!(store.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, String>(0),
+        ).unwrap(), "pending");
+
+        stop(&store, &ticket.id).unwrap();
+        let stopped: serde_json::Value = serde_json::from_str(
+            &inspect_headless_status(&store.path, Some(&ticket.id)).unwrap(),
+        ).unwrap();
+        assert_eq!(stopped["state"], "stopped");
+        assert_eq!(stopped["recovery"]["activeNativeAssignments"], 0);
+        assert_eq!(stopped["recovery"]["uncertainExternalEffects"], 1);
+        assert_eq!(stopped["recovery"]["mandateRevoked"], true);
+        assert_eq!(stopped["recovery"]["nextOperatorAction"],
+            "reconcile_authoritative_remote_effects");
+        assert_eq!(stopped["recovery"]["automaticReplayAllowed"], false);
+        assert_eq!(store.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, String>(0),
+        ).unwrap(), "uncertain");
+        assert!(inspect_headless_status(&store.path, Some("unknown-ticket")).is_err());
     }
 
     #[test]

@@ -292,6 +292,15 @@ identifiers and secrets. Unknown Ticket IDs and incompatible database schemas
 fail with a nonzero exit code. Output is local stdout, not an unauthenticated
 remote API.
 
+Ticket inspection also computes a **read-only recovery assessment** from all
+native running Assignments and all pending/uncertain effect receipts (not only
+the truncated receipt history). The `recovery` object reports native
+assignment consistency, mandate expiry/revocation, live-host uncertainty and
+an actionable next-step code. `automaticReplayAllowed` is always `false`:
+a running provider may still exist in another process; an uncertain remote
+write requires authoritative provider reconciliation, not an inferred retry.
+These observations do not create, admit, resume or approve a Ticket.
+
 Unlike import/export or ordinary serve startup, inspection opens
 `kingcode.sqlite3` **read-only before `setup_common`**. It neither starts bots
 nor runs the Store's migration/restart recovery; inspecting a live host must

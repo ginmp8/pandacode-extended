@@ -1,5 +1,11 @@
 # Extended 0.12.0 — known issues and acceptance gaps
 
+## 2026-11-13 — upstream 0.3.125 reconciliation
+
+Frozen upstream [`9739736d134ba29c6a07d92eca5745c3c4e5999b`](https://github.com/ginmp8/pandacode/commit/9739736d134ba29c6a07d92eca5745c3c4e5999b), tree `275bef5585e153bee54345166f9fafadea2c281e`, application **0.3.125**. Three upstream commits since `fd5942ec358a` changed **15 paths** (11 source-exact and four Extended-aware version/lockfile adaptations; zero deletions). Candidate inventory: **2,048 source / 2,106 Extended files; 1,968 exact shared / 80 customized shared / 58 Extended-only; zero missing source paths or mode/type differences**. Planned Extended **0.12.0 remains DRAFT**. This records a candidate, not exact-new-SHA CI success or native Settings acceptance.
+
+Open verification: native Playwright browser runs, Node/TypeScript build and tests, Rust check/test/Clippy, Expo, npm/RustSec audit and Settings On/Off and external-service integration on the exact integrated code SHA. CI for the new commit is unknown until GitHub Actions reports. The 80 existing customized shared paths require independent semantic review; tree equality alone does not establish control parity.
+
 ## 2026-11-13 — completed 0.3.124 integration CI verification
 
 The formerly pending [Push CI #43413789980](https://github.com/ginmp8/pandacode-extended/actions/runs/43413789980) and [PR CI #43413799925](https://github.com/ginmp8/pandacode-extended/actions/runs/43413799925) are now **successful (11/11 jobs each)** for [Extended `cd182962990966bea002798c25b2218a1df78956`](https://github.com/ginmp8/pandacode-extended/commit/cd182962990966bea002798c25b2218a1df78956). This closes CI status uncertainty **for that code SHA only**, not native Skills Library install/rollback acceptance, 80 customized-path semantic verification, installed-platform Settings On/Off, Connect, MCP, bots, cloud/VM, credential handoff or release approval. Source [fork `fd5942ec358ac3cad0721524284e41904a99218e`](https://github.com/ginmp8/pandacode/commit/fd5942ec358ac3cad0721524284e41904a99218e) remains unchanged; Extended 0.12.0 remains DRAFT.

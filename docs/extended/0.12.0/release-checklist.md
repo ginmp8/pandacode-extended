@@ -1,5 +1,15 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-13 — upstream 0.3.125 reconciliation
+
+Frozen upstream [`9739736d134ba29c6a07d92eca5745c3c4e5999b`](https://github.com/ginmp8/pandacode/commit/9739736d134ba29c6a07d92eca5745c3c4e5999b), tree `275bef5585e153bee54345166f9fafadea2c281e`, application **0.3.125**. Three upstream commits since `fd5942ec358a` changed **15 paths** (11 source-exact and four Extended-aware version/lockfile adaptations; zero deletions). Candidate inventory: **2,048 source / 2,106 Extended files; 1,968 exact shared / 80 customized shared / 58 Extended-only; zero missing source paths or mode/type differences**. Planned Extended **0.12.0 remains DRAFT**. This records a candidate, not exact-new-SHA CI success or native Settings acceptance.
+
+- [x] Inventory frozen upstream tree (2,048 files) and the prior Extended tree (2,105 files) without truncation.
+- [x] Plan 11 exact copies (including `releases/0.3.125.md`) and four Extended-aware version edits; preserve the 58 Extended-only files.
+- [ ] Verify the newly published destination commit, single-parent lineage and final 2,106-file tree.
+- [ ] Check Node/TypeScript, Rust/Clippy, Expo, dependency audits, GitHub Actions and native Settings On/Off on the new SHA.
+- [ ] Audit all 80 customized shared paths and obtain separate Extended release approval; no release is authorized.
+
 ## 2026-11-13 — completed 0.3.124 integration CI verification
 
 - [x] Reconfirm source [fork `fd5942ec358ac3cad0721524284e41904a99218e`](https://github.com/ginmp8/pandacode/commit/fd5942ec358ac3cad0721524284e41904a99218e) and destination [Extended `cd182962990966bea002798c25b2218a1df78956`](https://github.com/ginmp8/pandacode-extended/commit/cd182962990966bea002798c25b2218a1df78956); no upstream file missing in the complete 2,047/2,105-file inventory.

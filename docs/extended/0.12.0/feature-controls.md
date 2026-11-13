@@ -1,5 +1,11 @@
 # Extended 0.12.0 — feature-control continuity
 
+## 2026-11-13 — upstream 0.3.125 integration candidate
+
+Frozen upstream [`9739736d134ba29c6a07d92eca5745c3c4e5999b`](https://github.com/ginmp8/pandacode/commit/9739736d134ba29c6a07d92eca5745c3c4e5999b), tree `275bef5585e153bee54345166f9fafadea2c281e`, declares application **0.3.125**. Since `fd5942ec358a`, three upstream commits changed **15 paths: 11 source-exact copies (10 modifications and the original `releases/0.3.125.md`) and four Extended-aware manifest/lockfile version updates**, with no upstream deletions. Expected candidate inventory: **2,048 upstream / 2,106 Extended tracked files; 1,968 identical shared; 80 divergent shared; 58 Extended-only; no missing upstream paths or mode/type conflicts**. The four retained divergences protect Extended dependency remediations. **Planned Extended 0.12.0 remains DRAFT**, independent of the inherited app version. CI for the new destination commit and native control-path acceptance are **not yet available**; prior CI must not be attributed to the new SHA.
+
+The 0.3.125 source delta does **not** modify the existing Extended-control code paths. Preserve current optional On/Off behavior, manual and automatic paths, and upstream behavior when controls are enabled; no native installation or end-to-end verification of these behaviors was run here.
+
 ## 2026-11-13 — completed 0.3.124 integration CI verification
 
 For [Extended `cd182962990966bea002798c25b2218a1df78956`](https://github.com/ginmp8/pandacode-extended/commit/cd182962990966bea002798c25b2218a1df78956), [Push CI #43413789980](https://github.com/ginmp8/pandacode-extended/actions/runs/43413789980) and [PR CI #43413799925](https://github.com/ginmp8/pandacode-extended/actions/runs/43413799925) completed successfully (**11/11 jobs each**). Static comparison against [fork `fd5942ec358ac3cad0721524284e41904a99218e`](https://github.com/ginmp8/pandacode/commit/fd5942ec358ac3cad0721524284e41904a99218e) still shows 80 customized shared paths and no source path missing. Optional Extended feature controls remain present, but native On/Off paths, Connect/direct routing, pause/resume, external MCP, credential transfer and cloud/VM integration remain **unverified end to end**. Planned Extended 0.12.0 remains DRAFT. This evidence applies only to the named code SHA.

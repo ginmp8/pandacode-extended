@@ -1,5 +1,11 @@
 # Extended 0.12.0 — dependency and security tracking
 
+## 2026-11-13 — upstream 0.3.125 reconciliation
+
+Frozen upstream [`9739736d134ba29c6a07d92eca5745c3c4e5999b`](https://github.com/ginmp8/pandacode/commit/9739736d134ba29c6a07d92eca5745c3c4e5999b), tree `275bef5585e153bee54345166f9fafadea2c281e`, application **0.3.125**. Three upstream commits since `fd5942ec358a` changed **15 paths** (11 source-exact and four Extended-aware version/lockfile adaptations; zero deletions). Candidate inventory: **2,048 source / 2,106 Extended files; 1,968 exact shared / 80 customized shared / 58 Extended-only; zero missing source paths or mode/type differences**. Planned Extended **0.12.0 remains DRAFT**. This records a candidate, not exact-new-SHA CI success or native Settings acceptance.
+
+Native app version metadata is aligned to 0.3.125 in npm/Cargo/Tauri. Preserve Extended-only `dompurify ^3.4.17`, `katex ^0.18.2`, `vite ^7.3.7`, Cargo `tokio 1.53.3`, `rusqlite 0.41.1`, `rustls 0.23.46`, `zip 9.0.5`, and updater feature overrides; no dependency rollback or unrelated package refresh was performed. New-SHA npm and RustSec audits are pending CI; never infer zero vulnerabilities from a version-only change.
+
 ## 2026-11-13 — completed 0.3.124 integration CI verification
 
 For [Extended `cd182962990966bea002798c25b2218a1df78956`](https://github.com/ginmp8/pandacode-extended/commit/cd182962990966bea002798c25b2218a1df78956), [Push CI #43413789980](https://github.com/ginmp8/pandacode-extended/actions/runs/43413789980) and [PR CI #43413799925](https://github.com/ginmp8/pandacode-extended/actions/runs/43413799925) completed successfully (**11/11 jobs each**), including the named npm lockfile dependency-audit and Cargo RustSec audit jobs. The inherited application version remains 0.3.124, with Extended remediations retained in the divergent manifests and locks. This records CI evidence, not a new remediation or proof that every dependency risk is absent. No upstream source change occurred after [fork `fd5942ec358ac3cad0721524284e41904a99218e`](https://github.com/ginmp8/pandacode/commit/fd5942ec358ac3cad0721524284e41904a99218e); planned Extended 0.12.0 remains DRAFT.

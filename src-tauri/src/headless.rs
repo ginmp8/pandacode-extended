@@ -40,6 +40,7 @@ enum Command {
     InspectTicketSource { ticket_id: String },
     UnlinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
     InspectTeamReadiness { orchestration_id: String },
+    InspectTeamRoster { orchestration_id: String },
     ObserveSource { source_id: String },
     ObserveCheckRun { source_id: String, check_run_id: i64 },
     QueueDemand { orchestration_id: String, request_key: String, objective_file: PathBuf },
@@ -166,6 +167,20 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(readiness) => { println!("{readiness}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent Team readiness inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectTeamRoster { orchestration_id } = &command {
+                let result=app.path().app_data_dir()
+                    .map_err(|e|e.to_string())
+                    .and_then(|dir| crate::superagent::inspect_headless_team_roster(
+                        &dir.join("kingcode.sqlite3"),orchestration_id,
+                    ));
+                match result {
+                    Ok(roster) => { println!("{roster}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Team roster inspection failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -325,7 +340,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         // Inspection exits before setup_common and must never reach this branch.
         Command::InspectOrchestrations | Command::ListTickets | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. }
-        | Command::InspectTeamReadiness { .. } | Command::InspectTicketEffects { .. }
+        | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
+        | Command::InspectTicketEffects { .. }
         | Command::InspectTicketSource { .. } | Command::UnlinkSourceThread { .. }
         | Command::ObserveSource { .. } | Command::ObserveCheckRun { .. }
         | Command::QueueDemand { .. }
@@ -786,6 +802,14 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 2;
             }
+            "--inspect-team-roster" => {
+                let value=args.get(index+1)
+                    .ok_or_else(||format!("--inspect-team-roster needs a Team ID.\n\n{}",help()))?;
+                validate_orchestration_id(value)?;
+                command=Command::InspectTeamRoster{orchestration_id:value.clone()};
+                ops+=1;
+                index+=1;
+            }
             "--inspect-team-readiness" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--inspect-team-readiness needs a Team ID.\n\n{}", help()))?;
@@ -1092,7 +1116,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1122,6 +1146,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          Page up to 200 native Demands for one Team and exact Ticket state
                          (or all). Next page uses returned nextCursor; no private evidence
                          or startup recovery; exit.
+  --inspect-team-roster <id>
+                         Inspect ordered native Team members, configured models, harnesses and
+                         assigned Skill IDs without provider admission or Library trust scanning.
   --inspect-team-readiness <id>
                          Inspect a Team's read-only native manual admission preflight;
                          live sessions and policy must be rechecked on actual admission.
@@ -1236,6 +1263,13 @@ mod tests {
         assert!(parsed("--list-team-demands team_123 BLOCKED").is_err());
         assert!(parsed("--list-team-demands ../unsafe running").is_err());
         assert!(parsed("--list-team-demands team_123 running --stop-ticket task").is_err());
+        assert_eq!(parsed("--inspect-team-roster team_123"),
+            Ok(Command::InspectTeamRoster{orchestration_id:"team_123".into()}));
+        for invalid in [
+            "--inspect-team-roster",
+            "--inspect-team-roster ../unsafe",
+            "--inspect-team-roster team_123 --stop-ticket ticket_123",
+        ] { assert!(parsed(invalid).is_err(),"{invalid}"); }
         assert_eq!(parsed("--inspect-team-readiness team_123"),
             Ok(Command::InspectTeamReadiness { orchestration_id: "team_123".into() }));
         assert!(parsed("--inspect-team-readiness").is_err());
@@ -1382,6 +1416,11 @@ mod tests {
     #[test]
     fn help_mentions_every_flag() {
         let text = help();
+        let usage = text
+            .lines()
+            .find(|line| line.starts_with("Usage:"))
+            .unwrap();
+        assert!(usage.contains("--preview-orchestrations <file>"));
         for flag in [
             "--sign-in",
             "--sign-out",
@@ -1396,6 +1435,7 @@ mod tests {
             "--inspect-orchestrations",
             "--list-tickets",
             "--inspect-team-readiness",
+            "--inspect-team-roster",
             "--inspect-ticket",
             "--inspect-ticket-effects",
             "--inspect-ticket-source",
@@ -1412,6 +1452,137 @@ mod tests {
         ] {
             assert!(text.contains(flag), "{flag}");
         }
+    }
+
+    fn issue_comment_fixture() -> (PathBuf, String) {
+        let path = std::env::temp_dir().join(format!(
+            "pandacode-headless-issue-comment-{}.sqlite3",
+            crate::storage::id()
+        ));
+        let store = crate::storage::Store::open(&path).unwrap();
+        let now = crate::storage::now();
+        // If a regression reaches the real dispatcher, this absent checkout fails before `gh`.
+        let workspace = path.with_extension("no-checkout");
+        store
+            .db
+            .execute(
+                "INSERT INTO projects(id,name,path) VALUES('p','P',?1)",
+                [workspace.to_string_lossy().into_owned()],
+            )
+            .unwrap();
+        for (id, name) in [("co", "Coordinator"), ("wo", "Worker")] {
+            store
+                .db
+                .execute(
+                    "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                     VALUES(?1,?2,'p','codex','default','plan',?3,?3)",
+                    rusqlite::params![id, name, crate::storage::now()],
+                )
+                .unwrap();
+        }
+        store
+            .db
+            .execute(
+                "INSERT INTO sa_orchestrations(id,name,coordinator_bot_id,worker_bot_id,project_id,
+                    enabled,policy_revision,created_at,updated_at)
+                 VALUES('orchestration','Headless issue comment test','co','wo','p',1,1,?1,?1)",
+                [now],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,
+                    project_id,worker_bot_id,policy_revision,state,revision,active_assignment_id,
+                    created_at,updated_at)
+                 VALUES('ticket','orchestration','test','Confirm a GitHub comment','local-user',
+                    'manual','p','wo',1,'running',0,'assignment',?1,?1)",
+                [now],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO sa_mandates(ticket_id,actor,authorization_id,policy_revision,
+                    project_id,expires_at,created_at)
+                 VALUES('ticket','local-user','headless-test-auth',1,'p',?1,?2)",
+                rusqlite::params![now + 600_000, now],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,
+                    created_at,updated_at)
+                 VALUES('assignment','ticket','wo','headless-test-session','running',1,?1,?1)",
+                [now],
+            )
+            .unwrap();
+        drop(store);
+        (path, "ticket".into())
+    }
+
+    #[test]
+    fn first_issue_comment_requires_an_exact_confirmation_before_dispatch() {
+        let (path, ticket_id) = issue_comment_fixture();
+
+        let missing = crate::superagent::headless_issue_comment(
+            &path,
+            &ticket_id,
+            0,
+            "owner/repo",
+            7,
+            "github:comment:7",
+            "reviewed comment",
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            missing.contains("Explicit local confirmation is required"),
+            "{missing}"
+        );
+        assert!(missing.contains("--confirm-issue-comment"), "{missing}");
+
+        let wrong_confirmation = "0".repeat(64);
+        let mismatched = crate::superagent::headless_issue_comment(
+            &path,
+            &ticket_id,
+            0,
+            "owner/repo",
+            7,
+            "github:comment:7",
+            "reviewed comment",
+            Some(&wrong_confirmation),
+        )
+        .unwrap_err();
+        assert_eq!(
+            mismatched,
+            "The issue-comment confirmation hash does not match this exact payload."
+        );
+
+        let store = crate::superagent::effects::open_effect_store(&path).unwrap();
+        let grants: i64 = store
+            .db
+            .query_row("SELECT COUNT(*) FROM sa_effect_grants", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let receipts: i64 = store
+            .db
+            .query_row("SELECT COUNT(*) FROM sa_effect_receipts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            grants, 0,
+            "failed confirmation must not create a native grant"
+        );
+        assert_eq!(
+            receipts, 0,
+            "failed confirmation must not reserve a remote effect receipt"
+        );
+        drop(store);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

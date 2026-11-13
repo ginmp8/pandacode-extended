@@ -536,6 +536,20 @@ bodies. No GitHub call, provider admission, worker or automatic retry occurs.
 The CLI opens the existing storage path without running process-start recovery
 on a concurrently active headless host.
 
+### Read-only multi-role Team inspection
+
+Use `pandacode serve --inspect-team-roster <team-id>` for a bounded JSON
+projection of the saved Coordinator, ordered Workers and optional Reviewers
+while a desktop or headless service may still be active. The one-shot command
+uses the existing native role tables and bot profiles via a **read-only
+SQLite connection**; no startup recovery, provider, Council seat or grant is
+created. It exposes configured provider/model/mode and assigned Skill IDs
+without credentials, transcripts, Ticket objectives, effects or private tasks.
+It does not perform a Skills Library scan: `skillLibraryStatus=not_scanned`,
+`harnessCapability=not_verified`, `invocationEvidence=not_verified`.
+`multiRoleExecutionAvailable=false` remains explicit; all execution
+requires a separate task-scoped native authorization and live recheck.
+
 ## Explicit SuperAgent GitHub issue-comment effects (integrated)
 
 A local operator may request an exact GitHub issue comment only for a currently

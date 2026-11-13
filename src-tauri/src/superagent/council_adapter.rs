@@ -7,7 +7,23 @@ use crate::{architect, storage::{self, Store}, Result};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::{
+    fs,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    time::{Duration, Instant},
+};
+#[cfg(unix)]
+use std::os::unix::fs::{symlink, PermissionsExt};
+#[cfg(windows)]
+use std::os::windows::fs::{symlink_dir, symlink_file};
 use tauri::Manager;
+
+const SNAPSHOT_DIRECTORY: &str = storage::COUNCIL_REVIEW_SNAPSHOT_DIRECTORY;
+const SNAPSHOT_MAX_ENTRIES: usize = 50_000;
+const SNAPSHOT_MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
+const SNAPSHOT_MAX_TOTAL_BYTES: u64 = 1536 * 1024 * 1024;
+const SNAPSHOT_MAX_DURATION: Duration = Duration::from_secs(60);
 
 fn ticket_policy_revision(store: &Store, ticket_id: &str) -> Result<i64> {
     // Preserve the Ticket's immutable admission revision; a mutable Team or
@@ -92,6 +108,9 @@ struct RequiredRequest {
     council_config_json: String,
     council_config_sha256: String,
     artifact_sha256: Option<String>,
+    workspace_sha256: Option<String>,
+    workspace_snapshot_id: Option<String>,
+    workspace_snapshot_sha256: Option<String>,
     bound_at: Option<i64>,
     native_session_id: Option<String>,
     state: String,
@@ -105,15 +124,593 @@ fn required_request_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Requir
         cycle_started_at: row.get(8)?, generation: row.get(9)?,
         reviewer_policy_json: row.get(10)?, reviewer_policy_sha256: row.get(11)?,
         council_config_json: row.get(12)?, council_config_sha256: row.get(13)?,
-        artifact_sha256: row.get(14)?, bound_at: row.get(15)?, native_session_id: row.get(16)?,
-        state: row.get(17)?,
+        artifact_sha256: row.get(14)?, workspace_sha256: row.get(15)?,
+        workspace_snapshot_id: row.get(16)?, workspace_snapshot_sha256: row.get(17)?,
+        bound_at: row.get(18)?, native_session_id: row.get(19)?, state: row.get(20)?,
     })
 }
 
 const REQUEST_COLUMNS: &str = "id,ticket_id,assignment_id,worker_session_id,
  admitted_ticket_revision,ticket_revision,policy_revision,cycle_id,cycle_started_at,
  generation,reviewer_policy_json,reviewer_policy_sha256,council_config_json,
- council_config_sha256,artifact_sha256,bound_at,native_session_id,state";
+ council_config_sha256,artifact_sha256,workspace_sha256,workspace_snapshot_id,
+ workspace_snapshot_sha256,bound_at,native_session_id,state";
+
+#[derive(Default)]
+struct SnapshotBudget {
+    entries: usize,
+    copied_bytes: u64,
+    read_bytes: u64,
+    started: Option<Instant>,
+}
+
+impl SnapshotBudget {
+    fn check_time(&mut self) -> Result<()> {
+        let started = self.started.get_or_insert_with(Instant::now);
+        if started.elapsed() > SNAPSHOT_MAX_DURATION {
+            return Err("Council workspace snapshot exceeded its time limit.".into());
+        }
+        Ok(())
+    }
+
+    fn entry(&mut self) -> Result<()> {
+        self.check_time()?;
+        self.entries = self.entries.saturating_add(1);
+        if self.entries > SNAPSHOT_MAX_ENTRIES {
+            return Err("Council workspace snapshot exceeded its entry limit.".into());
+        }
+        Ok(())
+    }
+
+    fn read_bytes(&mut self, count: usize) -> Result<()> {
+        self.check_time()?;
+        self.read_bytes = self.read_bytes.saturating_add(count as u64);
+        if self.read_bytes > SNAPSHOT_MAX_TOTAL_BYTES {
+            return Err("Council workspace snapshot exceeded its total size limit.".into());
+        }
+        Ok(())
+    }
+
+    fn copied_bytes(&mut self, count: usize) -> Result<()> {
+        self.read_bytes(count)?;
+        self.copied_bytes = self.copied_bytes.saturating_add(count as u64);
+        if self.copied_bytes > SNAPSHOT_MAX_FILE_BYTES {
+            return Err("Council workspace snapshot exceeded its copy size limit.".into());
+        }
+        Ok(())
+    }
+}
+
+fn hash_field(hasher: &mut Sha256, bytes: &[u8]) {
+    hasher.update((bytes.len() as u64).to_be_bytes());
+    hasher.update(bytes);
+}
+
+fn workspace_relative_path(path: &Path, root: &Path) -> Result<String> {
+    let relative = path.strip_prefix(root).map_err(|_| "Council workspace path escaped its authorized root.")?;
+    let components = relative.components().map(|component| {
+        component.as_os_str().to_str().ok_or_else(|| "Council workspace has a non-UTF-8 path.".to_string())
+    }).collect::<Result<Vec<_>>>()?;
+    Ok(components.join("/"))
+}
+
+fn hash_permissions(hasher: &mut Sha256, metadata: &fs::Metadata, snapshot: bool) {
+    #[cfg(unix)]
+    {
+        let mode = metadata.permissions().mode() & 0o7777;
+        hasher.update((if snapshot { mode & !0o222 } else { mode }).to_be_bytes());
+    }
+    #[cfg(not(unix))]
+    hasher.update([u8::from(snapshot || metadata.permissions().readonly())]);
+}
+
+fn hash_workspace_directory(
+    root: &Path, directory: &Path, hasher: &mut Sha256,
+    visited_directories: &mut std::collections::HashSet<std::path::PathBuf>,
+    budget: &mut SnapshotBudget, snapshot: bool, require_read_only: bool,
+) -> Result<()> {
+    budget.check_time()?;
+    let canonical_directory = fs::canonicalize(directory)
+        .map_err(|_| "Council workspace is unavailable or unreadable.")?;
+    workspace_relative_path(&canonical_directory,root)
+        .map_err(|_| "Council workspace contains a directory link outside its authorized root.")?;
+    if !visited_directories.insert(canonical_directory) {
+        return Err("Council workspace contains an aliased or cyclic directory link.".into());
+    }
+    let directory_before = fs::metadata(directory).map_err(|_| "Council workspace is unavailable or unreadable.")?;
+    let modified_before = directory_before.modified().ok();
+    let mut entries = fs::read_dir(directory)
+        .map_err(|_| "Council workspace is unavailable or unreadable.")?
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|_| "Council workspace is unavailable or unreadable.")?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let name = file_name.to_str().ok_or("Council workspace has a non-UTF-8 path.")?;
+        let entry_type = entry.file_type().map_err(|_| "Council workspace changed while it was being read.")?;
+        if name == ".git" && entry_type.is_dir() {
+            // Repository object databases and indexes are VCS administration,
+            // not files the Council is asked to review in the checkout.
+            continue;
+        }
+        budget.entry()?;
+        let relative = workspace_relative_path(&path, root)?;
+        if entry_type.is_dir() {
+            let metadata = fs::metadata(&path).map_err(|_| "Council workspace changed while it was being read.")?;
+            if require_read_only && !metadata.permissions().readonly() {
+                return Err("Council workspace snapshot permissions changed.".into());
+            }
+            hasher.update(b"D");
+            hash_field(hasher, relative.as_bytes());
+            hash_permissions(hasher, &metadata, snapshot);
+            hash_workspace_directory(root,&path,hasher,visited_directories,budget,snapshot,require_read_only)?;
+        } else if entry_type.is_file() {
+            let before = fs::symlink_metadata(&path).map_err(|_| "Council workspace changed while it was being read.")?;
+            let modified_before = before.modified().ok();
+            if before.len() > SNAPSHOT_MAX_FILE_BYTES {
+                return Err("Council workspace contains a file above the review snapshot limit.".into());
+            }
+            if require_read_only && !before.permissions().readonly() {
+                return Err("Council workspace snapshot permissions changed.".into());
+            }
+            let mut file = fs::File::open(&path).map_err(|_| "Council workspace is unavailable or unreadable.")?;
+            hasher.update(b"F");
+            hash_field(hasher, relative.as_bytes());
+            hasher.update(before.len().to_be_bytes());
+            hash_permissions(hasher, &before, snapshot);
+            let mut bytes = [0_u8; 64 * 1024];
+            let mut read = 0_u64;
+            loop {
+                let count = file.read(&mut bytes).map_err(|_| "Council workspace is unavailable or unreadable.")?;
+                if count == 0 { break; }
+                budget.read_bytes(count)?;
+                read = read.saturating_add(count as u64);
+                hasher.update(&bytes[..count]);
+            }
+            let after = fs::symlink_metadata(&path).map_err(|_| "Council workspace changed while it was being read.")?;
+            if read != before.len() || after.len() != before.len() || after.modified().ok() != modified_before {
+                return Err("Council workspace changed while it was being read.".into());
+            }
+        } else if entry_type.is_symlink() {
+            let target = fs::canonicalize(&path).map_err(|_| "Council workspace contains an unavailable symbolic link.")?;
+            let target_relative = workspace_relative_path(&target, root)
+                .map_err(|_| "Council workspace contains a symbolic link outside its authorized root.")?;
+            hasher.update(b"L");
+            hash_field(hasher, relative.as_bytes());
+            hash_field(hasher, target_relative.as_bytes());
+        } else {
+            return Err("Council workspace contains an unsupported special file.".into());
+        }
+    }
+    let directory_after = fs::metadata(directory).map_err(|_| "Council workspace changed while it was being read.")?;
+    if directory_after.modified().ok() != modified_before {
+        return Err("Council workspace changed while it was being read.".into());
+    }
+    Ok(())
+}
+
+/// Identity of the actual authorized checkout: canonical root, relative paths,
+/// entry kinds, permissions and file bytes. Git administration directories are
+/// excluded; symlinks may only point back inside the same checkout.
+pub(crate) fn workspace_identity_sha256(root: &Path) -> Result<String> {
+    let root = fs::canonicalize(root).map_err(|_| "Council workspace is unavailable.")?;
+    if !root.is_dir() { return Err("Council workspace is unavailable.".into()); }
+    let root_text = root.to_str().ok_or("Council workspace has a non-UTF-8 root path.")?;
+    let mut hasher = Sha256::new();
+    hasher.update(b"PandaCode SuperAgent Council workspace v1\0");
+    hash_field(&mut hasher, root_text.as_bytes());
+    hash_workspace_directory(
+        &root,&root,&mut hasher,&mut std::collections::HashSet::new(),
+        &mut SnapshotBudget::default(),false,false,
+    )?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+/// Digest of a frozen tree, independent of the private destination path. The
+/// read-only permission normalization makes it stable across the source copy
+/// and the same copy after its write bits have been removed.
+pub(crate) fn workspace_snapshot_sha256(root: &Path) -> Result<String> {
+    let root = fs::canonicalize(root).map_err(|_| "Council review snapshot is unavailable.")?;
+    if !root.is_dir() || !fs::metadata(&root).is_ok_and(|metadata| metadata.permissions().readonly()) {
+        return Err("Council review snapshot is unavailable or writable.".into());
+    }
+    let mut hasher = Sha256::new();
+    hasher.update(b"PandaCode SuperAgent Council snapshot v1\0");
+    hash_workspace_directory(
+        &root,&root,&mut hasher,&mut std::collections::HashSet::new(),
+        &mut SnapshotBudget::default(),true,true,
+    )?;
+    Ok(format!("{:x}", hasher.finalize()))
+}
+
+#[derive(Clone)]
+struct WorkspaceSnapshot {
+    id: String,
+    root: PathBuf,
+    sha256: String,
+}
+
+fn snapshot_base(store: &Store) -> Result<PathBuf> {
+    snapshot_base_for_database(&store.path)
+}
+
+fn snapshot_base_for_database(database_path: &Path) -> Result<PathBuf> {
+    let database_parent = database_path.parent()
+        .ok_or("Council review snapshot storage is unavailable.")?
+        .canonicalize().map_err(|_| "Council review snapshot storage is unavailable.")?;
+    let base = database_parent.join(SNAPSHOT_DIRECTORY);
+    let created = match fs::symlink_metadata(&base) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err("Council review snapshot storage is unsafe.".into());
+        }
+        Ok(_) => false,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(&base).map_err(|_| "Council review snapshot storage could not be created.")?;
+            true
+        }
+        Err(_) => return Err("Council review snapshot storage is unavailable.".into()),
+    };
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(&base).map_err(|_| "Council review snapshot storage is unavailable.")?.permissions();
+        if created {
+            permissions.set_mode(0o700);
+            fs::set_permissions(&base,permissions)
+                .map_err(|_| "Council review snapshot storage permissions could not be restricted.")?;
+        }
+        let mode = fs::metadata(&base).map_err(|_| "Council review snapshot storage is unavailable.")?.permissions().mode() & 0o777;
+        if mode != 0o700 {
+            return Err("Council review snapshot storage permissions could not be restricted.".into());
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if created {
+            let mut permissions = fs::metadata(&base).map_err(|_| "Council review snapshot storage is unavailable.")?.permissions();
+            permissions.set_readonly(false);
+            fs::set_permissions(&base,permissions)
+                .map_err(|_| "Council review snapshot storage permissions could not be restricted.")?;
+        }
+        if fs::metadata(&base).is_ok_and(|metadata| metadata.permissions().readonly()) {
+            return Err("Council review snapshot storage permissions could not be restricted.".into());
+        }
+    }
+    Ok(base.canonicalize().map_err(|_| "Council review snapshot storage is unavailable.")?)
+}
+
+fn valid_snapshot_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 64
+        && id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+}
+
+fn snapshot_path(store: &Store, id: &str) -> Result<PathBuf> {
+    if !valid_snapshot_id(id) {
+        return Err("Council review snapshot identity is invalid.".into());
+    }
+    Ok(snapshot_base(store)?.join(id))
+}
+
+pub(crate) fn resolve_workspace_snapshot(store: &Store, id: &str) -> Result<PathBuf> {
+    resolve_workspace_snapshot_for_database(&store.path,id)
+}
+
+fn resolve_workspace_snapshot_for_database(database_path: &Path, id: &str) -> Result<PathBuf> {
+    let base = snapshot_base_for_database(database_path)?;
+    let path = base.join(if valid_snapshot_id(id) { id } else {
+        return Err("Council review snapshot identity is invalid.".into());
+    });
+    let metadata = fs::symlink_metadata(&path)
+        .map_err(|_| "Council review snapshot is unavailable.")?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("Council review snapshot identity is invalid.".into());
+    }
+    let canonical = path.canonicalize().map_err(|_| "Council review snapshot is unavailable.")?;
+    if canonical.parent() != Some(base.as_path()) {
+        return Err("Council review snapshot identity escaped its private storage.".into());
+    }
+    Ok(canonical)
+}
+
+fn private_directory(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mut permissions = fs::metadata(path).map_err(|_| "Council review snapshot directory is unavailable.")?.permissions();
+        permissions.set_mode(0o700);
+        fs::set_permissions(path,permissions)
+            .map_err(|_| "Council review snapshot directory permissions could not be restricted.")?;
+        if fs::metadata(path).map_err(|_| "Council review snapshot directory is unavailable.")?.permissions().mode() & 0o777 != 0o700 {
+            return Err("Council review snapshot directory permissions could not be restricted.".into());
+        }
+    }
+    #[cfg(not(unix))]
+    if fs::metadata(path).is_ok_and(|metadata| metadata.permissions().readonly()) {
+        return Err("Council review snapshot directory is unavailable.".into());
+    }
+    Ok(())
+}
+
+fn make_read_only(path: &Path) -> Result<()> {
+    let mut permissions = fs::metadata(path)
+        .map_err(|_| "Council review snapshot permissions could not be set.")?.permissions();
+    #[cfg(unix)]
+    permissions.set_mode(permissions.mode() & !0o222);
+    #[cfg(not(unix))]
+    permissions.set_readonly(true);
+    fs::set_permissions(path,permissions)
+        .map_err(|_| "Council review snapshot permissions could not be set.")?;
+    if !fs::metadata(path).map_err(|_| "Council review snapshot permissions could not be checked.")?.permissions().readonly() {
+        return Err("Council review snapshot permissions could not be checked.".into());
+    }
+    Ok(())
+}
+
+fn freeze_snapshot_tree(directory: &Path, budget: &mut SnapshotBudget) -> Result<()> {
+    budget.check_time()?;
+    let entries = fs::read_dir(directory)
+        .map_err(|_| "Council review snapshot could not be frozen.")?
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|_| "Council review snapshot could not be frozen.")?;
+    for entry in entries {
+        budget.check_time()?;
+        let path = entry.path();
+        let entry_type = entry.file_type().map_err(|_| "Council review snapshot could not be frozen.")?;
+        if entry_type.is_symlink() { continue; }
+        if entry_type.is_dir() {
+            freeze_snapshot_tree(&path,budget)?;
+        }
+        make_read_only(&path)?;
+    }
+    Ok(())
+}
+
+fn hash_snapshot_permissions(hasher: &mut Sha256, metadata: &fs::Metadata) {
+    #[cfg(unix)]
+    hasher.update((metadata.permissions().mode() & 0o7777 & !0o222).to_be_bytes());
+    #[cfg(not(unix))]
+    hasher.update([1_u8]);
+}
+
+fn create_snapshot_symlink(
+    source: &Path, destination: &Path, source_root: &Path, destination_root: &Path,
+    target_relative: &str,
+) -> Result<()> {
+    let target = fs::read_link(source)
+        .map_err(|_| "Council workspace contains an unavailable symbolic link.")?;
+    let target = if target.is_absolute() {
+        destination_root.join(target_relative)
+    } else {
+        target
+    };
+    let _ = source_root;
+    #[cfg(unix)]
+    symlink(target,destination)
+        .map_err(|_| "Council workspace symbolic link could not be copied into its review snapshot.".into())
+    #[cfg(windows)]
+    {
+        if fs::metadata(source).is_ok_and(|metadata| metadata.is_dir()) {
+            symlink_dir(target,destination)
+        } else {
+            symlink_file(target,destination)
+        }.map_err(|_| "Council workspace symbolic link could not be copied into its review snapshot.".into())
+    }
+    #[cfg(not(any(unix,windows)))]
+    {
+        let _ = (source,destination,target);
+        Err("Symbolic links are unsupported on this platform.".into())
+    }
+}
+
+fn copy_workspace_directory(
+    source_root: &Path, source_directory: &Path, destination_root: &Path,
+    destination_directory: &Path, source_hasher: &mut Sha256,
+    snapshot_hasher: &mut Sha256, visited_directories: &mut std::collections::HashSet<PathBuf>,
+    budget: &mut SnapshotBudget,
+) -> Result<()> {
+    budget.check_time()?;
+    let canonical_directory = fs::canonicalize(source_directory)
+        .map_err(|_| "Council workspace is unavailable or unreadable.")?;
+    workspace_relative_path(&canonical_directory,source_root)?;
+    if !visited_directories.insert(canonical_directory) {
+        return Err("Council workspace contains an aliased or cyclic directory link.".into());
+    }
+    let directory_before = fs::metadata(source_directory)
+        .map_err(|_| "Council workspace is unavailable or unreadable.")?;
+    let modified_before = directory_before.modified().ok();
+    let mut entries = fs::read_dir(source_directory)
+        .map_err(|_| "Council workspace is unavailable or unreadable.")?
+        .collect::<std::io::Result<Vec<_>>>()
+        .map_err(|_| "Council workspace is unavailable or unreadable.")?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let source = entry.path();
+        let name = entry.file_name();
+        let name_text = name.to_str().ok_or("Council workspace has a non-UTF-8 path.")?;
+        let entry_type = entry.file_type()
+            .map_err(|_| "Council workspace changed while it was being copied.")?;
+        if name_text == ".git" && entry_type.is_dir() { continue; }
+        budget.entry()?;
+        let relative = workspace_relative_path(&source,source_root)?;
+        let destination = destination_directory.join(&name);
+        if entry_type.is_dir() {
+            let metadata = fs::metadata(&source)
+                .map_err(|_| "Council workspace changed while it was being copied.")?;
+            source_hasher.update(b"D");
+            hash_field(source_hasher,relative.as_bytes());
+            hash_permissions(source_hasher,&metadata,false);
+            snapshot_hasher.update(b"D");
+            hash_field(snapshot_hasher,relative.as_bytes());
+            hash_snapshot_permissions(snapshot_hasher,&metadata);
+            fs::create_dir(&destination)
+                .map_err(|_| "Council workspace directory could not be copied into its review snapshot.")?;
+            copy_workspace_directory(
+                source_root,&source,destination_root,&destination,source_hasher,
+                snapshot_hasher,visited_directories,budget,
+            )?;
+            fs::set_permissions(&destination,metadata.permissions())
+                .map_err(|_| "Council workspace permissions could not be copied into its review snapshot.")?;
+        } else if entry_type.is_file() {
+            let before = fs::symlink_metadata(&source)
+                .map_err(|_| "Council workspace changed while it was being copied.")?;
+            if before.len() > SNAPSHOT_MAX_FILE_BYTES {
+                return Err("Council workspace contains a file above the review snapshot limit.".into());
+            }
+            let modified_before = before.modified().ok();
+            source_hasher.update(b"F");
+            hash_field(source_hasher,relative.as_bytes());
+            source_hasher.update(before.len().to_be_bytes());
+            hash_permissions(source_hasher,&before,false);
+            snapshot_hasher.update(b"F");
+            hash_field(snapshot_hasher,relative.as_bytes());
+            snapshot_hasher.update(before.len().to_be_bytes());
+            hash_snapshot_permissions(snapshot_hasher,&before);
+            let mut input = fs::File::open(&source)
+                .map_err(|_| "Council workspace is unavailable or unreadable.")?;
+            let mut output = fs::OpenOptions::new().write(true).create_new(true).open(&destination)
+                .map_err(|_| "Council workspace file could not be copied into its review snapshot.")?;
+            let mut bytes = [0_u8; 64 * 1024];
+            let mut copied = 0_u64;
+            loop {
+                let count = input.read(&mut bytes)
+                    .map_err(|_| "Council workspace is unavailable or unreadable.")?;
+                if count == 0 { break; }
+                budget.copied_bytes(count)?;
+                copied = copied.saturating_add(count as u64);
+                source_hasher.update(&bytes[..count]);
+                snapshot_hasher.update(&bytes[..count]);
+                output.write_all(&bytes[..count])
+                    .map_err(|_| "Council workspace file could not be copied into its review snapshot.")?;
+            }
+            output.flush().map_err(|_| "Council workspace file could not be copied into its review snapshot.")?;
+            if copied != before.len() {
+                return Err("Council workspace changed while it was being copied.".into());
+            }
+            let after = fs::symlink_metadata(&source)
+                .map_err(|_| "Council workspace changed while it was being copied.")?;
+            if after.len() != before.len() || after.modified().ok() != modified_before {
+                return Err("Council workspace changed while it was being copied.".into());
+            }
+            fs::set_permissions(&destination,before.permissions())
+                .map_err(|_| "Council workspace permissions could not be copied into its review snapshot.")?;
+        } else if entry_type.is_symlink() {
+            let target = fs::canonicalize(&source)
+                .map_err(|_| "Council workspace contains an unavailable symbolic link.")?;
+            let target_relative = workspace_relative_path(&target,source_root)
+                .map_err(|_| "Council workspace contains a symbolic link outside its authorized root.")?;
+            source_hasher.update(b"L");
+            hash_field(source_hasher,relative.as_bytes());
+            hash_field(source_hasher,target_relative.as_bytes());
+            snapshot_hasher.update(b"L");
+            hash_field(snapshot_hasher,relative.as_bytes());
+            hash_field(snapshot_hasher,target_relative.as_bytes());
+            create_snapshot_symlink(&source,&destination,source_root,destination_root,&target_relative)?;
+        } else {
+            return Err("Council workspace contains an unsupported special file.".into());
+        }
+    }
+    let directory_after = fs::metadata(source_directory)
+        .map_err(|_| "Council workspace changed while it was being copied.")?;
+    if directory_after.modified().ok() != modified_before {
+        return Err("Council workspace changed while it was being copied.".into());
+    }
+    Ok(())
+}
+
+fn make_snapshot_writable_for_cleanup(path: &Path) -> Result<()> {
+    let metadata = fs::symlink_metadata(path)
+        .map_err(|_| "Council review snapshot cleanup failed.")?;
+    if metadata.file_type().is_symlink() { return Ok(()); }
+    if metadata.is_dir() {
+        for entry in fs::read_dir(path).map_err(|_| "Council review snapshot cleanup failed.")? {
+            let entry = entry.map_err(|_| "Council review snapshot cleanup failed.")?;
+            make_snapshot_writable_for_cleanup(&entry.path())?;
+        }
+    }
+    let mut permissions = metadata.permissions();
+    #[cfg(unix)]
+    permissions.set_mode(permissions.mode() | 0o200);
+    #[cfg(not(unix))]
+    permissions.set_readonly(false);
+    fs::set_permissions(path,permissions).map_err(|_| "Council review snapshot cleanup failed.".into())
+}
+
+fn remove_snapshot_path(path: &Path) -> Result<()> {
+    if !path.exists() { return Ok(()); }
+    make_snapshot_writable_for_cleanup(path)?;
+    fs::remove_dir_all(path).map_err(|_| "Council review snapshot cleanup failed.".into())
+}
+
+fn remove_workspace_snapshot(store: &Store, id: &str) -> Result<()> {
+    let path = snapshot_path(store,id)?;
+    match fs::symlink_metadata(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("Council review snapshot cleanup failed.".into()),
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
+            return Err("Council review snapshot identity is invalid.".into());
+        }
+        Ok(_) => {}
+    }
+    remove_snapshot_path(&path)
+}
+
+fn freeze_workspace_snapshot(store: &Store, source_root: &Path, expected_identity: &str) -> Result<WorkspaceSnapshot> {
+    let source_root = fs::canonicalize(source_root)
+        .map_err(|_| "Council workspace is unavailable before review snapshot creation.")?;
+    let source_text = source_root.to_str().ok_or("Council workspace has a non-UTF-8 root path.")?;
+    let base = snapshot_base(store)?;
+    let id = storage::id();
+    if !valid_snapshot_id(&id) { return Err("Council review snapshot identity could not be generated.".into()); }
+    let staging = base.join(format!(".tmp-{id}"));
+    let destination = base.join(&id);
+    if destination.exists() { return Err("Council review snapshot identity already exists.".into()); }
+    fs::create_dir(&staging).map_err(|_| "Council review snapshot could not be created.")?;
+    let build = (|| {
+        private_directory(&staging)?;
+        let started = Instant::now();
+        let mut source_hasher = Sha256::new();
+        source_hasher.update(b"PandaCode SuperAgent Council workspace v1\0");
+        hash_field(&mut source_hasher,source_text.as_bytes());
+        let mut snapshot_hasher = Sha256::new();
+        snapshot_hasher.update(b"PandaCode SuperAgent Council snapshot v1\0");
+        let mut budget = SnapshotBudget::default();
+        copy_workspace_directory(
+            &source_root,&source_root,&destination,&staging,&mut source_hasher,
+            &mut snapshot_hasher,&mut std::collections::HashSet::new(),&mut budget,
+        )?;
+        let copied_source_identity = format!("{:x}",source_hasher.finalize());
+        let snapshot_digest = format!("{:x}",snapshot_hasher.finalize());
+        if copied_source_identity != expected_identity
+            || workspace_identity_sha256(&source_root)? != expected_identity
+            || started.elapsed() > SNAPSHOT_MAX_DURATION
+        {
+            return Err("Council workspace changed while its review snapshot was being created.".into());
+        }
+        freeze_snapshot_tree(&staging,&mut budget)?;
+        make_read_only(&staging)?;
+        fs::rename(&staging,&destination)
+            .map_err(|_| "Council review snapshot could not be finalized.")?;
+        let root = resolve_workspace_snapshot(store,&id)?;
+        if workspace_snapshot_sha256(&root)? != snapshot_digest
+            || started.elapsed() > SNAPSHOT_MAX_DURATION
+        {
+            return Err("Council review snapshot identity or permissions could not be revalidated.".into());
+        }
+        Ok(WorkspaceSnapshot { id:id.clone(),root,sha256:snapshot_digest })
+    })();
+    match build {
+        Ok(snapshot) => Ok(snapshot),
+        Err(error) => {
+            let _ = remove_snapshot_path(&staging);
+            let _ = remove_snapshot_path(&destination);
+            Err(error)
+        }
+    }
+}
+
+fn assignment_workspace_root(store: &Store, worker_session_id: &str) -> Result<std::path::PathBuf> {
+    let worker = store.session(worker_session_id)?;
+    store.workspace_root(&worker.project_id, Some(worker_session_id))
+}
 
 fn council_config(snapshot: &super::TeamSnapshot) -> Result<architect::CouncilConfig> {
     if !snapshot.policy.council_required
@@ -254,12 +851,13 @@ pub(super) fn bind_required_finished(
         return Err("Finished worker assignment or native thread is stale.".into());
     }
     let artifact = sha256(ticket.evidence.as_deref().unwrap_or_default().as_bytes());
+    let workspace = workspace_identity_sha256(&assignment_workspace_root(store,worker_session_id)?)?;
     let changed = store.db.execute(
         "UPDATE sa_council_requests SET ticket_revision=?2,artifact_sha256=?3,
-           bound_at=?4,state='bound',updated_at=?4
-         WHERE id=?1 AND state='admitted' AND assignment_id=?5
-           AND worker_session_id=?6 AND admitted_ticket_revision=?7",
-        params![request.id,ticket.revision,artifact,storage::now(),assignment_id,
+           workspace_sha256=?4,bound_at=?5,state='bound',updated_at=?5
+         WHERE id=?1 AND state='admitted' AND assignment_id=?6
+           AND worker_session_id=?7 AND admitted_ticket_revision=?8",
+        params![request.id,ticket.revision,artifact,workspace,storage::now(),assignment_id,
             worker_session_id,request.admitted_ticket_revision],
     ).map_err(|error| error.to_string())?;
     if changed != 1 {
@@ -306,6 +904,16 @@ fn block_request(store: &Store, request_id: &str, detail: &str) -> Result<()> {
 /// this request to the current artifact and Ticket revision.
 pub(crate) fn start_after_worker_completion(app: &tauri::AppHandle, worker_session_id: &str) -> Result<bool> {
     let state = app.state::<crate::AppState>();
+    start_after_worker_completion_inner(&state, worker_session_id, |launch| {
+        architect::start_superagent_review(app, launch)
+    })
+}
+
+fn start_after_worker_completion_inner(
+    state: &crate::AppState,
+    worker_session_id: &str,
+    start_review: impl FnOnce(architect::SuperAgentCouncilLaunch) -> Result<String>,
+) -> Result<bool> {
     // Serialize reviewer launch with Ticket Stop/restart recovery so a stop
     // cannot win the Ticket CAS while a native review team is being created.
     let database_path = state.store.lock().map_err(|error| error.to_string())?.path.clone();
@@ -319,6 +927,20 @@ pub(crate) fn start_after_worker_completion(app: &tauri::AppHandle, worker_sessi
         let Some(evidence) = evidence else {
             block_request(&store,&request.id,"Required Council has no successful worker artifact.")?;
             return Ok(false);
+        };
+        let workspace_root = match assignment_workspace_root(&store,worker_session_id) {
+            Ok(root) => root,
+            Err(_) => {
+                block_request(&store,&request.id,"Required Council workspace became unavailable before dispatch.")?;
+                return Ok(false);
+            }
+        };
+        let workspace = match workspace_identity_sha256(&workspace_root) {
+            Ok(identity) => identity,
+            Err(_) => {
+                block_request(&store,&request.id,"Required Council workspace could not be read before dispatch.")?;
+                return Ok(false);
+            }
         };
         let snapshot = super::ticket_team_snapshot(&store,&ticket.id)?;
         let mandate = super::mandate(&store,&ticket.id)?;
@@ -353,6 +975,7 @@ pub(crate) fn start_after_worker_completion(app: &tauri::AppHandle, worker_sessi
             && ticket.revision == request.ticket_revision
             && request.worker_session_id == worker_session_id
             && request.artifact_sha256.as_deref() == Some(artifact.as_str())
+            && request.workspace_sha256.as_deref() == Some(workspace.as_str())
             && request.bound_at.is_some()
             && mandate.policy_revision == request.policy_revision && !mandate.revoked
             && mandate.expires_at > storage::now()
@@ -365,6 +988,13 @@ pub(crate) fn start_after_worker_completion(app: &tauri::AppHandle, worker_sessi
         }
         let config_sha = sha256(serde_json::to_vec(&config).map_err(|error| error.to_string())?.as_slice());
         let worker = store.session(worker_session_id)?;
+        let frozen = match freeze_workspace_snapshot(&store,&workspace_root,&workspace) {
+            Ok(snapshot) => snapshot,
+            Err(_) => {
+                block_request(&store,&request.id,"Required Council workspace could not be frozen for review.")?;
+                return Ok(false);
+            }
+        };
         let binding = architect::SuperAgentCouncilBinding {
             ticket_id: ticket.id.clone(),
             assignment_id: request.assignment_id.clone(),
@@ -375,19 +1005,43 @@ pub(crate) fn start_after_worker_completion(app: &tauri::AppHandle, worker_sessi
             cycle_started_at: request.cycle_started_at,
             generation: u64::try_from(request.generation).map_err(|_| "Invalid Council generation.")?,
             artifact_sha256: artifact,
+            workspace_sha256: workspace,
+            workspace_snapshot_id: frozen.id.clone(),
+            workspace_snapshot_sha256: frozen.sha256.clone(),
             reviewer_policy_sha256: request.reviewer_policy_sha256.clone(),
             council_config_sha256: config_sha,
         };
-        let changed = store.db.execute(
-            "UPDATE sa_council_requests SET state='starting',updated_at=?2
-             WHERE id=?1 AND state='bound' AND ticket_revision=?3 AND artifact_sha256=?4",
-            params![request.id,storage::now(),request.ticket_revision,binding.artifact_sha256],
-        ).map_err(|error| error.to_string())?;
-        if changed != 1 { return Ok(false) }
+        let bind_snapshot = (|| -> Result<bool> {
+            let tx = store.db.unchecked_transaction().map_err(|error| error.to_string())?;
+            let changed = tx.execute(
+                "UPDATE sa_council_requests SET state='starting',workspace_snapshot_id=?2,
+                   workspace_snapshot_sha256=?3,updated_at=?4
+                 WHERE id=?1 AND state='bound' AND ticket_revision=?5 AND artifact_sha256=?6
+                   AND workspace_sha256=?7 AND workspace_snapshot_id IS NULL
+                   AND workspace_snapshot_sha256 IS NULL",
+                params![request.id,binding.workspace_snapshot_id,binding.workspace_snapshot_sha256,
+                    storage::now(),request.ticket_revision,binding.artifact_sha256,binding.workspace_sha256],
+            ).map_err(|error| error.to_string())?;
+            if changed != 1 { return Ok(false); }
+            tx.commit().map_err(|error| error.to_string())?;
+            Ok(true)
+        })();
+        match bind_snapshot {
+            Ok(true) => {}
+            Ok(false) => {
+                let _ = remove_workspace_snapshot(&store,&frozen.id);
+                return Ok(false);
+            }
+            Err(error) => {
+                let _ = remove_workspace_snapshot(&store,&frozen.id);
+                return Err(error);
+            }
+        }
         architect::SuperAgentCouncilLaunch {
             binding, config, project_id: worker.project_id, provider: worker.provider,
             model: worker.model, mode: worker.mode, title: format!("SuperAgent Council · {}",ticket.id),
             objective: ticket.objective, evidence,
+            workspace_root: frozen.root.to_string_lossy().into_owned(),
         }
     };
     let binding = launch.binding.clone();
@@ -399,7 +1053,7 @@ pub(crate) fn start_after_worker_completion(app: &tauri::AppHandle, worker_sessi
         ).optional().map_err(|error| error.to_string())?
     };
     let Some(request_id) = request_id else { return Ok(false) };
-    let native_session_id = match architect::start_superagent_review(app,launch) {
+    let native_session_id = match start_review(launch) {
         Ok(session) => session,
         Err(error) => {
             if let Ok(store) = state.store.lock() { let _ = block_request(&store,&request_id,"Native reviewer dispatch failed; explicit recovery is required."); }
@@ -410,9 +1064,11 @@ pub(crate) fn start_after_worker_completion(app: &tauri::AppHandle, worker_sessi
     let changed = store.db.execute(
         "UPDATE sa_council_requests SET native_session_id=?2,state='dispatched',updated_at=?3
          WHERE id=?1 AND state='starting' AND ticket_revision=?4
-           AND artifact_sha256=?5 AND cycle_id=?6",
+           AND artifact_sha256=?5 AND cycle_id=?6 AND workspace_sha256=?7
+           AND workspace_snapshot_id=?8 AND workspace_snapshot_sha256=?9",
         params![request_id,native_session_id,storage::now(),binding.ticket_revision,
-            binding.artifact_sha256,binding.cycle_id],
+            binding.artifact_sha256,binding.cycle_id,binding.workspace_sha256,
+            binding.workspace_snapshot_id,binding.workspace_snapshot_sha256],
     ).map_err(|error| error.to_string())?;
     if changed != 1 {
         drop(store);
@@ -435,6 +1091,15 @@ pub(crate) fn start_after_worker_completion(app: &tauri::AppHandle, worker_sessi
     Ok(true)
 }
 
+#[cfg(test)]
+pub(crate) fn start_after_worker_completion_for_test(
+    state: &crate::AppState, worker_session_id: &str,
+) -> Result<bool> {
+    start_after_worker_completion_inner(state,worker_session_id,|launch| {
+        architect::start_superagent_review_for_test(state,launch)
+    })
+}
+
 fn native_binding_matches(request: &RequiredRequest, team: &architect::TeamSnapshot) -> bool {
     let Some(binding) = team.superagent_review.as_ref() else { return false };
     let Some(artifact) = request.artifact_sha256.as_deref() else { return false };
@@ -447,11 +1112,25 @@ fn native_binding_matches(request: &RequiredRequest, team: &architect::TeamSnaps
         && binding.cycle_started_at == request.cycle_started_at
         && i64::try_from(binding.generation).ok() == Some(request.generation)
         && binding.artifact_sha256 == artifact
+        && request.workspace_sha256.as_deref() == Some(binding.workspace_sha256.as_str())
+        && request.workspace_snapshot_id.as_deref() == Some(binding.workspace_snapshot_id.as_str())
+        && request.workspace_snapshot_sha256.as_deref() == Some(binding.workspace_snapshot_sha256.as_str())
         && binding.reviewer_policy_sha256 == request.reviewer_policy_sha256
         && binding.council_config_sha256 == request.council_config_sha256
         && team.session_id == request.native_session_id.as_deref().unwrap_or_default()
         && team.council_since == request.cycle_started_at
         && i64::try_from(team.generation).ok() == Some(request.generation)
+}
+
+fn workspace_binding_current(store: &Store, request: &RequiredRequest) -> bool {
+    let Some(snapshot_id) = request.workspace_snapshot_id.as_deref() else { return false };
+    let Some(expected) = request.workspace_snapshot_sha256.as_deref() else { return false };
+    let Some(native_session_id) = request.native_session_id.as_deref() else { return false };
+    let Ok(native) = store.session(native_session_id) else { return false };
+    let Ok(native_root) = store.workspace_root(&native.project_id,Some(&native.id)) else { return false };
+    let Ok(snapshot_root) = resolve_workspace_snapshot(store,snapshot_id) else { return false };
+    native_root == snapshot_root
+        && workspace_snapshot_sha256(&snapshot_root).is_ok_and(|identity| identity == expected)
 }
 
 fn native_roster_matches(
@@ -548,10 +1227,13 @@ fn finalization_exists(store: &Store, request: &RequiredRequest, verdict: &str) 
           AND ticket_id=?2 AND assignment_id=?3 AND worker_session_id=?4
           AND ticket_revision=?5 AND policy_revision=?6 AND cycle_id=?7
           AND cycle_started_at=?8 AND generation=?9 AND native_session_id=?10
-          AND artifact_sha256=?11 AND verdict=?12)",
+          AND artifact_sha256=?11 AND workspace_sha256=?12
+          AND workspace_snapshot_id=?13 AND workspace_snapshot_sha256=?14 AND verdict=?15)",
         params![request.id,request.ticket_id,request.assignment_id,request.worker_session_id,
             request.ticket_revision,request.policy_revision,request.cycle_id,request.cycle_started_at,
-            request.generation,request.native_session_id,request.artifact_sha256,verdict],|row| row.get(0),
+            request.generation,request.native_session_id,request.artifact_sha256,
+            request.workspace_sha256,request.workspace_snapshot_id,
+            request.workspace_snapshot_sha256,verdict],|row| row.get(0),
     ).map_err(|error| error.to_string())
 }
 
@@ -564,13 +1246,21 @@ fn persist_finalization(
     // native callbacks then observe the committed receipt and become no-ops.
     if finalization_exists(store,request,verdict)? { return Ok(true); }
     let ticket = super::get_ticket(store,&request.ticket_id)?;
-    if !current_binding_valid(store,request,&ticket,team)? { return Ok(false); }
-    match verdict {
-        "passed" if architect::verified_council_pass(store,team) => {},
+    let binding_valid = current_binding_valid(store,request,&ticket,team)?;
+    let verdict_valid = match verdict {
+        "passed" if architect::verified_council_pass(store,team) => true,
         "human_accepted" if reason.is_some_and(|text| !text.trim().is_empty())
-            && architect::verified_council_accept(store,team) => {},
-        _ => return Ok(false),
+            && architect::verified_council_accept(store,team) => true,
+        _ => false,
+    };
+    // Validate the immutable review artifact under the same dispatch fence as
+    // finalization. The source checkout may change after the frozen copy.
+    if !workspace_binding_current(store,request) {
+        block_request(store,&request.id,"Required Council review snapshot changed or became unavailable before finalization.")?;
+        return Ok(false);
     }
+    if !binding_valid || !verdict_valid { return Ok(false); }
+    let database_path = store.path.clone();
     let tx = store.db.unchecked_transaction().map_err(|error| error.to_string())?;
     let now = storage::now();
     let finalization_id = storage::id();
@@ -578,12 +1268,14 @@ fn persist_finalization(
         "INSERT INTO sa_council_finalizations(
            id,request_id,ticket_id,assignment_id,worker_session_id,ticket_revision,
            policy_revision,cycle_id,cycle_started_at,generation,native_session_id,
-           artifact_sha256,verdict,actor,reason,created_at
-         ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16)",
+           artifact_sha256,workspace_sha256,workspace_snapshot_id,
+           workspace_snapshot_sha256,verdict,actor,reason,created_at
+         ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19)",
         params![finalization_id,request.id,request.ticket_id,request.assignment_id,
             request.worker_session_id,request.ticket_revision,request.policy_revision,
             request.cycle_id,request.cycle_started_at,request.generation,
-            request.native_session_id,request.artifact_sha256,verdict,
+            request.native_session_id,request.artifact_sha256,request.workspace_sha256,
+            request.workspace_snapshot_id,request.workspace_snapshot_sha256,verdict,
             if verdict == "passed" { "native-council" } else { "local-user" },
             reason.map(|text| text.trim().chars().take(500).collect::<String>()),now],
     ).map_err(|error| error.to_string())?;
@@ -597,9 +1289,11 @@ fn persist_finalization(
     let request_changed = tx.execute(
         "UPDATE sa_council_requests SET state=?2,updated_at=?3
          WHERE id=?1 AND state='dispatched' AND ticket_revision=?4
-           AND assignment_id=?5 AND cycle_id=?6 AND artifact_sha256=?7",
+           AND assignment_id=?5 AND cycle_id=?6 AND artifact_sha256=?7 AND workspace_sha256=?8
+           AND workspace_snapshot_id=?9 AND workspace_snapshot_sha256=?10",
         params![request.id,verdict,now,request.ticket_revision,request.assignment_id,
-            request.cycle_id,request.artifact_sha256],
+            request.cycle_id,request.artifact_sha256,request.workspace_sha256,
+            request.workspace_snapshot_id,request.workspace_snapshot_sha256],
     ).map_err(|error| error.to_string())?;
     if request_changed != 1 { return Ok(false); }
     tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[&request.ticket_id])
@@ -609,7 +1303,22 @@ fn persist_finalization(
         params![request.ticket_id,if verdict == "passed" { "council_passed" } else { "council_human_accepted" },
             reason.map_or_else(|| "Verified native Council pass".to_string(),|text| text.trim().chars().take(500).collect()),now],
     ).map_err(|error| error.to_string())?;
+    let snapshot_still_current = request.workspace_snapshot_id.as_deref().is_some_and(|id| {
+        resolve_workspace_snapshot_for_database(&database_path,id).is_ok_and(|root| {
+            request.workspace_snapshot_sha256.as_deref().is_some_and(|expected| {
+                workspace_snapshot_sha256(&root).is_ok_and(|actual| actual == expected)
+            })
+        })
+    });
+    if !snapshot_still_current {
+        drop(tx);
+        block_request(store,&request.id,"Required Council review snapshot changed before the final database commit.")?;
+        return Ok(false);
+    }
     tx.commit().map_err(|error| error.to_string())?;
+    if let Some(snapshot_id) = request.workspace_snapshot_id.as_deref() {
+        let _ = remove_workspace_snapshot(store,snapshot_id);
+    }
     Ok(true)
 }
 
@@ -678,6 +1387,10 @@ pub(super) fn prepare_human_accept(store: &Store, ticket_id: &str, expected_revi
     }
     let native_session_id = request.native_session_id.as_deref().ok_or("Native Council session is missing.")?;
     let team = architect::load(store,native_session_id)?.ok_or("Native Council team is missing.")?;
+    if !workspace_binding_current(store,&request) {
+        block_request(store,&request.id,"Required Council workspace changed or became unavailable before human acceptance.")?;
+        return Err("The reviewed Council workspace changed; this request is blocked.".into());
+    }
     if !current_binding_valid(store,&request,&ticket,&team)?
         || (!architect::superagent_council_human_acceptance_ready(store,&team)
             && !architect::verified_council_accept(store,&team))
@@ -875,6 +1588,7 @@ mod tests {
     use crate::{bots, storage::{self, Store}, superagent::{self, NewOrchestration}};
     use rusqlite::params;
     use serde_json::json;
+    use std::path::PathBuf;
 
     #[test]
     fn partial_duplicate_and_stale_rounds_cannot_claim_fresh_review() {
@@ -888,9 +1602,11 @@ mod tests {
     fn fixture() -> Store {
         let path = std::env::temp_dir().join(format!("sa-council-{}.sqlite3",storage::id()));
         let store = Store::open(&path).unwrap();
+        let workspace = std::env::temp_dir().join(format!("sa-council-workspace-{}",storage::id()));
+        std::fs::create_dir_all(&workspace).unwrap();
         store.db.execute(
             "INSERT INTO projects(id,name,path)
-             VALUES('project','Disposable','/tmp/disposable-council-bridge')",[],
+             VALUES('project','Disposable',?1)", [&workspace.to_string_lossy().to_string()],
         ).unwrap();
         for (id,name) in [("router","Router"),("worker","Builder")] {
             store.db.execute(
@@ -919,11 +1635,12 @@ mod tests {
     }
 
     fn attach_native_council(store: &Store, session: &str) {
+        let workspace = store.project("project").unwrap().path;
         let team=json!({
             "sessionId":session,
             "config":{
                 "workers":[],"maxParallel":1,"maxRounds":2,"maxAssignments":2,
-                "workspace":"/tmp/disposable-council-bridge","summaryLimit":3000,
+                "workspace":workspace,"summaryLimit":3000,
                 "council":{"target":9.0,"maxRounds":2,"reviewers":2}
             },
             "status":"ready","round":1,"revision":1,"workers":[],
@@ -938,11 +1655,17 @@ mod tests {
         ).unwrap();
     }
 
-    /// Build the native Ticket/request rows up to worker dispatch without
+    /// Build native Ticket/request rows up to worker dispatch without
     /// requiring locally installed reviewer executables in a unit fixture.
     /// The production admission path runs validate_superagent_council before
     /// writing the same immutable request identity.
     fn required_worker(store: &mut Store, key: &str) -> (superagent::Ticket,String,String) {
+        required_worker_with_rounds(store,key,10)
+    }
+
+    fn required_worker_with_rounds(
+        store: &mut Store, key: &str, max_rounds: usize,
+    ) -> (superagent::Ticket,String,String) {
         for id in ["reviewer-a", "reviewer-b"] {
             store.db.execute(
                 "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
@@ -1001,13 +1724,19 @@ mod tests {
              VALUES(?1,?2,'worker',?3,'running',1,?4,?4)",
             params![assignment_id,ticket_id,session,now],
         ).unwrap();
+        let project_root=store.project("project").unwrap().path;
+        superagent::write_grants::insert_for_assignment(
+            &tx,&ticket_id,&assignment_id,&session,&config.project_id,&project_root,0,
+            config.policy_revision,&["authorized-worker-write.md".into()],now,
+        ).unwrap();
         tx.execute(
             "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-             VALUES(?1,'admitted','manual readonly worker reserved',?2)",
+             VALUES(?1,'admitted','manual worker with scoped write authorization reserved',?2)",
             params![ticket_id,now],
         ).unwrap();
         let (reviewer_policy_json,reviewer_policy_sha256)=frozen_reviewer_policy(&snapshot).unwrap();
-        let council = council_config(&snapshot).unwrap();
+        let mut council = council_config(&snapshot).unwrap();
+        council.max_rounds = max_rounds;
         let council_config_bytes = serde_json::to_vec(&council).unwrap();
         let council_config_json = String::from_utf8(council_config_bytes.clone()).unwrap();
         tx.execute(
@@ -1023,6 +1752,38 @@ mod tests {
         ).unwrap();
         tx.commit().unwrap();
         (superagent::get_ticket(store,&ticket_id).unwrap(),session,assignment_id)
+    }
+
+    fn workspace(store: &Store) -> PathBuf {
+        PathBuf::from(store.project("project").unwrap().path)
+    }
+
+    fn start_required_review(store: Store, worker_session_id: &str) -> (crate::AppState,String) {
+        let state = architect::test_app_state(store);
+        assert!(start_after_worker_completion_for_test(&state,worker_session_id).unwrap());
+        let native_session_id = {
+            let store = state.store.lock().unwrap();
+            request_for_worker(&store,worker_session_id).unwrap().unwrap().native_session_id.unwrap()
+        };
+        (state,native_session_id)
+    }
+
+    fn complete_native_reviewers(state: &crate::AppState, native_session_id: &str, score: &str) {
+        let (generation,reviewers) = {
+            let store = state.store.lock().unwrap();
+            let team = architect::load(&store,native_session_id).unwrap().unwrap();
+            (team.generation,team.workers.into_iter().map(|worker| worker.session_id).collect::<Vec<_>>())
+        };
+        for reviewer_session_id in reviewers {
+            state.store.lock().unwrap().message(
+                &reviewer_session_id,"assistant",&format!("Review complete.\nCouncil score: {score}/10"),
+            ).unwrap();
+            architect::completed_state(
+                state,&reviewer_session_id,
+                Some(&architect::Admission { parent: native_session_id.to_owned(), generation }),
+                true,false,&mut |_| {},
+            );
+        }
     }
 
     #[test]
@@ -1171,6 +1932,9 @@ mod tests {
     fn required_worker_success_binds_exact_artifact_and_replays_are_ignored() {
         let mut store=fixture();
         let (ticket,session,assignment_id)=required_worker(&mut store,"required-success");
+        let workspace=workspace(&store);
+        std::fs::write(workspace.join("authorized-worker-write.md"),"written before the worker result commits").unwrap();
+        let expected_workspace=workspace_identity_sha256(&workspace).unwrap();
         assert!(superagent::on_run_finished(&store,&session,true,"Worker artifact").unwrap());
         let waiting=superagent::get_ticket(&store,&ticket.id).unwrap();
         assert_eq!(waiting.state,"waiting_review");
@@ -1178,6 +1942,11 @@ mod tests {
         assert_eq!(request.state,"bound");
         assert_eq!(request.ticket_revision,waiting.revision);
         assert_eq!(request.artifact_sha256.as_deref(),Some(sha256(b"Worker artifact").as_str()));
+        assert_eq!(request.workspace_sha256.as_deref(),Some(expected_workspace.as_str()));
+        assert!(store.db.execute(
+            "UPDATE sa_council_requests SET workspace_sha256=?2 WHERE assignment_id=?1",
+            params![assignment_id,"0".repeat(64)],
+        ).is_err());
         assert!(request.native_session_id.is_none());
         assert!(!superagent::on_run_finished(&store,&session,true,"Replayed artifact").unwrap());
         assert_eq!(superagent::get_ticket(&store,&ticket.id).unwrap().state,"waiting_review");
@@ -1259,9 +2028,12 @@ mod tests {
         let (ticket,session,assignment_id)=required_worker(&mut store,"required-replay");
         assert!(superagent::on_run_finished(&store,&session,true,"Worker artifact").unwrap());
         let native_session="native-review";
+        let snapshot_id=storage::id();
+        let snapshot_sha=sha256(b"frozen review snapshot");
         store.db.execute(
-            "UPDATE sa_council_requests SET native_session_id=?2,state='dispatched'
-             WHERE assignment_id=?1",params![assignment_id,native_session],
+            "UPDATE sa_council_requests SET native_session_id=?2,state='dispatched',
+               workspace_snapshot_id=?3,workspace_snapshot_sha256=?4 WHERE assignment_id=?1",
+            params![assignment_id,native_session,snapshot_id,snapshot_sha],
         ).unwrap();
         let request=request_for_assignment(&store,&ticket.id,&assignment_id).unwrap().unwrap();
         let artifact=request.artifact_sha256.as_deref().unwrap();
@@ -1269,18 +2041,269 @@ mod tests {
             "INSERT INTO sa_council_finalizations(
               id,request_id,ticket_id,assignment_id,worker_session_id,ticket_revision,
               policy_revision,cycle_id,cycle_started_at,generation,native_session_id,
-              artifact_sha256,verdict,actor,created_at
-             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,'passed','native-council',?13)",
+              artifact_sha256,workspace_sha256,workspace_snapshot_id,
+              workspace_snapshot_sha256,verdict,actor,created_at
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,'passed','native-council',?16)",
             params![storage::id(),request.id,request.ticket_id,request.assignment_id,
                 request.worker_session_id,request.ticket_revision,request.policy_revision,
                 request.cycle_id,request.cycle_started_at,request.generation,native_session,
-                artifact,storage::now()],
+                artifact,request.workspace_sha256,request.workspace_snapshot_id,
+                request.workspace_snapshot_sha256,storage::now()],
         ).unwrap();
         assert!(finalization_exists(&store,&request,"passed").unwrap());
         assert!(!finalization_exists(&store,&request,"human_accepted").unwrap());
         let mut stale=request.clone();
         stale.cycle_id.push_str("-stale");
         assert!(!finalization_exists(&store,&stale,"passed").unwrap());
+    }
+
+    #[test]
+    fn council_review_uses_frozen_snapshot_across_workspace_edit_restore() {
+        let mut store=fixture();
+        let workspace=workspace(&store);
+        std::fs::write(workspace.join("authorized-worker-write.md"),"reviewed bytes").unwrap();
+        let (ticket,worker_session_id,assignment_id)=required_worker(&mut store,"required-native-pass");
+        assert!(superagent::on_run_finished(&store,&worker_session_id,true,"Worker artifact").unwrap());
+        let expected_workspace=workspace_identity_sha256(&workspace).unwrap();
+        let (state,native_session_id)=start_required_review(store,&worker_session_id);
+        let (request,team)= {
+            let store=state.store.lock().unwrap();
+            (request_for_assignment(&store,&ticket.id,&assignment_id).unwrap().unwrap(),
+             architect::load(&store,&native_session_id).unwrap().unwrap())
+        };
+        assert_eq!(request.state,"dispatched");
+        assert_eq!(request.workspace_sha256.as_deref(),Some(expected_workspace.as_str()));
+        let binding=team.superagent_review.as_ref().unwrap();
+        assert_eq!(binding.workspace_sha256,expected_workspace);
+        let snapshot_id=request.workspace_snapshot_id.as_deref().unwrap();
+        let snapshot_sha=request.workspace_snapshot_sha256.as_deref().unwrap();
+        assert_eq!(binding.workspace_snapshot_id,snapshot_id);
+        assert_eq!(binding.workspace_snapshot_sha256,snapshot_sha);
+        let snapshot_root=resolve_workspace_snapshot(&state.store.lock().unwrap(),snapshot_id).unwrap();
+        assert_eq!(workspace_snapshot_sha256(&snapshot_root).unwrap(),snapshot_sha);
+        assert!(std::fs::metadata(&snapshot_root.join("authorized-worker-write.md")).unwrap().permissions().readonly());
+        assert_eq!(team.workers.len(),2);
+        assert!(team.workers.iter().all(|worker| worker.council.is_some() && worker.read_only));
+        {
+            let store=state.store.lock().unwrap();
+            assert!(team.workers.iter().all(|worker| {
+                store.workspace_root(&ticket.project_id,Some(&worker.session_id)).is_ok_and(|root| root == snapshot_root)
+            }));
+        }
+
+        let source_file=workspace.join("authorized-worker-write.md");
+        let original=std::fs::read(&source_file).unwrap();
+        std::fs::write(&source_file,"temporary edit during Council review").unwrap();
+        assert_eq!(std::fs::read(snapshot_root.join("authorized-worker-write.md")).unwrap(),original);
+        std::fs::write(&source_file,&original).unwrap();
+        assert_eq!(std::fs::read(snapshot_root.join("authorized-worker-write.md")).unwrap(),original);
+        assert_eq!(workspace_snapshot_sha256(&snapshot_root).unwrap(),snapshot_sha);
+
+        complete_native_reviewers(&state,&native_session_id,"9.5");
+        let store=state.store.lock().unwrap();
+        let team=architect::load(&store,&native_session_id).unwrap().unwrap();
+        assert_eq!(team.council_status.as_ref().unwrap().state,"passed");
+        let reviewer=team.workers.iter().find(|worker| worker.council.is_some()).unwrap();
+        assert!(finalize_after_native_run(&store,&reviewer.session_id).unwrap());
+        assert_eq!(superagent::get_ticket(&store,&ticket.id).unwrap().state,"completed");
+        let (actor,workspace_hash,stored_snapshot_id,stored_snapshot_sha):(String,String,String,String)=store.db.query_row(
+            "SELECT actor,workspace_sha256,workspace_snapshot_id,workspace_snapshot_sha256 FROM sa_council_finalizations WHERE ticket_id=?1",
+            [&ticket.id],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        ).unwrap();
+        assert_eq!(actor,"native-council");
+        assert_eq!(workspace_hash,expected_workspace);
+        assert_eq!(stored_snapshot_id,snapshot_id);
+        assert_eq!(stored_snapshot_sha,snapshot_sha);
+        assert!(!snapshot_root.exists());
+    }
+
+    #[test]
+    fn workspace_drift_before_dispatch_blocks_ticket() {
+        let mut store=fixture();
+        let (ticket,worker_session_id,assignment_id)=required_worker(&mut store,"required-pre-dispatch-drift");
+        assert!(superagent::on_run_finished(&store,&worker_session_id,true,"Worker artifact").unwrap());
+        let root=workspace(&store);
+        std::fs::write(root.join("changed-after-binding.md"),"drift").unwrap();
+        let state=architect::test_app_state(store);
+        assert!(!start_after_worker_completion_for_test(&state,&worker_session_id).unwrap());
+        {
+            let store=state.store.lock().unwrap();
+            assert_eq!(superagent::get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+            let request=request_for_assignment(&store,&ticket.id,&assignment_id).unwrap().unwrap();
+            assert_eq!(request.state,"blocked");
+            assert!(request.native_session_id.is_none());
+        }
+    }
+
+    #[test]
+    fn failed_snapshot_creation_cleans_partial_private_tree() {
+        let store=fixture();
+        let workspace=workspace(&store);
+        let source=workspace.join("reviewed.md");
+        std::fs::write(&source,"authorized bytes").unwrap();
+        let expected=workspace_identity_sha256(&workspace).unwrap();
+        let mut permissions=std::fs::metadata(&source).unwrap().permissions();
+        permissions.set_readonly(true);
+        std::fs::set_permissions(&source,permissions).unwrap();
+
+        assert!(freeze_workspace_snapshot(&store,&workspace,&expected).is_err());
+        let base=snapshot_base(&store).unwrap();
+        assert!(std::fs::read_dir(base).unwrap().next().is_none());
+    }
+
+    #[test]
+    fn snapshot_drift_before_native_finalization_blocks_ticket() {
+        let mut store=fixture();
+        let workspace=workspace(&store);
+        std::fs::write(workspace.join("reviewed.md"),"authorized bytes").unwrap();
+        let (ticket,worker_session_id,_)=required_worker(&mut store,"required-native-drift");
+        assert!(superagent::on_run_finished(&store,&worker_session_id,true,"Worker artifact").unwrap());
+        let (state,native_session_id)=start_required_review(store,&worker_session_id);
+        let (snapshot_id,snapshot_root)={
+            let store=state.store.lock().unwrap();
+            let request=request_for_ticket(&store,&ticket.id).unwrap().unwrap();
+            let snapshot_id=request.workspace_snapshot_id.unwrap();
+            let root=resolve_workspace_snapshot(&store,&snapshot_id).unwrap();
+            (snapshot_id,root)
+        };
+        complete_native_reviewers(&state,&native_session_id,"9.5");
+        let tampered=snapshot_root.join("reviewed.md");
+        let mut writable=std::fs::metadata(&tampered).unwrap().permissions();
+        #[cfg(unix)]
+        writable.set_mode(writable.mode() | 0o200);
+        #[cfg(not(unix))]
+        writable.set_readonly(false);
+        std::fs::set_permissions(&tampered,writable).unwrap();
+        std::fs::write(&tampered,"tampered reviewer bytes").unwrap();
+        make_read_only(&tampered).unwrap();
+        let store=state.store.lock().unwrap();
+        let team=architect::load(&store,&native_session_id).unwrap().unwrap();
+        let reviewer=team.workers.iter().find(|worker| worker.council.is_some()).unwrap();
+        assert!(!finalize_after_native_run(&store,&reviewer.session_id).unwrap());
+        assert_eq!(superagent::get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+        let finalizations:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_council_finalizations WHERE ticket_id=?1",[&ticket.id],|row| row.get(0),
+        ).unwrap();
+        assert_eq!(finalizations,0);
+        drop(store);
+        let store=state.store.lock().unwrap();
+        remove_workspace_snapshot(&store,&snapshot_id).unwrap();
+    }
+
+    #[test]
+    fn attributed_human_acceptance_is_persisted_only_for_the_same_workspace() {
+        let mut store=fixture();
+        let workspace=workspace(&store);
+        std::fs::write(workspace.join("authorized-worker-write.md"),"reviewed bytes").unwrap();
+        let (ticket,worker_session_id,_)=required_worker(&mut store,"required-human-acceptance");
+        assert!(superagent::on_run_finished(&store,&worker_session_id,true,"Worker artifact").unwrap());
+        let (state,native_session_id)=start_required_review(store,&worker_session_id);
+        let (snapshot_id,snapshot_sha,snapshot_root)={
+            let store=state.store.lock().unwrap();
+            let request=request_for_ticket(&store,&ticket.id).unwrap().unwrap();
+            let snapshot_id=request.workspace_snapshot_id.unwrap();
+            let snapshot_sha=request.workspace_snapshot_sha256.unwrap();
+            let root=resolve_workspace_snapshot(&store,&snapshot_id).unwrap();
+            (snapshot_id,snapshot_sha,root)
+        };
+        complete_native_reviewers(&state,&native_session_id,"8.5");
+        let ticket_revision= {
+            let store=state.store.lock().unwrap();
+            let ticket=superagent::get_ticket(&store,&ticket.id).unwrap();
+            assert_eq!(ticket.state,"waiting_review");
+            assert_eq!(prepare_human_accept(&store,&ticket.id,ticket.revision).unwrap(),native_session_id);
+            ticket.revision
+        };
+        architect::accept_superagent_review_for_test(&state,&native_session_id).unwrap();
+        let store=state.store.lock().unwrap();
+        let accepted=finalize_human_accept(
+            &store,&ticket.id,ticket_revision,"Reviewed the remaining findings and accept the documented residual risk.",
+        ).unwrap();
+        assert_eq!(accepted.state,"completed");
+        let (actor,reason,workspace_hash,stored_snapshot_id,stored_snapshot_sha):(String,String,String,String,String)=store.db.query_row(
+            "SELECT actor,reason,workspace_sha256,workspace_snapshot_id,workspace_snapshot_sha256 FROM sa_council_finalizations WHERE ticket_id=?1",
+            [&ticket.id],|row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+        ).unwrap();
+        assert_eq!(actor,"local-user");
+        assert_eq!(reason,"Reviewed the remaining findings and accept the documented residual risk.");
+        assert_eq!(workspace_hash,workspace_identity_sha256(&workspace).unwrap());
+        assert_eq!(stored_snapshot_id,snapshot_id);
+        assert_eq!(stored_snapshot_sha,snapshot_sha);
+        assert!(!snapshot_root.exists());
+    }
+
+    #[test]
+    fn human_acceptance_after_snapshot_drift_is_blocked_and_limit_is_terminal_denial() {
+        let mut store=fixture();
+        let root=workspace(&store);
+        std::fs::write(root.join("reviewed.md"),"authorized bytes").unwrap();
+        let (ticket,worker_session_id,_)=required_worker(&mut store,"required-human-drift");
+        assert!(superagent::on_run_finished(&store,&worker_session_id,true,"Worker artifact").unwrap());
+        let (state,native_session_id)=start_required_review(store,&worker_session_id);
+        let (snapshot_id,snapshot_root)={
+            let store=state.store.lock().unwrap();
+            let request=request_for_ticket(&store,&ticket.id).unwrap().unwrap();
+            let snapshot_id=request.workspace_snapshot_id.unwrap();
+            (snapshot_id.clone(),resolve_workspace_snapshot(&store,&snapshot_id).unwrap())
+        };
+        complete_native_reviewers(&state,&native_session_id,"8.5");
+        let ticket_revision= {
+            let store=state.store.lock().unwrap();
+            let ticket=superagent::get_ticket(&store,&ticket.id).unwrap();
+            prepare_human_accept(&store,&ticket.id,ticket.revision).unwrap();
+            ticket.revision
+        };
+        architect::accept_superagent_review_for_test(&state,&native_session_id).unwrap();
+        let tampered=snapshot_root.join("reviewed.md");
+        let mut writable=std::fs::metadata(&tampered).unwrap().permissions();
+        #[cfg(unix)]
+        writable.set_mode(writable.mode() | 0o200);
+        #[cfg(not(unix))]
+        writable.set_readonly(false);
+        std::fs::set_permissions(&tampered,writable).unwrap();
+        std::fs::write(&tampered,"tampered reviewer bytes").unwrap();
+        make_read_only(&tampered).unwrap();
+        let store=state.store.lock().unwrap();
+        assert!(finalize_human_accept(&store,&ticket.id,ticket_revision,"Reasoned acceptance").is_err());
+        assert_eq!(superagent::get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+        let finalizations:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_council_finalizations WHERE ticket_id=?1",[&ticket.id],|row| row.get(0),
+        ).unwrap();
+        assert_eq!(finalizations,0);
+        drop(store);
+        remove_workspace_snapshot(&state.store.lock().unwrap(),&snapshot_id).unwrap();
+
+        let mut store=fixture();
+        let (ticket,worker_session_id,_)=required_worker_with_rounds(&mut store,"required-review-limit",1);
+        assert!(superagent::on_run_finished(&store,&worker_session_id,true,"Worker artifact").unwrap());
+        let (state,native_session_id)=start_required_review(store,&worker_session_id);
+        complete_native_reviewers(&state,&native_session_id,"8.5");
+        let store=state.store.lock().unwrap();
+        let team=architect::load(&store,&native_session_id).unwrap().unwrap();
+        assert_eq!(team.council_status.as_ref().unwrap().state,"limit");
+        let reviewer=team.workers.iter().find(|worker| worker.council.is_some()).unwrap();
+        assert!(!finalize_after_native_run(&store,&reviewer.session_id).unwrap());
+        assert_eq!(superagent::get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+        let finalizations:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_council_finalizations WHERE ticket_id=?1",[&ticket.id],|row| row.get(0),
+        ).unwrap();
+        assert_eq!(finalizations,0);
+    }
+
+    #[test]
+    fn unavailable_workspace_blocks_required_council_before_native_dispatch() {
+        let mut store=fixture();
+        let (ticket,worker_session_id,assignment_id)=required_worker(&mut store,"required-workspace-unavailable");
+        assert!(superagent::on_run_finished(&store,&worker_session_id,true,"Worker artifact").unwrap());
+        let root=workspace(&store);
+        std::fs::remove_dir_all(&root).unwrap();
+        let state=architect::test_app_state(store);
+        assert!(!start_after_worker_completion_for_test(&state,&worker_session_id).unwrap());
+        let store=state.store.lock().unwrap();
+        assert_eq!(superagent::get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+        let request=request_for_assignment(&store,&ticket.id,&assignment_id).unwrap().unwrap();
+        assert_eq!(request.state,"blocked");
+        assert!(request.native_session_id.is_none());
     }
 
     #[test]

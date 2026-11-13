@@ -210,7 +210,7 @@ CREATE TRIGGER IF NOT EXISTS sa_ticket_team_snapshots_no_delete
 "#;
 
 /// Immutable Council request identity for one admitted worker assignment. The
-/// artifact and Council session are filled only after the worker finishes.
+/// worker artifact and workspace snapshot are filled only after the worker finishes.
 pub(crate) const COUNCIL_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sa_council_requests (
   id TEXT PRIMARY KEY,
@@ -228,6 +228,9 @@ CREATE TABLE IF NOT EXISTS sa_council_requests (
   council_config_json TEXT NOT NULL CHECK(json_valid(council_config_json)),
   council_config_sha256 TEXT NOT NULL CHECK(length(council_config_sha256)=64),
   artifact_sha256 TEXT,
+  workspace_sha256 TEXT CHECK(workspace_sha256 IS NULL OR length(workspace_sha256)=64),
+  workspace_snapshot_id TEXT,
+  workspace_snapshot_sha256 TEXT CHECK(workspace_snapshot_sha256 IS NULL OR length(workspace_snapshot_sha256)=64),
   bound_at INTEGER,
   native_session_id TEXT UNIQUE,
   state TEXT NOT NULL CHECK(state IN ('admitted','bound','starting','dispatched','passed','human_accepted','blocked')),
@@ -249,6 +252,9 @@ CREATE TABLE IF NOT EXISTS sa_council_finalizations (
   generation INTEGER NOT NULL CHECK(generation > 0),
   native_session_id TEXT NOT NULL,
   artifact_sha256 TEXT NOT NULL CHECK(length(artifact_sha256)=64),
+  workspace_sha256 TEXT CHECK(workspace_sha256 IS NULL OR length(workspace_sha256)=64),
+  workspace_snapshot_id TEXT,
+  workspace_snapshot_sha256 TEXT CHECK(workspace_snapshot_sha256 IS NULL OR length(workspace_snapshot_sha256)=64),
   verdict TEXT NOT NULL CHECK(verdict IN ('passed','human_accepted')),
   actor TEXT NOT NULL,
   reason TEXT,
@@ -274,6 +280,9 @@ CREATE TRIGGER IF NOT EXISTS sa_council_request_identity_immutable
    OR NEW.council_config_sha256 IS NOT OLD.council_config_sha256
    OR (OLD.state<>'admitted' AND NEW.ticket_revision IS NOT OLD.ticket_revision)
    OR (OLD.artifact_sha256 IS NOT NULL AND NEW.artifact_sha256 IS NOT OLD.artifact_sha256)
+   OR (OLD.workspace_sha256 IS NOT NULL AND NEW.workspace_sha256 IS NOT OLD.workspace_sha256)
+   OR (OLD.workspace_snapshot_id IS NOT NULL AND NEW.workspace_snapshot_id IS NOT OLD.workspace_snapshot_id)
+   OR (OLD.workspace_snapshot_sha256 IS NOT NULL AND NEW.workspace_snapshot_sha256 IS NOT OLD.workspace_snapshot_sha256)
    OR (OLD.bound_at IS NOT NULL AND NEW.bound_at IS NOT OLD.bound_at)
    OR (OLD.native_session_id IS NOT NULL AND NEW.native_session_id IS NOT OLD.native_session_id)
  BEGIN SELECT RAISE(ABORT,'SuperAgent Council request identity is immutable'); END;
@@ -914,6 +923,35 @@ fn load_ticket_team_snapshot(db: &Connection, ticket_id: &str) -> Result<TeamSna
         || snapshot.policy.policy_revision != policy_revision
     {
         return Err("Ticket Team snapshot identity or policy does not match its database key.".into());
+    }
+    let (ticket_orchestration_id,ticket_project_id,ticket_worker_bot_id,ticket_policy_revision):
+        (String,String,String,i64) = db.query_row(
+        "SELECT orchestration_id,project_id,worker_bot_id,policy_revision
+         FROM sa_tickets WHERE id=?1",
+        [ticket_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+    ).map_err(|_| "Ticket Team snapshot has no owning Ticket.")?;
+    if ticket_orchestration_id != orchestration_id
+        || snapshot.project_id != ticket_project_id
+        || snapshot.worker_bot_ids.first().map(String::as_str) != Some(ticket_worker_bot_id.as_str())
+        || ticket_policy_revision != policy_revision
+    {
+        return Err("Ticket Team snapshot bindings disagree with its owning Ticket row.".into());
+    }
+    let mut expected_role_bindings = Vec::with_capacity(
+        1 + snapshot.worker_bot_ids.len() + snapshot.reviewer_bot_ids.len(),
+    );
+    expected_role_bindings.push(("coordinator".to_string(),0,snapshot.coordinator_bot_id.clone()));
+    expected_role_bindings.extend(snapshot.worker_bot_ids.iter().enumerate().map(|(ordinal,bot_id)| {
+        ("worker".to_string(),ordinal,bot_id.clone())
+    }));
+    expected_role_bindings.extend(snapshot.reviewer_bot_ids.iter().enumerate().map(|(ordinal,bot_id)| {
+        ("reviewer".to_string(),ordinal,bot_id.clone())
+    }));
+    let role_bindings = snapshot.roles.iter().map(|role| (
+        role.role.clone(),role.ordinal,role.bot_id.clone(),
+    )).collect::<Vec<_>>();
+    if role_bindings != expected_role_bindings {
+        return Err("Ticket Team role bindings disagree with its saved role lists.".into());
     }
     let version = load_team_version_snapshot(db,&orchestration_id,team_version)?;
     if source_kind == "legacy-backfill" {
@@ -1659,6 +1697,51 @@ pub(crate) fn inspect_headless_team_readiness(
 /// Redacted to native receipt metadata; no external provider call, replay,
 /// model text or recovery mutation. Inspecting a live serve database cannot
 /// open Store::open because startup recovery interrupts active assignments.
+/// Read the persisted roster and existing bot profiles without opening a
+/// provider or relying on a desktop Webview. Unlike a live capability scan,
+/// assigned Skills alone cannot prove installation, harness support or use.
+pub(crate) fn inspect_headless_team_roster(
+    database_path: &std::path::Path, orchestration_id: &str,
+) -> Result<String> {
+    let store=Store::open_read_only(database_path)?;
+    let config=configuration(&store,orchestration_id)?;
+    let roster=roster::read(&store,orchestration_id)?;
+    let mut members=Vec::new();
+    let mut append=|role:&str,position:usize,bot_id:&str| -> Result<()> {
+        let bot=bots::get(&store,bot_id)?;
+        members.push(serde_json::json!({
+            "role":role, "position":position, "botId":bot.id,
+            "name":bot.name, "provider":bot.provider, "model":bot.model,
+            "mode":bot.mode, "paused":bot.paused,
+            "assignedSkillIds":bot.skills,
+            "harnessCapability":"not_verified",
+            "skillLibraryStatus":"not_scanned",
+            "invocationEvidence":"not_verified"
+        }));
+        Ok(())
+    };
+    append("coordinator",0,&roster.coordinator_bot_id)?;
+    for (position,id) in roster.worker_bot_ids.iter().enumerate() {
+        append("worker",position,id)?;
+    }
+    for (position,id) in roster.reviewer_bot_ids.iter().enumerate() {
+        append("reviewer",position,id)?;
+    }
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId":config.id,
+        "policyRevision":config.policy_revision,
+        "enabled":config.enabled,
+        "members":members,
+        "manualSingleWorkerTopology":roster.execution_ready,
+        "multiRoleExecutionAvailable":false,
+        "allowedTools":[],
+        "allowedSideEffects":false,
+        "authorizationIssued":false,
+        "observationalOnly":true,
+        "requiresLiveAdmissionRecheck":true
+    })).map_err(|e|e.to_string())
+}
+
 pub(crate) fn inspect_headless_effect_receipts(
     database_path: &std::path::Path, ticket_id: &str,
 ) -> Result<String> {
@@ -3321,6 +3404,19 @@ fn update_configuration_roles_with_policy(
     {
         return Err("Paused bots or workers outside one project scope cannot be selected.".into());
     }
+    // Historical Tickets always retain their original primary executor and
+    // coordinator ownership. Terminal history may allow future-only role and
+    // name edits, but cannot be silently rebound to another checkout.
+    let has_history: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
+        [id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if has_history && (current.coordinator_bot_id != coordinator.id
+        || current.worker_bot_id != worker_bot_ids[0]
+        || current.project_id != project_id)
+    {
+        return Err("Historical Tickets prevent changing primary Team identities.".into());
+    }
     if current.name==name && current.coordinator_bot_id==coordinator.id
         && current.worker_bot_ids==worker_bot_ids && current.reviewer_bot_ids==reviewer_bot_ids
         && current.council_required==council_required
@@ -3343,7 +3439,9 @@ fn update_configuration_roles_with_policy(
                          WHERE a.ticket_id=t.id AND a.state='running')
                OR EXISTS(SELECT 1 FROM sa_effect_receipts e
                          WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain')))
-        ))",
+        ))
+           AND (NOT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)
+             OR (coordinator_bot_id=?3 AND worker_bot_id=?4 AND project_id=?5))",
         params![id,name,coordinator.id,worker_bot_ids[0],project_id,next_revision,
             storage::now(),expected_revision],
     ).map_err(|e| e.to_string())?;
@@ -4177,6 +4275,58 @@ mod tests {
         assert_eq!(get_ticket(&reopened, id).unwrap().state, "stopped");
     }
 
+
+    #[test]
+    fn headless_roster_inspection_preserves_multi_role_profiles_without_admission() {
+        let store=fixture();
+        for id in ["additional-worker","reviewer"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        store.db.execute(
+            "UPDATE bots SET skills='[\"scope-skill\"]' WHERE id='additional-worker'",[],
+        ).unwrap();
+        let config=create_configuration(&store,NewOrchestration {
+            name:"Headless roster".into(),
+            coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'worker',1,'additional-worker')",[&config.id],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'reviewer',0,'reviewer')",[&config.id],
+        ).unwrap();
+        let path=store.path.clone();
+        drop(store);
+        let output=inspect_headless_team_roster(&path,&config.id).unwrap();
+        let view:serde_json::Value=serde_json::from_str(&output).unwrap();
+        assert_eq!(view["policyRevision"],config.policy_revision);
+        assert_eq!(view["members"].as_array().unwrap().len(),4);
+        assert_eq!(view["members"][0]["role"],"coordinator");
+        assert_eq!(view["members"][1]["role"],"worker");
+        assert_eq!(view["members"][2]["botId"],"additional-worker");
+        assert_eq!(view["members"][2]["assignedSkillIds"],serde_json::json!(["scope-skill"]));
+        assert_eq!(view["members"][2]["skillLibraryStatus"],"not_scanned");
+        assert_eq!(view["members"][3]["role"],"reviewer");
+        assert_eq!(view["manualSingleWorkerTopology"],false);
+        assert_eq!(view["multiRoleExecutionAvailable"],false);
+        assert_eq!(view["authorizationIssued"],false);
+        assert_eq!(view["allowedTools"],serde_json::json!([]));
+        for sensitive in ["authorizationId","sessionId","PRIVATE OBJECTIVE","worktreePath"] {
+            assert!(!output.contains(sensitive),"Unexpected private field: {sensitive}");
+        }
+        let verified=Store::open_read_only(&path).unwrap();
+        assert_eq!(verified.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(verified.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+        assert!(inspect_headless_team_roster(&path,"not-a-team").is_err());
+    }
     #[test]
     fn headless_team_readiness_is_redacted_nonmutating_and_never_admits() {
         let store = fixture();
@@ -5189,6 +5339,87 @@ mod tests {
         assert!(ticket_snapshot(&store, &ticket.id, 201).is_err());
     }
 
+    #[test]
+    fn ticket_team_snapshot_rejects_owner_row_binding_drift() {
+        for binding in ["orchestration_id","project_id","worker_bot_id","policy_revision"] {
+            let mut store=fixture();
+            let config=enabled(&store);
+            let other=create_configuration(&store,NewOrchestration {
+                name:"Other owner".into(),coordinator_bot_id:"router".into(),
+                worker_bot_id:"worker".into(),
+            }).unwrap();
+            let (ticket,launched)=admit(
+                &mut store,&config.id,"Snapshot owner binding","snapshot-owner-binding",true,
+            ).unwrap();
+            assert!(!launched);
+            let valid=ticket_team_snapshot(&store,&ticket.id).unwrap();
+            assert_eq!(valid.provenance,TeamSnapshotProvenance::Native);
+            let snapshot_before: (String,String)=store.db.query_row(
+                "SELECT snapshot_json,snapshot_sha256 FROM sa_ticket_team_snapshots WHERE ticket_id=?1",
+                [&ticket.id],|r|Ok((r.get(0)?,r.get(1)?)),
+            ).unwrap();
+
+            match binding {
+                "orchestration_id" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET orchestration_id=?1 WHERE id=?2",
+                        params![other.id,ticket.id],
+                    ).unwrap();
+                }
+                "project_id" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET project_id='drifted-project' WHERE id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "worker_bot_id" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET worker_bot_id='drifted-worker' WHERE id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "policy_revision" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET policy_revision=policy_revision+1 WHERE id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            assert!(ticket_team_snapshot(&store,&ticket.id).is_err(),
+                "owner binding drift in {binding} must be rejected");
+            let snapshot_after: (String,String)=store.db.query_row(
+                "SELECT snapshot_json,snapshot_sha256 FROM sa_ticket_team_snapshots WHERE ticket_id=?1",
+                [&ticket.id],|r|Ok((r.get(0)?,r.get(1)?)),
+            ).unwrap();
+            assert_eq!(snapshot_after,snapshot_before,"the immutable snapshot must be unchanged");
+        }
+    }
+
+    #[test]
+    fn legacy_unknown_ticket_team_snapshot_remains_loadable_for_its_owner() {
+        let store=fixture();
+        let config=enabled(&store);
+        let ticket_id="legacy-snapshot-owner";
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,
+                project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+             VALUES(?1,?2,?3,?4,?5,'manual',?6,?7,?8,'blocked',?9,?9)",
+            params![ticket_id,config.id,"legacy-snapshot-owner","Historical work","test",
+                config.project_id,config.worker_bot_id,config.policy_revision,now],
+        ).unwrap();
+        let snapshot=legacy_unknown_team_snapshot(
+            &config.id,config.team_version+1,&config.worker_bot_id,&config.project_id,
+            config.policy_revision,
+        ).unwrap();
+        insert_team_version(&store.db,&snapshot).unwrap();
+        insert_ticket_team_snapshot(&store.db,ticket_id,&snapshot,"legacy-backfill").unwrap();
+
+        assert_eq!(ticket_team_snapshot(&store,ticket_id).unwrap(),snapshot);
+    }
+
 
 
 
@@ -5742,6 +5973,44 @@ mod tests {
             "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",[&cfg.id],
         ).unwrap();
         configuration(store,&cfg.id).unwrap()
+    }
+
+    #[test]
+    fn settled_ticket_allows_future_role_policy_but_not_primary_rebinding() {
+        let mut store = fixture();
+        let enabled_team = enabled(&store);
+        let (ticket, _) = admit(&mut store, &enabled_team.id,
+            "Immutable execution checkout", "settled-primary-guard", false).unwrap();
+        stop(&store, &ticket.id).unwrap();
+        let disabled = change_enabled(
+            &store, &enabled_team.id, enabled_team.policy_revision, false,
+        ).unwrap();
+        add_worker(&store, "worker-two");
+        let proposed = NewOrchestration {
+            name: "Updated future Team".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker-two".into(),
+        };
+        let err = update_configuration_roles_with_policy(
+            &store, &disabled.id, disabled.policy_revision, &proposed,
+            vec!["worker-two".into()], Vec::new(), false,
+        ).unwrap_err();
+        assert!(err.contains("Historical Tickets prevent changing primary"));
+        assert_eq!(configuration(&store, &disabled.id).unwrap().worker_bot_id, "worker");
+
+        let rename = NewOrchestration {
+            name: "Updated future Team".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        };
+        let changed = update_configuration_roles_with_policy(
+            &store, &disabled.id, disabled.policy_revision, &rename,
+            vec!["worker".into()], Vec::new(), false,
+        ).unwrap();
+        assert_eq!(changed.worker_bot_id, "worker");
+        assert_eq!(changed.name, "Updated future Team");
+        assert_eq!(ticket_team_snapshot(&store, &ticket.id).unwrap().worker_bot_ids,
+            vec!["worker"]);
     }
 
     #[test]

@@ -70,6 +70,45 @@ struct PresetV2 {
     policy: TeamPolicy,
 }
 
+/// Schema v3 retains the original #150 portable layout, with an ordered
+/// non-secret profile per role. Source enabled state is informative only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BotProfile {
+    bot: String,
+    provider: String,
+    model: String,
+    mode: String,
+    skills: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ManifestV3 {
+    schema_version: u32,
+    orchestrations: Vec<PresetV3>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PresetV3 {
+    name: String,
+    coordinator_bot: String,
+    worker_bot: String,
+    #[serde(default)]
+    extra_worker_bots: Vec<String>,
+    #[serde(default)]
+    reviewer_bots: Vec<String>,
+    bot_profiles: Vec<BotProfile>,
+    // Never export/restore enabled authority. Older v3 sources may contain it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    enabled: Option<bool>,
+    autonomy: String,
+    max_concurrent_tasks: u8,
+    max_attempts_per_assignment: u8,
+    council: Council,
+}
+
 #[derive(Debug, Clone)]
 struct PortablePreset {
     name: String,
@@ -77,6 +116,8 @@ struct PortablePreset {
     workers: Vec<String>,
     reviewers: Vec<String>,
     policy: TeamPolicy,
+    // None for legacy v1/v2; mandatory full role-by-role drift guards in v3.
+    bot_profiles: Option<Vec<BotProfile>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -154,6 +195,7 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
                         max_attempts_per_assignment: preset.max_attempts_per_assignment,
                         council_enabled: preset.council.enabled,
                     },
+                    bot_profiles: None,
                 })
                 .collect()
         }
@@ -172,8 +214,30 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
                     workers: preset.workers,
                     reviewers: preset.reviewers,
                     policy: preset.policy,
+                    bot_profiles: None,
                 })
                 .collect()
+        }
+        3 => {
+            let manifest: ManifestV3 = serde_json::from_value(document.clone())
+                .map_err(|e| format!("Invalid SuperAgent companion manifest: {e}"))?;
+            if manifest.schema_version != 3 {
+                return Err("Unsupported SuperAgent manifest schema.".into());
+            }
+            manifest.orchestrations.into_iter().map(|preset| PortablePreset {
+                name: preset.name,
+                coordinator_bot: preset.coordinator_bot,
+                workers: std::iter::once(preset.worker_bot)
+                    .chain(preset.extra_worker_bots).collect(),
+                reviewers: preset.reviewer_bots,
+                policy: TeamPolicy {
+                    autonomy: preset.autonomy,
+                    max_concurrent_tasks: preset.max_concurrent_tasks,
+                    max_attempts_per_assignment: preset.max_attempts_per_assignment,
+                    council_enabled: preset.council.enabled,
+                },
+                bot_profiles: Some(preset.bot_profiles),
+            }).collect()
         }
         _ => return Err("Unsupported SuperAgent manifest schema.".into()),
     };
@@ -239,6 +303,31 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
             .iter()
             .map(|name| lookup(name))
             .collect::<Result<Vec<_>>>()?;
+        // Validate v3's complete, ordered, non-secret effective profile
+        // against the existing local bots *before* any private backup or
+        // Team write. Never install a Skill or change model/authority on import.
+        if let Some(profiles) = preset.bot_profiles.as_ref() {
+            let ordered = std::iter::once(coordinator)
+                .chain(workers.iter().copied())
+                .chain(reviewers.iter().copied())
+                .collect::<Vec<_>>();
+            if profiles.len() != ordered.len() {
+                return Err("Version 3 requires an effective profile for every Team role.".into());
+            }
+            for (profile, bot) in profiles.iter().zip(ordered.iter()) {
+                if !profile.bot.eq_ignore_ascii_case(&bot.name)
+                    || profile.provider != bot.provider
+                    || profile.model != bot.model
+                    || profile.mode != bot.mode
+                    || profile.skills != bot.skills
+                {
+                    return Err(format!(
+                        "Portable bot profile mismatch for {}; verify model, harness, mode and assigned Skills.",
+                        bot.name
+                    ));
+                }
+            }
+        }
         let mut identities = HashSet::new();
         for bot in std::iter::once(coordinator)
             .chain(workers.iter().copied())
@@ -446,16 +535,35 @@ fn export(store: &Store) -> Result<serde_json::Value> {
             .iter()
             .map(|id| bots::get(store, id).map(|bot| bot.name))
             .collect::<Result<Vec<_>>>()?;
-        presets.push(PresetV2 {
+        let profiles = std::iter::once(&snapshot.coordinator_bot_id)
+            .chain(snapshot.worker_bot_ids.iter())
+            .chain(snapshot.reviewer_bot_ids.iter())
+            .map(|id| {
+                let bot = bots::get(store, id)?;
+                Ok(BotProfile {
+                    bot: bot.name, provider: bot.provider, model: bot.model,
+                    mode: bot.mode, skills: bot.skills,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let policy = policy_from_snapshot(&snapshot);
+        presets.push(PresetV3 {
             name: snapshot.name.clone(),
             coordinator_bot: coordinator.name,
-            workers,
-            reviewers,
-            policy: policy_from_snapshot(&snapshot),
+            worker_bot: workers.first().ok_or("Versioned Team has no primary Worker.")?.clone(),
+            extra_worker_bots: workers.into_iter().skip(1).collect(),
+            reviewer_bots: reviewers,
+            bot_profiles: profiles,
+            // A portable file does not restore the original enablement flag.
+            enabled: None,
+            autonomy: policy.autonomy,
+            max_concurrent_tasks: policy.max_concurrent_tasks,
+            max_attempts_per_assignment: policy.max_attempts_per_assignment,
+            council: Council { enabled: policy.council_enabled },
         });
     }
-    serde_json::to_value(ManifestV2 {
-        schema_version: 2,
+    serde_json::to_value(ManifestV3 {
+        schema_version: 3,
         orchestrations: presets,
     })
     .map_err(|e| e.to_string())
@@ -626,7 +734,7 @@ mod tests {
         let path = first.backup_path.unwrap();
         let snapshot: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(snapshot["schemaVersion"], 2);
+        assert_eq!(snapshot["schemaVersion"], 3);
         assert_eq!(snapshot["orchestrations"].as_array().unwrap().len(), 0);
         let repeat =
             apply_with_backup(&store, &root, &document("Software Development"), true).unwrap();
@@ -639,7 +747,7 @@ mod tests {
             snapshot["orchestrations"][0]["name"],
             "Software Development"
         );
-        assert_eq!(snapshot["orchestrations"][0]["workers"], json!(["Builder"]));
+        assert_eq!(snapshot["orchestrations"][0]["workerBot"], "Builder");
         assert!(snapshot["orchestrations"][0].get("enabled").is_none());
         let imported_enabled: bool = store
             .db
@@ -695,11 +803,11 @@ mod tests {
         assert_eq!(imported.worker_bot_ids, vec!["worker"]);
         assert!(imported.reviewer_bot_ids.is_empty());
         let exported = export(&store).unwrap();
-        assert_eq!(exported["schemaVersion"], 2);
+        assert_eq!(exported["schemaVersion"], 3);
         assert!(exported["orchestrations"][0].get("enabled").is_none());
         assert_eq!(exported["orchestrations"][0]["coordinatorBot"], "Router");
-        assert_eq!(exported["orchestrations"][0]["workers"], json!(["Builder"]));
-        assert_eq!(exported["orchestrations"][0]["reviewers"], json!([]));
+        assert_eq!(exported["orchestrations"][0]["workerBot"], "Builder");
+        assert_eq!(exported["orchestrations"][0]["reviewerBots"], json!([]));
         let serialized = exported.to_string();
         for private in [
             "router-project",
@@ -747,22 +855,20 @@ mod tests {
         assert_eq!(imported.reviewer_bot_ids, vec!["reviewer"]);
 
         let exported = export(&store).unwrap();
-        assert_eq!(exported["schemaVersion"], 2);
+        assert_eq!(exported["schemaVersion"], 3);
         assert_eq!(exported["orchestrations"][0]["coordinatorBot"], "Router");
         assert_eq!(
-            exported["orchestrations"][0]["workers"],
-            json!(["Builder", "Builder Two"])
+            exported["orchestrations"][0]["workerBot"], "Builder");
+        assert_eq!(
+            exported["orchestrations"][0]["extraWorkerBots"], json!(["Builder Two"])
         );
         assert_eq!(
-            exported["orchestrations"][0]["reviewers"],
+            exported["orchestrations"][0]["reviewerBots"],
             json!(["Reviewer"])
         );
         assert_eq!(
-            exported["orchestrations"][0]["policy"],
-            json!({
-                "autonomy":"off","maxConcurrentTasks":1,
-                "maxAttemptsPerAssignment":2,"councilEnabled":false,
-            })
+            exported["orchestrations"][0]["council"],
+            json!({"enabled":false})
         );
         assert!(exported["orchestrations"][0].get("enabled").is_none());
         assert_eq!(
@@ -1013,7 +1119,7 @@ mod tests {
         );
         let backup: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&backups[0]).unwrap()).unwrap();
-        assert_eq!(backup["schemaVersion"], 2);
+        assert_eq!(backup["schemaVersion"], 3);
         assert!(backup["orchestrations"].as_array().unwrap().is_empty());
         store
             .db
@@ -1028,4 +1134,58 @@ mod tests {
         );
         let _ = std::fs::remove_dir_all(root);
     }
+    #[test]
+    fn v3_ordered_profile_drift_is_denied_before_backup_or_authorization() {
+        let origin = fixture();
+        origin.db.execute(
+            "UPDATE bots SET skills='[\"required-skill\"]' WHERE id='worker'", [],
+        ).unwrap();
+        apply(&origin, &document_v2("Pinned Team"), true).unwrap();
+        let portable = export(&origin).unwrap();
+        assert_eq!(portable["schemaVersion"], 3);
+        assert_eq!(portable["orchestrations"][0]["botProfiles"][1]["skills"],
+            json!(["required-skill"]));
+        let rendered = portable.to_string();
+        for private in ["worker-project", "router-project", "authorization_id", "session_id"] {
+            assert!(!rendered.contains(private), "Leaked local identity: {private}");
+        }
+
+        let destination = fixture_with_ids(
+            "other-router", "other-worker", "other-worker-two", "other-reviewer",
+        );
+        let root = std::env::temp_dir().join(format!("sa-v3-profile-drift-{}",storage::id()));
+        assert!(preview(&destination, &portable).is_err());
+        assert!(apply_with_backup(&destination, &root, &portable, true).is_err());
+        assert!(!root.join("bot-backups").exists());
+
+        destination.db.execute(
+            "UPDATE bots SET skills='[\"required-skill\"]' WHERE id='other-worker'", [],
+        ).unwrap();
+        assert_eq!(preview(&destination, &portable).unwrap().would_create,
+            vec!["Pinned Team"]);
+        destination.db.execute(
+            "UPDATE bots SET model='incompatible-model' WHERE id='other-worker'", [],
+        ).unwrap();
+        assert!(preview(&destination, &portable).unwrap_err().contains("profile mismatch"));
+        destination.db.execute(
+            "UPDATE bots SET model='default' WHERE id='other-worker'", [],
+        ).unwrap();
+        let mut missing = portable.clone();
+        missing["orchestrations"][0]["botProfiles"] = json!([]);
+        assert!(preview(&destination, &missing).is_err());
+        let mut downgrade = portable.clone();
+        downgrade["schemaVersion"] = json!(2);
+        assert!(preview(&destination, &downgrade).is_err());
+
+        let imported = apply_with_backup(&destination, &root, &portable, true).unwrap();
+        assert_eq!(imported.created, vec!["Pinned Team"]);
+        let config = super::super::configuration(
+            &destination, &orchestration_id(&destination, "Pinned Team"),
+        ).unwrap();
+        assert_eq!(config.worker_bot_id, "other-worker");
+        assert!(!config.enabled);
+        assert!(imported.backup_path.is_some());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
 }

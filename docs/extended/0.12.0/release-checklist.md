@@ -6,7 +6,7 @@
 - [x] Inventory all 2,046 source and 2,104 destination paths; preserve 58 Extended-only and 80 customized paths, with zero source paths missing or mode/type differences after the four-file import.
 - [x] Import all four upstream changed files byte/mode-exact, including the original revised `releases/0.3.123.md`.
 - [x] Identify [Push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43369851585) / [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43369858494) failures on destination `d3858b2e4462`: two Node timezone assertions and Windows x64/arm64 Clippy unused constant.
-- [ ] Verify complete Push and PR CI results against the newly published destination SHA; pending and previously failed runs are not passing evidence.
+- [x] Verify final CI for destination code SHA `a87be35fa883842555dc494e81948a89e7db6ccf`: [Push CI #43376914754](https://github.com/ginmp8/pandacode-extended/actions/runs/43376914754) **11/11 success**, [PR CI #43376923244](https://github.com/ginmp8/pandacode-extended/actions/runs/43376923244) **11/11 success** (2026-11-13). Future documentation-only SHAs require separate checks.
 - [ ] Run native crash recovery and Extended Settings ON/OFF, Connect/MCP/bots/cloud/VM/credentials tests on supported installations; review all 80 customizations semantically.
 - [ ] Obtain independent release authorization before any tagging, distribution or deployment. Extended 0.12.0 is DRAFT.
 

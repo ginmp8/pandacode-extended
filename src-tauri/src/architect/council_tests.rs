@@ -2555,6 +2555,27 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
             &std::sync::atomic::AtomicBool::new(false),
         ).unwrap_err();
         assert!(denied.contains("child_council_denied"), "{denied}");
+        // A forged owner admission must also be rejected by the provider-facing
+        // native boundary before any prompt, tool host, or completion can run.
+        let forged = Admission { parent: child_id.clone(), generation: activated.generation };
+        {
+            let store = state.store.lock().unwrap();
+            let denied = validate_admission(&store, &child_id, Some(&forged)).unwrap_err();
+            assert!(denied.contains("child_council_denied"), "{denied}");
+            let denied = reviewer_policy(&store, &child_id, Some(&forged)).unwrap_err();
+            assert!(denied.contains("child_council_denied"), "{denied}");
+            let denied = prompt(&store, &child_id, "untrusted launch", Some(&forged)).unwrap_err();
+            assert!(denied.contains("child_council_denied"), "{denied}");
+            let denied = mark_started(&store, &child_id, Some(&forged)).unwrap_err();
+            assert!(denied.contains("child_council_denied"), "{denied}");
+        }
+        let before = serde_json::to_value(saved(&state, &child_id)).unwrap();
+        completed_state(&state, &child_id, Some(&forged), true, false, &mut |_| {});
+        let after = serde_json::to_value(saved(&state, &child_id)).unwrap();
+        assert_eq!(before, after, "a forged native completion cannot mutate a child reservation");
+        if let Some(launch) = next_action_state(&state, &mut |_| {}).unwrap() {
+            assert_ne!(launch.sid, child_id, "the ordinary scheduler must not launch a child");
+        }
         store_team(&state, &mut original.clone());
     }
     let store = state.store.lock().unwrap();

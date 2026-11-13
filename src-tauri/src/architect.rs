@@ -634,6 +634,15 @@ pub(crate) fn parent_of(store: &Store, sid: &str) -> Result<Option<String>> {
         .optional()
         .map_err(|e| e.to_string())
 }
+/// Ordinary Architect entry points never act as the owner of a reserved child Council.
+/// Child reviewers require their own task-correlated native admission and callback path.
+fn reject_task_owned_child_lead(store: &Store, parent_session_id: &str) -> Result<()> {
+    if parent_of(store, parent_session_id)?.is_some() {
+        return Err("child_council_denied: task-owned child sessions cannot use ordinary Architect admission or callbacks.".into());
+    }
+    Ok(())
+}
+
 pub(crate) fn check_manual(store: &Store, sid: &str) -> Result<()> {
     if parent_of(store, sid)?.is_some() {
         return Err("This worker is managed by its architect. Use the team controls.".into());
@@ -651,6 +660,7 @@ pub(crate) fn reviewer_policy(
     admission: Option<&Admission>,
 ) -> Result<Option<reviewer_security::ReviewerToolPolicy>> {
     let Some(admission) = admission else { return Ok(None) };
+    reject_task_owned_child_lead(store, &admission.parent)?;
     if admission.parent == sid { return Ok(None) }
     let team = load(store, &admission.parent)?.ok_or("Reviewer team unavailable.")?;
     let worker = team.workers.iter().find(|worker| worker.session_id == sid)
@@ -695,6 +705,7 @@ pub(crate) fn validate_admission(
         }
         return Ok(());
     };
+    reject_task_owned_child_lead(store, &admission.parent)?;
     let mut team = load(store, &admission.parent)?.ok_or("Team is no longer configured.")?;
     if !active(&team.status) || team.generation != admission.generation {
         return Err("Team was paused or changed before this run started.".into());
@@ -760,6 +771,7 @@ pub(crate) fn prompt(
     let Some(admission) = admission else {
         return Ok(original.into());
     };
+    reject_task_owned_child_lead(store, &admission.parent)?;
     let mut team = load(store, &admission.parent)?.ok_or("Team is unavailable.")?;
     let actor = coordination::Actor::resolve(&team, sid).ok_or("Team actor is unavailable.")?;
     let (rules, reminder) = rules(store, &team, sid)?;
@@ -1725,6 +1737,7 @@ pub fn host(
     let actor = {
         let state = app.state::<AppState>();
         let store = state.store.lock().ok()?;
+        reject_task_owned_child_lead(&store, &admission.parent).ok()?;
         let team = load(&store, &admission.parent).ok()??;
         if team.generation != admission.generation || !active(&team.status) {
             return None;
@@ -2871,6 +2884,11 @@ fn next_action_state(
         if !active(&original.status) {
             continue;
         }
+        // A forged active child state is not a native child launch grant.
+        // Skip it without denying other independent root teams a scheduler turn.
+        if reject_task_owned_child_lead(&store, &original.session_id).is_err() {
+            continue;
+        }
         // One team's bad state or failed save must not stop scheduling for every other team.
         match team_action(&store, &agents, &teams, &roots, original, notify) {
             Ok(Some(action)) => return Ok(Some(action)),
@@ -3365,6 +3383,7 @@ fn fail_over(store: &Store, team: &mut TeamSnapshot, index: usize, reason: &str)
 }
 pub(crate) fn mark_started(store: &Store, sid: &str, admission: Option<&Admission>) -> Result<()> {
     if let Some(admission) = admission {
+        reject_task_owned_child_lead(store, &admission.parent)?;
         if sid == admission.parent {
             let mut team = load(store, sid)?.ok_or("Team unavailable.")?;
             team.last_turn_kind = team.pending_turn.take().and_then(|turn| turn.kind);
@@ -3584,6 +3603,10 @@ fn completed_with_agents(
 ) {
     if let Some(admission) = admission {
         if let Ok(store) = state.store.lock() {
+            // Completion is not an authority grant. Ignore spoofed child callbacks.
+            if reject_task_owned_child_lead(&store, &admission.parent).is_err() {
+                return;
+            }
             if let Ok(Some(mut team)) = load(&store, &admission.parent) {
                 if team.generation == admission.generation {
                     if let Some(index) = team.workers.iter().position(|w| w.session_id == sid) {

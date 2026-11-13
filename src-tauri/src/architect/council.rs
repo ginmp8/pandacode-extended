@@ -8,6 +8,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 
 const MAX_ROUNDS: usize = 100;
 const MAX_REVIEWERS: usize = 8;
@@ -608,6 +609,9 @@ pub struct CouncilUsageRecord {
     pub scope: CouncilUsageScope,
     pub phase: CouncilUsagePhase,
     pub strategy: CouncilStrategy,
+    /// Stable native trigger/challenge receipt IDs that justify a non-review phase.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decision_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub started_at_ms: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -874,7 +878,25 @@ impl CouncilUsageRecord {
         let required = [&self.id, &self.root_cycle_id, &self.attempt_id, &self.reviewer_id, &self.round_id, &self.seat_id];
         if required.iter().any(|value| !contract_token(value, MAX_CONTRACT_ID_CHARS))
             || self.child_cycle_id.as_ref().is_some_and(|value| !contract_token(value, MAX_CONTRACT_ID_CHARS))
+            || self.decision_ids.len() > MAX_RESULT_REFS
+            || !unique_refs(&self.decision_ids, MAX_RESULT_REFS)
+            || self.decision_ids.iter().any(|value| !contract_token(value, MAX_CONTRACT_ID_CHARS))
         { return Err(CouncilCompositionError::InvalidUsageRecord("correlation IDs")); }
+        let phase_decisions_valid = match self.phase {
+            CouncilUsagePhase::Review => self.decision_ids.is_empty(),
+            CouncilUsagePhase::Escalation => self.strategy == CouncilStrategy::Escalated && !self.decision_ids.is_empty(),
+            CouncilUsagePhase::Challenge => self.strategy == CouncilStrategy::TwoPhase && !self.decision_ids.is_empty(),
+        };
+        if !phase_decisions_valid {
+            return Err(CouncilCompositionError::InvalidUsageRecord("phase must match persisted decision IDs and strategy"));
+        }
+        let escalation_count_matches = match self.phase {
+            CouncilUsagePhase::Escalation => self.escalations.value == Some(self.decision_ids.len() as u32),
+            CouncilUsagePhase::Review | CouncilUsagePhase::Challenge => self.escalations.value.is_none_or(|value| value == 0),
+        };
+        if !escalation_count_matches {
+            return Err(CouncilCompositionError::InvalidUsageRecord("escalation count must match persisted trigger decisions"));
+        }
         if (self.scope == CouncilUsageScope::Child) != self.child_cycle_id.is_some() {
             return Err(CouncilCompositionError::InvalidUsageRecord("child scope and childCycleId must agree"));
         }
@@ -1932,6 +1954,9 @@ fn composed_verdict_in(
     if reconfigured(team, round) {
         return Some((format!("Council round {round} was closed by a composition or reviewer selection change. Dispatch a fresh round with the new frozen plan and councilLens."), false));
     }
+    if let Some(reason) = composition_source_coverage_error(team, config, round) {
+        return Some((format!("council_source_quorum_blocked: {reason}"), false));
+    }
     if !view.complete(round) {
         let missing = view.missing(team, round);
         let count = scored(team, round).count();
@@ -2081,6 +2106,65 @@ fn required_criteria_gate(
     composition.validate_required_criteria_gate(config.target, &per_seat)
 }
 
+fn composition_source_coverage_error(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> Option<String> {
+    let composition = config.composition.as_ref()?;
+    let mut selected_seen = HashSet::<String>::new();
+    let mut automatic = 0usize;
+    let mut duplicate_selected = false;
+    for (worker, _) in in_round(team, round).filter(|(worker, seat)| counts(worker, seat)) {
+        let Some(binding) = worker.reviewer_binding.as_ref() else { continue };
+        if let Some(bot_id) = binding.reviewer_bot_id.as_deref() {
+            let selected = composition.selected.iter().find(|candidate| candidate.bot_id == bot_id);
+            let expected_mode = selected.map(|selected| match selected.mode {
+                SelectedReviewerMode::Direct => "direct",
+                SelectedReviewerMode::Nested => "nested",
+            });
+            if expected_mode == binding.composition_mode.as_deref() {
+                duplicate_selected |= !selected_seen.insert(bot_id.to_owned());
+            }
+        } else if composition.automatic.enabled
+            && binding.composition_mode.as_deref().is_none_or(|mode| mode == "direct")
+        {
+            automatic = automatic.saturating_add(1);
+        }
+    }
+    let missing = composition.selected.iter()
+        .filter(|selected| selected.required && !selected_seen.contains(&selected.bot_id))
+        .map(|selected| selected.bot_id.as_str())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Some(format!("required selected reviewer seats are missing: {}.", missing.join(", ")));
+    }
+    if duplicate_selected {
+        return Some("a selected reviewer identity occupies more than one required seat.".into());
+    }
+    let automatic_valid = match composition.automatic.count {
+        AutomaticReviewerCount::Fixed(expected) => automatic == expected,
+        AutomaticReviewerCount::Auto(_) => {
+            (composition.minimum_automatic_seats()..=composition.maximum_automatic_seats()).contains(&automatic)
+        }
+    };
+    if !automatic_valid {
+        return Some(match composition.automatic.count {
+            AutomaticReviewerCount::Fixed(expected) => format!("the frozen plan requires exactly {expected} automatic reviewer seats, but round {round} has {automatic}."),
+            AutomaticReviewerCount::Auto(_) => format!("round {round} needs between {} and {} automatic reviewer seats, but has {automatic}.", composition.minimum_automatic_seats(), composition.maximum_automatic_seats()),
+        });
+    }
+    None
+}
+
+pub(super) fn two_phase_phase1_ready(
+    team: &TeamSnapshot,
+    config: &CouncilConfig,
+    outcomes: &[CouncilCriterionOutcomeReceipt],
+    findings: &[CouncilFinding],
+) -> bool {
+    if config.composition.is_none() { return false; }
+    composition_source_coverage_error(team, config, 1).is_none()
+        && two_phase_phase1_passes(team, config, &Rounds::of(team, config), outcomes)
+        && findings.iter().all(|finding| finding.validate().is_ok())
+}
+
 /// Return the first issue-defined trigger for one completed direct preliminary
 /// review. Inputs are already filtered to the current native ledger projection.
 pub(super) fn nested_preliminary_trigger(
@@ -2206,6 +2290,13 @@ fn reviewer_identity(worker: &Worker) -> String {
     )
 }
 
+pub(super) fn same_artifact_revision(left: &str, right: &str) -> bool {
+    let mut left = left.split(':');
+    let mut right = right.split(':');
+    matches!((left.next(), right.next()), (Some(a), Some(b)) if a == b)
+        && matches!((left.next(), right.next()), (Some(a), Some(b)) if a == b)
+}
+
 fn two_phase_independent(team: &TeamSnapshot, phase1: usize, phase2: usize) -> bool {
     let earlier: Vec<_> = in_round(team, phase1)
         .filter(|(worker, seat)| counts(worker, seat))
@@ -2217,18 +2308,22 @@ fn two_phase_independent(team: &TeamSnapshot, phase1: usize, phase2: usize) -> b
         && later.len() == earlier.len()
         && !stale(team, phase1)
         && !stale(team, phase2)
+        && later.iter().enumerate().all(|(index, (challenger, _))| {
+            later.iter().skip(index + 1).all(|(other, _)| reviewer_identity(challenger) != reviewer_identity(other))
+        })
         && later.iter().all(|(challenger, challenge_seat)| {
-            earlier.iter().any(|(author, author_seat)| {
-                same_lens(&author_seat.lens, &challenge_seat.lens)
-                    && reviewer_identity(author) != reviewer_identity(challenger)
-                    && author.reviewer_binding.as_ref().zip(challenger.reviewer_binding.as_ref())
-                        .is_some_and(|(author, challenger)| {
-                            // Reviewer authority revisions are seat-specific. Shared root cycle,
-                            // delivery and unchanged source mark establish the same artifact.
-                            author.council_cycle_id == challenger.council_cycle_id
-                                && author.delivery_id == challenger.delivery_id
-                        })
-            })
+            earlier.iter().all(|(author, _)| reviewer_identity(author) != reviewer_identity(challenger))
+                && earlier.iter().any(|(author, author_seat)| {
+                    same_lens(&author_seat.lens, &challenge_seat.lens)
+                        && author.reviewer_binding.as_ref().zip(challenger.reviewer_binding.as_ref())
+                            .is_some_and(|(author, challenger)| {
+                                // Reviewer authority revisions are seat-specific. Shared root cycle,
+                                // delivery and unchanged artifact establish the same challenge target.
+                                author.council_cycle_id == challenger.council_cycle_id
+                                    && author.delivery_id == challenger.delivery_id
+                                    && same_artifact_revision(&author.artifact_revision, &challenger.artifact_revision)
+                            })
+                })
         })
 }
 
@@ -2470,7 +2565,7 @@ pub(super) fn lead_rules(team: &TeamSnapshot, routed: bool) -> String {
     } else if selected { "native selected-bot seats" } else if routed || models.len() < 2 { "profileId \"auto\"" } else { "a different roster model for each reviewer, since one model is a weak council" };
     let limit = format!("Never finish below the target unless the limit of {} rounds is reached; after the last round make no more changes, and say so plainly.", config.max_rounds);
     let selected_note = if config.composition.is_some() && selected && plan.automatic > 0 {
-        format!(" The user selected persistent reviewer bot IDs: {}. Assign one frozen selected-bot seat per selected ID, then fill the remaining {} required automatic seats with independent native reviewers. Do not substitute an automatic reviewer for a selected bot or count a selected bot toward the automatic quota. Selected bots keep their frozen model and review persona; provider/model/profileId fields cannot override those selections.", config.reviewer_bot_ids.join(", "), plan.automatic)
+        format!(" The user selected persistent reviewer bot IDs: {}. Assign one frozen selected-bot seat per selected ID, then fill the remaining {} required automatic seats with independent native reviewers. Set councilSource=selected_bot and reviewerBotId to the exact selected ID on each bot seat; set councilSource=automatic on every automatic seat. Do not substitute an automatic reviewer for a selected bot or count a selected bot toward the automatic quota. Selected bots keep their frozen model and review persona; provider/model/profileId fields cannot override those selections.", config.reviewer_bot_ids.join(", "), plan.automatic)
     } else if selected {
         format!(" The user selected persistent reviewer bot IDs: {}. Native Council assigns each fresh reviewer seat to one of those bots, using that bot's frozen model and review persona. Dispatch one unique Council lens per bot; never substitute a worker or claim unavailable bots reviewed. Disclose reduced diversity if distinct bots use the same provider/model. Provider/model/profileId fields in reviewer assignments cannot override the selected bot.", config.reviewer_bot_ids.join(", "))
     } else { String::new() };

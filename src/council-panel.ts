@@ -3,7 +3,7 @@ import { reducedMotion, springKeyframes, trackSegment } from './motion';
 import { hidePopover, showPopover } from './popover-motion';
 import { teamActive, type CouncilComposition, type CouncilConfig, type CouncilStrategy, type NestedCouncilConfig, type SelectedCouncilReviewer, type TeamSnapshot, type TeamWorker } from './architect-types';
 import type { ProviderId } from './types';
-import { COUNCIL_COMPOSITION_MODES, COUNCIL_REVIEWERS, COUNCIL_ROUNDS, COUNCIL_TARGETS, councilCompositionMode, councilDefaults, councilForNewThreads, councilLedgerForCurrentCycle, criterionSourceFor, newCouncilComposition, setCouncilForNewThreads, validateCouncilComposition, withCouncilComposition, councilAsking, councilNotice, councilProgress, councilStateText, firstAndFinal, finishedBelow, formatScore, outOfTen, provisional, saveCouncilDefaults, seatScore, type CouncilLedgerProjection, type CouncilProgress, type CouncilRound, type CouncilSeatWorker } from './council';
+import { COUNCIL_COMPOSITION_MODES, COUNCIL_REVIEWERS, COUNCIL_ROUNDS, COUNCIL_TARGETS, councilCompositionMode, councilCompositionValidationIssues, councilDefaults, councilForNewThreads, councilLedgerForCurrentCycle, criterionSourceFor, newCouncilComposition, setCouncilForNewThreads, validateCouncilComposition, withCouncilComposition, councilAsking, councilNotice, councilProgress, councilStateText, firstAndFinal, finishedBelow, formatScore, outOfTen, provisional, saveCouncilDefaults, seatScore, type CouncilLedgerProjection, type CouncilProgress, type CouncilRound, type CouncilSeatWorker } from './council';
 
 /* Council in the composer: the tray's settings button and panel, and one compact strip inside the prompt box (its state,
  * the reviewers on demand, and what to do next). The Agents flyout shows the same state line and rows. */
@@ -56,6 +56,7 @@ const notChanged = (reason: string): string => `Council was not changed: ${reaso
 
 type CouncilLedgerView = CouncilLedgerProjection & {
   unavailableMessage?: string;
+  progress?: CouncilProgress | null;
   workers?: TeamWorker[];
   status?: { state?: string; round?: number; lowest?: number | null; target?: number; stale?: boolean } | null;
   acceptedBy?: string | null;
@@ -71,6 +72,171 @@ const ledgerRefs = (values: readonly string[]): string => values.length
   : '<p class="council-ledger-empty">No references.</p>';
 const usageValue = (value: { status: string; value?: number | null } | undefined): string =>
   !value || value.status === 'unknown' || value.value == null ? 'Unknown' : `${value.value.toLocaleString()}${value.status === 'measured' ? '' : ' · estimate only'}`;
+
+const validationId = (field: string): string => `council-field-error-${field.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+const fieldErrorMarkup = (field: string): string => `<small class="council-field-error" id="${validationId(field)}" data-composition-field-error="${escape(field)}" hidden></small>`;
+
+function compositionPlanPreview(active: CouncilComposition, bots: readonly ReviewerBot[]): { summary: string; details: string } {
+  const mode = councilCompositionMode(active);
+  const unavailable = mode === null;
+  const automatic = active.automatic.enabled;
+  const minimumAutomatic = automatic ? active.automatic.count === 'auto' ? Math.max(1, 2 - active.selected.length) : active.automatic.count : 0;
+  const automaticDetails = automatic
+    ? `<li><strong>Automatic Architect reviewers</strong><span>${active.automatic.count === 'auto' ? `Auto · at least ${minimumAutomatic}; native chooses the final count at dispatch` : `${active.automatic.count} configured`}</span></li>`
+    : '<li><strong>Automatic Architect reviewers</strong><span>Off</span></li>';
+  const selectedDetails = active.selected.length
+    ? active.selected.map(reviewer => {
+      const bot = bots.find(item => item.id === reviewer.botId), name = bot?.name ?? reviewer.botId;
+      const availability = !bot ? ' · unavailable' : bot.paused || bot.available === false ? ' · currently unavailable' : '';
+      const child = reviewer.mode === 'nested' ? reviewer.nested : undefined;
+      const branch = child
+        ? `Child Council · ${child.template.replaceAll('_', ' ')} · ${child.childReviewerCount} reviewers · target ${formatScore(child.target)} · ${child.maxRounds} rounds · ${child.childCriteriaSource} criteria · ${child.escalation.replaceAll('_', ' ')}`
+        : 'Direct reviewer';
+      return `<li><strong>${escape(name)} · Bot ${escape(reviewer.botId)}</strong><span>${escape(branch + availability)}</span></li>`;
+    }).join('')
+    : '<li><strong>No selected bot reviewers</strong><span>Only the automatic source can assign reviewers.</span></li>';
+  const criteria = active.criteria.length
+    ? `<ul class="council-plan-preview-list council-plan-preview-criteria">${active.criteria.map(item => `<li><strong>${escape(item.lens || item.id || 'Untitled criterion')}</strong><span>${escape(item.source)} · target ${formatScore(item.target)}${item.required ? ' · required' : ' · optional'}${item.evidenceRequired ? ' · evidence required' : ''}</span><p>${escape(item.description)}</p></li>`).join('')}</ul>`
+    : '<p class="council-plan-preview-empty">No explicit criteria are saved; the selected source supplies the criteria.</p>';
+  const rootCount = automatic && active.automatic.count === 'auto'
+    ? `${active.selected.length} selected bot${active.selected.length === 1 ? '' : 's'} + automatic count chosen at dispatch`
+    : `${active.selected.length + minimumAutomatic} configured root reviewer${active.selected.length + minimumAutomatic === 1 ? '' : 's'}`;
+  const sourceNote = unavailable
+    ? '<p class="council-plan-preview-unavailable">Unavailable: no reviewer source is enabled. Enable automatic reviewers or select at least one bot reviewer.</p>'
+    : '';
+  const details = `<div class="council-plan-preview-content"><dl><div><dt>Root reviewers</dt><dd>${escape(rootCount)}</dd></div><div><dt>Execution strategy</dt><dd>${escape(active.strategy.replaceAll('_', ' '))}</dd></div><div><dt>Criteria source</dt><dd>${escape(active.criteriaSource)}</dd></div></dl>${sourceNote}<h4>Reviewer branches</h4><ul class="council-plan-preview-list">${automaticDetails}${selectedDetails}</ul><h4>Criteria in this plan</h4>${criteria}<h4>Configured hard limits</h4><dl>${Object.entries(active.limits).map(([key, value]) => `<div><dt>${escape(key.replace(/([A-Z])/g, ' $1'))}</dt><dd>${escape(String(value))}</dd></div>`).join('')}</dl><p class="council-plan-preview-note">This previews the saved plan. Native assigns reviewers and records run scores, evidence, and usage.</p></div>`;
+  return { summary: unavailable ? 'Plan preview · Unavailable' : `Plan preview · ${mode}`, details };
+}
+
+function renderCompositionFieldErrors(slot: HTMLElement, issues: ReturnType<typeof councilCompositionValidationIssues>): void {
+  const grouped = new Map<string, string[]>();
+  for (const issue of issues) grouped.set(issue.field, [...(grouped.get(issue.field) ?? []), issue.message]);
+  for (const node of slot.querySelectorAll<HTMLElement>('[data-composition-field]')) {
+    const field = node.dataset.compositionField!, messages = grouped.get(field) ?? [], error = [...slot.querySelectorAll<HTMLElement>('[data-composition-field-error]')].find(item => item.dataset.compositionFieldError === field);
+    if (error) { error.hidden = messages.length === 0; error.textContent = messages.join(' '); }
+    const controls: HTMLElement[] = node.matches('input,select,textarea,[role="group"]') ? [node] : [...node.querySelectorAll<HTMLElement>('input,select,textarea,[role="group"]')];
+    const id = validationId(field);
+    for (const control of controls) {
+      if (messages.length) control.setAttribute('aria-invalid', 'true'); else control.removeAttribute('aria-invalid');
+      const describedBy = new Set((control.getAttribute('aria-describedby') ?? '').split(/\s+/).filter(value => value && value !== id));
+      if (messages.length && error) describedBy.add(id);
+      if (describedBy.size) control.setAttribute('aria-describedby', [...describedBy].join(' ')); else control.removeAttribute('aria-describedby');
+    }
+  }
+}
+
+function updateCompositionPlanPreview(slot: HTMLElement, active: CouncilComposition, bots: readonly ReviewerBot[]): void {
+  const preview = slot.querySelector<HTMLElement>('.council-plan-preview');
+  if (!preview) return;
+  const value = compositionPlanPreview(active, bots);
+  const summary = preview.querySelector<HTMLElement>('[data-plan-preview-summary]'), details = preview.querySelector<HTMLElement>('[data-plan-preview-details]');
+  if (summary && summary.textContent !== value.summary) summary.textContent = value.summary;
+  if (details && details.innerHTML !== value.details) {
+    const scrollTop = details.scrollTop, scrollLeft = details.scrollLeft;
+    details.innerHTML = value.details;
+    details.scrollTop = scrollTop; details.scrollLeft = scrollLeft;
+  }
+}
+
+function evidenceDetails(refs: readonly string[], available: boolean): string {
+  const body = refs.length ? ledgerRefs(refs) : `<p class="council-ledger-empty">${available ? 'No evidence references in the available records.' : 'Evidence references are not available in this snapshot.'}</p>`;
+  return `<details class="council-inspector-evidence"><summary>Evidence · ${refs.length}${available ? '' : ' · unknown'}</summary>${body}</details>`;
+}
+
+function roundName(roundId: string): string {
+  const suffix = roundId.split(':').at(-1) ?? '';
+  return /^\d+$/.test(suffix) ? `Round ${suffix}` : 'Round unknown';
+}
+
+function childCouncilHierarchyHtml(value: CouncilLedgerView, receipt: NonNullable<CouncilLedgerView['childReceipts']>[number]): string {
+  const cycleId = receipt.childCycleId;
+  const findings = (value.findings ?? []).filter(item => item.cycleId === cycleId);
+  const usage = (value.usage ?? []).filter(item => item.childCycleId === cycleId);
+  const reviews = (value.reviewReceipts ?? []).filter(item => item.cycleId === cycleId);
+  const rounds = new Map<string, { findings: typeof findings; usage: typeof usage; reviews: typeof reviews }>();
+  const round = (id: string) => {
+    let entry = rounds.get(id);
+    if (!entry) { entry = { findings: [], usage: [], reviews: [] }; rounds.set(id, entry); }
+    return entry;
+  };
+  for (const record of findings) round(record.roundId).findings.push(record);
+  for (const record of usage) round(record.roundId).usage.push(record);
+  const mappedReviewIds = new Set<string>();
+  for (const item of reviews) {
+    const linked = usage.find(record => record.seatId === item.assignmentId);
+    if (linked) { round(linked.roundId).reviews.push(item); mappedReviewIds.add(item.requestId); }
+  }
+  for (const item of reviews) if (!mappedReviewIds.has(item.requestId)) round('').reviews.push(item);
+
+  const roundMarkup = [...rounds.entries()].map(([roundId, entry]) => {
+    const seats = new Map<string, { reviewerIds: Set<string>; findings: typeof findings; usage: typeof usage; reviews: typeof reviews }>();
+    const seat = (id: string) => {
+      let entry = seats.get(id);
+      if (!entry) { entry = { reviewerIds: new Set(), findings: [], usage: [], reviews: [] }; seats.set(id, entry); }
+      return entry;
+    };
+    for (const item of entry.findings) seat(item.seatId).findings.push(item);
+    for (const item of entry.usage) { const found = seat(item.seatId); found.reviewerIds.add(item.reviewerId); found.usage.push(item); }
+    for (const item of entry.reviews) {
+      const id = item.assignmentId ?? `unknown-reviewer-${item.requestId}`;
+      seat(id).reviews.push(item);
+    }
+    const reviewerMarkup = [...seats.entries()].map(([seatId, records]) => {
+      const reviewers = [...records.reviewerIds];
+      const label = reviewers.length ? reviewers.join(', ') : seatId.startsWith('unknown-reviewer-') ? 'Unknown reviewer' : `Seat ${seatId}`;
+      const evidence = [...new Set([
+        ...records.findings.flatMap(item => [...item.evidenceRefs, ...(item.location?.file ? [item.location.file] : [])]),
+        ...records.reviews.flatMap(item => item.evidenceRefs),
+      ])];
+      const verdicts = [...new Set([...records.usage.map(item => item.terminalStatus), ...records.reviews.map(item => item.verdict)])];
+      const findingsMarkup = records.findings.length
+        ? `<ul class="council-inspector-findings">${records.findings.map(item => `<li><strong>${escape(item.category)} · ${escape(item.severity)}</strong><span>${escape(item.summary)}</span></li>`).join('')}</ul>`
+        : '<p class="council-ledger-empty">No finding details were projected for this reviewer.</p>';
+      const evidenceKnown = records.findings.length > 0 || records.reviews.length > 0 || value.findings !== undefined || value.reviewReceipts !== undefined;
+      return `<details class="council-inspector-node" data-level="reviewer"><summary>Reviewer ${escape(label)} · Score Unknown${verdicts.length ? ` · ${escape(verdicts.join(', '))}` : ' · status Unknown'}</summary><dl><div><dt>Reviewer seat</dt><dd>${escape(seatId)}</dd></div><div><dt>Score</dt><dd>Unknown · child reviewer scores are not included in this projection.</dd></div><div><dt>Verdict</dt><dd>${escape(verdicts.join(', ') || 'Unknown')}</dd></div><div><dt>Evidence</dt><dd>${evidence.length ? `${evidence.length} reference${evidence.length === 1 ? '' : 's'}` : records.findings.length || records.reviews.length ? 'No references recorded' : 'Unknown'}</dd></div></dl>${findingsMarkup}${evidenceDetails(evidence, evidenceKnown)}</details>`;
+    }).join('');
+    return `<details class="council-inspector-node" data-level="round"${roundId ? '' : ' data-round-unknown="true"'}><summary>${escape(roundName(roundId))}${roundId ? ` · ${escape(roundId)}` : ' · round identity unknown'}</summary>${reviewerMarkup || '<p class="council-ledger-empty">Reviewer rows are not available for this round.</p>'}</details>`;
+  }).join('');
+  const minScore = receipt.minScore == null ? 'Unknown' : `${formatScore(receipt.minScore)} / 10`;
+  const evidence = [...new Set(receipt.evidenceRefs)];
+  const scoreRefs = receipt.leafScoreRefs.length
+    ? `<p class="council-inspector-score-refs">Leaf score references: ${receipt.leafScoreRefs.map(escape).join(', ')}. Numeric reviewer scores are not included in this projection.</p>`
+    : '<p class="council-ledger-empty">No leaf score references were projected.</p>';
+  return `<details class="council-inspector-node" data-level="child-council" data-child-cycle="${escape(cycleId)}" data-stale="${receipt.status === 'stale'}"><summary>Child Council · ${escape(receipt.status)} · minimum score ${minScore}</summary><dl><div><dt>Bot</dt><dd>${escape(receipt.botId)}</dd></div><div><dt>Cycle</dt><dd>${escape(cycleId)}</dd></div><div><dt>Artifact revision</dt><dd>${escape(receipt.artifactRevision)}</dd></div><div><dt>Policy</dt><dd>${escape(receipt.policyFingerprint)}</dd></div><div><dt>Snapshot</dt><dd>${escape(receipt.snapshotFingerprint)}</dd></div></dl>${scoreRefs}${evidenceDetails(evidence, true)}<div class="council-inspector-children">${roundMarkup || '<p class="council-ledger-unavailable">Round details are unknown; the child receipt does not include reviewer round rows.</p>'}</div></details>`;
+}
+
+function councilHierarchyHtml(value: CouncilLedgerView): string {
+  const status = value.status, progress = value.progress, target = progress?.status.target ?? status?.target;
+  const lowest = status?.lowest ?? progress?.latest?.lowest ?? null, state = status?.state ?? 'Unknown';
+  const score = lowest === null ? 'lowest score Unknown' : `lowest score ${formatScore(lowest)} / ${target == null ? '10' : formatScore(target)}`;
+  const current = progress?.rounds.flatMap(item => item.seats) ?? [];
+  const childReceipts = value.childReceipts ?? [];
+  const linkedReceipts = new Set<NonNullable<CouncilLedgerView['childReceipts']>[number]>();
+  const bots = current.map(seat => {
+    const botId = seat.reviewerBinding?.reviewerBotId;
+    const name = botId ? `Bot ${botId}` : seat.name || 'Unknown bot';
+    const scoreValue = seatScore(seat), scoreText = scoreValue === null ? 'Score Unknown' : `Score ${formatScore(scoreValue)} / 10`;
+    const evidenceFindings = (value.findings ?? []).filter(item => item.cycleId === value.cycleId && item.seatId === seat.id);
+    const evidenceReviews = (value.reviewReceipts ?? []).filter(item => item.cycleId === value.cycleId && item.assignmentId === seat.id);
+    const evidence = [...new Set([
+      ...evidenceFindings.flatMap(item => [...item.evidenceRefs, ...(item.location?.file ? [item.location.file] : [])]),
+      ...evidenceReviews.flatMap(item => item.evidenceRefs),
+    ])];
+    const receipts = childReceipts.filter(item => item.parentSeatId === seat.id);
+    for (const receipt of receipts) linkedReceipts.add(receipt);
+    const selected = progress?.council.composition?.selected.find(item => item.botId === botId && item.mode === 'nested');
+    const children = receipts.map(receipt => childCouncilHierarchyHtml(value, receipt)).join('')
+      || (selected ? '<p class="council-ledger-unavailable" data-child-state="unknown">Child Council state Unknown · native has not projected a receipt for this bot.</p>' : '');
+    const evidenceKnown = value.findings !== undefined || value.reviewReceipts !== undefined;
+    return `<details class="council-inspector-node" data-level="bot" data-seat-id="${escape(seat.id)}"><summary>${escape(name)} · ${escape(seat.council.lens || 'Reviewer')} · Round ${seat.council.round} · ${scoreText}</summary><dl><div><dt>Seat</dt><dd>${escape(seat.id)}</dd></div><div><dt>Review status</dt><dd>${escape(seat.status)}</dd></div><div><dt>Score</dt><dd>${scoreValue === null ? 'Unknown' : `${formatScore(scoreValue)} / 10`}</dd></div><div><dt>Target</dt><dd>${target == null ? 'Unknown' : `${formatScore(target)} / 10`}</dd></div></dl>${evidenceDetails(evidence, evidenceKnown)}${children}</details>`;
+  }).join('');
+  const orphanReceipts = childReceipts.filter(receipt => !linkedReceipts.has(receipt)).map(receipt => `<details class="council-inspector-node" data-level="bot" data-parent-unknown="true"><summary>Bot ${escape(receipt.botId)} · parent seat Unknown</summary><p class="council-ledger-unavailable">Parent reviewer details are not present in this root snapshot.</p>${childCouncilHierarchyHtml(value, receipt)}</details>`).join('');
+  const hierarchyBody = current.length || orphanReceipts
+    ? `<div class="council-inspector-children">${bots}${orphanReceipts}</div>`
+    : '<p class="council-ledger-unavailable">Root round and reviewer details are Unknown in this snapshot.</p>';
+  const stale = status?.stale ? ' · stale' : '';
+  return `<section class="council-inspector-hierarchy" aria-label="Council review hierarchy"><h4>Review hierarchy</h4><details class="council-inspector-node" data-level="root-council" data-cycle-id="${escape(value.cycleId)}" data-stale="${Boolean(status?.stale)}" open><summary>Root Council · ${escape(state)} · ${score}${stale}</summary><dl><div><dt>Root cycle</dt><dd>${escape(value.cycleId)}</dd></div><div><dt>Round</dt><dd>${status?.round == null ? 'Unknown' : String(status.round)}</dd></div><div><dt>Target</dt><dd>${target == null ? 'Unknown' : `${formatScore(target)} / 10`}</dd></div><div><dt>Freshness</dt><dd>${status?.stale == null ? 'Unknown' : status.stale ? 'Stale · work changed after review' : 'Current'}</dd></div></dl>${hierarchyBody}</details></section>`;
+}
 
 /** Render native's projected Council records as inert text; workspace references are decorated by the bound file view. */
 export function councilReadOnlyPresenterHtml(value: CouncilLedgerView): string {
@@ -97,7 +263,7 @@ export function councilReadOnlyPresenterHtml(value: CouncilLedgerView): string {
   const reviewMarkup = receipts.map(receipt => `<article class="council-ledger-receipt"><header><strong>${escape(receipt.verdict)} · ${escape(receipt.cycleId)}</strong><span>revision ${receipt.terminalRevision}</span></header><p>Request ${escape(receipt.requestId)} · task ${escape(receipt.taskId ?? 'Unknown')} · seat ${escape(receipt.assignmentId ?? 'Unknown')}</p><p>Artifact ${escape(receipt.artifactDigest)} · policy ${escape(receipt.policyFingerprint)}</p>${ledgerRefs(receipt.evidenceRefs)}</article>`).join('');
   const childMarkup = children.map(receipt => `<article class="council-ledger-receipt"><header><strong>Child Council · ${escape(receipt.status)}</strong><span>${escape(receipt.botId)}</span></header><p>${escape(receipt.childCycleId)} · parent seat ${escape(receipt.parentSeatId)}</p><p>Artifact ${escape(receipt.artifactRevision)} · policy ${escape(receipt.policyFingerprint)}</p>${ledgerRefs(receipt.evidenceRefs)}</article>`).join('');
   const usageMarkup = usage.map(record => `<article class="council-ledger-usage"><header><strong>${escape(record.scope)} ${escape(record.phase)} · ${escape(record.terminalStatus)}</strong><span>${escape(record.reviewerId)}</span></header><p>${escape(record.strategy)} · ${escape(record.model ?? 'Unknown')} · ${escape(record.provider ?? 'Unknown')}</p><dl><div><dt>Elapsed</dt><dd>${usageValue(record.elapsedMs)}</dd></div><div><dt>Queue wait</dt><dd>${usageValue(record.queueWaitMs)}</dd></div><div><dt>Input tokens</dt><dd>${usageValue(record.inputTokens)}</dd></div><div><dt>Output tokens</dt><dd>${usageValue(record.outputTokens)}</dd></div><div><dt>Retries</dt><dd>${usageValue(record.retries)}</dd></div><div><dt>Escalations</dt><dd>${usageValue(record.escalations)}</dd></div><div><dt>Concurrent leaves</dt><dd>${usageValue(record.budgetConsumption.concurrentLeaves)}</dd></div><div><dt>Leaf reviews</dt><dd>${usageValue(record.budgetConsumption.leafReviews)}</dd></div><div><dt>Estimated cost</dt><dd>${usageValue(record.budgetConsumption.estimatedCostMicros)}</dd></div></dl>${record.costEstimate ? `<p>${escape(record.costEstimate.currency)} cost estimate · estimate only · ${escape(record.costEstimate.pricingSource)} ${escape(record.costEstimate.pricingVersion)}</p>` : ''}</article>`).join('');
-  return `<section class="council-ledger" data-cycle-id="${escape(value.cycleId)}">${stale}${accepted}${exceptions.length ? `<details class="council-ledger-exception"><summary>Authorized finding exceptions · ${exceptions.length}</summary><ul>${exceptions.map(item => `<li>${escape(item.findingId)} · ${escape(item.actorId)}: ${escape(item.rationale)}${ledgerRefs(item.artifactLinks)}</li>`).join('')}</ul></details>` : ''}<details><summary>Findings and dispositions · ${findings.length + dispositions.length}</summary>${findingMarkup || '<p class="council-ledger-empty">No findings.</p>'}</details><details><summary>Review receipts · ${receipts.length}</summary>${reviewMarkup || '<p class="council-ledger-empty">No review receipts.</p>'}</details><details><summary>Child Council receipts · ${children.length}</summary>${childMarkup || '<p class="council-ledger-empty">No child Council receipts.</p>'}</details><details><summary>Usage and hard-limit records · ${usage.length}</summary><p class="council-ledger-usage-note">Measured values are reported as recorded; estimated values are marked estimate only.</p>${usageMarkup || '<p class="council-ledger-empty">No usage records.</p>'}</details></section>`;
+  return `<section class="council-ledger" data-cycle-id="${escape(value.cycleId)}">${stale}${accepted}${councilHierarchyHtml(value)}${exceptions.length ? `<details class="council-ledger-exception"><summary>Authorized finding exceptions · ${exceptions.length}</summary><ul>${exceptions.map(item => `<li>${escape(item.findingId)} · ${escape(item.actorId)}: ${escape(item.rationale)}${ledgerRefs(item.artifactLinks)}</li>`).join('')}</ul></details>` : ''}<details><summary>Findings and dispositions · ${findings.length}</summary>${findingMarkup || '<p class="council-ledger-empty">No findings.</p>'}</details><details><summary>Review receipts · ${receipts.length}</summary>${reviewMarkup || '<p class="council-ledger-empty">No review receipts.</p>'}</details><details><summary>Child Council receipts · ${children.length}</summary>${childMarkup || '<p class="council-ledger-empty">No child Council receipts.</p>'}</details><details><summary>Usage and hard-limit records · ${usage.length}</summary><p class="council-ledger-usage-note">Measured values are reported as recorded; estimated values are marked estimate only.</p>${usageMarkup || '<p class="council-ledger-empty">No usage records.</p>'}</details></section>`;
 }
 
 
@@ -222,41 +388,129 @@ export function createCouncil(host: CouncilHost) {
   function defaultNested(): NestedCouncilConfig {
     return { template: 'explicit_task', childCriteriaSource: 'architect', childReviewerCount: 3, target: 9, maxRounds: 3, escalation: 'on_trigger' };
   }
+  function compositionNodeSelector(node: HTMLElement): string | null {
+    if (node.matches('.council-composition-body')) return '.council-composition-body';
+    const criterionId = node.closest<HTMLElement>('.council-criterion')?.dataset.criterionId;
+    const attribute = [...node.attributes].find(item => item.name.startsWith('data-composition-')
+      && item.name !== 'data-composition-field' && item.name !== 'data-composition-field-error')
+      ?? [...node.attributes].find(item => ['data-add-criterion', 'data-remove-criterion', 'data-plan-preview-summary', 'data-plan-preview-details'].includes(item.name));
+    if (!attribute) {
+      return node.matches('.council-criterion') && criterionId
+        ? `.council-criterion[data-criterion-id="${CSS.escape(criterionId)}"]` : null;
+    }
+    const value = `[${attribute.name}="${CSS.escape(attribute.value)}"]`;
+    if (criterionId && attribute.name === 'data-composition-criterion') return `.council-criterion[data-criterion-id="${CSS.escape(criterionId)}"] ${value}`;
+    const botId = node.dataset.botId;
+    if (botId && attribute.name === 'data-composition-nested') return `[data-bot-id="${CSS.escape(botId)}"]${value}`;
+    return value;
+  }
+  function compositionScrollSnapshot(slot: HTMLElement): {
+    panelTop: number; panelLeft: number; slotTop: number; slotLeft: number; windowX: number; windowY: number;
+    descendants: { selector: string; top: number; left: number }[];
+  } {
+    return {
+      panelTop: panel?.scrollTop ?? 0, panelLeft: panel?.scrollLeft ?? 0,
+      slotTop: slot.scrollTop, slotLeft: slot.scrollLeft, windowX: window.scrollX, windowY: window.scrollY,
+      descendants: [...slot.querySelectorAll<HTMLElement>('*')]
+        .filter(node => node.scrollTop !== 0 || node.scrollLeft !== 0)
+        .flatMap(node => { const selector = compositionNodeSelector(node); return selector ? [{ selector, top: node.scrollTop, left: node.scrollLeft }] : []; }),
+    };
+  }
+  function restoreCompositionScroll(slot: HTMLElement, saved: ReturnType<typeof compositionScrollSnapshot>): void {
+    if (panel) { panel.scrollTop = saved.panelTop; panel.scrollLeft = saved.panelLeft; }
+    slot.scrollTop = saved.slotTop; slot.scrollLeft = saved.slotLeft;
+    for (const item of saved.descendants) {
+      const node = slot.querySelector<HTMLElement>(item.selector);
+      if (node) { node.scrollTop = item.top; node.scrollLeft = item.left; }
+    }
+    if (window.scrollX !== saved.windowX || window.scrollY !== saved.windowY) window.scrollTo(saved.windowX, saved.windowY);
+  }
+  function replaceCompositionSlot(slot: HTMLElement, sessionId: string, preferredFocusSelector?: string | null): void {
+    const active = slot.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
+    const selector = preferredFocusSelector === undefined ? (active ? compositionNodeSelector(active) : null) : preferredFocusSelector;
+    const selection = active instanceof HTMLInputElement || active instanceof HTMLTextAreaElement
+      ? (() => { try { return { start: active.selectionStart, end: active.selectionEnd, direction: active.selectionDirection }; } catch { return undefined; } })()
+      : undefined;
+    const scroll = compositionScrollSnapshot(slot);
+    slot.innerHTML = compositionMarkup(sessionId);
+    compositionStatus(sessionId);
+    const next = selector ? slot.querySelector<HTMLElement>(selector) : null;
+    if (next) {
+      next.focus({ preventScroll: true });
+      if (selection && (next instanceof HTMLInputElement || next instanceof HTMLTextAreaElement)
+        && selection.start !== null && selection.end !== null) {
+        try { next.setSelectionRange(selection.start, selection.end, selection.direction ?? undefined); } catch { /* Some input types do not support text selection. */ }
+      }
+    }
+    restoreCompositionScroll(slot, scroll);
+  }
   function compositionErrors(sessionId: string): string[] {
     return validateCouncilComposition(activeComposition(sessionId), shownConfig(sessionId)?.target ?? councilDefaults().target);
   }
   function compositionStatus(sessionId: string): void {
     if (!panel || panelSession !== sessionId) return;
     const slot = panel.querySelector<HTMLElement>('.council-composition-slot');
-    const errors = compositionErrors(sessionId), alert = slot?.querySelector<HTMLElement>('[data-composition-errors]');
+    const scroll = slot ? compositionScrollSnapshot(slot) : undefined;
+    const issues = councilCompositionValidationIssues(activeComposition(sessionId), shownConfig(sessionId)?.target ?? councilDefaults().target);
+    const errors = issues.map(issue => issue.message), alert = slot?.querySelector<HTMLElement>('[data-composition-errors]');
     if (alert) {
       alert.hidden = errors.length === 0;
       alert.innerHTML = errors.length ? `<strong>Fix these settings before applying</strong><ul>${errors.map(error => `<li>${escape(error)}</li>`).join('')}</ul>` : '';
     }
+    if (slot) {
+      renderCompositionFieldErrors(slot, issues);
+      updateCompositionPlanPreview(slot, activeComposition(sessionId), reviewerBots.get(sessionId) ?? []);
+    }
+    const targetIssue = issues.find(issue => issue.field === 'councilTarget'), targetError = panel.querySelector<HTMLElement>('[data-composition-target-error]'), targetGroup = panel.querySelector<HTMLElement>('[data-field="target"]');
+    if (targetError) { targetError.hidden = !targetIssue; targetError.textContent = targetIssue?.message ?? ''; }
+    if (targetGroup) {
+      if (targetIssue) targetGroup.setAttribute('aria-invalid', 'true'); else targetGroup.removeAttribute('aria-invalid');
+      const id = validationId('councilTarget'), describedBy = new Set((targetGroup.getAttribute('aria-describedby') ?? '').split(/\s+/).filter(value => value && value !== id));
+      if (targetIssue && targetError) describedBy.add(id);
+      if (describedBy.size) targetGroup.setAttribute('aria-describedby', [...describedBy].join(' ')); else targetGroup.removeAttribute('aria-describedby');
+    }
     const apply = slot?.querySelector<HTMLButtonElement>('[data-composition-apply]');
     if (apply) apply.disabled = errors.length > 0;
+    if (slot && scroll) restoreCompositionScroll(slot, scroll);
   }
   function compositionMarkup(sessionId: string): string {
     const state = compositionState(sessionId), draft = state.value, active = activeComposition(sessionId);
     if (!state.enabled) return `<section class="council-composition-editor"><h3>Composition plan</h3><label class="council-composition-toggle"><input type="checkbox" data-composition-enabled><span>Use a schema v1 composition plan</span></label><p>Use direct bots, child Councils, Architect reviewers, criteria and bounded execution settings.</p></section>`;
-    const modeId = councilCompositionMode(active) ?? 'M1';
+    const modeId = councilCompositionMode(active);
+    const modeReadout = modeId ?? 'Unavailable';
+    const modeState = modeId
+      ? `<p class="council-composition-mode-state" role="status" data-composition-mode-state="available">Current mode: <span class="council-composition-mode-readout">${modeReadout}</span></p>`
+      : '<p class="council-composition-mode-state" role="status" data-composition-mode-state="unavailable">Current mode: <span class="council-composition-mode-readout">Unavailable</span> · No reviewer source is enabled. Enable automatic reviewers or select at least one bot reviewer.</p>';
     const bots = reviewerBots.get(sessionId) ?? [];
     const botIds = [...new Set([...bots.map(bot => bot.id), ...state.reviewers.keys()])];
     const botMarkup = botIds.map(id => {
       const bot = bots.find(item => item.id === id), selected = state.reviewers.get(id), mode = selected?.mode ?? 'direct';
       const nested = selected?.nested ?? defaultNested();
-      return `<article class="council-composition-reviewer${bot && (bot.paused || bot.available === false) ? ' is-unavailable' : ''}"><label class="council-composition-bot"><input type="checkbox" data-composition-bot="${escape(id)}" ${selected ? 'checked' : ''}><span><strong>${escape(bot?.name ?? id)}</strong><small>${escape(bot ? `${bot.role || 'Reviewer'} · ${bot.provider} / ${bot.model}` : 'Selected reviewer · unavailable')}</small></span></label><label class="council-composition-reviewer-mode"><span>Reviewer mode</span><select data-composition-reviewer-mode="${escape(id)}" ${selected ? '' : 'disabled'}><option value="direct" ${mode === 'direct' ? 'selected' : ''}>Direct reviewer</option><option value="nested" ${mode === 'nested' ? 'selected' : ''}>Child Council</option></select></label>${selected && mode === 'nested' ? `<fieldset class="council-nested-fields"><legend>Child Council · ${escape(id)}</legend><label>Template<select data-composition-nested="template" data-bot-id="${escape(id)}"><option value="explicit_task" ${nested.template === 'explicit_task' ? 'selected' : ''}>Explicit task</option><option value="validated_default" ${nested.template === 'validated_default' ? 'selected' : ''}>Validated default</option></select></label><label>Criteria source<select data-composition-nested="childCriteriaSource" data-bot-id="${escape(id)}">${['architect','user','hybrid'].map(source => `<option value="${source}" ${nested.childCriteriaSource === source ? 'selected' : ''}>${source}</option>`).join('')}</select></label><label>Child reviewers<input type="number" min="2" max="8" step="1" value="${nested.childReviewerCount}" data-composition-nested="childReviewerCount" data-bot-id="${escape(id)}"></label><label>Target<input type="number" min="1" max="10" step="0.1" value="${nested.target}" data-composition-nested="target" data-bot-id="${escape(id)}"></label><label>Max rounds<input type="number" min="1" max="100" step="1" value="${nested.maxRounds}" data-composition-nested="maxRounds" data-bot-id="${escape(id)}"></label><label>Escalation<select data-composition-nested="escalation" data-bot-id="${escape(id)}"><option value="on_trigger" ${nested.escalation === 'on_trigger' ? 'selected' : ''}>On trigger</option><option value="always" ${nested.escalation === 'always' ? 'selected' : ''}>Always</option></select></label></fieldset>` : ''}</article>`;
+      const reviewerIndex = active.selected.findIndex(reviewer => reviewer.botId === id), reviewerPath = reviewerIndex >= 0 ? `reviewers.${reviewerIndex}.botId` : '';
+      const modePath = reviewerIndex >= 0 ? `reviewers.${reviewerIndex}.mode` : '';
+      const nestedPath = (field: string) => `reviewers.${reviewerIndex}.nested.${field}`;
+      const nestedFields = selected && mode === 'nested' ? `<fieldset class="council-nested-fields"><legend>Child Council · ${escape(id)}</legend><label>Template<select data-composition-nested="template" data-bot-id="${escape(id)}"><option value="explicit_task" ${nested.template === 'explicit_task' ? 'selected' : ''}>Explicit task</option><option value="validated_default" ${nested.template === 'validated_default' ? 'selected' : ''}>Validated default</option></select></label><label>Criteria source<select data-composition-nested="childCriteriaSource" data-bot-id="${escape(id)}">${['architect','user','hybrid'].map(source => `<option value="${source}" ${nested.childCriteriaSource === source ? 'selected' : ''}>${source}</option>`).join('')}</select></label><label data-composition-field="${nestedPath('childReviewerCount')}">Child reviewers<input type="number" min="2" max="8" step="1" value="${nested.childReviewerCount}" data-composition-nested="childReviewerCount" data-bot-id="${escape(id)}">${fieldErrorMarkup(nestedPath('childReviewerCount'))}</label><label data-composition-field="${nestedPath('target')}">Target<input type="number" min="1" max="10" step="0.1" value="${nested.target}" data-composition-nested="target" data-bot-id="${escape(id)}">${fieldErrorMarkup(nestedPath('target'))}</label><label data-composition-field="${nestedPath('maxRounds')}">Max rounds<input type="number" min="1" max="100" step="1" value="${nested.maxRounds}" data-composition-nested="maxRounds" data-bot-id="${escape(id)}">${fieldErrorMarkup(nestedPath('maxRounds'))}</label><label>Escalation<select data-composition-nested="escalation" data-bot-id="${escape(id)}"><option value="on_trigger" ${nested.escalation === 'on_trigger' ? 'selected' : ''}>On trigger</option><option value="always" ${nested.escalation === 'always' ? 'selected' : ''}>Always</option></select></label></fieldset>` : '';
+      return `<article class="council-composition-reviewer${bot && (bot.paused || bot.available === false) ? ' is-unavailable' : ''}"><label class="council-composition-bot"><input type="checkbox" data-composition-bot="${escape(id)}" ${reviewerPath ? `data-composition-field="${reviewerPath}"` : ''} ${selected ? 'checked' : ''}><span><strong>${escape(bot?.name ?? id)}</strong><small>${escape(bot ? `${bot.role || 'Reviewer'} · ${bot.provider} / ${bot.model}` : 'Selected reviewer · unavailable')}</small></span></label>${reviewerPath ? fieldErrorMarkup(reviewerPath) : ''}<label class="council-composition-reviewer-mode"><span>Reviewer mode</span><select data-composition-reviewer-mode="${escape(id)}" ${modePath ? `data-composition-field="${modePath}"` : ''} ${selected ? '' : 'disabled'}><option value="direct" ${mode === 'direct' ? 'selected' : ''}>Direct reviewer</option><option value="nested" ${mode === 'nested' ? 'selected' : ''}>Child Council</option></select></label>${modePath ? fieldErrorMarkup(modePath) : ''}${nestedFields}</article>`;
     }).join('');
-    const shownCriteria = draft.criteria.filter(item => draft.criteriaSource === 'hybrid' || item.source === criterionSourceFor(draft.criteriaSource));
-    const criteriaMarkup = shownCriteria.map(item => `<fieldset class="council-criterion" data-criterion-id="${escape(item.id)}"><legend>${escape(item.lens || item.id || 'Criterion')}</legend><label>ID<input type="text" data-composition-criterion="id" maxlength="80" value="${escape(item.id)}"></label><label>Lens<input type="text" data-composition-criterion="lens" maxlength="80" value="${escape(item.lens)}"></label><label>Description<textarea data-composition-criterion="description" maxlength="4096" rows="2">${escape(item.description)}</textarea></label><label>Target<input type="number" data-composition-criterion="target" min="1" max="10" step="0.1" value="${item.target}"></label><label><input type="checkbox" data-composition-criterion="required" ${item.required ? 'checked' : ''}> Required</label><label><input type="checkbox" data-composition-criterion="evidenceRequired" ${item.evidenceRequired ? 'checked' : ''}> Evidence required</label><button type="button" class="ds-btn council-remove-criterion" data-remove-criterion="${escape(item.id)}">Remove criterion</button></fieldset>`).join('');
+    const shownCriteria = draft.criteria.map((item, index) => ({ item, index })).filter(({ item }) => draft.criteriaSource === 'hybrid' || item.source === criterionSourceFor(draft.criteriaSource));
+    const criteriaMarkup = shownCriteria.map(({ item, index }) => {
+      const path = (field: string) => `criteria.${index}.${field}`;
+      return `<fieldset class="council-criterion" data-criterion-id="${escape(item.id)}"><legend>${escape(item.lens || item.id || 'Criterion')}</legend><label data-composition-field="${path('id')}">ID<input type="text" data-composition-criterion="id" maxlength="80" value="${escape(item.id)}">${fieldErrorMarkup(path('id'))}</label><label data-composition-field="${path('lens')}">Lens<input type="text" data-composition-criterion="lens" maxlength="80" value="${escape(item.lens)}">${fieldErrorMarkup(path('lens'))}</label><label data-composition-field="${path('description')}">Description<textarea data-composition-criterion="description" maxlength="4096" rows="2">${escape(item.description)}</textarea>${fieldErrorMarkup(path('description'))}</label><label data-composition-field="${path('target')}">Target<input type="number" data-composition-criterion="target" min="1" max="10" step="0.1" value="${item.target}">${fieldErrorMarkup(path('target'))}</label><label><input type="checkbox" data-composition-criterion="required" ${item.required ? 'checked' : ''}> Required</label><label><input type="checkbox" data-composition-criterion="evidenceRequired" ${item.evidenceRequired ? 'checked' : ''}> Evidence required</label><button type="button" class="ds-btn council-remove-criterion" data-remove-criterion="${escape(item.id)}">Remove criterion</button></fieldset>`;
+    }).join('');
     const errors = compositionErrors(sessionId);
     const strategyOptions: readonly [CouncilStrategy, string][] = [['parallel','Parallel'], ['escalated','Escalated'], ['two_phase','Two phase']];
-    return `<section class="council-composition-editor"><h3>Composition plan</h3><label class="council-composition-toggle"><input type="checkbox" data-composition-enabled checked><span>Use a schema v1 composition plan</span></label><div class="council-composition-body"><p>Current mode: <span class="council-composition-mode-readout">${modeId}</span></p><ol class="council-composition-modes">${COUNCIL_COMPOSITION_MODES.map(mode => `<li data-composition-mode="${mode.id}" aria-current="${mode.id === modeId}"><strong>${mode.id}</strong><span>${escape(mode.label)}</span></li>`).join('')}</ol><label class="council-composition-toggle"><input type="checkbox" data-composition-automatic data-focus-key="automatic-toggle" ${draft.automatic.enabled ? 'checked' : ''}><span>Include automatic Architect reviewers</span></label><label class="council-composition-control">Automatic reviewer count<select data-composition-automatic-count data-focus-key="automatic-count" ${draft.automatic.enabled ? '' : 'disabled'}><option value="auto" ${draft.automatic.count === 'auto' ? 'selected' : ''}>Auto</option>${Array.from({length:8},(_,index)=>index+1).map(count => `<option value="${count}" ${draft.automatic.count === count ? 'selected' : ''}>${count}</option>`).join('')}</select></label><label class="council-composition-toggle"><input type="checkbox" data-composition-bots-enabled ${state.botsEnabled ? 'checked' : ''}><span>Include selected bot reviewers</span></label><div class="council-composition-bots">${botMarkup || '<p class="council-composition-missing">No configured reviewer bots are available.</p>'}</div><label class="council-composition-control">Execution strategy<select data-composition-strategy>${strategyOptions.map(([strategy,label]) => `<option value="${strategy}" ${draft.strategy === strategy ? 'selected' : ''}>${label}</option>`).join('')}</select></label><label class="council-composition-control">Criteria source<select data-composition-criteria-source><option value="architect" ${draft.criteriaSource === 'architect' ? 'selected' : ''}>Architect</option><option value="user" ${draft.criteriaSource === 'user' ? 'selected' : ''}>User</option><option value="hybrid" ${draft.criteriaSource === 'hybrid' ? 'selected' : ''}>Hybrid</option></select></label><section class="council-composition-criteria"><h3>Criteria</h3>${criteriaMarkup}<span><button type="button" class="ds-btn" data-add-criterion="user">Add user criterion</button> <button type="button" class="ds-btn" data-add-criterion="architect">Add Architect criterion</button></span></section><fieldset class="council-composition-limits"><legend>Hard limits</legend>${([['maxDepth','Maximum depth'],['maxRootSeats','Maximum root seats'],['maxConcurrentLeaves','Concurrent leaves'],['maxLeafReviewsPerRound','Leaf reviews per round'],['timeoutMs','Timeout (ms)'],['maxEstimatedCostMicros','Estimated cost cap (micro-units)']] as const).map(([key,label]) => `<label>${label}<input type="number" data-composition-limit="${key}" min="1" value="${draft.limits[key]}"></label>`).join('')}</fieldset><div class="council-plan-preview"><strong>Plan preview</strong><span>${active.automatic.enabled ? `${active.automatic.count} Architect reviewer source${active.automatic.count === 1 ? '' : 's'}` : 'No automatic Architect reviewers'} · ${active.selected.length} selected bot reviewer${active.selected.length === 1 ? '' : 's'} · ${active.criteria.length} criteria</span><span>Resource totals are estimate only; native enforces the hard limits at dispatch.</span></div><div class="council-composition-errors" data-composition-errors role="alert" ${errors.length ? '' : 'hidden'}>${errors.length ? `<strong>Fix these settings before applying</strong><ul>${errors.map(error => `<li>${escape(error)}</li>`).join('')}</ul>` : ''}</div><button type="button" class="ds-btn-primary council-composition-apply" data-composition-apply ${errors.length ? 'disabled' : ''}>Apply composition</button></div></section>`;
+    const planPreview = compositionPlanPreview(active, bots);
+    const limitFields = ([['maxDepth','Maximum depth'],['maxRootSeats','Maximum root seats'],['maxConcurrentLeaves','Concurrent leaves'],['maxLeafReviewsPerRound','Leaf reviews per round'],['timeoutMs','Timeout (ms)'],['maxEstimatedCostMicros','Estimated cost cap (micro-units)']] as const).map(([key,label]) => `<label data-composition-field="limits.${key}">${label}<input type="number" data-composition-limit="${key}" min="1" value="${draft.limits[key]}">${fieldErrorMarkup(`limits.${key}`)}</label>`).join('');
+    return `<section class="council-composition-editor"><h3>Composition plan</h3><label class="council-composition-toggle"><input type="checkbox" data-composition-enabled checked><span>Use a schema v1 composition plan</span></label><div class="council-composition-body">${modeState}<ol class="council-composition-modes">${COUNCIL_COMPOSITION_MODES.map(mode => `<li data-composition-mode="${mode.id}" aria-current="${mode.id === modeId}"><strong>${mode.id}</strong><span>${escape(mode.label)}</span></li>`).join('')}</ol><label class="council-composition-toggle"><input type="checkbox" data-composition-automatic data-focus-key="automatic-toggle" ${draft.automatic.enabled ? 'checked' : ''}><span>Include automatic Architect reviewers</span></label><label class="council-composition-control" data-composition-field="automatic.count">Automatic reviewer count<select data-composition-automatic-count data-composition-field="automatic.count" data-focus-key="automatic-count" ${draft.automatic.enabled ? '' : 'disabled'}><option value="auto" ${draft.automatic.count === 'auto' ? 'selected' : ''}>Auto</option>${Array.from({length:8},(_,index)=>index+1).map(count => `<option value="${count}" ${draft.automatic.count === count ? 'selected' : ''}>${count}</option>`).join('')}</select>${fieldErrorMarkup('automatic.count')}</label><label class="council-composition-toggle"><input type="checkbox" data-composition-bots-enabled ${state.botsEnabled ? 'checked' : ''}><span>Include selected bot reviewers</span></label><div class="council-composition-bots" role="group" aria-label="Selected reviewer bots" data-composition-field="reviewers">${botMarkup || '<p class="council-composition-missing">No configured reviewer bots are available.</p>'}${fieldErrorMarkup('reviewers')}</div><label class="council-composition-control" data-composition-field="strategy">Execution strategy<select data-composition-strategy>${strategyOptions.map(([strategy,label]) => `<option value="${strategy}" ${draft.strategy === strategy ? 'selected' : ''}>${label}</option>`).join('')}</select>${fieldErrorMarkup('strategy')}</label><label class="council-composition-control" data-composition-field="criteriaSource">Criteria source<select data-composition-criteria-source><option value="architect" ${draft.criteriaSource === 'architect' ? 'selected' : ''}>Architect</option><option value="user" ${draft.criteriaSource === 'user' ? 'selected' : ''}>User</option><option value="hybrid" ${draft.criteriaSource === 'hybrid' ? 'selected' : ''}>Hybrid</option></select>${fieldErrorMarkup('criteriaSource')}</label><section class="council-composition-criteria" role="group" aria-label="Criteria" data-composition-field="criteria"><h3>Criteria</h3>${criteriaMarkup}<span><button type="button" class="ds-btn" data-add-criterion="user">Add user criterion</button> <button type="button" class="ds-btn" data-add-criterion="architect">Add Architect criterion</button></span>${fieldErrorMarkup('criteria')}</section><fieldset class="council-composition-limits"><legend>Hard limits</legend>${limitFields}</fieldset><details class="council-plan-preview"><summary data-plan-preview-summary>${escape(planPreview.summary)}</summary><div data-plan-preview-details>${planPreview.details}</div></details><div class="council-composition-errors" data-composition-errors role="alert" ${errors.length ? '' : 'hidden'}>${errors.length ? `<strong>Fix these settings before applying</strong><ul>${errors.map(error => `<li>${escape(error)}</li>`).join('')}</ul>` : ''}</div><button type="button" class="ds-btn-primary council-composition-apply" data-composition-apply ${errors.length ? 'disabled' : ''}>Apply composition</button></div></section>`;
   }
   function updateCompositionField(sessionId: string, control: HTMLElement): boolean {
     const state = compositionState(sessionId), input = control as HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
     if (control.hasAttribute('data-composition-enabled')) { state.enabled = (control as HTMLInputElement).checked; if (state.enabled && !state.value) state.value = newCouncilComposition(); return true; }
-    if (control.hasAttribute('data-composition-automatic')) { state.value.automatic = { ...state.value.automatic, enabled: (control as HTMLInputElement).checked, count: (control as HTMLInputElement).checked ? (typeof state.value.automatic.count === 'number' ? state.value.automatic.count : 'auto') : 0 }; return true; }
+    if (control.hasAttribute('data-composition-automatic')) {
+      const enabled = (control as HTMLInputElement).checked, count = state.value.automatic.count;
+      state.value.automatic = { ...state.value.automatic, enabled, count: enabled ? typeof count === 'number' && count >= 1 ? count : 'auto' : 0 };
+      return true;
+    }
     if (control.hasAttribute('data-composition-bots-enabled')) { state.botsEnabled = (control as HTMLInputElement).checked; return true; }
     if (control.hasAttribute('data-composition-automatic-count')) { state.value.automatic.count = input.value === 'auto' ? 'auto' : Number(input.value); return true; }
     if (control.hasAttribute('data-composition-strategy')) { state.value.strategy = input.value as CouncilStrategy; return true; }
@@ -568,7 +822,7 @@ export function createCouncil(host: CouncilHost) {
     if (anchor.closest('.council-strip')) panel.dataset.compact = focusField ?? 'target';
     panel.setAttribute('role', 'dialog');
     panel.setAttribute('aria-labelledby', 'council-title');
-    panel.innerHTML = `<div class="council-panel-head"><label id="council-title" for="council-switch">Council</label><input id="council-switch" class="ds-toggle council-switch" type="checkbox" role="switch" tabindex="0" aria-describedby="council-about"></div><p id="council-about">${ABOUT}</p><p class="council-idle" role="status" hidden>No changes to review yet</p>${FIELDS.map(({ key, label, options, name }) => `<div class="council-field" data-field-row="${key}"><span id="council-${key}">${label}${key === 'target' ? '<small class="council-lowest"></small>' : ''}</span><div class="ds-seg" role="group" aria-labelledby="council-${key}" data-field="${key}">${options.map(value => `<button type="button" data-value="${value}" aria-pressed="false"${key === 'reviewers' && !value ? ` aria-label="${AUTO}" data-tip="${AUTO}"` : ''}>${name(value)}</button>`).join('')}${key === 'reviewers' ? '<button type="button" data-reviewers-source="selected" aria-label="Selected bots" data-tip="Review with existing configured bots" aria-pressed="false">Bots</button>' : ''}</div></div>`).join('')}<div class="council-bots" role="group" aria-label="Selected reviewer bots" hidden></div><div class="council-composition-slot">${compositionMarkup(sessionId)}</div><p class="council-error" role="alert" hidden></p><div class="council-foot"><label class="council-new"><input type="checkbox" class="council-new-threads" tabindex="0"><span>Start new threads with Council on</span></label></div>`;
+     panel.innerHTML = `<div class="council-panel-head"><label id="council-title" for="council-switch">Council</label><input id="council-switch" class="ds-toggle council-switch" type="checkbox" role="switch" tabindex="0" aria-describedby="council-about"></div><p id="council-about">${ABOUT}</p><p class="council-idle" role="status" hidden>No changes to review yet</p>${FIELDS.map(({ key, label, options, name }) => `<div class="council-field" data-field-row="${key}"><span id="council-${key}">${label}${key === 'target' ? '<small class="council-lowest"></small>' : ''}</span><div class="ds-seg" role="group" aria-labelledby="council-${key}" data-field="${key}">${options.map(value => `<button type="button" data-value="${value}" aria-pressed="false"${key === 'reviewers' && !value ? ` aria-label="${AUTO}" data-tip="${AUTO}"` : ''}>${name(value)}</button>`).join('')}${key === 'reviewers' ? '<button type="button" data-reviewers-source="selected" aria-label="Selected bots" data-tip="Review with existing configured bots" aria-pressed="false">Bots</button>' : ''}</div></div>${key === 'target' ? `<small class="council-field-error council-target-error" id="${validationId('councilTarget')}" data-composition-target-error hidden></small>` : ''}`).join('')}<div class="council-bots" role="group" aria-label="Selected reviewer bots" hidden></div><div class="council-composition-slot">${compositionMarkup(sessionId)}</div><p class="council-error" role="alert" hidden></p><div class="council-foot"><label class="council-new"><input type="checkbox" class="council-new-threads" tabindex="0"><span>Start new threads with Council on</span></label></div>`;
     document.body.append(panel);
     // Compact (from the strip): only the row it opened on, titled by what it does (a heading, no longer the switch's label).
     if (panel.dataset.compact) {
@@ -615,8 +869,7 @@ export function createCouncil(host: CouncilHost) {
       if (input.classList.contains('council-new-threads')) { setCouncilForNewThreads(input.checked); return; }
       if ((event.target as HTMLElement).closest('.council-composition-slot') && updateCompositionField(sessionId, event.target as HTMLElement)) {
         const slot = panel?.querySelector<HTMLElement>('.council-composition-slot');
-        if (slot) slot.innerHTML = compositionMarkup(sessionId);
-        compositionStatus(sessionId);
+        if (slot) replaceCompositionSlot(slot, sessionId);
         return;
       }
       if (input.hasAttribute('data-council-scoped') || input.hasAttribute('data-council-path')) {
@@ -685,14 +938,19 @@ export function createCouncil(host: CouncilHost) {
       const add = target.closest<HTMLButtonElement>('[data-add-criterion]');
       if (add?.dataset.addCriterion === 'user' || add?.dataset.addCriterion === 'architect') {
         addCriterion(sessionId, add.dataset.addCriterion);
-        const slot = panel?.querySelector<HTMLElement>('.council-composition-slot'); if (slot) slot.innerHTML = compositionMarkup(sessionId);
-        compositionStatus(sessionId); return;
+        const slot = panel?.querySelector<HTMLElement>('.council-composition-slot'); if (slot) replaceCompositionSlot(slot, sessionId);
+        return;
       }
       const remove = target.closest<HTMLButtonElement>('[data-remove-criterion]');
       if (remove) {
+        const slot = panel?.querySelector<HTMLElement>('.council-composition-slot');
+        const removeButtons = slot ? [...slot.querySelectorAll<HTMLButtonElement>('[data-remove-criterion]')] : [];
+        const removedIndex = removeButtons.indexOf(remove);
+        const fallback = removeButtons[removedIndex + 1] ?? removeButtons[removedIndex - 1] ?? slot?.querySelector<HTMLElement>('[data-add-criterion="user"]');
+        const fallbackSelector = fallback ? compositionNodeSelector(fallback) : null;
         const state = compositionState(sessionId); state.value.criteria = state.value.criteria.filter(item => item.id !== remove.dataset.removeCriterion);
-        const slot = panel?.querySelector<HTMLElement>('.council-composition-slot'); if (slot) slot.innerHTML = compositionMarkup(sessionId);
-        compositionStatus(sessionId); return;
+        if (slot) replaceCompositionSlot(slot, sessionId, fallbackSelector);
+        return;
       }
       const option = target.closest<HTMLElement>('[data-value], [data-reviewers-source]');
       if (!option) return;
@@ -732,12 +990,12 @@ export function createCouncil(host: CouncilHost) {
       }
       // Tab and Shift+Tab always move inside the panel, in document order (the switch, each row's stop, the footer
       // checkbox), wrapping like a dialog: WebKit would otherwise skip plain checkboxes and leave the panel.
-      if (event.key !== 'Tab' || !panel?.contains(document.activeElement)) return;
+      if (event.key !== 'Tab' || !panel?.isConnected) return;
       const controls = [...panel.querySelectorAll<HTMLElement>('input:not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not(:disabled)')].filter(control => control.tabIndex !== -1 && control.offsetParent !== null);
       if (!controls.length) return;
       event.preventDefault();
       const at = controls.indexOf(document.activeElement as HTMLElement), dir = event.shiftKey ? -1 : 1;
-      controls[at < 0 ? 0 : (at + dir + controls.length) % controls.length].focus();
+      controls[at < 0 ? event.shiftKey ? controls.length - 1 : 0 : (at + dir + controls.length) % controls.length].focus();
     };
     const onOutside = (event: PointerEvent) => {
       const target = event.target as Element;
@@ -892,15 +1150,20 @@ function stateLine(progress: CouncilProgress, team: TeamSnapshot): { text: strin
 /** The Agents flyout's Council: the state line and the rows, no actions (they live in the composer's strip). */
 export function councilSummaryHtml(native: TeamSnapshot): string {
   const team = shownTeam(native), progress = councilProgress(team);
-  if (!progress?.rounds.length) return '';
+  if (!progress) return '';
+  const hasProjection = Boolean(team.councilFindings || team.councilFindingDispositions || team.councilChildReceipts || team.councilReviewReceipts || team.councilUsage);
+  if (!progress.rounds.length && !progress.council.composition && !hasProjection) return '';
   const { text, score } = stateLine(progress, team);
   const ledger = councilLedgerForCurrentCycle(team);
-  const hasProjection = Boolean(team.councilFindings || team.councilFindingDispositions || team.councilChildReceipts || team.councilReviewReceipts || team.councilUsage);
-  const ledgerHtml = team.config.council?.composition || hasProjection
-    ? councilReadOnlyPresenterHtml({ ...ledger, workers: team.workers, status: team.councilStatus,
-      ...(!team.config.council?.composition && !hasProjection ? { unavailableMessage: 'This legacy Council configuration does not produce composition findings, receipts or usage.' } : {}) })
+  const composition = progress.council.composition;
+  const compositionSummary = composition
+    ? `Schema v${composition.schemaVersion} · ${councilCompositionMode(composition) ?? 'Unavailable'} · ${composition.strategy.replaceAll('_', ' ')} strategy · ${composition.criteriaSource} criteria`
     : '';
-  return `<section class="council-summary" data-session-id="${escape(team.sessionId)}" aria-label="Council"><p class="council-summary-state"><span>${escape(text)}</span><span class="council-strip-score">${score}</span></p><div class="council-rows">${rowsHtml(progress, team)}</div>${ledgerHtml}</section>`;
+  const ledgerHtml = composition || hasProjection
+    ? councilReadOnlyPresenterHtml({ ...ledger, progress, workers: team.workers, status: team.councilStatus,
+      ...(!composition && !hasProjection ? { unavailableMessage: 'This legacy Council configuration does not produce composition findings, receipts or usage.' } : {}) })
+    : '';
+  return `<section class="council-summary" data-session-id="${escape(team.sessionId)}" aria-label="Council"><p class="council-summary-state"><span>${escape(text)}</span><span class="council-strip-score">${score}</span></p>${compositionSummary ? `<small class="council-summary-composition">${escape(compositionSummary)}</small>` : ''}<div class="council-rows">${rowsHtml(progress, team)}</div>${ledgerHtml}</section>`;
 }
 /** The composer's strip: shown while Council is on and the cycle has a round or is asking, until a settled strip is
  *  dismissed. One line (glyph, state, lowest / target, disclosure), the reviewers when expanded, and what to do next. */

@@ -2383,7 +2383,7 @@ fn finding_receipt_and_usage_contracts_validate_correlation_and_unknown_measurem
     let usage = council::CouncilUsageRecord {
         id: "usage-1".into(), root_cycle_id: "root-cycle".into(), child_cycle_id: None, attempt_id: "attempt-1".into(),
         reviewer_id: "reviewer-1".into(), round_id: "round-1".into(), seat_id: "seat-1".into(), scope: council::CouncilUsageScope::Root,
-        phase: council::CouncilUsagePhase::Review, strategy: council::CouncilStrategy::Parallel, started_at_ms: Some(10), finished_at_ms: Some(110),
+        phase: council::CouncilUsagePhase::Review, strategy: council::CouncilStrategy::Parallel, decision_ids: Vec::new(), started_at_ms: Some(10), finished_at_ms: Some(110),
         queue_wait_ms: unknown.clone(), elapsed_ms: known(100u64), retries: council::CouncilUsageValue { status: ValueStatus::Measured, value: Some(0u32) },
         escalations: council::CouncilUsageValue { status: ValueStatus::Unknown, value: None }, provider: Some("codex".into()), model: Some("model-1".into()), harness: Some("codex".into()),
         input_tokens: known(120u64), output_tokens: known(40u64), request_count: known(1u64), terminal_status: Verdict::Passed,
@@ -2395,6 +2395,47 @@ fn finding_receipt_and_usage_contracts_validate_correlation_and_unknown_measurem
     let mut fabricated = usage;
     fabricated.elapsed_ms = council::CouncilUsageValue { status: ValueStatus::Unknown, value: Some(100) };
     assert!(matches!(fabricated.validate(), Err(council::CouncilCompositionError::InvalidUsageRecord(_))));
+}
+
+#[test]
+fn escalation_and_challenge_usage_require_correlated_native_decision_ids() {
+    use council::{CouncilUsagePhase as Phase, CouncilUsageValue as UsageValue};
+    use council::CouncilUsageValueStatus as ValueStatus;
+    let known_u32 = |value| UsageValue { status: ValueStatus::Measured, value: Some(value) };
+    let known_u64 = |value| UsageValue { status: ValueStatus::Measured, value: Some(value) };
+    let unknown = UsageValue::<u64> { status: ValueStatus::Unknown, value: None };
+    let mut usage = council::CouncilUsageRecord {
+        id: "usage-2".into(), root_cycle_id: "root-cycle".into(), child_cycle_id: None,
+        attempt_id: "seat-2:1".into(), reviewer_id: "reviewer-2".into(), round_id: "task-cycle:2".into(),
+        seat_id: "seat-2".into(), scope: council::CouncilUsageScope::Root,
+        phase: Phase::Review, strategy: council::CouncilStrategy::Parallel, decision_ids: Vec::new(),
+        started_at_ms: None, finished_at_ms: None, queue_wait_ms: unknown.clone(), elapsed_ms: unknown.clone(),
+        retries: known_u32(0u32), escalations: known_u32(0u32), provider: None, model: None, harness: None,
+        input_tokens: unknown.clone(), output_tokens: unknown.clone(), request_count: unknown.clone(),
+        terminal_status: council::CouncilReviewVerdict::Passed,
+        budget_consumption: council::CouncilResourceBudgetConsumption {
+            concurrent_leaves: known_u64(1u64), leaf_reviews: known_u64(2u64), estimated_cost_micros: unknown,
+        },
+        cost_estimate: None,
+    };
+
+    usage.phase = Phase::Escalation;
+    usage.strategy = council::CouncilStrategy::Escalated;
+    usage.decision_ids = vec!["trigger-1".into()];
+    usage.escalations = known_u32(1u32);
+    assert!(usage.validate().is_ok());
+    usage.decision_ids.clear();
+    assert!(matches!(usage.validate(), Err(council::CouncilCompositionError::InvalidUsageRecord(_))));
+    usage.decision_ids = vec!["trigger-1".into()];
+    usage.escalations = known_u32(0u32);
+    assert!(matches!(usage.validate(), Err(council::CouncilCompositionError::InvalidUsageRecord(_))));
+
+    usage.phase = Phase::Challenge;
+    usage.strategy = council::CouncilStrategy::TwoPhase;
+    usage.decision_ids = vec!["challenge-1".into()];
+    assert!(usage.validate().is_ok());
+    usage.decision_ids.clear();
+    assert!(matches!(usage.validate(), Err(council::CouncilCompositionError::InvalidUsageRecord(_))));
 }
 
 #[test]

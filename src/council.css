@@ -200,3 +200,45 @@ html[data-theme] .council-panel.floating-menu{background:color-mix(in srgb,var(-
 @media(max-width:420px){.council-composition-modes,.council-nested-fields,.council-composition-limits,.council-criterion{grid-template-columns:minmax(0,1fr)}.council-criterion>label:nth-of-type(3){grid-column:auto}.council-ledger dl>div{grid-template-columns:minmax(78px,.7fr) minmax(0,1.3fr)}}
 @media(prefers-contrast:more){.council-composition-modes li,.council-composition-reviewer,.council-nested-fields,.council-criterion,.council-composition-limits,.council-ledger>details{border-color:var(--border)}.council-composition-help,.council-composition-active,.council-plan-preview span,.council-ledger dt{color:var(--text)}}
 @media(forced-colors:active){.council-composition-modes li[aria-current=true],.council-composition-errors,.council-ledger-stale,.council-ledger-exception{border-color:CanvasText;color:CanvasText}.council-ledger-finding[data-severity=critical],.council-ledger-finding[data-severity=high]{border-color:CanvasText}}
+
+/* Detailed plan preview and shared hierarchical review inspector. */
+.council-plan-preview{min-width:0}
+.council-plan-preview>summary{cursor:pointer;color:var(--text);font-size:var(--ds-text-meta);font-weight:var(--weight-medium)}
+.council-plan-preview>summary:focus-visible,.council-inspector-node>summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.council-plan-preview-content{display:grid;gap:7px;min-width:0;margin-top:7px}
+.council-plan-preview-content h4,.council-inspector-hierarchy>h4{margin:2px 0 0;color:var(--text);font-size:var(--ds-text-meta);font-weight:var(--weight-medium)}
+.council-plan-preview-content dl,.council-inspector-node dl{display:grid;gap:4px;min-width:0;margin:0}
+.council-plan-preview-content dl>div,.council-inspector-node dl>div{display:grid;grid-template-columns:minmax(76px,.75fr) minmax(0,1.25fr);gap:7px;min-width:0}
+.council-plan-preview-content dt,.council-inspector-node dt{color:var(--muted);font-size:var(--ds-text-meta)}
+.council-plan-preview-content dd,.council-inspector-node dd{min-width:0;margin:0;color:var(--text);font-size:var(--ds-text-meta);overflow-wrap:anywhere}
+.council-plan-preview-list{display:grid;gap:5px;min-width:0;margin:0;padding:0;list-style:none}
+.council-plan-preview-list>li{display:grid;gap:3px;min-width:0;padding:6px;border:1px solid var(--ds-border);border-radius:var(--ds-radius-chip);background:var(--ds-card)}
+.council-plan-preview-list strong{color:var(--text);font-size:var(--ds-text-meta);overflow-wrap:anywhere}
+.council-plan-preview-list span,.council-plan-preview-list p,.council-plan-preview-empty,.council-plan-preview-note{margin:0;color:var(--muted);font-size:var(--ds-text-meta);line-height:1.4;overflow-wrap:anywhere}
+.council-composition-editor [aria-invalid=true]{border-color:var(--ds-danger)}
+.council-composition-editor [role=group][aria-invalid=true]{outline:1px solid var(--ds-danger);outline-offset:2px;border-radius:var(--ds-radius-control)}
+.council-field-error{color:var(--ds-danger)!important;font-size:var(--ds-text-meta);line-height:1.35;overflow-wrap:anywhere}
+.council-field-error[hidden]{display:none}
+.council-target-error{margin:0}
+.council-panel [data-field=target][aria-invalid=true]{outline:1px solid var(--ds-danger);outline-offset:2px;border-radius:var(--ds-radius-control)}
+.council-inspector-hierarchy{display:grid;gap:5px;min-width:0;padding:7px 0;border-top:1px solid var(--ds-border)}
+.council-inspector-node{display:grid;gap:6px;min-width:0;padding:7px;border:1px solid var(--ds-border);border-radius:var(--ds-radius-control);background:var(--ds-card-inner)}
+.council-inspector-hierarchy>.council-inspector-node{background:var(--ds-card)}
+.council-inspector-node>summary{display:flex;flex-wrap:wrap;align-items:baseline;gap:3px 7px;min-width:0;cursor:pointer;color:var(--text);font-size:var(--ds-text-meta);font-weight:var(--weight-medium);overflow-wrap:anywhere}
+.council-inspector-node[data-level=bot]{margin-inline-start:4px}
+.council-inspector-node[data-level=child-council]{margin-inline-start:7px;border-inline-start:2px solid var(--ds-border-strong)}
+.council-inspector-node[data-level=round]{margin-inline-start:5px}
+.council-inspector-node[data-level=reviewer]{margin-inline-start:5px}
+.council-inspector-node[data-stale=true],.council-inspector-node[data-stale=true]>summary{border-color:var(--ds-warn);color:var(--ds-warn)}
+.council-inspector-children{display:grid;gap:5px;min-width:0;padding-inline-start:5px;border-inline-start:1px solid var(--ds-border)}
+.council-inspector-evidence{min-width:0;padding:5px;border:1px solid var(--ds-border);border-radius:var(--ds-radius-chip)}
+.council-inspector-evidence>summary{cursor:pointer;color:var(--text);font-size:var(--ds-text-meta)}
+.council-inspector-evidence>summary:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+.council-inspector-findings{display:grid;gap:5px;margin:0;padding:0;list-style:none}
+.council-inspector-findings li{display:grid;gap:3px;min-width:0;padding:6px;border-inline-start:2px solid var(--ds-border-strong);background:var(--ds-card);font-size:var(--ds-text-meta);overflow-wrap:anywhere}
+.council-inspector-findings li strong{color:var(--text)}
+.council-inspector-findings li span,.council-inspector-score-refs{color:var(--muted);font-size:var(--ds-text-meta);line-height:1.4;overflow-wrap:anywhere}
+.council-inspector-score-refs{margin:0}
+@media(max-width:420px){.council-plan-preview-content dl>div,.council-inspector-node dl>div{grid-template-columns:minmax(68px,.7fr) minmax(0,1.3fr)}.council-inspector-node[data-level=bot],.council-inspector-node[data-level=child-council],.council-inspector-node[data-level=round],.council-inspector-node[data-level=reviewer]{margin-inline-start:2px}}
+@media(prefers-contrast:more){.council-plan-preview-list>li,.council-inspector-node,.council-inspector-evidence,.council-inspector-findings li{border-color:var(--border)}.council-field-error,.council-plan-preview-list span,.council-inspector-node dt,.council-inspector-findings li span{color:var(--text)!important}}
+@media(forced-colors:active){.council-field-error,.council-panel [data-field=target][aria-invalid=true],.council-composition-editor [aria-invalid=true],.council-inspector-node[data-stale=true]{border-color:CanvasText;color:CanvasText}.council-plan-preview>summary:focus-visible,.council-inspector-node>summary:focus-visible,.council-inspector-evidence>summary:focus-visible{outline-color:Highlight}}

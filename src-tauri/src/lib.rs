@@ -586,6 +586,88 @@ impl AppState {
             .workspace_root(project_id, session_id)
     }
 }
+
+/// Shared command-boundary logic. The exported Tauri commands and their
+/// regressions use these functions so no caller-supplied label can bypass the
+/// bearer capability check.
+fn superagent_council_task_request_for_client(
+    store: &storage::Store,
+    ticket_id: &str,
+    task_client_capability: &str,
+) -> Result<Option<superagent::council_adapter::CouncilObservation>> {
+    let task_client = superagent::authorize_task_client_capability(
+        store,
+        ticket_id,
+        task_client_capability,
+    )?;
+    superagent::council_adapter::request_task_review(store, &task_client)
+}
+
+fn superagent_council_evidence_read_for_client(
+    store: &storage::Store,
+    ticket_id: &str,
+    task_client_capability: &str,
+    request_id: &str,
+    evidence_ref: &str,
+) -> Result<serde_json::Value> {
+    let task_client = superagent::authorize_task_client_capability(
+        store,
+        ticket_id,
+        task_client_capability,
+    )?;
+    superagent::council_adapter::read_task_evidence(
+        store,
+        &task_client,
+        request_id,
+        evidence_ref,
+    )
+}
+
+/// Request the existing Council result for a finished native task. A random,
+/// assignment-bound bearer capability is checked here before creating a task
+/// client context; caller labels and ticket IDs alone never authenticate.
+#[tauri::command]
+async fn superagent_council_task_request(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    ticket_id: String,
+    task_client_capability: String,
+) -> Result<Option<superagent::council_adapter::CouncilObservation>> {
+    if window.label() != "main" {
+        return Err("Council task requests require the main window.".into());
+    }
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    superagent_council_task_request_for_client(
+        &store,
+        &ticket_id,
+        &task_client_capability,
+    )
+}
+
+/// Resolve one opaque evidence reference from the current approved Council
+/// receipt. The adapter revalidates the task and mandate on every read.
+#[tauri::command]
+async fn superagent_council_evidence_read(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    ticket_id: String,
+    task_client_capability: String,
+    request_id: String,
+    evidence_ref: String,
+) -> Result<serde_json::Value> {
+    if window.label() != "main" {
+        return Err("Council evidence reads require the main window.".into());
+    }
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    superagent_council_evidence_read_for_client(
+        &store,
+        &ticket_id,
+        &task_client_capability,
+        &request_id,
+        &evidence_ref,
+    )
+}
+
 /// Fixed instructions for every task turn: sidebar titles, the run script, change tracking.
 /// Projectless chats have nothing to run, so they skip the run script. Managed team workers
 /// report to their lead, not the user: no titles (they never get a title run), run script,
@@ -4454,6 +4536,8 @@ pub fn run() {
                 superagent::superagent_assignments,
                 superagent::superagent_activity,
                 superagent::superagent_snapshot,
+                superagent_council_task_request,
+                superagent_council_evidence_read,
                 superagent::superagent_submit,
                 superagent::superagent_submit_coordinated,
                 superagent::superagent_dispatch_worker,

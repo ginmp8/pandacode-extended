@@ -98,7 +98,7 @@ import { CONNECT_SETUP, LOCAL, behindDialog, behindText, cancelledRemoteStart, c
 import './cloud-agents.css';
 import { SETUP_CHOICE, cloudActionItems, cloudIcon, cloudProvider, cloudStrip, deleteMachineDialog, harnessRefusal, type CloudStage, type CloudTarget } from './cloud-agents';
 import { botsBarHtml, botsListHtml, botsPanelHeadHtml, markAllBotsRead, moveBot, pinnedBots, setBotPinned, storedSidebarView, storeSidebarView, syncSeen, type BotSignals, type SidebarView } from './sidebar-bots';
-import { sharedChannelActionsHtml, sharedChannelComposerHtml, sharedChannelCouncilComposition, sharedChannelCouncilCompositionError, restoreSharedChannelCouncilInputs, bindSharedChannelCouncil, toggleSharedChannelCouncil, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
+import { sharedChannelActionsHtml, sharedChannelComposerHtml, sharedChannelCouncilComposition, sharedChannelCouncilValidationIssues, showSharedChannelCouncilValidation, restoreSharedChannelCouncilInputs, bindSharedChannelCouncil, toggleSharedChannelCouncil, sharedChannelThreadHtml, type SharedChannelDetail, type SharedChannelSummary, type SharedChannelUiOptions } from './bot-shared-channels';
 import { connectAgentUiActions, type AgentUiAction } from './agent-ui-actions';
 import { createAgentInput, type AgentInput } from './agent-input';
 import { mountSlashCommands, type SlashCommand } from './slash-commands';
@@ -171,7 +171,7 @@ const state = {
   moodboardAttachments: new Map<string, { id: string; projectId: string; name: string }[]>(),
   generation: 0, hasOlder: false,
   sharedChannelId: '', sharedChannelDetail: null as SharedChannelDetail | null, sharedChannelRequest: 0,
-  sharedChannelDrafts: new Map<string, string>(), sharedChannelLimits: new Map<string, number>(), sharedChannelFromBottom: null as number | null, sharedChannelScrollTop: 0, sharedChannelAtBottom: true, sharedChannelPosting: new Set<string>(),
+  sharedChannelDrafts: new Map<string, string>(), sharedChannelLimits: new Map<string, number>(), sharedChannelFromBottom: null as number | null, sharedChannelScrollTop: 0, sharedChannelAtBottom: true, sharedChannelPosting: new Set<string>(), sharedChannelPostErrors: new Map<string, string>(),
 };
 let renderFrame = 0;
 /** Shows the open thread's scene behind the conversation (set once the sky mounts; `renderTranscript` calls it). */
@@ -2825,6 +2825,15 @@ function renderComposer(): void {
     if (menu) { menu.hidden = false; menu.previousElementSibling?.setAttribute('aria-expanded', 'true'); }
     const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
     const posting = state.sharedChannelPosting.has(state.sharedChannelId);
+    const postError = state.sharedChannelPostErrors.get(state.sharedChannelId) ?? '';
+    channelComposer?.setAttribute('aria-busy', String(posting));
+    const postStatus = channelComposer?.querySelector<HTMLElement>('[data-bc-post-status]');
+    if (postStatus) {
+      const failed = Boolean(postError) && !posting;
+      postStatus.setAttribute('role', failed ? 'alert' : 'status');
+      postStatus.setAttribute('aria-live', failed ? 'assertive' : 'polite');
+      postStatus.textContent = posting ? 'Sending message to channel…' : failed ? `Message not sent. ${postError}` : '';
+    }
     if (prompt) { prompt.value = state.sharedChannelDrafts.get(state.sharedChannelId) ?? ''; prompt.disabled = Boolean(channel?.archived) || !channel?.memberIds.length || posting; }
     const send = document.querySelector<HTMLButtonElement>('#shared-channel-composer button[type="submit"]');
     if (send) send.disabled = posting;
@@ -7338,17 +7347,21 @@ document.addEventListener('submit', event => {
     if (!text) return;
     const councilEnabled = data.get('councilEnabled') === 'on';
     const composition = councilEnabled ? sharedChannelCouncilComposition(form) : null;
-    const reviewerBotIds = composition?.selected.map(reviewer => reviewer.botId) ?? [];
+    const legacyMode = data.get('councilMode');
+    const legacyReviewerBotIds = legacyMode === 'selected'
+      ? [...form.querySelectorAll<HTMLInputElement>('[data-bc-legacy-reviewer]:checked:not(:disabled)')].map(input => input.value)
+      : [];
+    const reviewerBotIds = composition?.selected.map(reviewer => reviewer.botId) ?? legacyReviewerBotIds;
     const target = Number(data.get('councilTarget') ?? 9);
     const maxRounds = Number(data.get('councilMaxRounds') ?? 10);
-    if (councilEnabled && (!Number.isFinite(target) || target < 1 || target > 10
-      || !Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 100)) {
-      notify('Set a Council target from 1–10 and 1–100 rounds.');
-      return;
+    if (councilEnabled) {
+      const issues = sharedChannelCouncilValidationIssues(form, composition, target, maxRounds);
+      showSharedChannelCouncilValidation(form, issues, issues.length > 0);
+      if (issues.length) return;
     }
-    if (councilEnabled && composition) {
-      const compositionError = sharedChannelCouncilCompositionError(composition, target);
-      if (compositionError) { notify(compositionError); return; }
+    if (councilEnabled && !composition && legacyMode === 'selected' && (reviewerBotIds.length < 2 || reviewerBotIds.length > 8)) {
+      notify('Set a Council target from 1–10, 1–100 rounds and 2–8 selected reviewers, if selected.');
+      return;
     }
     const scopedFile = data.get('councilScopedFile') === 'on' && reviewerBotIds.length > 0;
     const filePath = String(data.get('councilFilePath') ?? '').trim();
@@ -7370,7 +7383,7 @@ document.addEventListener('submit', event => {
     const council = councilEnabled ? {
       target, maxRounds,
       reviewers: composition?.automatic.enabled && typeof composition.automatic.count === 'number' ? composition.automatic.count : 0,
-      ...(composition ? { reviewerBotIds, composition } : {}),
+      ...(composition ? { reviewerBotIds, composition } : legacyMode === 'selected' ? { reviewerBotIds } : {}),
       ...(issueEnabled ? { postAcceptanceIssue: { authorizationId: crypto.randomUUID(), repository: issueRepo } } : {}),
       ...(scopedFile ? { reviewPermissions: {
         authorizationId: crypto.randomUUID(),
@@ -7382,17 +7395,21 @@ document.addEventListener('submit', event => {
       const name = sidebarBots.find(bot => bot.id === id)?.name;
       return Boolean(name && new RegExp(`(?:^|\\s)@${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}(?=$|\\s|[^\\p{L}\\p{N}_])`, 'iu').test(text));
     }).slice(0, 2);
-    if (councilEnabled && reviewerBotIds.some(id => recipients.includes(id))) {
+    const effectiveRecipients = recipients.length ? recipients : channel?.leadBotId ? [channel.leadBotId] : [];
+    if (councilEnabled && reviewerBotIds.some(id => effectiveRecipients.includes(id))) {
       notify('A message executor cannot also be one of its Council reviewers.');
       return;
     }
     state.sharedChannelDrafts.delete(channelId);
+    state.sharedChannelPostErrors.delete(channelId);
     state.sharedChannelPosting.add(channelId); renderComposer();
     // A failed post goes back to its own channel's draft, unless something new was typed there.
     run(call('bot_shared_channel_post', { channelId, text, ...(recipients.length ? { recipients } : {}), ...(council ? { council } : {}) }).then(() => { state.sharedChannelPosting.delete(channelId); return refreshSharedChannel(channelId); }).catch(error => {
       state.sharedChannelPosting.delete(channelId);
       if (!state.sharedChannelDrafts.get(channelId)?.trim()) state.sharedChannelDrafts.set(channelId, text);
-      notify(error instanceof Error ? error.message : String(error));
+      const message = errorText(error);
+      state.sharedChannelPostErrors.set(channelId, message);
+      notify(message);
       if (channelId === state.sharedChannelId) renderComposer();
     }));
     return;

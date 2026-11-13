@@ -630,6 +630,14 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
         &ledger.council_findings,
     );
     if team.council_status.as_ref().is_some_and(|status| status.state == "passed")
+        && !s3_phase2_decisions_proven(store, team, team.council_status.as_ref().map_or(0, |status| status.round))
+    {
+        if let Some(status) = &mut team.council_status {
+            status.state = "blocked".into();
+            status.notice = Some("council_phase2_decision_missing: every S3 challenge must have a persisted independent challenge receipt.".into());
+        }
+    }
+    if team.council_status.as_ref().is_some_and(|status| status.state == "passed")
         && team.config.council.as_ref().and_then(|config| config.composition.as_ref())
             .and_then(|composition| composition.limits.max_estimated_cost_micros).is_some()
         && !council_cost_cap_proven(store, team)
@@ -648,6 +656,10 @@ fn native_council_status(store: &Store, team: &TeamSnapshot) -> Option<CouncilSt
         &ledger.council_criterion_outcomes,
         &ledger.council_findings,
     )?;
+    if status.state == "passed" && !s3_phase2_decisions_proven(store, team, status.round) {
+        status.state = "blocked".into();
+        status.notice = Some("council_phase2_decision_missing: every S3 challenge must have a persisted independent challenge receipt.".into());
+    }
     if status.state == "passed"
         && team.config.council.as_ref().and_then(|config| config.composition.as_ref())
             .and_then(|composition| composition.limits.max_estimated_cost_micros).is_some()
@@ -675,11 +687,18 @@ fn native_council_finish_refusal(store: &Store, team: &TeamSnapshot) -> Option<S
             return Some("council_cost_cap_unproven: the configured estimated-cost cap cannot be verified from current native estimate and usage receipts.".into());
         }
     }
-    council::finish_refusal_with_ledger(
+    let refusal = council::finish_refusal_with_ledger(
         team,
         &ledger.council_criterion_outcomes,
         &ledger.council_findings,
-    )
+    );
+    if refusal.is_none()
+        && team.council_status.as_ref().is_some_and(|status| status.round > 1)
+        && !s3_phase2_decisions_proven(store, team, team.council_status.as_ref().map_or(0, |status| status.round))
+    {
+        return Some("council_phase2_decision_missing: every S3 challenge must have a persisted independent challenge receipt.".into());
+    }
+    refusal
 }
 
 fn native_council_unreviewed(store: &Store, team: &TeamSnapshot) -> Option<String> {
@@ -1068,12 +1087,34 @@ struct CouncilLedgerSeat {
     attempt: usize,
     result_revision: u64,
     artifact_revision: String,
+    reviewer_artifact_revision: String,
     artifact_digest: String,
     finding_artifact_digest: String,
     policy_fingerprint: String,
     reviewer_id: String,
     child_cycle_id: Option<String>,
     criterion_ids: HashSet<String>,
+}
+
+#[derive(Clone, Copy)]
+struct S2EscalationScope<'a> {
+    task_id: &'a str,
+    task_cycle_id: &'a str,
+    round: usize,
+    seat_id: &'a str,
+    attempt: usize,
+    artifact_revision: &'a str,
+}
+
+fn s2_escalation_scope_from_ledger(scope: &CouncilLedgerSeat) -> S2EscalationScope<'_> {
+    S2EscalationScope {
+        task_id: &scope.task_id,
+        task_cycle_id: &scope.cycle_id,
+        round: scope.round,
+        seat_id: &scope.seat_id,
+        attempt: scope.attempt,
+        artifact_revision: &scope.reviewer_artifact_revision,
+    }
 }
 
 fn empty_council_ledger(team: TeamSnapshot) -> ArchitectReadSnapshot {
@@ -1174,6 +1215,7 @@ fn council_ledger_projection(store: &Store, team: &TeamSnapshot) -> ArchitectRea
             attempt: worker.attempt,
             result_revision: worker.result_revision,
             artifact_revision: binding.artifact_revision.clone(),
+            reviewer_artifact_revision: binding.artifact_revision.clone(),
             artifact_digest: council_artifact_digest(&binding.artifact_revision),
             finding_artifact_digest: council_artifact_digest(&binding.artifact_revision),
             policy_fingerprint,
@@ -1233,6 +1275,7 @@ fn council_ledger_projection(store: &Store, team: &TeamSnapshot) -> ArchitectRea
                 attempt: worker.attempt,
                 result_revision: worker.result_revision,
                 artifact_revision: link.root_artifact_revision.clone(),
+                reviewer_artifact_revision: child_binding.artifact_revision.clone(),
                 artifact_digest: council_artifact_digest(&child_binding.artifact_revision),
                 // Child findings are evidence about the root's frozen artifact.
                 finding_artifact_digest: council_artifact_digest(&link.root_artifact_revision),
@@ -1517,6 +1560,20 @@ fn council_ledger_projection(store: &Store, team: &TeamSnapshot) -> ArchitectRea
     ) else {
         return empty();
     };
+    let Ok(s2_decisions) = council_records::<CouncilS2EscalationReceipt>(
+        store,
+        &team.session_id,
+        "council_s2_escalation",
+    ) else {
+        return empty();
+    };
+    let Ok(s3_decisions) = council_records::<CouncilS3ChallengeReceipt>(
+        store,
+        &team.session_id,
+        "council_s3_challenge",
+    ) else {
+        return empty();
+    };
     let mut usage = Vec::new();
     for record in raw_usage {
         let Some(scope) = seats.iter().find(|scope| {
@@ -1536,13 +1593,51 @@ fn council_ledger_projection(store: &Store, team: &TeamSnapshot) -> ArchitectRea
         } else {
             council::CouncilUsageScope::Root
         };
+        let mut expected_decision_ids = match record.phase {
+            council::CouncilUsagePhase::Review => Some(Vec::new()),
+            council::CouncilUsagePhase::Escalation if record.strategy == council::CouncilStrategy::Escalated => {
+                let followup = s2_escalation_scope_from_ledger(scope);
+                let mut ids = s2_decisions.iter().filter(|decision| {
+                    seats.iter().any(|source| {
+                        s2_escalation_receipt_matches_followup(
+                            decision,
+                            &root_cycle_id,
+                            s2_escalation_scope_from_ledger(source),
+                            followup,
+                        )
+                    })
+                }).map(s2_escalation_decision_id).collect::<Vec<_>>();
+                ids.sort();
+                ids.dedup();
+                (!ids.is_empty()).then_some(ids)
+            }
+            council::CouncilUsagePhase::Challenge if record.strategy == council::CouncilStrategy::TwoPhase => {
+                s3_decisions.iter().find(|decision| {
+                    decision.validate()
+                        && decision.root_cycle_id == root_cycle_id
+                        && decision.task_id == scope.task_id
+                        && decision.task_cycle_id == scope.cycle_id
+                        && decision.round == scope.round
+                        && decision.seat_id == scope.seat_id
+                        && decision.attempt == scope.attempt
+                        && decision.artifact_revision == scope.artifact_revision
+                }).map(|decision| vec![decision.id.clone()])
+            }
+            _ => None,
+        };
+        let decision_ids_match = expected_decision_ids.as_mut().is_some_and(|ids| {
+            ids.sort();
+            let mut actual = record.decision_ids.clone();
+            actual.sort();
+            *ids == actual
+        });
         if record.validate().is_err()
             || record.id != expected_id
             || record.attempt_id != format!("{}:{}", scope.seat_id, scope.attempt)
             || record.round_id != format!("{}:{}", scope.cycle_id, scope.round)
             || record.reviewer_id != scope.reviewer_id
             || record.scope != expected_scope
-            || record.phase != council::CouncilUsagePhase::Review
+            || !decision_ids_match
         {
             continue;
         }
@@ -1763,6 +1858,350 @@ struct CouncilS2EscalationReceipt {
     decided_at_ms: u64,
 }
 
+fn s2_escalation_receipt_matches_followup(
+    receipt: &CouncilS2EscalationReceipt,
+    root_cycle_id: &str,
+    source: S2EscalationScope<'_>,
+    followup: S2EscalationScope<'_>,
+) -> bool {
+    receipt.schema_version == 1
+        && receipt.root_cycle_id == root_cycle_id
+        && receipt.task_id == source.task_id
+        && source.task_id == followup.task_id
+        && receipt.task_cycle_id == source.task_cycle_id
+        && source.task_cycle_id == followup.task_cycle_id
+        && receipt.round == source.round
+        && receipt.round.checked_add(1) == Some(followup.round)
+        && receipt.seat_id == source.seat_id
+        && receipt.attempt == source.attempt
+        && receipt.artifact_revision == source.artifact_revision
+        && council::same_artifact_revision(&receipt.artifact_revision, followup.artifact_revision)
+        && receipt.threshold.is_finite()
+        && (1.0..=10.0).contains(&receipt.threshold)
+        && receipt.decided_at_ms > 0
+}
+
+fn s2_escalation_decision_id(receipt: &CouncilS2EscalationReceipt) -> String {
+    format!(
+        "native-council-s2-trigger:{}:{}:{}:{}:{}:{}",
+        receipt.root_cycle_id,
+        receipt.task_cycle_id,
+        receipt.round,
+        receipt.seat_id,
+        receipt.attempt,
+        s2_trigger_name(receipt.trigger),
+    )
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CouncilS3ChallengeReceipt {
+    schema_version: u8,
+    id: String,
+    root_cycle_id: String,
+    task_cycle_id: String,
+    task_id: String,
+    round: usize,
+    seat_id: String,
+    attempt: usize,
+    artifact_revision: String,
+    reviewer_id: String,
+    author_seat_ids: Vec<String>,
+    finding_ids: Vec<String>,
+    decided_at_ms: u64,
+}
+
+impl CouncilS3ChallengeReceipt {
+    fn validate(&self) -> bool {
+        let valid_token = |value: &str| {
+            !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control)
+        };
+        let unique = |items: &[String]| {
+            let mut seen = HashSet::new();
+            items.iter().all(|item| valid_token(item) && seen.insert(item.as_str()))
+        };
+        self.schema_version == 1
+            && valid_token(&self.id)
+            && valid_token(&self.root_cycle_id)
+            && valid_token(&self.task_cycle_id)
+            && valid_token(&self.task_id)
+            && self.round > 1
+            && valid_token(&self.seat_id)
+            && self.attempt > 0
+            && valid_token(&self.artifact_revision)
+            && valid_token(&self.reviewer_id)
+            && !self.author_seat_ids.is_empty()
+            && self.author_seat_ids.len() <= 8
+            && self.finding_ids.len() <= 128
+            && unique(&self.author_seat_ids)
+            && unique(&self.finding_ids)
+            && self.decided_at_ms > 0
+            && self.id == format!(
+                "native-council-s3-challenge:{}:{}:{}:{}",
+                self.task_cycle_id, self.round, self.seat_id, self.attempt
+            )
+    }
+}
+
+fn s3_challenge_decision_id(task_cycle_id: &str, round: usize, seat_id: &str, attempt: usize) -> String {
+    format!("native-council-s3-challenge:{task_cycle_id}:{round}:{seat_id}:{attempt}")
+}
+
+fn council_ledger_owner(store: &Store, team: &TeamSnapshot) -> Result<(String, String)> {
+    if let Some(link) = validate_council_child_link(store, &team.session_id)? {
+        Ok((link.root_session_id, link.root_council_cycle_id))
+    } else {
+        Ok((team.session_id.clone(), format!("{}:{}", team.session_id, team.council_since)))
+    }
+}
+
+fn challenge_reviewer_identity(worker: &Worker) -> String {
+    worker.reviewer_binding.as_ref().map_or_else(
+        || format!("{}:{}", worker.provider, worker.model),
+        |binding| binding.reviewer_bot_id.clone().unwrap_or_else(|| {
+            format!("{}:{}", binding.snapshot.provider, binding.snapshot.model)
+        }),
+    )
+}
+
+fn s3_challenge_receipt_for_worker(
+    store: &Store,
+    team: &TeamSnapshot,
+    worker: &Worker,
+) -> Result<Option<CouncilS3ChallengeReceipt>> {
+    let (Some(binding), Some(seat)) = (&worker.reviewer_binding, &worker.council) else {
+        return Ok(None);
+    };
+    if seat.round <= 1
+        || !team.config.council.as_ref().and_then(|config| config.composition.as_ref())
+            .is_some_and(|composition| composition.strategy == council::CouncilStrategy::TwoPhase)
+    {
+        return Ok(None);
+    }
+    let (owner, root_cycle_id) = council_ledger_owner(store, team)?;
+    let task_cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    let id = s3_challenge_decision_id(&task_cycle_id, seat.round, &worker.id, worker.attempt);
+    let receipts = council_records::<CouncilS3ChallengeReceipt>(store, &owner, "council_s3_challenge")?;
+    let Some(receipt) = receipts.into_iter().find(|receipt| {
+        receipt.validate()
+            && receipt.id == id
+            && receipt.root_cycle_id == root_cycle_id
+            && receipt.task_cycle_id == task_cycle_id
+            && receipt.task_id == team.session_id
+            && receipt.round == seat.round
+            && receipt.seat_id == worker.id
+            && receipt.attempt == worker.attempt
+            && receipt.artifact_revision == binding.artifact_revision
+            && receipt.reviewer_id == challenge_reviewer_identity(worker)
+    }) else { return Ok(None) };
+    let Some(config) = team.config.council.as_ref() else { return Ok(None) };
+    let ledger = council_ledger_projection(store, team);
+    if !council::two_phase_phase1_ready(team, config, &ledger.council_criterion_outcomes, &ledger.council_findings) {
+        return Ok(None);
+    }
+    let mut authors = team.workers.iter().filter(|author| {
+        author.council.as_ref().is_some_and(|author_seat| {
+            author_seat.round == 1 && (!author.abandoned || author_seat.score.is_some())
+                && author_seat.score.is_some()
+        })
+    }).collect::<Vec<_>>();
+    authors.sort_by(|left, right| left.id.cmp(&right.id));
+    let expected_authors = authors.iter().map(|author| author.id.clone()).collect::<Vec<_>>();
+    let author_set = expected_authors.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut expected_findings = ledger.council_findings.iter()
+        .filter(|finding| author_set.contains(finding.seat_id.as_str()))
+        .map(|finding| finding.id.clone())
+        .collect::<Vec<_>>();
+    expected_findings.sort();
+    expected_findings.dedup();
+    let independent = authors.iter().all(|author| {
+        author.reviewer_binding.as_ref().is_some_and(|author_binding| {
+            author_binding.council_cycle_id == binding.council_cycle_id
+                && council::same_artifact_revision(&author_binding.artifact_revision, &binding.artifact_revision)
+                && author_binding.delivery_id == binding.delivery_id
+                && challenge_reviewer_identity(author) != receipt.reviewer_id
+        })
+    });
+    let matching_lens = authors.iter().any(|author| {
+        author.council.as_ref().is_some_and(|author_seat| {
+            author_seat.lens.trim().eq_ignore_ascii_case(seat.lens.trim())
+        })
+    });
+    if receipt.author_seat_ids != expected_authors
+        || receipt.finding_ids != expected_findings
+        || !independent
+        || !matching_lens
+    {
+        return Ok(None);
+    }
+    Ok(Some(receipt))
+}
+
+fn persist_s3_challenge_decision(store: &Store, team: &TeamSnapshot, worker: &Worker) -> Result<()> {
+    let (Some(binding), Some(seat)) = (&worker.reviewer_binding, &worker.council) else {
+        return Ok(());
+    };
+    let Some(config) = team.config.council.as_ref() else { return Ok(()) };
+    let Some(composition) = config.composition.as_ref() else { return Ok(()) };
+    if composition.strategy != council::CouncilStrategy::TwoPhase || seat.round <= 1 {
+        return Ok(());
+    }
+    let ledger = council_ledger_projection(store, team);
+    if !council::two_phase_phase1_ready(
+        team,
+        config,
+        &ledger.council_criterion_outcomes,
+        &ledger.council_findings,
+    ) {
+        return Err("council_phase2_blocked: phase 1 must pass with complete source coverage before challenge seats are dispatched.".into());
+    }
+    let root_task_cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    let mut authors = team.workers.iter().filter(|author| {
+        author.council.as_ref().is_some_and(|author_seat| {
+            author_seat.round == 1 && (!author.abandoned || author_seat.score.is_some())
+                && author_seat.score.is_some()
+        })
+    }).collect::<Vec<_>>();
+    authors.sort_by(|left, right| left.id.cmp(&right.id));
+    if authors.is_empty() {
+        return Err("council_phase2_blocked: phase 1 has no scored reviewer reports to challenge.".into());
+    }
+    let challenger_identity = challenge_reviewer_identity(worker);
+    if team.workers.iter().any(|other| {
+        other.id != worker.id
+            && other.council.as_ref().is_some_and(|other_seat| other_seat.round == seat.round)
+            && challenge_reviewer_identity(other) == challenger_identity
+    }) {
+        return Err("council_phase2_blocked: challenge reviewers must use distinct reviewer identities.".into());
+    }
+    let mut has_matching_lens = false;
+    for author in &authors {
+        let (Some(author_binding), Some(author_seat)) = (&author.reviewer_binding, &author.council) else {
+            return Err("council_phase2_blocked: a phase-1 report has no frozen reviewer identity.".into());
+        };
+        if author_binding.council_cycle_id != binding.council_cycle_id
+            || !council::same_artifact_revision(&author_binding.artifact_revision, &binding.artifact_revision)
+            || author_binding.delivery_id != binding.delivery_id
+        {
+            return Err("council_phase2_blocked: phase-1 reports and challenge seat do not share one frozen artifact and delivery.".into());
+        }
+        has_matching_lens |= author_seat.lens.trim().eq_ignore_ascii_case(seat.lens.trim());
+        if challenge_reviewer_identity(author) == challenger_identity {
+            return Err("council_phase2_blocked: every challenge reviewer must be independent of every phase-1 report author.".into());
+        }
+    }
+    if !has_matching_lens {
+        return Err("council_phase2_blocked: the challenge lens has no matching phase-1 report.".into());
+    }
+    let author_ids = authors.iter().map(|author| author.id.clone()).collect::<Vec<_>>();
+    let author_set = author_ids.iter().map(String::as_str).collect::<HashSet<_>>();
+    let mut finding_ids = ledger.council_findings.iter()
+        .filter(|finding| author_set.contains(finding.seat_id.as_str()))
+        .map(|finding| finding.id.clone())
+        .collect::<Vec<_>>();
+    finding_ids.sort();
+    finding_ids.dedup();
+    let (owner, root_cycle_id) = council_ledger_owner(store, team)?;
+    let task_cycle_id = binding.council_cycle_id.clone();
+    let receipt = CouncilS3ChallengeReceipt {
+        schema_version: 1,
+        id: s3_challenge_decision_id(&task_cycle_id, seat.round, &worker.id, worker.attempt),
+        root_cycle_id,
+        task_cycle_id,
+        task_id: team.session_id.clone(),
+        round: seat.round,
+        seat_id: worker.id.clone(),
+        attempt: worker.attempt,
+        artifact_revision: binding.artifact_revision.clone(),
+        reviewer_id: challenger_identity,
+        author_seat_ids: author_ids,
+        finding_ids,
+        decided_at_ms: storage::now().max(1) as u64,
+    };
+    if !receipt.validate() || binding.council_cycle_id != root_task_cycle_id {
+        return Err("council_phase2_blocked: challenge decision could not be correlated to its frozen seat.".into());
+    }
+    persist_council_record(store, &owner, &receipt.id, "council_s3_challenge", &receipt, &worker.id)
+}
+
+fn s2_escalation_decisions_for_worker(
+    store: &Store,
+    team: &TeamSnapshot,
+    worker: &Worker,
+    root_cycle_id: &str,
+    ledger_owner: &str,
+) -> Result<Vec<String>> {
+    let (Some(binding), Some(seat)) = (&worker.reviewer_binding, &worker.council) else {
+        return Ok(Vec::new());
+    };
+    if seat.round <= 1
+        || !team.config.council.as_ref().and_then(|config| config.composition.as_ref())
+            .is_some_and(|composition| composition.strategy == council::CouncilStrategy::Escalated)
+        || binding.validate(team, worker).is_err()
+        || reviewer_security::validate_issued_authority(store, &team.session_id, binding).is_err()
+    {
+        return Ok(Vec::new());
+    }
+    let records = council_records::<CouncilS2EscalationReceipt>(store, ledger_owner, "council_s2_escalation")?;
+    let followup = S2EscalationScope {
+        task_id: &team.session_id,
+        task_cycle_id: &binding.council_cycle_id,
+        round: seat.round,
+        seat_id: &worker.id,
+        attempt: worker.attempt,
+        artifact_revision: &binding.artifact_revision,
+    };
+    let mut ids = records.into_iter().filter(|receipt| {
+        team.workers.iter().any(|source_worker| {
+            if source_worker.abandoned {
+                return false;
+            }
+            let (Some(source_binding), Some(source_seat)) =
+                (&source_worker.reviewer_binding, &source_worker.council)
+            else {
+                return false;
+            };
+            if source_binding.council_cycle_id != binding.council_cycle_id
+                || source_binding.validate(team, source_worker).is_err()
+                || reviewer_security::validate_issued_authority(
+                    store,
+                    &team.session_id,
+                    source_binding,
+                )
+                .is_err()
+            {
+                return false;
+            }
+            let source = S2EscalationScope {
+                task_id: &team.session_id,
+                task_cycle_id: &source_binding.council_cycle_id,
+                round: source_seat.round,
+                seat_id: &source_worker.id,
+                attempt: source_worker.attempt,
+                artifact_revision: &source_binding.artifact_revision,
+            };
+            s2_escalation_receipt_matches_followup(receipt, root_cycle_id, source, followup)
+        })
+    }).map(|receipt| s2_escalation_decision_id(&receipt)).collect::<Vec<_>>();
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
+fn s3_phase2_decisions_proven(store: &Store, team: &TeamSnapshot, round: usize) -> bool {
+    if round <= 1 || !team.config.council.as_ref().and_then(|config| config.composition.as_ref())
+        .is_some_and(|composition| composition.strategy == council::CouncilStrategy::TwoPhase)
+    {
+        return true;
+    }
+    let seats = team.workers.iter().filter(|worker| worker.council.as_ref().is_some_and(|seat| {
+        seat.round == round && (!worker.abandoned || seat.score.is_some())
+    })).collect::<Vec<_>>();
+    !seats.is_empty() && seats.iter().all(|worker| {
+        s3_challenge_receipt_for_worker(store, team, worker).is_ok_and(|receipt| receipt.is_some())
+    })
+}
+
 fn nested_decision_key(decision: &council::NestedEscalationDecision) -> String {
     let phase = match decision.phase {
         council::NestedEscalationPhase::Preliminary => "preliminary",
@@ -1874,10 +2313,7 @@ fn persist_nested_decision(store: &Store, root_session_id: &str, decision: &coun
                         .map(|criterion| (criterion.id.clone(), criterion.target)).collect(),
                     decided_at_ms: decision.decided_at_ms.max(1),
                 };
-                let key = format!(
-                    "native-council-s2-trigger:{}:{}:{}:{}:{}:{}",
-                    root_cycle_id, decision.cycle_id, decision.round, decision.seat_id, decision.attempt, s2_trigger_name(trigger),
-                );
+                let key = s2_escalation_decision_id(&receipt);
                 persist_council_record(store, root_session_id, &key, "council_s2_escalation", &receipt, &decision.seat_id)?;
             }
         }
@@ -2028,10 +2464,7 @@ fn persist_s2_escalation_signals(
                 .map(|criterion| (criterion.id.clone(), criterion.target)).collect(),
             decided_at_ms: worker.updated_at.max(1) as u64,
         };
-        let key = format!(
-            "native-council-s2-trigger:{}:{}:{}:{}:{}:{}",
-            root_cycle_id, task_cycle_id, signal.round, signal.seat_id, signal.attempt, s2_trigger_name(signal.trigger),
-        );
+        let key = s2_escalation_decision_id(&receipt);
         persist_council_record(store, root_session_id, &key, "council_s2_escalation", &receipt, &signal.seat_id)?;
     }
     Ok(())
@@ -2357,11 +2790,23 @@ fn persist_council_terminal_receipts(
         status: council::CouncilUsageValueStatus::CalculatedEstimated,
         value: Some(value),
     });
+    let decision_ids = match strategy {
+        council::CouncilStrategy::Escalated => s2_escalation_decisions_for_worker(
+            store, team, worker, &root_cycle_id, ledger_owner,
+        )?,
+        council::CouncilStrategy::TwoPhase => s3_challenge_receipt_for_worker(store, team, worker)?
+            .map(|receipt| vec![receipt.id])
+            .unwrap_or_default(),
+        council::CouncilStrategy::Parallel => Vec::new(),
+    };
     let phase = match strategy {
-        council::CouncilStrategy::Escalated if seat.round > 1 => council::CouncilUsagePhase::Escalation,
-        council::CouncilStrategy::TwoPhase if seat.round > 1 => council::CouncilUsagePhase::Challenge,
+        council::CouncilStrategy::Escalated if !decision_ids.is_empty() => council::CouncilUsagePhase::Escalation,
+        council::CouncilStrategy::TwoPhase if !decision_ids.is_empty() => council::CouncilUsagePhase::Challenge,
         _ => council::CouncilUsagePhase::Review,
     };
+    let escalation_count = if phase == council::CouncilUsagePhase::Escalation {
+        decision_ids.len().min(u32::MAX as usize) as u32
+    } else { 0 };
     let usage = council::CouncilUsageRecord {
         id: format!(
             "native-council-usage:{}:{}:{}",
@@ -2385,12 +2830,13 @@ fn persist_council_terminal_receipts(
         },
         phase,
         strategy,
+        decision_ids: decision_ids.clone(),
         started_at_ms,
         finished_at_ms,
         queue_wait_ms: queue_wait,
         elapsed_ms: elapsed,
         retries: council_usage_known(worker.attempt.saturating_sub(1).min(u32::MAX as usize) as u32),
-        escalations: council_usage_known(u32::from(strategy == council::CouncilStrategy::Escalated && seat.round > 1)),
+        escalations: council_usage_known(escalation_count),
         provider: Some(worker.provider.clone()),
         model: Some(worker.model.clone()),
         harness: Some(worker.provider.clone()),
@@ -2665,7 +3111,8 @@ fn council_leaf_review_total(
     root_round: usize,
 ) -> Result<usize> {
     let root_reviews = root.workers.iter().filter(|worker| {
-        !worker.abandoned && worker.council.as_ref().is_some_and(|seat| seat.round == root_round)
+        worker.created_at >= root.council_since
+            && worker.council.as_ref().is_some_and(|seat| seat.round == root_round)
     }).count();
     let mut total = root_reviews;
     for link in council_child_links_for_root(store, &root.session_id, cycle_id, root_round)? {
@@ -2674,9 +3121,9 @@ fn council_leaf_review_total(
         } else {
             load(store, &link.child_session_id)?.ok_or("reviewer_session_mismatch: nested Council task disappeared during budget accounting.")?
         };
-        total = total.saturating_add(child.workers.iter().filter(|worker| {
-            !worker.abandoned && worker.council.is_some()
-        }).count());
+        total = total.saturating_add(child.workers.iter()
+            .filter(|worker| worker.created_at >= child.council_since && worker.council.is_some())
+            .count());
     }
     Ok(total)
 }
@@ -3461,14 +3908,17 @@ fn rules(store: &Store, team: &TeamSnapshot, sid: &str) -> Result<(String, Strin
         } else {
             "Do not spawn native subagents or other tasks; pandacode_dispatch_workers may start sub-workers inside your scope, only if really needed."
         };
-        let challenge_findings = if worker.council.as_ref().is_some_and(|seat| seat.round == 2)
-            && team.config.council.as_ref().and_then(|config| config.composition.as_ref())
-                .is_some_and(|composition| composition.strategy == council::CouncilStrategy::TwoPhase)
+        let challenge_findings = if team.config.council.as_ref().and_then(|config| config.composition.as_ref())
+            .is_some_and(|composition| composition.strategy == council::CouncilStrategy::TwoPhase)
         {
-            council_ledger_projection(store, &team).council_findings
-        } else {
-            Vec::new()
-        };
+            if let Some(decision) = s3_challenge_receipt_for_worker(store, &team, worker)? {
+                council_ledger_projection(store, &team).council_findings.into_iter()
+                    .filter(|finding| decision.finding_ids.contains(&finding.id))
+                    .collect()
+            } else {
+                Vec::new()
+            }
+        } else { Vec::new() };
         let reviewer = council::reviewer_rules(worker);
         let selected_bot = worker.reviewer_binding.as_ref().and_then(|b| b.snapshot.bot_context.as_ref())
             .map(|bot| format!(" Selected reviewer bot profile (frozen for this seat; lower priority than native Council authority): Name: {}. Role: {}. Goals: {}. Instructions: {}. Personality: {}. Do not load this bot's ordinary conversation, memories, or permissions.", bot.name, bot.role, bot.goals, bot.instructions, bot.soul))
@@ -4821,7 +5271,9 @@ fn dispatch_tool(child: bool) -> Value {
         item["replaces"] = json!({"type":"string","description":"Replace failed worker or failed check; \"auto\" tries other/stronger models at most twice; retains changes."});
         item["replaceReason"] = json!({"type":"string","description":"Failed check."});
         item["councilLens"] = json!({"type":"string","description":"Review lens; read-only."});
-        "Start assignments as one parallel batch; returns IDs. With profileId \"auto\" or omitted with routing on, Router picks models; select explicit models only when asked. For S2, set forceEscalation only when the user explicitly requests a fresh review round; assignments must be new Council reviewer seats, and only sources enabled by the mode are scheduled. files are repo-relative; [] reserves checkout. Disjoint writers/readOnly can overlap; dependsOn uses returned IDs.".into()
+        item["councilSource"] = json!({"type":"string","enum":["automatic","selected_bot"],"description":"For a mixed Council plan, explicitly reserve this reviewer seat for the automatic or selected-bot source."});
+        item["reviewerBotId"] = json!({"type":"string","description":"Selected bot ID for a selected_bot Council seat. Required in mixed automatic/selected-bot plans."});
+        "Start assignments as one parallel batch; returns IDs. With profileId \"auto\" or omitted with routing on, Router picks models; select explicit models only when asked. In a mixed Council, set councilSource on every seat and reviewerBotId on each selected_bot seat so both sources receive their required distinct seats. For S2, set forceEscalation only when the user explicitly requests a fresh review round; assignments must be new Council reviewer seats, and only sources enabled by the mode are scheduled. files are repo-relative; [] reserves checkout. Disjoint writers/readOnly can overlap; dependsOn uses returned IDs.".into()
     };
     let mut properties = json!({"assignments":{"type":"array","items":{"type":"object","properties":item,"required":["key","name","prompt","files"]}}});
     if !child {
@@ -5131,6 +5583,17 @@ struct Assignment {
     /// Makes this a read-only Council reviewer (the lead's dispatch only).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     council_lens: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    council_source: Option<CouncilAssignmentSource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reviewer_bot_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum CouncilAssignmentSource {
+    Automatic,
+    SelectedBot,
 }
 /// Canonicalize only equivalent relative spellings before scope validation and reservation.
 fn normalize_file_scopes(files: &mut [String]) {
@@ -5955,6 +6418,11 @@ fn dispatch_as_inner(
                     assignment.council_lens.as_deref(),
                     assignment.replaces.as_deref(),
                 )?;
+                if seat.is_none()
+                    && (assignment.council_source.is_some() || assignment.reviewer_bot_id.is_some())
+                {
+                    return Err("council_source_invalid: councilSource and reviewerBotId require a Council seat with councilLens.".into());
+                }
                 if let (Some(seat), Some(composition)) = (
                     seat.as_ref(),
                     composition_root.config.council.as_ref().and_then(|config| config.composition.as_ref()),
@@ -5977,20 +6445,37 @@ fn dispatch_as_inner(
                 // While routing is on, an assignment that names no model is routed too (`routes` has its key).
                 // The request above keeps the name as sent, so a retry still matches it.
                 let shown: String = assignment.name.chars().take(NAME_CHARS).collect();
+                let mixed_source_plan = team.config.council.as_ref().is_some_and(|config| {
+                    let plan = config.seat_plan();
+                    plan.automatic > 0 && plan.selected_bots() > 0
+                });
+                let use_legacy_seating = assignment.council_source.is_none()
+                    && assignment.reviewer_bot_id.is_none()
+                    && !mixed_source_plan;
                 let selected_bot = if let Some(seat) = &seat {
                     if test_reviewer_execution {
                         #[cfg(test)]
-                        { bot_reviewers::seat_bot_inner(&store, &team, seat.round, assignment.replaces.as_deref(), false)? }
+                        { if use_legacy_seating {
+                            bot_reviewers::seat_bot_inner(&store, &team, seat.round, assignment.replaces.as_deref(), false)?
+                        } else {
+                            bot_reviewers::seat_bot_inner_for_assignment(&store, &team, seat.round, assignment.replaces.as_deref(), assignment.council_source, assignment.reviewer_bot_id.as_deref(), false)?
+                        } }
                         #[cfg(not(test))]
                         { return Err("Test reviewer execution is unavailable.".into()); }
                     } else {
-                        bot_reviewers::seat_bot(
-                            &store,
-                            &team,
-                            seat.round,
-                            assignment.replaces.as_deref(),
-                            library,
-                        )?
+                        if use_legacy_seating {
+                            bot_reviewers::seat_bot(&store, &team, seat.round, assignment.replaces.as_deref(), library)?
+                        } else {
+                            bot_reviewers::seat_bot_for_assignment(
+                                &store,
+                                &team,
+                                seat.round,
+                                assignment.replaces.as_deref(),
+                                assignment.council_source,
+                                assignment.reviewer_bot_id.as_deref(),
+                                library,
+                            )?
+                        }
                     }
                 } else {
                     None
@@ -6208,6 +6693,7 @@ fn dispatch_as_inner(
                     wrote_at: 0,
                 });
                 let worker = team.workers.last().ok_or("Council worker was not saved.")?.clone();
+                persist_s3_challenge_decision(&store, &team, &worker)?;
                 if let Some((_, estimate)) = s2_estimate.as_ref() {
                     let root_session_id = nested_child_link.as_ref().map_or(sid, |link| link.root_session_id.as_str());
                     let root_cycle_id = nested_child_link.as_ref().map_or_else(

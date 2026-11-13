@@ -52,6 +52,32 @@ test.describe('shared bot channels', () => {
     }
   });
 
+  test('shared channel schema-v1 preview shows the draft without implying review evidence', async ({ page }) => {
+    test.setTimeout(120_000);
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' }).check();
+
+    const preview = panel.locator('[data-bc-plan-preview]');
+    const previewText = panel.locator('[data-bc-plan-preview-text]');
+    await expect(preview).toBeVisible();
+    await expect(previewText).toContainText('Draft only · configuration preview, not a review result');
+    await expect(previewText).toContainText('Schema version: 1');
+    await expect(previewText).toContainText('Reviewer sources: A · M1');
+    await expect(previewText).toContainText('A · Automatic Architect reviewers: Auto');
+    await expect(previewText).toContainText('Strategy: S1 · Parallel');
+    await expect(previewText).toContainText('Architect-provided criteria are not included in this composer preview.');
+    await expect(previewText).toContainText('Evidence status: not evaluated in this preview.');
+
+    await panel.getByRole('combobox', { name: 'Criteria source' }).selectOption('user');
+    await panel.locator('[data-bc-criterion-field="description"]').fill('Check the acceptance evidence.');
+    await expect(previewText).toContainText('Criteria source: User');
+    await expect(previewText).toContainText('Check the acceptance evidence.');
+  });
+
   test('shared Council state ignores a higher-revision event from an earlier cycle', async ({ page }) => {
     await page.addInitScript(() => localStorage.setItem('pandacode.teamClassic', 'false'));
     await showBots(page);
@@ -133,16 +159,16 @@ test.describe('shared bot channels', () => {
     const panel = composer.getByRole('dialog', { name: 'Council' });
     const councilTrigger = composer.locator('.bc-council-trigger');
     const reviewerRows = panel.locator('[data-bc-reviewer-row]');
-    const reviewers = panel.locator('input[name="councilReviewer"]');
+    const reviewers = panel.locator('[data-bc-reviewer]');
     const configureComposition = async (strategy: string) => {
       await panel.getByRole('switch', { name: 'Council' }).check();
       await panel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' }).check();
       await panel.getByRole('combobox', { name: 'Automatic reviewer count' }).selectOption('2');
-      await reviewers.nth(0).check();
       await reviewers.nth(1).check();
-      await reviewerRows.nth(0).getByRole('combobox', { name: 'Reviewer branch' }).selectOption('direct');
-      const nestedPolicy = reviewerRows.nth(1).locator('[data-bc-nested-policy]');
-      await reviewerRows.nth(1).getByRole('combobox', { name: 'Reviewer branch' }).selectOption('nested');
+      await reviewers.nth(2).check();
+      await reviewerRows.nth(1).getByRole('combobox', { name: 'Reviewer branch' }).selectOption('direct');
+      const nestedPolicy = reviewerRows.nth(2).locator('[data-bc-nested-policy]');
+      await reviewerRows.nth(2).getByRole('combobox', { name: 'Reviewer branch' }).selectOption('nested');
       await nestedPolicy.getByRole('combobox', { name: 'Task template' }).selectOption('validated_default');
       await nestedPolicy.getByRole('combobox', { name: 'Child criteria' }).selectOption('hybrid');
       await nestedPolicy.getByRole('spinbutton', { name: 'Child reviewers' }).fill('3');
@@ -198,6 +224,71 @@ test.describe('shared bot channels', () => {
     }
   });
 
+  test('no-mention M2 composition accepts two non-lead reviewers beside the fallback lead', async ({ page }) => {
+    test.setTimeout(120_000);
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    const prompt = page.getByRole('textbox', { name: 'Message channel' });
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' }).check();
+    await panel.getByRole('checkbox', { name: 'Include automatic Architect reviewers (A)' }).uncheck();
+    const rows = panel.locator('[data-bc-reviewer-row]');
+    const names = await rows.locator('.council-composition-bot strong').allTextContents();
+    expect(names).toEqual(['Scout', 'Writer', 'Ledger', 'Dozy']);
+    const reviewers = panel.locator('[data-bc-reviewer]');
+    await reviewers.nth(1).check();
+    await reviewers.nth(2).check();
+    await expect(panel.locator('[data-bc-source-summary]')).toHaveText('Sources D · M2');
+    const selected = await reviewers.evaluateAll(inputs => inputs.filter(input => (input as HTMLInputElement).checked).map(input => (input as HTMLInputElement).value));
+    await prompt.fill('Review the launch plan without naming an executor');
+    expect(await prompt.inputValue()).not.toMatch(/@/);
+
+    await composer.locator('button[type="submit"]').click();
+    const posts = () => page.evaluate(() => (window as any).__previewSharedChannelPosts ?? []);
+    await expect.poll(async () => (await posts()).length).toBe(1);
+    expect((await posts())[0]).toMatchObject({
+      channelId: 'sample-launch',
+      text: 'Review the launch plan without naming an executor',
+      council: {
+        reviewers: 0,
+        reviewerBotIds: selected,
+        composition: {
+          schemaVersion: 1,
+          automatic: { enabled: false, count: 0 },
+          selected: selected.map((botId: string) => ({ botId, mode: 'direct', required: true })),
+        },
+      },
+    });
+  });
+
+  test('no-mention M2 composition rejects a selected fallback lead', async ({ page }) => {
+    test.setTimeout(120_000);
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    const prompt = page.getByRole('textbox', { name: 'Message channel' });
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' }).check();
+    await panel.getByRole('checkbox', { name: 'Include automatic Architect reviewers (A)' }).uncheck();
+    const rows = panel.locator('[data-bc-reviewer-row]');
+    await expect(rows.first().locator('.council-composition-bot strong')).toHaveText('Scout');
+    await panel.locator('[data-bc-reviewer]').nth(0).check();
+    await panel.locator('[data-bc-reviewer]').nth(1).check();
+    await expect(panel.locator('[data-bc-source-summary]')).toHaveText('Sources D · M2');
+    await prompt.fill('Review without explicit @mentions');
+
+    await composer.locator('button[type="submit"]').click();
+    const posts = () => page.evaluate(() => (window as any).__previewSharedChannelPosts ?? []);
+    expect(await posts()).toHaveLength(0);
+    await expect(page.locator('#toast')).toContainText('A message executor cannot also be one of its Council reviewers.');
+    await expect(composer).toHaveAttribute('aria-busy', 'false');
+  });
+
   test('shared channel legacy Council submission omits absent composition', async ({ page }) => {
     test.setTimeout(120_000);
     await showBots(page);
@@ -221,6 +312,255 @@ test.describe('shared bot channels', () => {
     });
   });
 
+  test('shared channel legacy selected-bot Council submission stays available when composition is off', async ({ page }) => {
+    test.setTimeout(120_000);
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    const prompt = page.getByRole('textbox', { name: 'Message channel' });
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.locator('input[name="councilMode"][value="selected"]').check();
+    const reviewers = panel.locator('[data-bc-legacy-reviewer]');
+    await reviewers.nth(1).check();
+    await reviewers.nth(2).check();
+    const selectedIds = await reviewers.evaluateAll(inputs => inputs.filter(input => (input as HTMLInputElement).checked).map(input => (input as HTMLInputElement).value));
+    await expect(panel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' })).not.toBeChecked();
+    await prompt.fill('Keep selected legacy reviewers');
+    const target = panel.getByRole('spinbutton', { name: 'Custom target score' });
+    await target.fill('11');
+    await composer.locator('button[type="submit"]').click();
+    await expect(target).toHaveAttribute('aria-invalid', 'true');
+    await expect(target).toBeFocused();
+    const posts = () => page.evaluate(() => (window as any).__previewSharedChannelPosts ?? []);
+    expect(await posts()).toHaveLength(0);
+
+    // Correcting the legacy target clears its error without dropping the selected M2 reviewers.
+    await target.fill('9');
+    await expect(target).not.toHaveAttribute('aria-invalid', 'true');
+    await composer.locator('button[type="submit"]').click();
+
+    await expect.poll(async () => (await posts()).length).toBe(1);
+    expect((await posts())[0]).toEqual({
+      channelId: 'sample-launch',
+      text: 'Keep selected legacy reviewers',
+      council: { target: 9, maxRounds: 10, reviewers: 0, reviewerBotIds: selectedIds },
+    });
+  });
+
+  test('shared channel Council submission announces and clears its loading state', async ({ page }) => {
+    test.setTimeout(120_000);
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    await page.getByRole('textbox', { name: 'Message channel' }).fill('Wait for the channel post');
+    await page.evaluate(() => {
+      (window as any).__channelPostLoadingState = new Promise(resolve => {
+        document.addEventListener('submit', event => {
+          if ((event.target as HTMLFormElement | null)?.id !== 'shared-channel-composer') return;
+          queueMicrotask(() => {
+            const form = document.querySelector<HTMLFormElement>('#shared-channel-composer')!;
+            resolve({
+              busy: form.getAttribute('aria-busy'),
+              promptDisabled: form.querySelector<HTMLTextAreaElement>('#shared-channel-prompt')?.disabled,
+              sendDisabled: form.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled,
+              liveText: form.querySelector<HTMLElement>('[data-bc-post-status]')?.textContent?.trim(),
+              liveRole: form.querySelector<HTMLElement>('[data-bc-post-status]')?.getAttribute('role'),
+              liveMode: form.querySelector<HTMLElement>('[data-bc-post-status]')?.getAttribute('aria-live'),
+            });
+          });
+        }, { once: true });
+      });
+    });
+    await composer.locator('button[type="submit"]').click();
+    const loading = await page.evaluate(() => (window as any).__channelPostLoadingState);
+    expect(loading).toEqual({ busy: 'true', promptDisabled: true, sendDisabled: true, liveText: 'Sending message to channel…', liveRole: 'status', liveMode: 'polite' });
+    await expect.poll(() => composer.getAttribute('aria-busy')).toBe('false');
+    await expect(composer.getByRole('textbox', { name: 'Message channel' })).toBeEnabled();
+    await expect(composer.locator('button[type="submit"]')).toBeEnabled();
+  });
+
+  test('shared channel post errors are announced in an assertive live region', async ({ page }) => {
+    test.setTimeout(120_000);
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    await page.getByRole('textbox', { name: 'Message channel' }).fill('Try the archived channel');
+    await page.evaluate(async () => {
+      const { invokeBots } = await import('/src/preview-bots.ts');
+      await invokeBots('bot_shared_channel_archive', { channelId: 'sample-launch', archived: true }, {
+        invoke: async () => null,
+        emit: () => {},
+        addProject: () => ({}) as any,
+      } as any);
+    });
+
+    await page.locator('#shared-channel-composer button[type="submit"]').click();
+    const status = page.locator('#shared-channel-composer [data-bc-post-status]');
+    await expect(status).toHaveAttribute('role', 'alert');
+    await expect(status).toHaveAttribute('aria-live', 'assertive');
+    await expect(status).toHaveText('Message not sent. This channel is deleted.');
+  });
+
+  test('schema-v1 validation reopens the composition popover after it was closed', async ({ page }) => {
+    test.setTimeout(120_000);
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    const prompt = page.getByRole('textbox', { name: 'Message channel' });
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' }).check();
+    await panel.getByRole('checkbox', { name: 'Include automatic Architect reviewers (A)' }).uncheck();
+    const reviewer = panel.locator('[data-bc-reviewer-row]').first();
+    await reviewer.locator('[data-bc-reviewer]').check();
+    const branch = reviewer.getByRole('combobox', { name: 'Reviewer branch' });
+    await prompt.fill('Validate from the closed popover');
+    await page.keyboard.press('Escape');
+    await expect(panel).toBeHidden();
+
+    await composer.locator('button[type="submit"]').click();
+    await expect(panel).toBeVisible();
+    await expect(branch).toHaveAttribute('aria-invalid', 'true');
+    await expect(branch).toBeFocused();
+    await expect(panel.locator('[data-bc-validation-summary]')).toContainText('A/D/N selection provides fewer than 2 root reviewer seats');
+  });
+
+  test('schema-v1 Council popover contains forward and reverse Tab navigation', async ({ page }) => {
+    test.setTimeout(120_000);
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    const enabled = panel.getByRole('switch', { name: 'Council' });
+    await enabled.check();
+    await panel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' }).check();
+    await panel.locator('[data-bc-reviewer]').first().check();
+    const last = panel.locator('input[name="councilFilePath"]');
+    await expect(last).toBeVisible();
+    await last.focus();
+    await page.keyboard.press('Tab');
+    await expect(enabled).toBeFocused();
+    await page.keyboard.press('Shift+Tab');
+    await expect(last).toBeFocused();
+  });
+
+  test('shared channel Council submission focuses and scrolls an invalid nested field into view', async ({ page }) => {
+    test.setTimeout(120_000);
+    await page.setViewportSize({ width: 360, height: 440 });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    const prompt = page.getByRole('textbox', { name: 'Message channel' });
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' }).check();
+    await panel.getByRole('combobox', { name: 'Automatic reviewer count' }).selectOption('2');
+    const rows = panel.locator('[data-bc-reviewer-row]');
+    for (const index of [0, 1]) {
+      await rows.nth(index).locator('[data-bc-reviewer]').check();
+      await rows.nth(index).getByRole('combobox', { name: 'Reviewer branch' }).selectOption('nested');
+    }
+    const childTarget = rows.nth(1).locator('[data-bc-nested-field="target"]');
+    await childTarget.fill('11');
+    await prompt.fill('Show the invalid child target');
+    await panel.evaluate(element => { element.scrollTop = 0; });
+    const before = await childTarget.evaluate(element => {
+      const panel = element.closest<HTMLElement>('.bc-council-panel')!;
+      const field = element.getBoundingClientRect(), frame = panel.getBoundingClientRect();
+      return field.bottom > frame.bottom || field.top < frame.top;
+    });
+    expect(before).toBe(true);
+
+    await composer.locator('button[type="submit"]').click();
+    await expect(childTarget).toHaveAttribute('aria-invalid', 'true');
+    await expect(childTarget).toBeFocused();
+    const after = await childTarget.evaluate(element => {
+      const panel = element.closest<HTMLElement>('.bc-council-panel')!;
+      const field = element.getBoundingClientRect(), frame = panel.getBoundingClientRect();
+      const reviewerList = element.closest<HTMLElement>('[data-bc-reviewer-group]');
+      return {
+        insidePanel: field.top >= frame.top && field.bottom <= frame.bottom,
+        scrolled: panel.scrollTop > 0 || Boolean(reviewerList?.scrollTop),
+      };
+    });
+    expect(after).toEqual({ insidePanel: true, scrolled: true });
+  });
+
+  test('shared channel Council validation points to A/D/N, strategy, criteria and nested fields, then clears', async ({ page }) => {
+    test.setTimeout(120_000);
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    const prompt = page.getByRole('textbox', { name: 'Message channel' });
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' }).check();
+    await prompt.fill('Validate the visible Council plan');
+
+    // A alone with one automatic reviewer seat cannot meet the two-seat minimum.
+    await panel.getByRole('combobox', { name: 'Automatic reviewer count' }).selectOption('1');
+    await composer.locator('button[type="submit"]').click();
+    const automaticCount = panel.getByRole('combobox', { name: 'Automatic reviewer count' });
+    await expect(automaticCount).toHaveAttribute('aria-invalid', 'true');
+    await expect(panel.locator('[data-bc-validation-summary]')).toContainText('A/D/N selection provides fewer than 2 root reviewer seats');
+    await automaticCount.selectOption('2');
+    await expect(automaticCount).not.toHaveAttribute('aria-invalid', 'true');
+    await expect(panel.locator('[data-bc-validation-summary]')).toBeHidden();
+
+    // D alone with one selected member also needs another root seat.
+    await panel.getByRole('checkbox', { name: 'Include automatic Architect reviewers (A)' }).uncheck();
+    const reviewers = panel.locator('[data-bc-reviewer]');
+    await reviewers.nth(0).check();
+    const firstBranch = panel.locator('[data-bc-reviewer-row]').nth(0).getByRole('combobox', { name: 'Reviewer branch' });
+    await composer.locator('button[type="submit"]').click();
+    await expect(firstBranch).toHaveAttribute('aria-invalid', 'true');
+    await reviewers.nth(1).check();
+    await expect(firstBranch).not.toHaveAttribute('aria-invalid', 'true');
+
+    // N validation belongs to the selected nested reviewer branch.
+    await reviewers.nth(1).uncheck();
+    await firstBranch.selectOption('nested');
+    await composer.locator('button[type="submit"]').click();
+    await expect(firstBranch).toHaveAttribute('aria-invalid', 'true');
+    await reviewers.nth(1).check();
+    const secondBranch = panel.locator('[data-bc-reviewer-row]').nth(1).getByRole('combobox', { name: 'Reviewer branch' });
+    await secondBranch.selectOption('nested');
+    await expect(firstBranch).not.toHaveAttribute('aria-invalid', 'true');
+
+    const strategy = panel.getByRole('combobox', { name: 'Execution strategy' });
+    await strategy.evaluate(element => {
+      const select = element as HTMLSelectElement;
+      select.add(new Option('Unsupported strategy', 'unsupported'));
+      select.value = 'unsupported';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await composer.locator('button[type="submit"]').click();
+    await expect(strategy).toHaveAttribute('aria-invalid', 'true');
+    await strategy.selectOption('parallel');
+    await expect(strategy).not.toHaveAttribute('aria-invalid', 'true');
+
+    await panel.getByRole('combobox', { name: 'Criteria source' }).selectOption('user');
+    const description = panel.locator('[data-bc-criterion-field="description"]');
+    await description.fill('');
+    await composer.locator('button[type="submit"]').click();
+    await expect(description).toHaveAttribute('aria-invalid', 'true');
+    await description.fill('Check the published acceptance criteria.');
+    await expect(description).not.toHaveAttribute('aria-invalid', 'true');
+
+    const nestedTarget = panel.locator('[data-bc-reviewer-row]').first().locator('[data-bc-nested-field="target"]');
+    await nestedTarget.fill('11');
+    await composer.locator('button[type="submit"]').click();
+    await expect(nestedTarget).toHaveAttribute('aria-invalid', 'true');
+    await nestedTarget.fill('8.5');
+    await expect(nestedTarget).not.toHaveAttribute('aria-invalid', 'true');
+    await expect(panel.locator('[data-bc-validation-summary]')).toBeHidden();
+  });
+
   test('bot collaboration: Council restores selection after a channel refresh without showing settings inline', async ({ page }) => {
     // The full preview initializes channel state before exercising the Council controls.
     test.setTimeout(120_000);
@@ -232,7 +572,7 @@ test.describe('shared bot channels', () => {
     await panel.getByRole('switch', { name: 'Council' }).check();
     await panel.getByRole('button', { name: '9.5', exact: true }).click();
     await panel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' }).check();
-    const reviewers = panel.locator('input[name="councilReviewer"]');
+    const reviewers = panel.locator('[data-bc-reviewer]');
     await expect(reviewers.first()).toBeVisible();
     await reviewers.first().check();
     await page.keyboard.press('Escape');
@@ -248,7 +588,7 @@ test.describe('shared bot channels', () => {
     await expect(restoredPanel.getByRole('switch', { name: 'Council' })).toBeChecked();
     await expect(restoredPanel.getByRole('button', { name: '9.5', exact: true })).toHaveAttribute('aria-pressed', 'true');
     await expect(restoredPanel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' })).toBeChecked();
-    await expect(restoredPanel.locator('input[name="councilReviewer"]').first()).toBeChecked();
+    await expect(restoredPanel.locator('[data-bc-reviewer]').first()).toBeChecked();
   });
 
   test('renders isolated reviewer skill provenance with keyboard-readable details', async ({ page }) => {

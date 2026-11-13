@@ -51,60 +51,71 @@ export function newCouncilComposition(): CouncilComposition {
   };
 }
 
-/** Client-side mirror of the native schema gate. Native remains authoritative on save and dispatch. */
-export function validateCouncilComposition(composition: CouncilComposition, target: number): string[] {
-  const errors: string[] = [], { limits } = composition;
-  if (composition.schemaVersion !== 1) errors.push('Only Council composition schema version 1 is supported.');
-  if (limits.maxDepth !== 2) errors.push('Maximum depth is fixed at 2.');
-  if (limits.maxRootSeats !== 8) errors.push('Maximum root seats are fixed at 8.');
-  if (!Number.isInteger(limits.maxConcurrentLeaves) || limits.maxConcurrentLeaves < 1 || limits.maxConcurrentLeaves > 64) errors.push('Concurrent leaves must be between 1 and 64.');
-  if (!Number.isInteger(limits.maxLeafReviewsPerRound) || limits.maxLeafReviewsPerRound < 1 || limits.maxLeafReviewsPerRound > 128) errors.push('Leaf reviews per round must be between 1 and 128.');
-  if (!Number.isInteger(limits.timeoutMs) || limits.timeoutMs < 1 || limits.timeoutMs > 86_400_000) errors.push('Timeout must be between 1 millisecond and 24 hours.');
-  if (!Number.isSafeInteger(limits.maxEstimatedCostMicros) || limits.maxEstimatedCostMicros <= 0) errors.push('Estimated cost cap must be a positive whole number of micro-units.');
+export interface CouncilCompositionValidationIssue { field: string; message: string }
+
+/** Client-side mirror of the native schema gate, with stable field paths for accessible inline errors. */
+export function councilCompositionValidationIssues(composition: CouncilComposition, target: number): CouncilCompositionValidationIssue[] {
+  const issues: CouncilCompositionValidationIssue[] = [], { limits } = composition;
+  const add = (field: string, message: string): void => { issues.push({ field, message }); };
+  if (composition.schemaVersion !== 1) add('schemaVersion', 'Only Council composition schema version 1 is supported.');
+  if (limits.maxDepth !== 2) add('limits.maxDepth', 'Maximum depth is fixed at 2.');
+  if (limits.maxRootSeats !== 8) add('limits.maxRootSeats', 'Maximum root seats are fixed at 8.');
+  if (!Number.isInteger(limits.maxConcurrentLeaves) || limits.maxConcurrentLeaves < 1 || limits.maxConcurrentLeaves > 64) add('limits.maxConcurrentLeaves', 'Concurrent leaves must be between 1 and 64.');
+  if (!Number.isInteger(limits.maxLeafReviewsPerRound) || limits.maxLeafReviewsPerRound < 1 || limits.maxLeafReviewsPerRound > 128) add('limits.maxLeafReviewsPerRound', 'Leaf reviews per round must be between 1 and 128.');
+  if (!Number.isInteger(limits.timeoutMs) || limits.timeoutMs < 1 || limits.timeoutMs > 86_400_000) add('limits.timeoutMs', 'Timeout must be between 1 millisecond and 24 hours.');
+  if (!Number.isSafeInteger(limits.maxEstimatedCostMicros) || limits.maxEstimatedCostMicros <= 0) add('limits.maxEstimatedCostMicros', 'Estimated cost cap must be a positive whole number of micro-units.');
   const ids = new Set<string>(), lenses = new Set<string>();
-  for (const reviewer of composition.selected) {
-    if (!/^[A-Za-z0-9_-]{1,80}$/.test(reviewer.botId)) errors.push(`Reviewer ID "${reviewer.botId}" is not a valid native ID.`);
-    if (ids.has(reviewer.botId)) errors.push(`Reviewer "${reviewer.botId}" is selected more than once.`);
+  for (const [index, reviewer] of composition.selected.entries()) {
+    const field = (name: string): string => `reviewers.${index}.${name}`;
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(reviewer.botId)) add(field('botId'), `Reviewer ID "${reviewer.botId}" is not a valid native ID.`);
+    if (ids.has(reviewer.botId)) add(field('botId'), `Reviewer "${reviewer.botId}" is selected more than once.`);
     ids.add(reviewer.botId);
-    if (reviewer.required !== true) errors.push(`Reviewer "${reviewer.botId}" must be required.`);
+    if (reviewer.required !== true) add(field('botId'), `Reviewer "${reviewer.botId}" must be required.`);
     if (reviewer.mode === 'nested') {
       const nested = reviewer.nested;
-      if (!nested) { errors.push(`Reviewer "${reviewer.botId}" needs child Council settings.`); continue; }
-      if (!Number.isInteger(nested.childReviewerCount) || nested.childReviewerCount < 2 || nested.childReviewerCount > 8) errors.push(`Child reviewer count for "${reviewer.botId}" must be 2–8.`);
-      if (!Number.isFinite(nested.target) || nested.target < 1 || nested.target > 10) errors.push(`Child target for "${reviewer.botId}" must be 1–10.`);
-      if (!Number.isInteger(nested.maxRounds) || nested.maxRounds < 1 || nested.maxRounds > 100) errors.push(`Child max rounds for "${reviewer.botId}" must be 1–100.`);
-    } else if (reviewer.nested) errors.push(`Direct reviewer "${reviewer.botId}" cannot include child Council settings.`);
+      if (!nested) { add(field('nested'), `Reviewer "${reviewer.botId}" needs child Council settings.`); continue; }
+      if (!Number.isInteger(nested.childReviewerCount) || nested.childReviewerCount < 2 || nested.childReviewerCount > 8) add(field('nested.childReviewerCount'), `Child reviewer count for "${reviewer.botId}" must be 2–8.`);
+      if (!Number.isFinite(nested.target) || nested.target < 1 || nested.target > 10) add(field('nested.target'), `Child target for "${reviewer.botId}" must be 1–10.`);
+      if (!Number.isInteger(nested.maxRounds) || nested.maxRounds < 1 || nested.maxRounds > 100) add(field('nested.maxRounds'), `Child max rounds for "${reviewer.botId}" must be 1–100.`);
+    } else if (reviewer.nested) add(field('mode'), `Direct reviewer "${reviewer.botId}" cannot include child Council settings.`);
   }
-  if (composition.selected.length > 8) errors.push('Select no more than 8 root reviewers.');
+  if (composition.selected.length > 8) add('reviewers', 'Select no more than 8 root reviewers.');
   if (composition.automatic.enabled && composition.automatic.count !== 'auto'
-    && (!Number.isInteger(composition.automatic.count) || composition.automatic.count < 1 || composition.automatic.count > 8)) errors.push('Automatic reviewer count must be 1–8 or Auto.');
+    && (!Number.isInteger(composition.automatic.count) || composition.automatic.count < 1 || composition.automatic.count > 8)) add('automatic.count', 'Automatic reviewer count must be 1–8 or Auto.');
   if (!composition.automatic.enabled && typeof composition.automatic.count === 'number'
-    && (!Number.isInteger(composition.automatic.count) || composition.automatic.count < 0 || composition.automatic.count > 8)) errors.push('Disabled automatic reviewer count must be 0–8.');
+    && (!Number.isInteger(composition.automatic.count) || composition.automatic.count < 0 || composition.automatic.count > 8)) add('automatic.count', 'Disabled automatic reviewer count must be 0–8.');
   const minimumAutomatic = composition.automatic.enabled
     ? composition.automatic.count === 'auto' ? Math.max(1, 2 - composition.selected.length) : composition.automatic.count
     : 0;
   const rootSeats = composition.selected.length + minimumAutomatic;
-  if (rootSeats < 2) errors.push('At least 2 root reviewers are required.');
-  if (rootSeats > 8) errors.push('The plan exceeds the 8-seat root limit.');
-  if (composition.criteria.length > 64) errors.push('At most 64 criteria are allowed.');
-  for (const criterion of composition.criteria) {
-    if (!/^[A-Za-z0-9_-]{1,80}$/.test(criterion.id)) errors.push(`Criterion ID "${criterion.id}" must use letters, numbers, underscores or hyphens.`);
-    if (ids.has(`criterion:${criterion.id}`)) errors.push(`Criterion ID "${criterion.id}" is duplicated.`);
+  if (rootSeats < 2) add('reviewers', 'At least 2 root reviewers are required.');
+  if (rootSeats > 8) add('reviewers', 'The plan exceeds the 8-seat root limit.');
+  if (composition.criteria.length > 64) add('criteria', 'At most 64 criteria are allowed.');
+  for (const [index, criterion] of composition.criteria.entries()) {
+    const field = (name: string): string => `criteria.${index}.${name}`;
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(criterion.id)) add(field('id'), `Criterion ID "${criterion.id}" must use letters, numbers, underscores or hyphens.`);
+    if (ids.has(`criterion:${criterion.id}`)) add(field('id'), `Criterion ID "${criterion.id}" is duplicated.`);
     ids.add(`criterion:${criterion.id}`);
     const lens = criterion.lens.trim();
-    if (!lens || lens.length > 80 || /[\u0000-\u001f\u007f]/.test(lens)) errors.push(`Criterion "${criterion.id}" needs a plain lens name up to 80 characters.`);
-    if (lenses.has(lens.toLowerCase())) errors.push(`Criterion lens "${lens}" is duplicated.`);
+    if (!lens || lens.length > 80 || /[\u0000-\u001f\u007f]/.test(lens)) add(field('lens'), `Criterion "${criterion.id}" needs a plain lens name up to 80 characters.`);
+    if (lenses.has(lens.toLowerCase())) add(field('lens'), `Criterion lens "${lens}" is duplicated.`);
     lenses.add(lens.toLowerCase());
-    if (!criterion.description.trim() || criterion.description.length > 4096) errors.push(`Criterion "${criterion.id}" needs a description up to 4,096 characters.`);
-    if (!Number.isFinite(criterion.target) || criterion.target < 1 || criterion.target > 10) errors.push(`Criterion target for "${criterion.id}" must be 1–10.`);
+    if (!criterion.description.trim() || criterion.description.length > 4096) add(field('description'), `Criterion "${criterion.id}" needs a description up to 4,096 characters.`);
+    if (!Number.isFinite(criterion.target) || criterion.target < 1 || criterion.target > 10) add(field('target'), `Criterion target for "${criterion.id}" must be 1–10.`);
     if ((composition.criteriaSource === 'user' && criterion.source !== 'user')
-      || (composition.criteriaSource === 'architect' && criterion.source !== 'architect')) errors.push(`Criterion "${criterion.id}" does not match the selected criteria source.`);
+      || (composition.criteriaSource === 'architect' && criterion.source !== 'architect')) add('criteriaSource', `Criterion "${criterion.id}" does not match the selected criteria source.`);
   }
-  if (composition.criteriaSource === 'user' && (!composition.criteria.length || !composition.criteria.some(criterion => criterion.required))) errors.push('User criteria need at least one required criterion.');
-  if (composition.criteriaSource === 'hybrid' && !composition.criteria.some(criterion => criterion.source === 'user' && criterion.required)) errors.push('Hybrid criteria need at least one required user criterion.');
-  if (!Number.isFinite(target) || target < 1 || target > 10) errors.push('Council target must be between 1 and 10.');
-  if (!supportedCouncilStrategy(composition.strategy)) errors.push('Choose a supported Council execution strategy.');
-  return [...new Set(errors)];
+  if (composition.criteriaSource === 'user' && (!composition.criteria.length || !composition.criteria.some(criterion => criterion.required))) add('criteria', 'User criteria need at least one required criterion.');
+  if (composition.criteriaSource === 'hybrid' && !composition.criteria.some(criterion => criterion.source === 'user' && criterion.required)) add('criteria', 'Hybrid criteria need at least one required user criterion.');
+  if (!Number.isFinite(target) || target < 1 || target > 10) add('councilTarget', 'Council target must be between 1 and 10.');
+  if (!supportedCouncilStrategy(composition.strategy)) add('strategy', 'Choose a supported Council execution strategy.');
+  const seen = new Set<string>();
+  return issues.filter(issue => { if (seen.has(issue.message)) return false; seen.add(issue.message); return true; });
+}
+
+/** Keep the existing plain-message API for command validation and the preview host. */
+export function validateCouncilComposition(composition: CouncilComposition, target: number): string[] {
+  return councilCompositionValidationIssues(composition, target).map(issue => issue.message);
 }
 
 export function withCouncilComposition(config: CouncilConfig, composition: CouncilComposition): CouncilConfig {

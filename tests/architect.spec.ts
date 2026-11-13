@@ -1,5 +1,5 @@
 import { expect, test, type Locator, type Page } from '@playwright/test';
-import type { TeamConfig, TeamSnapshot, TeamWorker } from '../src/architect-types';
+import type { CouncilUsageRecord, TeamConfig, TeamSnapshot, TeamWorker } from '../src/architect-types';
 import type { Message } from '../src/types';
 
 type View = 'conversation' | 'board';
@@ -966,6 +966,94 @@ test.describe('architect teams', () => {
     const summary = panel(page).locator('.council-summary');
     await expect(summary).toContainText('Schema v1 · M1 · parallel strategy · architect criteria');
     await expect(summary.locator('.council-ledger-unavailable')).toHaveText('This host snapshot does not include Council ledger records.');
+  });
+
+  test('the Council inspector nests projected bot, child round and reviewer evidence with explicit unknown scores', async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 760 });
+    const councilSince = 1_800_000_000_000, rootCycleId = `session-2:${councilSince}`, childCycleId = 'child-cycle:1';
+    const composition = {
+      schemaVersion: 1 as const, automatic: { enabled: true, count: 'auto' as const },
+      selected: [{ botId: 'root-bot', mode: 'nested' as const, required: true, nested: { template: 'explicit_task' as const, childCriteriaSource: 'architect' as const, childReviewerCount: 3, target: 9, maxRounds: 3, escalation: 'on_trigger' as const } }],
+      criteriaSource: 'architect' as const, criteria: [], strategy: 'parallel' as const,
+      limits: { maxDepth: 2, maxRootSeats: 8, maxConcurrentLeaves: 64, maxLeafReviewsPerRound: 128, timeoutMs: 86_400_000, maxEstimatedCostMicros: 1_000_000 },
+    };
+    const usage: CouncilUsageRecord = {
+      id: 'child-usage', rootCycleId, childCycleId, attemptId: 'attempt-1', reviewerId: 'leaf-reviewer',
+      roundId: `${childCycleId}:2`, seatId: 'child-seat', scope: 'child', phase: 'review', strategy: 'parallel',
+      startedAtMs: councilSince, finishedAtMs: councilSince + 1000, queueWaitMs: { status: 'measured', value: 5 },
+      elapsedMs: { status: 'measured', value: 1000 }, retries: { status: 'measured', value: 0 }, escalations: { status: 'measured', value: 0 },
+      provider: 'codex', model: 'gpt-6', harness: 'codex', inputTokens: { status: 'unknown' }, outputTokens: { status: 'unknown' },
+      requestCount: { status: 'measured', value: 1 }, terminalStatus: 'passed',
+      budgetConsumption: { concurrentLeaves: { status: 'measured', value: 1 }, leafReviews: { status: 'measured', value: 1 }, estimatedCostMicros: { status: 'unknown' } },
+      costEstimate: null,
+    };
+    const snapshot = team('session-2', {
+      status: 'completed', councilSince,
+      config: { ...config(), council: { target: 9, maxRounds: 10, reviewers: 0, composition } },
+      workers: [worker('review', { id: 'root-seat', name: 'Security reviewer', status: 'completed', createdAt: councilSince, council: { round: 1, lens: 'Security', score: 9.4 }, reviewerBinding: { reviewerBotId: 'root-bot', councilCycleId: rootCycleId } })],
+      councilStatus: { state: 'passed', round: 1, lowest: 9.4, target: 9, stale: true },
+      councilFindings: [{ id: 'child-finding', cycleId: childCycleId, roundId: `${childCycleId}:2`, seatId: 'child-seat', artifactDigest: 'child-artifact', criterionId: 'security', severity: 'high', category: 'Security', summary: 'A projected child Council finding.', evidenceRefs: ['src/child.ts'], locationStatus: 'verified', location: { file: 'src/child.ts', line: 12 } }],
+      councilChildReceipts: [{ rootCycleId, parentSeatId: 'root-seat', childCycleId, botId: 'root-bot', artifactRevision: 'revision-2', policyFingerprint: 'child-policy', status: 'stale', minScore: 9.6, leafScoreRefs: ['opaque-score-ref'], findingsRefs: ['child-finding'], evidenceRefs: ['src/child.ts'], snapshotFingerprint: 'child-snapshot' }],
+      councilReviewReceipts: [{ schemaVersion: 1, requestId: 'child-review-request', cycleId: childCycleId, taskId: 'child-task', assignmentId: 'child-seat', policyFingerprint: 'child-policy', artifactDigest: 'child-artifact', verdict: 'passed', findingsRefs: ['child-finding'], evidenceRefs: ['src/child.ts'], terminalRevision: 3, idempotencyKey: 'child-terminal' }],
+      councilUsage: [usage],
+    });
+    await page.goto('/');
+    await page.evaluate(async value => {
+      const { ArchitectView } = await import('/src/architect.ts');
+      const view = new ArchitectView({ setup: () => {}, loadModels: async () => [], updated: () => {}, report: () => {} });
+      document.body.append(view.host);
+      view.setTask(value.sessionId, value, []);
+      view.open(false);
+      const { councilReadOnlyPresenterHtml } = await import('/src/council-panel.ts');
+      const { councilLedgerForCurrentCycle, councilProgress } = await import('/src/council.ts');
+      const direct = document.createElement('section');
+      direct.id = 'council-direct-fixture';
+      direct.innerHTML = councilReadOnlyPresenterHtml({
+        ...councilLedgerForCurrentCycle(value),
+        progress: councilProgress(value),
+        workers: value.workers,
+        status: value.councilStatus,
+      });
+      document.body.append(direct);
+    }, snapshot);
+
+    const summary = panel(page).locator('.council-summary:visible');
+    await expect(summary).toHaveCount(1);
+    await expect(summary).toBeVisible();
+    const hierarchy = summary.locator('.council-inspector-hierarchy');
+    const directHierarchy = page.locator('#council-direct-fixture .council-inspector-hierarchy');
+    const root = hierarchy.locator('[data-level="root-council"]');
+    const bot = root.locator('[data-level="bot"][data-seat-id="root-seat"]');
+    const child = bot.locator('[data-level="child-council"]');
+    const round = child.locator('[data-level="round"]');
+    const reviewer = round.locator('[data-level="reviewer"]');
+    await expect(directHierarchy.locator('[data-level="root-council"]')).toHaveAttribute('data-cycle-id', rootCycleId);
+    expect(await directHierarchy.evaluate(node => node.textContent)).toBe(await hierarchy.evaluate(node => node.textContent));
+    await expect(root.locator(':scope > summary')).toContainText('Root Council · passed · lowest score 9.4 / 9.0 · stale');
+    await expect(root).toHaveAttribute('data-stale', 'true');
+    await expect(bot.locator(':scope > summary')).toContainText('Bot root-bot · Security · Round 1 · Score 9.4 / 10');
+    await bot.locator(':scope > summary').focus();
+    await page.keyboard.press('Enter');
+    await expect(bot).toHaveAttribute('open', '');
+    await expect(child.locator(':scope > summary')).toContainText('Child Council · stale · minimum score 9.6 / 10');
+    await expect(child).toHaveAttribute('data-stale', 'true');
+    await child.locator(':scope > summary').focus();
+    await page.keyboard.press('Enter');
+    await round.locator(':scope > summary').focus();
+    await page.keyboard.press('Enter');
+    await expect(round.locator(':scope > summary')).toContainText(`Round 2 · ${childCycleId}:2`);
+    await reviewer.locator(':scope > summary').focus();
+    await page.keyboard.press('Enter');
+    await expect(reviewer.locator(':scope > summary')).toContainText('Reviewer leaf-reviewer · Score Unknown · passed');
+    await expect(reviewer).toContainText('child reviewer scores are not included in this projection');
+    const evidence = reviewer.locator('.council-inspector-evidence');
+    await evidence.locator(':scope > summary').focus();
+    await page.keyboard.press('Enter');
+    await expect(evidence).toContainText('src/child.ts');
+    await expect(child).toContainText('Numeric reviewer scores are not included in this projection.');
+    const fit = await hierarchy.evaluate(node => ({ width: node.clientWidth, scrollWidth: node.scrollWidth, right: node.getBoundingClientRect().right }));
+    expect(fit.scrollWidth).toBeLessThanOrEqual(fit.width + 1);
+    expect(fit.right).toBeLessThanOrEqual(361);
   });
 
   test('a long worker line never makes a narrow thread scroll sideways', async ({ page }) => {

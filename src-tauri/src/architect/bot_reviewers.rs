@@ -305,23 +305,99 @@ fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_execu
 /// Resolve a frozen selected reviewer. Live deletion, pause, executor identity and frozen-model
 /// availability are still checked, without substituting a newly edited profile or another bot.
 pub(super) fn seat_bot(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, library: Option<&crate::skills::Library>) -> Result<Option<SelectedReviewer>> {
-    seat_bot_with_skills(store, team, round, replaces, true, library)
+    seat_bot_with_source(store, team, round, replaces, SeatSourceRequest::legacy(), true, library)
+}
+pub(super) fn seat_bot_for_assignment(
+    store: &Store,
+    team: &TeamSnapshot,
+    round: usize,
+    replaces: Option<&str>,
+    source: Option<super::CouncilAssignmentSource>,
+    reviewer_bot_id: Option<&str>,
+    library: Option<&crate::skills::Library>,
+) -> Result<Option<SelectedReviewer>> {
+    seat_bot_with_source(store, team, round, replaces, SeatSourceRequest::explicit(source, reviewer_bot_id), true, library)
 }
 #[cfg(test)]
 pub(super) fn seat_bot_inner(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, check_executable: bool) -> Result<Option<SelectedReviewer>> {
-    seat_bot_with_skills(store, team, round, replaces, check_executable, None)
+    seat_bot_with_source(store, team, round, replaces, SeatSourceRequest::legacy(), check_executable, None)
+}
+#[cfg(test)]
+pub(super) fn seat_bot_inner_for_assignment(
+    store: &Store,
+    team: &TeamSnapshot,
+    round: usize,
+    replaces: Option<&str>,
+    source: Option<super::CouncilAssignmentSource>,
+    reviewer_bot_id: Option<&str>,
+    check_executable: bool,
+) -> Result<Option<SelectedReviewer>> {
+    seat_bot_with_source(store, team, round, replaces, SeatSourceRequest::explicit(source, reviewer_bot_id), check_executable, None)
 }
 #[cfg(test)]
 pub(super) fn seat_bot_inner_with_skills(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, library: &crate::skills::Library) -> Result<Option<SelectedReviewer>> {
-    seat_bot_with_skills(store, team, round, replaces, false, Some(library))
+    seat_bot_with_source(store, team, round, replaces, SeatSourceRequest::legacy(), false, Some(library))
 }
-fn seat_bot_with_skills(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, check_executable: bool, library: Option<&crate::skills::Library>) -> Result<Option<SelectedReviewer>> {
+
+#[derive(Clone, Copy)]
+struct SeatSourceRequest<'a> {
+    source: Option<super::CouncilAssignmentSource>,
+    reviewer_bot_id: Option<&'a str>,
+    required: bool,
+}
+
+impl<'a> SeatSourceRequest<'a> {
+    fn legacy() -> Self {
+        Self { source: None, reviewer_bot_id: None, required: false }
+    }
+    fn explicit(source: Option<super::CouncilAssignmentSource>, reviewer_bot_id: Option<&'a str>) -> Self {
+        Self { source, reviewer_bot_id, required: true }
+    }
+}
+
+fn seat_bot_with_source(
+    store: &Store,
+    team: &TeamSnapshot,
+    round: usize,
+    replaces: Option<&str>,
+    request: SeatSourceRequest<'_>,
+    check_executable: bool,
+    library: Option<&crate::skills::Library>,
+) -> Result<Option<SelectedReviewer>> {
+    let source = request.source;
+    let requested_bot_id = request.reviewer_bot_id;
     let Some(config) = team.config.council.as_ref() else { return Ok(None) };
     let composition = config.composition.is_some();
     let plan = config.seat_plan();
     let roster = selected_roster(config);
     let old = replaces.and_then(|id| team.workers.iter().find(|w| w.id == id));
     let inherited = old.and_then(|w| w.reviewer_binding.as_ref()).and_then(|b| b.reviewer_bot_id.as_deref());
+
+    if request.required && plan.automatic > 0 && plan.selected_bots() > 0 && source.is_none() {
+        return Err("council_source_required: every mixed Council seat must explicitly name its source.".into());
+    }
+    if source.is_none() && requested_bot_id.is_some() {
+        return Err("council_source_invalid: reviewerBotId requires councilSource=selected_bot.".into());
+    }
+    if source == Some(super::CouncilAssignmentSource::Automatic) {
+        if !composition || plan.automatic == 0 || requested_bot_id.is_some() || inherited.is_some() {
+            return Err("council_source_invalid: this assignment cannot claim an automatic Council seat.".into());
+        }
+        ensure_automatic_slot(team, round, replaces, plan.automatic)?;
+        return Ok(None);
+    }
+    if source == Some(super::CouncilAssignmentSource::SelectedBot) {
+        let requested = requested_bot_id.ok_or("council_source_invalid: selected_bot seats require reviewerBotId.")?;
+        if !roster.iter().any(|(id, _, _)| id == requested) {
+            return Err("council_source_invalid: reviewerBotId is not selected in this frozen Council composition.".into());
+        }
+        if inherited.is_some_and(|id| id != requested) {
+            return Err("reviewer_session_mismatch: a selected bot replacement must retain its original bot identity.".into());
+        }
+        if old.is_some_and(|worker| worker.council.is_some()) && inherited.is_none() {
+            return Err("reviewer_session_mismatch: a selected bot cannot replace an automatic reviewer.".into());
+        }
+    }
 
     if roster.is_empty() {
         if !composition { return Ok(None); }
@@ -348,6 +424,13 @@ fn seat_bot_with_skills(store: &Store, team: &TeamSnapshot, round: usize, replac
     let occupied = occupied_bot_ids(team, round, replaces);
     let selected = match inherited {
         Some(id) => id,
+        None if source == Some(super::CouncilAssignmentSource::SelectedBot) => {
+            let requested = requested_bot_id.ok_or("council_source_invalid: selected_bot seats require reviewerBotId.")?;
+            if occupied.contains(requested) {
+                return Err("reviewer_session_mismatch: reviewer identity is duplicated or no longer selected.".into());
+            }
+            requested
+        }
         None => match reviewers
             .iter()
             .cycle()

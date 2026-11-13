@@ -2162,16 +2162,35 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
             save(&state.store.lock().unwrap(), &mut team).unwrap();
 
             let root_assignments = (0..automatic_count + selected_specs.len())
-                .map(|index| json!({
+                .map(|index| {
+                    let selected = selected_specs.get(index);
+                    json!({
                     "key":format!("{mode_name}-{strategy:?}-root-{index}"),
                     "profileId":"priced-nano",
                     "name":format!("root reviewer {index}"),
                     "prompt":"Review the frozen root task.",
                     "files":["src"],
                     "readOnly":true,
-                    "councilLens":format!("root-lens-{index}")
-                }))
+                    "councilLens":format!("root-lens-{index}"),
+                    "councilSource":if selected.is_some() { "selected_bot" } else { "automatic" },
+                    "reviewerBotId":selected.map(|(id, _)| *id)
+                })})
                 .collect::<Vec<_>>();
+            if automatic_count > 0 && !selected_specs.is_empty() {
+                let mut unbound = root_assignments.clone();
+                for assignment in &mut unbound {
+                    assignment.as_object_mut().unwrap().remove("councilSource");
+                    assignment.as_object_mut().unwrap().remove("reviewerBotId");
+                }
+                let error = dispatch_state_runtime_test(
+                    &state,
+                    &root_id,
+                    team.generation,
+                    "pandacode_dispatch_workers",
+                    json!({"assignments":unbound}),
+                ).unwrap_err();
+                assert!(error.contains("council_source_required"), "{mode_name} × {strategy:?}: {error}");
+            }
             dispatch_state_runtime_test(
                 &state,
                 &root_id,
@@ -2187,6 +2206,9 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
             let selected_ids = root_seats.iter().filter_map(|worker| worker.reviewer_binding.as_ref()?.reviewer_bot_id.clone()).collect::<std::collections::HashSet<_>>();
             assert_eq!(selected_ids, selected_specs.iter().map(|(id, _)| (*id).to_string()).collect(),
                 "{mode_name} × {strategy:?} selected reviewer identities stay pinned");
+            assert_eq!(root_seats.iter().filter(|worker| worker.reviewer_binding.as_ref()
+                .is_some_and(|binding| binding.reviewer_bot_id.is_none())).count(), automatic_count,
+                "{mode_name} × {strategy:?} keeps the automatic source quota distinct from selected bot seats");
             assert!(root_seats.iter().all(|worker| worker.reviewer_binding.as_ref().is_some_and(|binding| {
                 binding.council_cycle_id == root_cycle_id
                     && binding.round == 1
@@ -2217,7 +2239,8 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
                     "prompt":"Review the frozen nested task.",
                     "files":["src"],
                     "readOnly":true,
-                    "councilLens":format!("child-lens-{index}")
+                    "councilLens":format!("child-lens-{index}"),
+                    "councilSource":"automatic"
                 })).collect::<Vec<_>>();
                 dispatch_state_runtime_test(
                     &state,
@@ -2239,6 +2262,370 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
             }
         }
     }
+}
+
+#[test]
+fn s2_usage_phase_requires_a_saved_trigger_for_the_followup_round() {
+    let setup = || {
+        let (store, mut team) = fixture();
+        team.council_since = storage::now().max(1);
+        team.dispatch_revision = 1;
+        let cycle_id = format!("{}:{}", team.session_id, team.council_since);
+        team.config.council = Some(council::CouncilConfig {
+            target: 9.0,
+            max_rounds: 5,
+            reviewers: 2,
+            composition: Some(council::CouncilComposition {
+                schema_version: 1,
+                automatic: council::CouncilAutomaticReviewers {
+                    enabled: true,
+                    count: council::AutomaticReviewerCount::Fixed(2),
+                },
+                selected: Vec::new(),
+                criteria_source: council::CouncilCriteriaSource::User,
+                criteria: vec![council::CouncilCriterion {
+                    id: "quality".into(),
+                    lens: "quality".into(),
+                    description: "Check the completed task.".into(),
+                    required: true,
+                    target: 9.0,
+                    evidence_required: false,
+                    source: council::CouncilCriterionOrigin::User,
+                }],
+                strategy: council::CouncilStrategy::Escalated,
+                limits: council::CouncilCompositionLimits {
+                    max_depth: 2, max_root_seats: 8, max_concurrent_leaves: 4,
+                    max_leaf_reviews_per_round: 32, timeout_ms: 3_600_000,
+                    max_estimated_cost_micros: None,
+                },
+            }),
+            ..council::CouncilConfig::default()
+        });
+        let mut source = worker("s2-triggering-seat", "completed", &[], &[]);
+        source.created_at = team.council_since + 1;
+        source.attempt = 2;
+        source.read_only = true;
+        source.council = Some(CouncilSeat {
+            round: 1, lens: "security".into(), score: Some(8.5), ..CouncilSeat::default()
+        });
+        let source_seat = source.council.as_ref().unwrap().clone();
+        let mut source_binding = reviewer_security::ReviewerBinding::native(
+            &team, &source.id, source.created_at, &source.provider, &source.model, &source_seat,
+        );
+        source_binding.composition_mode = Some("direct".into());
+        reviewer_security::record_native_authority(&store, &team.session_id, &source_binding).unwrap();
+        source.reviewer_binding = Some(source_binding);
+
+        let mut followup = worker("s2-followup", "completed", &[], &[]);
+        followup.created_at = team.council_since + 2;
+        followup.read_only = true;
+        followup.council = Some(CouncilSeat {
+            round: 2, lens: "security".into(), score: Some(9.5), ..CouncilSeat::default()
+        });
+        let followup_seat = followup.council.as_ref().unwrap().clone();
+        let mut followup_binding = reviewer_security::ReviewerBinding::native(
+            &team, &followup.id, followup.created_at, &followup.provider, &followup.model, &followup_seat,
+        );
+        followup_binding.composition_mode = Some("direct".into());
+        reviewer_security::record_native_authority(&store, &team.session_id, &followup_binding).unwrap();
+        followup.reviewer_binding = Some(followup_binding);
+        team.workers = vec![source.clone(), followup.clone()];
+        (store, team, source, followup, cycle_id)
+    };
+    let make_trigger = |team: &TeamSnapshot, source: &Worker| {
+        let binding = source.reviewer_binding.as_ref().unwrap();
+        let seat = source.council.as_ref().unwrap();
+        CouncilS2EscalationReceipt {
+            schema_version: 1,
+            root_cycle_id: format!("{}:{}", team.session_id, team.council_since),
+            task_cycle_id: binding.council_cycle_id.clone(),
+            task_id: team.session_id.clone(),
+            round: seat.round,
+            seat_id: source.id.clone(),
+            attempt: source.attempt,
+            artifact_revision: binding.artifact_revision.clone(),
+            trigger: council::NestedEscalationTrigger::BelowTarget,
+            threshold: 9.0,
+            criterion_thresholds: Vec::new(),
+            decided_at_ms: storage::now().max(1) as u64,
+        }
+    };
+    let make_usage = |team: &TeamSnapshot, followup: &Worker, trigger_id: &str| {
+        use council::{CouncilUsageValue as UsageValue, CouncilUsageValueStatus as ValueStatus};
+        let unknown_u64 = UsageValue::<u64> { status: ValueStatus::Unknown, value: None };
+        let known_u32 = |value| UsageValue { status: ValueStatus::Measured, value: Some(value) };
+        let known_u64 = |value| UsageValue { status: ValueStatus::Measured, value: Some(value) };
+        let seat = followup.council.as_ref().unwrap();
+        council::CouncilUsageRecord {
+            id: format!("native-council-usage:{}:{}:{}", followup.reviewer_binding.as_ref().unwrap().council_cycle_id, followup.id, followup.attempt),
+            root_cycle_id: format!("{}:{}", team.session_id, team.council_since),
+            child_cycle_id: None,
+            attempt_id: format!("{}:{}", followup.id, followup.attempt),
+            reviewer_id: followup.profile_id.clone(),
+            round_id: format!("{}:{}", followup.reviewer_binding.as_ref().unwrap().council_cycle_id, seat.round),
+            seat_id: followup.id.clone(),
+            scope: council::CouncilUsageScope::Root,
+            phase: council::CouncilUsagePhase::Escalation,
+            strategy: council::CouncilStrategy::Escalated,
+            decision_ids: vec![trigger_id.to_owned()],
+            started_at_ms: None,
+            finished_at_ms: None,
+            queue_wait_ms: unknown_u64.clone(),
+            elapsed_ms: unknown_u64.clone(),
+            retries: known_u32(followup.attempt.saturating_sub(1) as u32),
+            escalations: known_u32(1),
+            provider: None,
+            model: None,
+            harness: None,
+            input_tokens: unknown_u64.clone(),
+            output_tokens: unknown_u64.clone(),
+            request_count: unknown_u64.clone(),
+            terminal_status: council::CouncilReviewVerdict::Passed,
+            budget_consumption: council::CouncilResourceBudgetConsumption {
+                concurrent_leaves: known_u64(1),
+                leaf_reviews: known_u64(2),
+                estimated_cost_micros: unknown_u64,
+            },
+            cost_estimate: None,
+        }
+    };
+
+    let (store, team, source, followup, cycle_id) = setup();
+    let source_revision = &source.reviewer_binding.as_ref().unwrap().artifact_revision;
+    let followup_revision = &followup.reviewer_binding.as_ref().unwrap().artifact_revision;
+    assert_ne!(source_revision, followup_revision, "each seat has a distinct revision suffix");
+    assert!(council::same_artifact_revision(source_revision, followup_revision), "both seats share the frozen artifact chain");
+    assert!(s2_escalation_decisions_for_worker(&store, &team, &followup, &cycle_id, &team.session_id)
+        .unwrap().is_empty(), "round number alone must not label a seat as an escalation");
+
+    let trigger = make_trigger(&team, &source);
+    let trigger_id = s2_escalation_decision_id(&trigger);
+    persist_council_record(&store, &team.session_id, &trigger_id, "council_s2_escalation", &trigger, &trigger.seat_id).unwrap();
+    assert_eq!(
+        s2_escalation_decisions_for_worker(&store, &team, &followup, &cycle_id, &team.session_id).unwrap(),
+        vec![trigger_id.clone()],
+        "a valid follow-up may use the exact source attempt on the same artifact chain",
+    );
+    let valid_usage = make_usage(&team, &followup, &trigger_id);
+    valid_usage.validate().unwrap();
+    persist_council_record(&store, &team.session_id, &valid_usage.id, "council_usage_record", &valid_usage, &followup.id).unwrap();
+    let ledger = council_ledger_projection(&store, &team);
+    assert_eq!(ledger.council_usage, vec![valid_usage], "the matching persisted trigger keeps the follow-up escalation usage visible");
+
+    for invalid_case in [
+        "stale artifact chain",
+        "wrong exact source revision",
+        "wrong root cycle",
+        "wrong task cycle",
+        "wrong task",
+        "wrong source attempt",
+        "wrong source seat",
+        "wrong follow-up round",
+    ] {
+        let (store, team, source, followup, cycle_id) = setup();
+        let mut receipt = make_trigger(&team, &source);
+        match invalid_case {
+            "stale artifact chain" => {
+                receipt.artifact_revision = format!("{}:{}:{}:{}", team.council_since, team.dispatch_revision + 1, source.created_at, source.id);
+            }
+            "wrong exact source revision" => {
+                let parts = receipt.artifact_revision.split(':').collect::<Vec<_>>();
+                receipt.artifact_revision = format!("{}:{}:stale:{}", parts[0], parts[1], source.id);
+            }
+            "wrong root cycle" => receipt.root_cycle_id.push_str(":stale"),
+            "wrong task cycle" => receipt.task_cycle_id.push_str(":stale"),
+            "wrong task" => receipt.task_id = "another-task".into(),
+            "wrong source attempt" => receipt.attempt += 1,
+            "wrong source seat" => receipt.seat_id = "another-seat".into(),
+            "wrong follow-up round" => receipt.round += 1,
+            _ => unreachable!(),
+        }
+        let decision_id = s2_escalation_decision_id(&receipt);
+        persist_council_record(&store, &team.session_id, &decision_id, "council_s2_escalation", &receipt, &receipt.seat_id).unwrap();
+        assert!(s2_escalation_decisions_for_worker(&store, &team, &followup, &cycle_id, &team.session_id)
+            .unwrap().is_empty(), "{invalid_case} must not label usage as an escalation");
+        let usage = make_usage(&team, &followup, &decision_id);
+        usage.validate().unwrap();
+        persist_council_record(&store, &team.session_id, &usage.id, "council_usage_record", &usage, &followup.id).unwrap();
+        assert!(council_ledger_projection(&store, &team).council_usage.is_empty(),
+            "the Council ledger must fail closed for a {invalid_case} trigger");
+    }
+}
+
+#[test]
+fn s3_usage_phase_requires_a_persisted_independent_challenge_decision() {
+    let (store, mut team) = fixture();
+    team.council_since = storage::now().max(1);
+    let cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    team.config.council = Some(council::CouncilConfig {
+        target: 9.0,
+        max_rounds: 5,
+        reviewers: 2,
+        composition: Some(council::CouncilComposition {
+            schema_version: 1,
+            automatic: council::CouncilAutomaticReviewers {
+                enabled: true,
+                count: council::AutomaticReviewerCount::Fixed(2),
+            },
+            selected: Vec::new(),
+            criteria_source: council::CouncilCriteriaSource::User,
+            criteria: vec![council::CouncilCriterion {
+                id: "quality".into(), lens: "quality".into(),
+                description: "Review task quality.".into(), required: true,
+                target: 9.0, evidence_required: false, source: council::CouncilCriterionOrigin::User,
+            }],
+            strategy: council::CouncilStrategy::TwoPhase,
+            limits: council::CouncilCompositionLimits {
+                max_depth: 2, max_root_seats: 8, max_concurrent_leaves: 4,
+                max_leaf_reviews_per_round: 32, timeout_ms: 3_600_000,
+                max_estimated_cost_micros: None,
+            },
+        }),
+        ..council::CouncilConfig::default()
+    });
+    let mut seats = Vec::new();
+    for (id, round, lens, model) in [
+        ("phase1-a", 1, "security", "author-a"),
+        ("phase1-b", 1, "quality", "author-b"),
+        ("phase2-a", 2, "security", "challenger-a"),
+    ] {
+        let mut reviewer = worker(id, "completed", &[], &[]);
+        reviewer.created_at = team.council_since + 1;
+        reviewer.updated_at = reviewer.created_at;
+        reviewer.profile_id = model.into();
+        reviewer.model = model.into();
+        reviewer.read_only = true;
+        reviewer.council = Some(CouncilSeat {
+            round, lens: lens.into(), score: Some(9.5), started_at: team.council_since + 2,
+            ..CouncilSeat::default()
+        });
+        let seat = reviewer.council.as_ref().unwrap().clone();
+        let mut binding = reviewer_security::ReviewerBinding::native(
+            &team, &reviewer.id, reviewer.created_at, &reviewer.provider, &reviewer.model, &seat,
+        );
+        binding.composition_mode = Some("direct".into());
+        reviewer.reviewer_binding = Some(binding);
+        seats.push(reviewer);
+    }
+    team.workers = seats;
+    for author in team.workers.iter().filter(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 1)) {
+        let binding = author.reviewer_binding.as_ref().unwrap();
+        let outcome = council::CouncilCriterionOutcomeReceipt {
+            schema_version: 1,
+            root_cycle_id: cycle_id.clone(),
+            task_id: team.session_id.clone(),
+            task_cycle_id: cycle_id.clone(),
+            child_cycle_id: None,
+            round: 1,
+            seat_id: author.id.clone(),
+            parent_seat_id: None,
+            attempt: author.attempt,
+            artifact_revision: binding.artifact_revision.clone(),
+            outcome: council::CouncilCriterionOutcome {
+                criterion_id: "quality".into(),
+                score: 9.5,
+                verified_evidence_refs: Vec::new(),
+            },
+        };
+        let key = format!("native-council-criterion:{}:1:{}:quality", cycle_id, author.id);
+        persist_council_record(
+            &store,
+            &team.session_id,
+            &key,
+            "council_criterion_outcome",
+            &outcome,
+            &author.id,
+        ).unwrap();
+    }
+    let challenger = team.workers[2].clone();
+
+    assert!(s3_challenge_receipt_for_worker(&store, &team, &challenger).unwrap().is_none(),
+        "round 2 alone must not classify a usage record as a challenge");
+    let decision = CouncilS3ChallengeReceipt {
+        schema_version: 1,
+        id: s3_challenge_decision_id(&cycle_id, 2, &challenger.id, challenger.attempt),
+        root_cycle_id: cycle_id.clone(),
+        task_cycle_id: cycle_id.clone(),
+        task_id: team.session_id.clone(),
+        round: 2,
+        seat_id: challenger.id.clone(),
+        attempt: challenger.attempt,
+        artifact_revision: challenger.reviewer_binding.as_ref().unwrap().artifact_revision.clone(),
+        reviewer_id: challenge_reviewer_identity(&challenger),
+        author_seat_ids: vec!["phase1-a".into(), "phase1-b".into()],
+        finding_ids: Vec::new(),
+        decided_at_ms: 10,
+    };
+    assert!(decision.validate());
+    persist_council_record(&store, &team.session_id, &decision.id, "council_s3_challenge", &decision, &challenger.id).unwrap();
+    assert_eq!(
+        s3_challenge_receipt_for_worker(&store, &team, &challenger).unwrap().unwrap(),
+        decision,
+    );
+}
+
+#[test]
+fn abandoned_reviewer_attempts_still_consume_the_finite_leaf_review_budget() {
+    use council::{AutomaticReviewerCount as Count, CouncilCriterionOrigin as Origin, CouncilCriteriaSource as Source};
+    let (state, root_id) = state_fixture();
+    let mut team = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap();
+    team.config.workers.push(WorkerProfile {
+        id: "priced-nano".into(), name: "Locally priced reviewer".into(),
+        provider: "codex".into(), model: "gpt-5-nano".into(), reasoning_effort: None,
+    });
+    let composition = council::CouncilComposition {
+        schema_version: 1,
+        automatic: council::CouncilAutomaticReviewers { enabled: true, count: Count::Fixed(2) },
+        selected: Vec::new(),
+        criteria_source: Source::User,
+        criteria: vec![council::CouncilCriterion {
+            id: "coverage".into(), lens: "coverage".into(), description: "Verify the fixed plan.".into(),
+            required: true, target: 9.0, evidence_required: true, source: Origin::User,
+        }],
+        strategy: council::CouncilStrategy::Parallel,
+        limits: council::CouncilCompositionLimits {
+            max_depth: 2, max_root_seats: 8, max_concurrent_leaves: 4,
+            max_leaf_reviews_per_round: 3, timeout_ms: 3_600_000, max_estimated_cost_micros: None,
+        },
+    };
+    composition.validate().unwrap();
+    team.config.council = Some(council::CouncilConfig {
+        target: 9.0, max_rounds: 5, reviewers: 2, composition: Some(composition),
+        ..council::CouncilConfig::default()
+    });
+    team.council_since = storage::now().max(1);
+    save(&state.store.lock().unwrap(), &mut team).unwrap();
+    dispatch_state_runtime_test(&state, &root_id, team.generation, "pandacode_dispatch_workers", json!({"assignments":[
+        {"key":"budget-a","profileId":"priced-nano","name":"review-a","prompt":"Review the task.","files":["src"],"readOnly":true,"councilLens":"security"},
+        {"key":"budget-b","profileId":"priced-nano","name":"review-b","prompt":"Review the task.","files":["src"],"readOnly":true,"councilLens":"correctness"}
+    ]})).unwrap();
+    let mut root = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap();
+    let replaced = root.workers[0].id.clone();
+    root.workers[0].status = "failed".into();
+    save(&state.store.lock().unwrap(), &mut root).unwrap();
+    root = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap();
+    dispatch_state_runtime_test(&state, &root_id, root.generation, "pandacode_dispatch_workers", json!({"assignments":[
+        {"key":"budget-replacement","profileId":"priced-nano","name":"replacement","prompt":"Replace the failed reviewer.","files":["src"],"readOnly":true,"councilLens":"security","replaces":replaced,"replaceReason":"The review failed before producing a report."}
+    ]})).unwrap();
+    root = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap();
+    assert!(root.workers.iter().find(|worker| worker.id == replaced).unwrap().abandoned);
+    let mut historical = worker("prior-cycle-review", "failed", &[], &[]);
+    historical.created_at = root.council_since.saturating_sub(1);
+    historical.council = Some(CouncilSeat {
+        round: 1, lens: "prior cycle".into(), ..CouncilSeat::default()
+    });
+    root.workers.push(historical);
+    save(&state.store.lock().unwrap(), &mut root).unwrap();
+    root = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap();
+    let cycle_id = format!("{}:{}", root.session_id, root.council_since);
+    let store = state.store.lock().unwrap();
+    assert_eq!(council_leaf_review_total(&store, &root, &root, &cycle_id, 1).unwrap(), 3,
+        "the abandoned attempt and its replacement both remain in the finite review budget");
+    drop(store);
+    let error = dispatch_state_runtime_test(&state, &root_id, root.generation, "pandacode_dispatch_workers", json!({"assignments":[
+        {"key":"budget-extra","profileId":"priced-nano","name":"extra reviewer","prompt":"Review the task again.","files":["src"],"readOnly":true,"councilLens":"security"}
+    ]})).unwrap_err();
+    assert!(error.contains("council_leaf_review_budget_exhausted"), "{error}");
 }
 
 #[test]

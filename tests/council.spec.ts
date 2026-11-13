@@ -93,6 +93,78 @@ test('schema v1 derives all seven modes and keeps each bot branch draft when mod
   ]));
 });
 
+test('an empty reviewer composition is unavailable and keyboard edits keep focus, selection, scroll and wrap Tab', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 760 });
+  await open(page, '/?council=composition');
+  await button(page).click();
+  const editor = panel(page).locator('.council-composition-editor');
+  const automatic = editor.locator('[data-composition-automatic]');
+  await automatic.focus();
+  await page.keyboard.press('Space');
+  await expect(automatic).not.toBeChecked();
+  await expect(automatic).toBeFocused();
+  await expect(editor.locator('[data-composition-mode-state]')).toHaveAttribute('data-composition-mode-state', 'unavailable');
+  await expect(editor.locator('.council-composition-mode-readout')).toHaveText('Unavailable');
+  await expect(editor.locator('.council-composition-modes [aria-current="true"]')).toHaveCount(0);
+  await expect(editor.getByRole('alert')).toContainText('At least 2 root reviewers are required.');
+  const preview = editor.locator('.council-plan-preview');
+  await expect(preview.locator('summary')).toHaveText('Plan preview · Unavailable');
+  await preview.locator('summary').click();
+  await expect(preview).toContainText('Unavailable: no reviewer source is enabled.');
+
+  await automatic.focus();
+  const panelScroll = await panel(page).evaluate(node => {
+    node.scrollTop = Math.min(80, node.scrollHeight - node.clientHeight);
+    return node.scrollTop;
+  });
+  expect(panelScroll).toBeGreaterThan(0);
+  await page.keyboard.press('Tab');
+  await expect(editor.getByRole('checkbox', { name: 'Include selected bot reviewers' })).toBeFocused();
+  const strategy = editor.locator('[data-composition-strategy]');
+  await strategy.focus();
+  await strategy.selectOption('escalated');
+  await expect(strategy).toBeFocused();
+  await expect(strategy).toHaveValue('escalated');
+
+  const source = editor.locator('[data-composition-criteria-source]');
+  await source.selectOption('hybrid');
+  await expect(source).toBeFocused();
+  const add = editor.getByRole('button', { name: 'Add user criterion' });
+  await add.focus();
+  const addScroll = await panel(page).evaluate(node => node.scrollTop);
+  await page.keyboard.press('Enter');
+  await expect(editor.locator('.council-criterion')).toHaveCount(1);
+  await expect(add).toBeFocused();
+  await expect(panel(page)).toHaveJSProperty('scrollTop', addScroll);
+
+  const criterionId = editor.locator('[data-composition-criterion="id"]');
+  await criterionId.focus();
+  await criterionId.press('Home');
+  await criterionId.press('Shift+End');
+  const selection = await criterionId.evaluate(node => [node.selectionStart, node.selectionEnd]);
+  const selectionScroll = await panel(page).evaluate(node => node.scrollTop);
+  await automatic.evaluate(node => {
+    node.checked = true;
+    node.dispatchEvent(new Event('change', { bubbles: true }));
+  });
+  await expect(criterionId).toBeFocused();
+  await expect(criterionId).toHaveJSProperty('selectionStart', selection[0]);
+  await expect(criterionId).toHaveJSProperty('selectionEnd', selection[1]);
+  await expect(automatic).toBeChecked();
+  await expect(panel(page)).toHaveJSProperty('scrollTop', selectionScroll);
+
+  const remove = editor.getByRole('button', { name: 'Remove criterion' });
+  await remove.focus();
+  const removeScroll = await panel(page).evaluate(node => node.scrollTop);
+  await page.keyboard.press('Enter');
+  await expect(editor.locator('.council-criterion')).toHaveCount(0);
+  await expect(add).toBeFocused();
+  await expect(panel(page)).toHaveJSProperty('scrollTop', removeScroll);
+  await panel(page).getByRole('checkbox', { name: 'Start new threads with Council on' }).focus();
+  await page.keyboard.press('Tab');
+  await expect(toggle(page)).toBeFocused();
+});
+
 test('schema v1 direct editor submits all supported execution strategies', async ({ page }) => {
   await open(page, '/?council=composition');
   await button(page).click();
@@ -144,7 +216,52 @@ test('composition criteria, supported strategies, limits and keyboard stay usabl
   await limit.fill('16');
   await expect(editor.getByRole('alert')).toBeHidden();
   await expect(editor.getByRole('button', { name: 'Apply composition' })).toBeEnabled();
-  await expect(editor.locator('.council-plan-preview')).toContainText('estimate only');
+  await expect(editor.locator('.council-plan-preview')).toContainText('Native assigns reviewers and records run scores, evidence, and usage.');
+});
+
+test('plan preview explains nested reviewer branches and invalid fields have local accessible errors', async ({ page }) => {
+  await page.setViewportSize({ width: 360, height: 760 });
+  const reviewers: ReviewerFixture = { ids: [], bots: [
+    { id: 'reviewer-a', name: 'Review Alpha', role: 'Security reviewer', provider: 'codex', model: 'gpt-6', paused: false, available: true },
+  ] };
+  await open(page, '/?council=composition', {}, 0, '', {}, reviewers);
+  await button(page).click();
+  const editor = panel(page).locator('.council-composition-editor'), preview = editor.locator('.council-plan-preview');
+  await expect(editor.locator('.council-composition-bot')).toContainText('Review Alpha');
+  await preview.locator('summary').click();
+  await expect(preview).toContainText('Root reviewers');
+  await expect(preview).toContainText('automatic count chosen at dispatch');
+  await expect(preview).toContainText('Configured hard limits');
+
+  const automatic = editor.locator('[data-composition-automatic]'), automaticCount = editor.locator('[data-composition-automatic-count]');
+  await automatic.uncheck();
+  await expect(automaticCount).toBeDisabled();
+  await automatic.check();
+  await expect(automaticCount).toHaveValue('auto');
+  await expect(editor.getByRole('button', { name: 'Apply composition' })).toBeEnabled();
+
+  await editor.getByRole('checkbox', { name: 'Include selected bot reviewers' }).check();
+  await editor.locator('[data-composition-bot="reviewer-a"]').check();
+  await editor.locator('[data-composition-reviewer-mode="reviewer-a"]').selectOption('nested');
+  const nestedPreview = editor.locator('.council-plan-preview');
+  await nestedPreview.locator('summary').click();
+  await expect(nestedPreview).toContainText('Review Alpha · Bot reviewer-a');
+  await expect(nestedPreview).toContainText('Child Council · explicit task · 3 reviewers · target 9.0 · 3 rounds');
+
+  const childTarget = editor.locator('[data-composition-nested="target"][data-bot-id="reviewer-a"]');
+  await childTarget.fill('11');
+  await expect(childTarget).toHaveAttribute('aria-invalid', 'true');
+  const errorId = await childTarget.getAttribute('aria-describedby');
+  expect(errorId).toContain('council-field-error-reviewers-0-nested-target');
+  await expect(editor.locator('#council-field-error-reviewers-0-nested-target')).toContainText('Child target for "reviewer-a" must be 1–10.');
+  await expect(editor.getByRole('button', { name: 'Apply composition' })).toBeDisabled();
+  const fits = await panel(page).evaluate(node => node.scrollWidth <= node.clientWidth + 1 && node.getBoundingClientRect().right <= innerWidth);
+  expect(fits).toBe(true);
+
+  await childTarget.fill('8.5');
+  await expect(childTarget).not.toHaveAttribute('aria-invalid', 'true');
+  await expect(editor.locator('#council-field-error-reviewers-0-nested-target')).toBeHidden();
+  await expect(editor.getByRole('button', { name: 'Apply composition' })).toBeEnabled();
 });
 
 test('read-only inspector renders supplied findings, receipts, usage, stale state and accepted exceptions', async ({ page }) => {

@@ -127,6 +127,7 @@ pub(super) fn validate_roster(store: &Store, session_id: &str, council: &Council
     council.validate()?;
     if council.reviewer_bot_ids.is_empty() && council.nested_bot_reviewers.is_empty() { return Ok(()); }
     let executor = executor(store, session_id)?;
+    let project_id = store.session(session_id)?.project_id;
     let mut used = HashSet::new();
     let mut available_skills = HashSet::new();
     for id in council.reviewer_bot_ids.iter().chain(council.nested_bot_reviewers.iter().map(|child| &child.bot_id)) {
@@ -134,6 +135,13 @@ pub(super) fn validate_roster(store: &Store, session_id: &str, council: &Council
             return Err("reviewer_unavailable: repeated reviewer bot ID.".into());
         }
         let bot = bots::get(store, id).map_err(|_| format!("reviewer_unavailable: selected bot {id} was removed."))?;
+        // Child reviewers may only coordinate a task in their own project.
+        // Reject before Council is configured, not after creating child sessions.
+        if council.nested_bot_reviewers.iter().any(|child| &child.bot_id == id)
+            && bot.project_id != project_id
+        {
+            return Err("child_council_denied: selected nested bot belongs to another project.".into());
+        }
         valid_bot(&bot, executor.as_deref(), true)?;
         if council.nested_bot_reviewers.iter().any(|child| &child.bot_id == id) {
             if bot.provider == "zcode" {

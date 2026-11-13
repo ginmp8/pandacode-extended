@@ -2177,6 +2177,13 @@ fn child_council_revocation_and_project_isolation_fail_closed() {
             [],
         ).unwrap();
     }
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let preflight = bot_reviewers::validate_roster(&store, &sid, root.config.council.as_ref().unwrap())
+            .unwrap_err();
+        assert!(preflight.contains("child_council_denied"), "{preflight}");
+    }
     let denied = start_state(&state, &sid, "Review the task", None, None).unwrap_err();
     assert!(denied.contains("child_council_denied"), "{denied}");
     {

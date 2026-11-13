@@ -1869,6 +1869,10 @@ fn prepare_cloud_attach(
     stopped: Arc<AtomicBool>,
 ) -> Result<PreparedRun> {
     let session_id = session.id.clone();
+    // Cloud reattachment is a separate provider entrypoint from normal run
+    // preparation. Never let a task-owned SuperAgent session reattach through
+    // this unrestricted path (reviewer_boundary=false, reviewer_policy=None).
+    superagent::guard_cloud_attach(store, &session_id)?;
     let cloud = cloud_agents::load(store, &session_id)?
         .filter(|cloud| cloud.active())
         .ok_or("This cloud run already ended.")?;
@@ -2445,14 +2449,24 @@ async fn launch_operation_admitted(
                 config.reviewer_policy.as_ref(),
                 Some(architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly)
             ) {
-                // Read-only reviewers still need the two task-scoped, native skill
-                // retrieval/verification tools. Never expose Architect or bot tools.
-                let host = team.as_ref().and_then(|admission| {
-                    architect::reviewer_skill_host(
-                        app.clone(), session_id.clone(), stopped.clone(), admission,
-                    )
-                });
-                (host, false, None)
+                match superagent::write_grants::host(
+                    app.clone(),session_id.clone(),stopped.clone(),
+                ) {
+                    Err(error) => (None,false,Some(error)),
+                    // A granted SuperAgent worker receives this one app-owned
+                    // tool only; built-in provider tools remain read-only.
+                    Ok(Some(host)) => (Some(host),false,None),
+                    Ok(None) => {
+                        // Ordinary Council reviewers still receive only their
+                        // task-scoped, read-only skill evidence tools.
+                        let host = team.as_ref().and_then(|admission| {
+                            architect::reviewer_skill_host(
+                                app.clone(), session_id.clone(), stopped.clone(), admission,
+                            )
+                        });
+                        (host,false,None)
+                    }
+                }
             } else {
                 (None, false, None)
             };
@@ -2723,6 +2737,35 @@ async fn launch_operation_admitted(
             architect::completed(&app, &session_id, team.as_ref(), successful, was_stopped, provider_error.as_deref(), registry);
         }
         drop(registry);
+        // Persist a just-finished native Council reviewer result before its
+        // SuperAgent callback inspects the native score and skill receipts.
+        if let Ok(db) = store.lock() {
+            if let Err(error) = superagent::council_adapter::finalize_after_native_run(&db,&session_id) {
+                eprintln!("SuperAgent Council finalization failed: {error}");
+            }
+        }
+        // Successful bot workers have no failover path. Settle their Ticket
+        // synchronously so the exact artifact is frozen before actual native
+        // reviewers are dispatched; the later gateway callback is idempotent.
+        if successful && !was_stopped {
+            let required = store.lock().ok().and_then(|db| {
+                superagent::council_adapter::required_worker_session(&db,&session_id).ok()
+            }).unwrap_or(false);
+            if required {
+                let reply = store.lock().ok().and_then(|db| db.db.query_row(
+                    "SELECT content FROM messages WHERE session_id=?1 AND role='assistant' ORDER BY id DESC LIMIT 1",
+                    [&session_id],|row| row.get::<_,String>(0),
+                ).ok()).unwrap_or_default();
+                let settled = store.lock().ok().and_then(|db| {
+                    superagent::on_run_finished(&db,&session_id,true,&reply).ok()
+                }).unwrap_or(false);
+                if settled {
+                    if let Err(error) = superagent::council_adapter::start_after_worker_completion(&app,&session_id) {
+                        eprintln!("SuperAgent Council dispatch failed: {error}");
+                    }
+                }
+            }
+        }
         // A turn's approval requests expire even if Council is still reviewing
         // or the user stopped the run. This must precede deferred final callbacks.
         bots::gateway::turn_ended(&session_id);
@@ -4442,24 +4485,40 @@ pub fn run() {
                 superagent::events::superagent_source_decisions,
                 superagent::events::superagent_source_set_mode,
                 superagent::events::superagent_source_observe,
+                superagent::events::superagent_source_poll_authenticated,
+                superagent::events::superagent_source_observe_check_run,
+                superagent::events::superagent_source_fetch_thread,
                 superagent::events::superagent_source_link_thread,
+                superagent::events::superagent_source_unlink_thread,
                 superagent::events::superagent_source_thread_links,
+                superagent::events::superagent_source_thread_activity,
                 superagent::superagent_list,
+                superagent::roster::superagent_roster,
+                superagent::roster::superagent_roster_update,
+                superagent::roster::superagent_effective_team,
                 superagent::superagent_set_enabled,
                 superagent::superagent_update,
                 superagent::superagent_delete,
                 superagent::superagent_ticket,
                 superagent::superagent_mandate,
                 superagent::superagent_tickets,
+                superagent::superagent_all_demands,
+                superagent::superagent_review_inbox,
                 superagent::superagent_assignments,
                 superagent::superagent_activity,
                 superagent::superagent_snapshot,
+                superagent::superagent_graph,
+                superagent::superagent_effect_receipts,
+                superagent::superagent_preflight,
                 superagent::superagent_submit,
                 superagent::superagent_submit_coordinated,
                 superagent::superagent_dispatch_worker,
+                superagent::superagent_dispatch_worker_with_write_grant,
+                superagent::superagent_revoke_worker_write_grant,
                 superagent::superagent_retry,
                 superagent::superagent_accept,
                 superagent::superagent_reject,
+                superagent::superagent_issue_comment,
                 superagent::manifest::superagent_manifest_export,
                 superagent::manifest::superagent_manifest_preview,
                 superagent::manifest::superagent_manifest_import,
@@ -4535,6 +4594,7 @@ pub fn run() {
                 architect::architect_set_council,
                 architect::architect_council_reviewer_options,
                 architect::architect_council_accept,
+                superagent::superagent_accept_council,
                 architect::architect_start,
                 architect::architect_control,
                 architect::architect_worker_messages,

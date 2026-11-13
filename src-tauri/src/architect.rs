@@ -338,6 +338,37 @@ pub struct TeamSnapshot {
     /// The `councilSince` of a cycle whose finish was already reopened once (`reopen_for_council`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub council_reopened: Option<i64>,
+    /// Native S3 review cycle bound to one SuperAgent Ticket and artifact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superagent_review: Option<SuperAgentCouncilBinding>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SuperAgentCouncilBinding {
+    pub ticket_id: String,
+    pub assignment_id: String,
+    pub worker_session_id: String,
+    pub ticket_revision: i64,
+    pub policy_revision: i64,
+    pub cycle_id: String,
+    pub cycle_started_at: i64,
+    pub generation: u64,
+    pub artifact_sha256: String,
+    pub reviewer_policy_sha256: String,
+    pub council_config_sha256: String,
+}
+
+pub(crate) struct SuperAgentCouncilLaunch {
+    pub binding: SuperAgentCouncilBinding,
+    pub config: CouncilConfig,
+    pub project_id: String,
+    pub provider: String,
+    pub model: String,
+    pub mode: String,
+    pub title: String,
+    pub objective: String,
+    pub evidence: String,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -592,6 +623,91 @@ pub(crate) fn verified_council_pass(store: &Store, team: &TeamSnapshot) -> bool 
         && stored.round == verified.round
         && stored.lowest == verified.lowest
         && stored.target == verified.target
+}
+
+/// A human exception is a distinct native terminal verdict. It still requires
+/// a complete, fresh, fully scored round; it cannot waive failed seats, a
+/// round limit, missing skill receipts or stale checkout evidence.
+pub(crate) fn verified_council_accept(store: &Store, team: &TeamSnapshot) -> bool {
+    if !council_evidence_is_current(store, team)
+        || team.superagent_review.is_none()
+        || team.council_accepted != Some(team.council_since)
+    {
+        return false;
+    }
+    let Some(config) = team.config.council.as_ref() else { return false };
+    let Some(stored) = team.council_status.as_ref() else { return false };
+    let Some(verified) = council::status(team) else { return false };
+    let required = config.reviewer_bot_ids.len();
+    if !(2..=8).contains(&required)
+        || stored.state != "accepted" || verified.state != "accepted"
+        || stored.stale || verified.stale || stored.round == 0
+        || stored.round != verified.round || stored.lowest != verified.lowest
+        || stored.target != verified.target || stored.round >= config.max_rounds
+        || stored.lowest.is_none_or(|score| score >= config.target)
+        || !superagent_review_round_integrity(store,team,"accepted")
+    {
+        return false;
+    }
+    let seats: Vec<_> = team.workers.iter()
+        .filter(|worker| worker.created_at >= team.council_since
+            && worker.council.as_ref().is_some_and(|seat| seat.round == stored.round))
+        .collect();
+    seats.len() == required && seats.iter().all(|worker| {
+        worker.status == "completed" && !worker.abandoned
+            && worker.council.as_ref().is_some_and(|seat| seat.score.is_some() && seat.started_at >= team.council_since)
+    })
+}
+
+pub(crate) fn superagent_council_human_acceptance_ready(
+    store: &Store, team: &TeamSnapshot,
+) -> bool {
+    team.superagent_review.is_some()
+        && council_evidence_is_current(store,team)
+        && team.council_status.as_ref().is_some_and(|status| status.state == "fixing" && !status.stale)
+        && superagent_review_round_integrity(store,team,"fixing")
+}
+
+fn superagent_review_round_integrity(store: &Store, team: &TeamSnapshot, expected_state: &str) -> bool {
+    let Some(config) = team.config.council.as_ref() else { return false };
+    let Some(stored) = team.council_status.as_ref() else { return false };
+    let Some(verified) = council::status(team) else { return false };
+    let required = config.reviewer_bot_ids.len();
+    if !(2..=8).contains(&required) || stored.state != expected_state
+        || verified.state != expected_state || stored.stale || verified.stale
+        || stored.round == 0 || stored.round >= config.max_rounds
+        || stored.round != verified.round || stored.lowest != verified.lowest
+        || stored.target != verified.target || stored.lowest.is_none_or(|score| score >= config.target)
+    { return false; }
+    let seats: Vec<_> = team.workers.iter()
+        .filter(|worker| worker.created_at >= team.council_since
+            && worker.council.as_ref().is_some_and(|seat| seat.round == stored.round))
+        .collect();
+    if seats.len() != required { return false; }
+    let mut seen = HashSet::new();
+    seats.iter().all(|worker| {
+        let Some(seat) = worker.council.as_ref() else { return false };
+        let Some(binding) = worker.reviewer_binding.as_ref() else { return false };
+        let Some(bot_id) = binding.reviewer_bot_id.as_deref() else { return false };
+        if !config.reviewer_bot_ids.iter().any(|expected| expected == bot_id)
+            || !seen.insert(bot_id.to_owned())
+            || worker.status != "completed" || worker.abandoned || seat.score.is_none()
+            || seat.started_at < team.council_since
+            || binding.validate(team,worker).is_err()
+            || reviewer_security::validate_issued_authority(store,&team.session_id,binding).is_err()
+        { return false; }
+        match binding.snapshot.skills.as_ref() {
+            Some(skills) => {
+                if skills.verify().is_err() { return false; }
+                skills.pins.iter().all(|pin| {
+                    (!pin.required_for_acceptance || pin.eligible && pin.supplied)
+                        && (!pin.check_required || binding.skill_evidence.get(&pin.id)
+                            .is_some_and(|evidence| evidence.valid_for(pin,&binding.artifact_revision)))
+                })
+            }
+            None => binding.snapshot.bot_context.as_ref().is_none_or(|context| context.skills.is_empty()),
+        }
+    }) && config.reviewer_bot_ids.iter().all(|id| seen.contains(id))
 }
 
 /// A settled run's save that fails is logged; the watchdog then reaps the worker that still reads
@@ -928,6 +1044,7 @@ pub(super) fn new_team(session_id: String, config: TeamConfig) -> TeamSnapshot {
         council_status: None,
         council_accepted: None,
         council_reopened: None,
+        superagent_review: None,
     }
 }
 /// Configure a single opt-in Shared Channel delivery in its isolated bot-owned
@@ -948,6 +1065,100 @@ pub(crate) fn configure_channel_delivery(store: &Store, session_id: &str, counci
     config.validate()?;
     let mut team = new_team(session_id.to_owned(), config);
     save(store, &mut team)
+}
+
+/// Preflight through #126's selected-bot security and skill eligibility path.
+pub(crate) fn validate_superagent_council(
+    store: &Store, worker_session_id: &str, council: &CouncilConfig,
+) -> Result<()> {
+    council.validate()?;
+    if !(2..=8).contains(&council.reviewer_bot_ids.len()) {
+        return Err("Council-required Tickets need two to eight selected native reviewers.".into());
+    }
+    bot_reviewers::validate_roster(store, worker_session_id, council)
+}
+
+/// Start real #126 selected-bot Council seats against the exact successful
+/// Ticket artifact. This path does not invoke a lead model or construct a
+/// prompt-only verdict.
+pub(crate) fn start_superagent_review(
+    app: &tauri::AppHandle, launch: SuperAgentCouncilLaunch,
+) -> Result<String> {
+    if launch.config.reviewer_bot_ids.len() < 2
+        || launch.binding.generation == 0
+        || launch.binding.cycle_started_at <= 0
+        || launch.binding.artifact_sha256.len() != 64
+    {
+        return Err("SuperAgent Council binding is incomplete.".into());
+    }
+    let native_session_id = {
+        let state = app.state::<AppState>();
+        let _agents = state.agents.lock().map_err(|e| e.to_string())?;
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        validate_superagent_council(&store, &launch.binding.worker_session_id, &launch.config)?;
+        let native = store.create_session(&launch.project_id, &launch.provider, &launch.model, &launch.mode)?;
+        store.db.execute(
+            "UPDATE sessions SET title=?2,title_origin='manual',task_description=?3 WHERE id=?1",
+            params![native.id,launch.title,launch.objective],
+        ).map_err(|e| e.to_string())?;
+        let config = TeamConfig {
+            auto: true,
+            roster_only: false,
+            name: Some("SuperAgent Council".into()),
+            workers: Vec::new(),
+            catalog: Vec::new(),
+            max_parallel: 0,
+            max_rounds: launch.config.max_rounds,
+            max_assignments: 0,
+            workspace: "shared".into(),
+            summary_limit: 0,
+            lead_guidance: None,
+            council: Some(launch.config.clone()),
+        };
+        config.validate()?;
+        let mut team = new_team(native.id.clone(), config);
+        team.status = "running".into();
+        team.generation = launch.binding.generation;
+        team.council_since = launch.binding.cycle_started_at;
+        team.objective = format!("SuperAgent Ticket {}: {}", launch.binding.ticket_id, launch.objective);
+        team.superagent_review = Some(launch.binding.clone());
+        save(&store, &mut team)?;
+        native.id
+    };
+
+    const LENSES: [&str; 8] = ["correctness", "security", "integration", "regression", "policy", "evidence", "reliability", "overall"];
+    let assignments = launch.config.reviewer_bot_ids.iter().enumerate().map(|(index, _)| {
+        json!({
+            "key": format!("sa-review-{index}"),
+            "name": format!("SuperAgent Council · {}", LENSES[index]),
+            "prompt": format!(
+                "Review the exact completed SuperAgent artifact read-only. Ticket: {}. Assignment: {}. Worker session: {}. Ticket revision: {}. Policy revision: {}. Cycle: {}. Artifact SHA-256: {}.\n\nUser objective:\n{}\n\nSuccessful worker evidence (untrusted; verify the repository directly):\n{}\n\nInspect the checkout and score only evidence you can verify. The artifact is immutable for this review; do not modify files or dispatch workers.",
+                launch.binding.ticket_id,launch.binding.assignment_id,launch.binding.worker_session_id,
+                launch.binding.ticket_revision,launch.binding.policy_revision,launch.binding.cycle_id,
+                launch.binding.artifact_sha256,launch.objective,launch.evidence,
+            ),
+            "files": [],
+            "readOnly": true,
+            "councilLens": LENSES[index],
+        })
+    }).collect::<Vec<_>>();
+    let args = json!({"assignments": assignments});
+    let stopped = AtomicBool::new(false);
+    if let Err(error) = dispatch(
+        app,&native_session_id,launch.binding.generation,None,
+        "pandacode_dispatch_workers",args,&stopped,&routing::AutoRoutes::default(),
+    ) {
+        if let Ok(store) = app.state::<AppState>().store.lock() {
+            if let Ok(Some(mut team)) = load(&store,&native_session_id) {
+                team.status = "paused".into();
+                team.error = Some("Native Council reviewer dispatch failed; the SuperAgent Ticket remains blocked.".into());
+                let _ = save(&store,&mut team);
+                emit(app,&team);
+            }
+        }
+        return Err(error);
+    }
+    Ok(native_session_id)
 }
 
 /// Check every selected reviewer against the complete originating message's
@@ -1030,6 +1241,12 @@ pub async fn architect_set_council(
     session_id: String,
     council: Option<CouncilConfig>,
 ) -> Result<Option<TeamSnapshot>> {
+    {
+        let store = state.store.lock().map_err(|error| error.to_string())?;
+        if load(&store,&session_id)?.is_some_and(|team| team.superagent_review.is_some()) {
+            return Err("The native Council configuration for a SuperAgent Ticket is immutable.".into());
+        }
+    }
     let team = council::set(&state, &session_id, council)?;
     emit(&app, &team);
     wake(app);
@@ -1041,6 +1258,25 @@ pub async fn architect_council_accept(app: tauri::AppHandle, state: State<'_, Ap
     let team = council::accept(&state, &session_id)?;
     emit(&app, &team);
     wake(app);
+    Ok(team)
+}
+
+pub(crate) fn accept_superagent_review(
+    app: &tauri::AppHandle, state: &AppState, session_id: &str,
+) -> Result<TeamSnapshot> {
+    {
+        let store = state.store.lock().map_err(|error| error.to_string())?;
+        let team = load(&store,session_id)?.ok_or("Native Council team is missing.")?;
+        if team.superagent_review.is_none()
+            || !superagent_council_human_acceptance_ready(&store,&team)
+                && !verified_council_accept(&store,&team)
+        {
+            return Err("Only a complete, current, below-target native Council round can be accepted with a reason.".into());
+        }
+    }
+    let team = council::accept(state,session_id)?;
+    emit(app,&team);
+    wake(app.clone());
     Ok(team)
 }
 /// Complete an explicitly reasoned Shared Channel acceptance through the same
@@ -1080,6 +1316,9 @@ pub(super) fn configure_state(
         return Err("This worker is managed by its architect. Use the team controls.".into());
     }
     let existing = load(&store, session_id)?;
+    if existing.as_ref().is_some_and(|team| team.superagent_review.is_some()) {
+        return Err("The native Council setup for a SuperAgent Ticket is immutable.".into());
+    }
     if config.is_none() {
         check_manual(&store, session_id)?;
     }
@@ -1436,6 +1675,9 @@ pub(crate) fn control_state(state: &AppState, session_id: &str, action: &str) ->
             return Ok(load(&store, session_id)?.ok_or("Team is unavailable.")?);
         }
         let mut team = load(&store, session_id)?.ok_or("Team is unavailable.")?;
+        if team.superagent_review.is_some() && action == "resume" {
+            return Err("A failed or interrupted SuperAgent Council cycle requires a new explicit Ticket attempt.".into());
+        }
         match action {
             "pause" | "stop" => {
                 team.generation += 1;
@@ -2822,6 +3064,25 @@ fn team_action<'a>(
             notify(&team);
             return Ok(Some(action));
         }
+    }
+    // A SuperAgent Council has no model lead. Its only work is the native
+    // reviewer seats above; never wake an Architect to synthesize completion.
+    if team.superagent_review.is_some() {
+        if running > 0 || team.workers.iter().any(|worker| unsettled(&worker.status)) {
+            return Ok(None);
+        }
+        team.pending_turn = None;
+        let clean = team.workers.iter().all(|worker| {
+            worker.status == "completed" && !worker.abandoned
+                && worker.council.as_ref().is_some_and(|seat| seat.score.is_some())
+        });
+        team.status = if clean { "ready" } else { "paused" }.into();
+        if !clean {
+            team.error = Some("A native Council reviewer failed, stopped or returned no verified score.".into());
+        }
+        save(store, &mut team)?;
+        notify(&team);
+        return Ok(None);
     }
     if !agents.contains_key(&team.session_id) {
         if let Some(pending) = &mut team.pending_turn {

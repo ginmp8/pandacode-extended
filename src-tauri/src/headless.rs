@@ -38,6 +38,7 @@ enum Command {
     InspectTicket { ticket_id: String },
     InspectTicketEffects { ticket_id: String },
     InspectTicketSource { ticket_id: String },
+    UnlinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
     InspectTeamReadiness { orchestration_id: String },
     ObserveSource { source_id: String },
     ObserveCheckRun { source_id: String, check_run_id: i64 },
@@ -124,6 +125,22 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(activity) => { println!("{activity}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent source activity inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::UnlinkSourceThread { source_id, ticket_id, subject_key } = &command {
+                // One explicit trusted local mutation, no Store::open recovery,
+                // provider launch, grant, GitHub write, or implicit refollow.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_unlink_thread(
+                        &dir.join("kingcode.sqlite3"), source_id, ticket_id, subject_key,
+                    ));
+                match result {
+                    Ok(receipt) => { println!("{receipt}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent thread unlink failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -294,7 +311,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         Command::InspectOrchestrations | Command::ListTickets | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTicketEffects { .. }
-        | Command::InspectTicketSource { .. }
+        | Command::InspectTicketSource { .. } | Command::UnlinkSourceThread { .. }
         | Command::ObserveSource { .. } | Command::ObserveCheckRun { .. }
         | Command::QueueDemand { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
@@ -813,6 +830,25 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--unlink-source-thread" => {
+                let source_id = args.get(index + 1)
+                    .ok_or("--unlink-source-thread needs source ID, Ticket ID and exact thread key.")?;
+                let ticket_id = args.get(index + 2)
+                    .ok_or("--unlink-source-thread needs a Ticket ID.")?;
+                let subject_key = args.get(index + 3)
+                    .ok_or("--unlink-source-thread needs an exact issue:123 or pull:123 key.")?;
+                validate_ticket_id(source_id).map_err(|_| "Provide a bounded source ID.".to_owned())?;
+                validate_ticket_id(ticket_id)?;
+                if !crate::superagent::events::valid_thread_key(subject_key) {
+                    return Err("Provide an exact issue:123 or pull:123 thread key.".into());
+                }
+                command = Command::UnlinkSourceThread {
+                    source_id:source_id.clone(),ticket_id:ticket_id.clone(),
+                    subject_key:subject_key.clone(),
+                };
+                ops += 1;
+                index += 3;
+            }
             "--inspect-ticket-effects" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--inspect-ticket-effects needs a Ticket ID.\n\n{}", help()))?;
@@ -977,7 +1013,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1025,6 +1061,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-ticket-source <id>
                           Read up to 50 verified linked source receipts without GitHub polling,
                           task execution or startup recovery; exit.
+  --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123>
+                         Revoke only this explicit Ticket/GitHub context link, retain immutable
+                         receipts and audit, without starting a worker or provider; exit.
   --accept-ticket <id> <revision>
                          Accept current worker evidence at the expected Ticket revision; exit.
   --reject-ticket <id> <revision> <reason>
@@ -1157,6 +1196,29 @@ mod tests {
         assert!(parsed("--inspect-ticket-source").is_err());
         assert!(parsed("--inspect-ticket-source ../unsafe").is_err());
         assert!(parsed("--inspect-ticket-source ticket_123 --stop-ticket ticket_123").is_err());
+        assert_eq!(parsed("--unlink-source-thread source_123 ticket_123 issue:42"),
+            Ok(Command::UnlinkSourceThread {
+                source_id:"source_123".into(),ticket_id:"ticket_123".into(),
+                subject_key:"issue:42".into(),
+            }));
+        assert_eq!(parsed("--unlink-source-thread source_123 ticket_123 pull:99"),
+            Ok(Command::UnlinkSourceThread {
+                source_id:"source_123".into(),ticket_id:"ticket_123".into(),
+                subject_key:"pull:99".into(),
+            }));
+        for invalid in [
+            "--unlink-source-thread",
+            "--unlink-source-thread source_123",
+            "--unlink-source-thread source_123 ticket_123",
+            "--unlink-source-thread ../unsafe ticket_123 issue:42",
+            "--unlink-source-thread source_123 ../unsafe issue:42",
+            "--unlink-source-thread source_123 ticket_123 issue:0",
+            "--unlink-source-thread source_123 ticket_123 issue:01",
+            "--unlink-source-thread source_123 ticket_123 pull:abc",
+            "--unlink-source-thread source_123 ticket_123 issue:42 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert_eq!(parsed("--inspect-ticket-effects ticket_123"),
             Ok(Command::InspectTicketEffects { ticket_id: "ticket_123".into() }));
         assert!(parsed("--inspect-ticket-effects").is_err());
@@ -1253,6 +1315,7 @@ mod tests {
             "--inspect-ticket",
             "--inspect-ticket-effects",
             "--inspect-ticket-source",
+            "--unlink-source-thread",
             "--observe-source",
             "--observe-check-run",
             "--accept-ticket",

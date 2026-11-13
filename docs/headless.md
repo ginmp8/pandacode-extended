@@ -513,3 +513,25 @@ pandacode serve --rename-orchestration <team-id> <expected-policy-revision> "New
 ```
 
 The native write is a CAS-guarded, revisioned **name-only** update through the same SuperAgent policy handler as the desktop. It does not change Coordinator, Workers, Reviewers, project, task grants, history, provider sessions or external effects. Active/reviewable Tickets, running assignments and pending/uncertain external effects reject the action. The live database is opened without startup recovery, so a concurrent server's unrelated sessions are not interrupted. A repeated command with a stale revision fails closed. This is a local operator action, not a GitHub Auto trigger.
+
+### Headless revocation of a GitHub Ticket context link
+
+An authorized **local operator** can revoke an exact manually created source
+association without opening the desktop workspace:
+
+```sh
+pandacode serve --unlink-source-thread <source-id> <ticket-id> issue:42
+pandacode serve --unlink-source-thread <source-id> <ticket-id> pull:123
+```
+
+This one-shot operation uses the **same native transactional unlink** as the
+Ticket inspector. IDs and typed keys must match, or the operation exits nonzero.
+It atomically removes only that link and writes a durable Ticket audit entry.
+Historical authenticated Observe receipts, source cursors, Mandates, Ticket
+state and original evidence are never deleted or modified. Remaining explicit
+links to the same Team/repository/thread continue to correlate that context.
+The response is bounded JSON metadata (`unlinked`, identities,
+`authorizationIssued: false`); it includes no private objectives or event
+bodies. No GitHub call, provider admission, worker or automatic retry occurs.
+The CLI opens the existing storage path without running process-start recovery
+on a concurrently active headless host.

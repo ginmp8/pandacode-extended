@@ -162,7 +162,7 @@ pub struct SourceThreadLink {
 /// Links may refer only to an exact issue or PR number, not URLs, arbitrary
 /// text or any user-supplied action. Local approval of a link never authorizes
 /// an incoming webhook, a task transition or a tool call.
-fn valid_thread_key(value: &str) -> bool {
+pub(crate) fn valid_thread_key(value: &str) -> bool {
     let Some((kind, number)) = value.split_once(':') else { return false };
     matches!(kind, "issue" | "pull") && (1..=12).contains(&number.len())
         && !number.starts_with('0') && number.bytes().all(|c| c.is_ascii_digit())
@@ -1210,6 +1210,20 @@ fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<Ev
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+/// Trusted local operator revocation of an exact context association without
+/// opening Store::open, running startup recovery, or touching a live provider.
+/// Desktop and headless use the same native transaction and immutable receipts.
+pub(crate) fn headless_unlink_thread(
+    path: &std::path::Path, source_id: &str, ticket_id: &str, subject_key: &str,
+) -> Result<String> {
+    let store = super::open_headless_transition_store(path)?;
+    unlink_thread(&store, source_id, ticket_id, subject_key)?;
+    serde_json::to_string(&serde_json::json!({
+        "sourceId":source_id, "ticketId":ticket_id, "subjectKey":subject_key,
+        "unlinked":true, "authorizationIssued":false
+    })).map_err(|e| e.to_string())
+}
+
 /// Read-only source receipt inspection without headless startup recovery.
 pub(crate) fn headless_linked_activity(path: &std::path::Path, ticket_id: &str, limit: i64)
     -> Result<String>
@@ -2089,6 +2103,37 @@ mod tests {
         assert!(link_thread(&reopened,&observed.id,"ticket-one","issue:42").is_err(),
             "a terminal Ticket cannot gain a new context link");
         assert!(linked_decisions(&reopened,"ticket-one",50).unwrap().is_empty());
+    }
+
+    #[test]
+    fn headless_unlink_reuses_live_native_transaction_without_recovery_or_receipt_loss() {
+        let (store,path)=fixture();
+        insert_manual_ticket(&store,"headless-one","orch");
+        let source=create_source(&store,"orch","test/fixture",
+            "trusted-bot","issues.opened").unwrap();
+        let observed=set_mode(&store,&source.id,source.policy_revision,"observe").unwrap();
+        observe(&store,&event("verified-502",&observed,502)).unwrap();
+        link_thread(&store,&observed.id,"headless-one","issue:42").unwrap();
+        // Keep the original connection open: a one-shot operator command
+        // must never run startup recovery on an active owning process.
+        assert!(headless_unlink_thread(&path,&observed.id,"missing","issue:42").is_err());
+        assert!(headless_unlink_thread(&path,&observed.id,"headless-one","pull:42").is_err());
+        let result:serde_json::Value=serde_json::from_str(
+            &headless_unlink_thread(&path,&observed.id,"headless-one","issue:42").unwrap()
+        ).unwrap();
+        assert_eq!(result["unlinked"],true);
+        assert_eq!(result["authorizationIssued"],false);
+        assert_eq!(result["ticketId"],"headless-one");
+        assert!(headless_unlink_thread(&path,&observed.id,"headless-one","issue:42").is_err());
+        assert!(list_thread_links(&store,"headless-one").unwrap().is_empty());
+        assert!(linked_decisions(&store,"headless-one",50).unwrap().is_empty());
+        assert_eq!(list_decisions(&store,&observed.id,10).unwrap()[0].delivery_id,
+            "verified-502");
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_mandates",[],
+            |r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id='headless-one'
+             AND kind='source_thread_unlinked'",[],|r|r.get::<_,i64>(0)).unwrap(),1);
     }
 
     #[test]

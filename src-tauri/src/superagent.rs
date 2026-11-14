@@ -519,6 +519,10 @@ pub struct TeamRoleSnapshot {
     /// closed when a new run is requested.
     pub effective_config: Option<serde_json::Value>,
     pub effective_config_sha256: Option<String>,
+    /// Optional for historical snapshots; captured for newly admitted roles.
+    /// A later project checkout move cannot inherit the original task grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -620,9 +624,24 @@ fn effective_role_snapshot(
     let effective_config_sha256 = effective_config.as_ref().map(|profile| {
         serde_json::to_vec(profile).map(|bytes| sha256_hex(&bytes)).map_err(|e| e.to_string())
     }).transpose()?;
+    // Store the checkout separately from the bot-config digest. This keeps
+    // historical v1-v3 task profile hashes valid while pinning new paths.
+    let project_path = if let Some(project_id) = effective_config.as_ref()
+        .and_then(|config| config.get("projectId"))
+        .and_then(serde_json::Value::as_str)
+    {
+        let path: String = db.query_row(
+            "SELECT path FROM projects WHERE id=?1",
+            [project_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if path.trim().is_empty() {
+            return Err("Team member checkout path is unavailable.".into());
+        }
+        Some(path)
+    } else { None };
     Ok(TeamRoleSnapshot {
         role: role.into(), ordinal, bot_id: bot_id.into(),
-        effective_config, effective_config_sha256,
+        effective_config, effective_config_sha256, project_path,
     })
 }
 
@@ -691,10 +710,12 @@ fn legacy_unknown_team_snapshot(
         TeamRoleSnapshot {
             role: "coordinator".into(), ordinal: 0, bot_id: coordinator_bot_id.clone(),
             effective_config: None, effective_config_sha256: None,
+            project_path: None,
         },
         TeamRoleSnapshot {
             role: "worker".into(), ordinal: 0, bot_id: worker_bot_id.into(),
             effective_config: None, effective_config_sha256: None,
+            project_path: None,
         },
     ];
     Ok(TeamSnapshot {
@@ -1015,7 +1036,9 @@ fn snapshot_role_profile_matches(
     };
     let current = effective_role_snapshot(db,role,ordinal,bot_id)?;
     Ok(pinned.effective_config_sha256.is_some()
-        && pinned.effective_config_sha256 == current.effective_config_sha256)
+        && pinned.effective_config_sha256 == current.effective_config_sha256
+        && (pinned.project_path.is_none()
+            || pinned.project_path == current.project_path))
 }
 
 
@@ -3088,7 +3111,18 @@ fn admitted_session_matches_profile(
     let Some(config) = role_profile.effective_config.as_ref() else {
         return Ok(false);
     };
-    Ok(config.get("projectId").and_then(serde_json::Value::as_str) == Some(session.project_id.as_str())
+    let path_matches = match role_profile.project_path.as_deref() {
+        Some(expected) => {
+            let current: String = store.db.query_row(
+                "SELECT path FROM projects WHERE id=?1",
+                [&session.project_id], |row| row.get(0),
+            ).map_err(|e| e.to_string())?;
+            current == expected
+        }
+        None => true, // Historical snapshots cannot invent path evidence.
+    };
+    Ok(path_matches
+        && config.get("projectId").and_then(serde_json::Value::as_str) == Some(session.project_id.as_str())
         && config.get("provider").and_then(serde_json::Value::as_str) == Some(session.provider.as_str())
         && config.get("model").and_then(serde_json::Value::as_str) == Some(session.model.as_str())
         && config.get("mode").and_then(serde_json::Value::as_str) == Some(session.mode.as_str())
@@ -7123,6 +7157,36 @@ mod tests {
         ).unwrap();
         assert!(!auto::ticket_authorized(&store,&ticket.id).unwrap(),
             "revoking the source grant must fence the associated Demand");
+    }
+
+    #[test]
+    fn pinned_checkout_path_change_denies_new_worker_authority() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Pin checkout path", "pinned-checkout-path", false,
+        ).unwrap();
+        assert!(launched);
+        let pinned = ticket_team_snapshot(&store, &ticket.id).unwrap();
+        let member = pinned.roles.iter()
+            .find(|role| role.role == "worker").unwrap();
+        assert!(member.project_path.is_some());
+        assert!(roster::require_current_profile(
+            &store, &ticket.id, "worker", "worker",
+        ).is_ok());
+        let active = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        store.db.execute(
+            "UPDATE projects SET path=path || '/moved' WHERE id='project'",
+            [],
+        ).unwrap();
+        assert!(roster::require_current_profile(
+            &store, &ticket.id, "worker", "worker",
+        ).is_err(), "A moved checkout must not inherit the admitted role profile");
+        assert!(read_only_policy(&store, &active).is_err(),
+            "The moved checkout cannot retain provider tool authority");
+        assert!(on_run_finished(&store, &active, true, "Late success").unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked",
+            "A stale checkout must settle as blocked, never approved");
     }
 
     #[test]

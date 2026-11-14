@@ -48,6 +48,8 @@ pub struct AdmittedMemberProfile {
     pub position:usize,
     pub bot_id:String,
     pub project_id:String,
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    pub project_path:Option<String>,
     pub provider:String,
     pub model:String,
     pub mode:String,
@@ -88,6 +90,7 @@ pub(super) fn ticket_profile(store:&Store,ticket_id:&str)->Result<Option<Admitte
             position:role.ordinal,
             bot_id:role.bot_id.clone(),
             project_id:get("projectId")?,
+            project_path:role.project_path.clone(),
             provider:get("provider")?,
             model:get("model")?,
             mode:get("mode")?,

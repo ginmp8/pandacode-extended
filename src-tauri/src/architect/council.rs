@@ -993,11 +993,19 @@ fn mixed_source_quorum(team: &TeamSnapshot, config: &CouncilConfig, round: usize
         return true;
     }
     let mut selected = std::collections::HashSet::new();
+    let mut worker_ids = std::collections::HashSet::new();
+    let mut session_ids = std::collections::HashSet::new();
     let mut automatic = 0;
     for (worker, _) in in_round(team, round)
         .filter(|(worker, seat)| counts(worker, seat) && !unsettled(&worker.status) && seat.score.is_some())
     {
-        if !worker.read_only {
+        // A completed, read-only, native-bound worker is the only eligible seat.
+        // One session or worker ID may not be counted twice as distinct votes.
+        if !worker.read_only || worker.status != "completed"
+            || !worker_ids.insert(worker.id.as_str())
+            || !session_ids.insert(worker.session_id.as_str())
+            || worker.reviewer_binding.as_ref().is_none_or(|binding| binding.validate(team, worker).is_err())
+        {
             return false;
         }
         match worker.reviewer_binding.as_ref().and_then(|binding| binding.reviewer_bot_id.as_deref()) {
@@ -1570,6 +1578,11 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
     let needed = required_reviewers(team, config, round);
     if round == 0 {
         return has_writer(team).then(|| (format!("No Council round yet. Once writers settle, dispatch at least {needed} reviewers in one batch with councilLens."), false));
+    }
+    // Unlike legacy M1/M2, a composed root cannot finish at its round limit
+    // with a forged/duplicate/missing seat. Limit is not a passing verdict.
+    if config.mode() == "m3" && view.at_limit(config) && !view.complete(round) {
+        return Some(("Composed Council reached its round limit without distinct authenticated completed reviewer seats; only an attributed user exception can settle it.".into(), false));
     }
     if config.strategy == CouncilExecutionStrategy::TwoPhase {
         if round == 1 && view.complete(1) && !stale(team, 1)

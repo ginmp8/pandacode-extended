@@ -1195,6 +1195,64 @@ fn composed_root_admission_caps_actual_reviewer_attempts_without_legacy_changes(
 }
 
 #[test]
+fn composed_council_rejects_forged_failed_and_duplicate_native_seats_at_limit() {
+    let mut config = on(9.0, 1, 0);
+    config.reviewer_bot_ids = vec!["selected-reviewer".into()];
+    config.automatic_reviewers = 7;
+    assert!(config.validate().is_ok());
+    let mut team = team_with(config.clone(), Vec::new());
+    let mut selected = seat("direct", 1, Some(9.9), SINCE + 1);
+    let mut binding = reviewer_security::ReviewerBinding::native(
+        &team, &selected.id, selected.created_at, &selected.provider,
+        &selected.model, selected.council.as_ref().unwrap(),
+    );
+    binding.reviewer_bot_id = Some("selected-reviewer".into());
+    binding.roster_bot_ids = config.reviewer_bot_ids.clone();
+    binding.required_reviewers = Some(8);
+    binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+        name: "Selected reviewer".into(), role: "Security".into(),
+        instructions: String::new(), goals: String::new(), soul: String::new(),
+        reasoning_effort: String::new(), skill_ids: vec![],
+    });
+    selected.reviewer_binding = Some(binding);
+    team.workers.push(selected);
+    for i in 0..7 {
+        let mut worker = seat(&format!("automatic-{i}"), 1, Some(9.5), SINCE + 2 + i);
+        worker.reviewer_binding = Some(reviewer_security::ReviewerBinding::native(
+            &team, &worker.id, worker.created_at, &worker.provider,
+            &worker.model, worker.council.as_ref().unwrap(),
+        ));
+        team.workers.push(worker);
+    }
+    assert_eq!(council::status(&team).unwrap().state, "passed");
+    assert!(council::finish_refusal(&team).is_none());
+
+    let mut failed = team.clone();
+    failed.workers[1].status = "failed".into();
+    assert_ne!(council::status(&failed).unwrap().state, "passed");
+    assert!(council::finish_refusal(&failed).unwrap().contains("distinct authenticated completed"));
+
+    let mut forged = team.clone();
+    forged.workers[1].reviewer_binding.as_mut().unwrap().snapshot.model = "substituted".into();
+    assert_ne!(council::status(&forged).unwrap().state, "passed");
+    assert!(council::finish_refusal(&forged).unwrap().contains("distinct authenticated completed"));
+
+    let mut reused_session = team.clone();
+    reused_session.workers[7].session_id = reused_session.workers[6].session_id.clone();
+    assert_ne!(council::status(&reused_session).unwrap().state, "passed");
+    assert!(council::finish_refusal(&reused_session).unwrap().contains("distinct authenticated completed"));
+
+    let mut duplicate_vote = team.clone();
+    duplicate_vote.workers[7] = duplicate_vote.workers[6].clone();
+    assert_ne!(council::status(&duplicate_vote).unwrap().state, "passed");
+    assert!(council::finish_refusal(&duplicate_vote).unwrap().contains("distinct authenticated completed"));
+
+    // Exceptional human acceptance must remain distinct from a native pass.
+    duplicate_vote.council_accepted = Some(SINCE);
+    assert_eq!(council::status(&duplicate_vote).unwrap().state, "accepted");
+}
+
+#[test]
 fn mixed_automatic_and_direct_bot_sources_preserve_legacy_defaults_and_capacity() {
     let original = on(9.0, 10, 0);
     assert_eq!(serde_json::to_value(&original).unwrap(),

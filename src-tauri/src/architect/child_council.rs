@@ -42,6 +42,9 @@ pub struct ChildReservationView {
     pub root_cycle_id: String,
     pub required_leaf_reviewers: usize,
     pub status: &'static str,
+    /// Native verified leaf result, not a verified composite parent vote.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_child_receipt: Option<VerifiedChildReceipt>,
 }
 
 fn digest(data: &[u8]) -> String { format!("{:x}", Sha256::digest(data)) }
@@ -219,7 +222,7 @@ fn read(store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer) -> Re
     Ok(Some(record))
 }
 
-/** NATIVE LEAF RUNTIME */
+// NATIVE LEAF RUNTIME
 
 /// Resolve task descendants through native ownership, never a bot's editable
 /// roster or self-reported parent. This is deliberately limited to depth two.
@@ -229,9 +232,11 @@ fn leaf_sessions(store: &Store, root: &str) -> Result<Vec<String>> {
          JOIN architect_workers AS leaf ON leaf.parent_session_id=child.session_id
          WHERE child.parent_session_id=?1",
     ).map_err(|e| e.to_string())?;
-    statement.query_map([root], |row| row.get::<_, String>(0))
-        .map_err(|e| e.to_string())?
-        .collect::<std::result::Result<Vec<_>, _>>().map_err(|e| e.to_string())
+    let rows = statement.query_map([root], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?;
+    let sessions = rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(sessions)
 }
 
 /// An incomplete native stop must not let a resumed root overtake still-live
@@ -346,6 +351,120 @@ fn validate_admitted(
     Ok(())
 }
 
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VerifiedChildReceipt {
+    pub root_cycle_id: String,
+    pub child_session_id: String,
+    pub bot_id: String,
+    pub objective_sha256: String,
+    pub policy_sha256: String,
+    pub child_config_sha256: String,
+    pub lowest_score: f64,
+    pub leaf_worker_ids: Vec<String>,
+}
+
+fn receipt_key(root: &TeamSnapshot, bot_id: &str) -> String {
+    format!("native-council-child-receipt:{}:{bot_id}", root.council_since)
+}
+
+/// Construct child evidence only from settled, freshly scored native leaves.
+/// The root Council remains blocked until its separate composite-seat gate exists.
+fn verified_receipt(
+    store: &Store, record: &FrozenChildReservation, child: &TeamSnapshot,
+) -> Result<Option<VerifiedChildReceipt>> {
+    if child.workers.is_empty() || child.workers.iter().any(|leaf| leaf.status != "completed") {
+        return Ok(None);
+    }
+    let Some(status) = super::council::status(child) else { return Ok(None) };
+    if status.state != "passed" || status.stale || status.round != 1
+        || !super::council_evidence_is_current(store, child)
+    {
+        return Ok(None);
+    }
+    let mut lowest_score = f64::INFINITY;
+    let mut leaf_worker_ids = Vec::with_capacity(child.workers.len());
+    for leaf in &child.workers {
+        let Some(seat) = leaf.council.as_ref() else { return Ok(None) };
+        let Some(score) = seat.score else { return Ok(None) };
+        let Some(binding) = leaf.reviewer_binding.as_ref() else { return Ok(None) };
+        if !leaf.read_only || leaf.abandoned || leaf.wrote_at != 0
+            || !leaf.files.is_empty() || seat.round != 1 || seat.started_at <= 0
+            || seat.reported_severe_finding || seat.reported_conflict
+            || super::council::latest_score(store, &leaf.session_id) != Some(score)
+            || binding.validate(child, leaf).is_err()
+            || reviewer_security::validate_recorded_authority(
+                store, &child.session_id, binding,
+            ).is_err()
+        {
+            return Ok(None);
+        }
+        lowest_score = lowest_score.min(score);
+        leaf_worker_ids.push(leaf.id.clone());
+    }
+    if status.lowest != Some(lowest_score) { return Ok(None); }
+    Ok(Some(VerifiedChildReceipt {
+        root_cycle_id: record.root_cycle_id.clone(),
+        child_session_id: record.child_session_id.clone(),
+        bot_id: record.bot_id.clone(),
+        objective_sha256: record.objective_sha256.clone(),
+        policy_sha256: record.policy_sha256.clone(),
+        child_config_sha256: record.child_config_sha256.clone(),
+        lowest_score, leaf_worker_ids,
+    }))
+}
+
+/// An existing receipt is never accepted on its own: rederive the exact
+/// authenticated evidence from current immutable child inputs and leaf callbacks.
+fn read_verified_receipt(
+    store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
+    child: &TeamSnapshot,
+) -> Result<Option<VerifiedChildReceipt>> {
+    let existing: Option<String> = store.db.query_row(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_receipt'
+         AND worker_id=?3",
+        params![root.session_id, receipt_key(root, &record.bot_id), record.child_session_id],
+        |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    let Some(existing) = existing else { return Ok(None) };
+    let stored: VerifiedChildReceipt = serde_json::from_str(&existing)
+        .map_err(|_| "child_council_stale: malformed child evidence receipt.")?;
+    if verified_receipt(store, record, child)?.as_ref() != Some(&stored) {
+        return Err("child_council_stale: child receipt no longer matches native reviewer evidence.".into());
+    }
+    Ok(Some(stored))
+}
+
+/// Persist exactly one child evidence receipt per frozen root cycle and seat.
+/// An out-of-order retry must match the existing content rather than overwrite it.
+fn record_verified_receipt(
+    store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
+    child: &TeamSnapshot,
+) -> Result<bool> {
+    let Some(candidate) = verified_receipt(store, record, child)? else {
+        // A previously recorded receipt cannot survive revoked or altered evidence.
+        if read_verified_receipt(store, root, record, child)?.is_some() {
+            return Err("child_council_stale: completed child evidence was revoked.".into());
+        }
+        return Ok(false);
+    };
+    if let Some(previous) = read_verified_receipt(store, root, record, child)? {
+        if previous != candidate {
+            return Err("child_council_stale: child receipt replay differs.".into());
+        }
+        return Ok(false);
+    }
+    super::record_request(
+        store, &root.session_id, &receipt_key(root, &record.bot_id),
+        "council_child_receipt",
+        &serde_json::to_string(&candidate).map_err(|e| e.to_string())?,
+        &record.child_session_id,
+    )?;
+    Ok(true)
+}
+
 /// Trusted root-only transition: allocate fresh read-only reviewer sessions
 /// after the root's actual writing workers settle. No bot conversation, prompt
 /// claim or persisted child reservation can request this operation.
@@ -365,7 +484,10 @@ pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
             .ok_or("child_council_stale: expected native reservation is missing.")?;
         let mut child = super::load(store, &record.child_session_id)?
             .ok_or("child_council_stale: reserved child Architect is missing.")?;
-        if child.status == "running" { continue; }
+        if child.status == "running" {
+            created |= record_verified_receipt(store, root, &record, &child)?;
+            continue;
+        }
         if child.status != "blocked" || !child.workers.is_empty() {
             return Err("child_council_stale: child review is not eligible for admission.".into());
         }
@@ -601,14 +723,19 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
     council.nested_bot_reviewers.iter().map(|child| {
         let record = read(store, root, child)?
             .ok_or("child_council_stale: expected native child reservation is missing.")?;
-        let active = super::load(store, &record.child_session_id)?
-            .is_some_and(|team| team.status == "running");
+        let team = super::load(store, &record.child_session_id)?
+            .ok_or("child_council_stale: child team is missing.")?;
+        let verified_child_receipt = read_verified_receipt(store, root, &record, &team)?;
+        let active = team.status == "running";
         Ok(ChildReservationView {
             bot_id: child.bot_id.clone(),
             child_session_id: record.child_session_id,
             root_cycle_id: record.root_cycle_id,
             required_leaf_reviewers: child.child_reviewers,
-            status: if active { "reviewing" } else { "blocked_until_native_child_review" },
+            status: if verified_child_receipt.is_some() {
+                "child_evidence_ready_root_pending"
+            } else if active { "reviewing" } else { "blocked_until_native_child_review" },
+            verified_child_receipt,
         })
     }).collect()
 }

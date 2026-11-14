@@ -3356,3 +3356,82 @@ fn child_council_admits_real_read_only_native_leaves_only_after_root_review_barr
     assert_eq!(final_team.status, "completed");
     assert!(!council::inspection(&final_team, false).unwrap().verified_pass);
 }
+
+
+#[test]
+fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["security-child", "architecture-child"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.nested_bot_reviewers = ["security-child", "architecture-child"].iter().map(|bot|
+            council::CouncilNestedReviewer {
+                bot_id: (*bot).into(), child_reviewers: 2,
+                child_target: 9.5, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (root, _) = start_state(&state, &sid, "Review the frozen project", None, None).unwrap();
+    dispatch_state(
+        &state, &sid, root.generation, "pandacode_finish_team",
+        json!({"summary":"Begin native child reviews."}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    // A single scored leaf is not a child receipt or a parent vote.
+    for index in 0..4 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant", "Independent evidence.\\nCouncil score: 9.5/10").unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        assert!(child_council::inspect(&store, &root).unwrap()
+            .iter().all(|view| view.verified_child_receipt.is_none()));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1 AND kind='council_child_receipt'",
+            [&sid], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0, "a completed model turn alone must never persist a child verdict");
+        drop(store);
+        assert!(index < 4);
+    }
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    assert!(child_council::admit_leaves(&store, &root).unwrap());
+    let inspected = child_council::inspect(&store, &root).unwrap();
+    assert_eq!(inspected.len(), 2);
+    assert!(inspected.iter().all(|view| {
+        view.status == "child_evidence_ready_root_pending"
+            && view.verified_child_receipt.as_ref().is_some_and(|receipt|
+                receipt.leaf_worker_ids.len() == 2 && receipt.lowest_score == 9.5)
+    }));
+    assert_eq!(council::status(&root).unwrap().state, "blocked",
+        "verified child leaves do not automatically create authenticated parent votes");
+    assert!(!child_council::admit_leaves(&store, &root).unwrap(),
+        "retrying must not insert a second receipt");
+    let count: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1 AND kind='council_child_receipt'",
+        [&sid], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(count, 2);
+    store.db.execute(
+        "UPDATE architect_requests SET content='{}'
+         WHERE parent_session_id=?1 AND kind='council_child_receipt' AND worker_id=?2",
+        rusqlite::params![sid, inspected[0].child_session_id],
+    ).unwrap();
+    assert!(child_council::inspect(&store, &root).is_err(),
+        "forged or stale receipt must be rejected instead of granting a parent vote");
+}

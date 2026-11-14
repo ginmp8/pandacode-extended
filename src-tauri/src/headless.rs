@@ -27,6 +27,9 @@ enum Command {
     ExportBots { path: PathBuf },
     SyncBots { path: PathBuf },
     PreviewOrchestrations { path: PathBuf },
+    CreateOrchestration { path: PathBuf },
+    ConfigureTeamRoles { orchestration_id: String, expected_revision: i64, path: PathBuf },
+    EnableOrchestration { orchestration_id: String, expected_revision: i64 },
     ImportOrchestrations { path: PathBuf },
     ExportOrchestrations { path: PathBuf },
     InspectOrchestrations,
@@ -314,6 +317,33 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::CreateOrchestration { path } = &command {
+                let result = (|| -> Result<String, String> {
+                    let input: crate::superagent::OrchestrationInput =
+                        read_bounded_json_input(path)?;
+                    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+                    crate::superagent::headless_create_orchestration(
+                        &dir.join("kingcode.sqlite3"), input)
+                })();
+                match result {
+                    Ok(receipt) => { println!("{receipt}"); std::process::exit(0) }
+                    Err(error) => { eprintln!("Team creation failed: {error}"); std::process::exit(1) }
+                }
+            }
+            if let Command::ConfigureTeamRoles { orchestration_id, expected_revision, path } = &command {
+                let result = (|| -> Result<String, String> {
+                    let input: crate::superagent::roster::RosterInput =
+                        read_bounded_json_input(path)?;
+                    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+                    crate::superagent::headless_configure_team_roles(
+                        &dir.join("kingcode.sqlite3"), orchestration_id,
+                        *expected_revision, input)
+                })();
+                match result {
+                    Ok(receipt) => { println!("{receipt}"); std::process::exit(0) }
+                    Err(error) => { eprintln!("Team configuration failed: {error}"); std::process::exit(1) }
+                }
+            }
             if let Command::QueueDemand { orchestration_id, request_key, objective_file } = &command {
                 // The objective is a bounded local file, never a command-line
                 // argument or console payload. This command stages but does not run.
@@ -343,7 +373,7 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 }
             }
             let native_action = matches!(&command,
-                Command::AcceptTicket { .. } | Command::RejectTicket { .. }
+                Command::EnableOrchestration { .. } | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
                 | Command::StopTicket { .. } | Command::DisableOrchestration { .. }
                 | Command::RenameOrchestration { .. } | Command::IssueComment { .. });
             if native_action {
@@ -352,6 +382,10 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     .and_then(|dir| {
                         let database = dir.join("kingcode.sqlite3");
                         match &command {
+                            Command::EnableOrchestration { orchestration_id, expected_revision } =>
+                                crate::superagent::headless_enable_orchestration(
+                                    &database, orchestration_id, *expected_revision,
+                                ),
                             Command::AcceptTicket { ticket_id, expected_revision } =>
                                 crate::superagent::headless_accept_ticket(&database, ticket_id, *expected_revision),
                             Command::RejectTicket { ticket_id, expected_revision, reason } =>
@@ -412,7 +446,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::InspectTicketSource { .. } | Command::InspectSourceHealth { .. }
         | Command::UnlinkSourceThread { .. }
         | Command::ObserveSource { .. } | Command::ObserveCheckRun { .. }
-        | Command::QueueDemand { .. }
+        | Command::CreateOrchestration { .. } | Command::ConfigureTeamRoles { .. }
+        | Command::EnableOrchestration { .. } | Command::QueueDemand { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
         | Command::StopTicket { .. } | Command::DisableOrchestration { .. }
         | Command::RenameOrchestration { .. } | Command::IssueComment { .. } => {
@@ -811,6 +846,42 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--create-orchestration" => {
+                let value = args.get(index + 1)
+                    .ok_or("--create-orchestration needs a JSON file.")?;
+                command = Command::CreateOrchestration { path: PathBuf::from(value) };
+                ops += 1;
+                index += 1;
+            }
+            "--configure-team-roles" => {
+                let id = args.get(index + 1)
+                    .ok_or("--configure-team-roles needs a Team ID, expected revision and JSON file.")?;
+                validate_orchestration_id(id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--configure-team-roles needs the expected policy revision.")?;
+                let path = args.get(index + 3)
+                    .ok_or("--configure-team-roles needs a local JSON file.")?;
+                command = Command::ConfigureTeamRoles {
+                    orchestration_id: id.clone(),
+                    expected_revision: parse_ticket_revision(revision)?,
+                    path: PathBuf::from(path),
+                };
+                ops += 1;
+                index += 3;
+            }
+            "--enable-orchestration" => {
+                let id = args.get(index + 1)
+                    .ok_or("--enable-orchestration needs a Team ID and expected policy revision.")?;
+                validate_orchestration_id(id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--enable-orchestration needs the expected policy revision.")?;
+                command = Command::EnableOrchestration {
+                    orchestration_id: id.clone(),
+                    expected_revision: parse_ticket_revision(revision)?,
+                };
+                ops += 1;
+                index += 2;
+            }
             "--preview-orchestrations" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--preview-orchestrations needs a file path.\n\n{}", help()))?;
@@ -1163,6 +1234,23 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
     Ok((command, import))
 }
 
+/// Operator supplied local JSON is bounded before deserialization. Native
+/// config validation still owns bot eligibility, revisions and authorization.
+fn read_bounded_json_input<T: serde::de::DeserializeOwned>(path: &std::path::Path)
+    -> Result<T, String>
+{
+    use std::io::Read;
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("Cannot open local Team JSON: {e}"))?;
+    let mut data = Vec::new();
+    file.take(64 * 1024 + 1).read_to_end(&mut data)
+        .map_err(|e| format!("Cannot read local Team JSON: {e}"))?;
+    if data.len() > 64 * 1024 {
+        return Err("Team JSON exceeds the 64 KiB local input limit.".into());
+    }
+    serde_json::from_slice(&data).map_err(|e| format!("Invalid Team JSON: {e}"))
+}
+
 fn validate_ticket_id(value: &str) -> Result<(), String> {
     if value.is_empty() || value.len() > 128
         || !value.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
@@ -1286,6 +1374,16 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          its SHA-256 on a second invocation; uncertain effects are reconciled.
   --confirm-issue-comment <sha256>
                          Required for the first authorized issue-comment dispatch.
+  --create-orchestration <file>
+                         Create a disabled Team from bounded local JSON using the
+                         same native bot/role/Council guards as Desktop.
+  --configure-team-roles <id> <revision> <file>
+                         Update future-only ordered Workers, Reviewers and native
+                         Council requirement from strict local JSON. Team must be
+                         disabled, active/uncertain work must be settled.
+  --enable-orchestration <id> <revision>
+                         Explicitly enable Manual Team execution after native
+                         eligibility checks; does not launch tasks or grant effects.
   --rename-orchestration <id> <revision> <name>
                          Explicit local, revision-guarded Team rename only while disabled
                          and all Tickets/effects are settled; does not change bots, roles
@@ -1333,6 +1431,29 @@ mod tests {
             Ok(Command::ImportOrchestrations { path: PathBuf::from("presets.json") }));
         assert_eq!(parsed("--export-orchestrations presets.json"),
             Ok(Command::ExportOrchestrations { path: PathBuf::from("presets.json") }));
+        assert_eq!(parsed("--create-orchestration team.json"),
+            Ok(Command::CreateOrchestration { path: PathBuf::from("team.json") }));
+        assert_eq!(parsed("--configure-team-roles team_1 2 roles.json"),
+            Ok(Command::ConfigureTeamRoles {
+                orchestration_id:"team_1".into(), expected_revision:2,
+                path:PathBuf::from("roles.json"),
+            }));
+        assert_eq!(parsed("--enable-orchestration team_1 2"),
+            Ok(Command::EnableOrchestration {
+                orchestration_id:"team_1".into(), expected_revision:2,
+            }));
+        for invalid in [
+            "--create-orchestration",
+            "--configure-team-roles",
+            "--configure-team-roles team_1 2",
+            "--configure-team-roles ../bad 2 roles.json",
+            "--configure-team-roles team_1 not-a-revision roles.json",
+            "--enable-orchestration",
+            "--enable-orchestration team_1 0",
+            "--enable-orchestration team_1 2 --disable-orchestration team_1 2",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert_eq!(parsed("--inspect-orchestrations"), Ok(Command::InspectOrchestrations));
         assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
         assert_eq!(parsed("--list-review-inbox"), Ok(Command::ListReviewInbox));

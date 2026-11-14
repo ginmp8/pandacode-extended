@@ -2009,6 +2009,56 @@ pub(crate) fn headless_queue_demand(
     })).map_err(|e| e.to_string())
 }
 
+/// Local operator creation uses the same validated, transactional native Team
+/// builder as Desktop. Every new Team starts disabled, even if the input
+/// resembles an enabled policy; no task, provider, grant or Council is started.
+pub(crate) fn headless_create_orchestration(
+    database_path: &std::path::Path, input: OrchestrationInput,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let (legacy, workers, reviewers, council_required) = input.into_parts()?;
+    let team = create_configuration_roles_with_policy(
+        &store, legacy, workers, reviewers, council_required.unwrap_or(false),
+    )?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": team.id,
+        "name": team.name,
+        "enabled": team.enabled,
+        "policyRevision": team.policy_revision,
+        "teamVersion": team.team_version,
+        "workerCount": team.worker_bot_ids.len(),
+        "reviewerCount": team.reviewer_bot_ids.len(),
+        "councilRequired": team.council_required,
+        "grantIssued": false,
+    })).map_err(|e| e.to_string())
+}
+
+/// Headless Team edits share exactly the Desktop's revisioned native policy
+/// validation. Historical snapshots and active-effect guards remain intact.
+pub(crate) fn headless_configure_team_roles(
+    database_path: &std::path::Path, orchestration_id: &str,
+    expected_revision: i64, input: roster::RosterInput,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let roles = roster::set(&store, orchestration_id, expected_revision, &input)?;
+    serde_json::to_string_pretty(&roles).map_err(|e| e.to_string())
+}
+
+/// Opting a Team into Manual execution is a separate explicit local command.
+/// This cannot grant writes, enable GitHub Auto or start an inferred task.
+pub(crate) fn headless_enable_orchestration(
+    database_path: &std::path::Path, orchestration_id: &str,
+    expected_revision: i64,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let team = change_enabled(&store, orchestration_id, expected_revision, true)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": team.id, "enabled": team.enabled,
+        "policyRevision": team.policy_revision, "grantIssued": false,
+        "providerDispatchedByCommand": false
+    })).map_err(|e| e.to_string())
+}
+
 /// Explicit local headless Team rename uses the same desktop CAS and guard
 /// without startup recovery. This never changes bot identities, roles, grants
 /// or the historical Ticket snapshot; an active Team is always rejected.
@@ -4356,6 +4406,67 @@ pub async fn superagent_revoke_worker_write_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headless_team_creation_edit_and_enable_reuse_native_guards() {
+        let store = fixture();
+        let created: serde_json::Value = serde_json::from_str(
+            &headless_create_orchestration(&store.path, OrchestrationInput {
+                name: "Headless Team".into(),
+                coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+                worker_bot_ids: Some(vec!["worker".into()]),
+                reviewer_bot_ids: Some(Vec::new()), council_required: Some(false),
+            }).unwrap(),
+        ).unwrap();
+        let id = created["orchestrationId"].as_str().unwrap();
+        assert_eq!(created["enabled"], false);
+        assert_eq!(created["grantIssued"], false);
+        assert_eq!(created["workerCount"], 1);
+        assert_eq!(created["teamVersion"], 1);
+        let initial = configuration(&store,id).unwrap();
+        assert!(!initial.enabled);
+        add_worker(&store,"worker-two");
+        let revised: roster::TeamRoster = serde_json::from_str(
+            &headless_configure_team_roles(&store.path,id,initial.policy_revision,
+                roster::RosterInput {
+                    worker_bot_ids: vec!["worker".into(),"worker-two".into()],
+                    reviewer_bot_ids: Vec::new(), council_required: Some(false),
+                }).unwrap(),
+        ).unwrap();
+        assert_eq!(revised.worker_bot_ids, vec!["worker","worker-two"]);
+        assert_eq!(revised.policy_revision, initial.policy_revision + 1);
+        assert!(headless_configure_team_roles(&store.path,id,initial.policy_revision,
+            roster::RosterInput {
+                worker_bot_ids: vec!["worker".into()], reviewer_bot_ids: Vec::new(),
+                council_required: None,
+            }).is_err());
+        assert!(headless_enable_orchestration(
+            &store.path,id,revised.policy_revision).is_err(),
+            "A multi-worker Team must not fall back to one unapproved executor");
+        let single = headless_configure_team_roles(
+            &store.path,id,revised.policy_revision,roster::RosterInput {
+                worker_bot_ids: vec!["worker".into()], reviewer_bot_ids: Vec::new(),
+                council_required: Some(false),
+            }).unwrap();
+        let single: roster::TeamRoster = serde_json::from_str(&single).unwrap();
+        let enabled: serde_json::Value = serde_json::from_str(
+            &headless_enable_orchestration(&store.path,id,single.policy_revision).unwrap(),
+        ).unwrap();
+        assert_eq!(enabled["enabled"],true);
+        assert_eq!(enabled["providerDispatchedByCommand"],false);
+        assert!(headless_configure_team_roles(&store.path,id,
+            enabled["policyRevision"].as_i64().unwrap(),roster::RosterInput {
+                worker_bot_ids: vec!["worker".into()], reviewer_bot_ids: Vec::new(),
+                council_required: None,
+            }).is_err());
+        assert!(headless_create_orchestration(&store.path,OrchestrationInput {
+            name: "Invalid".into(), coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),worker_bot_ids:Some(vec!["router".into()]),
+            reviewer_bot_ids:None,council_required:None,
+        }).is_err());
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets",[],
+            |row|row.get::<_,i64>(0)).unwrap(),0);
+    }
 
     #[test]
     fn headless_queue_demand_is_durable_idempotent_and_never_dispatches() {

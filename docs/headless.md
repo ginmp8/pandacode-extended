@@ -655,3 +655,48 @@ source and Check Run receipts. Neither reads nor issue-comment grants implement
 a background GitHub subscription or general Auto mode. See
 [`superagent-unified-integration.md`](superagent-unified-integration.md) for
 source lineage and the outstanding acceptance gates.
+
+### Create and configure Teams from the native headless CLI
+
+Team administration can run without an active Desktop Webview or a live provider.
+It uses the same native SQLite Team-version and policy-revision checks as the
+Desktop interface. One-shot commands open the existing database without invoking
+startup recovery against an active `serve` process.
+
+```sh
+pandacode serve --create-orchestration /path/to/team.json
+pandacode serve --configure-team-roles TEAM_ID POLICY_REVISION /path/to/roles.json
+pandacode serve --enable-orchestration TEAM_ID POLICY_REVISION
+```
+
+`team.json` is bounded to 64 KiB and follows the Desktop create input contract:
+
+```json
+{
+  "name": "Software Development",
+  "coordinatorBotId": "EXISTING_COORDINATOR_ID",
+  "workerBotId": "EXISTING_PRIMARY_WORKER_ID",
+  "workerBotIds": ["EXISTING_PRIMARY_WORKER_ID"],
+  "reviewerBotIds": [],
+  "councilRequired": false
+}
+```
+
+`roles.json` uses the existing ordered native roster contract:
+
+```json
+{
+  "workerBotIds": ["EXISTING_PRIMARY_WORKER_ID"],
+  "reviewerBotIds": [],
+  "councilRequired": false
+}
+```
+
+Both inputs require existing eligible bots. Neither command creates bots,
+installs Skills, edits credentials, accepts a model decision or changes task
+authority. A new Team is always Off. Only a separate operator-issued enable
+command turns on Manual execution. A Team with additional Workers cannot be
+enabled until native multi-worker execution admission is supported. Any policy
+edit uses compare-and-swap revision checks, requires the Team to be Off, and
+does not rewrite an admitted Ticket or its Council/effect history. `--enable`
+never starts a provider, grants tools or changes GitHub source modes.

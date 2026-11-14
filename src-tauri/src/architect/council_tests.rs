@@ -3581,6 +3581,55 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
         [&sid], |row| row.get(0),
     ).unwrap();
     assert_eq!(parent_count, 2, "each child contributes one native parent seat");
+    // The root artifact is pinned only after writers settle, at native child
+    // admission. A restored child receipt cannot authorize a later root edit.
+    let pin_key = format!("native-council-root-artifact:{}", root.council_since);
+    let pin: String = store.db.query_row(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_root_artifact'",
+        rusqlite::params![sid, pin_key], |row| row.get(0),
+    ).unwrap();
+    let mut altered_root = root.clone();
+    altered_root.workers.push(writer("late-root-writer", storage::now() + 10));
+    assert!(child_council::verified_parent_seats(&store, &altered_root)
+        .unwrap_err().contains("root artifact revision changed"),
+        "a modified native root writer stamp must revoke composite evidence");
+    let edited_at = storage::now().max(root.council_since) + 10;
+    let message_id: i64 = store.db.query_row(
+        "INSERT INTO messages(session_id,role,content,created_at)
+         VALUES(?1,'changes','new root artifact revision',?2) RETURNING id",
+        rusqlite::params![sid, edited_at], |row| row.get(0),
+    ).unwrap();
+    let changed_id = "root-write-after-verified-child";
+    store.db.execute(
+        "INSERT INTO turn_changes(id,session_id,message_id,summary,created_at,diff_bytes)
+         VALUES(?1,?2,?3,?4,?5,0)",
+        rusqlite::params![changed_id, sid, message_id,
+            json!({"attributed":true,"ownFiles":1,
+                "files":[{"path":"src/changed-after-review.rs","status":"modified"}]}).to_string(),
+            edited_at],
+    ).unwrap();
+    assert!(child_council::verified_parent_seats(&store, &root)
+        .unwrap_err().contains("root artifact revision changed"),
+        "a persisted native root write after child completion must revoke its receipt");
+    store.db.execute("DELETE FROM turn_changes WHERE id=?1", [changed_id]).unwrap();
+    store.db.execute("DELETE FROM messages WHERE id=?1", [message_id]).unwrap();
+    assert_eq!(child_council::verified_parent_seats(&store, &root)
+        .unwrap().unwrap().len(), 2, "unchanged root still has exactly two child seats");
+    store.db.execute(
+        "UPDATE architect_requests SET content='{}'
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_root_artifact'",
+        rusqlite::params![sid, pin_key],
+    ).unwrap();
+    assert!(child_council::verified_parent_seats(&store, &root)
+        .unwrap_err().contains("malformed root artifact revision"));
+    store.db.execute(
+        "UPDATE architect_requests SET content=?3
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_root_artifact'",
+        rusqlite::params![sid, pin_key, pin],
+    ).unwrap();
+    assert_eq!(child_council::verified_parent_seats(&store, &root)
+        .unwrap().unwrap().len(), 2);
     let original: String = store.db.query_row(
         "SELECT content FROM architect_requests
          WHERE parent_session_id=?1 AND kind='council_parent_seat' AND worker_id=?2",

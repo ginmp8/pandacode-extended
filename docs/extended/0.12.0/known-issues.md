@@ -1,5 +1,10 @@
 # Extended 0.12.0 — known issues and acceptance gaps
 
+## 2026-11-13 — Astro CI failure resolved for the verified code SHA
+
+The earlier Astro 7.3.3 audit failure on `ea9dda3` is no longer an open CI failure for Extended code [`19ec683`](https://github.com/ginmp8/pandacode-extended/commit/19ec683abce68d9951d5fca660c852494d435b5e): [Push CI #43507810199](https://github.com/ginmp8/pandacode-extended/actions/runs/43507810199) and [PR CI #43507821448](https://github.com/ginmp8/pandacode-extended/actions/runs/43507821448) each passed **11/11 jobs**, including website npm install, build and audit on Astro **7.4.7**. Unresolved verification remains: native desktop Settings On/Off, Connect/direct routes, bots, MCP, cloud/VM/credentials, independent semantic evaluation of 81 customized shared paths, and any CI on a later documentation-only SHA. Complete tree coverage and green CI do not certify those behaviors or authorize the **Extended 0.12.0 DRAFT** for release.
+
+
 ## 2026-11-13 — security correction pending fresh CI
 
 The previous Extended [`ea9dda3`](https://github.com/ginmp8/pandacode-extended/commit/ea9dda3db12bd04bf27712b11ced084f99fb9b1c) failed both website npm audit jobs due to Astro 7.3.3 advisories. [`7ccbb7c`](https://github.com/ginmp8/pandacode-extended/commit/7ccbb7c45ba039b3a86d224bb47d3eb8038e28a9) introduces the Astro 7.4.7 candidate, but **fresh CI success is not yet established**; [push run #43507595356](https://github.com/ginmp8/pandacode-extended/actions/runs/43507595356) was pending at documentation authoring. A local `npm ci`, website build and npm audit could not run because registry DNS resolution failed (`EAI_AGAIN`). Native Settings On/Off, Connect, MCP, bots, cloud/VM, credential flows and semantic acceptance of the 81 customized shared files remain open. Do not promote planned Extended 0.12.0 based on static tree parity.

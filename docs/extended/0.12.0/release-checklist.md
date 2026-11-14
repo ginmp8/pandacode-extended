@@ -1,5 +1,15 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-13 — Astro remediation CI evidence checkpoint
+
+- [x] Confirm the exact inherited source SHA [`9739736d`](https://github.com/ginmp8/pandacode/commit/9739736d134ba29c6a07d92eca5745c3c4e5999b) and declared native application version **0.3.125**; retain planned Extended **0.12.0 DRAFT** separately.
+- [x] Verify the complete, nontruncated source/target Git trees: 2,048 upstream paths, 2,106 Extended paths, 1,967 byte-identical shared paths, 81 customized shared paths, 58 Extended-only paths, zero missing paths or type/mode differences.
+- [x] Verify code SHA [`19ec683`](https://github.com/ginmp8/pandacode-extended/commit/19ec683abce68d9951d5fca660c852494d435b5e) exact-SHA [Push CI #43507810199](https://github.com/ginmp8/pandacode-extended/actions/runs/43507810199) and [PR CI #43507821448](https://github.com/ginmp8/pandacode-extended/actions/runs/43507821448) completed **success (11/11 jobs each)**, including website `npm ci`, website build, website npm audit and cross-platform checks.
+- [ ] Run native Settings On/Off and external Connect/MCP/bots/cloud/VM/credential integration acceptance; perform independent semantic review of all 81 shared customizations.
+- [ ] Check exact-SHA CI separately for any subsequently published documentation-only commit; never carry forward the predecessor SHA's result.
+- [ ] Obtain independent release authorization outside this maintenance workflow. **Do not tag or publish Extended 0.12.0** here.
+
+
 ## 2026-11-13 — website Astro remediation gates (not release approval)
 
 - [x] Freeze current fork source `9739736d134ba29c6a07d92eca5745c3c4e5999b` and preserve native app version 0.3.125.

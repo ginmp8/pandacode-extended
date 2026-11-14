@@ -1,5 +1,10 @@
 # Extended 0.12.0 — dependency and security tracking
 
+## 2026-11-13 — verified website Astro correction CI
+
+For code [`19ec683`](https://github.com/ginmp8/pandacode-extended/commit/19ec683abce68d9951d5fca660c852494d435b5e), [Push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43507810199) and [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43507821448) both finished **success (11/11 jobs each)**. The recorded workflow steps `npm ci --prefix website`, `npm run site:build`, and `Audit website npm dependencies` all passed. The Extended website retains Astro **7.4.7** (instead of source Astro 7.3.3), while preserving existing hardened dependencies. This closes the previously failing website audit for this exact code SHA; it does **not** establish that every dependency is risk-free, that external services were tested, or that the subsequent documentation commit's CI has passed. Extended 0.12.0 remains a DRAFT.
+
+
 ## 2026-11-13 — verified website Astro audit failure and patch candidate
 
 At [Extended `ea9dda3`](https://github.com/ginmp8/pandacode-extended/commit/ea9dda3db12bd04bf27712b11ced084f99fb9b1c), both [push CI #43498814241](https://github.com/ginmp8/pandacode-extended/actions/runs/43498814241) and [PR CI #43498824064](https://github.com/ginmp8/pandacode-extended/actions/runs/43498824064) failed **Dependency audit (npm lockfiles)** on website Astro 7.3.3. The audit reported [GHSA-mh32-jxcr-mh9f](https://github.com/advisories/GHSA-mh32-jxcr-mh9f) (dynamic tag XSS, patched in Astro 7.4.5) and [GHSA-r3h5-4585-7x3w](https://github.com/advisories/GHSA-r3h5-4585-7x3w) (image endpoint path checking, patched in Astro 7.4.7). Root and relay npm audit steps had no findings in those jobs. This is a concrete dependency issue, not a reason to disable website functionality.

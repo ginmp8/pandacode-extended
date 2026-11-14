@@ -1,5 +1,10 @@
 # PandaCode Extended 0.12.0 — incremental development cycle
 
+## 2026-11-13 — current code SHA CI completed
+
+The candidate inherits upstream [`9739736d`](https://github.com/ginmp8/pandacode/commit/9739736d134ba29c6a07d92eca5745c3c4e5999b) / native application **0.3.125**. Extended code [`19ec683`](https://github.com/ginmp8/pandacode-extended/commit/19ec683abce68d9951d5fca660c852494d435b5e) passed [Push CI #43507810199](https://github.com/ginmp8/pandacode-extended/actions/runs/43507810199) and [PR CI #43507821448](https://github.com/ginmp8/pandacode-extended/actions/runs/43507821448), **11/11 jobs each**, including website `npm ci`, build and audit after the Extended Astro 7.4.7 upgrade. Static source coverage: **2,048 of 2,048 upstream paths present**, 81 customized shared paths and 58 Extended-only paths; no mode/type conflicts. These checks do not substitute for installed-platform tests, native Settings On/Off or end-to-end service integrations. **Planned Extended 0.12.0 remains DRAFT**, with no release approval.
+
+
 ## 2026-11-13 — website dependency remediation candidate
 
 Upstream [`9739736d`](https://github.com/ginmp8/pandacode/commit/9739736d134ba29c6a07d92eca5745c3c4e5999b) remains unchanged at native app version **0.3.125**. Extended [`7ccbb7c`](https://github.com/ginmp8/pandacode-extended/commit/7ccbb7c45ba039b3a86d224bb47d3eb8038e28a9) upgrades its website Astro dependency and lockfile to **7.4.7** after the preceding npm website audit failed. The dependency lock retains the Extended hardened Sharp 0.35.5 set. Source/target tree counts are **2,048 / 2,106** files, **1,967 identical** plus **81 Extended-customized shared** and **58 Extended-only**, zero missing or type/mode mismatches. No inherited functionality or Settings code is removed. Local `npm ci` and native Settings acceptance are unexecuted; newly published SHA CI is pending. This is not an approved Extended 0.12.0 release.

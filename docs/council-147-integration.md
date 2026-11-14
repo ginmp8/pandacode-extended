@@ -1,0 +1,29 @@
+# Council #147: two-PR integration ledger
+
+## Frozen sources and branch policy
+
+- Canonical implementation: [PR #152](https://github.com/ginmp8/pandacode-extended/pull/152), commit `455774df73fad829defd5765c89f91a601cd6297`.
+- Additional hardening: [PR #149](https://github.com/ginmp8/pandacode-extended/pull/149), commit `664c530152693f403199496a450ce17df550cf74`.
+- New destination: `feat/issue-147-council-unified`; target `extended/development`, base `f9efb3a1c7558dcf7d5688bb1687cfff9253f967`.
+- This is one conventional, single-parent integration commit. Source branches are never modified.
+- **Draft only**: source integration and issue acceptance are not interchangeable.
+
+## Canonical native implementation
+
+Retain PR #152's typed `CouncilComposition`, native isolated child Architects, root/child receipts, strategy, criteria, resource usage, evidence, task adapter, UI and Shared Channel behavior as the single runtime Council. PR #149 uses a different `CouncilConfig` schema and alternative modules for reservations, request/receipt, criteria editor and inspector. Directly combining these would create a competing engine and incorrect task authority.
+
+## Ported native hardening from #149
+
+1. Finite root worker concurrency: for composed Councils with `maxParallel = 0`, cap new root admission at eight simultaneous workers. Lead capacity disclosures and queue reasons use the same effective limit. Preserve original M1/M2 unlimited behavior and explicit child-leaf concurrency.
+2. Bounded actual root attempts: count all Council worker admissions in the current root cycle, including failed/abandoned workers, and fail closed after 1,024 attempts. The check runs before reviewer binding and is independent of worker keys; it does not change M1/M2 or the existing per-round child limit.
+3. Native Rust regression tests cover the boundary and compatibility behavior.
+
+## Remaining semantic-reconciliation debt
+
+The following PR #149 source-specific implementations were **not** imported as parallel, unverified components: `architect/child_council.rs` (reservation-only), `architect/council_requests.rs` (alternate task requests and receipts), `council-criteria-editor.ts` and `council-inspector.ts` (different UI/type contract), plus tests that depend on their conflicting types. Evaluate their distinct security, restart and inspection semantics against the canonical #152 path, then port missing behavior and native negative tests without duplicating runtime authority.
+
+Other unsatisfied #147 criteria remain explicit: 7 x 3 real terminal native scenarios; every AC-01..40 with exact-head evidence; stale revision and callback isolation; child restart/recovery; supported-harness native tool policy; provider interaction and accessible channel/embedded inspector regression. No implementation snapshot, earlier CI result or document ledger proves closure.
+
+## Verification and release gate
+
+Run `cargo test --locked --manifest-path src-tauri/Cargo.toml --lib`, `cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`, `npm run build` and focused Playwright Council/Channel tests against the new exact commit. This connector-only integration has **not run** local Rust, Node, browser, Desktop or provider tests. Keep the PR a draft until all material divergences, missing acceptance cases and regressions are resolved.

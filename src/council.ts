@@ -1,6 +1,6 @@
 /* Council: independent reviewers score the work out of 10 until every one reaches the user's target.
  * What a snapshot means, with no DOM, plus the remembered defaults. See docs/architect-workers.md. */
-import { teamActive, type CouncilConfig, type CouncilState, type CouncilStatus, type TeamSnapshot, type TeamWorker } from './architect-types.ts';
+import { teamActive, type ChildCouncilReceipt, type CouncilComposition, type CouncilConfig, type CouncilCriteriaSource, type CouncilCriterion, type CouncilFinding, type CouncilFindingDisposition, type CouncilReviewReceipt, type CouncilState, type CouncilStatus, type CouncilStrategy, type CouncilReviewerMode, type CouncilUsageRecord, type TeamSnapshot, type TeamWorker } from './architect-types.ts';
 
 export type { CouncilState, CouncilStatus };
 export const COUNCIL_KEY = 'pandacode.council';
@@ -10,6 +10,173 @@ export const COUNCIL_ROUNDS = [3, 5, 10, 25] as const;
 /** 0 = the lead picks reviewers for the work. */
 export const COUNCIL_REVIEWERS = [0, 2, 3, 4, 5] as const;
 const DEFAULTS: CouncilConfig = { target: 9, maxRounds: 10, reviewers: 0 };
+
+export type CouncilModeId = 'M1' | 'M2' | 'M3' | 'M4' | 'M5' | 'M6' | 'M7';
+export const COUNCIL_COMPOSITION_MODES: readonly { id: CouncilModeId; label: string; automatic: boolean; direct: boolean; nested: boolean }[] = [
+  { id: 'M1', label: 'Architect reviewers', automatic: true, direct: false, nested: false },
+  { id: 'M2', label: 'Direct bots', automatic: false, direct: true, nested: false },
+  { id: 'M3', label: 'Direct bots + Architect', automatic: true, direct: true, nested: false },
+  { id: 'M4', label: 'Bots with child Councils', automatic: false, direct: false, nested: true },
+  { id: 'M5', label: 'Child Councils + Architect', automatic: true, direct: false, nested: true },
+  { id: 'M6', label: 'Mixed direct + child bots', automatic: false, direct: true, nested: true },
+  { id: 'M7', label: 'Mixed bots + Architect', automatic: true, direct: true, nested: true },
+];
+
+/** Native derives one of seven reviewer-source modes; strategy and criterion ownership stay independent. */
+export function councilCompositionMode(composition: CouncilComposition): CouncilModeId | null {
+  const direct = composition.selected.some(reviewer => reviewer.mode === 'direct');
+  const nested = composition.selected.some(reviewer => reviewer.mode === 'nested');
+  return COUNCIL_COMPOSITION_MODES.find(mode => mode.automatic === composition.automatic.enabled && mode.direct === direct && mode.nested === nested)?.id ?? null;
+}
+
+export const DEFAULT_COUNCIL_LIMITS = Object.freeze({
+  maxDepth: 2,
+  maxRootSeats: 8,
+  maxConcurrentLeaves: 64,
+  maxLeafReviewsPerRound: 128,
+  timeoutMs: 86_400_000,
+  maxEstimatedCostMicros: 1_000_000,
+});
+
+/** Defaults are finite and valid. Composition is task-scoped, so these are only the starting values for this panel. */
+export function newCouncilComposition(): CouncilComposition {
+  return {
+    schemaVersion: 1,
+    automatic: { enabled: true, count: 'auto' },
+    selected: [],
+    criteriaSource: 'architect',
+    criteria: [],
+    strategy: 'parallel',
+    limits: { ...DEFAULT_COUNCIL_LIMITS },
+  };
+}
+
+export interface CouncilCompositionValidationIssue { field: string; message: string }
+
+/** Client-side mirror of the native schema gate, with stable field paths for accessible inline errors. */
+export function councilCompositionValidationIssues(composition: CouncilComposition, target: number): CouncilCompositionValidationIssue[] {
+  const issues: CouncilCompositionValidationIssue[] = [], { limits } = composition;
+  const add = (field: string, message: string): void => { issues.push({ field, message }); };
+  if (composition.schemaVersion !== 1) add('schemaVersion', 'Only Council composition schema version 1 is supported.');
+  if (limits.maxDepth !== 2) add('limits.maxDepth', 'Maximum depth is fixed at 2.');
+  if (limits.maxRootSeats !== 8) add('limits.maxRootSeats', 'Maximum root seats are fixed at 8.');
+  if (!Number.isInteger(limits.maxConcurrentLeaves) || limits.maxConcurrentLeaves < 1 || limits.maxConcurrentLeaves > 64) add('limits.maxConcurrentLeaves', 'Concurrent leaves must be between 1 and 64.');
+  if (!Number.isInteger(limits.maxLeafReviewsPerRound) || limits.maxLeafReviewsPerRound < 1 || limits.maxLeafReviewsPerRound > 128) add('limits.maxLeafReviewsPerRound', 'Leaf reviews per round must be between 1 and 128.');
+  if (!Number.isInteger(limits.timeoutMs) || limits.timeoutMs < 1 || limits.timeoutMs > 86_400_000) add('limits.timeoutMs', 'Timeout must be between 1 millisecond and 24 hours.');
+  if (!Number.isSafeInteger(limits.maxEstimatedCostMicros) || limits.maxEstimatedCostMicros <= 0) add('limits.maxEstimatedCostMicros', 'Estimated cost cap must be a positive whole number of micro-units.');
+  const ids = new Set<string>(), lenses = new Set<string>();
+  for (const [index, reviewer] of composition.selected.entries()) {
+    const field = (name: string): string => `reviewers.${index}.${name}`;
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(reviewer.botId)) add(field('botId'), `Reviewer ID "${reviewer.botId}" is not a valid native ID.`);
+    if (ids.has(reviewer.botId)) add(field('botId'), `Reviewer "${reviewer.botId}" is selected more than once.`);
+    ids.add(reviewer.botId);
+    if (reviewer.required !== true) add(field('botId'), `Reviewer "${reviewer.botId}" must be required.`);
+    if (reviewer.mode === 'nested') {
+      const nested = reviewer.nested;
+      if (!nested) { add(field('nested'), `Reviewer "${reviewer.botId}" needs child Council settings.`); continue; }
+      if (!Number.isInteger(nested.childReviewerCount) || nested.childReviewerCount < 2 || nested.childReviewerCount > 8) add(field('nested.childReviewerCount'), `Child reviewer count for "${reviewer.botId}" must be 2–8.`);
+      if (!Number.isFinite(nested.target) || nested.target < 1 || nested.target > 10) add(field('nested.target'), `Child target for "${reviewer.botId}" must be 1–10.`);
+      if (!Number.isInteger(nested.maxRounds) || nested.maxRounds < 1 || nested.maxRounds > 100) add(field('nested.maxRounds'), `Child max rounds for "${reviewer.botId}" must be 1–100.`);
+    } else if (reviewer.nested) add(field('mode'), `Direct reviewer "${reviewer.botId}" cannot include child Council settings.`);
+  }
+  if (composition.selected.length > 8) add('reviewers', 'Select no more than 8 root reviewers.');
+  if (composition.automatic.enabled && composition.automatic.count !== 'auto'
+    && (!Number.isInteger(composition.automatic.count) || composition.automatic.count < 1 || composition.automatic.count > 8)) add('automatic.count', 'Automatic reviewer count must be 1–8 or Auto.');
+  if (!composition.automatic.enabled && typeof composition.automatic.count === 'number'
+    && (!Number.isInteger(composition.automatic.count) || composition.automatic.count < 0 || composition.automatic.count > 8)) add('automatic.count', 'Disabled automatic reviewer count must be 0–8.');
+  const minimumAutomatic = composition.automatic.enabled
+    ? composition.automatic.count === 'auto' ? Math.max(1, 2 - composition.selected.length) : composition.automatic.count
+    : 0;
+  const rootSeats = composition.selected.length + minimumAutomatic;
+  if (rootSeats < 2) add('reviewers', 'At least 2 root reviewers are required.');
+  if (rootSeats > 8) add('reviewers', 'The plan exceeds the 8-seat root limit.');
+  if (composition.criteria.length > 64) add('criteria', 'At most 64 criteria are allowed.');
+  for (const [index, criterion] of composition.criteria.entries()) {
+    const field = (name: string): string => `criteria.${index}.${name}`;
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(criterion.id)) add(field('id'), `Criterion ID "${criterion.id}" must use letters, numbers, underscores or hyphens.`);
+    if (ids.has(`criterion:${criterion.id}`)) add(field('id'), `Criterion ID "${criterion.id}" is duplicated.`);
+    ids.add(`criterion:${criterion.id}`);
+    const lens = criterion.lens.trim();
+    if (!lens || lens.length > 80 || /[\u0000-\u001f\u007f]/.test(lens)) add(field('lens'), `Criterion "${criterion.id}" needs a plain lens name up to 80 characters.`);
+    if (lenses.has(lens.toLowerCase())) add(field('lens'), `Criterion lens "${lens}" is duplicated.`);
+    lenses.add(lens.toLowerCase());
+    if (!criterion.description.trim() || criterion.description.length > 4096) add(field('description'), `Criterion "${criterion.id}" needs a description up to 4,096 characters.`);
+    if (!Number.isFinite(criterion.target) || criterion.target < 1 || criterion.target > 10) add(field('target'), `Criterion target for "${criterion.id}" must be 1–10.`);
+    if ((composition.criteriaSource === 'user' && criterion.source !== 'user')
+      || (composition.criteriaSource === 'architect' && criterion.source !== 'architect')) add('criteriaSource', `Criterion "${criterion.id}" does not match the selected criteria source.`);
+  }
+  if (composition.criteriaSource === 'user' && (!composition.criteria.length || !composition.criteria.some(criterion => criterion.required))) add('criteria', 'User criteria need at least one required criterion.');
+  if (composition.criteriaSource === 'hybrid' && !composition.criteria.some(criterion => criterion.source === 'user' && criterion.required)) add('criteria', 'Hybrid criteria need at least one required user criterion.');
+  if (!Number.isFinite(target) || target < 1 || target > 10) add('councilTarget', 'Council target must be between 1 and 10.');
+  if (!supportedCouncilStrategy(composition.strategy)) add('strategy', 'Choose a supported Council execution strategy.');
+  const seen = new Set<string>();
+  return issues.filter(issue => { if (seen.has(issue.message)) return false; seen.add(issue.message); return true; });
+}
+
+/** Keep the existing plain-message API for command validation and the preview host. */
+export function validateCouncilComposition(composition: CouncilComposition, target: number): string[] {
+  return councilCompositionValidationIssues(composition, target).map(issue => issue.message);
+}
+
+export function withCouncilComposition(config: CouncilConfig, composition: CouncilComposition): CouncilConfig {
+  const selected = composition.selected.map(reviewer => reviewer.botId);
+  const reviewers = composition.automatic.enabled && typeof composition.automatic.count === 'number' ? composition.automatic.count : 0;
+  return { ...config, reviewers, reviewerBotIds: selected, composition };
+}
+
+export function withoutCouncilComposition(config: CouncilConfig): CouncilConfig {
+  const { composition: _composition, ...legacy } = config;
+  return legacy;
+}
+
+export const criterionSourceFor = (source: CouncilCriteriaSource): CouncilCriterion['source'] => source === 'user' ? 'user' : 'architect';
+export const supportedCouncilStrategy = (strategy: CouncilStrategy): boolean =>
+  strategy === 'parallel' || strategy === 'escalated' || strategy === 'two_phase';
+
+/** Native pins a root Council cycle to `<sessionId>:<councilSince>`; mirror that identity at the view boundary. */
+export const councilCycleId = (team: Pick<TeamSnapshot, 'sessionId' | 'councilSince'>): string => `${team.sessionId}:${team.councilSince ?? 0}`;
+
+/** Reject a snapshot from another task, an earlier cycle, or an older revision. Equal revisions in the same cycle
+ *  are allowed because projection arrays can be refreshed without changing visible worker state. */
+export function acceptsCouncilSnapshot(candidate: TeamSnapshot, current: TeamSnapshot | null, sessionId: string): boolean {
+  if (candidate.sessionId !== sessionId) return false;
+  if (!current || current.sessionId !== sessionId) return true;
+  return candidate.revision >= current.revision && (candidate.councilSince ?? 0) >= (current.councilSince ?? 0);
+}
+
+export interface CouncilLedgerProjection {
+  cycleId: string;
+  findings?: CouncilFinding[];
+  findingDispositions?: CouncilFindingDisposition[];
+  childReceipts?: ChildCouncilReceipt[];
+  reviewReceipts?: CouncilReviewReceipt[];
+  usage?: CouncilUsageRecord[];
+}
+
+/** Keep the UI bounded to native's projected root cycle and its correlated child cycles. RootCycleId is native's
+ *  `<sessionId>:<councilSince>`; child cycles are admitted only by current-root child receipts or usage records. */
+export function councilLedgerForCurrentCycle(
+  team: Pick<TeamSnapshot, 'sessionId' | 'councilSince' | 'councilFindings' | 'councilFindingDispositions' | 'councilChildReceipts' | 'councilReviewReceipts' | 'councilUsage'>,
+): CouncilLedgerProjection {
+  const cycleId = councilCycleId(team);
+  const childReceipts = team.councilChildReceipts?.filter(receipt => receipt.rootCycleId === cycleId);
+  const usage = team.councilUsage?.filter(record => record.rootCycleId === cycleId);
+  const childCycleIds = new Set([
+    ...(childReceipts ?? []).map(receipt => receipt.childCycleId),
+    ...(usage ?? []).map(record => record.childCycleId).filter((id): id is string => Boolean(id)),
+  ]);
+  const allowedCycleIds = new Set([cycleId, ...childCycleIds]);
+  const findings = team.councilFindings?.filter(finding => allowedCycleIds.has(finding.cycleId));
+  const findingIds = new Set((findings ?? []).map(finding => finding.id));
+  return {
+    cycleId,
+    ...(findings === undefined ? {} : { findings }),
+    ...(team.councilFindingDispositions === undefined ? {} : { findingDispositions: team.councilFindingDispositions.filter(item => findingIds.has(item.findingId)) }),
+    ...(childReceipts === undefined ? {} : { childReceipts }),
+    ...(team.councilReviewReceipts === undefined ? {} : { reviewReceipts: team.councilReviewReceipts.filter(receipt => allowedCycleIds.has(receipt.cycleId)) }),
+    ...(usage === undefined ? {} : { usage }),
+  };
+}
 
 export type CouncilSeatWorker = TeamWorker & { council: NonNullable<TeamWorker['council']> };
 /** A round as shown: its seats and their lowest score. Whether it is done is native's to say (`councilStatus`). */

@@ -1,7 +1,7 @@
 import type { CouncilConfig, ModelSelection, TeamConfig, TeamLibrary, TeamMessage, TeamMessagePage, TeamSetup, TeamSnapshot, TeamWorker, WorkerProfile } from './architect-types';
 import type { AgentEvent, Message, MessagePage, ProviderId, ProviderModel, Session } from './types';
 import { workerQueueReason } from './worker-scheduling.ts';
-import { formatScore } from './council.ts';
+import { formatScore, newCouncilComposition, validateCouncilComposition } from './council.ts';
 import type { CouncilStatus } from './architect-types';
 
 interface PreviewHost {
@@ -53,6 +53,10 @@ export function createPreviewArchitect(host: PreviewHost) {
   /** Like the native command: a sane range, or a refusal. */
   function validCouncil(council: CouncilConfig): CouncilConfig {
     if (!council || typeof council.target !== 'number' || !(council.target > 0 && council.target <= 10)) throw new Error('A council target is between 0 and 10.');
+    if (council.composition) {
+      const errors = validateCouncilComposition(council.composition, council.target);
+      if (errors.length) throw new Error(`council_composition_invalid: ${errors[0]}`);
+    }
     const ids = council.reviewerBotIds ?? [];
     const permissions = council.reviewPermissions;
     if (permissions && (!ids.length || !/^[a-zA-Z0-9-]{1,128}$/.test(permissions.authorizationId)
@@ -75,7 +79,7 @@ export function createPreviewArchitect(host: PreviewHost) {
         || new Set(checks).size !== checks.length) {
       throw new Error('Native check requirements must name unique mandatory selected-bot skills.');
     }
-    return { target: council.target, maxRounds: integer(council.maxRounds, 1, 100, 'Council rounds'), reviewers: integer(council.reviewers, 0, 8, 'Council reviewers'), ...(ids.length ? { reviewerBotIds: [...ids] } : {}), ...(optionalSkills.length ? { optionalSkillIds: [...optionalSkills] } : {}), ...(checks.length ? { requiredCheckSkillIds: [...checks] } : {}), ...(permissions ? { reviewPermissions: permissions } : {}) };
+    return { target: council.target, maxRounds: integer(council.maxRounds, 1, 100, 'Council rounds'), reviewers: integer(council.reviewers, 0, 8, 'Council reviewers'), ...(ids.length ? { reviewerBotIds: [...ids] } : {}), ...(optionalSkills.length ? { optionalSkillIds: [...optionalSkills] } : {}), ...(checks.length ? { requiredCheckSkillIds: [...checks] } : {}), ...(permissions ? { reviewPermissions: permissions } : {}), ...(council.composition !== undefined ? { composition: council.composition ? structuredClone(council.composition) : null } : {}) };
   }
   function validate(config: TeamConfig): TeamConfig {
     // Auto teams carry an optional roster (the lead picks models); configured teams name at least one profile.
@@ -463,7 +467,7 @@ export function createPreviewArchitect(host: PreviewHost) {
   }
   /** `?council` in the preview: a team partway through a council, in the named state. */
   function seedCouncil(sessionId: string, kind: string): void {
-    const parent = host.parent(sessionId), council = { target: 9.5, maxRounds: kind === 'limit' ? 2 : 10, reviewers: 0 };
+    const parent = host.parent(sessionId), council = { target: 9.5, maxRounds: kind === 'limit' ? 2 : 10, reviewers: 0, ...(['composition', 'ledger'].includes(kind) ? { composition: newCouncilComposition() } : {}) };
     const rounds: Record<string, (number | null)[][]> = {
       fixing: [[8.3, 9.1, 8.8]],
       finished: [[8.3, 9.1, 8.8]],
@@ -471,6 +475,7 @@ export function createPreviewArchitect(host: PreviewHost) {
       accepted: [[8.3, 9.1, 8.8]],
       passed: [[8.3, 9.1, 8.8], [9.5, 9.6, 9.7]],
       limit: [[8.3, 9.1, 8.8], [8.7, 9.6, 9]],
+      ledger: [[9.6, 9.8]],
     };
     const lenses = ['Correctness', 'Security', 'User experience'], models = host.models(parent.provider);
     // What native reports for each scenario.
@@ -478,6 +483,7 @@ export function createPreviewArchitect(host: PreviewHost) {
       fixing: { state: 'fixing', round: 1, lowest: 8.3, stale: true }, finished: { state: 'fixing', round: 1, lowest: 8.3 }, asking: { state: 'fixing', round: 1, lowest: 8.3 },
       passed: { state: 'passed', round: 2, lowest: 9.5 }, limit: { state: 'limit', round: 2, lowest: 8.7 },
       accepted: { state: 'accepted', round: 1, lowest: 8.3 }, cycle: { state: 'reviewing', round: 1, lowest: 9.2 },
+      ledger: { state: 'passed', round: 1, lowest: 9.6 },
     };
     const base = Date.now() - 3_600_000;
     const profile = { provider: parent.provider, model: models[0]?.id ?? parent.model, reasoningEffort: null };
@@ -497,6 +503,43 @@ export function createPreviewArchitect(host: PreviewHost) {
     const asking = kind === 'asking';
     if (asking) host.append(parent.id, 'assistant', 'Round 1 scored 8.3 on correctness: the search index still rebuilds on every keystroke. **Should I keep fixing, or would you like to lower the target to 8.5?**');
     const snapshot: TeamSnapshot = { sessionId: parent.id, config, status: running ? 'running' : asking ? 'ready' : 'completed', round: 1, revision: 1, councilSince, workers, updatedAt: Date.now() };
+    if (kind === 'ledger') {
+      const cycleId = `${parent.id}:${councilSince}`, childCycleId = 'nested-review-task:1';
+      const rootSeat = seats.find(worker => worker.council?.lens === 'Security') ?? seats[0];
+      rootSeat.reviewerBinding = { reviewerBotId: 'reviewer-alpha', councilCycleId: cycleId, artifactRevision: 'preview-revision-1' };
+      const finding = (id: string, findingCycle: string, round: number, seatId: string, artifactDigest: string, summary: string): NonNullable<TeamSnapshot['councilFindings']>[number] => ({
+        id, cycleId: findingCycle, roundId: `${findingCycle}:${round}`, seatId, artifactDigest, criterionId: 'security', severity: 'high', category: 'Security', summary,
+        evidenceRefs: ['src/main.ts'], locationStatus: 'verified', location: { file: 'src/main.ts', line: 42 }, suggestedFix: 'Keep the workspace read bounded.',
+      });
+      const usage = (id: string, childId: string | null, reviewerId: string, roundId: string, seatId: string, scope: 'root' | 'child', rootId = cycleId): NonNullable<TeamSnapshot['councilUsage']>[number] => ({
+        id, rootCycleId: rootId, childCycleId: childId, attemptId: `attempt-${id}`, reviewerId, roundId, seatId, scope, phase: 'review', strategy: 'parallel',
+        startedAtMs: Date.now() - 1200, finishedAtMs: Date.now(), queueWaitMs: { status: 'measured', value: 100 }, elapsedMs: { status: 'provider_estimated', value: 1100 },
+        retries: { status: 'measured', value: 0 }, escalations: { status: 'measured', value: 0 }, provider: 'codex', model: 'gpt-6', harness: 'codex',
+        inputTokens: { status: 'unknown' }, outputTokens: { status: 'provider_estimated', value: 250 }, requestCount: { status: 'measured', value: 1 }, terminalStatus: 'passed',
+        budgetConsumption: { concurrentLeaves: { status: 'measured', value: 1 }, leafReviews: { status: 'measured', value: 2 }, estimatedCostMicros: { status: 'calculated_estimated', value: 125000 } },
+        costEstimate: { amountMicros: 125000, currency: 'USD', pricingSource: 'Preview fixture', pricingVersion: 'v1', calculatedAtMs: Date.now() },
+      });
+      const rootFindingId = 'preview-finding-root', childFindingId = 'preview-finding-child';
+      snapshot.councilFindings = [
+        finding(rootFindingId, cycleId, 1, rootSeat.id, 'sha256:root-artifact', 'A current root-cycle issue.'),
+        finding(childFindingId, childCycleId, 1, 'nested-review-seat', 'sha256:root-artifact', 'A finding from the correlated child Council.'),
+        finding('preview-finding-old', `${parent.id}:older-cycle`, 1, 'old-seat', 'sha256:old-artifact', 'This earlier-cycle finding must stay hidden.'),
+      ];
+      snapshot.councilFindingDispositions = [
+        { findingId: rootFindingId, disposition: 'waived_by_authorized_human', actorId: 'local-user', rationale: 'Accepted as a documented preview exception.', timestampMs: Date.now(), artifactLinks: ['src/main.ts'] },
+        { findingId: 'preview-finding-old', disposition: 'addressed', actorId: 'old-cycle-user', rationale: 'Earlier cycle only.', timestampMs: Date.now() - 5000, artifactLinks: [] },
+      ];
+      snapshot.councilChildReceipts = [
+        { rootCycleId: cycleId, parentSeatId: rootSeat.id, childCycleId, botId: 'reviewer-nested', artifactRevision: 'preview-revision-1', policyFingerprint: 'preview-policy', status: 'passed', minScore: 9.6, leafScoreRefs: ['score:child'], findingsRefs: [childFindingId], evidenceRefs: ['src/main.ts'], snapshotFingerprint: 'preview-snapshot' },
+        { rootCycleId: `${parent.id}:older-cycle`, parentSeatId: 'old-seat', childCycleId: 'old-child:1', botId: 'old-reviewer', artifactRevision: 'old-revision', policyFingerprint: 'old-policy', status: 'stale', leafScoreRefs: [], findingsRefs: [], evidenceRefs: [], snapshotFingerprint: 'old-snapshot' },
+      ];
+      snapshot.councilReviewReceipts = [
+        { schemaVersion: 1, requestId: 'preview-request-root', cycleId, taskId: parent.id, assignmentId: rootSeat.id, policyFingerprint: 'preview-policy', artifactDigest: 'sha256:root-artifact', verdict: 'passed', findingsRefs: [rootFindingId], evidenceRefs: ['src/main.ts'], terminalRevision: 1, idempotencyKey: 'preview-terminal-root' },
+        { schemaVersion: 1, requestId: 'preview-request-child', cycleId: childCycleId, taskId: 'nested-review-task', assignmentId: 'nested-review-seat', policyFingerprint: 'preview-child-policy', artifactDigest: 'sha256:child-artifact', verdict: 'passed', findingsRefs: [childFindingId], evidenceRefs: ['src/main.ts'], terminalRevision: 1, idempotencyKey: 'preview-terminal-child' },
+        { schemaVersion: 1, requestId: 'preview-request-old', cycleId: `${parent.id}:older-cycle`, taskId: parent.id, assignmentId: 'old-seat', policyFingerprint: 'old-policy', artifactDigest: 'old-artifact', verdict: 'stale', findingsRefs: ['preview-finding-old'], evidenceRefs: [], terminalRevision: 1, idempotencyKey: 'old-terminal' },
+      ];
+      snapshot.councilUsage = [usage('root', null, 'reviewer-alpha', `${cycleId}:1`, rootSeat.id, 'root'), usage('child', childCycleId, 'reviewer-nested', `${childCycleId}:1`, 'nested-review-seat', 'child'), usage('old', 'old-child:1', 'old-reviewer', `${parent.id}:older-cycle:1`, 'old-seat', 'root', `${parent.id}:older-cycle`)];
+    }
     const runs = workers.map(worker => {
       const run: WorkerRun = { worker, output: sampleNotice, cursor: sampleNotice.length, messages: [] };
       workerMessage(run, 'user', worker.assignment); workerMessage(run, 'assistant', worker.council?.score != null ? `Score: ${worker.council.score}/10. ${sampleNotice}` : sampleNotice);

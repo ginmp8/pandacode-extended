@@ -13,8 +13,8 @@ test.describe('bot collaboration', () => {
         id: 'lab-security', name: 'lab-security', memberIds: ['executor', 'reviewer'],
         archived: false, messages: [], activeBotIds: [],
       } as any, [
-        { id: 'executor', name: 'Executor' },
-        { id: 'reviewer', name: 'Reviewer' },
+        { id: 'executor', name: 'Executor', avatar: 'panda:0', color: '' },
+        { id: 'reviewer', name: 'Reviewer', avatar: 'panda:1', color: '' },
       ] as any);
       const form = document.querySelector<HTMLFormElement>('#shared-channel-composer')!;
       form.style.cssText = 'max-width:830px;margin:24px auto';
@@ -67,7 +67,7 @@ test.describe('bot collaboration', () => {
     await expect(panel.locator('.bc-council-selected-permissions')).toBeVisible();
 
     // Resizing an open popover must re-anchor it without making the composer grow.
-    await page.setViewportSize({ width: 480, height: 640 });
+    await page.setViewportSize({ width: 360, height: 640 });
     const overflow = await panel.evaluate(element => {
       const box = element.getBoundingClientRect(), footer = document.querySelector('.send-button')!.getBoundingClientRect();
       return { left: box.left, right: box.right, top: box.top, bottom: box.bottom, viewport: window.innerWidth, footer: footer.bottom };
@@ -78,6 +78,168 @@ test.describe('bot collaboration', () => {
     expect(overflow.bottom).toBeLessThanOrEqual(640);
     expect(overflow.footer).toBeLessThanOrEqual(640);
     await expect(form.locator('.send-button')).toBeVisible();
+  });
+
+  test('Council reviewer names stay contained in the narrow schema-v1 picker', async ({ page }) => {
+    await page.setViewportSize({ width: 360, height: 620 });
+    await page.goto('/tests/fixtures/bot-manifests.html');
+    for (const url of ['/src/styles.css', '/src/design-system.css', '/src/council.css', '/src/bot-shared-channels.css']) {
+      await page.addStyleTag({ url });
+    }
+    const names = [
+      'A security reviewer with a display name much longer than a phone screen can show',
+      'An architecture reviewer whose very long name must not widen the Council panel',
+    ];
+    await page.evaluate(async names => {
+      const { sharedChannelComposerHtml, bindSharedChannelCouncil, toggleSharedChannelCouncil } = await import('/src/bot-shared-channels.ts');
+      document.body.innerHTML = sharedChannelComposerHtml({
+        id: 'long-names', name: 'long-names', memberIds: ['security', 'architecture'],
+        archived: false, messages: [], activeBotIds: [],
+      } as any, [
+        { id: 'security', name: names[0], avatar: 'panda:0', color: '' },
+        { id: 'architecture', name: names[1], avatar: 'panda:1', color: '' },
+      ] as any);
+      const form = document.querySelector<HTMLFormElement>('#shared-channel-composer')!;
+      form.style.cssText = 'max-width:830px;margin:24px auto';
+      bindSharedChannelCouncil(form);
+      toggleSharedChannelCouncil(form.querySelector<HTMLElement>('.bc-council-trigger')!);
+    }, names);
+
+    const panel = page.getByRole('dialog', { name: 'Council' });
+    await expect(panel).toBeVisible();
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' }).check();
+    const firstName = panel.locator('[data-bc-reviewer-row] .council-composition-bot strong').first();
+    await expect(firstName).toHaveText(names[0]);
+    const layout = await page.evaluate(() => {
+      const panel = document.querySelector<HTMLElement>('.bc-council-panel')!;
+      const name = panel.querySelector<HTMLElement>('.council-composition-bot strong')!;
+      const rect = panel.getBoundingClientRect();
+      const style = getComputedStyle(name);
+      return {
+        panelWidth: panel.clientWidth,
+        panelScrollWidth: panel.scrollWidth,
+        panelRight: rect.right,
+        viewportWidth: innerWidth,
+        nameFits: name.scrollWidth > name.clientWidth,
+        clipsName: style.overflow === 'hidden' && style.textOverflow === 'ellipsis' && style.whiteSpace === 'nowrap',
+      };
+    });
+    expect(layout.panelScrollWidth).toBeLessThanOrEqual(layout.panelWidth + 1);
+    expect(layout.panelRight).toBeLessThanOrEqual(layout.viewportWidth);
+    expect(layout.nameFits).toBe(true);
+    expect(layout.clipsName).toBe(true);
+  });
+
+  test('a channel Council report opens its populated nested Architect inspection', async ({ page }) => {
+    test.setTimeout(120_000);
+    await page.goto('/?bots=sample&council=ledger');
+    const botSidebar = page.getByRole('region', { name: 'Bots', exact: true });
+    const botsBar = page.locator('.sidebar-bots-bar');
+    if (await botsBar.getAttribute('aria-pressed') !== 'true') await botsBar.click();
+    await expect(botSidebar).toBeVisible();
+    await botSidebar.getByRole('button', { name: '#launch' }).click();
+
+    await page.evaluate(async () => {
+      const { sharedChannelThreadHtml } = await import('/src/bot-shared-channels.ts');
+      const host = document.createElement('div');
+      host.id = 'council-report-source';
+      host.innerHTML = sharedChannelThreadHtml({
+        id: 'sample-launch', name: 'launch', memberIds: ['executor', 'reviewer-alpha'], leadBotId: 'executor',
+        archived: false, updatedAt: 1, activeBotIds: [],
+        messages: [{
+          id: 'nested-delivery', kind: 'assigned', authorBotId: 'executor', text: 'Review this change', status: 'Completed', createdAt: 1,
+          council: {
+            cycleId: 'session-1:preview', sessionId: 'session-1', state: 'Passed', round: 1, target: 9.5,
+            lowest: 9.6, artifactRevision: 'preview-revision-1',
+            reviewers: [{ botId: 'reviewer-alpha', name: 'Review Alpha', lens: 'Security', round: 1, score: 9.8 }],
+          },
+        }],
+      } as any, [
+        { id: 'executor', name: 'Executor', avatar: 'panda:0', color: '' },
+        { id: 'reviewer-alpha', name: 'Review Alpha', avatar: 'panda:1', color: '' },
+      ] as any);
+      document.querySelector('.conversation-pane')?.append(host);
+    });
+
+    const source = page.locator('#council-report-source');
+    const report = source.getByRole('button', { name: 'View Council report' });
+    await report.scrollIntoViewIfNeeded();
+    await report.click();
+
+    const reportDialog = page.getByRole('dialog', { name: 'Council report' });
+    await expect(reportDialog).toBeVisible();
+    const hierarchy = reportDialog.locator('.council-inspector-hierarchy');
+    await expect(hierarchy).toBeVisible();
+    const rootSeat = hierarchy.locator('[data-level="bot"]').filter({ hasText: 'Security' });
+    await expect(rootSeat).toHaveCount(1);
+    await rootSeat.locator(':scope > summary').click();
+    const child = rootSeat.locator('[data-level="child-council"][data-child-cycle="nested-review-task:1"]');
+    await expect(child).toBeVisible();
+    await expect(child.locator(':scope > summary')).toContainText('Child Council · passed · minimum score 9.6');
+    await expect(child).toContainText('A finding from the correlated child Council.');
+    await expect(child).toContainText('src/main.ts');
+  });
+
+  test('channel Council report states cover unavailable, error, stopped, and retrying deliveries', async ({ page }) => {
+    test.setTimeout(120_000);
+    await page.goto('/?bots=sample');
+    const botSidebar = page.getByRole('region', { name: 'Bots', exact: true });
+    const botsBar = page.locator('.sidebar-bots-bar');
+    if (await botsBar.getAttribute('aria-pressed') !== 'true') await botsBar.click();
+    await expect(botSidebar).toBeVisible();
+    await botSidebar.getByRole('button', { name: '#launch' }).click();
+
+    await page.evaluate(async () => {
+      const { sharedChannelActionsHtml, sharedChannelThreadHtml } = await import('/src/bot-shared-channels.ts');
+      const bots = [
+        { id: 'executor', name: 'Executor', avatar: 'panda:0', color: '' },
+        { id: 'reviewer', name: 'Reviewer', avatar: 'panda:1', color: '' },
+      ] as any;
+      const channel = {
+        id: 'sample-launch', name: 'launch', memberIds: ['executor', 'reviewer'], leadBotId: 'executor',
+        archived: false, updatedAt: 1, activeBotIds: [],
+        messages: [
+          { id: 'error-user', kind: 'user', text: 'Review failed', status: 'Failed', createdAt: 1 },
+          { id: 'error-report', kind: 'assigned', authorBotId: 'executor', text: 'Review failed', status: 'Failed', createdAt: 2,
+            council: { cycleId: 'error-cycle', sessionId: 'session-1', state: 'Error', round: 1, target: 9, lowest: null, artifactRevision: '1:1', notice: 'The Council report could not be loaded.', reviewers: [] } },
+          { id: 'stopped-user', kind: 'user', text: 'Review stopped', status: 'Stopped', createdAt: 3 },
+          { id: 'stopped-report', kind: 'assigned', authorBotId: 'executor', text: 'Review stopped', status: 'Stopped', createdAt: 4,
+            council: { cycleId: 'stopped-cycle', sessionId: 'session-1', state: 'Stopped', round: 1, target: 9, lowest: null, artifactRevision: '1:2', reviewers: [] } },
+          { id: 'retry-user', kind: 'user', text: 'Review retry', status: 'In progress', createdAt: 5 },
+          { id: 'retry-report', kind: 'assigned', authorBotId: 'reviewer', text: 'Review retry', status: 'In progress', createdAt: 6,
+            council: { cycleId: 'retry-cycle', sessionId: 'session-1', state: 'Reviewing', round: 1, target: 9, lowest: null, artifactRevision: '1:3', reviewers: [] } },
+          { id: 'unavailable-user', kind: 'user', text: 'Report task unavailable', status: 'Failed', createdAt: 7 },
+          { id: 'unavailable-report', kind: 'assigned', authorBotId: 'executor', text: 'Report task unavailable', status: 'Failed', createdAt: 8,
+            council: { cycleId: 'unavailable-cycle', sessionId: 'missing-council-report', state: 'Unavailable', round: 1, target: 9, lowest: null, artifactRevision: '1:4', notice: 'Report task is unavailable.', reviewers: [] } },
+        ],
+      } as any;
+      const host = document.createElement('div');
+      host.id = 'council-report-states';
+      host.innerHTML = sharedChannelActionsHtml(channel, bots) + sharedChannelThreadHtml(channel, bots);
+      document.querySelector('.conversation-pane')?.append(host);
+    });
+
+    const fixture = page.locator('#council-report-states');
+    const error = fixture.locator('.bc-assigned[data-message-id="error-report"]');
+    await expect(error).toContainText('Council: Error');
+    await expect(error.locator('.bc-council-notice')).toHaveText('The Council report could not be loaded.');
+    await expect(error.getByRole('button', { name: 'View Council report' })).toHaveAttribute('data-session-id', 'session-1');
+
+    const stopped = fixture.locator('.bc-assigned[data-message-id="stopped-report"]');
+    await expect(stopped).toContainText('Stopped');
+    await expect(stopped).toContainText('Council: Stopped');
+    await expect(stopped.getByRole('button', { name: 'View Council report' })).toHaveAttribute('data-session-id', 'session-1');
+
+    const retrying = fixture.locator('.bc-assigned[data-message-id="retry-report"]');
+    await expect(retrying).toContainText('In progress');
+    await expect(retrying).toContainText('Council: Reviewing');
+    await expect(retrying.getByRole('button', { name: 'View Council report' })).toHaveAttribute('data-session-id', 'session-1');
+    await expect(fixture.locator('.bc-channel-actions')).toContainText('This message failed.');
+    await expect(fixture.locator('.bc-channel-actions').getByRole('button', { name: 'Continue' })).toBeVisible();
+
+    await fixture.locator('.bc-assigned[data-message-id="unavailable-report"]').getByRole('button', { name: 'View Council report' }).click();
+    await expect(page.locator('#toast')).toContainText('This Council delivery report is unavailable.');
   });
 
   test('Council opt-in is isolated to one message and statuses are per-delivery', async ({ page }) => {
@@ -132,7 +294,9 @@ test.describe('bot collaboration', () => {
     await expect(fixture.locator('input[name="councilEnabled"]')).toBeChecked();
     await expect(fixture.locator('input[name="councilTarget"]')).toHaveValue('9');
     await expect(fixture.locator('input[name="councilMaxRounds"]')).toHaveValue('10');
-    await expect(fixture.locator('input[name="councilReviewer"]')).toHaveCount(2);
+    const legacyReviewers = fixture.locator('[data-bc-legacy-reviewer]');
+    await expect(legacyReviewers).toHaveCount(2);
+    await expect(fixture.locator('[data-bc-composition-enabled]')).not.toBeChecked();
     await fixture.locator('input[name="councilMode"][value="selected"]').check();
     await expect(fixture.locator('input[name="councilScopedFile"]')).toHaveCount(1);
     await expect(fixture.locator('input[name="councilFilePath"]')).toHaveCount(1);
@@ -141,7 +305,7 @@ test.describe('bot collaboration', () => {
 
     await fixture.locator('input[name="councilTarget"]').fill('8.5');
     await fixture.locator('input[name="councilMaxRounds"]').fill('4');
-    await fixture.locator('input[name="councilReviewer"][value="reviewer"]').check();
+    await fixture.locator('[data-bc-legacy-reviewer][value="reviewer"]').check();
     await fixture.locator('input[name="councilScopedFile"]').check();
     await fixture.locator('input[name="councilFilePath"]').fill('src/entry.ts');
     await fixture.locator('input[name="councilGithubIssue"]').check();
@@ -154,7 +318,10 @@ test.describe('bot collaboration', () => {
         const holder = document.createElement('div');
         holder.innerHTML = sharedChannelComposerHtml({
           id, name: id, memberIds: ['executor', 'reviewer'], archived: false,
-        } as any, [{ id: 'executor', name: 'Executor' }, { id: 'reviewer', name: 'Reviewer' }] as any);
+        } as any, [
+          { id: 'executor', name: 'Executor', avatar: 'panda:0', color: '' },
+          { id: 'reviewer', name: 'Reviewer', avatar: 'panda:1', color: '' },
+        ] as any);
         return holder.querySelector<HTMLFormElement>('form')!;
       };
       const refreshed = render('quality');
@@ -168,7 +335,7 @@ test.describe('bot collaboration', () => {
     await expect(fixture.locator('input[name="councilMode"][value="selected"]')).toBeChecked();
     await expect(fixture.locator('input[name="councilTarget"]')).toHaveValue('8.5');
     await expect(fixture.locator('input[name="councilMaxRounds"]')).toHaveValue('4');
-    await expect(fixture.locator('input[name="councilReviewer"][value="reviewer"]')).toBeChecked();
+    await expect(fixture.locator('[data-bc-legacy-reviewer][value="reviewer"]')).toBeChecked();
     await expect(fixture.locator('input[name="councilScopedFile"]')).toBeChecked();
     await expect(fixture.locator('input[name="councilFilePath"]')).toHaveValue('src/entry.ts');
     await expect(fixture.locator('input[name="councilGithubIssue"]')).toBeChecked();
@@ -179,7 +346,10 @@ test.describe('bot collaboration', () => {
       const holder = document.createElement('div');
       holder.innerHTML = sharedChannelComposerHtml({
         id: 'other', name: 'other', memberIds: ['executor','reviewer'], archived: false,
-      } as any, [{ id: 'executor', name: 'Executor' }, { id: 'reviewer', name: 'Reviewer' }] as any);
+      } as any, [
+        { id: 'executor', name: 'Executor', avatar: 'panda:0', color: '' },
+        { id: 'reviewer', name: 'Reviewer', avatar: 'panda:1', color: '' },
+      ] as any);
       const next = holder.querySelector<HTMLFormElement>('form')!;
       restoreSharedChannelCouncilInputs(old, next);
       old.replaceWith(next);

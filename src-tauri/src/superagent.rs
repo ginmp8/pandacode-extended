@@ -10,6 +10,8 @@ pub(crate) mod council_adapter;
 pub mod effects;
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use hmac::{Hmac, Mac};
+use sha2::{Digest, Sha256};
 use tauri::{Manager, State};
 
 /// A desktop window is not itself a task mandate. It is nevertheless the
@@ -38,6 +40,199 @@ const MAX_OBJECTIVE_BYTES: usize = 16 * 1024;
 /// ticket mandate lifetime. A late provider result must never become newly
 /// approvable after its execution budget has elapsed.
 const MAX_ASSIGNMENT_RUN_MS: i64 = 30 * 60 * 1000;
+
+/// A ticket ID is public task history, not a caller identity. The main-window
+/// bearer capability is an HMAC scoped to its exact ticket, assignment and
+/// session, keyed by a per-ticket 244-bit random mandate seed. The seed stays
+/// native; only its stable SHA-256 display ID is serialized.
+type TaskClientMac = Hmac<Sha256>;
+
+/// Native context passed only after the exported command validates a bearer
+/// capability against the current task and worker assignment.
+pub(crate) struct TaskClientContext {
+    pub(super) ticket_id: String,
+    pub(super) assignment_id: String,
+    pub(super) session_id: String,
+    pub(super) caller_id: String,
+}
+
+fn task_client_binding(store: &Store, ticket: &Ticket) -> Result<(String, String)> {
+    if !matches!(ticket.state.as_str(), "running" | "waiting_approval" | "waiting_review") {
+        return Err("task_client_denied: task is not an active worker assignment.".into());
+    }
+    let assignment: Option<(String, String)> = store.db.query_row(
+        "SELECT a.id,a.session_id FROM sa_assignments a
+         JOIN sa_tickets t ON t.id=a.ticket_id
+         WHERE t.id=?1 AND a.bot_id=t.worker_bot_id
+           AND a.attempt=(SELECT MAX(attempt) FROM sa_assignments WHERE ticket_id=?1)
+           AND ((t.state='running' AND t.active_assignment_id=a.id AND a.state='running')
+             OR (t.state IN ('waiting_approval','waiting_review')
+                 AND a.state='finished' AND a.result=t.evidence))",
+        [&ticket.id], |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let Some((assignment_id, session_id)) = assignment else {
+        return Err("task_client_denied: no current worker assignment is bound to this ticket.".into());
+    };
+    if !assignment_thread_current(store, &session_id, &ticket.id)? {
+        return Err("task_client_denied: task worker assignment is no longer current.".into());
+    }
+    let grant = mandate(store, &ticket.id)?;
+    if grant.revoked || grant.expires_at <= storage::now() {
+        return Err("task_client_denied: task mandate is revoked or expired.".into());
+    }
+    Ok((assignment_id, session_id))
+}
+
+fn capability_digest(capability: &str) -> [u8; 32] {
+    Sha256::digest(capability.as_bytes()).into()
+}
+
+fn valid_task_client_hex(value: &str) -> bool {
+    value.len() == 64
+        && value.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn constant_time_eq(left: &[u8; 32], right: &[u8; 32]) -> bool {
+    left.iter().zip(right).fold(0u8, |diff, (a, b)| diff | (*a ^ *b)) == 0
+}
+
+fn digest_hex(digest: &[u8; 32]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn new_task_client_seed() -> String {
+    format!(
+        "{}{}",
+        uuid::Uuid::new_v4().simple(),
+        uuid::Uuid::new_v4().simple(),
+    )
+}
+
+fn task_client_seed(store: &Store, ticket_id: &str) -> Result<String> {
+    let seed: String = store.db.query_row(
+        "SELECT authorization_id FROM sa_mandates WHERE ticket_id=?1",
+        [ticket_id],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if !valid_task_client_hex(&seed) {
+        return Err("task_client_denied: this ticket has no private task-client seed.".into());
+    }
+    Ok(seed)
+}
+
+fn task_client_capability_for_assignment(
+    seed: &str,
+    ticket_id: &str,
+    assignment_id: &str,
+    session_id: &str,
+) -> Result<String> {
+    let material = format!(
+        "superagent-task-client-capability:v1\0{ticket_id}\0{assignment_id}\0{session_id}"
+    );
+    let mut mac = TaskClientMac::new_from_slice(seed.as_bytes())
+        .map_err(|_| "task_client_denied: task-client seed is invalid.")?;
+    mac.update(material.as_bytes());
+    let digest = mac.finalize().into_bytes();
+    Ok(digest.iter().map(|byte| format!("{byte:02x}")).collect())
+}
+
+/// Issue the deterministic bearer capability for a newly admitted worker
+/// assignment. Call only before that assignment is delivered. An idempotent
+/// request replay may recover this same value while the original assignment
+/// remains current and authorized; it cannot mint for a later assignment.
+pub(crate) fn issue_task_client_capability(
+    store: &Store,
+    ticket: &Ticket,
+) -> Result<String> {
+    let current = get_ticket(store, &ticket.id)?;
+    if current.state != "running" || current.active_assignment_id.is_none() {
+        return Err("task_client_denied: capabilities are issued only with a new running worker assignment.".into());
+    }
+    let (assignment_id, session_id) = task_client_binding(store, &current)?;
+    let seed = task_client_seed(store, &current.id)?;
+    task_client_capability_for_assignment(&seed, &current.id, &assignment_id, &session_id)
+}
+
+/// Recover the deterministic capability only when original admission durably
+/// recorded the assignment to which the capability was issued. A blocked
+/// admission records no assignment, so an explicit retry cannot become the
+/// original dispatch even when it happens to be attempt 1.
+fn replay_task_client_capability(store: &Store, ticket: &Ticket) -> Result<Option<String>> {
+    let current = get_ticket(store, &ticket.id)?;
+    if !matches!(current.state.as_str(), "running" | "waiting_approval" | "waiting_review") {
+        return Ok(None);
+    }
+
+    let original_assignment: Option<String> = store.db.query_row(
+        "SELECT original_admission_assignment_id FROM sa_tickets WHERE id=?1",
+        [&current.id],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    let Some(original_assignment) = original_assignment else {
+        return Ok(None);
+    };
+
+    let (assignment_id, session_id) = task_client_binding(store, &current)?;
+    if original_assignment != assignment_id {
+        return Err("task_client_denied: original task assignment changed; capability recovery denied.".into());
+    }
+
+    let seed = task_client_seed(store, &current.id)?;
+    Ok(Some(task_client_capability_for_assignment(
+        &seed, &current.id, &assignment_id, &session_id,
+    )?))
+}
+
+fn replayed_ticket_response(store: &Store, ticket: &Ticket) -> Result<Ticket> {
+    let mut current = get_ticket(store, &ticket.id)?;
+    current.task_client_capability = replay_task_client_capability(store, &current)?;
+    Ok(current)
+}
+
+fn issue_task_client_capability_for_dispatch(
+    store: &Store,
+    ticket: &Ticket,
+) -> Result<String> {
+    match issue_task_client_capability(store, ticket) {
+        Ok(capability) => Ok(capability),
+        Err(error) => {
+            // Do not leave an admitted worker running if its client capability
+            // could not be bound and returned to the caller.
+            let _ = fail_launch(store, &ticket.id, &error);
+            Err(error)
+        }
+    }
+}
+
+/// Enforce the task-client boundary used by both exported Council commands.
+/// The submitted ticket ID and caller label are not credentials; only the
+/// separately issued, task-assignment-bound bearer value authenticates it.
+pub(crate) fn authorize_task_client_capability(
+    store: &Store,
+    ticket_id: &str,
+    capability: &str,
+) -> Result<TaskClientContext> {
+    if !valid_task_client_hex(capability) {
+        return Err("task_client_denied: invalid task-client capability.".into());
+    }
+    let ticket = get_ticket(store, ticket_id)?;
+    let (assignment_id, session_id) = task_client_binding(store, &ticket)?;
+    let seed = task_client_seed(store, ticket_id)?;
+    let expected = task_client_capability_for_assignment(
+        &seed, ticket_id, &assignment_id, &session_id,
+    )?;
+    let submitted_digest = capability_digest(capability);
+    let expected_digest = capability_digest(&expected);
+    if !constant_time_eq(&expected_digest, &submitted_digest) {
+        return Err("task_client_denied: capability belongs to another task client or assignment.".into());
+    }
+    Ok(TaskClientContext {
+        ticket_id: ticket_id.to_string(),
+        assignment_id,
+        session_id,
+        caller_id: format!("superagent-task-client:v1:{}", digest_hex(&submitted_digest)),
+    })
+}
 
 fn assignment_within_budget(started_at: i64, now: i64) -> bool {
     started_at > 0 && now >= started_at
@@ -92,6 +287,7 @@ CREATE TABLE IF NOT EXISTS sa_tickets (
   state TEXT NOT NULL CHECK(state IN ('queued','running','waiting_approval','waiting_review','blocked','completed','failed','stopped','interrupted','inconclusive')),
   revision INTEGER NOT NULL DEFAULT 0,
   active_assignment_id TEXT,
+  original_admission_assignment_id TEXT,
   evidence TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
@@ -331,8 +527,8 @@ fn create_configuration(store: &Store, input: NewOrchestration) -> Result<Orches
 }
 
 /// Durable, read-only description of an explicitly issued task mandate.
-/// Exposes the grant's native identity without introducing an edit or escalation
-/// endpoint; a model result never alters the original authorization.
+/// Exposes a stable digest of the grant identity, not its private capability
+/// seed, without introducing an edit or escalation endpoint.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MandateSummary {
@@ -350,19 +546,22 @@ pub struct MandateSummary {
 
 fn mandate(store: &Store, ticket_id: &str) -> Result<MandateSummary> {
     get_ticket(store, ticket_id)?;
-    let (mut grant, tools): (MandateSummary, String) = store.db.query_row(
+    let (mut grant, tools, seed): (MandateSummary, String, String) = store.db.query_row(
         "SELECT ticket_id,actor,authorization_id,policy_revision,project_id,expires_at,
                 revoked,allowed_tools,allowed_side_effects,created_at
          FROM sa_mandates WHERE ticket_id=?1",
         [ticket_id],
         |r| Ok((MandateSummary {
-            ticket_id: r.get(0)?, actor: r.get(1)?, authorization_id: r.get(2)?,
+            ticket_id: r.get(0)?, actor: r.get(1)?, authorization_id: String::new(),
             policy_revision: r.get(3)?, project_id: r.get(4)?,
             expires_at: r.get(5)?, revoked: r.get::<_, i64>(6)? != 0,
             allowed_tools: Vec::new(), allowed_side_effects: r.get::<_, i64>(8)? != 0,
             created_at: r.get(9)?,
-        }, r.get(7)?)),
+        }, r.get(7)?, r.get(2)?)),
     ).map_err(|e| e.to_string())?;
+    // Keep the database seed private while retaining a stable, nonsecret
+    // identity for the existing Mandate summary UI and audit callers.
+    grant.authorization_id = digest_hex(&capability_digest(&seed));
     grant.allowed_tools = serde_json::from_str::<Vec<String>>(&tools)
         .map_err(|_| "SuperAgent mandate contains invalid tool authorization.")?;
     Ok(grant)
@@ -382,6 +581,10 @@ pub struct Ticket {
     pub evidence: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Present only on the response that successfully dispatches this worker
+    /// attempt. Ticket listings and later reads never expose the bearer value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task_client_capability: Option<String>,
 }
 
 fn ticket_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ticket> {
@@ -390,6 +593,7 @@ fn ticket_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ticket> {
         objective: row.get(3)?, actor: row.get(4)?, state: row.get(5)?,
         revision: row.get(6)?, active_assignment_id: row.get(7)?,
         evidence: row.get(8)?, created_at: row.get(9)?, updated_at: row.get(10)?,
+        task_client_capability: None,
     })
 }
 
@@ -788,15 +992,15 @@ fn admit_role(
     };
     let now = storage::now();
     tx.execute(
-        "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,project_id,worker_bot_id,policy_revision,state,active_assignment_id,created_at,updated_at)
-         VALUES(?1,?2,?3,?4,'local-user','manual',?5,?6,?7,?8,?9,?10,?10)",
+        "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,project_id,worker_bot_id,policy_revision,state,active_assignment_id,original_admission_assignment_id,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,'local-user','manual',?5,?6,?7,?8,?9,?9,?10,?10)",
         params![ticket_id,config.id,request_key,objective,config.project_id,worker.id,config.policy_revision,
             if blocked { "blocked" } else { "running" }, assignment_id,now],
     ).map_err(|e| e.to_string())?;
     tx.execute(
         "INSERT INTO sa_mandates(ticket_id,actor,authorization_id,policy_revision,project_id,expires_at,created_at)
          VALUES(?1,'local-user',?2,?3,?4,?5,?6)",
-        params![ticket_id,storage::id(),config.policy_revision,config.project_id,now + 4 * 60 * 60 * 1000,now],
+        params![ticket_id,new_task_client_seed(),config.policy_revision,config.project_id,now + 4 * 60 * 60 * 1000,now],
     ).map_err(|e| e.to_string())?;
     if let (Some(assignment_id),Some(session_id)) = (&assignment_id,&session_id) {
         tx.execute(
@@ -1746,7 +1950,14 @@ pub async fn superagent_submit(window: tauri::WebviewWindow,
         let (ticket,launch)=admit(&mut store,&orchestration_id,&objective,&request_key,busy)?;
         (ticket,launch,cfg.worker_bot_id)
     };
-    if !launch { return Ok(ticket); }
+    if !launch {
+        let store = state.store.lock().map_err(|error| error.to_string())?;
+        return replayed_ticket_response(&store, &ticket);
+    }
+    let task_client_capability = {
+        let store = state.store.lock().map_err(|error| error.to_string())?;
+        issue_task_client_capability_for_dispatch(&store, &ticket)?
+    };
     let delivered=bots::gateway::deliver(
         &app,
         bots::gateway::Inbound {
@@ -1766,7 +1977,9 @@ pub async fn superagent_submit(window: tauri::WebviewWindow,
         return Err(format!("Dispatch failed; ticket {} retained for inspection: {error}",ticket.id));
     }
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    get_ticket(&store, &ticket.id)
+    let mut dispatched = get_ticket(&store, &ticket.id)?;
+    dispatched.task_client_capability = Some(task_client_capability);
+    Ok(dispatched)
 }
 
 /// An occupied worker leaves its ticket blocked, not discarded. Only another
@@ -1999,6 +2212,10 @@ pub async fn superagent_dispatch_worker(window: tauri::WebviewWindow,
             .is_some_and(|(bot,_)|bot.id==worker));
         prepare_coordinated_worker(&mut store,&ticket_id,busy)?
     };
+    let task_client_capability = {
+        let store = state.store.lock().map_err(|error| error.to_string())?;
+        issue_task_client_capability_for_dispatch(&store, &ticket)?
+    };
     let delivered = bots::gateway::deliver(&app,bots::gateway::Inbound {
         bot_id: worker_id, channel_id: CHANNEL.into(), thread,
         sender_id: "local-user".into(), sender_name: "Manual delegated task".into(),
@@ -2013,7 +2230,9 @@ pub async fn superagent_dispatch_worker(window: tauri::WebviewWindow,
         return Err(format!("Worker dispatch failed; ticket {} retained: {error}",ticket.id));
     }
     let store = state.store.lock().map_err(|e|e.to_string())?;
-    get_ticket(&store,&ticket.id)
+    let mut dispatched = get_ticket(&store, &ticket.id)?;
+    dispatched.task_client_capability = Some(task_client_capability);
+    Ok(dispatched)
 }
 
 #[tauri::command]
@@ -2029,6 +2248,10 @@ pub async fn superagent_retry(window: tauri::WebviewWindow,
         let busy=active.iter().any(|sid| bots::owner_of(&store,sid).ok().flatten()
             .is_some_and(|(bot,_)|bot.id==bot_id));
         retry_blocked(&mut store,&ticket_id,busy)?
+    };
+    let task_client_capability = {
+        let store = state.store.lock().map_err(|error| error.to_string())?;
+        issue_task_client_capability_for_dispatch(&store, &ticket)?
     };
     let delivered=bots::gateway::deliver(&app,bots::gateway::Inbound {
         bot_id: worker_id,
@@ -2046,7 +2269,9 @@ pub async fn superagent_retry(window: tauri::WebviewWindow,
         return Err(format!("Retry dispatch failed; ticket {} retained: {error}",ticket.id));
     }
     let store=state.store.lock().map_err(|e|e.to_string())?;
-    get_ticket(&store,&ticket.id)
+    let mut dispatched = get_ticket(&store, &ticket.id)?;
+    dispatched.task_client_capability = Some(task_client_capability);
+    Ok(dispatched)
 }
 
 
@@ -2640,6 +2865,14 @@ mod tests {
             ).unwrap();
         }
         store
+    }
+
+    fn emulate_v43_schema(store: &Store) {
+        store.db.execute_batch(
+            "DROP TRIGGER IF EXISTS sa_original_admission_assignment_immutable;
+             ALTER TABLE sa_tickets DROP COLUMN original_admission_assignment_id;
+             PRAGMA user_version=43;",
+        ).unwrap();
     }
 
     fn enabled(store: &Store) -> Orchestration {
@@ -4231,5 +4464,248 @@ mod tests {
         assert!(read_only_policy(&store,&sid).is_err());
         assert!(on_run_finished(&store,&sid,true,"Stale result").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+    }
+
+    #[test]
+    fn task_client_capabilities_are_unpredictable_assignment_bound_and_reject_foreign_tickets() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (first, first_launched) = admit(
+            &mut store, &config.id, "First isolated task", "client-bound-first", false,
+        ).unwrap();
+        assert!(first_launched);
+        let first_capability = issue_task_client_capability(&store, &first).unwrap();
+        assert_eq!(first_capability.len(), 64);
+        assert!(valid_task_client_hex(&first_capability));
+        assert_ne!(first_capability, first.id);
+        let private_seed: String = store.db.query_row(
+            "SELECT authorization_id FROM sa_mandates WHERE ticket_id=?1",
+            [&first.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(private_seed.len(), 64);
+        assert_ne!(private_seed, first_capability);
+        assert_ne!(private_seed, mandate(&store, &first.id).unwrap().authorization_id,
+            "the public mandate summary must not reveal the HMAC seed");
+        let first_assignment_id: String = store.db.query_row(
+            "SELECT original_admission_assignment_id FROM sa_tickets WHERE id=?1",
+            [&first.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(first_assignment_id, first.active_assignment_id.as_deref().unwrap(),
+            "initial admission records the exact assignment that receives this capability");
+        let first_client = authorize_task_client_capability(&store, &first.id, &first_capability).unwrap();
+        assert!(first_client.caller_id.starts_with("superagent-task-client:v1:"));
+        assert!(!first_client.caller_id.contains(first.id.as_str()));
+        assert!(serde_json::to_value(&get_ticket(&store, &first.id).unwrap()).unwrap()
+            .get("taskClientCapability").is_none(),
+            "ticket history must not disclose the issued bearer capability");
+
+        let first_session = assignment_session(&store, &first.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &first_session, true, "First evidence").unwrap());
+        emulate_v43_schema(&store);
+        let path = store.path.clone();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+        let recovered_assignment_id: String = store.db.query_row(
+            "SELECT original_admission_assignment_id FROM sa_tickets WHERE id=?1",
+            [&first.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(recovered_assignment_id, first_assignment_id,
+            "the schema migration restores a successful original assignment from its admission record");
+        assert!(store.db.execute(
+            "UPDATE sa_tickets SET original_admission_assignment_id='forged' WHERE id=?1",
+            [&first.id],
+        ).is_err(), "original admission assignment identity is immutable");
+        assert!(authorize_task_client_capability(&store, &first.id, &first_capability).is_ok(),
+            "the same assignment capability must survive restart for durable task replay");
+
+        let assignment_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments", [], |row| row.get(0),
+        ).unwrap();
+        let session_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sessions", [], |row| row.get(0),
+        ).unwrap();
+        let bot_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM bots", [], |row| row.get(0),
+        ).unwrap();
+        let (first_replay, first_replay_launched) = admit(
+            &mut store, &config.id, "First isolated task", "client-bound-first", false,
+        ).unwrap();
+        assert!(!first_replay_launched, "an idempotent replay must not launch a worker");
+        let first_replay_response = replayed_ticket_response(&store, &first_replay).unwrap();
+        assert_eq!(first_replay_response.task_client_capability.as_deref(), Some(first_capability.as_str()),
+            "a lost response can recover the same capability after the worker finishes");
+        assert_eq!(store.db.query_row::<i64,_,_>(
+            "SELECT COUNT(*) FROM sa_assignments", [], |row| row.get(0),
+        ).unwrap(), assignment_count, "replay must not create another assignment");
+        assert_eq!(store.db.query_row::<i64,_,_>(
+            "SELECT COUNT(*) FROM sessions", [], |row| row.get(0),
+        ).unwrap(), session_count, "replay must not create another worker session");
+        assert_eq!(store.db.query_row::<i64,_,_>(
+            "SELECT COUNT(*) FROM bots", [], |row| row.get(0),
+        ).unwrap(), bot_count, "replay must not create a worker bot");
+
+        let (second, second_launched) = admit(
+            &mut store, &config.id, "Second isolated task", "client-bound-second", false,
+        ).unwrap();
+        assert!(second_launched);
+        let second_capability = issue_task_client_capability(&store, &second).unwrap();
+        assert_ne!(first_capability, second_capability);
+        let (second_replay, second_replay_launched) = admit(
+            &mut store, &config.id, "Second isolated task", "client-bound-second", false,
+        ).unwrap();
+        assert!(!second_replay_launched);
+        let second_replay_response = replayed_ticket_response(&store, &second_replay).unwrap();
+        assert_eq!(second_replay_response.task_client_capability.as_deref(), Some(second_capability.as_str()));
+        assert!(authorize_task_client_capability(
+            &store, &second.id, &first_capability,
+        ).err().unwrap().contains("task_client_denied"));
+        assert!(authorize_task_client_capability(
+            &store, &first.id, second_replay_response.task_client_capability.as_deref().unwrap(),
+        ).err().unwrap().contains("task_client_denied"));
+        assert!(authorize_task_client_capability(
+            &store, &first.id, "callerId=superagent-ticket:forged",
+        ).err().unwrap().contains("task_client_denied"));
+        assert!(issue_task_client_capability(&store, &first).is_err(),
+            "a settled-ticket replay cannot produce another capability response");
+    }
+
+    #[test]
+    fn task_client_capability_is_invalid_after_the_ticket_moves_to_a_new_assignment() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (first_attempt, launched) = admit(
+            &mut store, &config.id, "Retry under the original mandate", "client-assignment-rotation", false,
+        ).unwrap();
+        assert!(launched);
+        let first_capability = issue_task_client_capability(&store, &first_attempt).unwrap();
+        fail_launch(&store, &first_attempt.id, "provider unavailable").unwrap();
+
+        let (retry, _, _) = retry_blocked(&mut store, &first_attempt.id, false).unwrap();
+        let retry_capability = issue_task_client_capability(&store, &retry).unwrap();
+        assert_ne!(first_capability, retry_capability);
+        assert!(authorize_task_client_capability(
+            &store, &first_attempt.id, &first_capability,
+        ).err().unwrap().contains("task_client_denied"));
+        assert!(authorize_task_client_capability(
+            &store, &retry.id, &retry_capability,
+        ).is_ok());
+        let (replayed, launched) = admit(
+            &mut store, &config.id, "Retry under the original mandate", "client-assignment-rotation", false,
+        ).unwrap();
+        assert!(!launched, "the original request key must not create another assignment");
+        assert!(replayed_ticket_response(&store, &replayed).unwrap_err()
+            .contains("original task assignment changed"),
+            "the original idempotency key must not recover a capability for a retry assignment");
+        assert_eq!(assignments(&store, &retry.id, 10).unwrap().len(), 2,
+            "capability rotation follows the one explicit retry assignment");
+    }
+
+    #[test]
+    fn blocked_original_admission_never_recovers_its_first_retry_capability() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (occupier, launched) = admit(
+            &mut store, &config.id, "Occupy the worker", "client-replay-occupier", false,
+        ).unwrap();
+        assert!(launched);
+        let (blocked, launched) = admit(
+            &mut store, &config.id, "Wait for the worker", "client-replay-blocked", true,
+        ).unwrap();
+        assert!(!launched);
+        assert_eq!(blocked.state, "blocked");
+        let original_assignment: Option<String> = store.db.query_row(
+            "SELECT original_admission_assignment_id FROM sa_tickets WHERE id=?1",
+            [&blocked.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(original_assignment, None,
+            "the blocked admission durably records that no assignment was created");
+
+        fail_launch(&store, &occupier.id, "Release the worker for the explicit retry").unwrap();
+        let (retry, _, _) = retry_blocked(&mut store, &blocked.id, false).unwrap();
+        let retry_assignment_id: String = store.db.query_row(
+            "SELECT id FROM sa_assignments WHERE ticket_id=?1 AND state='running'",
+            [&blocked.id], |row| row.get(0),
+        ).unwrap();
+        let retry_attempt: i64 = store.db.query_row(
+            "SELECT attempt FROM sa_assignments WHERE id=?1",
+            [&retry_assignment_id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(retry_attempt, 1,
+            "this is the counterexample: a retry can be attempt 1 without belonging to original admission");
+        let retry_capability = issue_task_client_capability(&store, &retry).unwrap();
+        let retry_session = assignment_session(&store, &retry.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &retry_session, true, "Retry evidence").unwrap());
+        assert!(authorize_task_client_capability(&store, &retry.id, &retry_capability).is_ok());
+
+        let before_counts: (i64, i64, i64) = store.db.query_row(
+            "SELECT (SELECT COUNT(*) FROM sa_assignments),
+                    (SELECT COUNT(*) FROM sessions),
+                    (SELECT COUNT(*) FROM bots)",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        emulate_v43_schema(&store);
+        let path = store.path.clone();
+        drop(store);
+        let mut store = Store::open(&path).unwrap();
+
+        let migrated_original_assignment: Option<String> = store.db.query_row(
+            "SELECT original_admission_assignment_id FROM sa_tickets WHERE id=?1",
+            [&blocked.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(migrated_original_assignment, None,
+            "migration must not relabel the first later retry as an original assignment");
+        let persisted_retry_assignment: String = store.db.query_row(
+            "SELECT id FROM sa_assignments WHERE ticket_id=?1 AND attempt=1",
+            [&blocked.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(persisted_retry_assignment, retry_assignment_id,
+            "migration preserves the retry's exact assignment identity");
+        assert!(authorize_task_client_capability(&store, &blocked.id, &retry_capability).is_ok(),
+            "the retry capability remains valid for its own assignment");
+
+        let (replayed, replay_launched) = admit(
+            &mut store, &config.id, "Wait for the worker", "client-replay-blocked", false,
+        ).unwrap();
+        assert!(!replay_launched, "replay must not create another worker or assignment");
+        let response = replayed_ticket_response(&store, &replayed).unwrap();
+        assert_eq!(response.task_client_capability, None,
+            "an original admission with no assignment cannot recover the retry capability");
+        let after_counts: (i64, i64, i64) = store.db.query_row(
+            "SELECT (SELECT COUNT(*) FROM sa_assignments),
+                    (SELECT COUNT(*) FROM sessions),
+                    (SELECT COUNT(*) FROM bots)",
+            [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).unwrap();
+        assert_eq!(after_counts, before_counts,
+            "old-key replay leaves assignment, session and bot counts unchanged");
+        assert_eq!(assignments(&store, &blocked.id, 10).unwrap().len(), 1);
+        assert!(store.db.execute(
+            "UPDATE sa_tickets SET original_admission_assignment_id=?2 WHERE id=?1",
+            params![blocked.id, retry_assignment_id],
+        ).is_err(), "a retry assignment cannot be installed as original after admission");
+    }
+
+    #[test]
+    fn task_client_replay_rejects_legacy_mandates_without_a_private_seed() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Legacy task authorization", "legacy-task-client", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session, true, "Legacy task evidence").unwrap());
+        store.db.execute(
+            "UPDATE sa_mandates SET authorization_id='legacy-authorization-id' WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+
+        let (replayed, launched) = admit(
+            &mut store, &config.id, "Legacy task authorization", "legacy-task-client", false,
+        ).unwrap();
+        assert!(!launched);
+        assert!(replayed_ticket_response(&store, &replayed).unwrap_err()
+            .contains("no private task-client seed"),
+            "legacy mandate identifiers must not be used as HMAC seeds");
     }
 }

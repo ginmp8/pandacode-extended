@@ -492,6 +492,20 @@ impl ReviewerBinding {
             && revision[1].parse::<u64>().is_ok_and(|r| r <= team.dispatch_revision)
             && revision[2] == worker.created_at.to_string()
             && revision[3] == worker.id.as_str();
+        // A composed plan pins the total root allocation separately from its
+        // selected-bot roster (one selected + one automatic is a quorum of two).
+        // Legacy M2 still requires 2–8 selected bots and no automatic substitute.
+        let roster_quorum_matches = self.roster_bot_ids.is_empty() || {
+            let composed = team.config.council.as_ref().filter(|config| config.composition.is_some());
+            if let Some(config) = composed {
+                config.validate().is_ok()
+                    && self.required_reviewers == Some(config.needed())
+                    && self.roster_bot_ids.iter().map(String::as_str)
+                        .eq(config.composition.as_ref().unwrap().selected_bot_ids())
+            } else {
+                self.required_reviewers == Some(self.roster_bot_ids.len())
+            }
+        };
         if self.council_cycle_id != format!("{}:{}", team.session_id, team.council_since)
             || self.seat_id != worker.id
             || self.round != seat.round
@@ -511,8 +525,9 @@ impl ReviewerBinding {
             || self.reviewer_bot_id.is_some() != self.snapshot.bot_context.is_some()
             || self.reviewer_bot_id.as_deref().is_some_and(|id| !super::valid_id(id))
             || self.required_reviewers.is_some_and(|n| !(2..=8).contains(&n))
-            || (!self.roster_bot_ids.is_empty() && (self.required_reviewers != Some(self.roster_bot_ids.len())
-                || self.reviewer_bot_id.as_ref().is_none_or(|id| !self.roster_bot_ids.contains(id))))
+            || !roster_quorum_matches
+            || (!self.roster_bot_ids.is_empty()
+                && self.reviewer_bot_id.as_ref().is_none_or(|id| !self.roster_bot_ids.contains(id)))
         {
             return Err("reviewer_session_mismatch: immutable reviewer binding differs from scheduled worker.".into());
         }

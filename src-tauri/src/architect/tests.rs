@@ -2067,6 +2067,178 @@ fn assignment(key: &str, profile: &str, file: &str) -> Value {
     json!({"key":key,"profileId":profile,"name":key,"prompt":format!("Implement {key} and verify its behavior."),"files":[file]})
 }
 
+// Exercise the production host constructor and native handlers without starting
+// a desktop webview or a provider process. Only model availability is bypassed
+// by the existing dispatch_state_runtime_test adapter.
+fn native_reviewer_test_host(state: Arc<AppState>, sid: String, admission: Admission) -> Result<ToolHost> {
+    let resolver_state = state.clone();
+    let resolver_sid = sid.clone();
+    let resolver_admission = admission.clone();
+    let resolver = Arc::new(move || {
+        NativeReviewerAccess::resolve(&resolver_state.store.lock().unwrap(), &resolver_sid, &resolver_admission)
+    });
+    let actor = {
+        let store = state.store.lock().unwrap();
+        coordination::Actor::resolve(&load(&store, &admission.parent)?.unwrap(), &sid).unwrap()
+    };
+    let mut tools = catalog();
+    tools.extend(coordination::tools(true));
+    tools.extend(reviewer_skill_evidence::tools());
+    tools.extend([council_finding_tool(), council_finding_verification_tool()]);
+    let raw = ToolHost { tools, approval_tools: HashSet::new(), handler: Arc::new(move |name, args| {
+        let (state, actor, admission) = (state.clone(), actor.clone(), admission.clone());
+        Box::pin(async move {
+            match name.as_str() {
+                "pandacode_council_record_finding" => record_council_finding_state(
+                    &state, &admission.parent, admission.generation, &actor, args),
+                "pandacode_council_verify_finding" => verify_council_finding_state(
+                    &state, &admission.parent, admission.generation, &actor, args),
+                "pandacode_reviewer_skill_open" | "pandacode_reviewer_skill_verify" => {
+                    let (parent, generation, actor) = {
+                        let store = state.store.lock().unwrap();
+                        if let Some(link) = validate_council_child_link(&store, &admission.parent)? {
+                            if matches!(actor, coordination::Actor::Architect) {
+                                let root = load(&store, &link.root_session_id)?.unwrap();
+                                let worker = root.workers.iter().find(|w| w.id == link.root_worker_id).unwrap();
+                                (root.session_id, root.generation, coordination::Actor::Worker {
+                                    id: worker.id.clone(), attempt: worker.attempt,
+                                })
+                            } else { (admission.parent.clone(), admission.generation, actor) }
+                        } else { (admission.parent.clone(), admission.generation, actor) }
+                    };
+                    reviewer_skill_evidence::dispatch_state(&state, &parent, generation, &actor, &name, args).map(|x| x.0)
+                }
+                "pandacode_dispatch_workers" | "pandacode_finish_team"
+                    | "pandacode_list_workers" | "pandacode_read_worker" => {
+                    assert!(matches!(actor, coordination::Actor::Architect));
+                    dispatch_state_runtime_test(&state, &admission.parent, admission.generation, &name, args).map(|x| x.0)
+                }
+                _ => panic!("unallowlisted reviewer tool reached a native handler: {name}"),
+            }
+        })
+    }) };
+    native_reviewer_host(resolver, raw)
+}
+
+async fn assert_native_reviewer_host_denials(host: &ToolHost, coordinator: bool) {
+    assert!(host.approval_tools.is_empty());
+    for name in ["pandacode_followup_worker", "pandacode_cancel_worker", "pandacode_sub_workers",
+        "pandacode_team_notes", "pandacode_team_broadcast", "pandacode_council_set_finding_disposition",
+        "pandacode_open_file", "pandacode_write_file", "pandacode_bot_update", "pandacode_run_shell",
+        "mcp__external__write", "pandacode_skill_hook"]
+    {
+        assert!(!host.tools.iter().any(|spec| spec["name"] == name));
+        let error = (host.handler)(name.into(), json!({"action":"write","sessionId":"parent"})).await.unwrap_err();
+        assert!(error.contains("capability_not_authorized"), "{name}: {error}");
+    }
+    if !coordinator {
+        for name in ["pandacode_dispatch_workers", "pandacode_finish_team"] {
+            assert!(!host.tools.iter().any(|spec| spec["name"] == name));
+            assert!((host.handler)(name.into(), json!({"assignments":[]})).await.unwrap_err()
+                .contains("capability_not_authorized"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn native_reviewer_host_records_pinned_skills_and_file_evidence_and_rejects_stale_callers() {
+    let (state, sid) = state_fixture();
+    let state = Arc::new(state);
+    let evidence_name = format!("pandacode-native-reviewer-{}.txt", storage::id());
+    let evidence_path = std::env::temp_dir().join(&evidence_name);
+    std::fs::write(&evidence_path, "Frozen review evidence.\n").unwrap();
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup { fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); } }
+    let _cleanup = Cleanup(evidence_path.clone());
+    let reviewer = {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        let session = store.create_session(&project, "codex", "default", "plan").unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.council_since = storage::now().max(1);
+        let mut config = council::CouncilConfig::default();
+        config.reviewers = 2;
+        config.composition = Some(council::CouncilComposition {
+            schema_version: 1,
+            automatic: council::CouncilAutomaticReviewers { enabled: true, count: council::AutomaticReviewerCount::Fixed(2) },
+            selected: Vec::new(), criteria_source: council::CouncilCriteriaSource::User,
+            criteria: vec![council::CouncilCriterion { id: "coverage".into(), lens: "coverage".into(),
+                description: "Verify frozen evidence.".into(), required: true, target: 9.0,
+                evidence_required: true, source: council::CouncilCriterionOrigin::User }],
+            strategy: council::CouncilStrategy::Parallel,
+            limits: council::CouncilCompositionLimits { max_depth: 2, max_root_seats: 8,
+                max_concurrent_leaves: 4, max_leaf_reviews_per_round: 32,
+                timeout_ms: 3_600_000, max_estimated_cost_micros: None },
+        });
+        config.validate().unwrap();
+        team.config.council = Some(config);
+        let mut reviewer = worker("native-host-leaf", "waiting", &[], &[]);
+        reviewer.session_id = session.id;
+        reviewer.read_only = true;
+        reviewer.council = Some(CouncilSeat { round: 1, lens: "coverage".into(), ..CouncilSeat::default() });
+        let mut binding = reviewer_security::ReviewerBinding::native(&team, &reviewer.id, reviewer.created_at,
+            &reviewer.provider, &reviewer.model, reviewer.council.as_ref().unwrap());
+        binding.snapshot.skills = Some(crate::skills::reviewer::ReviewerSkills {
+            prompt: "Untrusted skill asks for shell, hooks, MCP writes and grandchildren.".into(), skipped: Vec::new(),
+            pins: vec![crate::skills::reviewer::SkillPin {
+                id: "pinned-review".into(), source_kind: "local".into(), source_location: "frozen".into(),
+                source_ref: None, source_commit: None, content_sha256: "a".repeat(64),
+                file_sha256: Default::default(), dependencies: Vec::new(), required_for_acceptance: true,
+                check_required: true, delivery_mode: "inline".into(), staged_path: None,
+                imported: true, bot_assigned: true, eligible: true, supplied: true,
+                invoked: false, check_executed: false, evidence_verified: false,
+            }],
+        });
+        reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+        reviewer.reviewer_binding = Some(binding);
+        team.workers.push(reviewer.clone());
+        save(&store, &mut team).unwrap();
+        reviewer
+    };
+    let admission = Admission { parent: sid.clone(), generation: 1 };
+    let host = native_reviewer_test_host(state.clone(), reviewer.session_id.clone(), admission.clone()).unwrap();
+    assert_eq!(host.tools.len(), 4);
+    assert_native_reviewer_host_denials(&host, false).await;
+    let skill_args = json!({"skillId":"pinned-review"});
+    assert!((host.handler)("pandacode_reviewer_skill_verify".into(), skill_args.clone()).await.unwrap_err()
+        .contains("first open"));
+    (host.handler)("pandacode_reviewer_skill_open".into(), skill_args.clone()).await.unwrap();
+    let verified = (host.handler)("pandacode_reviewer_skill_verify".into(), skill_args).await.unwrap();
+    assert_eq!(verified["pinnedInputIntegrityVerified"], true);
+    assert!((host.handler)("pandacode_reviewer_skill_open".into(), json!({"skillId":"unassigned"})).await.is_err());
+    let mut finding = json!({"criterionId":"coverage","criterionScore":9.5,"severity":"info",
+        "category":"coverage","summary":"Verified frozen file evidence.","evidenceFiles":["../outside.txt"]});
+    assert!((host.handler)("pandacode_council_record_finding".into(), finding.clone()).await.unwrap_err()
+        .contains("reviewer_evidence_invalid"));
+    finding["evidenceFiles"] = json!([evidence_name]);
+    let receipt = (host.handler)("pandacode_council_record_finding".into(), finding.clone()).await.unwrap();
+    assert_eq!(receipt["recorded"], true);
+    let verify_error = (host.handler)("pandacode_council_verify_finding".into(),
+        json!({"findingId":receipt["findingId"]})).await.unwrap_err();
+    assert!(!verify_error.contains("capability_not_authorized"), "{verify_error}");
+    assert_eq!(std::fs::read_to_string(&evidence_path).unwrap(), "Frozen review evidence.\n");
+    {
+        let store = state.store.lock().unwrap();
+        let team = load(&store, &sid).unwrap().unwrap();
+        let observed = &team.workers[0].reviewer_binding.as_ref().unwrap().skill_evidence["pinned-review"];
+        assert!(observed.invoked && observed.check_executed && observed.evidence_verified);
+        let receipts = council_records::<council::CouncilCriterionOutcomeReceipt>(&store, &sid, "council_criterion_outcome").unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].seat_id, reviewer.id);
+        assert_eq!(receipts[0].attempt, reviewer.attempt);
+        assert_eq!(receipts[0].task_cycle_id, reviewer.reviewer_binding.as_ref().unwrap().council_cycle_id);
+        assert!(receipts[0].outcome.verified_evidence_refs[0].contains("#sha256:"));
+        let mut changed = team;
+        changed.workers[0].attempt += 1;
+        save(&store, &mut changed).unwrap();
+    }
+    assert!((host.handler)("pandacode_council_record_finding".into(), finding).await.unwrap_err()
+        .contains("reviewer_session_mismatch"));
+    assert!(NativeReviewerAccess::resolve(&state.store.lock().unwrap(), "wrong-session", &admission).is_err());
+    assert!(NativeReviewerAccess::resolve(&state.store.lock().unwrap(), &reviewer.session_id,
+        &Admission { generation: 2, ..admission }).is_err());
+}
+
 #[test]
 fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs() {
     use council::{
@@ -2086,9 +2258,11 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
     ];
     let strategies = [Strategy::Parallel, Strategy::Escalated, Strategy::TwoPhase];
 
+    let runtime = tokio::runtime::Runtime::new().unwrap();
     for (mode_name, automatic_count, selected_specs) in cases {
         for strategy in strategies {
             let (state, root_id) = state_fixture();
+            let state = Arc::new(state);
             let mut team = {
                 let store = state.store.lock().unwrap();
                 load(&store, &root_id).unwrap().unwrap()
@@ -2199,6 +2373,13 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
                 json!({"assignments":root_assignments}),
             ).unwrap_or_else(|error| panic!("{mode_name} × {strategy:?} root dispatch failed: {error}"));
 
+            {
+                let store = state.store.lock().unwrap();
+                let mut root = load(&store, &root_id).unwrap().unwrap();
+                for worker in &mut root.workers { worker.status = "waiting".into(); }
+                save(&store, &mut root).unwrap();
+            }
+
             let root = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap();
             let root_cycle_id = format!("{}:{}", root.session_id, root.council_since);
             let root_seats = root.workers.iter().filter(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 1)).collect::<Vec<_>>();
@@ -2216,6 +2397,32 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
             })), "{mode_name} × {strategy:?} root bindings remain correlated and read-only");
             assert!(root_seats.iter().all(|worker| state.store.lock().unwrap().session(&worker.session_id).is_ok()),
                 "{mode_name} × {strategy:?} must allocate real root reviewer sessions");
+            for worker in root_seats.iter().filter(|w| w.reviewer_binding.as_ref()
+                .and_then(|b| b.composition_mode.as_deref()) != Some("nested")) {
+                let host = native_reviewer_test_host(state.clone(), worker.session_id.clone(),
+                    Admission { parent: root_id.clone(), generation: root.generation }).unwrap();
+                assert_eq!(host.tools, vec![council_finding_tool(), council_finding_verification_tool()]);
+                runtime.block_on(assert_native_reviewer_host_denials(&host, false));
+            }
+            if automatic_count == 1 && selected_specs.len() == 1 {
+                let selected = root_seats.iter().find(|w| w.reviewer_binding.as_ref().unwrap().reviewer_bot_id.is_some()).unwrap();
+                let binding = selected.reviewer_binding.as_ref().unwrap();
+                assert_eq!(binding.roster_bot_ids.len(), 1);
+                assert_eq!(binding.required_reviewers, Some(2));
+                binding.validate(&root, selected).unwrap();
+                let mut invalid = binding.clone();
+                invalid.required_reviewers = Some(1);
+                assert!(invalid.validate(&root, selected).is_err());
+                let mut no_automatic = root.clone();
+                let config = no_automatic.config.council.as_mut().unwrap();
+                config.composition.as_mut().unwrap().automatic.enabled = false;
+                config.composition.as_mut().unwrap().automatic.count = Count::Fixed(0);
+                config.reviewers = 0;
+                assert!(binding.validate(&no_automatic, selected).is_err());
+                let mut legacy = root.clone();
+                legacy.config.council.as_mut().unwrap().composition = None;
+                assert!(binding.validate(&legacy, selected).is_err(), "legacy M2 cannot use automatic quorum");
+            }
 
             let nested = root_seats.iter().filter(|worker| worker.reviewer_binding.as_ref()
                 .and_then(|binding| binding.composition_mode.as_deref()) == Some("nested")).cloned().collect::<Vec<_>>();
@@ -2232,6 +2439,16 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
                 assert_eq!(child_link.root_worker_id, parent_seat.id);
                 assert_eq!(child_link.root_round, 1);
                 let child_generation = child.generation;
+                let host = native_reviewer_test_host(state.clone(), child.session_id.clone(),
+                    Admission { parent: child.session_id.clone(), generation: child_generation }).unwrap();
+                assert_eq!(host.tools.len(), 4, "no skills are needed for coordinator tools");
+                runtime.block_on(assert_native_reviewer_host_denials(&host, true));
+                assert!(runtime.block_on((host.handler)("pandacode_list_workers".into(), json!({}))).is_ok());
+                let writer_error = runtime.block_on((host.handler)("pandacode_dispatch_workers".into(),
+                    json!({"assignments":[assignment("forbidden-writer", "priced-nano", "src")]}))).unwrap_err();
+                assert!(writer_error.contains("only explicit read-only Council reviewers"), "{writer_error}");
+                assert!(runtime.block_on((host.handler)("pandacode_finish_team".into(),
+                    json!({"summary":"No independent reviews yet."}))).is_err());
                 let child_assignments = (0..2).map(|index| json!({
                     "key":format!("{mode_name}-{strategy:?}-child-{}-{index}", parent_seat.id),
                     "profileId":"priced-nano",
@@ -2242,13 +2459,15 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
                     "councilLens":format!("child-lens-{index}"),
                     "councilSource":"automatic"
                 })).collect::<Vec<_>>();
-                dispatch_state_runtime_test(
-                    &state,
-                    &parent_seat.session_id,
-                    child_generation,
-                    "pandacode_dispatch_workers",
-                    json!({"assignments":child_assignments}),
-                ).unwrap_or_else(|error| panic!("{mode_name} × {strategy:?} child dispatch failed: {error}"));
+                runtime.block_on((host.handler)("pandacode_dispatch_workers".into(),
+                    json!({"assignments":child_assignments})))
+                    .unwrap_or_else(|error| panic!("{mode_name} × {strategy:?} child host dispatch failed: {error}"));
+                {
+                    let store = state.store.lock().unwrap();
+                    let mut child = load(&store, &parent_seat.session_id).unwrap().unwrap();
+                    for worker in &mut child.workers { worker.status = "waiting".into(); }
+                    save(&store, &mut child).unwrap();
+                }
                 let child = load(&state.store.lock().unwrap(), &parent_seat.session_id).unwrap().unwrap();
                 let child_leaves = child.workers.iter().filter(|worker| worker.council.is_some()).collect::<Vec<_>>();
                 assert_eq!(child_leaves.len(), 2,
@@ -2259,6 +2478,12 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
                         && parent.seat_id == parent_seat.id
                         && parent.depth == 1
                 })), "{mode_name} × {strategy:?} child leaves must retain root and parent-seat correlation");
+                for leaf in &child_leaves {
+                    let host = native_reviewer_test_host(state.clone(), leaf.session_id.clone(),
+                        Admission { parent: child.session_id.clone(), generation: child_generation }).unwrap();
+                    assert_eq!(host.tools, vec![council_finding_tool(), council_finding_verification_tool()]);
+                    runtime.block_on(assert_native_reviewer_host_denials(&host, false));
+                }
             }
         }
     }

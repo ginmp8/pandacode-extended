@@ -5833,15 +5833,123 @@ pub fn host(
     })
 }
 
-/// Build a strictly allowlisted native host for read-only selected reviewers.
-/// Skills never enable the Architect dispatcher or other bot/MCP commands.
-pub(crate) fn reviewer_skill_host(
+/// The identity captured by a native reviewer host. Observed skill receipts may
+/// change during a turn; the native-issued binding and caller attempt may not.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NativeReviewerAccess {
+    coordinator: bool,
+    binding: Option<reviewer_security::ReviewerBinding>,
+    attempt: usize,
+    cycle_id: String,
+    findings: bool,
+}
+
+impl NativeReviewerAccess {
+    fn resolve(store: &Store, sid: &str, admission: &Admission) -> Result<Self> {
+        let team = load(store, &admission.parent)?.ok_or("reviewer_session_mismatch: team is missing.")?;
+        if team.generation != admission.generation || !active(&team.status) {
+            return Err("reviewer_session_mismatch: team generation is no longer active.".into());
+        }
+        if reviewer_policy(store, sid, Some(admission))?
+            != Some(reviewer_security::ReviewerToolPolicy::NativeReadOnly)
+        {
+            return Err("capability_not_authorized: native read-only reviewer policy is required.".into());
+        }
+        let (coordinator, mut binding, attempt, findings) = if sid == admission.parent {
+            let link = validate_council_child_link(store, sid)?
+                .ok_or("reviewer_session_mismatch: coordinator has no native child link.")?;
+            let root = load(store, &link.root_session_id)?.ok_or("Council root is missing.")?;
+            let worker = root.workers.iter().find(|w| w.id == link.root_worker_id)
+                .ok_or("Council parent seat is missing.")?;
+            (true, Some(link.binding), worker.attempt, false)
+        } else {
+            let worker = team.workers.iter().find(|w| w.session_id == sid
+                && active(&w.status) && !w.abandoned && w.council.is_some())
+                .ok_or("reviewer_session_mismatch: Council leaf is no longer active.")?;
+            (false, worker.reviewer_binding.clone(), worker.attempt,
+                council_finding_tool_enabled(store, &admission.parent, &worker.id)?)
+        };
+        if let Some(binding) = &mut binding {
+            binding.skill_evidence.clear();
+        }
+        Ok(Self { coordinator, binding, attempt,
+            cycle_id: format!("{}:{}", team.session_id, team.council_since), findings })
+    }
+
+    fn tools(&self) -> Vec<Value> {
+        let mut specs = if self.coordinator {
+            // These operations are scoped to the isolated child team. Existing
+            // dispatch/finish guards still enforce read-only leaves and budgets.
+            catalog().into_iter().filter(|spec| matches!(spec["name"].as_str(),
+                Some("pandacode_dispatch_workers" | "pandacode_list_workers"
+                    | "pandacode_read_worker" | "pandacode_finish_team"))).collect()
+        } else if self.findings {
+            vec![council_finding_tool(), council_finding_verification_tool()]
+        } else {
+            Vec::new()
+        };
+        if self.binding.as_ref().and_then(|b| b.snapshot.skills.as_ref())
+            .is_some_and(|skills| !skills.pins.is_empty())
+        {
+            specs.extend(reviewer_skill_evidence::tools());
+        }
+        specs
+    }
+}
+
+/// Shared production constructor: both catalog and handler are allowlisted.
+/// Re-resolve native authorization on every call, including hidden MCP names.
+fn native_reviewer_host(
+    resolve: Arc<dyn Fn() -> Result<NativeReviewerAccess> + Send + Sync>,
+    raw: ToolHost,
+) -> Result<ToolHost> {
+    let access = resolve()?;
+    let specs = access.tools();
+    let host = if specs.is_empty() {
+        // Legacy no-criteria/no-skill seats still receive a denying host, never
+        // an unrestricted fallback or tools gained from ambient configuration.
+        ToolHost { tools: Vec::new(), handler: raw.handler, approval_tools: HashSet::new() }
+    } else {
+        let filtered = reviewer_skill_evidence::readonly_host(raw, specs.clone())
+            .ok_or("policy_unsupported: native reviewer tools are unavailable.")?;
+        if filtered.tools.len() != specs.len() {
+            return Err("policy_unsupported: required native reviewer tools are unavailable.".into());
+        }
+        filtered
+    };
+    let allowed = specs.iter().filter_map(|spec| spec["name"].as_str().map(str::to_owned))
+        .collect::<HashSet<_>>();
+    let handler = host.handler;
+    Ok(ToolHost { tools: host.tools, approval_tools: HashSet::new(),
+        handler: Arc::new(move |name, args| {
+            let authorization = if allowed.contains(&name) {
+                resolve().and_then(|current| if current == access { Ok(()) } else {
+                    Err("reviewer_session_mismatch: native reviewer host identity changed.".into())
+                })
+            } else {
+                Err("capability_not_authorized: tool is outside this native reviewer role.".into())
+            };
+            let handler = handler.clone();
+            Box::pin(async move { authorization?; (handler)(name, args).await })
+        }),
+    })
+}
+
+/// Build distinct coordinator/leaf hosts without app, bot, shell or MCP tools.
+pub(crate) fn reviewer_host(
     app: tauri::AppHandle,
     session_id: String,
     stopped: Arc<AtomicBool>,
     admission: &Admission,
-) -> Option<ToolHost> {
-    reviewer_skill_evidence::readonly_host(host(app, session_id, stopped, admission)?)
+) -> Result<ToolHost> {
+    let raw = host(app.clone(), session_id.clone(), stopped, admission)
+        .ok_or("policy_unsupported: native reviewer host is unavailable.")?;
+    let admission = admission.clone();
+    native_reviewer_host(Arc::new(move || {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        NativeReviewerAccess::resolve(&store, &session_id, &admission)
+    }), raw)
 }
 
 #[derive(Serialize, Deserialize)]
@@ -6897,13 +7005,10 @@ fn dispatch_as_inner(
                         }
                         if let Some(bot) = &selected_bot {
                             binding.reviewer_bot_id = Some(bot.id.clone());
-                            // A hybrid plan can legitimately have one selected bot and one or
-                            // more automatic seats. ReviewerBinding's legacy roster contract
-                            // requires a 2–8 bot roster, so leave that optional legacy pin empty
-                            // for the single-bot hybrid; the composition and frozen round record
-                            // remain the source of truth for the combined quorum.
-                            if bot.roster_bot_ids.len() >= 2 {
-                                binding.roster_bot_ids = bot.roster_bot_ids.clone();
+                            binding.roster_bot_ids = bot.roster_bot_ids.clone();
+                            // Compositions pin their combined selected/automatic quorum;
+                            // legacy selected-only rounds pin the selected roster size.
+                            if team.config.council.as_ref().is_none_or(|c| c.composition.is_none()) {
                                 binding.required_reviewers = Some(bot.roster_bot_ids.len());
                             }
                             binding.composition_mode =

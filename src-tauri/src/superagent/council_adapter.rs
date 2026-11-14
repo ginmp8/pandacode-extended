@@ -122,6 +122,81 @@ fn reviewers_started_after_binding<'a>(
     required > 0 && total == required
 }
 
+/// Composed bindings freeze the whole quota separately from the selected bot
+/// roster. Count a nested result once, through
+/// its native-verified parent receipt, never once per leaf review receipt.
+fn composed_review_started_after_binding(
+    store: &Store,
+    team: &architect::TeamSnapshot,
+    evidence: &architect::VerifiedCouncilTaskEvidence,
+    bound_at: i64,
+) -> bool {
+    let Some(config) = team.config.council.as_ref() else { return false };
+    if config.composition.is_none() { return false; }
+    let Some(status) = team.council_status.as_ref() else { return false };
+    if status.round == 0 || evidence.cycle_id != format!("{}:{}", team.session_id, team.council_since) {
+        return false;
+    }
+    let workers = team.workers.iter().filter(|worker| {
+        !worker.abandoned && worker.created_at >= team.council_since
+            && worker.council.as_ref().is_some_and(|seat| seat.round == status.round)
+    }).collect::<Vec<_>>();
+    let mut frozen_required = None;
+    for worker in &workers {
+        let Some(binding) = worker.reviewer_binding.as_ref() else { return false };
+        if binding.validate(team, worker).is_err()
+            || architect::reviewer_security::validate_issued_authority(store, &team.session_id, binding).is_err()
+        {
+            return false;
+        }
+        let Some(required) = binding.required_reviewers else { return false };
+        if frozen_required.is_some_and(|previous| previous != required) {
+            return false;
+        }
+        frozen_required = Some(required);
+        let child_receipts = evidence.child_receipts.iter().filter(|receipt| {
+            receipt.root_cycle_id == evidence.cycle_id && receipt.parent_seat_id == worker.id
+        }).collect::<Vec<_>>();
+        if child_receipts.len() > 1 { return false; }
+        if let Some(receipt) = child_receipts.first() {
+            if binding.composition_mode.as_deref() != Some("nested")
+                || binding.reviewer_bot_id.as_deref() != Some(receipt.bot_id.as_str())
+                || binding.artifact_revision != receipt.artifact_revision
+            {
+                return false;
+            }
+            let Some((child_id, _)) = receipt.child_cycle_id.rsplit_once(':') else { return false };
+            let Ok(Some(child)) = architect::load(store, child_id) else { return false };
+            let Some(child_status) = child.council_status.as_ref() else { return false };
+            if receipt.child_cycle_id != format!("{}:{}", child.session_id, child.council_since)
+                || child_status.round == 0
+                || child.workers.iter().filter(|leaf| {
+                    !leaf.abandoned && leaf.created_at >= child.council_since
+                        && leaf.council.as_ref().is_some_and(|seat| seat.round == child_status.round)
+                }).any(|leaf| leaf.council.as_ref().is_none_or(|seat| seat.started_at < bound_at))
+            {
+                return false;
+            }
+        } else if evidence.review_receipts.iter().filter(|receipt| {
+            receipt.cycle_id == evidence.cycle_id
+                && receipt.task_id.as_deref() == Some(team.session_id.as_str())
+                && receipt.assignment_id.as_deref() == Some(worker.id.as_str())
+                && receipt.terminal_revision == worker.result_revision
+        }).count() != 1 {
+            // Includes native-verified on-trigger preliminary direct reviews.
+            return false;
+        }
+    }
+    let Some(required) = frozen_required else { return false };
+    // Auto may legitimately allocate more than the frozen minimum. Native's
+    // source-coverage gate has already verified every seat in this evidence.
+    workers.len() >= required && reviewers_started_after_binding(
+        workers.len(), workers.iter().map(|worker| {
+            (worker.session_id.as_str(), worker.council.as_ref().unwrap().started_at)
+        }), bound_at,
+    )
+}
+
 fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
@@ -530,8 +605,15 @@ fn inspect_with_caller(
     } else {
         None
     };
+    let verified_evidence = architect::verified_council_task_evidence(store, &team)
+        .filter(|evidence| evidence.cycle_id == format!("{}:{}", session, team.council_since));
     let review_started_after_binding = bound_at.is_some_and(|frozen_at| {
         let Some(config) = team.config.council.as_ref() else { return false };
+        if config.composition.is_some() {
+            return verified_evidence.as_ref().is_some_and(|evidence| {
+                composed_review_started_after_binding(store, &team, evidence, frozen_at)
+            });
+        }
         let required = if config.reviewer_bot_ids.is_empty() {
             config.reviewers.max(2)
         } else {
@@ -549,8 +631,6 @@ fn inspect_with_caller(
     });
     let mut approval_receipt = None;
     if let Some(request) = request.as_ref() {
-        let verified_evidence = architect::verified_council_task_evidence(store, &team)
-            .filter(|evidence| evidence.cycle_id == request.cycle_id);
         let approved = verified && review_started_after_binding && verified_evidence.is_some();
         let terminal = approved || matches!(team.status.as_str(), "completed" | "failed" | "stopped" | "interrupted");
         if terminal {
@@ -823,6 +903,267 @@ mod tests {
         let client = test_task_client(store, &ticket.id, None);
         let observation = request_task_review(store, &client).unwrap().unwrap();
         (ticket, session, observation)
+    }
+
+    fn save_test_team(store: &Store, team: &architect::TeamSnapshot) {
+        store.db.execute(
+            "INSERT INTO architect_teams(session_id,content) VALUES(?1,?2)
+             ON CONFLICT(session_id) DO UPDATE SET content=excluded.content",
+            params![team.session_id, serde_json::to_string(team).unwrap()],
+        ).unwrap();
+    }
+
+    fn test_council_record(store: &Store, session: &str, key: &str, kind: &str, value: Value) {
+        store.db.execute(
+            "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+             VALUES(?1,?2,?3,?4,'fixture')",
+            params![session, key, kind, value.to_string()],
+        ).unwrap();
+    }
+
+    fn test_review_receipt(team: &architect::TeamSnapshot, worker: &architect::Worker) -> Value {
+        let binding = worker.reviewer_binding.as_ref().unwrap();
+        let policy = serde_json::to_vec(&(
+            &binding.snapshot.tool_policy, &binding.reviewer_bot_id,
+            &binding.snapshot.bot_context, &binding.snapshot.skills,
+            &binding.composition_mode, &binding.delivery_id, &binding.parent_council,
+        )).unwrap();
+        json!({
+            "schemaVersion":1,
+            "requestId":format!("native-council-request:{}:{}:1",binding.council_cycle_id,worker.id),
+            "cycleId":binding.council_cycle_id,"taskId":team.session_id,"assignmentId":worker.id,
+            "policyFingerprint":sha256(&policy),"artifactDigest":sha256(binding.artifact_revision.as_bytes()),
+            "verdict":"passed","findingsRefs":[],"evidenceRefs":[],
+            "terminalRevision":worker.result_revision,
+            "idempotencyKey":format!("native-council-terminal:{}:{}:1",binding.council_cycle_id,worker.id)
+        })
+    }
+
+    /// Persist the same authority, composed quota, child ownership and
+    /// terminal contracts consumed by the real native gate, without launching a CLI.
+    fn completed_composed_task(store: &mut Store, mode: &str) -> (superagent::Ticket, String) {
+        let (ticket, session) = completed_native_task(store, mode);
+        attach_correlated_passing_reviews(store, &session);
+        let mut team = architect::load(store, &session).unwrap().unwrap();
+        let template = team.workers[0].clone();
+        team.workers.clear();
+        store.db.execute(
+            "DELETE FROM architect_requests WHERE parent_session_id=?1
+             AND kind IN ('reviewer_authority','council_review_receipt')", [&session],
+        ).unwrap();
+        let nested = json!({
+            "template":"validated_default","childCriteriaSource":"architect","childReviewerCount":2,
+            "target":9.0,"maxRounds":2,"escalation":"always","userForced":false
+        });
+        let sources: Vec<(&str, &str)> = match mode {
+            "M3" => vec![("direct-bot", "direct")],
+            "M5" => vec![("nested-bot", "nested")],
+            "M7" => vec![("direct-bot", "direct"), ("nested-bot", "nested")],
+            _ => panic!("unsupported composed fixture"),
+        };
+        let roster = sources.iter().map(|(id, _)| id.to_string()).collect::<Vec<_>>();
+        for (id, _) in &sources {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',1,1)", [id],
+            ).unwrap();
+        }
+        let selected = sources.iter().map(|(id, source)| {
+            let mut value = json!({"botId":id,"mode":source,"required":true});
+            if *source == "nested" { value["nested"] = nested.clone(); }
+            value
+        }).collect::<Vec<_>>();
+        let composition = json!({
+            "schemaVersion":1,"automatic":{"enabled":true,"count":1},"selected":selected,
+            "criteriaSource":"architect","criteria":[],"strategy":"parallel",
+            "limits":{"maxDepth":2,"maxRootSeats":8,"maxConcurrentLeaves":8,
+                      "maxLeafReviewsPerRound":32,"timeoutMs":3600000,"maxEstimatedCostMicros":null}
+        });
+        let config = team.config.council.as_mut().unwrap();
+        config.reviewers = 1;
+        config.reviewer_bot_ids = roster.clone();
+        config.composition = Some(serde_json::from_value(composition.clone()).unwrap());
+        config.validate_composition().unwrap();
+        save_test_team(store, &team);
+        let client = test_task_client(store, &ticket.id, None);
+        bind_finished(store, &ticket.id, &client.assignment_id, &session).unwrap();
+        let bound_at: i64 = store.db.query_row(
+            "SELECT bound_at FROM sa_council_targets WHERE ticket_id=?1", [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let cycle = format!("{}:{}", session, team.council_since);
+        for index in 0..=sources.len() {
+            let mut worker = template.clone();
+            worker.id = format!("composed-{index}");
+            worker.session_id = store.create_session("project", "codex", "default", "ask").unwrap().id;
+            worker.created_at = bound_at + index as i64 + 1;
+            worker.updated_at = worker.created_at + 1;
+            worker.result_revision = 20 + index as u64;
+            let seat = worker.council.as_mut().unwrap();
+            seat.lens = format!("lens-{index}");
+            seat.score = Some(9.5);
+            seat.started_at = worker.created_at;
+            let mut binding = architect::reviewer_security::ReviewerBinding::native(
+                &team, &worker.id, worker.created_at, &worker.provider, &worker.model,
+                worker.council.as_ref().unwrap(),
+            );
+            binding.composition_mode = Some("direct".into());
+            if index > 0 {
+                let (bot_id, source) = sources[index - 1];
+                binding.reviewer_bot_id = Some(bot_id.into());
+                binding.composition_mode = Some(source.into());
+                binding.roster_bot_ids = roster.clone();
+                binding.snapshot.bot_context = Some(architect::reviewer_security::ReviewerBotContext::from_bot(
+                    &bots::get(store, bot_id).unwrap(),
+                ));
+            }
+            architect::reviewer_security::record_native_authority(store, &session, &binding).unwrap();
+            worker.reviewer_binding = Some(binding.clone());
+            if binding.composition_mode.as_deref() == Some("nested") {
+                let mut child = team.clone();
+                child.session_id = worker.session_id.clone();
+                child.council_since = bound_at + 10;
+                child.workers.clear();
+                let mut child_composition = composition.clone();
+                child_composition["automatic"]["count"] = json!(2);
+                child_composition["selected"] = json!([]);
+                let child_config = child.config.council.as_mut().unwrap();
+                child_config.reviewers = 2;
+                child_config.reviewer_bot_ids.clear();
+                child_config.composition = Some(serde_json::from_value(child_composition).unwrap());
+                let child_cycle = format!("{}:{}", child.session_id, child.council_since);
+                for leaf_index in 0..2 {
+                    let mut leaf = template.clone();
+                    leaf.id = format!("leaf-{leaf_index}");
+                    leaf.session_id = store.create_session("project", "codex", "default", "ask").unwrap().id;
+                    leaf.created_at = child.council_since + leaf_index + 1;
+                    leaf.council.as_mut().unwrap().started_at = leaf.created_at;
+                    leaf.council.as_mut().unwrap().lens = format!("leaf-lens-{leaf_index}");
+                    leaf.council.as_mut().unwrap().score = Some(9.5);
+                    let mut leaf_binding = architect::reviewer_security::ReviewerBinding::native(
+                        &child, &leaf.id, leaf.created_at, &leaf.provider, &leaf.model,
+                        leaf.council.as_ref().unwrap(),
+                    );
+                    leaf_binding.parent_council = Some(architect::reviewer_security::ReviewerParentBinding {
+                        session_id: session.clone(), council_cycle_id: cycle.clone(),
+                        artifact_revision: binding.artifact_revision.clone(), seat_id: worker.id.clone(), depth: 1,
+                    });
+                    architect::reviewer_security::record_native_authority(store, &child.session_id, &leaf_binding).unwrap();
+                    leaf.reviewer_binding = Some(leaf_binding);
+                    test_council_record(store, &session, &format!("leaf-receipt-{leaf_index}"),
+                        "council_review_receipt", test_review_receipt(&child, &leaf));
+                    child.workers.push(leaf);
+                }
+                save_test_team(store, &child);
+                store.db.execute("INSERT INTO architect_workers VALUES(?1,?2,?3)",
+                    params![session, worker.id, child.session_id]).unwrap();
+                test_council_record(store, &session, &format!("native-council-child:{cycle}:{}",worker.id),
+                    "council_child_link", json!({
+                        "schemaVersion":1,"rootSessionId":session,"rootWorkerId":worker.id,
+                        "rootCouncilCycleId":cycle,"rootRound":1,"rootArtifactRevision":binding.artifact_revision,
+                        "rootDispatchRevision":team.dispatch_revision,"rootChangedAt":0,
+                        "childSessionId":child.session_id,"childCouncilCycleId":child_cycle,
+                        "deliveryId":null,"depth":1,"timeoutAt":storage::now()+3600000,
+                        "maxConcurrentLeaves":8,"maxLeafReviewsPerRound":32,"maxEstimatedCostMicros":null,
+                        "nested":nested,"binding":binding,"createdAt":worker.created_at
+                    }));
+                let child_snapshot = serde_json::to_vec(&(
+                    &child.session_id, child.council_since, child.dispatch_revision,
+                    child.changed_at, &child.config.council, &child.workers,
+                )).unwrap();
+                let root_review = test_review_receipt(&team, &worker);
+                test_council_record(store, &session, "child-receipt", "council_child_receipt", json!({
+                    "rootCycleId":cycle,"parentSeatId":worker.id,"childCycleId":child_cycle,
+                    "botId":binding.reviewer_bot_id,"artifactRevision":binding.artifact_revision,
+                    "policyFingerprint":root_review["policyFingerprint"],"status":"passed","minScore":9.5,
+                    "leafScoreRefs":["leaf-0:1","leaf-1:1"],"findingsRefs":[],"evidenceRefs":[],
+                    "snapshotFingerprint":sha256(&child_snapshot)
+                }));
+            } else {
+                test_council_record(store, &session, &format!("root-receipt-{index}"),
+                    "council_review_receipt", test_review_receipt(&team, &worker));
+            }
+            team.workers.push(worker);
+        }
+        let unknown = json!({"status":"unknown"});
+        test_council_record(store, &session, "usage", "council_usage_record", json!({
+            "id":format!("native-council-usage:{cycle}:composed-0:1"),"rootCycleId":cycle,
+            "attemptId":"composed-0:1","reviewerId":"automatic","roundId":format!("{cycle}:1"),
+            "seatId":"composed-0","scope":"root","phase":"review","strategy":"parallel",
+            "queueWaitMs":unknown,"elapsedMs":unknown,"retries":unknown,"escalations":unknown,
+            "inputTokens":unknown,"outputTokens":unknown,"requestCount":unknown,"terminalStatus":"passed",
+            "budgetConsumption":{"concurrentLeaves":unknown,"leafReviews":unknown,"estimatedCostMicros":unknown}
+        }));
+        save_test_team(store, &team);
+        (ticket, session)
+    }
+
+    #[test]
+    fn composed_m3_m5_m7_issue_one_receipt_authorize_evidence_and_replay_after_restart() {
+        for mode in ["M3", "M5", "M7"] {
+            let (mut store, path) = fixture_with_path();
+            let (ticket, session) = completed_composed_task(&mut store, mode);
+            let client = test_task_client(&store, &ticket.id, None);
+            let first = request_task_review(&store, &client).unwrap().unwrap();
+            assert!(first.native_pass_verified, "{mode}: {first:?}");
+            assert!(first.review_started_after_binding, "{mode}: frozen allocation must include automatic seats");
+            assert!(first.native_approved, "{mode}: {first:?}");
+            let receipt = first.approval_receipt.clone().unwrap();
+            assert_eq!(receipt.verdict, "approved");
+            assert_eq!(receipt.evidence_refs.len(), 1);
+            let reference = &receipt.evidence_refs[0];
+            assert!(reference.starts_with("native-council-evidence:v1:"));
+            assert!(serde_json::to_value(&first).unwrap().get("authorizedEvidence").is_none());
+            let evidence = read_task_evidence(&store, &client, &receipt.request_id, reference).unwrap();
+            assert_eq!(evidence["childReceipts"].as_array().unwrap().len(), usize::from(mode != "M3"));
+            let foreign = test_task_client(&store, &ticket.id, Some("foreign-caller"));
+            assert!(read_task_evidence(&store, &foreign, &receipt.request_id, reference).is_err());
+            assert!(request_task_review(&store, &foreign).unwrap_err().contains("replay_mismatch"));
+            assert!(read_task_evidence(&store, &client, &receipt.request_id, "native-council-evidence:v1:foreign").is_err());
+            assert_eq!(request_task_review(&store, &client).unwrap().unwrap().approval_receipt, Some(receipt.clone()));
+            drop(store);
+            let reopened = Store::open(&path).unwrap();
+            assert_eq!(request_task_review(&reopened, &client).unwrap().unwrap().approval_receipt, Some(receipt.clone()));
+            assert_eq!(read_task_evidence(&reopened, &client, &receipt.request_id, reference).unwrap(), evidence);
+            for kind in ["council_task_request", "council_task_receipt"] {
+                assert_eq!(reopened.db.query_row::<i64,_,_>(
+                    "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1 AND kind=?2",
+                    params![session, kind], |row| row.get(0),
+                ).unwrap(), 1, "{mode}: {kind} is persisted exactly once");
+            }
+            reopened.db.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1", [&ticket.id]).unwrap();
+            assert!(read_task_evidence(&reopened, &client, &receipt.request_id, reference).is_err());
+        }
+    }
+
+    #[test]
+    fn composed_receipts_do_not_authorize_missing_foreign_stale_or_nonpassing_seats() {
+        for mode in ["M3", "M5", "M7"] {
+            for fault in ["missing_automatic", "stale_start", "accepted", "missing_receipt", "foreign_child"] {
+                if mode == "M3" && fault == "foreign_child" { continue; }
+                let mut store = fixture();
+                let (ticket, session) = completed_composed_task(&mut store, mode);
+                let mut team = architect::load(&store, &session).unwrap().unwrap();
+                match fault {
+                    "missing_automatic" => { team.workers.remove(0); }
+                    "stale_start" => { team.workers[0].council.as_mut().unwrap().started_at = 1; }
+                    "accepted" => { team.council_status.as_mut().unwrap().state = "accepted".into(); }
+                    "missing_receipt" => {
+                        store.db.execute("DELETE FROM architect_requests WHERE parent_session_id=?1 AND key='root-receipt-0'", [&session]).unwrap();
+                    }
+                    "foreign_child" => {
+                        store.db.execute("UPDATE architect_requests SET content=json_set(content,'$.rootCycleId','foreign:1')
+                            WHERE parent_session_id=?1 AND kind='council_child_receipt'", [&session]).unwrap();
+                    }
+                    _ => unreachable!(),
+                }
+                save_test_team(&store, &team);
+                let client = test_task_client(&store, &ticket.id, None);
+                let observation = request_task_review(&store, &client).unwrap().unwrap();
+                assert!(!observation.native_approved, "{mode}/{fault}: {observation:?}");
+                assert!(observation.evidence_refs.is_empty());
+                assert!(!observation.approval_receipt.unwrap().approved);
+            }
+        }
     }
 
     #[test]

@@ -109,10 +109,17 @@ never a GitHub grant or inferred demand.
 
 ## Per-window repository identity consistency
 
-A bounded authenticated Events poll checks the repository name and, when the
-GitHub Events feed supplies `repo.id`, requires the same positive numeric ID
-on every event in that window. An invalid, missing-in-part or conflicting ID
-rejects the whole batch before any decision receipt or cursor is committed.
-This prevents mixing two repository histories under the same display name.
-It does **not** pin repository identity across separate polls, create a
-subscription, authorize Auto, or treat user-supplied events as authenticated.
+Every explicit live Observe poll now authenticates the operator through
+`gh api user`, resolves `gh api repos/{owner}/{repo}`, and requires an exact
+repository `full_name` (case-insensitive) and positive numeric `id`. Every
+event in the subsequently fetched bounded Events window must contain that
+same repository ID. A renamed, deleted/recreated, redirected, foreign or
+inconsistent repository cannot reuse the previous display name and silently
+advance the source cursor. The entire failed poll leaves decision receipts
+and the cursor unchanged. An empty verified feed is valid.
+
+The internal legacy-fixture parser still accepts all-ID-free test windows for
+backward compatibility; the **live authenticated adapter** does not. This is
+a read-only extra repository-metadata request after explicit Observe opt-in,
+not a durable GitHub subscription or Auto authorization. Source configuration
+still defaults Off, and no Ticket, Worker, Council or external write is created.

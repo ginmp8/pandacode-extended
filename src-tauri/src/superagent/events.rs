@@ -681,6 +681,32 @@ fn authenticated_login(raw: &serde_json::Value) -> Result<String> {
     Ok(login.to_owned())
 }
 
+/// Resolve the exact repository identity through an independently
+/// authenticated GitHub repository metadata request. A renamed repository
+/// or an alias that redirects elsewhere cannot silently reuse this source.
+fn authenticated_repository_id(raw: &serde_json::Value, requested: &str) -> Result<u64> {
+    let name = raw.get("full_name").and_then(|value| value.as_str())
+        .ok_or("Authenticated GitHub repository has no full name.")?;
+    if !name.eq_ignore_ascii_case(requested) {
+        return Err("Authenticated GitHub repository identity differs from the configured source.".into());
+    }
+    raw.get("id").and_then(|value| value.as_u64()).filter(|id| *id > 0)
+        .ok_or_else(|| "Authenticated GitHub repository ID is missing or invalid.".into())
+}
+
+/// A GitHub Events window must belong to the exact ID resolved from the
+/// signed-in repository API on this request, not merely share its display
+/// name. Reject the entire window before any receipt or cursor transaction.
+fn require_authenticated_feed_repository(raw: &serde_json::Value, repository_id: u64) -> Result<()> {
+    let events = raw.as_array().ok_or("Authenticated GitHub Events response is not an array.")?;
+    if events.iter().any(|event| event.pointer("/repo/id")
+        .and_then(|value| value.as_u64()) != Some(repository_id))
+    {
+        return Err("GitHub Events repository ID differs from authenticated repository metadata; cursor unchanged.".into());
+    }
+    Ok(())
+}
+
 /// Verify the feed's descending GitHub event identities while collecting a
 /// finite pagination window. A short page, an older persisted identity, or
 /// a pre-activation timestamp anchors the historical boundary. Without an
@@ -988,6 +1014,13 @@ fn fetch_authenticated_github_window(
         &root, &["api", "user"], crate::github::TIMEOUT,
     )?;
     let signed_in = authenticated_login(&crate::github::json(&user)?)?;
+    // Resolve ID on every explicit Observe request, including after a rename
+    // or delete/recreate of the same repository display name.
+    let repository_endpoint = format!("repos/{repo}");
+    let repository = crate::github::run_gh(
+        &root, &["api", &repository_endpoint], crate::github::TIMEOUT,
+    )?;
+    let repository_id = authenticated_repository_id(&crate::github::json(&repository)?, repo)?;
     let mut pages = Vec::new();
     let mut previous_id = None;
     for page in 1..=GITHUB_MAX_PAGES {
@@ -1001,6 +1034,7 @@ fn fetch_authenticated_github_window(
         if complete { break; }
     }
     let response = combine_github_pages(&pages, since, prior_cursor)?;
+    require_authenticated_feed_repository(&response, repository_id)?;
     Ok((signed_in, response, pages.len()))
 }
 
@@ -1705,6 +1739,33 @@ mod tests {
         assert!(list_decisions(&store,&on.id,10).unwrap().is_empty());
     }
 
+
+    #[test]
+    fn live_observe_repository_metadata_pins_every_event_to_authenticated_id() {
+        let repository = serde_json::json!({"id":73,"full_name":"Owner/Repo"});
+        assert_eq!(authenticated_repository_id(&repository,"owner/repo").unwrap(),73);
+        for invalid in [
+            serde_json::json!({"id":74,"full_name":"owner/other"}),
+            serde_json::json!({"id":0,"full_name":"owner/repo"}),
+            serde_json::json!({"id":"73","full_name":"owner/repo"}),
+            serde_json::json!({"id":73}),
+        ] {
+            assert!(authenticated_repository_id(&invalid,"owner/repo").is_err());
+        }
+        let valid = serde_json::json!([
+            {"repo":{"id":73,"name":"owner/repo"}},
+            {"repo":{"id":73,"name":"Owner/Repo"}}
+        ]);
+        assert!(require_authenticated_feed_repository(&valid,73).is_ok());
+        assert!(require_authenticated_feed_repository(&serde_json::json!([]),73).is_ok());
+        let mut rebound = valid.clone();
+        rebound[1]["repo"]["id"] = serde_json::json!(74);
+        assert!(require_authenticated_feed_repository(&rebound,73).is_err());
+        rebound[1]["repo"].as_object_mut().unwrap().remove("id");
+        assert!(require_authenticated_feed_repository(&rebound,73).is_err());
+        assert!(require_authenticated_feed_repository(&valid,74).is_err());
+        assert!(require_authenticated_feed_repository(&serde_json::json!({}),73).is_err());
+    }
 
     #[test]
     fn authenticated_poll_rejects_repository_id_drift_before_any_receipt_or_cursor() {

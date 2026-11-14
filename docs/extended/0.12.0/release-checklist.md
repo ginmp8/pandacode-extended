@@ -1,5 +1,14 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-14 — verified CI for the Cargo.lock reconciliation
+
+- [x] Verify exact-source [source 6c42278ff598](https://github.com/ginmp8/pandacode/commit/6c42278ff5981e50c9dc494986b4380123d4686d) and exact-code [Extended 7d6897e87c3e](https://github.com/ginmp8/pandacode-extended/commit/7d6897e87c3e8a88c1ebb323783cb75a7071f65b); the native application remains **0.3.125**.
+- [x] Verify complete Git tree inventories: **2,051 upstream** and **2,109 Extended** paths, **zero missing** and **zero mode/type differences**; **81 customized shared** paths remain.
+- [x] Verify [push CI #43568928848](https://github.com/ginmp8/pandacode-extended/actions/runs/43568928848) and [PR CI #43568932573](https://github.com/ginmp8/pandacode-extended/actions/runs/43568932573): **11/11 successful jobs each**, including Rust locked build/tests, Clippy, RustSec, npm, TypeScript/website, Expo and ONNX.
+- [ ] Independently validate functional parity across all 81 customized paths, native Settings On/Off, direct/automatic and existing/new bot execution, Connect/MCP, cloud/VM and credential-transfer integrations.
+- [ ] Complete platform/release approval gates. **Extended 0.12.0 remains DRAFT**; CI success alone is not approval.
+
+
 ## 2026-11-14 — Cargo.lock consistency repair (validation pending)
 
 - [x] Reproduce the exact `Cargo.lock` correction from the failed CI's `cargo metadata` diff and match its Git blob SHA `b9922223a60fc1da5628307009569758f20fb1a3`.

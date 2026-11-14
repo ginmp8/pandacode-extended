@@ -1249,6 +1249,25 @@ pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: O
     let done = view.complete(latest);
     // Abandoned seats take room too, so dropping and re-dispatching cannot go on forever.
     let room = in_round(team, latest).count() < MAX_REVIEWERS;
+    // A hierarchical Council's composite child seats are not ordinary root
+    // workers, so Rounds::complete(1) cannot represent their first-wave
+    // quorum. Once all configured root seats are issued, propose a fresh
+    // forced S2 root wave. The trusted dispatcher must independently verify
+    // the first-wave child receipts and root grants *before* admission.
+    if config.strategy == CouncilExecutionStrategy::Escalated
+        && config.force_escalation
+        && !config.nested_bot_reviewers.is_empty()
+        && latest == 1 && current && !replaced
+    {
+        let root_needed = config.reviewer_bot_ids.len() + config.automatic_reviewers;
+        let issued = in_round(team, 1).filter(|(worker, seat)| counts(worker, seat)).count();
+        if root_needed > 0 && issued >= root_needed {
+            if view.at_limit(config) {
+                return Err(format!("The Council round limit of {} is reached.", config.max_rounds));
+            }
+            return Ok(2);
+        }
+    }
     if current && room && (replaced || !done) {
         return Ok(latest);
     }

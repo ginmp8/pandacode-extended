@@ -4192,7 +4192,7 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
     })).unwrap();
     let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
     let (first_run, _) = claim(&state, action);
-    finish(&state, &first_run, "Independent root review.\\nCouncil score: 9.7/10", true);
+    finish(&state, &first_run, "Independent root review.\nCouncil score: 9.7/10", true);
     let second_request = json!({
         "assignments":[reviewer_assignment("s2-root-second", "correctness")]
     });
@@ -4206,7 +4206,7 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
         let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
         {
             let store = state.store.lock().unwrap();
-            store.message(&action.sid, "assistant", "Independent child evidence.\\nCouncil score: 9.5/10").unwrap();
+            store.message(&action.sid, "assistant", "Independent child evidence.\nCouncil score: 9.5/10").unwrap();
         }
         completed_state(&state, &action.sid, Some(&action.admission), true, false, &mut |_| {});
     }
@@ -4220,7 +4220,7 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
     let (second_run, _) = claim(&state, action);
     assert_ne!(first_run.config.session_id, second_run.config.session_id);
     assert!(second_run.config.reviewer_boundary);
-    finish(&state, &second_run, "Independent follow-up root review.\\nCouncil score: 9.8/10", true);
+    finish(&state, &second_run, "Independent follow-up root review.\nCouncil score: 9.8/10", true);
     let store = state.store.lock().unwrap();
     let root = load(&store, &sid).unwrap().unwrap();
     assert_eq!(root.workers.iter().filter(|w| w.council.as_ref().is_some_and(|s| s.round == 2)).count(), 1);

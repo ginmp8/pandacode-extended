@@ -700,3 +700,29 @@ enabled until native multi-worker execution admission is supported. Any policy
 edit uses compare-and-swap revision checks, requires the Team to be Off, and
 does not rewrite an admitted Ticket or its Council/effect history. `--enable`
 never starts a provider, grants tools or changes GitHub source modes.
+
+### Durable local retry intents
+
+A separate CLI process cannot safely dispatch a bot owned by a live headless
+host. Request a **single revision-bound native retry** instead:
+
+```sh
+pandacode serve --retry-ticket TICKET_ID REVISION
+pandacode serve --inspect-retry-request TICKET_ID REVISION
+```
+
+The first command records a durable read-only request only if the Ticket remains
+blocked, its original local-user mandate is unrevoked and unexpired, the Team is
+enabled, and there are no unreconciled external effects. Duplicate requests for
+the same Ticket revision return the existing receipt without new work.
+
+The live `pandacode serve` runtime, not the one-shot CLI, claims queued intents
+and reuses the same native Ticket, bot, scope, project checkout and retry budget
+validation as Desktop before entering the existing bot gateway. A claimed
+request with no admitted assignment may be safely retried after a stale claim;
+once admission or an ambiguous gateway handoff has occurred, no automatic
+redelivery is attempted. The receipt distinguishes `queued`, `claimed`,
+`dispatched`, `uncertain` and `rejected`; **dispatched is not completed**.
+Stop, revoked policy and stale Ticket revisions block future action.
+This does not enable GitHub Auto, privileged writes, arbitrary shell access,
+MCP effects, or unsupervised recovery.

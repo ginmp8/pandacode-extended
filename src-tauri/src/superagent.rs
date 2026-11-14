@@ -10,6 +10,7 @@ pub(crate) mod events;
 pub(crate) mod council_adapter;
 pub mod effects;
 pub(crate) mod write_grants;
+pub(crate) mod headless_dispatch;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -4406,6 +4407,49 @@ pub async fn superagent_revoke_worker_write_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headless_retry_request_is_durable_deduplicated_and_revision_bound() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit_role_with_staging(
+            &mut store, &team.id, "Read-only retry objective",
+            "headless-retry-request", true, false, true,
+        ).unwrap();
+        assert!(!launched);
+        assert_eq!(ticket.state,"blocked");
+        let first = headless_dispatch::request(
+            &store.path, &ticket.id, ticket.revision,
+        ).unwrap();
+        let receipt: serde_json::Value = serde_json::from_str(&first).unwrap();
+        assert_eq!(receipt["state"],"queued");
+        assert_eq!(receipt["providerCompleted"],false);
+        assert_eq!(receipt["automaticReplayPermitted"],true);
+        assert!(!first.contains("Read-only retry objective"));
+        assert_eq!(first,headless_dispatch::request(
+            &store.path,&ticket.id,ticket.revision,
+        ).unwrap());
+        assert_eq!(first,headless_dispatch::inspect(
+            &store.path,&ticket.id,ticket.revision,
+        ).unwrap());
+        assert!(headless_dispatch::request(
+            &store.path,&ticket.id,ticket.revision+1,
+        ).is_err());
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_headless_retry_requests WHERE ticket_id=?1",
+            [&ticket.id],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(count,1);
+        let _ = retry_blocked(&mut store,&ticket.id,false).unwrap();
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"running");
+        assert!(headless_dispatch::request(
+            &store.path,&ticket.id,ticket.revision+1,
+        ).is_err());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_headless_retry_requests WHERE ticket_id=?1",
+            [&ticket.id],|row|row.get::<_,i64>(0),
+        ).unwrap(),1);
+    }
 
     #[test]
     fn headless_team_creation_edit_and_enable_reuse_native_guards() {

@@ -30,6 +30,8 @@ enum Command {
     CreateOrchestration { path: PathBuf },
     ConfigureTeamRoles { orchestration_id: String, expected_revision: i64, path: PathBuf },
     EnableOrchestration { orchestration_id: String, expected_revision: i64 },
+    RetryTicket { ticket_id: String, expected_revision: i64 },
+    InspectRetryRequest { ticket_id: String, expected_revision: i64 },
     ImportOrchestrations { path: PathBuf },
     ExportOrchestrations { path: PathBuf },
     InspectOrchestrations,
@@ -113,6 +115,20 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(status) => { println!("{status}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectRetryRequest { ticket_id, expected_revision } = &command {
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::headless_dispatch::inspect(
+                        &dir.join("kingcode.sqlite3"), ticket_id, *expected_revision,
+                    ));
+                match result {
+                    Ok(status) => { println!("{status}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("Headless retry receipt inspection failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -373,7 +389,8 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 }
             }
             let native_action = matches!(&command,
-                Command::EnableOrchestration { .. } | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
+                Command::EnableOrchestration { .. } | Command::RetryTicket { .. }
+                | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
                 | Command::StopTicket { .. } | Command::DisableOrchestration { .. }
                 | Command::RenameOrchestration { .. } | Command::IssueComment { .. });
             if native_action {
@@ -382,6 +399,10 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     .and_then(|dir| {
                         let database = dir.join("kingcode.sqlite3");
                         match &command {
+                            Command::RetryTicket { ticket_id, expected_revision } =>
+                                crate::superagent::headless_dispatch::request(
+                                    &database, ticket_id, *expected_revision,
+                                ),
                             Command::EnableOrchestration { orchestration_id, expected_revision } =>
                                 crate::superagent::headless_enable_orchestration(
                                     &database, orchestration_id, *expected_revision,
@@ -448,6 +469,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::ObserveSource { .. } | Command::ObserveCheckRun { .. }
         | Command::CreateOrchestration { .. } | Command::ConfigureTeamRoles { .. }
         | Command::EnableOrchestration { .. } | Command::QueueDemand { .. }
+        | Command::RetryTicket { .. } | Command::InspectRetryRequest { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
         | Command::StopTicket { .. } | Command::DisableOrchestration { .. }
         | Command::RenameOrchestration { .. } | Command::IssueComment { .. } => {
@@ -653,6 +675,20 @@ fn start_services(app: tauri::AppHandle) {
                     }
                 },
                 Err(error) => eprintln!("serve: SuperAgent watchdog failed: {error}"),
+            }
+        }
+    });
+    // The one-shot CLI never dispatches a provider. Only the live serve runtime
+    // consumes explicit, durable headless retry requests through native guards.
+    let retries = app.clone();
+    tauri::async_runtime::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            if retries.state::<AppState>().shutdown.load(Ordering::SeqCst) != 0 {
+                break;
+            }
+            if let Err(error) = crate::superagent::headless_dispatch::drain_one(retries.clone()).await {
+                eprintln!("serve: native headless retry requires inspection: {error}");
             }
         }
     });
@@ -1130,6 +1166,26 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 3;
             }
+            "--retry-ticket" | "--inspect-retry-request" => {
+                let inspect = args[index] == "--inspect-retry-request";
+                let ticket_id = args.get(index + 1)
+                    .ok_or("A headless retry command requires a Ticket ID and revision.")?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("A headless retry command needs the expected Ticket revision.")?;
+                let expected_revision = parse_ticket_revision(revision)?;
+                command = if inspect {
+                    Command::InspectRetryRequest {
+                        ticket_id: ticket_id.clone(), expected_revision,
+                    }
+                } else {
+                    Command::RetryTicket {
+                        ticket_id: ticket_id.clone(), expected_revision,
+                    }
+                };
+                ops += 1;
+                index += 2;
+            }
             "--stop-ticket" => {
                 let ticket_id = args.get(index + 1)
                     .ok_or_else(|| format!("--stop-ticket needs a ticket ID.\n\n{}", help()))?;
@@ -1365,6 +1421,12 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          Accept current worker evidence at the expected Ticket revision; exit.
   --reject-ticket <id> <revision> <reason>
                          Reject current worker evidence with a required reason; quote it if it has spaces.
+  --retry-ticket <id> <revision>
+                         Queue one explicit read-only retry intent for a blocked
+                         native Ticket; live serve owns dispatch, no CLI provider.
+  --inspect-retry-request <id> <revision>
+                         Inspect the exact immutable retry receipt, without
+                         provider dispatch or startup recovery; exit.
   --stop-ticket <id>    Revoke a Ticket mandate and stop the Ticket; exit.
   --disable-orchestration <id> <revision>
                          Turn a Team Off and atomically revoke its mandates;
@@ -1451,6 +1513,18 @@ mod tests {
             "--enable-orchestration",
             "--enable-orchestration team_1 0",
             "--enable-orchestration team_1 2 --disable-orchestration team_1 2",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(parsed("--retry-ticket ticket_1 2"),
+            Ok(Command::RetryTicket { ticket_id:"ticket_1".into(), expected_revision:2 }));
+        assert_eq!(parsed("--inspect-retry-request ticket_1 2"),
+            Ok(Command::InspectRetryRequest { ticket_id:"ticket_1".into(), expected_revision:2 }));
+        for invalid in [
+            "--retry-ticket", "--retry-ticket ticket_1",
+            "--retry-ticket ../escape 2", "--retry-ticket ticket_1 0",
+            "--retry-ticket ticket_1 2 --stop-ticket ticket_1",
+            "--inspect-retry-request", "--inspect-retry-request ticket_1 nope",
         ] {
             assert!(parsed(invalid).is_err(), "{invalid}");
         }

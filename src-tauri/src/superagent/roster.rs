@@ -39,6 +39,97 @@ pub struct TeamRoster {
     pub council_required:bool,
     pub execution_ready:bool,
 }
+/// Read-only projection of the canonical, digest-validated Ticket Team snapshot.
+/// No second SQLite profile table, mutable authority or grant is introduced.
+#[derive(Debug,Clone,Serialize,Deserialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase")]
+pub struct AdmittedMemberProfile {
+    pub role:String,
+    pub position:usize,
+    pub bot_id:String,
+    pub project_id:String,
+    pub provider:String,
+    pub model:String,
+    pub mode:String,
+    pub reasoning_effort:String,
+    pub assigned_skill_ids:Vec<String>,
+}
+#[derive(Debug,Clone,Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct AdmittedTeamProfile {
+    pub policy_revision:i64,
+    pub captured_at:i64,
+    pub members:Vec<AdmittedMemberProfile>,
+}
+
+/// The native v48+ Ticket admission already captures this exact immutable
+/// per-role profile together with the Ticket, Mandate and first Assignment.
+pub(super) fn ticket_profile(store:&Store,ticket_id:&str)->Result<Option<AdmittedTeamProfile>> {
+    let snapshot=super::ticket_team_snapshot(store,ticket_id)?;
+    if snapshot.provenance!=super::TeamSnapshotProvenance::Native {
+        return Ok(None);
+    }
+    let mut members=Vec::with_capacity(snapshot.roles.len());
+    for role in &snapshot.roles {
+        let Some(config)=role.effective_config.as_ref() else {
+            return Ok(None);
+        };
+        let get=|name:&str|->Result<String> {
+            config.get(name).and_then(serde_json::Value::as_str)
+                .map(str::to_owned)
+                .ok_or_else(||format!("Pinned Team role is missing {name}."))
+        };
+        let skills=serde_json::from_value::<Vec<String>>(
+            config.get("skills").cloned()
+                .ok_or("Pinned Team role is missing its Skills snapshot.")?
+        ).map_err(|_|"Pinned Team Skills snapshot is invalid.".to_owned())?;
+        members.push(AdmittedMemberProfile {
+            role:role.role.clone(),
+            position:role.ordinal,
+            bot_id:role.bot_id.clone(),
+            project_id:get("projectId")?,
+            provider:get("provider")?,
+            model:get("model")?,
+            mode:get("mode")?,
+            reasoning_effort:get("reasoningEffort")?,
+            assigned_skill_ids:skills,
+        });
+    }
+    if members.len()<2 || members.len()!=1+snapshot.worker_bot_ids.len()+snapshot.reviewer_bot_ids.len() {
+        return Err("Pinned Team member count does not match the admitted Ticket.".into());
+    }
+    let policy_revision:i64=store.db.query_row(
+        "SELECT policy_revision FROM sa_tickets WHERE id=?1",
+        [ticket_id],|row|row.get(0),
+    ).map_err(|e|e.to_string())?;
+    if policy_revision!=snapshot.policy.policy_revision {
+        return Err("Pinned Team profile disagrees with immutable Ticket policy.".into());
+    }
+    let captured_at:i64=store.db.query_row(
+        "SELECT created_at FROM sa_ticket_team_snapshots WHERE ticket_id=?1",
+        [ticket_id],|row|row.get(0),
+    ).map_err(|e|e.to_string())?;
+    Ok(Some(AdmittedTeamProfile {policy_revision,captured_at,members}))
+}
+
+/// New Worker attempts cannot inherit a later provider/model/mode/project/
+/// Skills change. Already admitted sessions keep their frozen policy.
+pub(super) fn require_current_profile(
+    store:&Store,ticket_id:&str,role:&str,bot_id:&str,
+)->Result<()> {
+    let snapshot=super::ticket_team_snapshot(store,ticket_id)?;
+    if snapshot.provenance!=super::TeamSnapshotProvenance::Native {
+        return Ok(());
+    }
+    let pinned=snapshot.roles.iter()
+        .find(|candidate|candidate.role==role && candidate.bot_id==bot_id)
+        .ok_or("Bot role was not captured in the original Demand.")?;
+    if !super::snapshot_role_profile_matches(&store.db,&snapshot,role,pinned.ordinal,bot_id)? {
+        return Err("Bot provider, model, mode, project or Skills changed after Demand admission; create a newly authorized Demand.".into());
+    }
+    Ok(())
+}
+
 pub(super) fn has_additional_members(store: &Store, id: &str) -> Result<bool> {
     let config = configuration(store, id)?;
     // Native task Council supports a single Worker with selected Reviewers.
@@ -89,6 +180,8 @@ pub struct EffectiveMember {
     pub project_id:String,
     pub paused:bool,
     pub skills:Vec<EffectiveSkill>,
+    /// Local, attributable configuration issues; not an execution capability verdict.
+    pub configuration_issues:Vec<String>,
 }
 #[derive(Debug,Clone,Serialize)]
 #[serde(rename_all="camelCase")]
@@ -112,7 +205,7 @@ fn effective_team(
     let mut members=Vec::new();
     let mut add=|role:&str,position:usize,bot_id:&str|->Result<()> {
         let bot=bots::get(store,bot_id)?;
-        let skills=bot.skills.iter().map(|skill_id| {
+        let skills:Vec<EffectiveSkill>=bot.skills.iter().map(|skill_id| {
             let state=library.get(skill_id);
             EffectiveSkill {
                 id:skill_id.clone(),
@@ -122,10 +215,33 @@ fn effective_team(
                 invocation_evidence:"not_verified".into(),
             }
         }).collect();
+        let mut configuration_issues=Vec::new();
+        if bot.paused {
+            configuration_issues.push("Paused bot: resume it in Bots before admission.".into());
+        }
+        // Worker project drift can occur after configuring a reusable Team.
+        // Coordinator projects may differ; Workers own the execution scope.
+        if role == "worker" && bot.project_id != config.project_id {
+            configuration_issues.push(
+                "Worker project differs from the Team execution project: restore its project or reconfigure this disabled Team.".into(),
+            );
+        }
+        for skill in &skills {
+            if skill.library_status=="missing" {
+                configuration_issues.push(format!(
+                    "Assigned Skill {} is missing: install or unassign it in Skills Manager.",skill.id,
+                ));
+            } else if skill.safety_status=="review_required" {
+                configuration_issues.push(format!(
+                    "Assigned Skill {} has unresolved safety findings: review it in Skills Manager.",
+                    skill.id,
+                ));
+            }
+        }
         members.push(EffectiveMember {
             role:role.into(),position,bot_id:bot.id,name:bot.name,
             provider:bot.provider,model:bot.model,mode:bot.mode,
-            project_id:bot.project_id,paused:bot.paused,skills,
+            project_id:bot.project_id,paused:bot.paused,skills,configuration_issues,
         });
         Ok(())
     };
@@ -246,6 +362,31 @@ mod tests {
         assert_eq!(view.members[1].skills[0].harness_eligibility,"not_verified");
         assert_eq!(view.members[1].skills[0].invocation_evidence,"not_verified");
         assert_eq!(view.members[1].skills[1].library_status,"missing");
+        assert_eq!(view.members[1].configuration_issues.len(),2);
+        assert!(view.members[1].configuration_issues.iter().any(|issue|
+            issue.contains("missing") && issue.contains("Skills Manager")));
+        assert!(view.members[1].configuration_issues.iter().any(|issue|
+            issue.contains("unresolved safety findings")));
+        assert!(view.members[0].configuration_issues.is_empty());
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('moved-project','Moved','/tmp/sa-moved')",[],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE bots SET project_id='moved-project' WHERE id='another-worker'",[],
+        ).unwrap();
+        let reopened=Store::open_read_only(&path).unwrap();
+        let drift=effective_team(&reopened,&cfg.id,&library).unwrap();
+        assert_eq!(drift.policy_revision,roster.policy_revision);
+        assert!(drift.members[2].configuration_issues.iter().any(|issue|
+            issue.contains("Worker project differs from the Team execution project")));
+        assert!(drift.members[0].configuration_issues.is_empty());
+        assert!(!drift.grants_issued);
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='reviewer'",[]).unwrap();
+        let paused=effective_team(&store,&cfg.id,&library).unwrap();
+        assert_eq!(paused.policy_revision,roster.policy_revision);
+        assert!(paused.members[3].configuration_issues.iter().any(|issue|
+            issue.contains("Paused bot")));
+        assert!(!paused.grants_issued);
         assert!(!view.execution_ready);
         assert!(!view.grants_issued);
         assert_eq!(store.db.query_row(

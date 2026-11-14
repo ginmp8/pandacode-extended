@@ -93,7 +93,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await expect(details).toContainText('No side effects allowed');
   await expect(details).toContainText('Attempt 1');
   await expect(details).toContainText('admitted');
-  await expect(details.locator('ol li').first()).toContainText(' · admitted · ');
+  await expect(details.getByRole('heading',{name:'Native activity',exact:true}).locator('xpath=following-sibling::ol[1] li').first()).toContainText(' · admitted · ');
   await row.getByRole('button',{name:'Stop'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(row).toContainText('stopped');
@@ -327,6 +327,17 @@ test('Off and Observe source controls expose durable native receipts without Aut
         s.mode=args?.mode; s.policyRevision=Number(s.policyRevision)+1;
         return s as never;
       }
+      if(command==='superagent_source_integrity') {
+        const src = sources.find(item => item.id === args?.sourceId);
+        if (!src) throw new Error('Unknown native source');
+        return {
+          sourceId:src.id,repository:src.repository,mode:src.mode,
+          policyRevision:src.policyRevision,cursorKind:'github_event_identity_high_watermark',
+          lastSequence:src.lastSequence,receiptCount:1,permittedReceiptCount:1,
+          maxReceiptSequence:3,cursorConsistent:false,receiptCapacityReached:false,
+          nextAction:'investigate_cursor_receipt_mismatch',observationalOnly:true
+        } as never;
+      }
       if(command==='superagent_source_decisions') return [{
         sourceId:args?.sourceId,deliveryId:'delivery-2',
         eventKind:'issues.opened',subjectKey:'issue:42',sequence:2,
@@ -355,6 +366,13 @@ test('Off and Observe source controls expose durable native receipts without Aut
   await host.getByRole('button',{name:'Enable Observe'}).click();
   await host.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(host.locator('.sa-source-list')).toContainText('observe');
+  await host.getByRole('button',{name:'Inspect source health'}).click();
+  const integrity = host.getByRole('region',{name:'Source integrity'});
+  await expect(integrity).toContainText('GitHub Events high-watermark');
+  await expect(integrity).toContainText('investigate_cursor_receipt_mismatch');
+  await expect(integrity).toContainText('Cursor behind durable receipts');
+  await expect(integrity).toContainText('Observation only.');
+  await expect(host.locator('[data-sa-next-mode="auto"]')).toHaveCount(0);
   await host.getByRole('button',{name:'View decisions'}).click();
   await expect(host.getByRole('region',{name:'Source decisions'})).toContainText('observed_permitted');
   await expect(host.getByRole('region',{name:'Source decisions'})).toContainText('issue:42');
@@ -365,6 +383,7 @@ test('Off and Observe source controls expose durable native receipts without Aut
   await host.getByRole('button',{name:'Load sources'}).click();
   await expect(host.getByText('No event sources configured.')).toBeVisible();
   await expect(host.getByRole('region',{name:'Source decisions'})).toHaveCount(0);
+  await expect(host.getByRole('region',{name:'Source integrity'})).toHaveCount(0);
 });
 
 
@@ -440,9 +459,17 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
           subjectKey:String(args.subjectKey),createdAt:Date.now()};
         links.push(link);return link as never;
       }
+      if(command==='superagent_source_link_issue_pull'){
+        if(args?.sourceId!=='source-one'||args.ticketId!=='ticket-one'||
+            args.issueKey!=='issue:42'||args.pullKey!=='pull:77'||
+            !links.some(link=>link.subjectKey===args.issueKey))throw Error('Invalid pairing');
+        const link={sourceId:'source-one',ticketId:'ticket-one',repository:'test/fixture',
+          subjectKey:'pull:77',createdAt:Date.now()};
+        links.push(link);return link as never;
+      }
       if(command==='superagent_source_unlink_thread'){
         if(args?.sourceId!=='source-one' || args.ticketId!=='ticket-one' ||
-            args.subjectKey!=='issue:42') throw Error('Wrong unlink scope');
+            !['issue:42','pull:77'].includes(String(args.subjectKey))) throw Error('Wrong unlink scope');
         const index=links.findIndex(link=>link.sourceId===args.sourceId &&
           link.ticketId===args.ticketId && link.subjectKey===args.subjectKey);
         if(index<0) throw Error('Missing native link');
@@ -469,15 +496,22 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
   const activity=host.getByRole('region',{name:'Observed linked GitHub activity'});
   await expect(activity).toContainText('verified-501');
   await expect(activity).toContainText('observed_permitted');
+  await host.getByRole('textbox',{name:'Exact PR thread key'}).fill('pull:77');
+  await host.getByRole('button',{name:'Associate PR with linked issue (context only)'}).click();
+  await expect(host.locator('.sa-linked-threads')).toContainText('pull:77');
+  await expect(host.locator('.sa-feedback[role="status"]')).toContainText('GitHub relationship is not verified');
   await expect(host.getByRole('button',{name:'Unlink test/fixture / issue:42'})).toBeVisible();
   await host.getByRole('button',{name:'Unlink test/fixture / issue:42'}).click();
   await expect(host.getByText('Unlink this exact GitHub source thread?',{exact:false})).toBeVisible();
+  await host.getByRole('button',{name:'Confirm'}).click();
+  await expect(host.locator('.sa-linked-threads')).toContainText('pull:77');
+  await host.getByRole('button',{name:'Unlink test/fixture / pull:77'}).click();
   await host.getByRole('button',{name:'Confirm'}).click();
   await expect(host.locator('.sa-linked-threads')).toContainText('No threads linked.');
   await host.getByRole('button',{name:'Load linked source decisions'}).click();
   await expect(activity).toContainText('No authenticated Observe decisions match linked threads.');
   await expect.poll(()=>page.evaluate(
-    ()=>(window as unknown as {saUnlinkCount:()=>number}).saUnlinkCount())).toBe(1);
+    ()=>(window as unknown as {saUnlinkCount:()=>number}).saUnlinkCount())).toBe(2);
   await expect(host.getByText('Private fixture')).toBeVisible();
   await expect.poll(()=>page.evaluate(
     ()=>(window as unknown as {saDispatchCount:()=>number}).saDispatchCount())).toBe(0);
@@ -700,7 +734,8 @@ test('multi-member Team Builder updates settled history safely without launching
       if(command==='superagent_roster_update') {
         if(args?.expectedRevision!==config.policyRevision)throw Error('Native policy revision mismatch');
         const input=args?.input as {workerBotIds:string[];reviewerBotIds:string[]};
-        if(input.workerBotIds.length!==3||input.reviewerBotIds.length!==2)throw Error('Role validation failed');
+        if(input.workerBotIds.join(',')!=='worker,worker-c,worker-b' ||
+          input.reviewerBotIds.length!==2)throw Error('Role order validation failed');
         config.policyRevision++;
         roster={...roster,workerBotIds:input.workerBotIds,reviewerBotIds:input.reviewerBotIds,
           policyRevision:config.policyRevision,executionReady:false};
@@ -713,12 +748,15 @@ test('multi-member Team Builder updates settled history safely without launching
   await host.getByRole('button',{name:'Load native members'}).click();
   const form=host.locator('form[data-sa-form="roster"]');
   await form.locator('select[name="additionalWorkers"]').selectOption(['worker-b','worker-c']);
+  await form.getByRole('button',{name:'Move Worker C up'}).click();
+  await expect(form.locator('.sa-worker-order li').first()).toContainText('Worker C');
   await form.locator('select[name="reviewers"]').selectOption(['review-a','review-b']);
   await expect(form.getByRole('button',{name:'Save configured roles'})).toBeEnabled();
   await form.getByRole('button',{name:'Save configured roles'}).click();
   await expect(host.getByText('Multi-member execution is disabled',{exact:false})).toBeVisible();
   await expect(host.getByRole('region',{name:'Configured Team roles'}))
     .toContainText('Policy revision 2');
+  await expect(host.locator('.sa-worker-order li').first()).toContainText('Worker C');
   const calls=await page.evaluate(()=>(window as unknown as {saRosterCalls:string[]}).saRosterCalls);
   expect(calls.filter(value=>value==='superagent_roster_update')).toHaveLength(1);
   expect(calls.filter(value=>value==='superagent_submit' || value==='superagent_set_enabled')).toHaveLength(0);
@@ -1214,13 +1252,15 @@ test('Team effective policy view is native-backed and never grants or launches t
         orchestrationId:'team',policyRevision:3,enabled:false,executionReady:false,
         grantsIssued:false,members:[
           {role:'coordinator',position:0,botId:'lead',name:'Lead',provider:'codex',
-            model:'gpt-main',mode:'plan',projectId:'p',paused:false,skills:[]},
+            model:'gpt-main',mode:'plan',projectId:'p',paused:false,skills:[],configurationIssues:[]},
           {role:'worker',position:0,botId:'worker',name:'Worker',provider:'claude',
             model:'sonnet',mode:'plan',projectId:'p',paused:false,skills:[
               {id:'quality',libraryStatus:'installed',safetyStatus:'clean',
                 harnessEligibility:'not_verified',invocationEvidence:'not_verified'},
               {id:'removed',libraryStatus:'missing',safetyStatus:'unknown',
                 harnessEligibility:'not_verified',invocationEvidence:'not_verified'}
+            ],configurationIssues:[
+              'Assigned Skill removed is missing: install or unassign it in Skills Manager.'
             ]}
         ]
       } as never;
@@ -1236,6 +1276,8 @@ test('Team effective policy view is native-backed and never grants or launches t
   await expect(view).toContainText('Model sonnet');
   await expect(view).toContainText('Skill quality · Library installed · Safety clean');
   await expect(view).toContainText('Skill removed · Library missing');
+  await expect(view.getByText('Assigned Skill removed is missing: install or unassign it in Skills Manager.')).toBeVisible();
+  await expect(view).toContainText('No local configuration issues detected. Harness/tool eligibility unverified.');
   await expect(view).toContainText('Harness eligibility not_verified');
   await expect(view).toContainText('Multi-role execution unavailable');
   await expect(view).toContainText('No task grant issued');

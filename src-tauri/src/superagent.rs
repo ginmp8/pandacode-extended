@@ -2016,7 +2016,6 @@ pub(crate) fn guard_run_admission(
     store: &Store, session_id: &str, running_sessions: &[String],
 ) -> Result<()> {
     let session = store.session(session_id)?;
-    let session_path=checkout_path(store,&session.project_id)?;
     let superagent_run = read_only_policy(store, session_id)?.is_some();
     let leased_by_other: bool = store.db.query_row(
         "SELECT EXISTS(
@@ -2038,6 +2037,7 @@ pub(crate) fn guard_run_admission(
         return Err("Project is reserved by another native SuperAgent assignment.".into());
     }
     if superagent_run {
+        let session_path=checkout_path(store,&session.project_id)?;
         for other_id in running_sessions {
             if other_id == session_id { continue; }
             // A disappeared active session is not proof that a lease is free.
@@ -7351,5 +7351,17 @@ mod tests {
             ).unwrap();
             assert!(sql.contains("old_checkout.path=new_checkout.path"),"{name}");
         }
+    }
+
+    #[test]
+    fn ordinary_chat_admission_retains_legacy_empty_project_path_behavior() {
+        let store=fixture();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('legacy-empty-project','Legacy','')",[]
+        ).unwrap();
+        let ordinary=store.create_session("legacy-empty-project","codex","default","ask").unwrap();
+        // No SuperAgent owns this session. The new exact-checkout guard cannot
+        // turn a legacy ordinary chat into a task-scoped provider admission.
+        assert!(guard_run_admission(&store,&ordinary.id,&[]).is_ok());
     }
 }

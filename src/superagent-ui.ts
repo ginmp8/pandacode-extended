@@ -300,7 +300,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       {
       const workerIds = item.workerBotIds?.length ? item.workerBotIds : [item.workerBotId];
       const reviewerIds = item.reviewerBotIds ?? [];
-      const canEdit = !item.enabled && (item.ticketCount ?? 0) === 0;
       const roles = safe(botName(item.coordinatorBotId)) + ' · Workers: ' +
         safe(workerIds.map(botName).join(', ')) + (reviewerIds.length
           ? ' · Reviewers: ' + safe(reviewerIds.map(botName).join(', ')) : '');
@@ -315,8 +314,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '</small></div><span>' +
       (item.enabled ? 'Manual' : 'Off') + '</span>' +
       '<button type="button" data-sa-select="' + safe(item.id) + '" aria-current="' +
-      (item.id === selected) + '">Details</button>' + (canEdit
-        ? '<button type="button" data-sa-edit-team="' + safe(item.id) + '">Edit Team</button>' : '') +
+      (item.id === selected) + '">Details</button>' +
+      '<button type="button" data-sa-edit-team="' + safe(item.id) + '">Edit Team</button>' +
       '</li>';
       }
     ).join('');
@@ -479,9 +478,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       roleEditor('worker', selectedTeamDraft?.workerBotIds ?? [], selectedProjectId) +
       roleEditor('reviewer', selectedTeamDraft?.reviewerBotIds ?? [], selectedProjectId) +
       councilField('sa-edit-council', selectedTeamDraft?.councilRequired === true, editCouncilError) +
-      '<button class="primary-button" type="submit"' +
-      (chosen.enabled || (chosen.ticketCount ?? 0) > 0 ? ' disabled' : '') + '>Save Team version</button></form>' +
-      (chosen.ticketCount ? '<p>Team roles lock after its first Ticket.</p>' : '') +
+      '<button class="primary-button" type="submit">Save Team version</button></form>' +
+      '<p>Saving creates a new Team version used by future tasks. Active Tickets keep their saved Team snapshot, grants and roles.</p>' +
       '<p>Policy revision ' + chosen.policyRevision + ' · Native read-only permission until separately authorized.</p>' +
       '<form data-sa-form="run"><label>Task objective<textarea name="objective" rows="3" maxlength="16000" required></textarea></label>' +
       '<label>Dispatch<select name="mode"><option value="coordinated">Coordinator, then worker</option>' +
@@ -744,7 +742,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     }
     if (target.dataset.saEditTeam) {
       const team = presets.find(item => item.id === target.dataset.saEditTeam);
-      if (!team || team.enabled || (team.ticketCount ?? 0) > 0) return;
+      if (!team) return;
       editTeamDrafts.set(team.id, {
         name: team.name,
         coordinatorBotId: team.coordinatorBotId,
@@ -1071,7 +1069,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     }
     if (form.dataset.saForm === 'edit') {
       const existing = current();
-      if (!existing || existing.enabled || (existing.ticketCount ?? 0) > 0) return;
+      if (!existing) return;
       const draft = readTeamDraft(form);
       const councilError = councilDraftError(draft);
       if (councilError) {

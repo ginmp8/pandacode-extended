@@ -401,6 +401,71 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
   await expect(workspace.getByText('No orchestrations created.')).toBeVisible();
 });
 
+test('Team Builder saves a future-only Team version for an enabled Team with Ticket history', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const previous=document.querySelector<HTMLElement>('#superagent-host')!;
+    const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
+    const bots=[
+      {id:'coordinator',name:'Coordinator',paused:false,projectId:'project-one'},
+      {id:'worker-one',name:'Worker One',paused:false,projectId:'project-one'},
+      {id:'worker-two',name:'Worker Two',paused:false,projectId:'project-one'},
+      {id:'reviewer',name:'Reviewer',paused:false,projectId:'project-one'},
+    ];
+    const ticket={id:'ticket-running',objective:'Active Ticket',state:'running',revision:2,evidence:null};
+    let config:Record<string,any>={id:'team-future-version',name:'Enabled Team',
+      coordinatorBotId:'coordinator',workerBotId:'worker-one',workerBotIds:['worker-one'],
+      reviewerBotIds:['reviewer'],enabled:true,policyRevision:6,teamVersion:3,
+      projectId:'project-one',councilRequired:false};
+    const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return bots as never;
+      if(command==='superagent_list')return [{...config,ticketCount:1,runningCount:1,
+        blockedCount:0}] as never;
+      if(command==='superagent_tickets')return [ticket] as never;
+      if(command==='superagent_update'){
+        calls.push({command,args:{...args}});
+        const input=args?.input as Record<string,any>;
+        config={...config,...input,teamVersion:Number(config.teamVersion)+1,
+          policyRevision:Number(config.policyRevision)+1};
+        return config as never;
+      }
+      throw new Error('Unexpected enabled Team edit command: '+command);
+    });
+    (window as unknown as {saFutureVersionCalls:typeof calls}).saFutureVersionCalls=calls;
+  });
+
+  const selected=host.getByRole('region',{name:'Selected orchestration',exact:true});
+  await expect(host.locator('.sa-list .sa-item .sa-counts')).toHaveText('1 tasks · 1 running · 0 blocked');
+  await expect(host.getByText('Active Ticket')).toBeVisible();
+  await expect(host.getByRole('button',{name:'Edit Team'})).toBeVisible();
+  await host.getByRole('button',{name:'Edit Team'}).click();
+  const edit=selected.locator('form[data-sa-form="edit"]');
+  await expect(edit.getByRole('button',{name:'Save Team version',exact:true})).toBeEnabled();
+  const contract='Saving creates a new Team version used by future tasks. Active Tickets keep their saved Team snapshot, grants and roles.';
+  await expect(selected.getByText(contract,{exact:true})).toBeVisible();
+  await edit.getByRole('textbox',{name:'Team name',exact:true}).fill('Enabled Team renamed');
+  await edit.getByRole('button',{name:'Add worker'}).click();
+  await edit.getByRole('combobox',{name:'Worker 2'}).selectOption('worker-two');
+  await edit.getByRole('button',{name:'Save Team version',exact:true}).click();
+  await expect(host).toHaveAttribute('aria-busy','false');
+  await expect(selected.getByRole('textbox',{name:'Team name',exact:true})).toHaveValue('Enabled Team renamed');
+  const calls=await page.evaluate(()=>(window as unknown as {
+    saFutureVersionCalls:Array<{command:string;args?:Record<string,unknown>}>
+  }).saFutureVersionCalls);
+  expect(calls).toEqual([{command:'superagent_update',args:{
+    orchestrationId:'team-future-version',expectedRevision:6,input:{
+      name:'Enabled Team renamed',coordinatorBotId:'coordinator',
+      workerBotIds:['worker-one','worker-two'],reviewerBotIds:['reviewer'],
+      workerBotId:'worker-one',councilRequired:false,
+    },
+  }}]);
+  await expect(host.getByText('Active Ticket')).toBeVisible();
+});
+
 test('native SuperAgent clears tickets when switching presets after a failed read', async ({ page }) => {
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {
@@ -1046,6 +1111,7 @@ test('Team Builder leaves an unknown saved Council state unchanged and omits it 
 });
 
 test('Team Builder disables roles from another project', async ({page}) => {
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
   await page.evaluate(async () => {

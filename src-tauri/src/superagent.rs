@@ -2611,9 +2611,9 @@ fn change_enabled(
     configuration(store,orchestration_id)
 }
 
-/// A Team edit appends a version only while disabled and before its first
-/// Ticket. Existing Ticket snapshots and grants remain bound to their admitted
-/// roles and effective profiles.
+/// A Team edit appends an immutable version and policy revision for future
+/// admissions. Existing Tickets keep the snapshot, mandate, assignment and
+/// grants they were admitted under, so an edit never rewrites active work.
 // Test-only legacy wrapper; the command boundary uses the role and policy aware
 // update below.
 #[cfg(test)]
@@ -2640,16 +2640,6 @@ fn update_configuration_roles_with_policy(
     let current = configuration(store, id)?;
     if current.policy_revision != expected_revision {
         return Err("Orchestration policy revision changed; reload before editing.".into());
-    }
-    if current.enabled {
-        return Err("Disable the orchestration before editing its Team.".into());
-    }
-    let has_tickets: bool = store.db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
-        [id], |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
-    if has_tickets {
-        return Err("Orchestrations with Tickets cannot be edited.".into());
     }
     let name = input.name.trim();
     if name.is_empty() || name.len()>120 || name.chars().any(char::is_control) {
@@ -2685,12 +2675,13 @@ fn update_configuration_roles_with_policy(
     let changed = tx.execute(
         "UPDATE sa_orchestrations SET name=?2,coordinator_bot_id=?3,worker_bot_id=?4,
             project_id=?5,policy_revision=?6,updated_at=?7
-         WHERE id=?1 AND policy_revision=?8 AND enabled=0
-           AND NOT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
+         WHERE id=?1 AND policy_revision=?8
+           AND COALESCE((SELECT MAX(version) FROM sa_team_versions
+                         WHERE orchestration_id=?1),0)=?9",
         params![id,name,coordinator.id,worker_bot_ids[0],project_id,next_revision,
-            storage::now(),expected_revision],
+            storage::now(),expected_revision,current.team_version],
     ).map_err(|e| e.to_string())?;
-    if changed!=1 { return Err("Orchestration changed or is no longer eligible for Team editing.".into()); }
+    if changed!=1 { return Err("Team changed concurrently; reload before editing.".into()); }
     let snapshot = make_team_snapshot(&tx,id,next_version,name,&project_id,next_revision,
         &coordinator.id,&worker_bot_ids,&reviewer_bot_ids,council_required,
         TeamSnapshotProvenance::Native)?;
@@ -2714,16 +2705,29 @@ fn delete_configuration(store: &Store, id: &str, expected_revision: i64) -> Resu
     Ok(())
 }
 
+/// Command-boundary Team edit. Kept separate from the Tauri window guard so
+/// tests exercise the exact input parsing and Council defaulting the command
+/// uses, while the window guard keeps its own test.
+fn update_orchestration_input(
+    store: &Store, orchestration_id: &str, expected_revision: i64, input: OrchestrationInput,
+) -> Result<Orchestration> {
+    let (legacy,workers,reviewers,council_required) = input.into_parts()?;
+    let required = council_required.unwrap_or(
+        configuration(store,orchestration_id)?.council_required,
+    );
+    update_configuration_roles_with_policy(
+        store,orchestration_id,expected_revision,&legacy,workers,reviewers,required,
+    )
+}
+
 #[tauri::command]
 pub async fn superagent_update(window: tauri::WebviewWindow, 
     state: State<'_,AppState>, orchestration_id: String,
     expected_revision: i64, input: OrchestrationInput,
 ) -> Result<Orchestration> {
     require_main_window(&window)?;
-    let store=state.store.lock().map_err(|e| e.to_string())?;
-    let (legacy,workers,reviewers,council_required) = input.into_parts()?;
-    let required = council_required.unwrap_or(configuration(&store,&orchestration_id)?.council_required);
-    update_configuration_roles_with_policy(&store,&orchestration_id,expected_revision,&legacy,workers,reviewers,required)
+    let store=state.store.lock().map_err(|e|e.to_string())?;
+    update_orchestration_input(&store,&orchestration_id,expected_revision,input)
 }
 
 #[tauri::command]
@@ -4148,7 +4152,7 @@ mod tests {
     }
 
     #[test]
-    fn enabled_orchestration_rejects_team_edit_without_mutation() {
+    fn enabled_team_edit_appends_a_future_version_and_stale_revision_is_rejected() {
         let store=fixture();
         let config=enabled(&store);
         add_worker(&store,"worker-2");
@@ -4156,17 +4160,22 @@ mod tests {
         let input=NewOrchestration {
             name:"Changed Team".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker-2".into(),
         };
+        let updated=update_configuration(&store,&config.id,before.policy_revision,&input).unwrap();
+        assert!(updated.enabled);
+        assert_eq!(updated.name,"Changed Team");
+        assert_eq!(updated.worker_bot_ids,vec!["worker-2"]);
+        assert_eq!(updated.policy_revision,before.policy_revision+1);
+        assert_eq!(updated.team_version,before.team_version+1);
+
+        // A stale revision must not append another version. The successful edit
+        // also proves the same no-op guard still settles without a new version.
         assert!(update_configuration(&store,&config.id,before.policy_revision,&input).is_err());
-        assert!(update_configuration(&store,&config.id,before.policy_revision-1,&input).is_err());
         let after=configuration(&store,&config.id).unwrap();
-        assert_eq!(after.name,before.name);
-        assert_eq!(after.coordinator_bot_id,before.coordinator_bot_id);
-        assert_eq!(after.project_id,before.project_id);
-        assert_eq!(after.policy_revision,before.policy_revision);
-        assert_eq!(after.team_version,before.team_version);
-        assert_eq!(after.worker_bot_id,before.worker_bot_id);
-        assert_eq!(after.worker_bot_ids,before.worker_bot_ids);
-        assert_eq!(after.reviewer_bot_ids,before.reviewer_bot_ids);
+        assert_eq!(after.name,"Changed Team");
+        assert_eq!(after.policy_revision,updated.policy_revision);
+        assert_eq!(after.team_version,updated.team_version);
+        assert_eq!(update_configuration(&store,&config.id,updated.policy_revision,&input).unwrap().team_version,
+            updated.team_version);
     }
 
     #[test]
@@ -4234,30 +4243,38 @@ mod tests {
     }
 
     #[test]
-    fn orchestration_with_ticket_history_rejects_team_edits_and_blocks_deletion() {
+    fn enabled_team_with_ticket_history_appends_a_future_version_and_keeps_deletion_blocked() {
         let mut store=fixture();
         let config=enabled(&store);
         let (ticket,_)=admit(&mut store,&config.id,"Immutable history","policy-guard",false).unwrap();
         let original=ticket_team_snapshot(&store,&ticket.id).unwrap();
-        let disabled=change_enabled(&store,&config.id,config.policy_revision,false).unwrap();
+        let mandate_before=serde_json::to_value(mandate(&store,&ticket.id).unwrap()).unwrap();
         add_worker(&store,"worker-2");
-        let input=NewOrchestration {
+        // The native command boundary parses ordered roles and defaults the
+        // Council policy from the current Team before the versioned edit.
+        let input=OrchestrationInput {
             name:"Future Team".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker-2".into(),
+            worker_bot_ids:None,reviewer_bot_ids:None,council_required:None,
         };
-        assert!(update_configuration(&store,&config.id,disabled.policy_revision,&input).is_err());
-        let after=configuration(&store,&config.id).unwrap();
-        assert_eq!(after.name,disabled.name);
-        assert_eq!(after.coordinator_bot_id,disabled.coordinator_bot_id);
-        assert_eq!(after.project_id,disabled.project_id);
-        assert!(!after.enabled);
-        assert_eq!(after.team_version,disabled.team_version);
-        assert_eq!(after.policy_revision,disabled.policy_revision);
-        assert_eq!(after.worker_bot_id,disabled.worker_bot_id);
-        assert_eq!(after.worker_bot_ids,disabled.worker_bot_ids);
-        assert_eq!(after.reviewer_bot_ids,disabled.reviewer_bot_ids);
+        let updated=update_orchestration_input(&store,&config.id,config.policy_revision,input).unwrap();
+        assert!(updated.enabled);
+        assert_eq!(updated.name,"Future Team");
+        assert_eq!(updated.worker_bot_ids,vec!["worker-2"]);
+        assert_eq!(updated.policy_revision,config.policy_revision+1);
+        assert_eq!(updated.team_version,config.team_version+1);
+
+        // The existing Ticket keeps its exact admitted roles and mandate.
         assert_eq!(ticket_team_snapshot(&store,&ticket.id).unwrap(),original);
+        assert_eq!(serde_json::to_value(mandate(&store,&ticket.id).unwrap()).unwrap(),mandate_before);
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().objective,"Immutable history");
-        assert!(delete_configuration(&store,&config.id,disabled.policy_revision).is_err());
+        // A Ticket admitted after the edit binds the new immutable version.
+        let (future,_)=admit(&mut store,&config.id,"Future task","policy-guard-future",false).unwrap();
+        let future_snapshot=ticket_team_snapshot(&store,&future.id).unwrap();
+        assert_eq!(future_snapshot.team_version,updated.team_version);
+        assert_eq!(future_snapshot.policy.policy_revision,updated.policy_revision);
+        assert_eq!(future_snapshot.worker_bot_ids,vec!["worker-2"]);
+        // Ticket history still blocks deletion even after a future-only edit.
+        assert!(delete_configuration(&store,&config.id,updated.policy_revision).is_err());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().objective,"Immutable history");
     }
 
@@ -5823,24 +5840,30 @@ mod tests {
     }
 
     #[test]
-    fn active_ticket_remains_bound_to_its_team_when_edit_is_rejected() {
+    fn active_ticket_remains_bound_to_its_team_after_a_future_version_edit() {
         let mut store=fixture();
         let cfg=enabled(&store);
         let (ticket,_)=admit(&mut store,&cfg.id,"Review","revision-1",false).unwrap();
         let sid=assignment_session(&store,&ticket.id).unwrap().unwrap();
-        let input=NewOrchestration{
+        let original=ticket_team_snapshot(&store,&ticket.id).unwrap();
+        let ticket_before=serde_json::to_value(ticket_snapshot(&store,&ticket.id,20).unwrap()).unwrap();
+        let input=OrchestrationInput {
             name:"Future policy".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
+            worker_bot_ids:None,reviewer_bot_ids:None,council_required:None,
         };
-        assert!(update_configuration(&store,&cfg.id,cfg.policy_revision,&input).is_err());
-        let after=configuration(&store,&cfg.id).unwrap();
-        assert_eq!(after.policy_revision,cfg.policy_revision);
-        assert_eq!(after.team_version,cfg.team_version);
-        assert_eq!(after.coordinator_bot_id,cfg.coordinator_bot_id);
-        assert_eq!(after.project_id,cfg.project_id);
-        assert_eq!(after.worker_bot_ids,cfg.worker_bot_ids);
-        assert_eq!(after.reviewer_bot_ids,cfg.reviewer_bot_ids);
+        let updated=update_orchestration_input(&store,&cfg.id,cfg.policy_revision,input).unwrap();
+        assert!(updated.enabled);
+        assert_eq!(updated.policy_revision,cfg.policy_revision+1);
+        assert_eq!(updated.team_version,cfg.team_version+1);
+        // The running assignment keeps the original role/profile snapshot and
+        // mandate; the future revision exists only for later admissions.
+        assert_eq!(ticket_team_snapshot(&store,&ticket.id).unwrap(),original);
+        assert_eq!(
+            serde_json::to_value(ticket_snapshot(&store,&ticket.id,20).unwrap()).unwrap(),
+            ticket_before,
+        );
         assert!(read_only_policy(&store,&sid).unwrap().is_some());
-        assert!(on_run_finished(&store,&sid,true,"Stale result").unwrap());
+        assert!(on_run_finished(&store,&sid,true,"Current result").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"waiting_approval");
     }
 }

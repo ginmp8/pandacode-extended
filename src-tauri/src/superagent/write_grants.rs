@@ -672,13 +672,47 @@ mod tests {
         assert!(validate_paths(&["src/main.rs".into(),"src/main.rs".into()]).is_err());
     }
 
+    /// Exact stored authority rows for one Ticket. A Team edit must not rewrite
+    /// any of these bytes, so compare the JSON projections before and after.
+    #[cfg(windows)]
+    fn authority_rows(store: &Store, ticket_id: &str) -> (String,String,String,String) {
+        store.db.query_row(
+            "SELECT
+               COALESCE((SELECT snapshot_json FROM sa_ticket_team_snapshots
+                         WHERE ticket_id=?1),''),
+               COALESCE((SELECT json_group_array(json_object(
+                   'ticket',ticket_id,'actor',actor,'authorization',authorization_id,
+                   'policy',policy_revision,'project',project_id,'expires',expires_at,
+                   'revoked',revoked,'tools',allowed_tools,
+                   'sideEffects',allowed_side_effects,'created',created_at))
+                 FROM (SELECT * FROM sa_mandates WHERE ticket_id=?1
+                       ORDER BY created_at)),''),
+               COALESCE((SELECT json_group_array(json_object(
+                   'id',id,'bot',bot_id,'session',session_id,'state',state,
+                   'attempt',attempt,'result',result,'created',created_at,
+                   'updated',updated_at))
+                 FROM (SELECT * FROM sa_assignments WHERE ticket_id=?1
+                       ORDER BY created_at,id)),''),
+               COALESCE((SELECT json_group_array(json_object(
+                   'id',id,'assignment',assignment_id,'session',session_id,
+                   'revision',ticket_revision,'policy',policy_revision,
+                   'project',project_id,'actor',actor,'tool',tool_name,
+                   'paths',allowed_paths,'expires',expires_at,'revoked',revoked,
+                   'created',created_at,'revokedAt',revoked_at))
+                 FROM (SELECT * FROM sa_worker_write_grants WHERE ticket_id=?1
+                       ORDER BY created_at,id)),'')",
+            [ticket_id],
+            |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+        ).unwrap()
+    }
+
     #[cfg(windows)]
     #[test]
-    fn rejected_team_edits_keep_an_active_ticket_snapshot_and_grant_unchanged() {
+    fn editing_a_future_team_version_keeps_an_active_ticket_snapshot_and_grant_unchanged() {
         let fixture=Fixture::new();
         let old_ticket=fixture.queued_ticket(&fixture.config_a,"snapshot-grant-edit");
         let paths=vec!["src/allowed.txt".to_owned()];
-        let (worker_ticket,session_id,grant_before,old_snapshot) = {
+        let (worker_ticket,session_id,grant_before,old_snapshot,old_authority) = {
             let mut store=fixture.store();
             let old_snapshot=super::super::ticket_team_snapshot(&store,&old_ticket.id).unwrap();
             let (running,_,_,_)=super::super::prepare_coordinated_worker_inner(
@@ -687,7 +721,8 @@ mod tests {
             let session_id=super::super::assignment_session(&store,&running.id).unwrap().unwrap();
             let grant=summary_for_ticket(&store,&running.id).unwrap();
             assert!(current_grant(&store,&session_id,Some(&grant.id)).unwrap().is_some());
-            (running,session_id,grant,old_snapshot)
+            let rows=authority_rows(&store,&running.id);
+            (running,session_id,grant,old_snapshot,rows)
         };
         {
             let mut store=fixture.store();
@@ -710,54 +745,47 @@ mod tests {
                 name:"Write fixture A v2".into(),coordinator_bot_id:"router-a".into(),
                 worker_bot_id:"worker-a".into(),
             };
-            // An enabled Team rejects the edit before it can mutate the saved
-            // version. The active Ticket and its current grant stay exact.
-            let enabled_error=super::super::update_configuration_roles(
+            // Editing an enabled Team with Tickets appends a future-only version.
+            let updated=super::super::update_configuration_roles(
                 &store,&current.id,current.policy_revision,&requested,
                 vec!["worker-a".into(),"worker-extra".into()],vec!["reviewer-extra".into()],
-            ).unwrap_err();
-            assert!(enabled_error.contains("Disable the orchestration"),"{enabled_error}");
-            assert_eq!(super::super::configuration(&store,&current.id).unwrap().team_version,current.team_version);
+            ).unwrap();
+            assert!(updated.enabled);
+            assert_eq!(updated.name,"Write fixture A v2");
+            assert_eq!(updated.worker_bot_ids,vec!["worker-a","worker-extra"]);
+            assert_eq!(updated.reviewer_bot_ids,vec!["reviewer-extra"]);
+            assert_eq!(updated.team_version,current.team_version+1);
+            assert_eq!(updated.policy_revision,current.policy_revision+1);
+
+            // The active Ticket keeps its exact admitted snapshot, mandate,
+            // assignment rows and write grant bytes.
             assert_eq!(super::super::ticket_team_snapshot(&store,&worker_ticket.id).unwrap(),old_snapshot);
+            assert_eq!(authority_rows(&store,&worker_ticket.id),old_authority);
             assert_eq!(serde_json::to_value(summary_for_ticket(&store,&worker_ticket.id).unwrap()).unwrap(),
                 serde_json::to_value(&grant_before).unwrap());
             let active=current_grant(&store,&session_id,Some(&grant_before.id)).unwrap().unwrap();
             assert_eq!(serde_json::to_value(active.summary).unwrap(),serde_json::to_value(&grant_before).unwrap());
 
-            // Versioned future Team edits are not implemented: once a Ticket
-            // exists the native guard rejects every edit. Disabling is a native
-            // revocation, not a Team edit. The immutable Ticket snapshot
-            // survives, while the live grant is revoked with its mandate and
-            // Ticket history still blocks the edit.
-            let disabled=super::super::change_enabled(
-                &store,&fixture.config_a,current.policy_revision,false,
-            ).unwrap();
-            assert!(!disabled.enabled);
-            assert_eq!(super::super::ticket_team_snapshot(&store,&worker_ticket.id).unwrap(),old_snapshot);
-            assert!(summary_for_ticket(&store,&worker_ticket.id).unwrap().revoked);
-            assert!(matches!(current_grant(&store,&session_id,Some(&grant_before.id)),Err(_)|Ok(None)));
-            let disabled_error=super::super::update_configuration_roles(
-                &store,&current.id,disabled.policy_revision,&requested,
-                vec!["worker-a".into(),"worker-extra".into()],vec!["reviewer-extra".into()],
-            ).unwrap_err();
-            assert!(disabled_error.contains("Orchestrations with Tickets cannot be edited"),"{disabled_error}");
-            assert_eq!(super::super::ticket_team_snapshot(&store,&worker_ticket.id).unwrap(),old_snapshot);
-
-            // Re-enable only after the rejected edit. A future Ticket still
-            // binds the original saved Team version; no silently edited Team
-            // version can take effect while this Ticket history exists.
-            let reenabled=super::super::change_enabled(
-                &store,&fixture.config_a,disabled.policy_revision,true,
-            ).unwrap();
-            assert!(reenabled.enabled);
+            // A Ticket admitted after the edit binds the new immutable version.
             let (future,launched)=super::super::admit(
                 &mut store,&fixture.config_a,"Future ticket","snapshot-grant-future",true,
             ).unwrap();
             assert!(!launched);
             let future_snapshot=super::super::ticket_team_snapshot(&store,&future.id).unwrap();
-            assert_eq!(future_snapshot.team_version,old_snapshot.team_version);
-            assert_eq!(future_snapshot.worker_bot_ids,old_snapshot.worker_bot_ids);
-            assert_eq!(future_snapshot.reviewer_bot_ids,old_snapshot.reviewer_bot_ids);
+            assert_eq!(future_snapshot.team_version,updated.team_version);
+            assert_eq!(future_snapshot.policy.policy_revision,updated.policy_revision);
+            assert_eq!(future_snapshot.worker_bot_ids,vec!["worker-a","worker-extra"]);
+            assert_eq!(future_snapshot.reviewer_bot_ids,vec!["reviewer-extra"]);
+
+            // Disabling remains a native revocation: the immutable snapshot
+            // survives and the live grant is revoked with its mandate.
+            let disabled=super::super::change_enabled(
+                &store,&fixture.config_a,updated.policy_revision,false,
+            ).unwrap();
+            assert!(!disabled.enabled);
+            assert_eq!(super::super::ticket_team_snapshot(&store,&worker_ticket.id).unwrap(),old_snapshot);
+            assert!(summary_for_ticket(&store,&worker_ticket.id).unwrap().revoked);
+            assert!(matches!(current_grant(&store,&session_id,Some(&grant_before.id)),Err(_)|Ok(None)));
         }
     }
 

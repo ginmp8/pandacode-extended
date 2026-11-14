@@ -577,9 +577,9 @@ pub(super) fn verified_parent_seats(
             continue;
         };
         if seat.parent_worker_id.is_empty() || seat.child_session_id.is_empty()
-            || !bots.insert(seat.bot_id.as_str())
-            || !workers.insert(seat.parent_worker_id.as_str())
-            || !sessions.insert(seat.child_session_id.as_str())
+            || !bots.insert(seat.bot_id.clone())
+            || !workers.insert(seat.parent_worker_id.clone())
+            || !sessions.insert(seat.child_session_id.clone())
             || root.workers.iter().any(|worker|
                 worker.id == seat.parent_worker_id || worker.session_id == seat.child_session_id)
         {

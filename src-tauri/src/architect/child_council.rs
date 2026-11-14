@@ -48,6 +48,9 @@ pub struct ChildReservationView {
     /// Native verified leaf result, not a verified composite parent vote.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified_child_receipt: Option<VerifiedChildReceipt>,
+    /// Native correlation to exactly one child receipt, not a passed root vote.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authenticated_parent_seat: Option<AuthenticatedParentSeat>,
 }
 
 fn digest(data: &[u8]) -> String { format!("{:x}", Sha256::digest(data)) }
@@ -368,6 +371,25 @@ pub struct VerifiedChildReceipt {
     pub leaf_worker_ids: Vec<String>,
 }
 
+/// A task-scoped composite seat backed by a revalidated real child Council.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AuthenticatedParentSeat {
+    pub root_session_id: String,
+    pub root_cycle_id: String,
+    pub parent_worker_id: String,
+    pub child_session_id: String,
+    pub bot_id: String,
+    pub objective_sha256: String,
+    pub policy_sha256: String,
+    pub child_receipt_sha256: String,
+    pub lowest_score: f64,
+}
+
+fn parent_seat_key(root: &TeamSnapshot, bot_id: &str) -> String {
+    format!("native-council-parent-seat:{}:{bot_id}", root.council_since)
+}
+
 fn receipt_key(root: &TeamSnapshot, bot_id: &str) -> String {
     format!("native-council-child-receipt:{}:{bot_id}", root.council_since)
 }
@@ -468,6 +490,61 @@ fn record_verified_receipt(
     Ok(true)
 }
 
+/// Bind the real child receipt to one root-owned native worker identity.
+fn parent_seat(
+    store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
+    child: &TeamSnapshot, persist: bool,
+) -> Result<Option<AuthenticatedParentSeat>> {
+    let receipt = read_verified_receipt(store, root, record, child)?;
+    let existing: Option<(String, String)> = store.db.query_row(
+        "SELECT content,worker_id FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_parent_seat'",
+        params![root.session_id, parent_seat_key(root, &record.bot_id)],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let candidate = if let Some(receipt) = receipt {
+        let (count, worker): (i64, Option<String>) = store.db.query_row(
+            "SELECT COUNT(*), MIN(worker_id) FROM architect_workers
+             WHERE parent_session_id=?1 AND session_id=?2",
+            params![root.session_id, record.child_session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|e| e.to_string())?;
+        if count != 1 {
+            return Err("child_council_stale: composite root seat has invalid native ownership.".into());
+        }
+        Some(AuthenticatedParentSeat {
+            root_session_id: root.session_id.clone(),
+            root_cycle_id: record.root_cycle_id.clone(),
+            parent_worker_id: worker.ok_or("child_council_stale: missing parent worker identity.")?,
+            child_session_id: record.child_session_id.clone(),
+            bot_id: record.bot_id.clone(),
+            objective_sha256: record.objective_sha256.clone(),
+            policy_sha256: record.policy_sha256.clone(),
+            child_receipt_sha256: digest(&serde_json::to_vec(&receipt).map_err(|e| e.to_string())?),
+            lowest_score: receipt.lowest_score,
+        })
+    } else { None };
+    if let Some((content, owned_child)) = existing {
+        let recorded: AuthenticatedParentSeat = serde_json::from_str(&content)
+            .map_err(|_| "child_council_stale: malformed composite parent seat.")?;
+        if owned_child != record.child_session_id || candidate.as_ref() != Some(&recorded) {
+            return Err("child_council_stale: composite parent seat no longer matches native evidence.".into());
+        }
+        return Ok(Some(recorded));
+    }
+    if persist {
+        if let Some(candidate) = candidate.as_ref() {
+            super::record_request(
+                store, &root.session_id, &parent_seat_key(root, &record.bot_id),
+                "council_parent_seat",
+                &serde_json::to_string(candidate).map_err(|e| e.to_string())?,
+                &record.child_session_id,
+            )?;
+        }
+    }
+    Ok(candidate.filter(|_| persist))
+}
+
 /// Trusted root-only transition: allocate fresh read-only reviewer sessions
 /// after the root's actual writing workers settle. No bot conversation, prompt
 /// claim or persisted child reservation can request this operation.
@@ -489,6 +566,10 @@ pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
             .ok_or("child_council_stale: reserved child Architect is missing.")?;
         if child.status == "running" {
             created |= record_verified_receipt(store, root, &record, &child)?;
+            let had_parent_seat = parent_seat(store, root, &record, &child, false)?.is_some();
+            if parent_seat(store, root, &record, &child, true)?.is_some() && !had_parent_seat {
+                created = true;
+            }
             continue;
         }
         if child.status != "blocked" || !child.workers.is_empty() {
@@ -733,6 +814,7 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
         let team = super::load(store, &record.child_session_id)?
             .ok_or("child_council_stale: child team is missing.")?;
         let verified_child_receipt = read_verified_receipt(store, root, &record, &team)?;
+        let authenticated_parent_seat = parent_seat(store, root, &record, &team, false)?;
         let active = team.status == "running";
         Ok(ChildReservationView {
             bot_id: child.bot_id.clone(),
@@ -742,10 +824,13 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
             observed_leaf_usage: (!team.workers.is_empty())
                 .then(|| super::council::inspection(&team, false).map(|view| view.usage))
                 .flatten(),
-            status: if verified_child_receipt.is_some() {
+            status: if authenticated_parent_seat.is_some() {
+                "parent_composite_ready_root_pending"
+            } else if verified_child_receipt.is_some() {
                 "child_evidence_ready_root_pending"
             } else if active { "reviewing" } else { "blocked_until_native_child_review" },
             verified_child_receipt,
+            authenticated_parent_seat,
         })
     }).collect()
 }

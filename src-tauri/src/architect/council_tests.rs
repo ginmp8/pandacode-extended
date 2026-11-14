@@ -3405,7 +3405,8 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
         let store = state.store.lock().unwrap();
         let root = load(&store, &sid).unwrap().unwrap();
         assert!(child_council::inspect(&store, &root).unwrap()
-            .iter().all(|view| view.verified_child_receipt.is_none()));
+            .iter().all(|view| view.verified_child_receipt.is_none()
+                && view.authenticated_parent_seat.is_none()));
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1 AND kind='council_child_receipt'",
             [&sid], |row| row.get::<_, i64>(0),
@@ -3421,9 +3422,14 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
         usage.unique_attempts == 2 && usage.token_count.is_none()
             && usage.cost_amount.is_none() && usage.cost_currency.is_none())));
     assert!(inspected.iter().all(|view| {
-        view.status == "child_evidence_ready_root_pending"
+        view.status == "parent_composite_ready_root_pending"
             && view.verified_child_receipt.as_ref().is_some_and(|receipt|
                 receipt.leaf_worker_ids.len() == 2 && receipt.lowest_score == 9.5)
+            && view.authenticated_parent_seat.as_ref().is_some_and(|seat|
+                seat.root_session_id == sid && seat.child_session_id == view.child_session_id
+                    && seat.root_cycle_id == format!("{}:{}", sid, root.council_since)
+                    && seat.bot_id == view.bot_id && seat.lowest_score == 9.5
+                    && !seat.parent_worker_id.is_empty())
     }));
     assert_eq!(council::status(&root).unwrap().state, "blocked",
         "verified child leaves do not automatically create authenticated parent votes");
@@ -3434,9 +3440,34 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
         [&sid], |row| row.get(0),
     ).unwrap();
     assert_eq!(count, 2);
+    let parent_count: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_parent_seat'",
+        [&sid], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(parent_count, 2, "each child contributes one native parent seat");
+    let original: String = store.db.query_row(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_parent_seat' AND worker_id=?2",
+        rusqlite::params![sid, inspected[0].child_session_id], |row| row.get(0),
+    ).unwrap();
     store.db.execute(
         "UPDATE architect_requests SET content='{}'
-         WHERE parent_session_id=?1 AND kind='council_child_receipt' AND worker_id=?2",
+         WHERE parent_session_id=?1 AND kind='council_parent_seat' AND worker_id=?2",
+        rusqlite::params![sid, inspected[0].child_session_id],
+    ).unwrap();
+    assert!(child_council::inspect(&store, &root).is_err(),
+        "tampered composite seat must fail native read-time revalidation");
+    store.db.execute(
+        "UPDATE architect_requests SET content=?3
+         WHERE parent_session_id=?1 AND kind='council_parent_seat' AND worker_id=?2",
+        rusqlite::params![sid, inspected[0].child_session_id, original],
+    ).unwrap();
+    assert_eq!(child_council::inspect(&store, &root).unwrap().iter()
+        .filter(|view| view.authenticated_parent_seat.is_some()).count(), 2);
+    store.db.execute(
+        "UPDATE architect_requests SET content='{}'
+         WHERE parent_session_id=?1 AND kind='council_child_receipt' AND worker_id=?2"
         rusqlite::params![sid, inspected[0].child_session_id],
     ).unwrap();
     assert!(child_council::inspect(&store, &root).is_err(),

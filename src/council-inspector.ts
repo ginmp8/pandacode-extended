@@ -159,6 +159,18 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       ' · Cost ' + (usage.costAmount === null || !usage.costCurrency ? 'unknown' : escape(String(usage.costAmount) + ' ' + usage.costCurrency)) +
       '</p>'
     : '';
+  const composed = inspection.composedUsage;
+  const composedHtml = composed && children.length
+    ? '<p class="council-composed-usage">Root + child native attempts: ' + escape(String(composed.uniqueAttempts)) +
+      ' · Cumulative queue ' + escape(observedDuration('', composed.cumulativeQueueWaitMs).trim()) +
+      ' (' + escape(String(composed.queueMeasuredAttempts)) + ' measured)' +
+      ' · Cumulative observed span ' + escape(observedDuration('', composed.cumulativeObservedSpanMs).trim()) +
+      ' (' + escape(String(composed.spanMeasuredAttempts)) + ' measured)' +
+      ' · Provider tokens ' + (composed.tokenCount == null ? 'unknown' : escape(String(composed.tokenCount))) +
+      ' · Cost ' + (composed.costAmount == null || !composed.costCurrency
+        ? 'unknown' : escape(String(composed.costAmount) + ' ' + composed.costCurrency)) +
+      ' · Child reservations and parent composite seats excluded.</p>'
+    : '';
   const groups = inspection.usageByRoundSource ?? [];
   const groupHtml = groups.length
     ? '<section aria-label="Root usage by round and source" class="council-usage-breakdown">' +
@@ -181,7 +193,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     '</strong> · ' + (inspection.status.stale ? 'Stale revision' : 'Current native status') +
     ': ' + escape(inspection.status.state) + ' · Revision ' + escape(String(inspection.teamRevision)) +
     '</p>' + criteriaHtml +
-    completion + sourceBreakdown + strategyHtml + usageHtml + groupHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
+    completion + sourceBreakdown + strategyHtml + usageHtml + composedHtml + groupHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
     (attempts || '<p>No reviewer attempts have been admitted.</p>') + childHtml + findingsHtml + '</div>';
 }
 

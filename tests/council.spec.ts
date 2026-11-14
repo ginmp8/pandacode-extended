@@ -256,6 +256,12 @@ test('child Council drill-down shows actual native leaves without root votes or 
     mode: 'm4', cycleStartedAt: 1000, teamRevision: 7,
     status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: true },
     verifiedPass: false, criteria: [], attempts: [],
+    usage: { uniqueAttempts: 0, queueMeasuredAttempts: 0, spanMeasuredAttempts: 0,
+      cumulativeQueueWaitMs: null, cumulativeObservedSpanMs: null,
+      tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+    composedUsage: { uniqueAttempts: 2, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
+      cumulativeQueueWaitMs: 250, cumulativeObservedSpanMs: 800,
+      tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
     reservedChildren: [{
       botId: 'security-child', childSessionId: 'child-session', rootCycleId: 'task:1000',
       requiredLeafReviewers: 2, status: 'reviewing',
@@ -287,6 +293,11 @@ test('child Council drill-down shows actual native leaves without root votes or 
   await expect(leaves).toContainText('Tokens unknown');
   await expect(leaves.getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
   await expect(leaves.locator('img')).toHaveCount(0);
+  const combined = panel(page).locator('.council-composed-usage');
+  await expect(combined).toContainText('Root + child native attempts: 2');
+  await expect(combined).toContainText('Provider tokens unknown');
+  await expect(combined).toContainText('Cost unknown');
+  await expect(combined).toContainText('parent composite seats excluded');
   await expect(children).toContainText('No verified child receipt is available; no parent vote');
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
   await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);

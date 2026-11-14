@@ -477,6 +477,9 @@ pub struct CouncilInspection {
     pub attempts: Vec<CouncilInspectionAttempt>,
     /// Summed native observations, not wall-clock elapsed time or a provider billing receipt.
     pub usage: CouncilUsageTotals,
+    /// Root and task-owned child leaf attempts counted once; no provider billing is inferred.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub composed_usage: Option<CouncilUsageTotals>,
     /// Root-only native observations grouped by round and reviewer source. Each worker ID
     /// contributes to at most one group; unexecuted child reservations contribute nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -539,6 +542,19 @@ fn usage_totals(attempts: &[CouncilInspectionAttempt]) -> CouncilUsageTotals {
         cost_currency: None,
         usage_provenance: "unknown",
     }
+}
+/// Account for every actually admitted root and child leaf attempt. Child
+/// reservations and composite parent seats are NOT additional attempts. The
+/// existing native deduplication and unknown-billing semantics remain intact.
+pub(super) fn composed_usage(
+    roots: &[CouncilInspectionAttempt],
+    children: &[super::child_council::ChildReservationView],
+) -> CouncilUsageTotals {
+    let mut attempts = roots.to_vec();
+    for child in children {
+        attempts.extend(child.leaf_attempts.iter().cloned());
+    }
+    usage_totals(&attempts)
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -744,7 +760,7 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
         cycle_started_at: team.council_since, team_revision: team.revision,
         status, verified_pass, verified_completion, criteria: config.criteria.clone(),
         usage_by_round_source: usage_by_round_source(&attempts),
-        usage: usage_totals(&attempts), attempts,
+        usage: usage_totals(&attempts), attempts, composed_usage: None,
         reserved_children: Vec::new(), reported_findings: Vec::new(),
     })
 }

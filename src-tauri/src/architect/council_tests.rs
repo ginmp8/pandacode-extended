@@ -3866,6 +3866,16 @@ fn child_only_parallel_root_finishes_from_real_revalidated_composite_seats() {
     assert!(verified_council_pass(&store, &saved));
     let inspect = council_inspection_state(&store, &sid).unwrap().unwrap();
     assert!(inspect.verified_pass);
+    assert_eq!(inspect.usage.unique_attempts, 0, "M4 has no direct root reviewer");
+    let composed = inspect.composed_usage.as_ref().expect("task-scoped child usage");
+    assert_eq!(composed.unique_attempts, 4, "two child Councils issue four real leaves, not two votes");
+    assert_eq!(composed.queue_measured_attempts, 4);
+    assert!(composed.token_count.is_none() && composed.cost_amount.is_none());
+    let mut duplicate_leaf_id = inspect.reserved_children.clone();
+    duplicate_leaf_id[1].leaf_attempts[0].worker_id =
+        duplicate_leaf_id[0].leaf_attempts[0].worker_id.clone();
+    assert_eq!(council::composed_usage(&inspect.attempts, &duplicate_leaf_id).unique_attempts, 3,
+        "a replayed worker ID cannot be double-billed or counted twice");
     assert_eq!(inspect.verified_completion.unwrap().lowest, 9.5);
     assert_eq!(inspect.reserved_children.len(), 2);
     let child_id = inspect.reserved_children[0].child_session_id.clone();
@@ -3961,6 +3971,12 @@ fn assert_nested_m5_root_and_child_callbacks(strategy: council::CouncilExecution
     assert_eq!(saved.council_status.as_ref().unwrap().state, "passed");
     assert_eq!(saved.council_status.as_ref().unwrap().lowest, Some(9.5));
     assert!(verified_council_pass(&store, &saved));
+    let inspected = council_inspection_state(&store, &sid).unwrap().unwrap();
+    assert_eq!(inspected.usage.unique_attempts, 1, "root attempt is separate from child leaves");
+    assert_eq!(inspected.reserved_children.len(), 1);
+    let composed = inspected.composed_usage.expect("native hierarchical usage");
+    assert_eq!(composed.unique_attempts, 3, "one automatic root reviewer and two child leaves");
+    assert!(composed.token_count.is_none() && composed.cost_amount.is_none());
     if strategy == council::CouncilExecutionStrategy::Escalated {
         let children = child_council::verified_parent_seats(&store, &saved)
             .unwrap().unwrap();

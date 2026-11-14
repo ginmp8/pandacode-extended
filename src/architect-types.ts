@@ -111,6 +111,8 @@ export interface CouncilInspection {
   attempts: CouncilInspectionAttempt[];
   /** Optional for older native builds / existing preview fixtures. */
   usage?: CouncilUsageTotals;
+  /** Root and child native attempts, excluding reservations and composite seats; provider billing remains unknown. */
+  composedUsage?: CouncilUsageTotals | null;
   /** Absent in older builds; all groups together count each root worker ID at most once. */
   usageByRoundSource?: CouncilUsageGroup[];
   reportedFindings?: CouncilReportedFinding[];

@@ -121,6 +121,17 @@ jobs:
       # Tauri embeds the built frontend, so dist/ must exist before cargo runs.
       - run: npm ci
       - run: npm run build
+      - name: Diagnose locked Rust dependencies without modifying committed sources
+        shell: bash
+        run: |
+          if cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null; then
+            exit 0
+          fi
+          cargo generate-lockfile --manifest-path src-tauri/Cargo.toml
+          echo '--- BEGIN GENERATED CARGO LOCK DIFF ---'
+          git diff -- src-tauri/Cargo.lock
+          echo '--- END GENERATED CARGO LOCK DIFF ---'
+          exit 1
       - run: cargo test --locked --manifest-path src-tauri/Cargo.toml --lib
       - if: ${{ !cancelled() }}
         run: cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings

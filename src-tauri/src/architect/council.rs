@@ -1021,6 +1021,18 @@ fn mixed_source_quorum(team: &TeamSnapshot, config: &CouncilConfig, round: usize
     selected.len() == config.reviewer_bot_ids.len() && automatic == config.automatic_reviewers
 }
 
+/// Count only distinct native worker/session identities in a scored round.
+fn independent_scored_sessions(team: &TeamSnapshot, round: usize) -> bool {
+    let mut workers = std::collections::HashSet::new();
+    let mut sessions = std::collections::HashSet::new();
+    in_round(team, round)
+        .filter(|(worker, seat)| counts(worker, seat) && seat.score.is_some())
+        .all(|(worker, _)| !worker.id.is_empty()
+            && !worker.session_id.is_empty()
+            && workers.insert(worker.id.as_str())
+            && sessions.insert(worker.session_id.as_str()))
+}
+
 /// One check's view of the cycle's rounds, computed once: the latest round, whether each is complete
 /// (oldest first), how many started, and the lenses the first round fixed.
 struct Rounds {
@@ -1046,6 +1058,9 @@ impl Rounds {
             let count = scored(team, round).count();
             let required = required_reviewers(team, config, round);
             let complete = !reconfigured(team, round) && count == seated && count >= required
+                // A native reviewer session cannot occupy multiple counted seats,
+                // including legacy M1/M2 and after restoring a persisted task.
+                && independent_scored_sessions(team, round)
                 && mixed_source_quorum(team, config, round)
                 && view.missing(team, round).is_empty() && missing_required_criteria(team, config, round).is_empty();
             view.done.push(complete);
@@ -1540,6 +1555,9 @@ fn two_phase_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view: &Round
             || !criterion_blockers(team, config, round).is_empty()
             || !unverified_required_skill_checks(team, round).is_empty()
             || severe_findings(team, round)
+            // A phase-two numeric score cannot silently resolve a reported
+            // contradiction without independently verified evidence.
+            || reported_conflicts(team, round)
         {
             return false;
         }

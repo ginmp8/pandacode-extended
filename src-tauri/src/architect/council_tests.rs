@@ -558,6 +558,22 @@ fn selected_bot_config_requires_distinct_bounded_identity_roster() {
 }
 
 #[test]
+fn native_legacy_council_quorum_rejects_duplicate_scored_sessions() {
+    let team = team_with(on(9.0, 3, 2), vec![
+        seat("legacy-first", 1, Some(9.7), SINCE + 1),
+        seat("legacy-second", 1, Some(9.6), SINCE + 2),
+    ]);
+    assert_eq!(council::status(&team).unwrap().state, "passed");
+    let mut reused = team.clone();
+    reused.workers[1].session_id = reused.workers[0].session_id.clone();
+    assert_ne!(council::status(&reused).unwrap().state, "passed");
+    assert!(finish_refusal(&reused).is_some());
+    let mut missing = team;
+    missing.workers[1].session_id.clear();
+    assert_ne!(council::status(&missing).unwrap().state, "passed");
+}
+
+#[test]
 fn native_user_forced_s2_requires_two_fresh_independent_rounds_before_pass() {
     let mut config = on(9.0, 4, 2);
     config.strategy = council::CouncilExecutionStrategy::Escalated;
@@ -915,6 +931,19 @@ fn native_s3_uses_fresh_read_only_challengers_and_never_passes_phase_one_alone()
     assert_eq!(council::status(&team).unwrap().state, "passed");
     assert!(finish_refusal(&team).is_none());
     assert!(council::round_for(&team, &config, None).unwrap_err().contains("challenge allocation"));
+
+    // Either phase can report an unresolved contradiction; a numeric score
+    // from phase two is not proof that the conflict was independently resolved.
+    for index in [0, 3] {
+        let mut contradicted = team.clone();
+        contradicted.workers[index].council.as_mut().unwrap().reported_conflict = true;
+        assert_ne!(council::status(&contradicted).unwrap().state, "passed");
+        assert!(finish_refusal(&contradicted).unwrap().contains("S3 two-phase"));
+    }
+
+    let mut shared_session = team.clone();
+    shared_session.workers[1].session_id = shared_session.workers[0].session_id.clone();
+    assert_ne!(council::status(&shared_session).unwrap().state, "passed");
 
     let mut replay = team.clone();
     replay.workers[2].id = "phase-one-a".into();

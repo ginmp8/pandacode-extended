@@ -708,3 +708,13 @@ source and Check Run receipts. Neither reads nor issue-comment grants implement
 a background GitHub subscription or general Auto mode. See
 [`superagent-unified-integration.md`](superagent-unified-integration.md) for
 source lineage and the outstanding acceptance gates.
+
+
+### Durable headless retry requests
+
+`pandacode serve --retry-ticket <ticket-id> <revision>` records one exact-revision
+retry for a blocked Ticket. Inspect via `--inspect-retry-request` with the same
+arguments. A separate CLI never launches providers or invokes startup recovery.
+Only the live server claims queued requests using native admission, assignment,
+mandate, effect and checkout guards. Duplicate requests deduplicate; an ambiguous
+handoff remains uncertain and never automatically replays.

@@ -13,6 +13,7 @@ pub(crate) mod auto;
 pub(crate) mod council_adapter;
 pub mod effects;
 pub(crate) mod write_grants;
+pub(crate) mod headless_dispatch;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -6035,6 +6036,25 @@ mod tests {
             "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
             [&ticket.id], |r| r.get::<_, String>(0),
         ).unwrap(), "uncertain");
+    }
+
+    #[test]
+    fn headless_retry_request_is_durable_and_revision_bound() {
+        let mut store=fixture();
+        let team=enabled(&store);
+        let (ticket,started)=admit_role_with_staging(
+            &mut store,&team.id,"Private retry objective",
+            "headless-retry-intent",true,false,true,
+        ).unwrap();
+        assert!(!started);
+        let first=headless_dispatch::request(&store.path,&ticket.id,ticket.revision).unwrap();
+        let value:serde_json::Value=serde_json::from_str(&first).unwrap();
+        assert_eq!(value["state"],"queued");
+        assert_eq!(value["providerCompleted"],false);
+        assert!(!first.contains("Private retry objective"));
+        assert_eq!(first,headless_dispatch::request(&store.path,&ticket.id,ticket.revision).unwrap());
+        assert_eq!(first,headless_dispatch::inspect(&store.path,&ticket.id,ticket.revision).unwrap());
+        assert!(headless_dispatch::request(&store.path,&ticket.id,ticket.revision+1).is_err());
     }
 
     #[test]

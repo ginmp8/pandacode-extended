@@ -140,6 +140,7 @@ pub(crate) fn lock_dispatch_before_wait(
     let lock_path = database_path.with_extension("superagent-effect-dispatch.lock");
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(lock_path)
@@ -1226,7 +1227,7 @@ mod tests {
                     let changed=store.db.execute(
                         "UPDATE bot_threads SET external_id='detached'
                          WHERE session_id=?1 AND channel_id=?2",
-                        params![&session_id, super::CHANNEL],
+                        params![&session_id, crate::superagent::CHANNEL],
                     ).unwrap();
                     assert_eq!(changed, 1);
                 }

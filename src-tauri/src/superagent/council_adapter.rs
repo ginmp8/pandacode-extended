@@ -468,7 +468,10 @@ fn hash_snapshot_permissions(hasher: &mut Sha256, metadata: &fs::Metadata) {
     #[cfg(unix)]
     hasher.update((metadata.permissions().mode() & 0o7777 & !0o222).to_be_bytes());
     #[cfg(not(unix))]
-    hasher.update([1_u8]);
+    {
+        let _ = metadata;
+        hasher.update([1_u8]);
+    }
 }
 
 fn create_snapshot_symlink(

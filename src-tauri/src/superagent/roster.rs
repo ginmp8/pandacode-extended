@@ -75,7 +75,7 @@ pub struct AdmittedTeamProfile {
 /// Validate stored execution fields using the native Bots editor's rules.
 /// Legacy imports or stale database rows can bypass that editor. Provider
 /// catalog membership does not prove harness installation or tool support.
-fn member_execution_issue(bot:&bots::Bot)->Option<&'static str> {
+pub(super) fn member_execution_issue(bot:&bots::Bot)->Option<&'static str> {
     if !bots::known_provider(&bot.provider) {
         Some("Bot harness is not supported by PandaCode.")
     } else if !storage::valid_permission_mode(&bot.mode) {

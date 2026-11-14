@@ -1796,6 +1796,9 @@ fn manual_preflight(
         Some("Team is disabled or bots are globally paused.".to_owned())
     } else if coordinator.paused || worker.paused || worker.project_id != cfg.project_id {
         Some("Selected bot is paused or outside the Team project.".to_owned())
+    } else if let Some(issue)=roster::member_execution_issue(&coordinator)
+        .or_else(||roster::member_execution_issue(&worker)) {
+        Some(issue.to_owned())
     } else if roster::has_additional_members(store, config_id)? {
         Some("Multi-member execution requires native scoped role admission; manual runner is single-worker.".to_owned())
     } else if busy || manual_candidate_occupied(store, &candidate.id, &cfg.project_id, &candidate.project_id)? {
@@ -1890,6 +1893,14 @@ fn admit_role_with_staging(
     let worker = bots::get(store, &config.worker_bot_id)?;
     if coordinator.paused || worker.paused || worker.project_id != config.project_id {
         return Err("A selected bot is paused, missing or outside the worker project scope.".into());
+    }
+    // Preflight stored execution profiles BEFORE creating a native provider
+    // session. The session layer also validates its inputs, but it cannot
+    // report the Team policy blocker or authorize a Demand snapshot.
+    for member in [&coordinator,&worker] {
+        if let Some(issue)=roster::member_execution_issue(member) {
+            return Err(issue.into());
+        }
     }
     let candidate = if coordinate { &coordinator } else { &worker };
     let occupied = manual_candidate_occupied(store, &candidate.id, &config.project_id, &candidate.project_id)?;

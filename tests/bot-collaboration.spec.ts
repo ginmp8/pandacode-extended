@@ -140,7 +140,12 @@ test.describe('bot collaboration', () => {
     await expect(botSidebar).toBeVisible();
     await botSidebar.getByRole('button', { name: '#launch' }).click();
 
-    await page.evaluate(async () => {
+    const reportIdentity = await page.evaluate(async () => {
+      const { call } = await import('/src/bridge.ts');
+      const team = await call<import('/src/architect-types.ts').TeamSnapshot | null>('architect_get', { sessionId: 'session-1' });
+      if (!team || !Number.isSafeInteger(team.councilSince)) throw new Error('Expected the populated Council ledger snapshot');
+      // Channel delivery revisions use councilSince:dispatchRevision, not the child receipt's artifact revision.
+      const identity = { sessionId: team.sessionId, cycleId: `${team.sessionId}:${team.councilSince}`, artifactRevision: `${team.councilSince}:1` };
       const { sharedChannelThreadHtml } = await import('/src/bot-shared-channels.ts');
       const host = document.createElement('div');
       host.id = 'council-report-source';
@@ -150,8 +155,8 @@ test.describe('bot collaboration', () => {
         messages: [{
           id: 'nested-delivery', kind: 'assigned', authorBotId: 'executor', text: 'Review this change', status: 'Completed', createdAt: 1,
           council: {
-            cycleId: 'session-1:preview', sessionId: 'session-1', state: 'Passed', round: 1, target: 9.5,
-            lowest: 9.6, artifactRevision: 'preview-revision-1',
+            ...identity, state: 'Passed', round: 1, target: 9.5,
+            lowest: 9.6,
             reviewers: [{ botId: 'reviewer-alpha', name: 'Review Alpha', lens: 'Security', round: 1, score: 9.8 }],
           },
         }],
@@ -160,17 +165,24 @@ test.describe('bot collaboration', () => {
         { id: 'reviewer-alpha', name: 'Review Alpha', avatar: 'panda:1', color: '' },
       ] as any);
       document.querySelector('.conversation-pane')?.append(host);
+      return identity;
     });
 
     const source = page.locator('#council-report-source');
     const report = source.getByRole('button', { name: 'View Council report' });
+    await expect(report).toHaveAttribute('data-session-id', reportIdentity.sessionId);
+    await expect(report).toHaveAttribute('data-cycle-id', reportIdentity.cycleId);
+    await expect(report).toHaveAttribute('data-artifact-revision', reportIdentity.artifactRevision);
     await report.scrollIntoViewIfNeeded();
     await report.click();
 
     const reportDialog = page.getByRole('dialog', { name: 'Council report' });
     await expect(reportDialog).toBeVisible();
+    await expect(reportDialog.locator('section.bc-council-report')).toHaveAttribute('data-session-id', reportIdentity.sessionId);
+    await expect(reportDialog.locator('section.bc-council-report')).toHaveAttribute('data-cycle-id', reportIdentity.cycleId);
     const hierarchy = reportDialog.locator('.council-inspector-hierarchy');
     await expect(hierarchy).toBeVisible();
+    await expect(hierarchy.locator('[data-level="root-council"]')).toHaveAttribute('data-cycle-id', reportIdentity.cycleId);
     const rootSeat = hierarchy.locator('[data-level="bot"]').filter({ hasText: 'Security' });
     await expect(rootSeat).toHaveCount(1);
     await rootSeat.locator(':scope > summary').click();
@@ -179,7 +191,60 @@ test.describe('bot collaboration', () => {
     await expect(child.locator(':scope > summary')).toContainText('Child Council · passed · minimum score 9.6');
     await expect(child).toContainText('A finding from the correlated child Council.');
     await expect(child).toContainText('src/main.ts');
+    await expect(reportDialog).not.toContainText('This earlier-cycle finding must stay hidden.');
+    await expect(reportDialog.locator('input, textarea, select, [contenteditable="true"]')).toHaveCount(0);
   });
+
+  for (const scenario of [
+    { name: 'current cycle', cycleId: 'report-task:100', artifactRevision: '100:2', snapshotSessionId: 'report-task', available: true },
+    { name: 'wrong cycle with matching councilSince', cycleId: 'another-task:100', artifactRevision: '100:2', snapshotSessionId: 'report-task', available: false },
+    { name: 'stale revision', cycleId: 'report-task:100', artifactRevision: '99:2', snapshotSessionId: 'report-task', available: false },
+    { name: 'wrong snapshot session', cycleId: 'report-task:100', artifactRevision: '100:2', snapshotSessionId: 'another-task', available: false },
+  ]) {
+    test(`channel Council report correlation: ${scenario.name}`, async ({ page }) => {
+      await page.goto('/tests/fixtures/bot-manifests.html');
+      const result = await page.evaluate(async scenario => {
+        const { openSharedChannelCouncilReport } = await import('/src/bot-shared-channels.ts');
+        const team: import('/src/architect-types.ts').TeamSnapshot = {
+          sessionId: scenario.snapshotSessionId, councilSince: 100, status: 'completed', round: 1, revision: 2,
+          config: { workers: [], maxParallel: 1, maxRounds: 1, maxAssignments: 1, workspace: 'shared', summaryLimit: 100 },
+          workers: [], updatedAt: 100, councilFindings: [],
+          councilStatus: { state: 'passed', round: 1, target: 9, lowest: 9.6, stale: false },
+        };
+        const loadedSessionIds: string[] = [], notifications: string[] = [];
+        const reports: { title: string; sessionId?: string; cycleId?: string; text: string }[] = [];
+        const evidenceBindings: { sessionId: string; cycleId?: string }[] = [];
+        await openSharedChannelCouncilReport('report-task', scenario.cycleId, scenario.artifactRevision, {
+          bots: [],
+          call: async () => { throw new Error('Unexpected IPC call'); },
+          closeModal: () => {}, changed: async () => {}, openChannel: () => {},
+          loadCouncilSnapshot: async sessionId => { loadedSessionIds.push(sessionId); return team; },
+          notify: text => { notifications.push(text); },
+          modal: (title, body) => {
+            const dialog = document.createElement('dialog');
+            dialog.innerHTML = body;
+            const report = dialog.querySelector<HTMLElement>('section.bc-council-report')!;
+            reports.push({ title, sessionId: report.dataset.sessionId, cycleId: report.dataset.cycleId, text: report.textContent ?? '' });
+            return dialog;
+          },
+          bindCouncilEvidence: (host, sessionId) => { evidenceBindings.push({ sessionId, cycleId: host.dataset.cycleId }); },
+        });
+        return { loadedSessionIds, notifications, reports, evidenceBindings };
+      }, scenario);
+      expect(result.loadedSessionIds).toEqual(['report-task']);
+      if (scenario.available) {
+        expect(result.notifications).toEqual([]);
+        expect(result.reports).toEqual([{
+          title: 'Council report', sessionId: 'report-task', cycleId: scenario.cycleId, text: expect.stringContaining('Council: passed'),
+        }]);
+        expect(result.evidenceBindings).toEqual([{ sessionId: 'report-task', cycleId: scenario.cycleId }]);
+      } else {
+        expect(result.notifications).toEqual(['This Council delivery report is unavailable.']);
+        expect(result.reports).toEqual([]);
+        expect(result.evidenceBindings).toEqual([]);
+      }
+    });
+  }
 
   test('channel Council report states cover unavailable, error, stopped, and retrying deliveries', async ({ page }) => {
     test.setTimeout(120_000);

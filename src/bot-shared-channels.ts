@@ -3,7 +3,7 @@ import { botAvatarHtml } from './bot-avatars';
 import { escape, icon } from './dom';
 import { WORKING_LABELS } from './bot-thread';
 import type { CouncilComposition, CouncilCriteriaSource, CouncilReviewerMode, CouncilStrategy, TeamSnapshot } from './architect-types';
-import { councilCompositionValidationIssues } from './council';
+import { councilCompositionValidationIssues, councilCycleId } from './council';
 import { councilLedgerHtmlForTeam } from './council-panel';
 
 export interface SharedChannelSummary {
@@ -772,7 +772,7 @@ export async function openSharedChannelCouncilReport(sessionId: string, cycleId:
   try { team = await options.loadCouncilSnapshot(sessionId); }
   catch { options.notify('This Council delivery report is unavailable.'); return; }
   const expectedSince = Number(artifactRevision.split(':', 1)[0]);
-  if (!team || team.sessionId !== sessionId || !cycleId || !Number.isSafeInteger(expectedSince)
+  if (!team || team.sessionId !== sessionId || cycleId !== councilCycleId(team) || !Number.isSafeInteger(expectedSince)
       || team.councilSince !== expectedSince) {
     options.notify('This Council delivery report is unavailable.'); return;
   }

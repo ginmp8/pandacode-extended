@@ -65,17 +65,17 @@ fn assignment_within_policy_budget(started_at: i64, now: i64, limit_ms: i64) -> 
 /// A redacted headless lease diagnostic uses exactly the same native expiry
 /// rule as tool admission and callback settlement. This is observation only:
 /// inspecting a live database must neither reap a session nor grant a new one.
-fn headless_assignment_budget(assignment: &Assignment, now: i64) -> (bool, Option<i64>) {
+fn headless_assignment_budget(assignment: &Assignment, now: i64, limit_ms: i64) -> (bool, Option<i64>) {
     if assignment.state != "running" {
         return (false, None);
     }
     let valid_start = assignment.created_at > 0 && now >= assignment.created_at;
     let remaining = if valid_start {
-        MAX_ASSIGNMENT_RUN_MS.saturating_sub(now.saturating_sub(assignment.created_at)).max(0)
+        limit_ms.saturating_sub(now.saturating_sub(assignment.created_at)).max(0)
     } else {
         0
     };
-    (!assignment_within_budget(assignment.created_at, now), Some(remaining))
+    (!assignment_within_policy_budget(assignment.created_at, now, limit_ms), Some(remaining))
 }
 
 /// Global pause is an immediate native revocation of execution authority,
@@ -1540,9 +1540,11 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
     let ticket = get_ticket(store, ticket_id)?;
     let native_mandate = mandate(store, ticket_id)?;
     let native_assignments = assignments(store, ticket_id, limit)?;
+    let admitted_team = ticket_team_snapshot(store, ticket_id)?;
+    let attempt_limit = admitted_team.policy.strategy.attempt_timeout_ms;
     let observed_at = storage::now();
     let attempt_insights = native_assignments.iter().map(|a| {
-        let (expired, remaining) = headless_assignment_budget(a, observed_at);
+        let (expired, remaining) = headless_assignment_budget(a, observed_at, attempt_limit);
         AssignmentInsight {
             assignment_id: a.id.clone(),
             current_assignment: ticket.state == "running" && a.state == "running"
@@ -1571,7 +1573,7 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
         finalization_gate: finalization_gate.to_owned(),
         unresolved_external_effects,
         council: council_adapter::inspect(store, &ticket)?,
-        team_snapshot: ticket_team_snapshot(store,ticket_id)?,
+        team_snapshot: admitted_team,
         ticket,
         mandate: native_mandate,
         assignments: native_assignments,
@@ -1712,7 +1714,9 @@ pub(crate) fn inspect_headless_status(
             },
             "assignments": snapshot.assignments.iter().map(|a| {
                 let (run_budget_expired, remaining_run_budget_ms) =
-                    headless_assignment_budget(a, observed_at);
+                    headless_assignment_budget(
+                        a, observed_at, snapshot.team_snapshot.policy.strategy.attempt_timeout_ms,
+                    );
                 serde_json::json!({
                     "id": &a.id, "botId": &a.bot_id, "sessionId": &a.session_id,
                     "state": &a.state, "attempt": a.attempt,

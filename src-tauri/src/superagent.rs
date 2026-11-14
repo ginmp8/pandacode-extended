@@ -1516,12 +1516,22 @@ fn checkout_path(store:&Store,project_id:&str)->Result<String> {
     Ok(path)
 }
 
-/// Two distinct stored project paths may resolve to the same physical checkout
-/// (for example, a symlink or a /./ alias). Preserve literal matching for
-/// legacy/nonexistent paths, and check resolved identity whenever possible.
+/// Two distinct stored project paths may resolve to the same physical checkout.
+/// Compare harmless dot components even before a checkout exists, then resolve
+/// physical aliases (including symlinks) whenever both paths are available.
+/// Keep parent components intact: collapsing `..` through a symlink is unsafe.
 /// This is an admission fence, not permission to write to a checkout.
 fn checkout_paths_equivalent(left: &str, right: &str) -> bool {
     if left == right { return true; }
+    if std::path::Path::new(left)
+        .components()
+        .filter(|component| *component != std::path::Component::CurDir)
+        .eq(std::path::Path::new(right)
+            .components()
+            .filter(|component| *component != std::path::Component::CurDir))
+    {
+        return true;
+    }
     match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
@@ -6385,7 +6395,7 @@ mod tests {
         assert!(mandate(&store, &ticket.id).unwrap().revoked);
         assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "stopped");
         assert_eq!(
-            headless_cancelled_assignments(&store, &[session_id.clone()]).unwrap(),
+            headless_cancelled_assignments(&store, std::slice::from_ref(&session_id)).unwrap(),
             vec![session_id.clone()],
         );
         assert!(read_only_policy(&store, &session_id).is_err());
@@ -6927,6 +6937,50 @@ mod tests {
         ).unwrap());
         assert!(guard_run_admission(&store,&ordinary.id,&[]).is_ok());
         std::fs::remove_dir(&checkout).unwrap();
+    }
+
+    #[test]
+    fn unresolved_dot_checkout_alias_fences_native_leases_without_path_creation() {
+        let mut store = fixture();
+        let root = std::env::temp_dir().join(format!(
+            "sa-unresolved-checkout-{}", storage::id(),
+        ));
+        let original = root.join("checkout").to_string_lossy().to_string();
+        let alias = root.join(".").join("checkout").to_string_lossy().to_string();
+        let unrelated = root.join("other").to_string_lossy().to_string();
+        assert!(!root.exists());
+        assert_ne!(original, alias);
+        assert!(checkout_paths_equivalent(&original, &alias));
+        assert!(!checkout_paths_equivalent(&original, &unrelated));
+        store.db.execute(
+            "UPDATE projects SET path=?1 WHERE id='project'",
+            [&original],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('alias-project','Alias',?1)",
+            [&alias],
+        ).unwrap();
+        let config = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &config.id, "Keep an uncreated checkout reserved",
+            "unresolved-dot-alias", false,
+        ).unwrap();
+        assert!(started);
+        let ordinary = store.create_session(
+            "alias-project", "codex", "default", "plan",
+        ).unwrap();
+        assert!(active_manual_conflict(
+            &store, std::slice::from_ref(&ordinary.id), "worker", "project",
+        ).unwrap());
+        assert!(manual_candidate_occupied(
+            &store, "unrelated-worker", "alias-project", "alias-project",
+        ).unwrap());
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_err());
+        stop(&store, &ticket.id).unwrap();
+        assert!(!manual_candidate_occupied(
+            &store, "unrelated-worker", "alias-project", "alias-project",
+        ).unwrap());
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_ok());
     }
 
     #[test]

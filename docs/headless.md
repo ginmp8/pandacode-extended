@@ -467,6 +467,20 @@ operator must separately verify the current revision, server state and remote
 effect receipt before any authorized action. Sensitive objectives, results,
 credentials, effect keys and private audit details are not returned.
 
+### Read-only global Demand queue
+
+Use `pandacode serve --list-demands <state>` to page native Ticket status
+across all Teams, with `all` or an exact native state. Append
+`--before <beforeUpdatedAt> <beforeId>` and optionally
+`--search "objective fragment"` to filter before the 200-item page limit.
+Results include each Ticket ID, Team ID, state, revision, timestamp and
+`nextCursor`; objectives, search terms, actors, sessions, mandates and evidence
+are withheld. The query opens SQLite read-only and cannot launch providers,
+change authorization or perform restart recovery. Cursor pages are live
+snapshots rather than one long transaction; concurrently changing Tickets
+may move between pages. Avoid sensitive CLI search phrases in shell history
+and process arguments.
+
 ### Read-only Team Demand status inspection
 
 Use `pandacode serve --list-team-demands <team-id> <state>` to inspect up to

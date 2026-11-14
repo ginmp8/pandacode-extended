@@ -477,6 +477,8 @@ fn list_all_demands_page(
 
 /// Exact native Ticket-state filtering happens in SQLite before keyset paging.
 /// Unknown values fail closed: provider input is never SQL or execution authority.
+/// Production uses the searched query directly; this wrapper is a test oracle.
+#[cfg(test)]
 fn list_all_demands_page_filtered(
     store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
     orchestration_id: Option<&str>, state_filter: Option<&str>,
@@ -1108,6 +1110,42 @@ pub(crate) fn list_headless_team_demands_searched(
         "observationalOnly": true,
         "demands": page.iter().map(|item| serde_json::json!({
             "ticketId": &item.id,
+            "state": &item.state,
+            "revision": item.revision,
+            "updatedAt": item.updated_at
+        })).collect::<Vec<_>>()
+    })).map_err(|e| e.to_string())
+}
+
+/// Global headless Demand index using the desktop's native pre-pagination search.
+/// The operator gets only Ticket IDs, Team IDs, states and revisions, not
+/// objectives, actor identifiers, mandates, provider sessions or evidence.
+pub(crate) fn list_headless_all_demands_searched(
+    database_path: &std::path::Path, state: &str,
+    before_updated_at: Option<i64>, before_id: Option<&str>, search_query: Option<&str>,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let state_filter = if state == "all" { None } else { Some(state) };
+    let page = list_all_demands_page_searched(
+        &store, 200, before_updated_at, before_id, None, state_filter, search_query,
+    )?;
+    let may_have_more = page.len() == 200;
+    let next_cursor = if may_have_more {
+        page.last().map(|item| serde_json::json!({
+            "beforeUpdatedAt": item.updated_at, "beforeId": &item.id
+        }))
+    } else { None };
+    serde_json::to_string_pretty(&serde_json::json!({
+        "scope": "allTeams",
+        "stateFilter": state,
+        "searchApplied": search_query.is_some(),
+        "pageLimit": 200,
+        "mayHaveMore": may_have_more,
+        "nextCursor": next_cursor,
+        "observationalOnly": true,
+        "demands": page.iter().map(|item| serde_json::json!({
+            "ticketId": &item.id,
+            "orchestrationId": &item.orchestration_id,
             "state": &item.state,
             "revision": item.revision,
             "updatedAt": item.updated_at
@@ -4696,6 +4734,84 @@ mod tests {
             [&team.id], |row| row.get(0),
         ).unwrap();
         assert_eq!(total,205);
+    }
+
+
+    #[test]
+    fn headless_global_demand_search_is_cross_team_paginated_and_redacted() {
+        let store = fixture();
+        let economy = create_configuration(&store, NewOrchestration {
+            name: "Global headless Economy".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        let performance = create_configuration(&store, NewOrchestration {
+            name: "Global headless Performance".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        for index in 0..208 {
+            let owner = if index < 201 { &economy } else { &performance };
+            let id = format!("global-{index:03}");
+            let objective = if index >= 205 { "PRIVATE UNRELATED OBJECTIVE" }
+                else { "PRIVATE MATCHING NEEDLE OBJECTIVE" };
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?1,?3,'local-user','manual',
+                        ?4,'worker',?5,'blocked',1000,2000)",
+                params![id,owner.id,objective,owner.project_id,owner.policy_revision],
+            ).unwrap();
+        }
+        let path = store.path.clone();
+        drop(store);
+        let first_raw = list_headless_all_demands_searched(
+            &path, "blocked", None, None, Some("needle"),
+        ).unwrap();
+        let first: serde_json::Value = serde_json::from_str(&first_raw).unwrap();
+        assert_eq!(first["scope"], "allTeams");
+        assert_eq!(first["observationalOnly"], true);
+        assert_eq!(first["searchApplied"], true);
+        assert_eq!(first["demands"].as_array().unwrap().len(), 200);
+        assert!(first["demands"].as_array().unwrap().iter()
+            .any(|item| item["orchestrationId"] == performance.id));
+        let time = first["nextCursor"]["beforeUpdatedAt"].as_i64().unwrap();
+        let id = first["nextCursor"]["beforeId"].as_str().unwrap();
+        let second_raw = list_headless_all_demands_searched(
+            &path, "blocked", Some(time), Some(id), Some("needle"),
+        ).unwrap();
+        let second: serde_json::Value = serde_json::from_str(&second_raw).unwrap();
+        assert_eq!(second["demands"].as_array().unwrap().len(), 5);
+        let distinct: std::collections::HashSet<_> = first["demands"].as_array().unwrap()
+            .iter().chain(second["demands"].as_array().unwrap().iter())
+            .map(|item| item["ticketId"].as_str().unwrap()).collect();
+        assert_eq!(distinct.len(), 205);
+        assert_eq!(second["mayHaveMore"], false);
+        for secret in ["PRIVATE", "OBJECTIVE", "local-user", "authorizationId", "request_key"] {
+            assert!(!first_raw.contains(secret) && !second_raw.contains(secret));
+        }
+        let empty = list_headless_all_demands_searched(
+            &path, "running", None, None, None,
+        ).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&empty).unwrap()
+            ["demands"].as_array().unwrap().is_empty());
+        let injection = list_headless_all_demands_searched(
+            &path, "blocked", None, None, Some("' OR 1=1 --"),
+        ).unwrap();
+        assert!(serde_json::from_str::<serde_json::Value>(&injection).unwrap()
+            ["demands"].as_array().unwrap().is_empty());
+        assert!(list_headless_all_demands_searched(
+            &path, "ALL", None, None, None,
+        ).is_err());
+        assert!(list_headless_all_demands_searched(
+            &path, "blocked", Some(time), None, None,
+        ).is_err());
+        assert!(list_headless_all_demands_searched(
+            &path, "blocked", None, None, Some("a\ninvalid"),
+        ).is_err());
+        let check = Store::open_read_only(&path).unwrap();
+        assert_eq!(check.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0)
+        ).unwrap(), 208);
     }
 
     #[test]

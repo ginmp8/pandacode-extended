@@ -155,6 +155,23 @@ export async function invokeSuperagent<T>(
       break;
     }
     case 'superagent_tickets':value=tickets.get(args.orchestrationId)||[];break;
+    case 'superagent_delivery_inspect':{
+      const ticket=[...tickets.values()].flat().find(t=>t.id===args.ticketId);
+      if(!ticket)throw Error('Ticket not found.');
+      const state=ticket.state;
+      value={
+        ticketId:ticket.id,ticketRevision:ticket.revision,ticketState:state,
+        deliveryState:state==='completed'?'native_complete_delivery_unverified':
+          ['blocked','failed','stopped','interrupted','inconclusive'].includes(state)?'blocked':
+          ['waiting_approval','waiting_review'].includes(state)?'awaiting_native_review':'in_progress',
+        totalWorkItems:0,verifiedWorkItems:0,unresolvedExternalEffects:0,
+        repositoryHeadSha:null,worktreeStatusSha256:null,worktreeDiffSha256:null,
+        observedStatusEntries:null,checkoutObservation:'preview_only_no_native_git',
+        sourceAttribution:'not_attributed_to_ticket',
+        testExecutionVerified:false,ciResultVerified:false,
+        externalDeliveryVerified:false,checkedAt:Date.now(),readOnly:true,
+      };break;
+    }
     case 'superagent_snapshot':
     case 'superagent_mandate':
     case 'superagent_assignments':

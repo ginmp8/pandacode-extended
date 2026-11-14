@@ -54,6 +54,15 @@ interface WorkItemEvidence {
   requiresWrite:boolean; writeAuthorized:boolean;
   evidenceSha256?:string|null; approvalKind?:string|null; evidenceVerifiedAt?:number|null;
 }
+interface DeliveryObservation {
+  ticketId:string; ticketRevision:number; ticketState:string; deliveryState:string;
+  totalWorkItems:number; verifiedWorkItems:number; unresolvedExternalEffects:number;
+  repositoryHeadSha:string|null; worktreeStatusSha256:string|null;
+  worktreeDiffSha256:string|null; observedStatusEntries:number|null;
+  checkoutObservation:string; sourceAttribution:string;
+  testExecutionVerified:boolean; ciResultVerified:boolean;
+  externalDeliveryVerified:boolean; checkedAt:number; readOnly:boolean;
+}
 interface DemandPlanEvidence {
   ticketId:string; ticketRevision:number; teamVersion:number; policyRevision:number;
   planSha256:string; state:string; items:WorkItemEvidence[];
@@ -235,6 +244,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let ticketDetails: TicketDetails | null = null;
   let effectReceipts: EffectReceipt[] = [], effectReceiptsLoaded = false;
   let runGraph: RunGraph | null = null, runGraphLoaded = false;
+  let delivery:DeliveryObservation|null=null, deliveryLoaded=false;
   let roleRoster: TeamRoster | null = null;
   let teamStrategy: StrategyView | null = null;
   // Draft order is committed only by the native revision-guarded roster update.
@@ -388,6 +398,25 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           Math.max(0, Math.floor(insight.remainingRunBudgetMs / 1000)) + ' seconds remain') +
         '</dd></dl><button type="button" data-sa-close-assignment>Close attempt</button></section>'
       : '';
+    const deliveryPanel = '<section class="sa-pane" role="region" aria-label="Engineering delivery evidence">' +
+      '<h5>Engineering delivery evidence</h5>' +
+      '<p>Read-only native state and bounded Git observations. Git HEAD and a Worker response do not prove tests, CI or a delivered PR.</p>' +
+      '<button type="button" data-sa-inspect-delivery>Inspect native delivery</button>' +
+      (deliveryLoaded && delivery?.ticketId===inspectedTicket
+        ? '<dl><dt>Native delivery state</dt><dd>' + safe(delivery.deliveryState) + '</dd>' +
+          '<dt>Verified WorkItems</dt><dd>' + safe(delivery.verifiedWorkItems) +
+            ' / ' + safe(delivery.totalWorkItems) + '</dd>' +
+          '<dt>Unresolved external effects</dt><dd>' + safe(delivery.unresolvedExternalEffects) + '</dd>' +
+          '<dt>Git observation</dt><dd>' + safe(delivery.checkoutObservation) + '</dd>' +
+          '<dt>Git HEAD (unattributed)</dt><dd><code>' +
+            safe(delivery.repositoryHeadSha ?? 'unavailable') + '</code></dd>' +
+          '<dt>Source attribution</dt><dd>' + safe(delivery.sourceAttribution) + '</dd>' +
+          '<dt>Native tests / CI / publication</dt><dd>' +
+            (delivery.testExecutionVerified ? 'Tests verified' : 'Tests unverified') + ' · ' +
+            (delivery.ciResultVerified ? 'CI verified' : 'CI unverified') + ' · ' +
+            (delivery.externalDeliveryVerified ? 'Publication verified' : 'Publication unverified') +
+          '</dd></dl><p>Git digests are snapshots, not task-attributed commits or delivery approval.</p>'
+        : '<p>Not inspected for this Ticket.</p>') + '</section>';
     const demandPlanPanel = '<section class="sa-pane" role="region" aria-label="Demand WorkItems">' +
       '<h5>Native dependency plan</h5><p>Each WorkItem has a separate native Ticket and review gate. ' +
       'No Coordinator text can issue write authorization.</p>' +
@@ -478,7 +507,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
         '<h4>Ticket evidence</h4><p>Read-only native snapshot. Model output is not task approval.</p>' +
         renderTeamSnapshot(ticketDetails.teamSnapshot) +
-        demandPlanPanel + subagentPanel +
+        deliveryPanel + demandPlanPanel + subagentPanel +
         '<dl><dt>Ticket ID</dt><dd><code>' + safe(inspected.id) + '</code></dd>' +
         '<dt>State / revision</dt><dd>' + safe(inspected.state) + ' / ' + inspected.revision + '</dd>' +
         '<dt>Actor</dt><dd>' + safe(ticketDetails.mandate.actor) + '</dd>' +
@@ -1093,6 +1122,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     // revision change refreshes the snapshot before a later human decision.
     effectReceipts = []; effectReceiptsLoaded = false;
     runGraph = null; runGraphLoaded = false;
+    delivery=null; deliveryLoaded=false;
     const [snapshot, links] = await Promise.all([
       call<TicketDetails>('superagent_snapshot', { ticketId:id, limit:50 }),
       call<ThreadLink[]>('superagent_source_thread_links', { ticketId:id }),
@@ -1710,6 +1740,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
+    if (target.hasAttribute('data-sa-inspect-delivery')) {
+      const ticketId=inspectedTicket;
+      if (!ticketId || !ticketDetails || ticketDetails.ticket.id!==ticketId) return;
+      void work(async()=>{
+        const observed=await call<DeliveryObservation>('superagent_delivery_inspect',{ticketId});
+        if(observed.ticketId!==ticketId || observed.readOnly!==true)
+          throw new Error('Native delivery inspection did not match this Ticket.');
+        if(inspectedTicket===ticketId){delivery=observed;deliveryLoaded=true;}
+      });
+      return;
+    }
     if (target.hasAttribute('data-sa-load-work-plan')) {
       const ticketId = inspectedTicket;
       const selectedTicket = tickets.find(ticket => ticket.id === ticketId);
@@ -1802,6 +1843,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target.dataset.saInspectTicket) {
       subagentTree = null; subagentTreeLoaded = false;
       workPlan = null; workPlanLoaded = false;
+      delivery=null; deliveryLoaded=false;
       workWriteItemKey = ''; workWritePaths = '';
       const id = target.dataset.saInspectTicket;
       if (inspectedTicket === id) {

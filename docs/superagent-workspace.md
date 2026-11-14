@@ -255,3 +255,18 @@ fresh, attributed acceptance of its actual latest Worker result may mark the
 item verified and release its dependants. Independent ready items continue
 without waiting for this particular recovery; exhausted attempts remain
 blocked and require a newly authorized demand.
+
+
+### Read-only native engineering delivery inspection
+
+Use the **Inspect native delivery** control on a selected Ticket, or
+`pandacode serve --inspect-delivery <ticket-id>`, to read its WorkItem approval
+receipts, unresolved effects, and—where a current checkout is pinned to an
+immutable task profile—bounded Git HEAD/status/diff hashes. The UI/CLI never
+returns raw local paths, diffs, environment variables or file contents. Git
+commands use the existing sandboxed/bounded workspace runner and are started
+only by an explicit operator request, outside the Desktop agent/SQLite mutex.
+Historical tasks without a trustworthy checkout pin show an unavailable Git
+observation. The status `native_complete_delivery_unverified` explicitly
+means **not yet independently verified as software delivered**; test runs,
+CI and publication remain unverified until real native receipts are added.

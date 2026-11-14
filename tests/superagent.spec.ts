@@ -152,6 +152,36 @@ test('guided SuperAgent Team Builder validates five native-backed stages and sav
   await expect(host.getByRole('button',{name:'Enable manual'})).toBeVisible();
 });
 
+test('delivery inspector distinguishes observed native work from verified software delivery',async ({page})=>{
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  const create=host.locator('form[data-sa-form="create"]');
+  await create.getByRole('textbox',{name:'Name',exact:true}).fill('Evidence Team');
+  await create.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
+  await create.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
+  await create.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(host.locator('.sa-list .sa-item')).toHaveCount(1);
+  await host.getByRole('button',{name:'Enable manual'}).click();
+  await host.getByRole('alertdialog',{name:'Confirm orchestration action'})
+    .getByRole('button',{name:'Confirm',exact:true}).click();
+  await host.getByRole('textbox',{name:'Task objective'}).fill('Inspect a test fixture');
+  await host.getByRole('combobox',{name:'Dispatch'}).selectOption('direct');
+  await host.getByRole('button',{name:'Dispatch manually'}).click();
+  const row=host.locator('.sa-tickets li',{hasText:'Inspect a test fixture'});
+  await expect(row).toContainText('running');
+  await row.getByRole('button',{name:'View evidence'}).click();
+  const card=host.getByRole('region',{name:'Engineering delivery evidence'});
+  await card.getByRole('button',{name:'Inspect native delivery'}).click();
+  await expect(card).toContainText('in_progress');
+  await expect(card).toContainText('preview_only_no_native_git');
+  await expect(card).toContainText('not_attributed_to_ticket');
+  await expect(card).toContainText('Tests unverified');
+  await expect(card).toContainText('CI unverified');
+  await expect(card).toContainText('Publication unverified');
+  await expect(card).not.toContainText('Git HEAD (verified)');
+});
+
 test('native SuperAgent manual dispatch requires opt-in and supports explicit revocation',async ({page})=>{
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

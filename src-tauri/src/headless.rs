@@ -34,6 +34,7 @@ enum Command {
     ExportOrchestrations { path: PathBuf },
     InspectOrchestrations,
     InspectTeamStrategy { orchestration_id: String },
+    InspectDelivery { ticket_id: String },
     ListTickets,
     ListReviewInbox,
     ListRecoveryInbox,
@@ -135,6 +136,19 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 match result {
                     Ok(receipt)=>{println!("{receipt}");std::process::exit(0)}
                     Err(error)=>{eprintln!("Team strategy inspection failed: {error}");std::process::exit(1)}
+                }
+            }
+            if let Command::InspectDelivery { ticket_id } = &command {
+                let result=app.path().app_data_dir().map_err(|e|e.to_string())
+                    .and_then(|directory|crate::superagent::delivery::headless_inspect(
+                        &directory.join("kingcode.sqlite3"),ticket_id,
+                    ));
+                match result {
+                    Ok(receipt)=>{println!("{receipt}");std::process::exit(0)}
+                    Err(error)=>{
+                        eprintln!("Native delivery inspection failed: {error}");
+                        std::process::exit(1)
+                    }
                 }
             }
             if let Command::InspectRetryRequest { ticket_id, expected_revision } = &command {
@@ -515,6 +529,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::ListRecoveryInbox | Command::ListDemands { .. }
         | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
+        | Command::InspectDelivery { .. }
         | Command::InspectDemandPlan { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
         | Command::InspectTicketEffects { .. }
@@ -984,6 +999,12 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
             "--inspect-orchestrations" => {
                 command = Command::InspectOrchestrations;
                 ops += 1;
+            }
+            "--inspect-delivery" => {
+                let id=args.get(index+1).ok_or("--inspect-delivery requires a Ticket ID.")?;
+                validate_ticket_id(id)?;
+                command=Command::InspectDelivery { ticket_id:id.clone() };
+                ops+=1;index+=1;
             }
             "--inspect-team-strategy" => {
                 let id=args.get(index+1).ok_or("--inspect-team-strategy requires Team ID.")?;
@@ -1461,7 +1482,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --create-orchestration <file> | --configure-team-roles <id> <revision> <file> | --enable-orchestration <id> <revision> | --retry-ticket <id> <revision> | --inspect-retry-request <id> <revision> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-delivery <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --create-orchestration <file> | --configure-team-roles <id> <revision> <file> | --enable-orchestration <id> <revision> | --retry-ticket <id> <revision> | --inspect-retry-request <id> <revision> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1489,6 +1510,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          List native orchestration status without modifying live tasks; exit.
   --inspect-team-strategy <id>
                          Read immutable Team strategy and native capability limits.
+  --inspect-delivery <ticket-id>
+                         Inspect receipt-backed progress and sanitized local Git hashes;
+                         never claim actual delivery without test/CI/publication proof.
   --list-tickets         List up to 200 redacted native SuperAgent tickets; exit.
   --list-review-inbox    List up to 200 pending human/Council decisions across Teams;
                          redact objectives, never approve or run a reviewer; exit.
@@ -1594,6 +1618,17 @@ mod tests {
             "--configure-team-roles team_1 nope roles.json","--enable-orchestration",
             "--enable-orchestration team_1 0",
             "--enable-orchestration team_1 2 --disable-orchestration team_1 2"] {
+            assert!(parsed(invalid).is_err(),"{invalid}");
+        }
+    }
+
+    #[test]
+    fn headless_delivery_inspection_is_read_only_and_ticket_scoped() {
+        assert_eq!(parsed("--inspect-delivery ticket_1"),
+            Ok(Command::InspectDelivery {ticket_id:"ticket_1".into()}));
+        for invalid in ["--inspect-delivery",
+            "--inspect-delivery ../escape",
+            "--inspect-delivery ticket_1 --stop-ticket ticket_1"] {
             assert!(parsed(invalid).is_err(),"{invalid}");
         }
     }

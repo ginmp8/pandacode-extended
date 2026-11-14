@@ -763,3 +763,26 @@ plan is rejected; no existing work is rewritten. Every work item remains
 until a separate native work-item scheduler and test/evidence contracts are
 implemented. `readyFrontier` currently describes nodes without prerequisites,
 not permission to run or proof that earlier items were completed.
+
+## SuperAgent Demand search and terminal orphan quarantine
+
+A local operator can filter durable native Demands by a bounded literal objective
+fragment without receiving private objective text in the headless response:
+
+```sh
+pandacode serve --list-team-demands <team-id> all --search "retry"
+pandacode serve --list-team-demands <team-id> blocked --before <updated-ms> <ticket-id> --search "retry"
+```
+
+The filter runs in the native SQLite query before keyset pagination; output
+remains redacted, and `searchApplied` reports whether filtering was used.
+Only one bounded search fragment is accepted. These commands are observational
+and do not admit a provider, approve a Ticket, or authorize an effect.
+
+Use `pandacode serve --quarantine-terminal-orphan <ticket-id> <expected-revision>`
+only when a terminal Ticket still has a native assignment marked running.
+The revision-guarded operation revokes its mandate, interrupts orphaned
+assignments, and marks pending remote effects uncertain. It acquires the
+cross-process effect fence and never asserts that a live provider was stopped
+or that an external effect may be replayed. Reconcile uncertain receipts
+independently.

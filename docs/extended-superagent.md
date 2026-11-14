@@ -153,3 +153,17 @@ Replays return the original decision; each linked thread has its own monotonic
 cursor, gaps are accepted, and older out-of-order values are recorded as
 ignored. Turning a source Off blocks the next fetch before even
 `gh auth status`, so Off sends no request.
+
+## Checkout identity and recovery hardening
+
+Schema v55 rebuilds the native running-assignment lease triggers so stored
+checkout-path aliases cannot bypass a project lease. Native manual admission
+and ordinary-session admission also compare canonical checkout paths when
+available, including distinct project IDs referring to one physical directory.
+An unresolved active checkout prevents a positive admission decision.
+
+A terminal Ticket with an orphaned running native assignment can be
+quarantined explicitly using its current revision through the headless CLI.
+This does not retry a provider or an external effect, and does not grant new
+execution authority. A recovered pending effect must be reconciled before
+any subsequent remote action.

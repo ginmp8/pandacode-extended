@@ -263,3 +263,20 @@ The native regression suite covers modified session fields, denied provider
 access, denied final callbacks, duplicate callback handling and preservation of
 session fields after later Bot edits. This is not a writable Work grant, not
 proof of task completion, and not a substitute for verified Council/effects.
+
+## Portable Teams and native objective search
+
+Portable Team export now emits schema v4, including each role's configured
+non-secret reasoning effort alongside provider, model, mode, and Skills.
+Imports continue to accept legacy schema v1-v3 documents, but a v4 import
+requires one complete effective profile for every role and rejects mismatched
+reasoning effort before any Team write or backup. Imported Teams remain Off.
+The canonical Team remains the atomic versioned native Team snapshot; a
+parallel mutable roster is not created.
+
+The **All Demands / Runs** view supports explicit literal objective search.
+Native Team and Ticket-state filters, objective matching, and newest-first
+keyset pagination execute in SQLite before returning a page. Search input
+is bounded to 128 bytes and does not grant execution, approval, or access
+to private task transcripts. The headless counterpart returns only redacted
+Ticket metadata, not the matching objective text.

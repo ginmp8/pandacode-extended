@@ -3,8 +3,69 @@ import assert from 'node:assert/strict';
 
 const memory = new Map();
 globalThis.localStorage = { getItem: key => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, String(value)), removeItem: key => memory.delete(key) };
-const { COUNCIL_KEY, seatVerdict, formatScore, finishedBelow, outOfTen, councilAsking, councilDefaults, councilNotice, councilProgress, councilRounds, councilForNewThreads, councilStateText, firstAndFinal, provisional, saveCouncilDefaults, scoreVerdict, setCouncilForNewThreads } = await import('../src/council.ts');
+const { COUNCIL_KEY, COUNCIL_COMPOSITION_MODES, acceptsCouncilSnapshot, councilCompositionMode, councilCycleId, councilLedgerForCurrentCycle, summarizeCouncilUsage, newCouncilComposition, validateCouncilComposition, withCouncilComposition, seatVerdict, formatScore, finishedBelow, outOfTen, councilAsking, councilDefaults, councilNotice, councilProgress, councilRounds, councilForNewThreads, councilStateText, firstAndFinal, provisional, saveCouncilDefaults, scoreVerdict, setCouncilForNewThreads } = await import('../src/council.ts');
 const { createPreviewArchitect } = await import('../src/preview-architect.ts');
+
+test('composition derives all seven source modes and preserves the additive schema shape', () => {
+  const direct = (botId) => ({ botId, mode: 'direct', required: true });
+  const nested = botId => ({ botId, mode: 'nested', required: true, nested: { template: 'explicit_task', childCriteriaSource: 'architect', childReviewerCount: 2, target: 9, maxRounds: 3, escalation: 'always' } });
+  const modes = [
+    ['M1', true, []], ['M2', false, [direct('a')]], ['M3', true, [direct('a')]],
+    ['M4', false, [nested('a')]], ['M5', true, [nested('a')]],
+    ['M6', false, [direct('a'), nested('b')]], ['M7', true, [direct('a'), nested('b')]],
+  ];
+  assert.equal(COUNCIL_COMPOSITION_MODES.length, 7);
+  for (const [expected, automatic, selected] of modes) {
+    const composition = { ...newCouncilComposition(), automatic: { enabled: automatic, count: automatic ? 'auto' : 0 }, selected };
+    assert.equal(councilCompositionMode(composition), expected);
+  }
+  const empty = newCouncilComposition();
+  assert.equal(councilCompositionMode(empty), 'M1');
+  assert.deepEqual(Object.keys(empty).sort(), ['automatic', 'criteria', 'criteriaSource', 'limits', 'schemaVersion', 'selected', 'strategy']);
+  assert.equal(empty.schemaVersion, 1);
+  assert.equal(empty.strategy, 'parallel');
+  assert.deepEqual(Object.keys(withCouncilComposition({ target: 9, maxRounds: 10, reviewers: 0 }, empty).composition), Object.keys(empty));
+});
+
+test('composition validation accepts all strategy and source-mode combinations and rejects unknown strategies', () => {
+  const composition = newCouncilComposition();
+  assert.deepEqual(validateCouncilComposition(composition, 9), []);
+  assert.match(validateCouncilComposition({ ...composition, limits: { ...composition.limits, maxEstimatedCostMicros: 0 } }, 9)[0], /positive whole number/);
+  const direct = (botId) => ({ botId, mode: 'direct', required: true });
+  const nested = botId => ({ botId, mode: 'nested', required: true, nested: { template: 'explicit_task', childCriteriaSource: 'architect', childReviewerCount: 2, target: 9, maxRounds: 3, escalation: 'always' } });
+  const modes = [
+    { automatic: { enabled: true, count: 'auto' }, selected: [] },
+    { automatic: { enabled: false, count: 0 }, selected: [direct('a'), direct('b')] },
+    { automatic: { enabled: true, count: 'auto' }, selected: [direct('a')] },
+    { automatic: { enabled: false, count: 0 }, selected: [nested('a'), nested('b')] },
+    { automatic: { enabled: true, count: 'auto' }, selected: [nested('a')] },
+    { automatic: { enabled: false, count: 0 }, selected: [direct('a'), nested('b')] },
+    { automatic: { enabled: true, count: 'auto' }, selected: [direct('a'), nested('b')] },
+  ];
+  for (const strategy of ['parallel', 'escalated', 'two_phase']) {
+    for (const mode of modes) {
+      assert.deepEqual(validateCouncilComposition({ ...composition, ...mode, strategy }, 9), [], `${strategy} with ${mode.selected.length} selected reviewers`);
+    }
+  }
+  assert.match(validateCouncilComposition({ ...composition, strategy: 'unknown' }, 9).join(' '), /supported Council execution strategy/);
+  const selectedOnly = { ...composition, automatic: { enabled: false, count: 0 }, selected: [
+    { botId: 'bot-a', mode: 'nested', required: true, nested: { template: 'explicit_task', childCriteriaSource: 'user', childReviewerCount: 2, target: 9, maxRounds: 3, escalation: 'on_trigger' } },
+    { botId: 'bot-b', mode: 'direct', required: true },
+  ], criteriaSource: 'user', criteria: [
+    { id: 'security', lens: 'Security', description: 'Check the security boundary.', required: true, target: 9, evidenceRequired: true, source: 'user' },
+  ] };
+  assert.deepEqual(validateCouncilComposition(selectedOnly, 9), []);
+  assert.match(validateCouncilComposition({ ...selectedOnly, selected: selectedOnly.selected.slice(0, 1) }, 9).join(' '), /At least 2 root reviewers/);
+  const mandatory = { ...composition, automatic: { enabled: false, count: 0 },
+    selected: [nested('native-a'), nested('native-b')], strategy: 'two_phase',
+    limits: { ...composition.limits, maxLeafReviewsPerRound: 7 } };
+  assert.match(validateCouncilComposition(mandatory, 9).join(' '), /At least 8 leaf reviews/);
+  assert.deepEqual(validateCouncilComposition({ ...mandatory, limits: { ...mandatory.limits, maxLeafReviewsPerRound: 8 } }, 9), []);
+  const optional = { ...mandatory, selected: mandatory.selected.map(reviewer => ({
+    ...reviewer, nested: { ...reviewer.nested, escalation: 'on_trigger' },
+  })) };
+  assert.deepEqual(validateCouncilComposition({ ...optional, limits: { ...optional.limits, maxLeafReviewsPerRound: 1 } }, 9), []);
+});
 
 let nextId = 0;
 const seat = (round, score, over = {}) => ({ id: `w${++nextId}`, status: score === undefined ? 'running' : 'completed', readOnly: true, createdAt: 100 * round, updatedAt: 100 * round + 50, council: { round, lens: `lens ${nextId}`, score: score ?? null, startedAt: 100 * round }, ...over });
@@ -22,6 +83,90 @@ test('rounds group the current cycle, oldest first, and drop unscored abandoned 
   assert.equal(rounds[0].seats.length, 1);
   assert.equal(rounds[1].lowest, 7.5);
   assert.deepEqual(councilRounds({ workers: [writer()], config: {} }), []);
+});
+
+test('native ledger projection is pinned to the current root cycle and its correlated child cycles', () => {
+  const root = 'session:200', child = 'child-session:9', old = 'session:100';
+  const finding = (id, cycleId) => ({ id, cycleId, roundId: `${cycleId}:1`, seatId: `seat-${id}`, artifactDigest: `artifact-${id}`, criterionId: 'security', severity: 'high', category: 'Security', summary: id, evidenceRefs: [], locationStatus: 'missing' });
+  const team = {
+    sessionId: 'session', councilSince: 200,
+    councilFindings: [finding('root', root), finding('child', child), finding('old', old)],
+    councilFindingDispositions: [
+      { findingId: 'root', disposition: 'addressed' }, { findingId: 'child', disposition: 'waived_by_authorized_human' }, { findingId: 'old', disposition: 'disputed' }, { findingId: 'orphan', disposition: 'addressed' },
+    ],
+    councilChildReceipts: [
+      { rootCycleId: root, childCycleId: child }, { rootCycleId: old, childCycleId: 'old-child:1' },
+    ],
+    councilChildLeaves: [
+      { rootCycleId: root, childCycleId: child, seatId: 'leaf', score: 9.4 },
+      { rootCycleId: old, childCycleId: 'old-child:1', seatId: 'stale', score: 10 },
+    ],
+    councilCriterionOutcomes: [
+      { rootCycleId: root, taskCycleId: root, outcome: { criterionId: 'root' } },
+      { rootCycleId: root, taskCycleId: child, childCycleId: child, outcome: { criterionId: 'child' } },
+      { rootCycleId: old, taskCycleId: old, outcome: { criterionId: 'old' } },
+    ],
+    councilReviewReceipts: [
+      { cycleId: root, requestId: 'root' }, { cycleId: child, requestId: 'child' }, { cycleId: old, requestId: 'old' },
+    ],
+    councilUsage: [
+      { rootCycleId: root, childCycleId: null, id: 'root' }, { rootCycleId: root, childCycleId: child, id: 'child' }, { rootCycleId: old, childCycleId: 'old-child:1', id: 'old' },
+    ],
+  };
+  const projection = councilLedgerForCurrentCycle(team);
+  assert.equal(projection.cycleId, root);
+  assert.deepEqual(projection.findings.map(item => item.id), ['root', 'child']);
+  assert.deepEqual(projection.findingDispositions.map(item => item.findingId), ['root', 'child']);
+  assert.deepEqual(projection.childReceipts.map(item => item.childCycleId), [child]);
+  assert.deepEqual(projection.childLeaves.map(item => item.seatId), ['leaf']);
+  assert.deepEqual(projection.criterionOutcomes.map(item => item.outcome.criterionId), ['root', 'child']);
+  assert.deepEqual(projection.reviewReceipts.map(item => item.requestId), ['root', 'child']);
+  assert.deepEqual(projection.usage.map(item => item.id), ['root', 'child']);
+});
+
+
+test('usage rollup deduplicates native attempts and preserves unknown values and cost provenance', () => {
+  const known = value => ({ status: 'measured', value });
+  const row = (id, scope, inputTokens, costEstimate) => ({
+    id, rootCycleId: 'root:1', childCycleId: scope === 'child' ? 'child:1' : null,
+    attemptId: id, scope, elapsedMs: known(100), inputTokens, outputTokens: known(50),
+    requestCount: known(1), costEstimate,
+  });
+  const priced = (amountMicros, currency = 'USD') => ({
+    amountMicros, currency, pricingSource: 'Pinned pricing', pricingVersion: 'v1', calculatedAtMs: 300,
+  });
+  const root = row('root-attempt', 'root', known(1000), priced(120000));
+  const child = row('child-attempt', 'child', known(2000), priced(80000));
+  const totals = summarizeCouncilUsage([root, child, { ...child }]);
+  assert.equal(totals.attempts, 2, 'duplicate native child usage must not create a third attempt');
+  assert.equal(totals.duplicateAttempts, 1);
+  assert.equal(totals.rootAttempts, 1);
+  assert.equal(totals.childAttempts, 1);
+  assert.deepEqual(totals.inputTokens, known(3000));
+  assert.deepEqual(totals.reviewerElapsedMs, known(200));
+  assert.deepEqual(totals.estimatedCostMicros, { status: 'calculated_estimated', value: 200000 });
+  assert.equal(totals.currency, 'USD');
+  assert.deepEqual(totals.pricingProvenance, ['Pinned pricing v1 @ 300']);
+  const partial = summarizeCouncilUsage([root, row('missing', 'child', { status: 'unknown' }, null)]);
+  assert.equal(partial.inputTokens.status, 'unknown');
+  assert.equal(partial.estimatedCostMicros.status, 'unknown');
+  assert.equal(partial.reviewerElapsedMs.value, 200, 'other independent measured fields remain usable');
+  const crossCurrency = summarizeCouncilUsage([root, row('eur-child', 'child', known(0), priced(100000, 'EUR'))]);
+  assert.equal(crossCurrency.estimatedCostMicros.status, 'unknown', 'never sum unmatched currencies');
+  const conflicting = summarizeCouncilUsage([root, { ...root, inputTokens: known(99999) }]);
+  assert.equal(conflicting.conflictingAttempts, 1);
+  assert.equal(conflicting.inputTokens.status, 'unknown', 'conflicting duplicate data must not be arbitrarily chosen');
+});
+
+test('snapshot updates require the active session, non-older cycle, and non-older revision', () => {
+  const current = { sessionId: 'session', revision: 8, councilSince: 200 };
+  assert.equal(councilCycleId(current), 'session:200');
+  assert.equal(acceptsCouncilSnapshot({ ...current, revision: 9 }, current, 'session'), true, 'newer revision in the same cycle');
+  assert.equal(acceptsCouncilSnapshot({ ...current, councilFindings: [] }, current, 'session'), true, 'same revision may carry a refreshed projection');
+  assert.equal(acceptsCouncilSnapshot({ ...current, revision: 12, councilSince: 100 }, current, 'session'), false, 'a larger revision cannot revive an earlier cycle');
+  assert.equal(acceptsCouncilSnapshot({ ...current, revision: 7 }, current, 'session'), false, 'older revision');
+  assert.equal(acceptsCouncilSnapshot({ ...current, sessionId: 'other' }, current, 'session'), false, 'wrong task');
+  assert.equal(acceptsCouncilSnapshot({ ...current, revision: 9, councilSince: 300 }, current, 'session'), true, 'newer cycle and revision');
 });
 
 test('a scored seat stays in its round even if abandoned', () => {
@@ -50,6 +195,12 @@ test('state text reads as the design says', () => {
   assert.equal(text({ state: 'fixing', round: 3, lowest: 8.3, stale: true }), 'Round 3 of 10 · fixing', 'a stale round below target is the normal fixing loop');
   assert.equal(text({ state: 'fixing', lowest: 9.5, stale: true }), 'Changed after passing at 9.5: fixing');
   assert.equal(text({ state: 'passed', lowest: 9.5 }), 'Passed at 9.5');
+  assert.equal(text({ state: 'blocked', round: 0, lowest: null }), 'Council blocked · review required');
+  assert.equal(text({ state: 'blocked', round: 2, lowest: 9.5 }), 'Blocked · round 2 of 10');
+  assert.equal(text({ state: 'failed', round: 2 }), 'Review failed · round 2 of 10');
+  assert.equal(text({ state: 'inconclusive', round: 2 }), 'Review inconclusive · round 2 of 10');
+  assert.equal(text({ state: 'stale', round: 2 }), 'Review stale · a fresh verified round is required');
+  assert.doesNotMatch(text({ state: 'blocked', round: 2, lowest: 9.5 }), /Passed/);
   assert.equal(text({ state: 'limit', lowest: 8.7, round: 3 }), 'Stopped at round limit (3 of 10)', 'used of the limit');
   const edited = text({ state: 'limit', lowest: 9.5, round: 3, stale: true });
   assert.equal(edited, 'Stopped at round limit: changed after passing at 9.5 (3 of 10)');

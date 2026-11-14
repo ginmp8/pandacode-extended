@@ -10,11 +10,115 @@ export interface WorkerProfile {
 /** What a council must reach: every reviewer at `target`, within `maxRounds` completed rounds (1-100), with `reviewers` seats (0 = the lead decides). */
 export interface CouncilReviewGrant { tool: string; action: string; resourceArgument: string; resource: string; actionArgument?: string | null }
 export interface CouncilPermissionSelection { authorizationId: string; grants: CouncilReviewGrant[] }
-export interface CouncilConfig { target: number; maxRounds: number; reviewers: number; /** Task-scoped persistent reviewer identities; absent means automatic native workers. */ reviewerBotIds?: string[]; optionalSkillIds?: string[]; requiredCheckSkillIds?: string[]; reviewPermissions?: CouncilPermissionSelection | null; postAcceptanceIssue?: { authorizationId: string; repository: string } | null }
+/** Native's untagged count is either a fixed number or the string "auto". */
+export type ReviewerCount = number | 'auto';
+export interface CouncilAutomatic { enabled: boolean; count: ReviewerCount }
+export type CouncilReviewerMode = 'direct' | 'nested';
+export type CouncilCriteriaSource = 'architect' | 'user' | 'hybrid';
+export type CouncilCriterionOrigin = 'user' | 'architect';
+export type CouncilStrategy = 'parallel' | 'escalated' | 'two_phase';
+export type NestedCouncilTemplate = 'explicit_task' | 'validated_default';
+export type NestedCouncilEscalation = 'always' | 'on_trigger';
+export interface NestedCouncilConfig {
+  template: NestedCouncilTemplate;
+  childCriteriaSource: CouncilCriteriaSource;
+  childReviewerCount: number;
+  target: number;
+  maxRounds: number;
+  escalation: NestedCouncilEscalation;
+}
+export interface SelectedCouncilReviewer { botId: string; mode: CouncilReviewerMode; required: true; nested?: NestedCouncilConfig | null }
+export interface CouncilCriterion {
+  id: string; lens: string; description: string; required: boolean; target: number;
+  evidenceRequired: boolean; source: CouncilCriterionOrigin;
+}
+export interface CouncilLimits {
+  maxDepth: number; maxRootSeats: number; maxConcurrentLeaves: number;
+  maxLeafReviewsPerRound: number; timeoutMs: number; maxEstimatedCostMicros: number;
+}
+export interface CouncilComposition {
+  schemaVersion: 1; automatic: CouncilAutomatic; selected: SelectedCouncilReviewer[];
+  criteriaSource: CouncilCriteriaSource; criteria: CouncilCriterion[];
+  strategy: CouncilStrategy; limits: CouncilLimits;
+}
+export type CouncilFindingSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
+export type CouncilFindingLocationStatus = 'verified' | 'missing' | 'unverified';
+export interface CouncilFindingLocation { file: string; line?: number | null }
+/** Native verified record; suggestedFix is untrusted display text. */
+export interface CouncilFinding {
+  id: string; cycleId: string; roundId: string; seatId: string; artifactDigest: string;
+  criterionId: string; severity: CouncilFindingSeverity; category: string; summary: string;
+  /** Optional on historical findings; untrusted text, not execution authority. */
+  title?: string | null; explanation?: string | null;
+  evidenceRefs: string[]; locationStatus: CouncilFindingLocationStatus;
+  location?: CouncilFindingLocation | null; suggestedFix?: string | null;
+}
+export type CouncilFindingDispositionKind = 'open' | 'addressed' | 'disputed' | 'not_reproduced' | 'waived_by_authorized_human';
+export interface CouncilFindingDisposition {
+  findingId: string; disposition: CouncilFindingDispositionKind; actorId: string;
+  rationale: string; timestampMs: number; artifactLinks: string[];
+}
+export type ChildCouncilStatus = 'passed' | 'accepted' | 'fixing' | 'limit' | 'stopped' | 'failed' | 'blocked' | 'inconclusive' | 'stale';
+export interface ChildCouncilReceipt {
+  rootCycleId: string; parentSeatId: string; childCycleId: string; botId: string;
+  artifactRevision: string; policyFingerprint: string; status: ChildCouncilStatus;
+  minScore?: number | null; leafScoreRefs: string[]; findingsRefs: string[];
+  evidenceRefs: string[]; snapshotFingerprint: string;
+}
+/** Native-authorized child reviewer row; never an extra root vote. */
+export interface CouncilChildLeafProjection {
+  rootCycleId: string; parentSeatId: string; childCycleId: string;
+  roundId: string; seatId: string; reviewerId: string; attempt: number;
+  status: string; score?: number | null;
+}
+export interface CouncilCriterionOutcomeReceipt {
+  schemaVersion: number; rootCycleId: string; taskId: string; taskCycleId: string;
+  childCycleId?: string | null; round: number; seatId: string; parentSeatId?: string | null;
+  attempt: number; artifactRevision: string;
+  outcome: { criterionId: string; score: number; verifiedEvidenceRefs: string[] };
+}
+export type CouncilReviewVerdict = 'passed' | 'accepted' | 'failed' | 'limit' | 'blocked' | 'stopped' | 'inconclusive' | 'stale';
+export interface CouncilReviewReceipt {
+  schemaVersion: number; requestId: string; cycleId: string; taskId?: string | null;
+  assignmentId?: string | null; policyFingerprint: string; artifactDigest: string;
+  verdict: CouncilReviewVerdict; findingsRefs: string[]; evidenceRefs: string[];
+  terminalRevision: number; idempotencyKey: string;
+}
+export type CouncilUsageValueStatus = 'measured' | 'provider_estimated' | 'calculated_estimated' | 'unknown';
+export interface CouncilUsageValue<T> { status: CouncilUsageValueStatus; value?: T | null }
+export interface CouncilCostEstimate { amountMicros: number; currency: string; pricingSource: string; pricingVersion: string; calculatedAtMs: number }
+export interface CouncilResourceBudgetConsumption {
+  concurrentLeaves: CouncilUsageValue<number>; leafReviews: CouncilUsageValue<number>;
+  estimatedCostMicros: CouncilUsageValue<number>;
+}
+export type CouncilUsageScope = 'root' | 'child';
+export type CouncilUsagePhase = 'review' | 'escalation' | 'challenge';
+export interface CouncilUsageRecord {
+  id: string; rootCycleId: string; childCycleId?: string | null; attemptId: string;
+  reviewerId: string; roundId: string; seatId: string; scope: CouncilUsageScope;
+  phase: CouncilUsagePhase; strategy: CouncilStrategy; startedAtMs?: number | null;
+  finishedAtMs?: number | null; queueWaitMs: CouncilUsageValue<number>;
+  elapsedMs: CouncilUsageValue<number>; retries: CouncilUsageValue<number>;
+  escalations: CouncilUsageValue<number>; provider?: string | null; model?: string | null;
+  harness?: string | null; inputTokens: CouncilUsageValue<number>;
+  outputTokens: CouncilUsageValue<number>; requestCount: CouncilUsageValue<number>;
+  terminalStatus: CouncilReviewVerdict; budgetConsumption: CouncilResourceBudgetConsumption;
+  costEstimate?: CouncilCostEstimate | null;
+}
+export interface CouncilCriterionOutcome { criterionId: string; score: number; verifiedEvidenceRefs: string[] }
+export interface CouncilConfig {
+  target: number; maxRounds: number; reviewers: number;
+  /** Task-scoped persistent reviewer identities; absent means automatic native workers. */
+  reviewerBotIds?: string[]; optionalSkillIds?: string[]; requiredCheckSkillIds?: string[];
+  reviewPermissions?: CouncilPermissionSelection | null;
+  postAcceptanceIssue?: { authorizationId: string; repository: string } | null;
+  /** Additive schema v1. Missing keeps the original M1/M2 behavior. */
+  composition?: CouncilComposition | null;
+}
 /** A worker's seat on the council: the round it reviews, what it looks at, and its score once given. */
 export interface CouncilSeat { round: number; lens: string; score?: number | null; /** First launch; a round begins with its earliest seat. */ startedAt?: number }
 /** `dispatch`: the latest round is open but no seat is live, so it waits on the lead; `asking`: the team rests for the user. */
-export type CouncilState = 'waiting' | 'reviewing' | 'dispatch' | 'fixing' | 'passed' | 'limit' | 'asking' | 'accepted';
+export type CouncilState = 'waiting' | 'reviewing' | 'dispatch' | 'fixing' | 'passed' | 'limit' | 'asking' | 'accepted' | 'blocked' | 'failed' | 'stopped' | 'inconclusive' | 'stale';
 /** Native's own reading of the council, which also sees edits the webview cannot (the lead's own). `stale`: the latest round passed, then the work changed. */
 /** `accepted`: the user accepted this cycle's result (Council stays on). `notice`: a plain sentence for the user whenever `team.error`
  *  holds a Council refusal written for the lead (asking or paused), which is then never shown; null otherwise. */
@@ -94,6 +198,8 @@ export interface TeamWorker extends WorkerProfile {
   /** S1/S2 native authority, with a pinned persistent bot ID where selected. */
   reviewerBinding?: {
     reviewerBotId?: string | null;
+    /** Native cycle pinned to this review seat; parent snapshots can contain prior-cycle workers. */
+    councilCycleId?: string;
     artifactRevision?: string;
     skillEvidence?: Record<string, { contentSha256: string; artifactRevision: string; invoked: boolean; checkExecuted: boolean; evidenceVerified: boolean; checkKind?: string | null }>;
     snapshot?: {
@@ -127,6 +233,14 @@ export interface TeamSnapshot {
   councilSince?: number;
   /** Native's reading, the only source of the council's state: the webview never derives it (a host that sends none reads as waiting). */
   councilStatus?: CouncilStatus | null;
+  /** Native's read-only projection for the live Council cycle. Older hosts may omit these fields. */
+  councilFindings?: CouncilFinding[];
+  councilFindingDispositions?: CouncilFindingDisposition[];
+  councilChildReceipts?: ChildCouncilReceipt[];
+  councilChildLeaves?: CouncilChildLeafProjection[];
+  councilCriterionOutcomes?: CouncilCriterionOutcomeReceipt[];
+  councilReviewReceipts?: CouncilReviewReceipt[];
+  councilUsage?: CouncilUsageRecord[];
   updatedAt: number;
 }
 /** The note on a team whose failed lead turn PandaCode is retrying. */

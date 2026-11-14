@@ -2,6 +2,9 @@ import type { Bot } from './bots';
 import { botAvatarHtml } from './bot-avatars';
 import { escape, icon } from './dom';
 import { WORKING_LABELS } from './bot-thread';
+import type { CouncilComposition, CouncilCriteriaSource, CouncilReviewerMode, CouncilStrategy, TeamSnapshot } from './architect-types';
+import { councilCompositionValidationIssues } from './council';
+import { councilLedgerHtmlForTeam } from './council-panel';
 
 export interface SharedChannelSummary {
   id: string;
@@ -58,9 +61,15 @@ export interface SharedChannelUiOptions {
   changed(): Promise<void>;
   openChannel(channelId: string): void;
   notify(text: string): void;
+  loadCouncilSnapshot?: (sessionId: string) => Promise<TeamSnapshot | null>;
+  bindCouncilEvidence?: (host: HTMLElement, sessionId: string) => void;
 }
 
 const channelName = (name: string) => `#${name.replace(/^#+/, '')}`;
+const CHANNEL_COUNCIL_LIMITS = Object.freeze({
+  maxDepth: 2, maxRootSeats: 8, maxConcurrentLeaves: 64,
+  maxLeafReviewsPerRound: 128, timeoutMs: 86_400_000, maxEstimatedCostMicros: 1_000_000,
+});
 
 function faces(ids: string[], bots: Bot[], cls = ''): string {
   const members = ids.map(id => bots.find(bot => bot.id === id)).filter((bot): bot is Bot => Boolean(bot));
@@ -118,7 +127,7 @@ function messageHtml(message: SharedChannelMessage, bots: Bot[]): string {
         : '';
       return `${escape(reviewer.name)} (${escape(reviewer.lens ?? 'review')})${reviewer.score == null ? '' : ` ${reviewer.score.toFixed(1)}`}${skillNote}`;
     }).join(' · ') ?? '';
-    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${reviewerSummary}</span>${council.notice ? `<span class="bc-council-notice">${escape(council.notice)}</span>` : ''}${council.acceptanceReason ? `<span class="bc-council-acceptance">Accepted by local user: ${escape(council.acceptanceReason)}</span>` : ''}${council.followupStatus ? `<span class="bc-council-followup">GitHub follow-up: ${escape(council.followupStatus)}${council.followupError ? ` · ${escape(council.followupError)}` : ''}${council.followupUrl?.startsWith('https://github.com/') ? ` · <a href="${escape(council.followupUrl)}" target="_blank" rel="noopener noreferrer">Open issue</a>` : ''}</span>` : ''}${council.sessionId ? `<button type="button" class="secondary-button bc-council-report" data-action="channel-council-report" data-session-id="${escape(council.sessionId)}">View Council report</button>` : ''}${council.round > 0 && ['Limit reached', 'Needs correction', 'Inconclusive'].includes(council.state) && message.status !== 'Stopped' && message.status !== 'Failed' ? `<button type="button" class="secondary-button" data-action="channel-council-accept" data-delivery-id="${escape(message.id)}">Accept with reason</button>` : ''}</span>` : '';
+    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${reviewerSummary}</span>${council.notice ? `<span class="bc-council-notice">${escape(council.notice)}</span>` : ''}${council.acceptanceReason ? `<span class="bc-council-acceptance">Accepted by local user: ${escape(council.acceptanceReason)}</span>` : ''}${council.followupStatus ? `<span class="bc-council-followup">GitHub follow-up: ${escape(council.followupStatus)}${council.followupError ? ` · ${escape(council.followupError)}` : ''}${council.followupUrl?.startsWith('https://github.com/') ? ` · <a href="${escape(council.followupUrl)}" target="_blank" rel="noopener noreferrer">Open issue</a>` : ''}</span>` : ''}${council.sessionId ? `<button type="button" class="secondary-button bc-council-report" data-action="channel-council-report" data-delivery-id="${escape(message.id)}" data-cycle-id="${escape(council.cycleId)}" data-artifact-revision="${escape(council.artifactRevision)}" data-session-id="${escape(council.sessionId)}">View Council report</button>` : ''}${council.round > 0 && ['Limit reached', 'Needs correction', 'Inconclusive'].includes(council.state) && message.status !== 'Stopped' && message.status !== 'Failed' ? `<button type="button" class="secondary-button" data-action="channel-council-accept" data-delivery-id="${escape(message.id)}">Accept with reason</button>` : ''}</span>` : '';
     return `<div class="bc-assigned" role="note" data-message-id="${escape(message.id)}"><span>${escape(description)}</span>${message.status ? `<small>${escape(message.status)}</small>` : ""}${verdict}</div>`;
   }
   const bot = message.authorBotId ? bots.find(item => item.id === message.authorBotId) : undefined;
@@ -168,22 +177,129 @@ export function sharedChannelActionsHtml(channel: SharedChannelDetail, bots: Bot
 /** Preserve unsent, per-message Council inputs across a channel refresh only. */
 export function restoreSharedChannelCouncilInputs(previous: HTMLFormElement | null, next: HTMLFormElement | null): void {
   if (!previous || !next || previous.dataset.channelId !== next.dataset.channelId) return;
-  const oldInputs = [...previous.querySelectorAll<HTMLInputElement>('input[name^="council"]')];
-  for (const input of next.querySelectorAll<HTMLInputElement>('input[name^="council"]')) {
-    const old = oldInputs.find(item => item.name === input.name
-      && (item.type === 'checkbox' || item.type === 'radio' ? item.value === input.value : true));
+  const oldRows = [...previous.querySelectorAll<HTMLElement>('[data-bc-criterion]')];
+  const nextList = next.querySelector<HTMLElement>('[data-bc-criteria-list]');
+  const template = next.querySelector<HTMLTemplateElement>('[data-bc-criterion-template]');
+  if (nextList && template) {
+    while (next.querySelectorAll('[data-bc-criterion]').length < oldRows.length) {
+      const row = template.content.firstElementChild?.cloneNode(true);
+      if (row) nextList.append(row);
+    }
+    while (next.querySelectorAll('[data-bc-criterion]').length > oldRows.length && oldRows.length > 0) {
+      next.querySelector('[data-bc-criterion]:last-of-type')?.remove();
+    }
+    reindexChannelCriteria(previous);
+    reindexChannelCriteria(next);
+  }
+  const oldInputs = [...previous.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>('[name^="council"]')];
+  const restored = new Set<Element>();
+  for (const input of next.querySelectorAll<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>('[name^="council"]')) {
+    const key = input.dataset.councilDraftKey;
+    const old = oldInputs.find(item => !restored.has(item) && (key
+      ? item.dataset.councilDraftKey === key
+      : item.name === input.name && item.tagName === input.tagName
+        && (!(item instanceof HTMLInputElement) || !(input instanceof HTMLInputElement)
+          || (item.type !== 'checkbox' && item.type !== 'radio') || item.value === input.value)));
     if (!old) continue;
-    if (input.type === 'checkbox' || input.type === 'radio') input.checked = old.checked;
+    restored.add(old);
+    if (input instanceof HTMLInputElement && (input.type === 'checkbox' || input.type === 'radio') && old instanceof HTMLInputElement) input.checked = old.checked;
     else input.value = old.value;
   }
+}
+
+function reindexChannelCriteria(form: HTMLFormElement): void {
+  for (const [index, row] of [...form.querySelectorAll<HTMLElement>('[data-bc-criterion]')].entries()) {
+    for (const control of row.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('[data-bc-criterion-field]')) {
+      control.dataset.councilDraftKey = `criterion-${index}-${control.dataset.bcCriterionField}`;
+    }
+  }
+}
+
+function sharedChannelCouncilPreview(form: HTMLFormElement, composition: CouncilComposition): string {
+  const reviewerRows = [...form.querySelectorAll<HTMLElement>('[data-bc-reviewer-row]')];
+  const selectedLines = composition.selected.map(reviewer => {
+    const row = reviewerRows.find(item => item.querySelector<HTMLInputElement>('[data-bc-reviewer]')?.value === reviewer.botId);
+    const name = row?.querySelector<HTMLElement>('.council-composition-bot strong')?.textContent?.trim() || reviewer.botId;
+    if (reviewer.mode !== 'nested') return `D · Direct review: ${name}`;
+    const raw = (key: string) => {
+      const value = row?.querySelector<HTMLInputElement | HTMLSelectElement>(`[data-bc-nested-field="${key}"]`)?.value.trim() ?? '';
+      return value || 'not set';
+    };
+    return `N · Child Council: ${name} (template ${raw('template')}; criteria ${raw('childCriteriaSource')}; reviewers ${raw('childReviewerCount')}; target ${raw('target')}; max rounds ${raw('maxRounds')}; escalation ${raw('escalation')})`;
+  });
+  const automaticCount = composition.automatic.enabled
+    ? form.querySelector<HTMLSelectElement>('[data-bc-automatic-count]')?.value || 'not set'
+    : 'off';
+  const hasDirect = composition.selected.some(reviewer => reviewer.mode === 'direct');
+  const hasNested = composition.selected.some(reviewer => reviewer.mode === 'nested');
+  const sourceKey = `${composition.automatic.enabled ? 'A' : ''}${hasDirect ? 'D' : ''}${hasNested ? 'N' : ''}`;
+  const modeId = ({ A: 'M1', D: 'M2', AD: 'M3', N: 'M4', AN: 'M5', DN: 'M6', ADN: 'M7' } as Record<string, string>)[sourceKey] ?? 'none';
+  const strategy = ({ parallel: 'S1 · Parallel', escalated: 'S2 · Escalated / on-demand', two_phase: 'S3 · Two-phase' } as Record<string, string>)[composition.strategy] ?? composition.strategy;
+  const criteriaSource = composition.criteriaSource === 'architect' ? 'Architect'
+    : composition.criteriaSource === 'hybrid' ? 'Hybrid (Architect + User)' : 'User';
+  const criteriaLines = composition.criteria.map((criterion, index) => {
+    const rawTarget = criterionRowsRawValue(form, index, 'target') || 'not set';
+    return `  ${criterion.id || 'ID not set'} · ${criterion.lens || 'lens not set'} · target ${rawTarget}/10 · ${criterion.required ? 'required' : 'optional'} · evidence required: ${criterion.evidenceRequired ? 'yes' : 'no'}\n    ${criterion.description || 'Description not set'}`;
+  });
+  const lines = [
+    'Draft only · configuration preview, not a review result',
+    'Schema version: 1',
+    `Reviewer sources: ${sourceKey ? `${sourceKey} · ${modeId}` : 'none selected'}`,
+    ...(composition.automatic.enabled ? [`A · Automatic Architect reviewers: ${automaticCount === 'auto' ? 'Auto' : automaticCount}`] : ['A · Automatic Architect reviewers: off']),
+    ...selectedLines,
+    `Strategy: ${strategy}`,
+    `Criteria source: ${criteriaSource}`,
+    ...(composition.criteriaSource !== 'user' ? ['Architect-provided criteria are not included in this composer preview.'] : []),
+    composition.criteria.length ? 'User criteria (draft):' : 'User criteria: none configured',
+    ...criteriaLines,
+    'Plan limits: depth 2; root seats 8; concurrent leaves 64; leaf reviews per round 128; timeout 24 hours; estimated cost cap 1,000,000 micros.',
+    'Evidence status: not evaluated in this preview.',
+  ];
+  return lines.join('\n');
+}
+
+function criterionRowsRawValue(form: HTMLFormElement, index: number, name: string): string {
+  return [...form.querySelectorAll<HTMLElement>('[data-bc-criterion]')][index]
+    ?.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[data-bc-criterion-field="${name}"]`)?.value.trim() ?? '';
+}
+
+function channelCriterionMarkup(): string {
+  return `<fieldset class="council-criterion" data-bc-criterion>
+    <legend>User criterion</legend>
+    <label>Criterion ID<input type="text" name="councilCriterionId" data-bc-criterion-field="id" maxlength="80" value="criterion-1"></label>
+    <label>Lens<input type="text" name="councilCriterionLens" data-bc-criterion-field="lens" maxlength="80" value="correctness"></label>
+    <label>Description<textarea name="councilCriterionDescription" data-bc-criterion-field="description" rows="2" maxlength="4096">Check correctness and evidence.</textarea></label>
+    <label>Target<input type="number" name="councilCriterionTarget" data-bc-criterion-field="target" min="1" max="10" step="0.5" value="8.5"></label>
+    <label><input type="checkbox" name="councilCriterionRequired" data-bc-criterion-field="required" checked> Required for acceptance</label>
+    <label><input type="checkbox" name="councilCriterionEvidence" data-bc-criterion-field="evidenceRequired" checked> Require verified evidence</label>
+    <button type="button" class="ds-btn council-remove-criterion" data-bc-remove-criterion>Remove criterion</button>
+  </fieldset>`;
 }
 
 export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bot[] = []): string {
   if (channel.archived || !channel.memberIds.length) return '';
   const members = channel.memberIds.map(id => bots.find(bot => bot.id === id)).filter((bot): bot is Bot => Boolean(bot));
-  const options = members.map(bot => `<label><input name="councilReviewer" type="checkbox" value="${escape(bot.id)}"><span>${escape(bot.name)}</span></label>`).join('');
-  return `<form id="shared-channel-composer" data-channel-id="${escape(channel.id)}" class="composer bc-composer"><textarea id="shared-channel-prompt" name="text" aria-label="Message channel" aria-description="Enter to send. Shift Enter for a new line." rows="2" placeholder="Message ${escape(channelName(channel.name))}… @mention up to two bots"></textarea>
+  const options = members.map(bot => `<div class="council-composition-reviewer" data-bc-reviewer-row>
+    <label class="council-composition-bot"><input name="councilReviewer" type="checkbox" value="${escape(bot.id)}" data-bc-reviewer><span><strong>${escape(bot.name)}</strong><small>Channel member</small></span></label>
+    <label class="council-composition-reviewer-mode">Reviewer branch<select name="councilReviewerMode" data-bc-reviewer-mode data-council-draft-key="reviewer-${escape(bot.id)}-mode" disabled><option value="direct" selected>Direct review</option><option value="nested">Child Council</option></select></label>
+    <fieldset class="council-nested-fields" data-bc-nested-policy hidden>
+      <legend>Child Council policy</legend>
+      <label>Task template<select name="councilNestedTemplate" data-bc-nested-field="template" data-council-draft-key="reviewer-${escape(bot.id)}-template"><option value="explicit_task" selected>Explicit task</option><option value="validated_default">Validated default</option></select></label>
+      <label>Child criteria<select name="councilNestedCriteriaSource" data-bc-nested-field="childCriteriaSource" data-council-draft-key="reviewer-${escape(bot.id)}-criteria"><option value="architect" selected>Architect</option><option value="user">User</option><option value="hybrid">Hybrid</option></select></label>
+      <label>Child reviewers<input type="number" name="councilNestedReviewerCount" data-bc-nested-field="childReviewerCount" data-council-draft-key="reviewer-${escape(bot.id)}-count" min="2" max="8" step="1" value="2"></label>
+      <label>Child target<input type="number" name="councilNestedTarget" data-bc-nested-field="target" data-council-draft-key="reviewer-${escape(bot.id)}-target" min="1" max="10" step="0.5" value="9"></label>
+      <label>Child max rounds<input type="number" name="councilNestedMaxRounds" data-bc-nested-field="maxRounds" data-council-draft-key="reviewer-${escape(bot.id)}-rounds" min="1" max="100" step="1" value="10"></label>
+      <label>Escalation<select name="councilNestedEscalation" data-bc-nested-field="escalation" data-council-draft-key="reviewer-${escape(bot.id)}-escalation"><option value="always" selected>Always</option><option value="on_trigger">On trigger</option></select></label>
+    </fieldset>
+  </div>`).join('');
+  const legacyOptions = members.map(bot => `<label><input type="checkbox" name="councilReviewer" value="${escape(bot.id)}" data-bc-legacy-reviewer data-council-draft-key="legacy-reviewer-${escape(bot.id)}" disabled>${botAvatarHtml(bot.avatar, bot.name, 'bc-pick-face', bot.color)}<span>${escape(bot.name)}</span></label>`).join('');
+  const sourceModes = [
+    ['M1', 'A · automatic'], ['M2', 'D · direct'], ['M3', 'A + D'],
+    ['M4', 'N · nested'], ['M5', 'A + N'], ['M6', 'D + N'], ['M7', 'A + D + N'],
+  ].map(([id, label]) => `<li data-bc-source-mode="${id}"><strong>${id}</strong><span>${label}</span></li>`).join('');
+  return `<form id="shared-channel-composer" data-channel-id="${escape(channel.id)}" class="composer bc-composer" novalidate><textarea id="shared-channel-prompt" name="text" aria-label="Message channel" aria-description="Enter to send. Shift Enter for a new line." rows="2" placeholder="Message ${escape(channelName(channel.name))}… @mention up to two bots"></textarea>
     <div class="composer-toolbar"><button type="button" class="bc-council-trigger composer-council-button" data-action="channel-council" aria-label="Council: off" aria-haspopup="dialog" aria-expanded="false" aria-controls="bc-council-panel" title="Council settings"><span class="council-glyph"><svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v16M8 20h8M5 7h14M5 7l-3 6.5a3 3 0 0 0 6 0zM19 7l-3 6.5a3 3 0 0 0 6 0z"/></svg></span></button><span class="bc-composer-spacer"></span><button type="submit" class="send-button" title="Send message" aria-label="Send message">${icon('arrow')}</button></div>
+    <p class="sr-only" data-bc-post-status role="status" aria-live="polite" aria-atomic="true"></p>
     <section id="bc-council-panel" class="floating-menu council-panel bc-council-panel" role="dialog" aria-labelledby="bc-council-title" popover="auto">
       <div class="bc-council-controls">
         <div class="council-panel-head"><label id="bc-council-title" for="bc-council-enabled">Council</label><input id="bc-council-enabled" class="ds-toggle council-switch" type="checkbox" role="switch" name="councilEnabled" aria-describedby="bc-council-about"></div>
@@ -191,13 +307,43 @@ export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bo
         <fieldset class="bc-council-options"><legend class="sr-only">Council settings for this message</legend>
         <div class="council-field"><span id="bc-council-target-label">Target score</span><div class="bc-council-value-row"><div class="ds-seg" role="group" aria-labelledby="bc-council-target-label"><button type="button" data-council-preset="target" data-value="7" aria-pressed="false">7.0</button><button type="button" data-council-preset="target" data-value="8" aria-pressed="false">8.0</button><button type="button" data-council-preset="target" data-value="8.5" aria-pressed="false">8.5</button><button type="button" data-council-preset="target" data-value="9" aria-pressed="true">9.0</button><button type="button" data-council-preset="target" data-value="9.5" aria-pressed="false">9.5</button><button type="button" data-council-preset="target" data-value="10" aria-pressed="false">10.0</button></div><input type="number" name="councilTarget" aria-label="Custom target score" title="Target score (1–10)" min="1" max="10" step="0.5" value="9"></div></div>
         <div class="council-field"><span id="bc-council-rounds-label">Max rounds</span><div class="bc-council-value-row"><div class="ds-seg" role="group" aria-labelledby="bc-council-rounds-label"><button type="button" data-council-preset="rounds" data-value="3" aria-pressed="false">3</button><button type="button" data-council-preset="rounds" data-value="5" aria-pressed="false">5</button><button type="button" data-council-preset="rounds" data-value="10" aria-pressed="true">10</button><button type="button" data-council-preset="rounds" data-value="25" aria-pressed="false">25</button></div><input type="number" name="councilMaxRounds" aria-label="Custom max rounds" title="Max rounds (1–100)" min="1" max="100" step="1" value="10"></div></div>
-        <div class="bc-council-mode-group"><span class="bc-council-section-label">Reviewers</span>
-          <div class="bc-council-modes ds-seg" role="group" aria-label="Reviewer mode">
-            <label><input type="radio" name="councilMode" value="auto" checked><span>Auto</span></label>
-            <label><input type="radio" name="councilMode" value="selected"><span>Bots</span></label>
+        <fieldset class="bc-council-mode-group" data-bc-legacy-controls>
+          <legend>Legacy reviewer selection</legend>
+          <div class="bc-council-modes" role="group" aria-label="Legacy Council reviewer source">
+            <label><input type="radio" name="councilMode" value="auto" data-council-draft-key="legacy-mode-auto" checked>Automatic native reviewers</label>
+            <label><input type="radio" name="councilMode" value="selected" data-council-draft-key="legacy-mode-selected">Selected channel bots</label>
           </div>
-        </div>
-        <div class="bc-council-reviewer-options"><p>Choose 2–8 members other than any bot assigned this message.</p>${options}</div>
+          <div class="bc-council-reviewer-options" role="group" aria-label="Legacy selected channel bots" data-bc-legacy-reviewer-options>
+            <p>Choose 2–8 members other than any bot assigned this message.</p>${legacyOptions || '<p>No channel members are available for selection.</p>'}
+          </div>
+        </fieldset>
+        <section class="council-composition-editor" aria-labelledby="bc-council-composition-title">
+          <h3 id="bc-council-composition-title">Reviewer composition</h3>
+          <label class="council-composition-toggle"><input type="checkbox" name="councilCompositionEnabled" data-bc-composition-enabled data-council-draft-key="composition-enabled"><span>Use a schema v1 composition plan</span></label>
+          <p class="council-composition-help">When this is off, Council keeps its legacy automatic reviewer behavior. Composition reviewers are limited to this channel’s members.</p>
+          <div class="council-composition-body" data-bc-composition-body hidden>
+            <p class="council-composition-mode-readout" role="status" data-bc-source-summary>Choose one or more reviewer sources.</p>
+            <ol class="council-composition-modes" aria-label="Derived reviewer sources">${sourceModes}</ol>
+            <label class="council-composition-toggle"><input type="checkbox" name="councilAutomaticEnabled" data-bc-automatic-enabled data-council-draft-key="automatic-enabled" checked><span>Include automatic Architect reviewers (A)</span></label>
+            <label class="council-composition-control">Automatic reviewer count<select name="councilAutomaticCount" data-bc-automatic-count data-council-draft-key="automatic-count"><option value="auto" selected>Auto</option>${Array.from({ length: 8 }, (_, index) => `<option value="${index + 1}">${index + 1}</option>`).join('')}</select></label>
+            <div class="council-composition-bots" role="group" aria-label="Selected channel-member reviewers" data-bc-reviewer-group>${options || '<p>No channel members are available for reviewer selection.</p>'}</div>
+            <label class="council-composition-control">Criteria source<select name="councilCriteriaSource" data-bc-criteria-source data-council-draft-key="criteria-source"><option value="architect" selected>Architect</option><option value="user">User</option><option value="hybrid">Hybrid</option></select></label>
+            <p class="council-composition-help">Architect criteria come from the lead’s plan. User criteria are explicit review gates; hybrid combines both.</p>
+            <div class="council-composition-criteria" data-bc-criteria-editor hidden>
+              <div data-bc-criteria-list>${channelCriterionMarkup()}</div>
+              <template data-bc-criterion-template>${channelCriterionMarkup()}</template>
+              <button type="button" class="ds-btn" data-bc-add-criterion>Add user criterion</button>
+            </div>
+            <label class="council-composition-control">Execution strategy<select name="councilStrategy" data-bc-strategy data-council-draft-key="strategy"><option value="parallel" selected>S1 · Parallel</option><option value="escalated">S2 · Escalated / on-demand</option><option value="two_phase">S3 · Two-phase</option></select></label>
+            <p class="council-composition-help">Choose an execution strategy independently of the reviewer sources. Native controls scheduling and validates the submitted plan.</p>
+            <section class="council-plan-preview" data-bc-plan-preview aria-label="Schema v1 plan preview" hidden>
+              <h4>Schema v1 plan preview</h4>
+              <p class="council-composition-help">Draft only. This is the configuration being sent; it does not show review results or verified evidence.</p>
+              <pre data-bc-plan-preview-text style="box-sizing:border-box;min-width:0;max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+            </section>
+          </div>
+        </section>
+        <p class="council-composition-help" data-bc-validation-summary role="alert" hidden></p>
         <div class="bc-council-followup"><label><input type="checkbox" name="councilGithubIssue"> After Council approval, create one GitHub issue with accepted findings</label>
           <label>Authorized repository (owner/name) <input type="text" name="councilGithubRepo" maxlength="201" placeholder="owner/repository" autocomplete="off"></label>
           <small>Uses the existing signed-in GitHub CLI. A failed or uncertain external write is reported separately; it never changes the Council verdict.</small></div>
@@ -205,6 +351,212 @@ export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bo
         </fieldset>
       </div>
     </section></form>`;
+}
+
+/** Build the schema-v1 draft from the visible channel controls; absent means keep the legacy Council payload. */
+export function sharedChannelCouncilComposition(form: HTMLFormElement): CouncilComposition | null {
+  if (!form.querySelector<HTMLInputElement>('[data-bc-composition-enabled]')?.checked) return null;
+  const automaticEnabled = form.querySelector<HTMLInputElement>('[data-bc-automatic-enabled]')?.checked ?? false;
+  const countValue = form.querySelector<HTMLSelectElement>('[data-bc-automatic-count]')?.value ?? 'auto';
+  const automaticCount = automaticEnabled ? countValue === 'auto' ? 'auto' : Number(countValue) : 0;
+  const selected = [...form.querySelectorAll<HTMLInputElement>('[data-bc-reviewer]:checked')].map(input => {
+    const row = input.closest<HTMLElement>('[data-bc-reviewer-row]');
+    const mode = (row?.querySelector<HTMLSelectElement>('[data-bc-reviewer-mode]')?.value ?? 'direct') as CouncilReviewerMode;
+    if (mode !== 'nested') return { botId: input.value, mode, required: true as const };
+    const field = (name: string): string => row?.querySelector<HTMLInputElement | HTMLSelectElement>(`[data-bc-nested-field="${name}"]`)?.value ?? '';
+    return {
+      botId: input.value, mode, required: true as const,
+      nested: {
+        template: field('template') as 'explicit_task' | 'validated_default',
+        childCriteriaSource: field('childCriteriaSource') as CouncilCriteriaSource,
+        childReviewerCount: Number(field('childReviewerCount')),
+        target: Number(field('target')),
+        maxRounds: Number(field('maxRounds')),
+        escalation: field('escalation') as 'always' | 'on_trigger',
+      },
+    };
+  });
+  const criteriaSource = (form.querySelector<HTMLSelectElement>('[data-bc-criteria-source]')?.value ?? 'architect') as CouncilCriteriaSource;
+  const criteria = criteriaSource === 'architect' ? [] : [...form.querySelectorAll<HTMLElement>('[data-bc-criterion]')].map(row => {
+    const value = (name: string): string => row.querySelector<HTMLInputElement | HTMLTextAreaElement>(`[data-bc-criterion-field="${name}"]`)?.value ?? '';
+    return {
+      id: value('id'), lens: value('lens'), description: value('description'),
+      required: row.querySelector<HTMLInputElement>('[data-bc-criterion-field="required"]')?.checked ?? false,
+      target: Number(value('target')),
+      evidenceRequired: row.querySelector<HTMLInputElement>('[data-bc-criterion-field="evidenceRequired"]')?.checked ?? false,
+      source: 'user' as const,
+    };
+  });
+  const strategy = (form.querySelector<HTMLSelectElement>('[data-bc-strategy]')?.value ?? 'parallel') as CouncilStrategy;
+  return {
+    schemaVersion: 1,
+    automatic: { enabled: automaticEnabled, count: automaticCount },
+    selected,
+    criteriaSource,
+    criteria,
+    strategy,
+    limits: { ...CHANNEL_COUNCIL_LIMITS },
+  };
+}
+
+export interface SharedChannelCouncilIssue { field: HTMLElement | null; message: string }
+
+/** Validate the visible draft and point each failure back to its source field. Native remains authoritative. */
+export function sharedChannelCouncilValidationIssues(
+  form: HTMLFormElement,
+  composition: CouncilComposition | null,
+  target: number,
+  maxRounds: number,
+): SharedChannelCouncilIssue[] {
+  const issues: SharedChannelCouncilIssue[] = [];
+  const field = (selector: string): HTMLElement | null => form.querySelector<HTMLElement>(selector);
+  const add = (control: HTMLElement | null, message: string) => issues.push({ field: control, message });
+  const roundsInput = field('[name="councilMaxRounds"]');
+  if (!Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 100) add(roundsInput, 'Council max rounds must be an integer from 1 to 100.');
+  if (!composition) {
+    if (!Number.isFinite(target) || target < 1 || target > 10) add(field('[name="councilTarget"]'), 'Council target must be between 1 and 10.');
+    return issues;
+  }
+
+  const reviewerRows = [...form.querySelectorAll<HTMLElement>('[data-bc-reviewer-row]')];
+  const reviewerGroup = field('[data-bc-reviewer-group]');
+  const automaticCount = field('[data-bc-automatic-count]');
+  const criterionRows = [...form.querySelectorAll<HTMLElement>('[data-bc-criterion]')];
+  const reviewerField = (index: number, suffix = ''): HTMLElement | null => {
+    const reviewer = composition.selected[index];
+    const row = reviewerRows.find(item => item.querySelector<HTMLInputElement>('[data-bc-reviewer]')?.value === reviewer?.botId);
+    if (suffix.startsWith('nested.')) return row?.querySelector<HTMLElement>(`[data-bc-nested-field="${suffix.slice(7)}"]`) ?? row?.querySelector<HTMLElement>('[data-bc-nested-policy]') ?? reviewerGroup;
+    if (suffix === 'nested') return row?.querySelector<HTMLElement>('[data-bc-nested-policy]') ?? reviewerGroup;
+    if (suffix === 'mode') return row?.querySelector<HTMLElement>('[data-bc-reviewer-mode]') ?? reviewerGroup;
+    if (suffix === 'botId') return row?.querySelector<HTMLElement>('[data-bc-reviewer]') ?? reviewerGroup;
+    return row ?? reviewerGroup;
+  };
+  const coreField = (path: string, message: string): HTMLElement | null => {
+    if (path === 'strategy') return field('[data-bc-strategy]');
+    if (path === 'criteriaSource') return field('[data-bc-criteria-source]');
+    if (path === 'councilTarget') return field('[name="councilTarget"]');
+    if (path === 'automatic.count') return automaticCount;
+    if (path === 'reviewers') {
+      if (message.includes('At least 2 root reviewers')) {
+        const sourceFields: HTMLElement[] = [];
+        if (composition.automatic.enabled && automaticCount) sourceFields.push(automaticCount);
+        for (const reviewer of composition.selected) {
+          const row = reviewerRows.find(item => item.querySelector<HTMLInputElement>('[data-bc-reviewer]')?.value === reviewer.botId);
+          const branch = row?.querySelector<HTMLElement>('[data-bc-reviewer-mode]');
+          if (branch) sourceFields.push(branch);
+        }
+        if (sourceFields.length) {
+          for (const source of sourceFields) add(source, 'This A/D/N selection provides fewer than 2 root reviewer seats. Add another direct or nested reviewer, or increase automatic reviewers.');
+          return null;
+        }
+        return field('[data-bc-source-summary]');
+      }
+      return reviewerGroup;
+    }
+    if (path === 'criteria') {
+      const required = criterionRows.find(row => !row.querySelector<HTMLInputElement>('[data-bc-criterion-field="required"]')?.checked)
+        ?.querySelector<HTMLElement>('[data-bc-criterion-field="required"]');
+      return message.includes('required criterion') ? required ?? field('[data-bc-criteria-list]') : field('[data-bc-criteria-list]');
+    }
+    if (path === 'schemaVersion') return field('[data-bc-composition-enabled]');
+    if (path.startsWith('limits.')) return field('[data-bc-plan-preview]');
+    const reviewerMatch = /^reviewers\.(\d+)\.(.+)$/.exec(path);
+    if (reviewerMatch) return reviewerField(Number(reviewerMatch[1]), reviewerMatch[2]);
+    const criterionMatch = /^criteria\.(\d+)\.(.+)$/.exec(path);
+    if (criterionMatch) {
+      const row = criterionRows[Number(criterionMatch[1])];
+      return row?.querySelector<HTMLElement>(`[data-bc-criterion-field="${criterionMatch[2]}"]`) ?? field('[data-bc-criteria-list]');
+    }
+    return null;
+  };
+  for (const issue of councilCompositionValidationIssues(composition, target)) {
+    const mapped = coreField(issue.field, issue.message);
+    if (mapped) add(mapped, issue.message);
+  }
+
+  for (const [index, reviewer] of composition.selected.entries()) {
+    if (!['direct', 'nested'].includes(reviewer.mode)) add(reviewerField(index, 'mode'), 'Choose a direct or nested reviewer branch.');
+    if (reviewer.mode !== 'nested' || !reviewer.nested) continue;
+    const row = reviewerRows.find(item => item.querySelector<HTMLInputElement>('[data-bc-reviewer]')?.value === reviewer.botId);
+    const nestedField = (name: string) => row?.querySelector<HTMLElement>(`[data-bc-nested-field="${name}"]`) ?? row?.querySelector<HTMLElement>('[data-bc-nested-policy]') ?? reviewerGroup;
+    if (!['explicit_task', 'validated_default'].includes(reviewer.nested.template)) add(nestedField('template'), 'Choose a supported child task template.');
+    if (!['architect', 'user', 'hybrid'].includes(reviewer.nested.childCriteriaSource)) add(nestedField('childCriteriaSource'), 'Choose a supported child criteria source.');
+    if (!['always', 'on_trigger'].includes(reviewer.nested.escalation)) add(nestedField('escalation'), 'Choose a supported escalation setting.');
+  }
+  return issues;
+}
+
+/** Render the client-side issues next to their controls; edits clear or update the failed state. */
+export function showSharedChannelCouncilValidation(form: HTMLFormElement, issues: SharedChannelCouncilIssue[], focusFirst = false): void {
+  const summary = form.querySelector<HTMLElement>('[data-bc-validation-summary]');
+  for (const control of form.querySelectorAll<HTMLElement>('[data-bc-validation-linked]')) {
+    const previousId = control.dataset.bcValidationLinked;
+    const describedBy = (control.getAttribute('aria-describedby') ?? '').split(/\s+/).filter(id => id && id !== previousId);
+    if (describedBy.length) control.setAttribute('aria-describedby', describedBy.join(' '));
+    else control.removeAttribute('aria-describedby');
+    control.removeAttribute('aria-invalid');
+    if (control.dataset.bcValidationTabindex === 'added') control.removeAttribute('tabindex');
+    delete control.dataset.bcValidationLinked;
+    delete control.dataset.bcValidationTabindex;
+  }
+  for (const error of form.querySelectorAll<HTMLElement>('[data-bc-inline-error]')) error.remove();
+  if (summary) {
+    summary.hidden = issues.length === 0;
+    summary.textContent = issues.length ? `Council settings need attention: ${issues.map(issue => issue.message).join(' ')}` : '';
+  }
+  form.dataset.bcValidationVisible = String(issues.length > 0);
+  const grouped = new Map<HTMLElement, string[]>();
+  for (const issue of issues) {
+    if (!issue.field) continue;
+    grouped.set(issue.field, [...(grouped.get(issue.field) ?? []), issue.message]);
+  }
+  for (const [index, [control, messages]] of [...grouped.entries()].entries()) {
+    const label = control.closest('label');
+    const error = document.createElement('small');
+    error.className = 'council-composition-help';
+    error.dataset.bcInlineError = '';
+    error.id = `bc-council-validation-${index}`;
+    error.textContent = [...new Set(messages)].join(' ');
+    if (label) label.append(error);
+    else control.insertAdjacentElement('afterend', error);
+    control.setAttribute('aria-invalid', 'true');
+    if (!control.hasAttribute('tabindex') && !control.matches('input,select,textarea,button,[tabindex]')) {
+      control.setAttribute('tabindex', '-1');
+      control.dataset.bcValidationTabindex = 'added';
+    }
+    const describedBy = (control.getAttribute('aria-describedby') ?? '').split(/\s+/).filter(Boolean);
+    control.setAttribute('aria-describedby', [...describedBy, error.id].join(' '));
+    control.dataset.bcValidationLinked = error.id;
+  }
+  if (focusFirst && issues.length) {
+    const panel = form.querySelector<HTMLElement>('.bc-council-panel');
+    if (panel && !panel.matches(':popover-open')) panel.showPopover();
+    const first = issues.find(issue => issue.field)?.field;
+    first?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    first?.focus({ preventScroll: true });
+  }
+}
+
+/** Compatibility helper for callers that only need the first composition-level message. */
+export function sharedChannelCouncilCompositionError(composition: CouncilComposition, target: number): string | null {
+  const issues = sharedChannelCouncilValidationIssues(document.createElement('form'), composition, target, 10);
+  return issues[0]?.message ?? null;
+}
+
+function addChannelCriterion(form: HTMLFormElement): HTMLElement | null {
+  const template = form.querySelector<HTMLTemplateElement>('[data-bc-criterion-template]');
+  const list = form.querySelector<HTMLElement>('[data-bc-criteria-list]');
+  if (!template || !list || list.querySelectorAll('[data-bc-criterion]').length >= 64) return null;
+  const row = template.content.firstElementChild?.cloneNode(true) as HTMLElement | null;
+  if (!row) return null;
+  const used = new Set([...list.querySelectorAll<HTMLInputElement>('[data-bc-criterion-field="id"]')].map(input => input.value));
+  let id = 1;
+  while (used.has(`criterion-${id}`)) id++;
+  const idInput = row.querySelector<HTMLInputElement>('[data-bc-criterion-field="id"]');
+  if (idInput) idInput.value = `criterion-${id}`;
+  list.append(row);
+  reindexChannelCriteria(form);
+  return row;
 }
 
 /** Bind the per-message Council panel without changing the channel's native submission contract. */
@@ -225,8 +577,84 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
       const input = form.elements.namedItem(name) as HTMLInputElement | null;
       choice.setAttribute('aria-pressed', String(Number(input?.value) === Number(choice.dataset.value)));
     }
+    const compositionEnabled = form.querySelector<HTMLInputElement>('[data-bc-composition-enabled]')?.checked ?? false;
+    const compositionBody = form.querySelector<HTMLElement>('[data-bc-composition-body]');
+    if (compositionBody) { compositionBody.hidden = !compositionEnabled; compositionBody.style.display = compositionEnabled ? 'grid' : 'none'; }
+    const legacyControls = form.querySelector<HTMLElement>('[data-bc-legacy-controls]');
+    const legacySelected = form.querySelector<HTMLInputElement>('input[name="councilMode"][value="selected"]')?.checked ?? false;
+    if (legacyControls) { legacyControls.hidden = compositionEnabled; legacyControls.style.display = compositionEnabled ? 'none' : 'grid'; }
+    for (const mode of form.querySelectorAll<HTMLInputElement>('input[name="councilMode"]')) mode.disabled = compositionEnabled;
+    for (const reviewer of form.querySelectorAll<HTMLInputElement>('[data-bc-legacy-reviewer]')) reviewer.disabled = compositionEnabled || !legacySelected;
+    const automaticEnabled = compositionEnabled && (form.querySelector<HTMLInputElement>('[data-bc-automatic-enabled]')?.checked ?? false);
+    const count = form.querySelector<HTMLSelectElement>('[data-bc-automatic-count]');
+    if (count) count.disabled = !automaticEnabled;
+    const reviewerRows = [...form.querySelectorAll<HTMLElement>('[data-bc-reviewer-row]')];
+    const selectedRows: HTMLElement[] = [];
+    let direct = false, nested = false;
+    for (const row of reviewerRows) {
+      const selected = row.querySelector<HTMLInputElement>('[data-bc-reviewer]')?.checked ?? false;
+      const mode = row.querySelector<HTMLSelectElement>('[data-bc-reviewer-mode]');
+      if (mode) mode.disabled = !compositionEnabled || !selected;
+      const isNested = selected && mode?.value === 'nested';
+      const nestedFields = row.querySelector<HTMLElement>('[data-bc-nested-policy]');
+      if (nestedFields) { nestedFields.hidden = !compositionEnabled || !isNested; nestedFields.style.display = compositionEnabled && isNested ? 'grid' : 'none'; }
+      for (const field of row.querySelectorAll<HTMLInputElement | HTMLSelectElement>('[data-bc-nested-field]')) field.disabled = !compositionEnabled || !isNested;
+      if (!selected || !compositionEnabled) continue;
+      selectedRows.push(row);
+      if (isNested) nested = true;
+      else direct = true;
+    }
+    const scopedPermissions = form.querySelector<HTMLElement>('.bc-council-selected-permissions');
+    if (scopedPermissions) scopedPermissions.style.display = compositionEnabled
+      ? selectedRows.length ? 'grid' : 'none'
+      : legacySelected ? 'grid' : 'none';
+    const sourceKey = `${automaticEnabled ? 'A' : ''}${direct ? 'D' : ''}${nested ? 'N' : ''}`;
+    const derived = ({ A: 'M1', D: 'M2', AD: 'M3', N: 'M4', AN: 'M5', DN: 'M6', ADN: 'M7' } as Record<string, string>)[sourceKey];
+    const sourceSummary = form.querySelector<HTMLElement>('[data-bc-source-summary]');
+    if (sourceSummary) sourceSummary.textContent = derived ? `Sources ${[automaticEnabled && 'A', direct && 'D', nested && 'N'].filter(Boolean).join(' + ')} · ${derived}` : 'Choose one or more reviewer sources.';
+    for (const item of form.querySelectorAll<HTMLElement>('[data-bc-source-mode]')) item.setAttribute('aria-current', String(item.dataset.bcSourceMode === derived));
+    const criteriaSource = form.querySelector<HTMLSelectElement>('[data-bc-criteria-source]')?.value ?? 'architect';
+    const criteriaEditable = compositionEnabled && criteriaSource !== 'architect';
+    const criteriaEditor = form.querySelector<HTMLElement>('[data-bc-criteria-editor]');
+    if (criteriaEditor) { criteriaEditor.hidden = !criteriaEditable; criteriaEditor.style.display = criteriaEditable ? 'grid' : 'none'; }
+    for (const control of form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement>('[data-bc-criterion-field]')) control.disabled = !criteriaEditable;
+    const criterionRows = form.querySelectorAll('[data-bc-criterion]');
+    const addCriterion = form.querySelector<HTMLButtonElement>('[data-bc-add-criterion]');
+    if (addCriterion) addCriterion.disabled = !criteriaEditable || criterionRows.length >= 64;
+    for (const remove of form.querySelectorAll<HTMLButtonElement>('[data-bc-remove-criterion]')) remove.disabled = !criteriaEditable || criterionRows.length <= 1;
+    const preview = form.querySelector<HTMLElement>('[data-bc-plan-preview]');
+    const previewText = form.querySelector<HTMLElement>('[data-bc-plan-preview-text]');
+    if (preview) preview.hidden = !compositionEnabled;
+    if (compositionEnabled && previewText) {
+      const composition = sharedChannelCouncilComposition(form);
+      if (composition) previewText.textContent = sharedChannelCouncilPreview(form, composition);
+    }
+    if (form.dataset.bcValidationVisible === 'true') {
+      if (!enabled) showSharedChannelCouncilValidation(form, []);
+      else {
+        const composition = sharedChannelCouncilComposition(form);
+        const target = Number((form.elements.namedItem('councilTarget') as HTMLInputElement | null)?.value ?? 9);
+        const rounds = Number((form.elements.namedItem('councilMaxRounds') as HTMLInputElement | null)?.value ?? 10);
+        showSharedChannelCouncilValidation(form, sharedChannelCouncilValidationIssues(form, composition, target, rounds));
+      }
+    }
   };
   panel.addEventListener('click', event => {
+    const target = event.target as Element;
+    if (target.closest('[data-bc-add-criterion]')) {
+      const row = addChannelCriterion(form);
+      sync();
+      row?.querySelector<HTMLInputElement>('[data-bc-criterion-field="id"]')?.focus({ preventScroll: true });
+      return;
+    }
+    const removeCriterion = target.closest<HTMLButtonElement>('[data-bc-remove-criterion]');
+    if (removeCriterion) {
+      const list = form.querySelector<HTMLElement>('[data-bc-criteria-list]');
+      if (list && list.querySelectorAll('[data-bc-criterion]').length > 1) removeCriterion.closest('[data-bc-criterion]')?.remove();
+      reindexChannelCriteria(form);
+      sync();
+      return;
+    }
     const choice = (event.target as Element).closest<HTMLButtonElement>('button[data-council-preset]');
     if (!choice) return;
     const name = choice.dataset.councilPreset === 'target' ? 'councilTarget' : 'councilMaxRounds';
@@ -236,11 +664,25 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
   panel.addEventListener('keydown', event => {
-    if (event.key !== 'Escape') return;
-    event.preventDefault();
-    event.stopPropagation();
-    panel.hidePopover();
-    trigger.focus({ preventScroll: true });
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopPropagation();
+      panel.hidePopover();
+      trigger.focus({ preventScroll: true });
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const focusable = [...panel.querySelectorAll<HTMLElement>('a[href],button:not([disabled]),input:not([type="hidden"]),select,textarea,[tabindex]:not([tabindex="-1"])')]
+      .filter(element => !element.matches(':disabled') && element.tabIndex >= 0 && element.getClientRects().length > 0);
+    if (!focusable.length) { event.preventDefault(); return; }
+    const first = focusable[0], last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
   });
   const place = () => positionSharedChannelCouncilPanel(trigger, panel);
   panel.addEventListener('toggle', event => {
@@ -258,6 +700,7 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
   });
   form.addEventListener('change', sync);
   form.addEventListener('input', sync);
+  reindexChannelCriteria(form);
   sync();
 }
 
@@ -313,6 +756,34 @@ async function editChannel(options: SharedChannelUiOptions, channel: SharedChann
 
 export async function openSharedChannel(channelId: string, options: SharedChannelUiOptions): Promise<void> {
   options.openChannel(channelId);
+}
+
+/** Use the same current-cycle ledger presenter as the Workers inspector, with no editable controls. */
+export function sharedChannelCouncilReportHtml(team: TeamSnapshot, cycleId: string): string {
+  const status = team.councilStatus;
+  const score = status?.lowest == null ? 'lowest score Unknown' : `lowest score ${status.lowest.toFixed(1)} / ${status.target.toFixed(1)}`;
+  return `<section class="bc-council-report" data-session-id="${escape(team.sessionId)}" data-cycle-id="${escape(cycleId)}" aria-label="Council report"><p class="bc-council-report-state"><strong>Council: ${escape(status?.state ?? 'Unknown')}</strong> · ${score}</p>${councilLedgerHtmlForTeam(team)}</section>`;
+}
+
+/** Open the report from a channel without leaving its current conversation route. */
+export async function openSharedChannelCouncilReport(sessionId: string, cycleId: string, artifactRevision: string, options: SharedChannelUiOptions): Promise<void> {
+  if (!options.loadCouncilSnapshot) { options.notify('This Council delivery report is unavailable.'); return; }
+  let team: TeamSnapshot | null;
+  try { team = await options.loadCouncilSnapshot(sessionId); }
+  catch { options.notify('This Council delivery report is unavailable.'); return; }
+  // Native delivery pins are serialized as "cycle:<councilSince>".
+  // Reject opaque/legacy revision strings instead of widening the read to
+  // any session's latest Council state.
+  const expectedSince = /^cycle:[1-9]\d*$/.test(artifactRevision)
+    ? Number(artifactRevision.slice('cycle:'.length))
+    : NaN;
+  if (!team || team.sessionId !== sessionId || !cycleId || !Number.isSafeInteger(expectedSince)
+      || team.councilSince !== expectedSince) {
+    options.notify('This Council delivery report is unavailable.'); return;
+  }
+  const dialog = options.modal('Council report', sharedChannelCouncilReportHtml(team, cycleId), 'bot-shared-dialog');
+  const report = dialog.querySelector<HTMLElement>('.bc-council-report');
+  if (report) options.bindCouncilEvidence?.(report, sessionId);
 }
 
 export async function openSharedChannelSettings(channelId: string, options: SharedChannelUiOptions): Promise<void> {

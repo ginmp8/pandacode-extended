@@ -586,6 +586,88 @@ impl AppState {
             .workspace_root(project_id, session_id)
     }
 }
+
+/// Shared command-boundary logic. The exported Tauri commands and their
+/// regressions use these functions so no caller-supplied label can bypass the
+/// bearer capability check.
+fn superagent_council_task_request_for_client(
+    store: &storage::Store,
+    ticket_id: &str,
+    task_client_capability: &str,
+) -> Result<Option<superagent::council_adapter::CouncilObservation>> {
+    let task_client = superagent::authorize_task_client_capability(
+        store,
+        ticket_id,
+        task_client_capability,
+    )?;
+    superagent::council_adapter::request_task_review(store, &task_client)
+}
+
+fn superagent_council_evidence_read_for_client(
+    store: &storage::Store,
+    ticket_id: &str,
+    task_client_capability: &str,
+    request_id: &str,
+    evidence_ref: &str,
+) -> Result<serde_json::Value> {
+    let task_client = superagent::authorize_task_client_capability(
+        store,
+        ticket_id,
+        task_client_capability,
+    )?;
+    superagent::council_adapter::read_task_evidence(
+        store,
+        &task_client,
+        request_id,
+        evidence_ref,
+    )
+}
+
+/// Request the existing Council result for a finished native task. A random,
+/// assignment-bound bearer capability is checked here before creating a task
+/// client context; caller labels and ticket IDs alone never authenticate.
+#[tauri::command]
+async fn superagent_council_task_request(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    ticket_id: String,
+    task_client_capability: String,
+) -> Result<Option<superagent::council_adapter::CouncilObservation>> {
+    if window.label() != "main" {
+        return Err("Council task requests require the main window.".into());
+    }
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    superagent_council_task_request_for_client(
+        &store,
+        &ticket_id,
+        &task_client_capability,
+    )
+}
+
+/// Resolve one opaque evidence reference from the current approved Council
+/// receipt. The adapter revalidates the task and mandate on every read.
+#[tauri::command]
+async fn superagent_council_evidence_read(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    ticket_id: String,
+    task_client_capability: String,
+    request_id: String,
+    evidence_ref: String,
+) -> Result<serde_json::Value> {
+    if window.label() != "main" {
+        return Err("Council evidence reads require the main window.".into());
+    }
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    superagent_council_evidence_read_for_client(
+        &store,
+        &ticket_id,
+        &task_client_capability,
+        &request_id,
+        &evidence_ref,
+    )
+}
+
 /// Fixed instructions for every task turn: sidebar titles, the run script, change tracking.
 /// Projectless chats have nothing to run, so they skip the run script. Managed team workers
 /// report to their lead, not the user: no titles (they never get a title run), run script,
@@ -1824,6 +1906,7 @@ fn prepare_task_run_in_project(
         mode: if reviewer_boundary { "plan".into() } else { session.mode },
         reviewer_boundary,
         reviewer_policy,
+        native_reviewer_host: None,
         cwd,
         resume_id: session.resume_id,
         prompt,
@@ -1883,6 +1966,7 @@ fn prepare_cloud_attach(
         mode: session.mode,
         reviewer_boundary: false,
         reviewer_policy: None,
+        native_reviewer_host: None,
         cwd,
         resume_id: session.resume_id,
         prompt: String::new(),
@@ -2402,8 +2486,44 @@ async fn launch_operation_admitted(
             config.reviewer_policy.as_ref(),
             Some(architect::reviewer_security::ReviewerToolPolicy::Scoped(_))
         );
-        let (host, team_tools_missing, reviewer_host_error) =
-            if !config.reviewer_boundary || scoped_reviewer {
+        let native_read_only = matches!(
+            config.reviewer_policy.as_ref(),
+            Some(architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly)
+        );
+        let native_child_coordinator = native_read_only
+            && team.as_ref().is_some_and(|admission| admission.parent == session_id)
+            && store.lock().ok().and_then(|db|
+                architect::native_child_coordinator_admitted(&db, &session_id).ok()
+            ).unwrap_or(false);
+        let native_leaf_reviewer = native_read_only
+            && team.as_ref().is_some_and(|admission| admission.parent != session_id);
+        let (host, team_tools_missing, reviewer_host_error, native_host_kind) =
+            if native_child_coordinator || native_leaf_reviewer {
+                // Build only the Architect's app-owned task host. In particular,
+                // do NOT append the general bot, shell, deployment or MCP catalogs.
+                let host = team.as_ref().and_then(|admission| {
+                    architect::host(app.clone(), session_id.clone(), stopped.clone(), admission)
+                });
+                let missing = host.is_none();
+                let filtered = config.reviewer_policy.as_ref()
+                    .ok_or_else(|| "policy_unsupported: native reviewer policy is missing.".to_string())
+                    .and_then(|policy| if native_child_coordinator {
+                        policy.restrict_child_coordinator_host(host)
+                    } else {
+                        policy.restrict_host(host)
+                    });
+                match filtered {
+                    Ok(filtered) => {
+                        let kind = filtered.as_ref().map(|_| if native_child_coordinator {
+                            providers::NativeReviewerHostKind::ChildCoordinator
+                        } else {
+                            providers::NativeReviewerHostKind::Evidence
+                        });
+                        (filtered, missing, None, kind)
+                    }
+                    Err(error) => (None, missing, Some(error), None),
+                }
+            } else if !config.reviewer_boundary || scoped_reviewer {
                 let host = if let Some(admission) = team.as_ref() {
                     architect::host(app.clone(), session_id.clone(), stopped.clone(), admission)
                         .map(|host| {
@@ -2435,11 +2555,11 @@ async fn launch_operation_admitted(
                         .ok_or_else(|| "policy_unsupported: reviewer policy is missing.".to_string())
                         .and_then(|policy| policy.restrict_host(host));
                     match result {
-                        Ok(filtered) => (filtered, missing, None),
-                        Err(error) => (None, missing, Some(error)),
+                        Ok(filtered) => (filtered, missing, None, None),
+                        Err(error) => (None, missing, Some(error), None),
                     }
                 } else {
-                    (host, missing, None)
+                    (host, missing, None, None)
                 }
             } else if matches!(
                 config.reviewer_policy.as_ref(),
@@ -2452,10 +2572,22 @@ async fn launch_operation_admitted(
                         app.clone(), session_id.clone(), stopped.clone(), admission,
                     )
                 });
-                (host, false, None)
+                let filtered = config.reviewer_policy.as_ref()
+                    .ok_or_else(|| "policy_unsupported: native reviewer policy is missing.".to_string())
+                    .and_then(|policy| policy.restrict_host(host));
+                match filtered {
+                    Ok(filtered) => {
+                        let kind = filtered.as_ref().map(|_| providers::NativeReviewerHostKind::Evidence);
+                        (filtered, false, None, kind)
+                    }
+                    Err(error) => (None, false, Some(error), None),
+                }
             } else {
-                (None, false, None)
+                (None, false, None, None)
             };
+        // Only a trusted, schema-filtered native reviewer host may carry the
+        // provider-level host token. It is never derived from a prompt or bot.
+        config.native_reviewer_host = native_host_kind;
         // What the next turn's warm agent needs: this launch and the tools it listed.
         // Team workers rarely get a follow-up, and their warm agents would push out the
         // architect's, whose review turn starts as soon as they settle.
@@ -4454,6 +4586,8 @@ pub fn run() {
                 superagent::superagent_assignments,
                 superagent::superagent_activity,
                 superagent::superagent_snapshot,
+                superagent_council_task_request,
+                superagent_council_evidence_read,
                 superagent::superagent_submit,
                 superagent::superagent_submit_coordinated,
                 superagent::superagent_dispatch_worker,
@@ -4535,6 +4669,7 @@ pub fn run() {
                 architect::architect_set_council,
                 architect::architect_council_reviewer_options,
                 architect::architect_council_accept,
+                architect::architect_council_waive_finding,
                 architect::architect_start,
                 architect::architect_control,
                 architect::architect_worker_messages,

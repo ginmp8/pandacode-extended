@@ -34,7 +34,12 @@ fn spares() -> std::sync::MutexGuard<'static, HashMap<String, Spare>> {
 
 /// Only plain Claude Code: key-based relays carry per-launch credentials.
 pub fn supported(config: &RunConfig) -> bool {
+    // A reviewer or child Council coordinator is bound to one native task,
+    // artifact and grant. Its warm process must never survive into another
+    // admission even when the model, prompt and advertised tools look equal.
     config.provider == "claude" && config.goal.is_none() && config.skill.is_none()
+        && !config.reviewer_boundary && config.reviewer_policy.is_none()
+        && config.native_reviewer_host.is_none()
 }
 
 /// Everything that shapes the launch: the command line, the folder and the tool catalog.
@@ -301,6 +306,24 @@ mod tests {
         assert!(supported(&base));
         assert!(!supported(&crate::providers::tests::config("glm")));
         assert!(!supported(&RunConfig { skill: Some(("review".into(), PathBuf::from("/skills/review"))), ..base.clone() }));
+    }
+
+    #[test]
+    fn native_council_reviewers_and_child_coordinators_never_use_warm_processes() {
+        use crate::architect::reviewer_security::ReviewerToolPolicy;
+        let mut config = crate::providers::tests::config("claude");
+        assert!(supported(&config));
+        config.mode = "plan".into();
+        config.reviewer_boundary = true;
+        config.reviewer_policy = Some(ReviewerToolPolicy::NativeReadOnly);
+        assert!(!supported(&config), "ordinary read-only Council reviewer is task-bound");
+        config.native_reviewer_host = Some(crate::providers::NativeReviewerHostKind::Evidence);
+        assert!(!supported(&config), "native evidence host cannot be reused between tasks");
+        config.native_reviewer_host = Some(crate::providers::NativeReviewerHostKind::ChildCoordinator);
+        assert!(!supported(&config), "native child coordinator host cannot be warmed across cycles");
+        config.reviewer_boundary = false;
+        config.reviewer_policy = None;
+        assert!(!supported(&config), "a stray host marker cannot warm an ordinary session");
     }
 
     #[test]

@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 55;
+pub const SCHEMA_VERSION: i64 = 56;
 pub(crate) const COUNCIL_REVIEW_SNAPSHOT_DIRECTORY: &str = "council-review-snapshots";
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
@@ -900,6 +900,15 @@ impl Store {
                 migration.execute_batch("PRAGMA user_version=55;")
                     .map_err(|e| e.to_string())?;
             }
+            if version < 56 {
+                // Keep the canonical work-plan DAG immutable. Native provider
+                // attempts and independently reviewed evidence are separate,
+                // revisioned records; a plan is never a grant.
+                migration.execute_batch(crate::superagent::work_items::progress::SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=56;")
+                    .map_err(|e| e.to_string())?;
+            }
             migration.commit().map_err(|e| e.to_string())?;
         }
         // Recovery can revoke a SuperAgent mandate. Serialize it with the
@@ -952,6 +961,8 @@ impl Store {
             WHERE CASE WHEN json_valid(content) THEN json_extract(content,'$.status') END IN ('running','waiting');").map_err(|e|e.to_string())?;
         // Reconcile SuperAgent-owned running assignments without replaying effects.
         recovery.execute_batch(crate::superagent::RECOVER).map_err(|e| e.to_string())?;
+        recovery.execute_batch(crate::superagent::work_items::progress::RECOVER)
+            .map_err(|e| e.to_string())?;
         recovery.execute_batch(crate::superagent::write_grants::RECOVER).map_err(|e| e.to_string())?;
         recovery.execute_batch(crate::superagent::effects::RECOVER).map_err(|e| e.to_string())?;
         recovery.commit().map_err(|e| e.to_string())?;

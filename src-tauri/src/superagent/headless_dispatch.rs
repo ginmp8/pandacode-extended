@@ -220,7 +220,11 @@ pub(crate) async fn drain_one(app: tauri::AppHandle) -> Result<bool> {
             super::retry_blocked(&mut store,&ticket_id,busy)
         })();
         match admitted {
-            Ok((ticket,thread,worker)) => Some((ticket,thread,worker,revision)),
+            Ok((ticket,thread,worker)) => {
+                let instruction=super::work_items::progress::instruction(&store,&ticket.id)?
+                    .unwrap_or_default();
+                Some((ticket,thread,worker,revision,instruction))
+            },
             Err(error) => {
                 if error.contains("occupied") || error.contains("Worker is busy") {
                     // No assignment or external call was started; a bounded
@@ -234,7 +238,7 @@ pub(crate) async fn drain_one(app: tauri::AppHandle) -> Result<bool> {
             }
         }
     };
-    let Some((ticket,thread,worker,revision))=prepared else { return Ok(false) };
+    let Some((ticket,thread,worker,revision,instruction))=prepared else { return Ok(false) };
     let outcome=bots::gateway::deliver(&app,bots::gateway::Inbound {
         bot_id: worker,
         channel_id: super::CHANNEL.into(),
@@ -242,8 +246,8 @@ pub(crate) async fn drain_one(app: tauri::AppHandle) -> Result<bool> {
         sender_id: "local-user".into(),
         sender_name: "Headless retry".into(),
         text: format!(
-            "SuperAgent ticket {} (headless manual retry)\n\n{}\n\nRead-only assignment. Report evidence and remaining gaps; do not claim approval.",
-            ticket.id,ticket.objective,
+            "SuperAgent ticket {} (headless manual retry)\n\n{}{}\n\nRead-only assignment. Report evidence and remaining gaps; do not claim approval.",
+            ticket.id,ticket.objective,instruction,
         ),
         trusted: true,
         image_ids: None,

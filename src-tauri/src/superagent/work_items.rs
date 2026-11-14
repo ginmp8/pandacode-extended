@@ -5,6 +5,8 @@
 //! Its immutable DAG is useful for deterministic frontier and blocked-state
 //! diagnostics while the task execution scheduler remains independently gated.
 
+pub(crate) mod progress;
+
 use super::{effects, require_main_window};
 use crate::{storage::{self, Store}, AppState, Result};
 use rusqlite::{params, OptionalExtension};
@@ -182,6 +184,16 @@ fn inspect(store: &Store, ticket_id: &str) -> Result<WorkPlanView> {
     ).map_err(|e|e.to_string())?;
     let mut items=Vec::new();
     let mut frontier=Vec::new();
+    let awaiting_review:bool=if progress::available(store)? {
+        store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_work_item_attempts attempt
+             WHERE attempt.ticket_id=?1 AND attempt.state IN ('running','observed')
+               AND NOT EXISTS (
+                 SELECT 1 FROM sa_work_item_approvals verified
+                 WHERE verified.ticket_id=attempt.ticket_id AND verified.item_key=attempt.item_key))",
+            [ticket_id],|row|row.get(0),
+        ).map_err(|error|error.to_string())?
+    } else { false };
     for (key,title,acceptance,state) in raw {
         if state != "planned" {
             return Err("Unknown persisted work-item state; no scheduling authority inferred.".into());
@@ -189,11 +201,17 @@ fn inspect(store: &Store, ticket_id: &str) -> Result<WorkPlanView> {
         let depends_on=dependencies.query_map(params![ticket_id,&key],|row|row.get::<_,String>(0))
             .map_err(|e|e.to_string())?
             .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
-        let ready=depends_on.is_empty();
+        let (current_state,execution_admitted,evidence_verified)=
+            progress::state(store,ticket_id,&key)?;
+        let ready=!awaiting_review
+            && matches!(current_state,"planned"|"failed")
+            && depends_on.iter().try_fold(true,|ready,dependency| {
+                progress::verified(store,ticket_id,dependency).map(|verified| ready&&verified)
+            })?;
         if ready { frontier.push(key.clone()); }
         items.push(WorkItemView {
-            key,title,acceptance,depends_on,state:"planned",ready,
-            execution_admitted:false,evidence_verified:false,
+            key,title,acceptance,depends_on,state:current_state,ready,
+            execution_admitted,evidence_verified,
         });
     }
     let active_assignments:i64=store.db.query_row(

@@ -4485,6 +4485,7 @@ pub fn run() {
                 superagent::strategy::superagent_strategy_update,
                 superagent::work_items::superagent_work_plan_create,
                 superagent::work_items::superagent_work_plan,
+                superagent::work_items::progress::superagent_work_item_verify,
                 superagent::events::superagent_source_create,
                 superagent::events::superagent_source_list,
                 superagent::events::superagent_source_decisions,

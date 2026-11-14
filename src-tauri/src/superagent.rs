@@ -3419,6 +3419,10 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
                 .map_err(|e| e.to_string())?;
         }
     }
+    work_items::progress::observe(
+        &tx,&assignment_id,authorized && successful
+            && matches!(next,"waiting_approval"|"waiting_review"),&trimmed,
+    )?;
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,?2,?3,?4)",
@@ -3454,6 +3458,9 @@ fn accept_with_pause(
         return Err("Task has no current verified worker result to accept.".into());
     }
     let team_snapshot = ticket_team_snapshot(store,ticket_id)?;
+    if work_items::progress::unverified_count(store,ticket_id)? > 0 {
+        return Err("A native Work Plan still has unverified items; final acceptance is denied.".into());
+    }
     if team_snapshot.policy.council_required {
         return Err("Council-required Tickets need the attributed native Council acceptance flow.".into());
     }
@@ -4269,6 +4276,9 @@ fn retry_blocked(
     council_adapter::admit_required(
         store,&tx,ticket_id,&assignment_id,&session_id,ticket.revision.saturating_add(1),&snapshot,
     )?;
+    // The same durable native assignment may reserve exactly one ready DAG
+    // item; the Plan never independently creates a mandate or provider session.
+    work_items::progress::attach(&tx,ticket_id,&assignment_id)?;
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,'manual_retry','user-requested bounded read-only worker attempt',?2)",
@@ -4589,7 +4599,7 @@ pub async fn superagent_retry(window: tauri::WebviewWindow,
     app: tauri::AppHandle, state: State<'_,AppState>, ticket_id: String,
 ) -> Result<Ticket> {
     require_main_window(&window)?;
-    let (ticket,thread,worker_id)={
+    let (ticket,thread,worker_id,plan_instruction)={
         let active: Vec<String> = state.agents.lock().map_err(|e|e.to_string())?
             .keys().cloned().collect();
         let mut store=state.store.lock().map_err(|e|e.to_string())?;
@@ -4597,7 +4607,10 @@ pub async fn superagent_retry(window: tauri::WebviewWindow,
         let ticket = get_ticket(&store, &ticket_id)?;
         let cfg = configuration(&store, &ticket.orchestration_id)?;
         let busy=active_manual_conflict(&store,&active,&bot_id,&cfg.project_id)?;
-        retry_blocked(&mut store,&ticket_id,busy)?
+        let (ticket,thread,worker_id)=retry_blocked(&mut store,&ticket_id,busy)?;
+        let plan_instruction=work_items::progress::instruction(&store,&ticket.id)?
+            .unwrap_or_default();
+        (ticket,thread,worker_id,plan_instruction)
     };
     let delivered=bots::gateway::deliver(&app,bots::gateway::Inbound {
         bot_id: worker_id,
@@ -4605,7 +4618,7 @@ pub async fn superagent_retry(window: tauri::WebviewWindow,
         thread,
         sender_id: "local-user".into(),
         sender_name: "Manual retry".into(),
-        text: format!("SuperAgent ticket {} (manual retry)\n\n{}\n\nRead-only assignment. Report evidence and remaining gaps; do not claim approval.",ticket.id,ticket.objective),
+        text: format!("SuperAgent ticket {} (manual retry)\n\n{}{}\n\nRead-only assignment. Report evidence and remaining gaps; do not claim approval.",ticket.id,ticket.objective,plan_instruction),
         trusted: true,
         image_ids: None,
         moodboard_ids: None,

@@ -7,9 +7,13 @@ bounded, deduplicated decision metadata for the exact repository, actor, kind,
 and issue/PR subject. It does not admit a Ticket, launch a Worker, request a
 native Council verdict, post a comment or approve a review.
 
-Supported GitHub REST Events actions include issue opening/editing, issue/PR
-comments, PR opening/closing/reopening, review creation/update/dismissal and
-PR diff review-comment creation. For backward compatibility the internal source
+Supported GitHub REST Events actions include issue opening/editing/closing/
+reopening, issue and PR assignment/unassignment and label changes, PR
+opening/closing/reopening/merging, issue/PR comment creation, review
+creation/update/dismissal and PR diff review-comment creation. The additional
+triage actions record only exact event-kind, actor and typed thread metadata:
+label text, assignee details and event payloads are never persisted. A merged
+PR observation is not proof of SuperAgent delivery or authorization. For backward compatibility the internal source
 kind `pull_request_review.submitted` represents a GitHub REST
 `PullRequestReviewEvent` with `payload.action=created`. GitHub webhooks use
 a different review action name (`submitted`); webhook payloads are **not**

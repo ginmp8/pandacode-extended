@@ -80,8 +80,11 @@ const GITHUB_PAGE_SIZE: usize = 100;
 const GITHUB_MAX_PAGES: usize = 3;
 const EVENT_KINDS: &[&str] = &[
     "issues.opened", "issues.edited", "issues.closed", "issues.reopened",
+    "issues.assigned", "issues.unassigned", "issues.labeled", "issues.unlabeled",
     "issue_comment.created",
     "pull_request.opened", "pull_request.closed", "pull_request.reopened",
+    "pull_request.merged", "pull_request.assigned", "pull_request.unassigned",
+    "pull_request.labeled", "pull_request.unlabeled",
     "pull_request_review.submitted", "pull_request_review.updated",
     "pull_request_review.dismissed", "pull_request_review_comment.created",
     "check_run.completed",
@@ -828,10 +831,21 @@ fn github_kind(value: &serde_json::Value) -> Option<&'static str> {
         ("IssuesEvent", "edited") => Some("issues.edited"),
         ("IssuesEvent", "closed") => Some("issues.closed"),
         ("IssuesEvent", "reopened") => Some("issues.reopened"),
+        // Only exact GitHub REST Events actions are supported. These
+        // provenance-only triage events never alter Ticket authorization.
+        ("IssuesEvent", "assigned") => Some("issues.assigned"),
+        ("IssuesEvent", "unassigned") => Some("issues.unassigned"),
+        ("IssuesEvent", "labeled") => Some("issues.labeled"),
+        ("IssuesEvent", "unlabeled") => Some("issues.unlabeled"),
         ("IssueCommentEvent", "created") => Some("issue_comment.created"),
         ("PullRequestEvent", "opened") => Some("pull_request.opened"),
         ("PullRequestEvent", "closed") => Some("pull_request.closed"),
         ("PullRequestEvent", "reopened") => Some("pull_request.reopened"),
+        ("PullRequestEvent", "merged") => Some("pull_request.merged"),
+        ("PullRequestEvent", "assigned") => Some("pull_request.assigned"),
+        ("PullRequestEvent", "unassigned") => Some("pull_request.unassigned"),
+        ("PullRequestEvent", "labeled") => Some("pull_request.labeled"),
+        ("PullRequestEvent", "unlabeled") => Some("pull_request.unlabeled"),
         // GitHub's REST Events feed calls a new review "created", unlike
         // the webhook action "submitted". Preserve the original normalized
         // source kind for existing persisted review subscriptions.
@@ -1510,6 +1524,75 @@ pub async fn superagent_source_thread_links(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn authenticated_issue_and_pr_triage_actions_are_observe_only_and_restart_durable() {
+        let (store, path) = fixture();
+        let actions = [
+            ("IssuesEvent", "assigned", "issues.assigned", "issue:41"),
+            ("IssuesEvent", "unassigned", "issues.unassigned", "issue:41"),
+            ("IssuesEvent", "labeled", "issues.labeled", "issue:41"),
+            ("IssuesEvent", "unlabeled", "issues.unlabeled", "issue:41"),
+            ("PullRequestEvent", "merged", "pull_request.merged", "pull:71"),
+            ("PullRequestEvent", "assigned", "pull_request.assigned", "pull:71"),
+            ("PullRequestEvent", "unassigned", "pull_request.unassigned", "pull:71"),
+            ("PullRequestEvent", "labeled", "pull_request.labeled", "pull:71"),
+            ("PullRequestEvent", "unlabeled", "pull_request.unlabeled", "pull:71"),
+        ];
+        let mut source_ids = Vec::new();
+        for (index, (event_type, action, kind, thread)) in actions.iter().enumerate() {
+            let off = create_source(&store, "orch", "owner/repo", "trusted-bot", kind).unwrap();
+            assert_eq!(off.mode, "off");
+            let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+            let raw = serde_json::json!([{
+                "id": (5_000_040_001_i64 + index as i64).to_string(),
+                "created_at": "2026-11-12T09:00:00Z",
+                "type": event_type,
+                "repo": {"name": "owner/repo"},
+                "actor": {"login": "trusted-bot"},
+                // Both objects exist deliberately. Only the trusted event type
+                // determines which exact thread is correlated.
+                "payload": {"action": action,
+                    "issue": {"number": 41},
+                    "pull_request": {"number": 71},
+                    "label": {"name": "untrusted-content"}}
+            }]);
+            let first = poll_authenticated_events(&store, &active, 0, &raw).unwrap();
+            assert_eq!(first.recorded, 1, "{kind}");
+            assert_eq!(first.duplicates, 0, "{kind}");
+            let receipt = list_decisions(&store, &active.id, 10).unwrap();
+            assert_eq!(receipt.len(), 1);
+            assert_eq!(receipt[0].event_kind, *kind);
+            assert_eq!(receipt[0].subject_key, *thread);
+            assert_eq!(receipt[0].decision, "observed_permitted");
+            assert_eq!(poll_authenticated_events(&store, &active, 0, &raw)
+                .unwrap().duplicates, 1, "{kind}");
+            source_ids.push(active.id);
+        }
+        // Non-Events webhook actions and unsupported comment edits must not
+        // be guessed from untrusted payload fields.
+        for (event_type, action) in [
+            ("IssueCommentEvent", "edited"),
+            ("IssuesEvent", "transferred"),
+            ("PullRequestEvent", "synchronize"),
+        ] {
+            let raw = serde_json::json!({
+                "type": event_type, "payload": {"action": action}
+            });
+            assert_eq!(github_kind(&raw), None);
+        }
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |r| r.get::<_, i64>(0)).unwrap(), 0);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        for id in source_ids {
+            assert_eq!(list_decisions(&reopened, &id, 10).unwrap().len(), 1);
+            assert!(source(&reopened, &id).unwrap().last_sequence > 0);
+        }
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
 
     #[test]
     fn source_cursor_mismatch_denies_authenticated_replay_and_survives_restart() {

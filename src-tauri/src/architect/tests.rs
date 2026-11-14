@@ -2130,6 +2130,58 @@ fn native_task_council_admission_is_idempotent_and_rejects_foreign_or_stale_requ
 }
 
 #[test]
+fn native_task_council_restart_preserves_request_and_new_cycle_isolation() {
+    let path = std::env::temp_dir()
+        .join(format!("pandacode-native-council-{}.db", storage::id()));
+    let (sid, project_id, first_request) = {
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let sid = store.create_session(&project.id, "claude", "default", "ask").unwrap().id;
+        let mut team = new_team(sid.clone(), config());
+        team.status = "running".into();
+        team.council_since = storage::now().max(1);
+        team.objective = "Review the first native task target.".into();
+        team.config.council = Some(council::CouncilConfig::default());
+        save(&store, &mut team).unwrap();
+        let request = native_council_task::admit(
+            &store, "native-client", &sid, &project.id, "assignment", &"a".repeat(64),
+        ).unwrap();
+        (sid, project.id, request)
+    };
+    {
+        let store = Store::open(&path).unwrap();
+        let replay = native_council_task::admit(
+            &store, "native-client", &sid, &project_id, "assignment", &"a".repeat(64),
+        ).unwrap();
+        assert_eq!(replay.request_id, first_request.request_id,
+            "a restart must not mint a duplicate admission");
+        assert!(native_council_task::read_terminal(
+            &store, "native-client", &sid, &project_id, "assignment",
+            &"a".repeat(64), &replay.request_id,
+        ).is_err(), "reopened requests do not manufacture terminal approval");
+
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.council_since = team.council_since.saturating_add(1);
+        team.objective = "Review a different artifact in a fresh Council cycle.".into();
+        save(&store, &mut team).unwrap();
+        let next = native_council_task::admit(
+            &store, "native-client", &sid, &project_id, "assignment", &"b".repeat(64),
+        ).unwrap();
+        assert_ne!(next.request_id, first_request.request_id);
+        assert_ne!(next.cycle_id, first_request.cycle_id);
+        assert!(native_council_task::inspect(
+            &store, "native-client", &sid, &project_id, "assignment",
+            &"a".repeat(64), &first_request.request_id,
+        ).is_err(), "an old-cycle request cannot authorize a new-cycle result");
+        assert!(native_council_task::record_terminal(
+            &store, "native-client", &sid, &project_id, "assignment",
+            &"b".repeat(64), &next.request_id,
+        ).is_err(), "a fresh cycle still requires an independently verified pass");
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs() {
     use council::{
         AutomaticReviewerCount as Count, CouncilCriterionOrigin as Origin,

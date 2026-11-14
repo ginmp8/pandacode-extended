@@ -125,3 +125,11 @@ cycle and rejects mismatched callers or artifact identities. Request storage
 keys contain the cycle so old request records survive later task cycles
 without granting reusable approval authority. This adds negative coverage
 for multiple assignments/callers on one Council review.
+
+
+## Native task recovery regression
+
+A disposable SQLite test covers replaying an identical request after process
+restart, refusing a terminal receipt without a real Council pass, retaining
+old admission history, admitting a fresh objective with the same assignment
+name under a new cycle, and rejecting the old request ID on that new cycle.

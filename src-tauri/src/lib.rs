@@ -4544,6 +4544,7 @@ pub fn run() {
                 superagent::superagent_assignments,
                 superagent::superagent_activity,
                 superagent::superagent_snapshot,
+                superagent::delivery::superagent_delivery_inspect,
                 superagent::superagent_graph,
                 superagent::scheduler::superagent_plan_demand,
                 superagent::scheduler::superagent_demand_plan,

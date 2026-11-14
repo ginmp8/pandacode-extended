@@ -15,6 +15,7 @@ pub mod effects;
 pub(crate) mod write_grants;
 pub(crate) mod headless_dispatch;
 pub(crate) mod strategy;
+pub(crate) mod delivery;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

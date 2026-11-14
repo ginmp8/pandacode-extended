@@ -1313,6 +1313,37 @@ test('native Team directory counts configured roles and filters without creating
   expect(calls.every(command=>['bots_list','superagent_list','superagent_tickets'].includes(command))).toBe(true);
 });
 
+test('duplicate Team uses native atomic roster creation without copying source authority', async ({page}) => {
+  await page.goto('/?bots=sample');
+  const bar=page.locator('.sidebar-bots-bar');
+  if(await bar.getAttribute('aria-pressed')!=='true')await bar.click();
+  const sidebar=page.getByRole('region',{name:'Bots',exact:true});
+  await sidebar.getByRole('button',{name:'Bot actions'}).click();
+  await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
+  const workspace=page.getByRole('region',{name:'Orchestrations'});
+  await workspace.getByRole('button',{name:'Teams',exact:true}).click();
+  const form=workspace.locator('form[data-sa-form="create"]');
+  await form.getByRole('textbox',{name:'Name',exact:true}).fill('Review Fixture');
+  await form.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption({label:'Scout'});
+  await form.getByRole('combobox',{name:'Worker',exact:true}).selectOption({label:'Writer'});
+  await form.locator('summary').click();
+  await form.locator('select[name="reviewers"]').selectOption({label:'Ledger'});
+  await form.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(workspace.locator('.sa-list .sa-item')).toHaveCount(1);
+  await workspace.getByRole('button',{name:'Duplicate as new Team'}).click();
+  const approval=workspace.getByRole('alertdialog',{name:'Confirm orchestration action'});
+  await expect(approval).toContainText('Tickets, source subscriptions, permissions and approvals are not copied');
+  await approval.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(workspace.locator('.sa-list .sa-item')).toHaveCount(2);
+  await expect(workspace.locator('.sa-list')).toContainText('Review Fixture copy');
+  await expect(workspace.getByRole('status').filter({hasText:'Disabled Team duplicated.'})).toBeVisible();
+  await expect(workspace.getByRole('button',{name:'Enable manual'})).toBeDisabled();
+  await workspace.getByRole('button',{name:'Load native members'}).click();
+  await expect(workspace.getByRole('region',{name:'Configured Team roles'})).toContainText('Ledger');
+  await expect(workspace.locator('.sa-list .sa-item').filter({hasText:'Review Fixture copy'}))
+    .toContainText('0 tasks · 0 running · 0 blocked');
+});
+
 test('new Team persists optional reviewers as one disabled role configuration', async ({page}) => {
   await page.goto('/?bots=sample');
   const bar=page.locator('.sidebar-bots-bar');

@@ -484,7 +484,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       (!chosen.enabled && ((chosen.workerCount ?? 1)>1 || (chosen.reviewerCount ?? 0)>0)
         ? ' disabled title="Multi-member execution requires native scoped admission"'
         : '') + '>' + (chosen.enabled ? 'Disable' : 'Enable manual') +
-      '</button><button type="button" data-sa-delete="' + safe(chosen.id) + '"' +
+      '</button><button type="button" data-sa-duplicate="' + safe(chosen.id) +
+      '">Duplicate as new Team</button><button type="button" data-sa-delete="' + safe(chosen.id) + '"' +
       (chosen.enabled ? ' disabled' : '') + '>Delete unused</button></div></header>' +
       '<form data-sa-form="edit"><label>Preset title<input name="name" required maxlength="120" value="' + safe(chosen.name) + '"></label>' +
       '<div class="sa-grid"><label>Edit coordinator<select name="coordinatorBotId" required>' +
@@ -936,6 +937,45 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target.hasAttribute('data-sa-cancel')) { confirm = null; render(); return; }
     if (target.hasAttribute('data-sa-confirm')) {
       const action = confirm?.action; confirm = null; if (action) void work(action);
+      return;
+    }
+    if (target.dataset.saDuplicate) {
+      const source = presets.find(item => item.id === target.dataset.saDuplicate);
+      if (!source || busy) return;
+      const base = source.name.trim() + ' copy';
+      let name = base;
+      for (let index = 2; presets.some(item => item.name.toLowerCase() === name.toLowerCase()); index++) {
+        name = base + ' ' + index;
+      }
+      if (new TextEncoder().encode(name).length > 120) {
+        error = 'The Team name is too long to duplicate. Rename the source Team first.';
+        render(); return;
+      }
+      ask('Create a disabled copy of ' + source.name +
+        ' with its existing role roster? Tickets, source subscriptions, permissions and approvals are not copied.', async () => {
+        // Recheck native identity and revision before creation. The native
+        // create-with-roster transaction validates every bot and stays Off.
+        const roster = await call<TeamRoster>('superagent_roster', {orchestrationId:source.id});
+        const latest = (await call<Config[]>('superagent_list'))
+          .find(item => item.id === source.id);
+        if (!latest || latest.policyRevision !== source.policyRevision ||
+            latest.coordinatorBotId !== source.coordinatorBotId ||
+            latest.workerBotId !== source.workerBotId ||
+            roster.policyRevision !== source.policyRevision ||
+            roster.coordinatorBotId !== source.coordinatorBotId ||
+            roster.workerBotIds[0] !== source.workerBotId) {
+          throw new Error('Source Team changed. Reload before duplicating.');
+        }
+        const created = await call<Config>('superagent_create', {
+          input:{name,coordinatorBotId:source.coordinatorBotId,workerBotId:source.workerBotId},
+          roster:{workerBotIds:roster.workerBotIds,reviewerBotIds:roster.reviewerBotIds},
+        });
+        if (created.enabled) throw new Error('New Team did not remain disabled.');
+        selected = created.id; workspaceView = 'teams';
+        roleRoster = null; workerOrder = []; sourcesLoaded = false; sources = [];
+        await reload();
+        feedback = 'Disabled Team duplicated. No prior Tickets, source grants or approvals were copied.';
+      });
       return;
     }
     if (target.dataset.saUnlinkSource && target.dataset.saUnlinkThread) {

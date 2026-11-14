@@ -528,6 +528,8 @@ fn exact_grant(db: &Connection, intent: &IssueCommentIntent) -> Result<ActiveSco
 fn attested_worker_scope(
     store: &Store, intent: &IssueCommentIntent, scope: &ActiveScope,
 ) -> Result<()> {
+    let snapshot = super::ticket_team_snapshot(store, &intent.ticket_id)?;
+    let attempt_timeout = snapshot.policy.strategy.attempt_timeout_ms;
     let assignment: Option<(String, i64)> = store.db.query_row(
         "SELECT bot_id,attempt FROM sa_assignments
          WHERE id=?1 AND ticket_id=?2 AND session_id=?3 AND state='running'
@@ -536,12 +538,11 @@ fn attested_worker_scope(
            AND (SELECT COUNT(*) FROM sa_assignments other
                 WHERE other.ticket_id=?2 AND other.state='running')=1",
         params![scope.assignment_id, intent.ticket_id, scope.session_id,
-            storage::now(), super::MAX_ASSIGNMENT_RUN_MS],
+            storage::now(), attempt_timeout],
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional().map_err(|e| e.to_string())?;
     let (bot_id, attempt) = assignment
         .ok_or("Native effect worker assignment is no longer active.")?;
-    let snapshot = super::ticket_team_snapshot(store, &intent.ticket_id)?;
     let ordinal = snapshot.worker_bot_ids.iter().position(|id| id == &bot_id)
         .ok_or("Native effect assignment is not an authorized Worker.")?;
     let session = store.session(&scope.session_id)?;

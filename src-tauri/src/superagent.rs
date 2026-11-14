@@ -12,6 +12,7 @@ pub mod effects;
 pub(crate) mod write_grants;
 pub(crate) mod headless_dispatch;
 pub(crate) mod work_items;
+pub(crate) mod strategy;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -51,6 +52,14 @@ const MAX_ASSIGNMENT_RUN_MS: i64 = 30 * 60 * 1000;
 fn assignment_within_budget(started_at: i64, now: i64) -> bool {
     started_at > 0 && now >= started_at
         && now.saturating_sub(started_at) < MAX_ASSIGNMENT_RUN_MS
+}
+
+/// The admitted Ticket's immutable budget may be stricter than the hard
+/// platform ceiling. Never extend an expired attempt using mutable Team data.
+fn assignment_within_policy_budget(started_at: i64, now: i64, limit_ms: i64) -> bool {
+    (60_000..=MAX_ASSIGNMENT_RUN_MS).contains(&limit_ms)
+        && started_at > 0 && now >= started_at
+        && now.saturating_sub(started_at) < limit_ms
 }
 
 /// A redacted headless lease diagnostic uses exactly the same native expiry
@@ -498,6 +507,9 @@ pub struct TeamPolicySnapshot {
     pub autonomy: String,
     pub max_concurrent_tasks: u8,
     pub max_attempts_per_assignment: u8,
+    /// Legacy snapshots default to a bounded, non-delegating manual strategy.
+    #[serde(default)]
+    pub strategy: strategy::StrategySettings,
     /// Reviewer memberships are descriptive only until a fresh native Council
     /// adapter is bound to the Ticket.
     pub council_enabled: bool,
@@ -662,6 +674,7 @@ fn make_team_snapshot(
             autonomy: "off".into(),
             max_concurrent_tasks: 1,
             max_attempts_per_assignment: 2,
+            strategy: strategy::StrategySettings::default(),
             council_enabled: council_required,
             council_required,
         },
@@ -711,6 +724,7 @@ fn legacy_unknown_team_snapshot(
             autonomy: "off".into(),
             max_concurrent_tasks: 1,
             max_attempts_per_assignment: 0,
+            strategy: strategy::StrategySettings::default(),
             council_enabled: false,
             council_required: false,
         },
@@ -2385,7 +2399,8 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
                     CASE
                       WHEN a.created_at<=0 OR a.created_at>?1
                         THEN 'Invalid assignment clock; no replay'
-                      WHEN (?1-a.created_at)>=?2
+                      WHEN (?1-a.created_at)>=COALESCE(
+                          json_extract(pinned.snapshot_json,'$.policy.strategy.attemptTimeoutMs'),?2)
                         THEN 'Assignment exceeded its bounded run time; no replay'
                       WHEN ?3=1
                         THEN 'Bots paused; native execution authority revoked'
@@ -2421,6 +2436,7 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
              FROM sa_assignments a
              JOIN sa_tickets t ON t.id=a.ticket_id
              JOIN sa_orchestrations o ON o.id=t.orchestration_id
+             LEFT JOIN sa_ticket_team_snapshots pinned ON pinned.ticket_id=t.id
              LEFT JOIN sa_mandates m ON m.ticket_id=t.id
              LEFT JOIN bots coordinator ON coordinator.id=o.coordinator_bot_id
              LEFT JOIN bots worker ON worker.id=a.bot_id
@@ -2629,7 +2645,9 @@ fn manual_preflight(
         selected_role: if coordinate { "coordinator" } else { "worker" }.into(),
         eligible: reason.is_none(), reason,
         allowed_tools: Vec::new(), allowed_side_effects: false,
-        attempt_budget_ms: MAX_ASSIGNMENT_RUN_MS,
+        attempt_budget_ms: load_team_version_snapshot(
+            &store.db, &cfg.id, cfg.team_version,
+        )?.policy.strategy.attempt_timeout_ms,
     })
 }
 
@@ -2743,12 +2761,18 @@ fn admit_role_with_staging(
     {
         return Err("Team changed during Ticket admission; reload and submit again.".into());
     }
-    let team_snapshot = make_team_snapshot(
+    let configured_snapshot = load_team_version_snapshot(&tx,&config.id,config.team_version)?;
+    let mut team_snapshot = make_team_snapshot(
         &tx,&config.id,config.team_version,&config.name,&config.project_id,
         config.policy_revision,&config.coordinator_bot_id,&config.worker_bot_ids,&config.reviewer_bot_ids,
         config.council_required,
         TeamSnapshotProvenance::Native,
     )?;
+    // Team strategy is pinned from the last immutable config version; a new
+    // Ticket must never silently reset its retry/time/resource settings.
+    team_snapshot.policy.strategy = configured_snapshot.policy.strategy;
+    team_snapshot.policy.max_concurrent_tasks = configured_snapshot.policy.max_concurrent_tasks;
+    team_snapshot.policy.max_attempts_per_assignment = configured_snapshot.policy.max_attempts_per_assignment;
     if team_snapshot.policy.council_required != config.council_required {
         return Err("Team Council policy changed during Ticket admission; reload and submit again.".into());
     }
@@ -3021,7 +3045,9 @@ pub(crate) fn read_only_policy(
         if scope.ticket_state != "running" || scope.assignment_state != "running" || scope.revoked
             || scope.expiry <= storage::now()
             || scope.mandate_version != snapshot.policy.policy_revision
-            || !assignment_within_budget(scope.started_at, storage::now())
+            || !assignment_within_policy_budget(
+                scope.started_at, storage::now(), snapshot.policy.strategy.attempt_timeout_ms,
+            )
             // The current task channel has only native read-only enforcement.
             // A persisted write/tool grant must not be silently treated as a
             // runnable permission (or as harmless metadata) until a separate
@@ -3306,7 +3332,9 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     let trimmed = text.trim().chars().take(4096).collect::<String>();
     // A stop-all transition may happen after admission but before the provider
     // callback. A stale success must not become approvable after global pause.
-    let within_budget = assignment_within_budget(started_at, storage::now());
+    let within_budget = assignment_within_policy_budget(
+        started_at, storage::now(), team_snapshot.policy.strategy.attempt_timeout_ms,
+    );
     let thread_current = assignment_thread_current(store, session_id, &task_id)?;
     // Revalidate the exact admitted runtime identity on final callbacks, not
     // just at the provider admission/tool host boundary.
@@ -3725,6 +3753,13 @@ fn change_enabled(
         return Err("Orchestration policy revision changed; reload before editing.".into());
     }
     if enabled {
+        let configured = load_team_version_snapshot(&store.db, orchestration_id, current.team_version)?;
+        if configured.policy.max_concurrent_tasks != 1
+            || configured.policy.strategy.token_ceiling.is_some()
+            || configured.policy.strategy.estimated_cost_ceiling_minor.is_some()
+            || configured.policy.strategy.subagent_delegation_enabled {
+            return Err("This Team requests parallel, token/cost or subagent limits not enforceable by the native runtime; keep it Off.".into());
+        }
         if roster::has_additional_members(store,orchestration_id)? {
             return Err("Configured multi-member Teams cannot run without native scoped admission.".into());
         }
@@ -3926,9 +3961,13 @@ fn update_configuration_roles_with_policy(
             storage::now(),expected_revision],
     ).map_err(|e| e.to_string())?;
     if changed!=1 { return Err("Orchestration changed or is no longer eligible for Team editing.".into()); }
-    let snapshot = make_team_snapshot(&tx,id,next_version,name,&project_id,next_revision,
+    let previous_snapshot = load_team_version_snapshot(&tx,id,current.team_version)?;
+    let mut snapshot = make_team_snapshot(&tx,id,next_version,name,&project_id,next_revision,
         &coordinator.id,&worker_bot_ids,&reviewer_bot_ids,council_required,
         TeamSnapshotProvenance::Native)?;
+    snapshot.policy.strategy = previous_snapshot.policy.strategy;
+    snapshot.policy.max_concurrent_tasks = previous_snapshot.policy.max_concurrent_tasks;
+    snapshot.policy.max_attempts_per_assignment = previous_snapshot.policy.max_attempts_per_assignment;
     insert_team_version(&tx,&snapshot)?;
     tx.commit().map_err(|e| e.to_string())?;
     configuration(store,id)

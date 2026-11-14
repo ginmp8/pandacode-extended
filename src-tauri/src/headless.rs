@@ -37,6 +37,7 @@ enum Command {
     ImportOrchestrations { path: PathBuf },
     ExportOrchestrations { path: PathBuf },
     InspectOrchestrations,
+    InspectTeamStrategy { orchestration_id: String },
     ListTickets,
     ListReviewInbox,
     ListRecoveryInbox,
@@ -119,6 +120,20 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(status) => { println!("{status}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectTeamStrategy { orchestration_id } = &command {
+                let result = app.path().app_data_dir()
+                    .map_err(|error| error.to_string())
+                    .and_then(|directory| crate::superagent::strategy::headless_inspect(
+                        &directory.join("kingcode.sqlite3"), orchestration_id,
+                    ));
+                match result {
+                    Ok(status) => { println!("{status}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("Team strategy inspection failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -495,7 +510,8 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
 fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import: Option<PathBuf>) {
     match command {
         // Inspection exits before setup_common and must never reach this branch.
-        Command::InspectOrchestrations | Command::ListTickets | Command::ListReviewInbox
+        Command::InspectOrchestrations | Command::InspectTeamStrategy { .. }
+        | Command::ListTickets | Command::ListReviewInbox
         | Command::ListRecoveryInbox | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
@@ -997,6 +1013,14 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 command = Command::InspectOrchestrations;
                 ops += 1;
             }
+            "--inspect-team-strategy" => {
+                let id = args.get(index + 1)
+                    .ok_or("--inspect-team-strategy needs an exact Team ID.")?;
+                validate_orchestration_id(id)?;
+                command = Command::InspectTeamStrategy { orchestration_id: id.clone() };
+                ops += 1;
+                index += 1;
+            }
             "--list-tickets" => {
                 command = Command::ListTickets;
                 ops += 1;
@@ -1430,7 +1454,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1456,6 +1480,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          Export portable SuperAgent presets without tickets or secrets; exit.
   --inspect-orchestrations
                          List native orchestration status without modifying live tasks; exit.
+  --inspect-team-strategy <id>
+                         Inspect immutable Team resource policy and unavailable
+                         execution capabilities without admitting work; exit.
   --list-tickets         List up to 200 redacted native SuperAgent tickets; exit.
   --list-review-inbox    List up to 200 pending human/Council decisions across Teams;
                          redact objectives, never approve or run a reviewer; exit.
@@ -1643,6 +1670,15 @@ mod tests {
             assert!(parsed(invalid).is_err(), "{invalid}");
         }
         assert_eq!(parsed("--inspect-orchestrations"), Ok(Command::InspectOrchestrations));
+        assert_eq!(parsed("--inspect-team-strategy team_123"),
+            Ok(Command::InspectTeamStrategy { orchestration_id: "team_123".into() }));
+        for invalid in [
+            "--inspect-team-strategy",
+            "--inspect-team-strategy ../unsafe",
+            "--inspect-team-strategy team_123 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
         assert_eq!(parsed("--list-review-inbox"), Ok(Command::ListReviewInbox));
         assert_eq!(parsed("--list-recovery-inbox"), Ok(Command::ListRecoveryInbox));
@@ -1879,6 +1915,7 @@ mod tests {
             "--import-orchestrations",
             "--export-orchestrations",
             "--inspect-orchestrations",
+            "--inspect-team-strategy",
             "--list-tickets",
             "--list-review-inbox",
             "--list-recovery-inbox",

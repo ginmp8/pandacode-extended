@@ -4722,6 +4722,11 @@ pub(crate) fn start_state(
         }
     }
     let mut team = load(&store, session_id)?.ok_or("Configure a team first.")?;
+    // A completed composed task must never reuse its prior Council receipt
+    // namespace for a new objective, even if the old verdict has become stale.
+    // Capture completion before replacing the objective or applying a new plan.
+    let completed_composed_cycle = team.status == "completed"
+        && team.config.council.as_ref().is_some_and(|config| config.composition.is_some());
     if active(&team.status)
         || agents.contains_key(session_id)
         || team
@@ -4745,7 +4750,16 @@ pub(crate) fn start_state(
     team.objective = text.to_owned();
     // "Keep going" after a stop continues an unfinished Council cycle and its rounds.
     refresh_council(&store, &mut team);
-    if native_council_finish_refusal(&store, &team).is_none() {
+    if completed_composed_cycle
+        || (team.config.council.as_ref().is_some_and(|config| config.composition.is_some())
+            && team.workers.iter().any(|worker|
+                worker.council.is_some() && worker.created_at >= team.council_since
+                    && worker.status == "completed")
+            && native_council_finish_refusal(&store, &team).is_none())
+    {
+        // A cycle ID is a receipt namespace. Even same-tick starts must advance.
+        team.council_since = storage::now().max(team.council_since.saturating_add(1));
+    } else if native_council_finish_refusal(&store, &team).is_none() {
         team.council_since = storage::now();
     }
     team.error = None;

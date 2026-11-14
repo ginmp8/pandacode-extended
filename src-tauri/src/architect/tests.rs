@@ -7167,6 +7167,37 @@ fn composed_admission_test_config() -> council::CouncilConfig {
 }
 
 #[test]
+fn finished_composed_council_starts_a_strictly_new_cycle_even_when_old_review_is_blocked() {
+    let (state, sid) = state_fixture();
+    let previous_cycle;
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.config.council = Some(composed_admission_test_config());
+        team.status = "completed".into();
+        team.objective = "Previous task completed with an explicit exception.".into();
+        team.council_since = storage::now().max(2);
+        let mut reviewer = worker("old-completed-reviewer", "completed", &[], &[]);
+        reviewer.created_at = team.council_since;
+        reviewer.council = Some(CouncilSeat {
+            round: 1, score: Some(6.0), ..CouncilSeat::default()
+        });
+        team.workers.push(reviewer);
+        previous_cycle = team.council_since;
+        save(&store, &mut team).unwrap();
+        assert!(native_council_finish_refusal(&store, &team).is_some(),
+            "the previous review is not an independently verified native pass");
+    }
+    let (started, _) = start_state(
+        &state, &sid, "Review a different task in a new Council cycle.", None, None,
+    ).unwrap();
+    assert!(started.council_since > previous_cycle,
+        "a completed root must not reuse old root and child receipt correlation IDs");
+    assert!(started.workers.iter().all(|worker| worker.created_at < started.council_since),
+        "old reviewer seats must be excluded from the fresh Council quorum");
+}
+
+#[test]
 fn composed_attempt_budget_counts_child_failures_and_all_rounds_without_refunds() {
     let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();
     let store = state.store.lock().unwrap();

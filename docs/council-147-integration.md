@@ -160,3 +160,10 @@ states and the fixed versus OnTrigger budget boundary.
 - Preserved the existing configured `maxLeafReviewsPerRound` limit and legacy M1/M2 behavior. The cumulative check runs before new root **and** child reviewer creation inside the native dispatch transaction; duplicates or changed child-cycle identities fail closed.
 - Added native regression cases for abandoned and failed child leaves, multiple rounds, in-flight batch accounting, old-cycle exclusion, and legacy compatibility.
 - This change does not copy PR #149's parallel child engine or claim end-to-end integration acceptance. Rust and UI tests remain unexecuted from the connector environment.
+
+## November 14: completed-cycle receipt isolation
+
+- Adapted PR #149's new-cycle rotation for completed composed Councils to PR #155's native objective-start path. Capture the prior completed state before swapping the objective, then advance the root cycle key monotonically (even for same-tick requests).
+- An old blocked or now-stale terminal verdict cannot keep a newly submitted objective in the previous receipt namespace. Incomplete/paused Council continuation retains its existing behavior.
+- Added a Rust regression for a completed composed task with an old non-passing review, new objective, and exclusion of prior-cycle reviewer seats.
+- Native tests are not run in this connector-only environment; no full issue #147 terminal acceptance is claimed.

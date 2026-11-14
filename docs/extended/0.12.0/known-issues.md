@@ -1,5 +1,9 @@
 # Extended 0.12.0 — known issues and acceptance gaps
 
+## 2026-11-14 — fixed-source pin candidate; exact-SHA CI pending
+
+The [previous code SHA `ca60310`](https://github.com/ginmp8/pandacode-extended/commit/ca60310c59ad346c652bd4a41ab5eeff496ac933) failed the `npm run test:release` job in [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43603320753) and [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43603326654): two assertions referenced stale upstream **0.3.125** metadata even though the upstream and application manifests are **0.3.126**. The pinned metadata now points at the verified upstream commit/tree and original release-note/date blob hashes. This is a confirmed metadata/test fixture inconsistency; it is **not evidence of a missing upstream product feature**. The corrected SHA must independently pass CI. Native Settings, Connect/MCP, bots, cloud/VM and credential flows, plus functional parity across 81 customized source files, remain unverified. **Extended 0.12.0 is DRAFT**.
+
 ## 2026-11-14 — upstream 0.3.126 inherited limitations and acceptance gaps
 
 The upstream [0.3.126 release notes](../../../releases/0.3.126.md) state that the animated sky briefly pauses on every machine during scrolling/typing, even where the earlier blur was inexpensive; project explorer names cannot contain slash, backslash or colon or equal `.git`; and opening a project file externally hands it to the operating system's default handler. These are **upstream limitations**, not established Extended-specific regressions.

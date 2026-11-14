@@ -1,5 +1,13 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-14 — upstream 0.3.126 source identity CI correction
+
+- [x] Diagnose the exact-SHA [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43603320753) failure: two release-identity assertions incorrectly expect **0.3.125** while all application manifests declare source **0.3.126**.
+- [x] Verify current source commit/tree, all 40 historical release-note blobs and the release-date blob against the complete, nontruncated source/destination trees; update the pinned Extended baseline without rewriting original source notes or weakening tests.
+- [ ] Confirm `npm run test:release`, the full push/PR CI job matrix and release metadata on the new corrective SHA.
+- [ ] Independently validate native Extended Settings On/Off, Connect, bots, MCP, cloud/VM, credential flows and the 81 shared customization paths.
+- [ ] Keep planned Extended **0.12.0 DRAFT**; no distribution or release approval is implied.
+
 ## 2026-11-14 — upstream 0.3.126 candidate gate
 
 - [x] Freeze and verify source [`6c91efdb4d5f`](https://github.com/ginmp8/pandacode/commit/6c91efdb4d5ff317c2e7597fcb717e0814939349) versus destination baseline [`7206c0592f65`](https://github.com/ginmp8/pandacode-extended/commit/7206c0592f652af3aea01848ea85c44906f0264d); all recursive trees complete, not truncated.

@@ -157,3 +157,17 @@ Replays return the original decision; each linked thread has its own monotonic
 cursor, gaps are accepted, and older out-of-order values are recorded as
 ignored. Turning a source Off blocks the next fetch before even
 `gh auth status`, so Off sends no request.
+
+
+### Bounded native no-progress watchdog
+
+A running native Assignment is interrupted when **25 minutes elapse without
+attributable persisted assistant/tool/handoff output from its exact session**,
+or when its immutable Team attempt timeout or the platform's 30-minute hard
+run limit expires, whichever is earlier. User prompts and other sessions do
+not reset this timer. Only durable message timestamps count; in-memory streaming
+not yet persisted does not count as verified progress. This can interrupt a
+long-running provider call that emits no saved updates. The native watchdog
+revokes the Mandate, preserves uncertain external effects and denies late
+callbacks; it does **not** replay provider work. This watchdog complements
+rather than replaces configured attempt and retry budgets.

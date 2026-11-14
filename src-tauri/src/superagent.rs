@@ -52,6 +52,10 @@ const TEAM_SNAPSHOT_VERSION: u32 = 3;
 /// ticket mandate lifetime. A late provider result must never become newly
 /// approvable after its execution budget has elapsed.
 const MAX_ASSIGNMENT_RUN_MS: i64 = 30 * 60 * 1000;
+// Revoke a stalled attempt before the absolute deadline. This is based only on
+// persisted, attributable provider/tool output from the exact native session.
+// The hard run deadline remains non-waivable even if progress is emitted.
+const NO_PROGRESS_MAX_MS: i64 = 25 * 60 * 1000;
 
 fn assignment_within_budget(started_at: i64, now: i64) -> bool {
     started_at > 0 && now >= started_at
@@ -2482,6 +2486,16 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
                       WHEN (?1-a.created_at)>=COALESCE(
                           json_extract(pinned.snapshot_json,'$.policy.strategy.attemptTimeoutMs'),?2)
                         THEN 'Assignment exceeded its bounded run time; no replay'
+                      WHEN (?1 - COALESCE(
+                           (SELECT MAX(activity.created_at)
+                            FROM messages activity
+                            WHERE activity.session_id=a.session_id
+                              AND activity.created_at>=a.created_at
+                              AND activity.created_at<=?1
+                              AND activity.role IN ('assistant','tool','handoff')
+                              AND trim(activity.content)<>''),
+                           a.created_at))>=?4
+                        THEN 'No attributable persisted provider progress within the bounded interval; no replay'
                       WHEN ?3=1
                         THEN 'Bots paused; native execution authority revoked'
                       WHEN o.enabled=0
@@ -2526,7 +2540,8 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
              ORDER BY a.created_at,a.id",
         ).map_err(|e| e.to_string())?;
         let rows = stmt.query_map(
-            params![now,MAX_ASSIGNMENT_RUN_MS,i64::from(crate::feature_controls::get().bots_paused)],
+            params![now,MAX_ASSIGNMENT_RUN_MS,
+                i64::from(crate::feature_controls::get().bots_paused),NO_PROGRESS_MAX_MS],
             |r| Ok((
                 r.get::<_, String>(0)?, r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?, r.get::<_, i64>(3)?,
@@ -6411,6 +6426,61 @@ mod tests {
         assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "interrupted");
         assert_eq!(history(&store, &ticket.id, 10).unwrap()
             .iter().filter(|entry| entry.kind == "watchdog_interrupted").count(), 1);
+    }
+
+    #[test]
+    fn watchdog_fences_persisted_no_progress_and_respects_current_session_activity() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (ticket,started)=admit(
+            &mut store,&cfg.id,"Require durable provider progress","watchdog-stall",false,
+        ).unwrap();
+        assert!(started);
+        let session=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        let now=storage::now();
+        let start=now - NO_PROGRESS_MAX_MS - 1;
+        assert!(now-start < MAX_ASSIGNMENT_RUN_MS);
+        store.db.execute(
+            "UPDATE sa_assignments SET created_at=?2 WHERE ticket_id=?1",
+            params![&ticket.id,start],
+        ).unwrap();
+        // A prompt, or output from another session, cannot refresh this
+        // assignment's progress clock.
+        store.db.execute(
+            "INSERT INTO messages(session_id,role,content,created_at)
+             VALUES(?1,'user','Injected prompt does not count as progress',?2)",
+            params![&session,now-60_000],
+        ).unwrap();
+        assert_eq!(watchdog_expired_assignments(&store,now).unwrap(),vec![session.clone()]);
+        assert!(mandate(&store,&ticket.id).unwrap().revoked);
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"interrupted");
+        assert!(history(&store,&ticket.id,20).unwrap().iter().any(|event|
+            event.kind=="watchdog_interrupted"
+            && event.detail.contains("No attributable persisted provider progress")));
+        assert!(watchdog_expired_assignments(&store,now+1).unwrap().is_empty());
+        assert!(!on_run_finished(&store,&session,true,"Late model output").unwrap());
+
+        let (active,admitted)=admit(
+            &mut store,&cfg.id,"Provider emitted durable output","watchdog-progress",false,
+        ).unwrap();
+        assert!(admitted);
+        let live=assignment_session(&store,&active.id).unwrap().unwrap();
+        store.db.execute(
+            "UPDATE sa_assignments SET created_at=?2 WHERE ticket_id=?1",
+            params![&active.id,start],
+        ).unwrap();
+        // Only output belonging to this exact session and attempt may
+        // postpone the idle deadline. It cannot extend the hard run budget.
+        store.db.execute(
+            "INSERT INTO messages(session_id,role,content,created_at)
+             VALUES(?1,'assistant','Persisted incremental result',?2)",
+            params![&live,now-60_000],
+        ).unwrap();
+        assert!(watchdog_expired_assignments(&store,now).unwrap().is_empty());
+        assert_eq!(get_ticket(&store,&active.id).unwrap().state,"running");
+        assert_eq!(watchdog_expired_assignments(
+            &store,start+MAX_ASSIGNMENT_RUN_MS,
+        ).unwrap(),vec![live]);
     }
 
     #[test]

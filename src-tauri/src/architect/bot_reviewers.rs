@@ -457,7 +457,11 @@ fn seat_bot_with_source(
     available.reasoning_effort = frozen.context.reasoning_effort.clone();
     valid_bot(&available, executor(store, &team.session_id)?.as_deref(), check_executable)?;
     if let Some(binding) = old.and_then(|w| w.reviewer_binding.as_ref()) {
-        super::reviewer_security::validate_issued_authority(store, &team.session_id, binding)?;
+        if team.config.council.as_ref().is_some_and(|config| config.composition.is_some()) {
+            super::reviewer_security::validate_recorded_authority(store, &team.session_id, binding)?;
+        } else {
+            super::reviewer_security::validate_issued_authority(store, &team.session_id, binding)?;
+        }
         if binding.round == round && (binding.snapshot.provider != frozen.profile.provider || binding.snapshot.model != frozen.profile.model
             || binding.snapshot.bot_context.as_ref() != Some(&frozen.context)
             || binding.snapshot.tool_policy != frozen.tool_policy

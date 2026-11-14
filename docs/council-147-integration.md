@@ -65,3 +65,17 @@ The root terminal gate also rejects multiple native review or child receipts
 for the same current seat identity, rather than choosing the first match.
 A regression test covers zero, one, duplicate and replayed receipt matches.
 Automated execution remains outstanding for this connector-authored batch.
+
+
+## Review-time authority enforcement
+
+Composed reviewers now require their persisted native authority at the execution
+boundary, while reading frozen task evidence, recording/verifying findings,
+recovering selected-bot reviewer seats, and projecting nested-child review evidence.
+Missing bindings on composed workers fail closed at the tool-policy boundary.
+Legacy non-composed read-only sessions retain their historical fallback.
+A native regression covers admission before/after issuance, modification,
+revocation, and legacy compatibility.
+
+Code and tests are published, but actual Rust, browser, and live provider
+validation remain not_run at this integration SHA.

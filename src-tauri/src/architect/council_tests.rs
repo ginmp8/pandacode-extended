@@ -232,6 +232,45 @@ fn composed_terminal_receipt_selector_rejects_duplicates_and_replays() {
 }
 
 #[test]
+fn composed_reviewer_tool_authority_denies_unissued_and_modified_bindings() {
+    use council::AutomaticReviewerCount as Count;
+    let (state, sid) = state_fixture();
+    let store = state.store.lock().unwrap();
+    let config = config_for_composition(composition(true, Count::Fixed(2), vec![]));
+    let mut team = team_with(config, vec![]);
+    team.session_id = sid.clone();
+    let mut reviewer = seat("native-composed", 1, Some(9.8), SINCE + 1);
+    let binding = reviewer_security::ReviewerBinding::native(
+        &team, &reviewer.id, reviewer.created_at, &reviewer.provider,
+        &reviewer.model, reviewer.council.as_ref().unwrap(),
+    );
+    reviewer.reviewer_binding = Some(binding.clone());
+    team.workers.push(reviewer);
+
+    assert!(validate_current_reviewer_authority(&store, &team, &binding)
+        .unwrap_err().contains("capability_not_authorized"),
+        "composed reviewer admission must require a stored native grant");
+    reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+    assert!(validate_current_reviewer_authority(&store, &team, &binding).is_ok());
+
+    let mut corrupted = binding.clone();
+    corrupted.artifact_revision.push_str("-unissued");
+    assert!(validate_current_reviewer_authority(&store, &team, &corrupted).is_err());
+
+    let removed = store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, "native-reviewer-authority:native-composed"],
+    ).unwrap();
+    assert_eq!(removed, 1);
+    assert!(validate_current_reviewer_authority(&store, &team, &binding).is_err(),
+        "a revoked grant must prevent a reviewer from resuming or reporting");
+
+    team.config.council.as_mut().unwrap().composition = None;
+    assert!(validate_current_reviewer_authority(&store, &team, &binding).is_ok(),
+        "legacy read-only reviewer sessions keep their pre-composition behavior");
+}
+
+#[test]
 fn selected_bot_config_requires_distinct_bounded_identity_roster() {
     let mut c = on(9.0, 10, 0);
     c.reviewer_bot_ids = vec!["bot-1".into()];

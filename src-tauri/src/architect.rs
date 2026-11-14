@@ -839,6 +839,21 @@ pub(crate) fn council_evidence_is_current(store: &Store, team: &TeamSnapshot) ->
     council::changed_at(store, team).is_ok_and(|latest| latest <= team.changed_at)
 }
 
+/// Ensure all native reviewer entry points use the same task-scoped authority
+/// gate. Only legacy tasks without Council composition retain the read-only
+/// compatibility fallback for pre-existing reviewer sessions.
+fn validate_current_reviewer_authority(
+    store: &Store,
+    team: &TeamSnapshot,
+    binding: &reviewer_security::ReviewerBinding,
+) -> Result<()> {
+    if team.config.council.as_ref().is_some_and(|config| config.composition.is_some()) {
+        reviewer_security::validate_recorded_authority(store, &team.session_id, binding)
+    } else {
+        reviewer_security::validate_issued_authority(store, &team.session_id, binding)
+    }
+}
+
 /// A composed Council's root seats must all have a recorded, current native
 /// capability binding. A plausible completed worker snapshot is not authority.
 fn composed_native_authority_current(
@@ -931,7 +946,7 @@ pub(crate) fn verified_council_task_evidence(
     }) {
         let binding = worker.reviewer_binding.as_ref()?;
         binding.validate(team, worker).ok()?;
-        reviewer_security::validate_issued_authority(store, &team.session_id, binding).ok()?;
+        validate_current_reviewer_authority(store, team, binding).ok()?;
         bot_reviewers::validate_frozen_seat_for_task(store, &team.session_id, binding, false).ok()?;
         revisions.push(binding.artifact_revision.clone());
         policy_parts.push(format!("root:{}:{}", worker.id, council_policy_fingerprint(binding).ok()?));
@@ -1333,7 +1348,7 @@ fn council_ledger_projection(store: &Store, team: &TeamSnapshot) -> ArchitectRea
         };
         if binding.council_cycle_id != root_cycle_id
             || binding.validate(team, worker).is_err()
-            || reviewer_security::validate_issued_authority(store, &team.session_id, binding)
+            || validate_current_reviewer_authority(store, team, binding)
                 .is_err()
         {
             continue;
@@ -1420,11 +1435,7 @@ fn council_ledger_projection(store: &Store, team: &TeamSnapshot) -> ArchitectRea
             };
             if child_binding.council_cycle_id != child_cycle_id
                 || child_binding.validate(child, worker).is_err()
-                || reviewer_security::validate_issued_authority(
-                    store,
-                    &child.session_id,
-                    child_binding,
-                )
+                || validate_current_reviewer_authority(store, child, child_binding)
                 .is_err()
             {
                 continue;
@@ -2313,7 +2324,7 @@ fn s2_escalation_decisions_for_worker(
         || !team.config.council.as_ref().and_then(|config| config.composition.as_ref())
             .is_some_and(|composition| composition.strategy == council::CouncilStrategy::Escalated)
         || binding.validate(team, worker).is_err()
-        || reviewer_security::validate_issued_authority(store, &team.session_id, binding).is_err()
+        || validate_current_reviewer_authority(store, team, binding).is_err()
     {
         return Ok(Vec::new());
     }
@@ -2338,11 +2349,7 @@ fn s2_escalation_decisions_for_worker(
             };
             if source_binding.council_cycle_id != binding.council_cycle_id
                 || source_binding.validate(team, source_worker).is_err()
-                || reviewer_security::validate_issued_authority(
-                    store,
-                    &team.session_id,
-                    source_binding,
-                )
+                || validate_current_reviewer_authority(store, team, source_binding)
                 .is_err()
             {
                 return false;
@@ -2804,7 +2811,7 @@ fn persist_council_terminal_receipts(
         return Ok(());
     }
     binding.validate(team, worker)?;
-    reviewer_security::validate_issued_authority(store, &team.session_id, binding)?;
+    validate_current_reviewer_authority(store, team, binding)?;
     let nested_link = if load_council_child_link(store, &team.session_id)?.is_some() {
         validate_council_child_link(store, &team.session_id)?
     } else {
@@ -3425,7 +3432,7 @@ fn validate_council_child_link(
         return Err("reviewer_session_mismatch: nested Council root, child, revision, policy, or delivery linkage changed.".into());
     }
     binding.validate(&root, worker)?;
-    reviewer_security::validate_issued_authority(store, &root.session_id, binding)?;
+    validate_current_reviewer_authority(store, &root, binding)?;
     bot_reviewers::validate_frozen_seat_for_task(store, &root.session_id, binding, false)?;
     if binding
         .snapshot
@@ -3762,7 +3769,7 @@ pub(crate) fn reviewer_policy(
     }
     let policy = if let Some(binding) = &worker.reviewer_binding {
         binding.validate(&team, worker)?;
-        reviewer_security::validate_issued_authority(store, &team.session_id, binding)?;
+        validate_current_reviewer_authority(store, &team, binding)?;
         bot_reviewers::validate_frozen_seat_for_task(store, &team.session_id, binding, true)?;
         if let Some(parent) = &binding.parent_council {
             let link = validate_council_child_link(store, &team.session_id)?.ok_or(
@@ -3797,6 +3804,9 @@ pub(crate) fn reviewer_policy(
         }
         binding.snapshot.tool_policy.clone()
     } else {
+        if team.config.council.as_ref().is_some_and(|config| config.composition.is_some()) {
+            return Err("reviewer_session_mismatch: composed Council reviewer has no issued native binding.".into());
+        }
         reviewer_security::ReviewerToolPolicy::NativeReadOnly
     };
     policy.validate()?;
@@ -5245,7 +5255,7 @@ fn record_council_finding_state(
         .as_ref()
         .ok_or("reviewer_session_mismatch: Council reviewer authority is missing.")?;
     binding.validate(&team, worker)?;
-    reviewer_security::validate_issued_authority(&store, team_session_id, binding)?;
+    validate_current_reviewer_authority(&store, &team, binding)?;
     let link = if load_council_child_link(&store, team_session_id)?.is_some() {
         validate_council_child_link(&store, team_session_id)?
     } else {
@@ -5554,7 +5564,7 @@ fn verify_council_finding_state(
     let (binding, seat) = worker.reviewer_binding.as_ref().zip(worker.council.as_ref())
         .ok_or("Only a native Council reviewer can verify a finding.")?;
     binding.validate(&team, worker)?;
-    reviewer_security::validate_issued_authority(&store, team_session_id, binding)?;
+    validate_current_reviewer_authority(&store, &team, binding)?;
     let cycle_id = format!("{}:{}", team.session_id, team.council_since);
     let finding = council_records::<council::CouncilFinding>(
         &store, team_session_id, "council_finding",

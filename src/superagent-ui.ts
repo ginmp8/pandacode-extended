@@ -20,7 +20,7 @@ interface EffectiveSkill {
 interface EffectiveMember {
   role:string; position:number; botId:string; name:string;
   provider:string; model:string; mode:string; projectId:string;
-  paused:boolean; skills:EffectiveSkill[];
+  paused:boolean; skills:EffectiveSkill[]; configurationIssues?:string[];
 }
 interface EffectiveTeam {
   orchestrationId:string; policyRevision:number; enabled:boolean;
@@ -113,6 +113,15 @@ interface SourceDecision {
   checkConclusion?: string; checkHeadSha?: string; checkCompletedAt?: number;
 }
 
+interface SourceIntegrity {
+  sourceId: string; repository: string; mode: 'off' | 'observe';
+  policyRevision: number; cursorKind: string; lastSequence: number;
+  receiptCount: number; permittedReceiptCount: number;
+  maxReceiptSequence: number; cursorConsistent: boolean;
+  receiptCapacityReached: boolean; nextAction: string;
+  observationalOnly: boolean;
+}
+
 async function issueCommentEffectKey(
   ticketId: string, repository: string, issueNumber: number, comment: string,
 ): Promise<string> {
@@ -150,9 +159,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let effectReceipts: EffectReceipt[] = [], effectReceiptsLoaded = false;
   let runGraph: RunGraph | null = null, runGraphLoaded = false;
   let roleRoster: TeamRoster | null = null;
+  // Draft order is committed only by the native revision-guarded roster update.
+  let workerOrder: string[] = [];
   let effectiveTeam: EffectiveTeam | null = null;
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
+  let sourceIntegrity: SourceIntegrity | null = null;
   let linkedDecisions: SourceDecision[] = [], linkedDecisionsLoaded = false;
   const safe = (value: unknown) => escape(String(value ?? ''));
   const current = () => presets.find(item => item.id === selected);
@@ -398,6 +410,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             'maxlength="24" placeholder="issue:42 or pull:123"></label>' +
             '<button type="submit">Link thread (context only)</button></form>'
           : '<p>Load event sources below before linking a thread.</p>') +
+        (sourcesLoaded && threadLinks.some(link => link.subjectKey.startsWith('issue:'))
+          ? '<form data-sa-form="issue-pull-link"><p>Operator-asserted PR association; ' +
+            'not GitHub-verified and not a permission grant.</p>' +
+            '<label>Linked issue<select name="issueLink" required>' +
+            threadLinks.filter(link => link.subjectKey.startsWith('issue:')).map(link =>
+              '<option value="' + safe(link.sourceId + '|' + link.subjectKey) + '">' +
+              safe(link.repository) + ' / ' + safe(link.subjectKey) + '</option>').join('') +
+            '</select></label><label>Exact PR thread key<input name="pullKey" required ' +
+            'maxlength="24" placeholder="pull:123"></label>' +
+            '<button type="submit">Associate PR with linked issue (context only)</button></form>'
+          : '') +
         (ticketDetails.council
           ? '<section class="sa-council-observation" role="note" aria-label="Native Council observation">' +
             '<h5>Native Council (advisory)</h5><p>Native team status: ' +
@@ -445,7 +468,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           : '<button type="button" data-sa-source-poll="' + safe(src.id) +
             '">Poll authenticated GitHub</button>') : '') +
       '<button type="button" data-sa-source-decisions="' + safe(src.id) +
-      '">View decisions</button></li>').join('');
+      '">View decisions</button>' +
+      '<button type="button" data-sa-source-health="' + safe(src.id) +
+      '">Inspect source health</button></li>').join('');
     const sourcePanel = '<section class="sa-event-sources" aria-label="GitHub event sources">' +
       '<h4>GitHub event sources</h4><p>Off/Observe only. Authenticated GitHub Events polling is bounded; Checks API requires an explicit Check Run ID and a unique matching PR head. Neither is a gap-free subscription or an authorization to launch tasks or external writes.</p>' +
       (!sourcesLoaded ? '<button type="button" data-sa-load-sources>Load sources</button>'
@@ -462,6 +487,26 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '</select></label><button type="submit">Add source (Off)</button></form>' +
           '<ul class="sa-tickets sa-source-list">' +
           (sourceRows || '<li class="sa-empty">No event sources configured.</li>') + '</ul>' +
+          (sourceIntegrity ? '<section role="region" aria-label="Source integrity">' +
+            '<h5>Native source integrity</h5><p>' +
+            safe(sourceIntegrity.repository) + ' · ' + safe(sourceIntegrity.mode) +
+            ' · Revision ' + safe(sourceIntegrity.policyRevision) + '</p>' +
+            '<p>Cursor type: ' +
+            safe(sourceIntegrity.cursorKind === 'local_check_run_observation_count'
+              ? 'Local Check Run observation count' : 'GitHub Events high-watermark') +
+            ' · Stored cursor: ' + safe(sourceIntegrity.lastSequence) +
+            ' · Highest durable receipt: ' + safe(sourceIntegrity.maxReceiptSequence) +
+            '</p><p>Decisions: ' + safe(sourceIntegrity.receiptCount) +
+            ' · Permitted: ' + safe(sourceIntegrity.permittedReceiptCount) +
+            ' · ' + (sourceIntegrity.receiptCapacityReached
+              ? 'Receipt capacity reached — operator intervention required'
+              : 'Receipt capacity available') + '</p>' +
+            '<p>' + (sourceIntegrity.cursorConsistent
+              ? 'Cursor is consistent with stored receipts.'
+              : 'Cursor behind durable receipts — new observations denied until reconciled.') +
+            ' Native next action: ' + safe(sourceIntegrity.nextAction) + '</p>' +
+            '<p>Observation only. No GitHub subscription completeness, worker admission, Council pass, or Auto authorization is implied.</p>' +
+            '</section>' : '') +
           (decisionSourceId ? '<div role="region" aria-label="Source decisions">' +
             '<h5>Recorded decisions</h5><ol>' +
             (decisions.map(d => '<li>' + safe(activityTime(d.at)) + ' · ' +
@@ -625,7 +670,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           ' · Harness ' + safe(member.provider) + ' · Model ' + safe(member.model) +
           ' · Bot mode ' + safe(member.mode) + ' · Project ' + safe(member.projectId) +
           (member.paused ? ' · Paused' : ' · Not paused (live availability unverified)') +
-          '<ul>' + (member.skills.map(skill =>
+          '<section class="sa-member-issues" aria-label="Local configuration checks">' +
+          (member.configurationIssues?.length
+            ? '<p>Native configuration issues:</p><ul>' +
+              member.configurationIssues.map(issue => '<li>' + safe(issue) + '</li>').join('') + '</ul>'
+            : '<p>No local configuration issues detected. Harness/tool eligibility unverified.</p>') +
+          '</section><ul>' + (member.skills.map(skill =>
             '<li>Skill ' + safe(skill.id) + ' · Library ' + safe(skill.libraryStatus) +
             ' · Safety ' + safe(skill.safetyStatus) +
             ' · Harness eligibility ' + safe(skill.harnessEligibility) +
@@ -641,8 +691,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             ' · Primary Worker: ' + safe(botName(roleRoster.workerBotIds[0])) +
             ' · Policy revision ' + roleRoster.policyRevision + '</p>' +
             '<form data-sa-form="roster">' +
-              '<label>Additional Workers (up to 15)<select name="additionalWorkers" multiple size="5">' +
-              roleOptions(roleRoster.workerBotIds.slice(1)) + '</select></label>' +
+              '<label>Additional Workers (up to 15)<select name="additionalWorkers" data-sa-worker-select multiple size="5">' +
+              roleOptions(workerOrder) + '</select></label>' +
+              '<ol class="sa-worker-order" aria-label="Additional Worker order">' +
+              workerOrder.map((id,index) => '<li><span>' + (index + 2) + '. ' + safe(botName(id)) +
+                '</span><button type="button" data-sa-worker-move="' + safe(id) +
+                '" data-sa-direction="up" aria-label="Move ' + safe(botName(id)) +
+                ' up"' + (index === 0 || chosen.enabled ? ' disabled' : '') + '>Up</button>' +
+                '<button type="button" data-sa-worker-move="' + safe(id) +
+                '" data-sa-direction="down" aria-label="Move ' + safe(botName(id)) +
+                ' down"' + (index === workerOrder.length - 1 || chosen.enabled ? ' disabled' : '') +
+                '>Down</button></li>').join('') + '</ol>' +
               '<label>Optional Council Reviewers (up to 8)<select name="reviewers" multiple size="5">' +
               roleOptions(roleRoster.reviewerBotIds) + '</select></label>' +
               '<label><input type="checkbox" name="councilRequired"' +
@@ -825,8 +884,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
         inspectedTicket = ''; threadLinks = [];
-        linkedDecisions = []; linkedDecisionsLoaded = false; roleRoster = null; effectiveTeam = null;
+        linkedDecisions = []; linkedDecisionsLoaded = false; roleRoster = null; workerOrder = []; effectiveTeam = null;
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
+        sourceIntegrity = null;
       }
       // A failed native read must not leave old ticket approval controls
       // visible underneath a newly selected or reloaded preset.
@@ -836,6 +896,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       await refreshTicketDetails();
       if (roleRoster && selected) {
         roleRoster = await call<TeamRoster>('superagent_roster',{orchestrationId:selected});
+        workerOrder = roleRoster.workerBotIds.slice(1);
       }
       // Any native refresh invalidates this non-authoritative, time-bound scan.
       effectiveTeam = null;
@@ -847,6 +908,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           decisions = await call<SourceDecision[]>('superagent_source_decisions',
             {sourceId:decisionSourceId,limit:50});
         }
+        // Native policies and cursors are mutable; never keep a prior
+        // scan visible as current after a reload or a Team change.
+        sourceIntegrity = null;
       }
       error = '';
     } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
@@ -869,6 +933,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   // Templates populate editable names only; no bot, tool or task is selected.
   host.addEventListener('change', event => {
     const target = event.target;
+    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-worker-select')) {
+      if (busy || !roleRoster || roleRoster.orchestrationId !== selected) return;
+      const next = Array.from(target.selectedOptions, option => option.value);
+      workerOrder = [...workerOrder.filter(id => next.includes(id)),
+        ...next.filter(id => !workerOrder.includes(id))];
+      render();
+      return;
+    }
     if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-team-status')) {
       if (!['all','enabled','disabled'].includes(target.value)) return;
       teamStatusFilter = target.value as typeof teamStatusFilter;
@@ -970,6 +1042,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   host.addEventListener('click', event => {
     const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button') : null;
     if (!target || !host.contains(target) || target.disabled) return;
+    if (target.dataset.saWorkerMove) {
+      if (busy || roleRoster?.orchestrationId !== selected || current()?.enabled) return;
+      const index = workerOrder.indexOf(target.dataset.saWorkerMove);
+      const offset = target.dataset.saDirection === 'up' ? -1 : 1;
+      const next = index + offset;
+      if (index < 0 || next < 0 || next >= workerOrder.length) return;
+      [workerOrder[index], workerOrder[next]] = [workerOrder[next], workerOrder[index]];
+      const movedId = target.dataset.saWorkerMove, direction = target.dataset.saDirection;
+      render();
+      Array.from(host.querySelectorAll<HTMLButtonElement>('[data-sa-worker-move]'))
+        .find(button => button.dataset.saWorkerMove === movedId &&
+          button.dataset.saDirection === direction)?.focus({preventScroll:true});
+      return;
+    }
     if (target.hasAttribute('data-sa-cancel')) { confirm = null; render(); return; }
     if (target.hasAttribute('data-sa-confirm')) {
       const action = confirm?.action; confirm = null; if (action) void work(action);
@@ -1098,8 +1184,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       selected = demand.orchestrationId;
       workspaceView = 'runs';
       tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
-      inspectedAssignmentId = ''; roleRoster = null; effectiveTeam = null;
+      inspectedAssignmentId = ''; roleRoster = null; workerOrder = []; effectiveTeam = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
+      sourceIntegrity = null;
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{
           orchestrationId:demand.orchestrationId,limit:50,
@@ -1124,6 +1211,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target.hasAttribute('data-sa-role-load')) {
       if (selected) void work(async () => {
         roleRoster=await call<TeamRoster>('superagent_roster',{orchestrationId:selected});
+        workerOrder=roleRoster.workerBotIds.slice(1);
       });
       return;
     }
@@ -1156,6 +1244,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       inspectedTicket = ''; ticketDetails = null; threadLinks = [];
       inspectedAssignmentId = ''; roleRoster = null; effectiveTeam = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
+      sourceIntegrity = null;
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 });
       });
@@ -1227,6 +1316,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           summary.selfIgnored + ' self-authored ignored, ' + summary.duplicates +
           ' duplicate. No tasks or effects started. This is not a gap-free subscription.';
         await reload();
+      });
+      return;
+    }
+    if (target.dataset.saSourceHealth) {
+      const sourceId = target.dataset.saSourceHealth;
+      if (sources.some(item => item.id === sourceId)) void work(async () => {
+        const diagnosis = await call<SourceIntegrity>('superagent_source_integrity', {sourceId});
+        if (sources.some(item => item.id === sourceId)) sourceIntegrity = diagnosis;
       });
       return;
     }
@@ -1497,7 +1594,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (form.dataset.saForm === 'roster') {
       const cfg=current();
       if (!cfg || !roleRoster || roleRoster.orchestrationId!==cfg.id) return;
-      const workerBotIds=[cfg.workerBotId,...data.getAll('additionalWorkers').map(String)];
+      const workerBotIds=[cfg.workerBotId,...workerOrder];
       const reviewerBotIds=data.getAll('reviewers').map(String);
       // Freeze the visible policy before async work; reload may clear the
       // selected roster while the native compare-and-swap request is pending.
@@ -1524,6 +1621,23 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         await call('superagent_source_link_thread', {sourceId,ticketId,subjectKey});
         await refreshTicketDetails();
         feedback = 'Thread linked as context only; no task or authorization created.';
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'issue-pull-link') {
+      const ticketId=inspectedTicket;
+      const selectedLink=String(data.get('issueLink') ?? '');
+      const issueLink=threadLinks.find(link => link.ticketId===ticketId &&
+        link.subjectKey.startsWith('issue:') &&
+        link.sourceId+'|'+link.subjectKey===selectedLink);
+      const pullKey=String(data.get('pullKey') ?? '').trim();
+      if (!ticketId || !issueLink || !/^pull:[1-9][0-9]{0,11}$/.test(pullKey)) return;
+      void work(async () => {
+        await call('superagent_source_link_issue_pull',{
+          sourceId:issueLink.sourceId,ticketId,issueKey:issueLink.subjectKey,pullKey,
+        });
+        await refreshTicketDetails();
+        feedback='PR associated as operator context only; GitHub relationship is not verified.';
       });
       return;
     }

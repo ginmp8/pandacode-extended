@@ -127,11 +127,23 @@ command reads the Team's policy revision and actual existing bot profiles
 (Coordinator, ordered Workers and optional Reviewers), including the bot's
 configured harness/provider, model, mode, project and paused state.
 
+The configured-role editor preserves the operator's explicit order for additional
+Workers with keyboard-focusable Up/Down controls; the revision-guarded native
+roster commit stores that order and reloads it from SQLite. This is configuration
+only, not task delegation or permission to execute multiple Workers.
+
 The command inspects the **existing PandaCode Skills Library** and each bot's
 assigned skill IDs without importing, installing, activating, executing or granting
 anything. It reports library presence and native package-scan safety state
 (`clean`, `findings_acknowledged` or `review_required`) separately. Missing
-assigned IDs remain visible. **Harness eligibility and actual invocation/evidence
+assigned IDs remain visible. A native, per-member local configuration check
+reports paused bots, missing assigned Skills and unresolved Skill safety findings
+with actionable remediation in the existing Bots / Skills Manager screens.
+It also detects Workers whose project changed after Team configuration; a
+Coordinator may intentionally have a separate project. An out-of-scope Worker
+is a configuration problem, never a grant or a reason to substitute a bot.
+These checks do not infer a live provider capability, do not change any stored
+bot or Team policy, and never grant execution rights. **Harness eligibility and actual invocation/evidence
 are explicitly `not_verified`** until a task-bound provider and evidence contract
 can establish them; a known package is not a verified reviewer skill.
 
@@ -163,3 +175,23 @@ profile metadata. Successful imports remain **disabled and Off** and do not
 install Skills, change existing bots, issue a grant, or prove provider
 availability/Skill invocation. Native execution capability still requires
 independent task-scoped admission checks.
+
+### Immutable admitted Team configuration (unified native Team snapshots)
+
+Each newly admitted native Ticket stores an immutable, revision-bound Team snapshot
+in `sa_ticket_team_snapshots`, including the ordered Coordinator, Worker and
+Reviewer roles and each member's effective bot configuration. The snapshot is
+persisted in the Ticket admission transaction with a SHA-256 integrity digest;
+Team version membership remains immutable even if the reusable Team later changes.
+This is the single authoritative admitted profile in the unified branch. The
+legacy `sa_ticket_profiles` sidecar proposed independently by PR #150 is not
+created or read here because it would duplicate the authoritative snapshot.
+
+Before a new worker attempt or task-scoped provider/tool action, native code
+rechecks the relevant immutable role and effective configuration digest.
+Changes to the selected bot's provider, model, mode, reasoning, Skills,
+project, or other pinned configuration fail closed instead of silently granting
+a different identity or tool capability. Historical Tickets with explicitly
+unknown legacy profile provenance remain visible but cannot use that unknown
+profile to authorize a fresh session. A stored configuration snapshot is never
+itself a tool grant, a Council verdict, or evidence of Skill execution.

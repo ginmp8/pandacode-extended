@@ -206,6 +206,7 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
     if !valid_thread_key(subject_key) {
         return Err("A source link requires an exact issue:123 or pull:123 thread key.".into());
     }
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let ticket = super::get_ticket(store, ticket_id)?;
     let src = source(store, source_id)?;
     if src.orchestration_id != ticket.orchestration_id {
@@ -216,7 +217,7 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
     {
         return Err("Terminal Tickets cannot gain new source thread links.".into());
     }
-    let current: Option<String> = store.db.query_row(
+    let current: Option<String> = tx.query_row(
         "SELECT ticket_id FROM sa_source_thread_links
          WHERE source_id=?1 AND subject_key=?2",
         params![source_id,subject_key], |row| row.get(0),
@@ -225,7 +226,7 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
     // silently assign that same Team/repository/thread to another Ticket.
     // This check uses only trusted native source configuration and the local
     // operator's explicit thread link, never issue/PR text.
-    let conflicting: Option<String> = store.db.query_row(
+    let conflicting: Option<String> = tx.query_row(
         "SELECT l.ticket_id FROM sa_source_thread_links l
          JOIN sa_event_sources linked ON linked.id=l.source_id
          WHERE linked.orchestration_id=?1 AND linked.repository=?2
@@ -241,24 +242,101 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
             return Err("Source thread is already linked to a different Ticket.".into());
         }
     } else {
-        let count: i64 = store.db.query_row(
+        let count: i64 = tx.query_row(
             "SELECT COUNT(*) FROM sa_source_thread_links WHERE ticket_id=?1",
             [ticket_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
         if count >= MAX_LINKS_PER_TICKET {
             return Err("Ticket source thread link limit reached.".into());
         }
-        store.db.execute(
+        tx.execute(
             "INSERT INTO sa_source_thread_links
              (source_id,subject_key,ticket_id,created_at) VALUES(?1,?2,?3,?4)",
             params![source_id,subject_key,ticket_id,storage::now()],
         ).map_err(|e| e.to_string())?;
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'source_thread_linked',?2,?3)",
+            params![ticket_id,format!("{source_id} / {} / {subject_key}",src.repository),
+                storage::now()],
+        ).map_err(|e| e.to_string())?;
     }
+    tx.commit().map_err(|e| e.to_string())?;
     list_thread_links(store, ticket_id)?.into_iter()
         .find(|link| link.source_id == source_id && link.subject_key == subject_key)
         .ok_or_else(|| "Source thread link unavailable after update.".into())
 }
 
+
+/// Operator-asserted issue/PR context only; not proof of a GitHub relationship.
+/// The existing linked issue and the new PR reference must share Team, Ticket
+/// and repository. Both association and audit are atomic and idempotent.
+fn link_issue_to_pull(store: &Store, source_id: &str, ticket_id: &str,
+    issue_key: &str, pull_key: &str) -> Result<SourceThreadLink>
+{
+    if !valid_thread_key(issue_key) || !issue_key.starts_with("issue:")
+        || !valid_thread_key(pull_key) || !pull_key.starts_with("pull:") {
+        return Err("Issue-to-PR association requires exact issue:123 and pull:123 keys.".into());
+    }
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let issue_linked: Option<i64> = tx.query_row(
+        "SELECT 1 FROM sa_source_thread_links l
+         JOIN sa_event_sources initial ON initial.id=l.source_id
+         JOIN sa_event_sources target ON target.id=?1
+         JOIN sa_tickets t ON t.id=l.ticket_id
+         WHERE l.ticket_id=?2 AND l.subject_key=?3
+           AND initial.orchestration_id=t.orchestration_id
+           AND target.orchestration_id=t.orchestration_id
+           AND initial.repository=target.repository LIMIT 1",
+        params![source_id,ticket_id,issue_key], |r| r.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if issue_linked.is_none() {
+        return Err("PR association requires an explicit issue link for this Team, Ticket and repository.".into());
+    }
+    // Reuse every native link admission check and the append-only link audit.
+    // This executes within the same connection's transaction (SQLite savepoint
+    // is not needed; link_thread opens a nested transaction, so do not call it).
+    let ticket = super::get_ticket(store, ticket_id)?;
+    let src = source(store, source_id)?;
+    if ticket.orchestration_id != src.orchestration_id
+        || matches!(ticket.state.as_str(),"completed"|"stopped"|"failed"|"interrupted"|"inconclusive") {
+        return Err("Ticket is terminal or outside the source Team.".into());
+    }
+    let previous: Option<String> = tx.query_row(
+        "SELECT ticket_id FROM sa_source_thread_links WHERE source_id=?1 AND subject_key=?2",
+        params![source_id,pull_key], |r|r.get(0),
+    ).optional().map_err(|e|e.to_string())?;
+    let conflicting: Option<String> = tx.query_row(
+        "SELECT l.ticket_id FROM sa_source_thread_links l
+         JOIN sa_event_sources s ON s.id=l.source_id
+         WHERE s.orchestration_id=?1 AND s.repository=?2
+           AND l.subject_key=?3 AND l.ticket_id<>?4 LIMIT 1",
+        params![&ticket.orchestration_id,&src.repository,pull_key,ticket_id],
+        |r|r.get(0),
+    ).optional().map_err(|e|e.to_string())?;
+    if conflicting.is_some() || previous.as_deref().is_some_and(|id|id!=ticket_id) {
+        return Err("PR thread is already associated with another Ticket.".into());
+    }
+    if previous.is_none() {
+        let count:i64=tx.query_row(
+            "SELECT COUNT(*) FROM sa_source_thread_links WHERE ticket_id=?1",
+            [ticket_id],|r|r.get(0),
+        ).map_err(|e|e.to_string())?;
+        if count>=MAX_LINKS_PER_TICKET { return Err("Ticket source thread link limit reached.".into()); }
+        let at=storage::now();
+        tx.execute("INSERT INTO sa_source_thread_links
+            (source_id,subject_key,ticket_id,created_at) VALUES(?1,?2,?3,?4)",
+            params![source_id,pull_key,ticket_id,at]).map_err(|e|e.to_string())?;
+        tx.execute("INSERT INTO sa_audit(ticket_id,kind,detail,at)
+            VALUES(?1,'source_issue_pull_associated',?2,?3)",
+            params![ticket_id,format!("{issue_key} -> {pull_key} (operator asserted)"),at])
+            .map_err(|e|e.to_string())?;
+    }
+    tx.commit().map_err(|e|e.to_string())?;
+    list_thread_links(store,ticket_id)?.into_iter()
+        .find(|link|link.source_id==source_id && link.subject_key==pull_key)
+        .ok_or_else(||"Source PR link unavailable after association.".into())
+}
 
 /// Revocation affects only the operator's exact Team/Ticket/source/thread
 /// association. Authenticated receipt rows and Ticket evidence remain durable.
@@ -335,6 +413,92 @@ fn list_sources(store: &Store, orchestration_id: &str) -> Result<Vec<EventSource
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+/// Native source health distinguishes a verified GitHub Events watermark from
+/// a local Check Run observation count; neither is a subscription guarantee.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceIntegrity {
+    pub source_id: String,
+    pub repository: String,
+    pub mode: String,
+    pub policy_revision: i64,
+    pub cursor_kind: &'static str,
+    pub last_sequence: i64,
+    pub receipt_count: i64,
+    pub permitted_receipt_count: i64,
+    pub max_receipt_sequence: i64,
+    pub cursor_consistent: bool,
+    pub receipt_capacity_reached: bool,
+    pub next_action: &'static str,
+    pub observational_only: bool,
+}
+
+fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceIntegrity> {
+    let selected = source(store, source_id)?;
+    let (receipt_count, permitted_receipt_count, max_receipt_sequence):
+        (i64, i64, i64) = store.db.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN decision='observed_permitted' THEN 1 ELSE 0 END),0),
+                COALESCE(MAX(sequence),0)
+         FROM sa_event_decisions WHERE source_id=?1",
+        [source_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).map_err(|e| e.to_string())?;
+    let cursor_consistent = selected.last_sequence >= max_receipt_sequence;
+    let receipt_capacity_reached = receipt_count >= MAX_RECEIPTS;
+    let next_action = if !cursor_consistent {
+        "investigate_cursor_receipt_mismatch"
+    } else if receipt_capacity_reached {
+        "receipt_limit_requires_operator_intervention"
+    } else if selected.mode == "off" {
+        "source_off_no_poll"
+    } else { "explicit_observe_available" };
+    Ok(SourceIntegrity {
+        source_id:selected.id, repository:selected.repository, mode:selected.mode,
+        policy_revision:selected.policy_revision,
+        cursor_kind:if selected.event_kind == "check_run.completed" {
+            "local_check_run_observation_count"
+        } else { "github_event_identity_high_watermark" },
+        last_sequence:selected.last_sequence, receipt_count, permitted_receipt_count,
+        max_receipt_sequence, cursor_consistent, receipt_capacity_reached,
+        next_action, observational_only:true,
+    })
+}
+
+/// Corrupted cursor records must not reclassify previously stored observations.
+/// The guard runs inside the same transaction as new receipts and cursor writes.
+fn require_source_cursor_integrity(
+    tx: &rusqlite::Transaction<'_>, selected: &EventSource,
+) -> Result<()> {
+    let highest_receipt: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(sequence),0) FROM sa_event_decisions WHERE source_id=?1",
+        [&selected.id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if selected.last_sequence < highest_receipt {
+        return Err("Source cursor is behind durable receipts; observation denied pending reconciliation.".into());
+    }
+    Ok(())
+}
+
+/// Read-only headless inspection must not trigger Store::open recovery while
+/// another server owns the native bot/assignment runtime.
+pub(crate) fn headless_inspect_source_integrity(
+    database_path: &std::path::Path, source_id: &str,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    serde_json::to_string_pretty(&inspect_source_integrity(&store, source_id)?)
+        .map_err(|e| e.to_string())
+}
+
+/// Desktop and headless consume the same native receipt/cursor diagnosis.
+#[tauri::command]
+pub async fn superagent_source_integrity(
+    window: tauri::WebviewWindow, state: State<'_, AppState>, source_id: String,
+) -> Result<SourceIntegrity> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    inspect_source_integrity(&store, &source_id)
+}
+
 /// A user creates an exact, non-wildcard source in Off. Reusing the same
 /// config is idempotent, never an implicit enable/revision change.
 fn create_source(
@@ -347,12 +511,25 @@ fn create_source(
     {
         return Err("Source requires an exact canonical repository, actor and supported event class.".into());
     }
-    let existing: Option<String> = store.db.query_row(
+    // GitHub logins and App slugs are case-insensitive. A case-only edit
+    // must reuse the same source, not create a second cursor and receipt stream.
+    // Preserve legacy rows as-is and deny ambiguous legacy case collisions.
+    let actor_key = actor_filter.to_ascii_lowercase();
+    let mut statement = store.db.prepare(
         "SELECT id FROM sa_event_sources
-         WHERE orchestration_id=?1 AND repository=?2 AND actor_filter=?3 AND event_kind=?4",
-        params![orchestration_id,repository,actor_filter,event_kind], |r| r.get(0),
-    ).optional().map_err(|e| e.to_string())?;
-    if let Some(id) = existing { return source(store, &id); }
+         WHERE orchestration_id=?1 AND repository=?2
+           AND actor_filter=?3 COLLATE NOCASE AND event_kind=?4
+         ORDER BY id LIMIT 2",
+    ).map_err(|e| e.to_string())?;
+    let matches = statement.query_map(
+        params![orchestration_id,repository,&actor_key,event_kind],
+        |row| row.get::<_,String>(0),
+    ).map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+    if matches.len() > 1 {
+        return Err("Multiple legacy source actors differ only by case; reconcile before creating a source.".into());
+    }
+    if let Some(id) = matches.first() { return source(store, id); }
     let count: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM sa_event_sources WHERE orchestration_id=?1",
         [orchestration_id], |r| r.get(0),
@@ -363,7 +540,7 @@ fn create_source(
     store.db.execute(
         "INSERT INTO sa_event_sources(id,orchestration_id,repository,actor_filter,event_kind,
             mode,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,'off',?6,?6)",
-        params![id,orchestration_id,repository,actor_filter,event_kind,now],
+        params![id,orchestration_id,repository,&actor_key,event_kind,now],
     ).map_err(|e| e.to_string())?;
     source(store, &id)
 }
@@ -485,6 +662,7 @@ fn observe_authenticated(store: &Store, event: &EventEnvelope, signed_in: &str)
 {
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let src = source(store, &event.source_id)?;
+    require_source_cursor_integrity(&tx, &src)?;
     let receipt = observe_authenticated_in_tx(&tx, &src, event, signed_in)?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok(receipt)
@@ -756,6 +934,7 @@ fn poll_authenticated_events_with_identity(
     if current_policy.mode != "observe" || current_policy.policy_revision != expected.policy_revision {
         return Err("Source mode/revision changed during GitHub request; no event recorded.".into());
     }
+    require_source_cursor_integrity(&tx, &current_policy)?;
     let mut recorded = 0;
     let mut duplicates = 0;
     let mut self_ignored = 0;
@@ -1107,6 +1286,16 @@ fn authenticated_check_run(
     if prs[0].pointer("/head/sha").and_then(serde_json::Value::as_str) != Some(sha) {
         return Err("Check Run does not match the pull request head SHA.".into());
     }
+    // GitHub's Checks API lists PRs with a matching head, not necessarily
+    // the PR that triggered the check. A matching SHA and number alone do
+    // not establish that a PR belongs to this source's repository.
+    let expected_base_repo = format!("https://api.github.com/repos/{}", selected.repository);
+    if !prs[0].pointer("/base/repo/url")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(|url| url.eq_ignore_ascii_case(&expected_base_repo))
+    {
+        return Err("Check Run pull request base repository is missing or mismatched.".into());
+    }
     let number = prs[0].get("number").and_then(serde_json::Value::as_u64)
         .ok_or("Check Run pull request number is unavailable.")?;
     if number == 0 || number > 999_999_999_999 {
@@ -1159,6 +1348,7 @@ fn observe_authenticated_check_run(
     if current.mode != "observe" || current.policy_revision != expected.policy_revision {
         return Err("Checks API source changed before receipt commit.".into());
     }
+    require_source_cursor_integrity(&tx, &current)?;
     let delivery_id = format!("checkrun_{requested_id}");
     let previously_recorded: Option<i64> = tx.query_row(
         "SELECT sequence FROM sa_event_decisions WHERE source_id=?1 AND delivery_id=?2",
@@ -1366,6 +1556,17 @@ pub async fn superagent_source_unlink_thread(
     unlink_thread(&store, &source_id, &ticket_id, &subject_key)
 }
 
+/// Operator-asserted issue-to-PR context; no GitHub verification or authority.
+#[tauri::command]
+pub async fn superagent_source_link_issue_pull(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    source_id: String, ticket_id: String, issue_key: String, pull_key: String,
+) -> Result<SourceThreadLink> {
+    require_main_window(&window)?;
+    let store=state.store.lock().map_err(|e|e.to_string())?;
+    link_issue_to_pull(&store,&source_id,&ticket_id,&issue_key,&pull_key)
+}
+
 /// Authenticated Observe receipts associated with an explicit, same-Team
 /// source-thread link. This is context metadata only: no work admission,
 /// policy changes, private GitHub content or inferred source authority.
@@ -1456,6 +1657,124 @@ pub async fn superagent_source_thread_links(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_cursor_mismatch_denies_authenticated_replay_and_survives_restart() {
+        let (store, path) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "issues.opened").unwrap();
+        let inactive = inspect_source_integrity(&store, &off.id).unwrap();
+        assert_eq!(inactive.next_action, "source_off_no_poll");
+        assert_eq!(inactive.receipt_count, 0);
+        let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let event = |id: &str| serde_json::json!([{
+            "id":id, "type":"IssuesEvent", "created_at":"2026-11-12T08:59:00Z",
+            "actor":{"login":"trusted-bot"}, "repo":{"name":"owner/repo"},
+            "payload":{"action":"opened","issue":{"number":42,
+                       "body":"UNTRUSTED provider text"}}
+        }]);
+        assert_eq!(poll_authenticated_events(&store, &active, 0, &event("5000000201"))
+            .unwrap().recorded, 1);
+        let valid = inspect_source_integrity(&store, &off.id).unwrap();
+        assert_eq!(valid.receipt_count, 1);
+        assert_eq!(valid.permitted_receipt_count, 1);
+        assert!(valid.cursor_consistent);
+        assert_eq!(valid.last_sequence, valid.max_receipt_sequence);
+        assert_eq!(valid.cursor_kind, "github_event_identity_high_watermark");
+
+        store.db.execute("UPDATE sa_event_sources SET last_sequence=0 WHERE id=?1",
+            [&off.id]).unwrap();
+        let damaged = inspect_source_integrity(&store, &off.id).unwrap();
+        assert!(!damaged.cursor_consistent);
+        assert_eq!(damaged.next_action, "investigate_cursor_receipt_mismatch");
+        assert!(poll_authenticated_events(&store, &active, 0, &event("5000000202")).is_err());
+        assert_eq!(list_decisions(&store, &off.id, 10).unwrap().len(), 1);
+        assert_eq!(source(&store, &off.id).unwrap().last_sequence, 0);
+        let redacted = headless_inspect_source_integrity(&path, &off.id).unwrap();
+        assert!(redacted.contains("investigate_cursor_receipt_mismatch"));
+        assert!(!redacted.contains("UNTRUSTED"));
+        assert!(!redacted.contains("trusted-bot"));
+        assert!(headless_inspect_source_integrity(&path, "missing").is_err());
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert!(!inspect_source_integrity(&reopened, &off.id).unwrap().cursor_consistent);
+        assert_eq!(list_decisions(&reopened, &off.id, 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn check_run_health_is_a_local_counter_without_provider_or_task_execution() {
+        let (store, path) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "github-actions",
+            "check_run.completed").unwrap();
+        let status = inspect_source_integrity(&store, &off.id).unwrap();
+        assert_eq!(status.cursor_kind, "local_check_run_observation_count");
+        assert_eq!(status.next_action, "source_off_no_poll");
+        let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        assert_eq!(inspect_source_integrity(&store, &active.id).unwrap().next_action,
+            "explicit_observe_available");
+        let json = headless_inspect_source_integrity(&path, &active.id).unwrap();
+        assert!(json.contains("local_check_run_observation_count"));
+        assert!(json.contains("observationalOnly"));
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |r| r.get::<_,i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn github_source_actor_case_aliases_share_one_durable_source_and_cursor() {
+        let (store, path) = fixture();
+        let first = create_source(&store, "orch", "owner/repo", "Trusted-Bot", "issues.opened").unwrap();
+        assert_eq!(first.actor_filter, "trusted-bot");
+        let alias = create_source(&store, "orch", "owner/repo", "TRUSTED-BOT", "issues.opened").unwrap();
+        assert_eq!(alias.id, first.id);
+        let active = set_mode(&store, &first.id, first.policy_revision, "observe").unwrap();
+        let events = serde_json::json!([{
+            "id":"5000003001", "type":"IssuesEvent",
+            "created_at":"2026-11-12T08:59:00Z",
+            "repo":{"name":"owner/repo"}, "actor":{"login":"TRUSTED-BOT"},
+            "payload":{"action":"opened", "issue":{"number":17,
+                "body":"Untrusted text is not a grant"}}
+        }]);
+        assert_eq!(poll_authenticated_events(&store, &active, 0, &events).unwrap().recorded, 1);
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        let later = create_source(&reopened, "orch", "owner/repo", "trusted-bot", "issues.opened").unwrap();
+        assert_eq!(later.id, first.id);
+        assert_eq!(later.policy_revision, active.policy_revision);
+        assert_eq!(later.last_sequence, 5_000_003_001);
+        assert_eq!(list_decisions(&reopened, &later.id, 10).unwrap().len(), 1);
+        let count: i64 = reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_event_sources WHERE orchestration_id='orch'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |row| row.get::<_,i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn ambiguous_legacy_case_aliases_fail_closed_without_changing_sources() {
+        let (store, _) = fixture();
+        create_source(&store, "orch", "owner/repo", "other-bot", "issues.opened").unwrap();
+        store.db.execute(
+            "INSERT INTO sa_event_sources
+             (id,orchestration_id,repository,actor_filter,event_kind,mode,created_at,updated_at)
+             VALUES('legacy-case','orch','owner/repo','Other-Bot','issues.opened','off',1,1)",
+            [],
+        ).unwrap();
+        let error = create_source(&store, "orch", "owner/repo", "OTHER-BOT", "issues.opened")
+            .unwrap_err();
+        assert!(error.contains("legacy source actors differ only by case"));
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_event_sources WHERE orchestration_id='orch'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_event_decisions", [],
+            |row| row.get::<_,i64>(0),
+        ).unwrap(), 0);
+    }
 
     #[test]
     fn authenticated_login_and_self_event_filter_are_native_and_restart_durable() {
@@ -1881,7 +2200,8 @@ mod tests {
             "id": 240, "status": "completed", "conclusion": "success",
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
             "app": {"slug": "trusted-bot"},
-            "pull_requests": [{"number": 42, "head": {"sha": sha}}]
+            "pull_requests": [{"number": 42, "head": {"sha": sha},
+                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo"}}}]
         });
         assert!(observe_authenticated_check_run(&store, &off, 240, &run, "operator").is_err());
         let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
@@ -1923,7 +2243,8 @@ mod tests {
             "id": 701, "status": "completed", "conclusion": "failure",
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
             "app": {"slug": "trusted-bot"},
-            "pull_requests": [{"number": 42, "head": {"sha": sha}}]
+            "pull_requests": [{"number": 42, "head": {"sha": sha},
+                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo"}}}]
         });
         let first = observe_authenticated_check_run(&store, &on, 701, &run, "operator").unwrap();
         assert_eq!(first.decision, "observed_permitted");
@@ -1972,7 +2293,8 @@ mod tests {
             "id": 702, "status": "completed", "conclusion": "success",
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
             "app": {"slug": "trusted-bot"},
-            "pull_requests": [{"number": 42, "head": {"sha": sha}}]
+            "pull_requests": [{"number": 42, "head": {"sha": sha},
+                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo"}}}]
         });
         store.db.execute_batch(
             "CREATE TEMP TRIGGER reject_check_outcome BEFORE INSERT ON sa_check_run_results
@@ -2007,9 +2329,10 @@ mod tests {
             "id": 390, "status": "completed", "conclusion": "failure",
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
             "app": {"slug": "trusted-bot"},
-            "pull_requests": [{"number": 42, "head": {"sha": sha}}]
+            "pull_requests": [{"number": 42, "head": {"sha": sha},
+                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo"}}}]
         });
-        for mutation in 0..9 {
+        for mutation in 0..13 {
             let mut bad = run.clone();
             match mutation {
                 0 => bad["pull_requests"] = serde_json::json!([]),
@@ -2022,13 +2345,28 @@ mod tests {
                 5 => bad["id"] = serde_json::json!(391),
                 6 => bad["pull_requests"][0]["number"] = serde_json::json!(0),
                 7 => bad["completed_at"] = serde_json::json!("2019-01-01T00:00:00Z"),
-                _ => bad["conclusion"] = serde_json::json!(null),
+                8 => bad["conclusion"] = serde_json::json!(null),
+                9 => bad["pull_requests"][0]["base"] = serde_json::Value::Null,
+                10 => bad["pull_requests"][0]["base"]["repo"]["url"] =
+                    serde_json::json!("https://api.github.com/repos/other/repo"),
+                11 => bad["pull_requests"][0]["base"]["repo"]["url"] =
+                    serde_json::json!("https://attacker.example/repos/owner/repo"),
+                _ => bad["pull_requests"][0]["base"]["repo"]["url"] =
+                    serde_json::json!("https://api.github.com/repos/owner/repo/other"),
             }
             assert!(observe_authenticated_check_run(&store, &on, 390, &bad, "operator").is_err(),
                 "invalid Check Run variation {mutation} must be denied");
         }
         assert_eq!(source(&store, &on.id).unwrap().last_sequence, 0);
         assert!(list_decisions(&store, &on.id, 10).unwrap().is_empty());
+        let mut case_variant = run.clone();
+        case_variant["pull_requests"][0]["base"]["repo"]["url"] =
+            serde_json::json!("https://api.github.com/repos/OWNER/REPO");
+        assert_eq!(
+            authenticated_check_run(&on, &case_variant, 390, 1).unwrap().subject_key,
+            "pull:42",
+            "GitHub repository paths are case insensitive"
+        );
         let success = observe_authenticated_check_run(&store, &on, 390, &run, "operator").unwrap();
         assert_eq!(success.decision, "observed_permitted");
         let mut conflicting = run.clone();
@@ -2525,6 +2863,44 @@ mod tests {
         assert_eq!(source(&reopened,&src.id).unwrap().last_sequence,0);
     }
 
+
+    #[test]
+    fn issue_pr_pair_requires_explicit_source_and_rolls_back_failed_audit() {
+        let (store,path)=fixture();
+        insert_manual_ticket(&store,"one","orch");
+        insert_manual_ticket(&store,"two","orch");
+        let issue=create_source(&store,"orch","test/fixture","trusted-bot","issues.opened").unwrap();
+        let pull=create_source(&store,"orch","test/fixture","trusted-bot","pull_request.opened").unwrap();
+        let other=create_source(&store,"orch","elsewhere/repo","trusted-bot","pull_request.opened").unwrap();
+        assert!(link_issue_to_pull(&store,&pull.id,"one","issue:42","pull:99").is_err());
+        link_thread(&store,&issue.id,"one","issue:42").unwrap();
+        assert!(link_issue_to_pull(&store,&pull.id,"two","issue:42","pull:99").is_err());
+        assert!(link_issue_to_pull(&store,&other.id,"one","issue:42","pull:99").is_err());
+        assert!(link_issue_to_pull(&store,&pull.id,"one","pull:42","pull:99").is_err());
+        assert!(link_issue_to_pull(&store,&pull.id,"one","issue:42","issue:99").is_err());
+        store.db.execute_batch("CREATE TEMP TRIGGER fail_pair_audit BEFORE INSERT ON sa_audit
+            WHEN NEW.kind='source_issue_pull_associated'
+            BEGIN SELECT RAISE(ABORT,'test audit rollback'); END;").unwrap();
+        assert!(link_issue_to_pull(&store,&pull.id,"one","issue:42","pull:99").is_err());
+        assert_eq!(list_thread_links(&store,"one").unwrap().len(),1);
+        store.db.execute_batch("DROP TRIGGER fail_pair_audit").unwrap();
+        let first=link_issue_to_pull(&store,&pull.id,"one","issue:42","pull:99").unwrap();
+        assert_eq!(first.subject_key,"pull:99");
+        assert_eq!(link_issue_to_pull(&store,&pull.id,"one","issue:42","pull:99").unwrap().created_at,
+            first.created_at);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_audit
+            WHERE ticket_id='one' AND kind='source_issue_pull_associated'",[],
+            |r|r.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_mandates",[],
+            |r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(source(&store,&pull.id).unwrap().mode,"off");
+        drop(store);
+        let reopened=Store::open(&path).unwrap();
+        assert_eq!(list_thread_links(&reopened,"one").unwrap().len(),2);
+        assert!(list_thread_links(&reopened,"two").unwrap().is_empty());
+        assert_eq!(link_issue_to_pull(&reopened,&pull.id,"one","issue:42","pull:99")
+            .unwrap().created_at,first.created_at);
+    }
 
     #[test]
     fn removing_exact_source_link_revokes_context_without_erasing_receipts_or_task_evidence() {

@@ -664,7 +664,11 @@ fn sync_thread_profiles(store: &Store, bot: &Bot, preserve_desktop_model: bool) 
     let mut statement = store.db.prepare("SELECT session_id,channel_id FROM bot_threads WHERE bot_id=?1 ORDER BY updated_at").map_err(|e| e.to_string())?;
     let rows = statement.query_map([&bot.id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))).map_err(|e| e.to_string())?;
     for (session_id, channel_id) in rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())? {
-        sync_thread_profile(store, bot, &session_id, !preserve_desktop_model || channel_id != DESKTOP)?;
+        // An admitted SuperAgent session pins its provider, model and permission mode.
+        // Bot profile edits apply only to future native task sessions.
+        if channel_id != crate::superagent::CHANNEL {
+            sync_thread_profile(store, bot, &session_id, !preserve_desktop_model || channel_id != DESKTOP)?;
+        }
     }
     Ok(())
 }
@@ -840,9 +844,12 @@ pub(crate) fn thread_session(store: &Store, bot: &Bot, channel_id: &str, externa
         .map_err(|e| e.to_string())?;
     if let Some(session) = existing {
         if store.session(&session).is_ok() {
-            // A manual model pick in the bot's desktop conversation belongs to that
-            // conversation. Channel and scheduled threads still follow the bot profile.
-            sync_thread_profile(store, bot, &session, channel_id != DESKTOP)?;
+            // Desktop model picks remain local; ordinary channel/schedule threads follow
+            // the bot. A SuperAgent assignment instead retains its admitted session
+            // profile, including mode and reasoning effort, across delivery/retry.
+            if channel_id != crate::superagent::CHANNEL {
+                sync_thread_profile(store, bot, &session, channel_id != DESKTOP)?;
+            }
             store.db.execute("UPDATE bot_threads SET updated_at=?2 WHERE session_id=?1", params![session, crate::storage::now()]).map_err(|e| e.to_string())?;
             return Ok((session, false));
         }

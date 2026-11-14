@@ -65,3 +65,19 @@ metadata; remove each authorized association to stop correlation. No GitHub
 network operation, worker launch, external effect or Auto authorization
 occurs. The Inspector refreshes links and invalidates its cached observed
 activity after the native transition.
+
+## Explicit issue-to-PR context (operator assertion)
+
+The Ticket Inspector can associate an exact `pull:123` with an already-linked `issue:42` on the same Team, Ticket and repository. This is a **local operator assertion**, not an authenticated GitHub issue-closing relationship. The native SQLite association and audit commit together, are idempotent on replay and roll back together on error. Other Teams, repositories and Tickets cannot inherit this relationship. The existing unlink action revokes one exact context reference while retaining decision receipts and audit. No provider, task admission, auto-execution, Council approval or external write is implied. Only separately authenticated Observe decisions are displayed as activity.
+
+## Case-insensitive GitHub source identities
+
+GitHub actor logins and App slugs are compared case-insensitively. Creating an
+otherwise identical source with different actor capitalization reuses its
+existing source ID, policy revision, receipt history and cursor instead of
+splitting observation into duplicate streams. New actor filters are stored in
+lowercase. Existing sources are not silently rewritten; if legacy rows already
+contain multiple case-only aliases for the same Team, repository and event
+kind, source creation fails with an explicit ambiguity until an operator
+reconciles the configuration. This never enables a source, admits a Ticket,
+or authorizes a GitHub effect.

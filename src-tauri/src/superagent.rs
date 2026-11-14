@@ -1328,6 +1328,39 @@ fn list_review_inbox(store: &Store, limit: i64) -> Result<Vec<DemandIndex>> {
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+/// Bounded read-only headless projection of the same native cross-Team review
+/// states as the desktop. A state is not evidence of Council approval or
+/// permission to accept; a separate, current native revision check is required.
+pub(crate) fn list_headless_review_inbox(database_path: &std::path::Path) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let items = list_review_inbox(&store, 200)?;
+    let may_have_more = items.len() == 200;
+    let entries = items.into_iter().map(|item| {
+        let next_action = if item.state == "waiting_review" {
+            "await_fresh_task_bound_native_council"
+        } else {
+            "inspect_current_revision_before_human_decision"
+        };
+        serde_json::json!({
+            "ticketId": item.id,
+            "orchestrationId": item.orchestration_id,
+            "state": item.state,
+            "revision": item.revision,
+            "updatedAt": item.updated_at,
+            "nextOperatorAction": next_action,
+            "nativeCouncilPassVerifiedByThisCommand": false,
+            "acceptanceAuthorizedByThisCommand": false
+        })
+    }).collect::<Vec<_>>();
+    serde_json::to_string_pretty(&serde_json::json!({
+        "tickets": entries,
+        "limit": 200,
+        "mayHaveMore": may_have_more,
+        "observationalOnly": true,
+        "startupRecoveryPerformed": false
+    })).map_err(|e| e.to_string())
+}
+
 /// Immutable native assignment history, including completed and failed attempts.
 /// Never infer task success or authorization from an assignment's terminal state.
 #[derive(Debug, Clone, Serialize)]
@@ -1555,6 +1588,25 @@ fn run_graph(store: &Store, ticket_id: &str) -> Result<RunGraph> {
     })
 }
 
+/// Headless parity with the workspace's native, revisioned Ticket execution
+/// graph. This is an observation of durable attempts, NOT a record of
+/// dynamic subagents, native Council verdicts or live provider handles.
+/// Opening read-only must not run restart recovery beside an active host.
+pub(crate) fn inspect_headless_ticket_graph(
+    database_path: &std::path::Path, ticket_id: &str,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let graph = run_graph(&store, ticket_id)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "graph": graph,
+        "observationalOnly": true,
+        "dynamicSubagentsRepresented": false,
+        "councilVerdictIncluded": false,
+        "providerDispatchedByCommand": false,
+        "recoveryPerformed": false
+    })).map_err(|e| e.to_string())
+}
+
 /// A one-shot local CLI inspector is deliberately read-only: it must not run
 /// Store::open's migration/restart settlement behind a live serve process.
 /// Return bounded operational metadata, never the task objective, worker result,
@@ -1621,10 +1673,21 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
          FROM sa_effect_receipts WHERE ticket_id=?1",
         [&ticket.id], |row| Ok((row.get(0)?, row.get(1)?)),
     ).map_err(|e| e.to_string())?;
+    let expired_running: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM sa_assignments
+         WHERE ticket_id=?1 AND state='running'
+           AND (created_at<=0 OR created_at>?2 OR created_at<=?3)",
+        params![&ticket.id, now, now.saturating_sub(MAX_ASSIGNMENT_RUN_MS)],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
     let mandate = mandate(store, &ticket.id)?;
     let consistent = if ticket.state == "running" {
-        running > 0 && active_linked == 1
+        // One active native assignment is the current Ticket contract. A
+        // duplicate attempt with a valid active link must still be triaged.
+        running == 1 && active_linked == 1
     } else {
+        // A completed/stopped Ticket with an orphan live assignment is not
+        // healthy, even if its own state is terminal.
         running == 0
     };
     let terminal = matches!(ticket.state.as_str(),
@@ -1633,6 +1696,8 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         "reconcile_authoritative_remote_effects"
     } else if !consistent {
         "investigate_native_assignment_state"
+    } else if expired_running > 0 {
+        "investigate_expired_native_assignment_before_retry"
     } else if running > 0 {
         "verify_live_serve_provider_before_intervention"
     } else if ticket.state == "waiting_review" {
@@ -1647,6 +1712,7 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
     Ok(serde_json::json!({
         "observedAt": now,
         "activeNativeAssignments": running,
+        "expiredNativeAssignments": expired_running,
         "activeAssignmentLinked": active_linked == 1,
         "assignmentStateConsistent": consistent,
         "pendingExternalEffects": pending,
@@ -1794,6 +1860,74 @@ pub(crate) fn list_headless_team_demands(
             "revision": item.revision,
             "updatedAt": item.updated_at
         })).collect::<Vec<_>>()
+    })).map_err(|e| e.to_string())
+}
+
+/// Redacted cross-Team recovery queue for a trusted local operator. Only
+/// genuine native Ticket state and unresolved durable effect receipts qualify:
+/// a healthy running provider is deliberately omitted. This is NOT recovery
+/// admission, permission issuance, or proof that a remote effect was applied.
+/// One read transaction provides a consistent ordered operational snapshot.
+pub(crate) fn list_headless_recovery_inbox(database_path: &std::path::Path) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let snapshot = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let observed_at = storage::now();
+    let cutoff = observed_at.saturating_sub(MAX_ASSIGNMENT_RUN_MS);
+    let ids = {
+        let mut stmt = store.db.prepare(
+            "SELECT t.id FROM sa_tickets t
+             WHERE t.state IN ('queued','blocked','waiting_approval','waiting_review',
+                               'failed','interrupted','inconclusive')
+                OR EXISTS(SELECT 1 FROM sa_effect_receipts e
+                          WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
+                OR (t.state<>'running' AND EXISTS(
+                    SELECT 1 FROM sa_assignments a
+                    WHERE a.ticket_id=t.id AND a.state='running'))
+                OR (t.state='running' AND (
+                    t.active_assignment_id IS NULL
+                    OR (SELECT COUNT(*) FROM sa_assignments a
+                        WHERE a.ticket_id=t.id AND a.state='running')<>1
+                    OR NOT EXISTS(SELECT 1 FROM sa_assignments a
+                                  WHERE a.id=t.active_assignment_id
+                                    AND a.ticket_id=t.id AND a.state='running'
+                                    AND a.created_at>0 AND a.created_at<=?1
+                                    AND a.created_at>?2)))
+             ORDER BY CASE WHEN EXISTS(
+                 SELECT 1 FROM sa_effect_receipts e
+                 WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain')
+               ) THEN 0 WHEN EXISTS(
+                   SELECT 1 FROM sa_assignments a
+                   WHERE a.ticket_id=t.id AND a.state='running'
+               ) THEN 1 ELSE 2 END,
+               t.updated_at DESC,t.id DESC
+             LIMIT 201",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(params![observed_at, cutoff],
+            |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+    };
+    let mut items = Vec::with_capacity(ids.len().min(200));
+    for id in ids.iter().take(200) {
+        let ticket = get_ticket(&store, id)?;
+        let recovery = headless_recovery_summary(&store, &ticket, observed_at)?;
+        items.push(serde_json::json!({
+            "ticketId": ticket.id,
+            "orchestrationId": ticket.orchestration_id,
+            "state": ticket.state,
+            "revision": ticket.revision,
+            "updatedAt": ticket.updated_at,
+            "recovery": recovery
+        }));
+    }
+    snapshot.commit().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "observedAt": observed_at,
+        "pageLimit": 200,
+        "mayHaveMore": ids.len() > 200,
+        "items": items,
+        "observationalOnly": true,
+        "automaticRecoveryPerformed": false,
+        "requiresCurrentNativeRecheckBeforeAnyAction": true
     })).map_err(|e| e.to_string())
 }
 
@@ -4364,6 +4498,172 @@ mod tests {
     }
 
     #[test]
+    fn headless_recovery_inbox_prioritizes_uncertain_effects_and_preserves_history() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (running, launched) = admit(&mut store, &cfg.id,
+            "Private remote delivery", "recovery-inbox-effect", false).unwrap();
+        assert!(launched);
+        let (blocked, dispatched) = admit(&mut store, &cfg.id,
+            "Private next demand", "recovery-inbox-blocked", true).unwrap();
+        assert!(!dispatched);
+        let (settled, dispatched) = admit(&mut store, &cfg.id,
+            "Private stopped demand", "recovery-inbox-settled", true).unwrap();
+        assert!(!dispatched);
+        stop(&store, &settled.id).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'original-remote-write',
+                    '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+                    'pending',?2,?2)",
+            params![&running.id,storage::now()],
+        ).unwrap();
+        stop(&store, &running.id).unwrap();
+        let before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get(0)
+        ).unwrap();
+        let inbox: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&store.path).unwrap()
+        ).unwrap();
+        let items = inbox["items"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[0]["ticketId"], running.id);
+        assert_eq!(items[0]["recovery"]["uncertainExternalEffects"], 1);
+        assert_eq!(items[0]["recovery"]["nextOperatorAction"],
+            "reconcile_authoritative_remote_effects");
+        assert_eq!(items[1]["ticketId"], blocked.id);
+        assert_eq!(items[1]["state"], "blocked");
+        assert!(!items.iter().any(|item| item["ticketId"] == settled.id));
+        assert_eq!(inbox["observationalOnly"], true);
+        assert_eq!(inbox["automaticRecoveryPerformed"], false);
+        assert_eq!(inbox["requiresCurrentNativeRecheckBeforeAnyAction"], true);
+        assert!(!inbox["mayHaveMore"].as_bool().unwrap());
+        let encoded = serde_json::to_string(&inbox).unwrap();
+        for secret in ["Private remote delivery", "Private next demand",
+            "Private stopped demand", "original-remote-write"] {
+            assert!(!encoded.contains(secret), "Recovery inbox leaked protected content");
+        }
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get::<_, i64>(0)
+        ).unwrap(), before);
+        assert_eq!(get_ticket(&store, &running.id).unwrap().state, "stopped");
+        assert_eq!(store.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
+            [&running.id], |row| row.get::<_, String>(0)
+        ).unwrap(), "uncertain");
+        let path = store.path.clone();
+        drop(store);
+        let again: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap()
+        ).unwrap();
+        assert_eq!(again["items"].as_array().unwrap().len(), 2);
+        assert_eq!(again["items"][0]["ticketId"], running.id);
+    }
+
+    #[test]
+    fn headless_recovery_inbox_flags_terminal_ticket_with_orphan_running_assignment() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(&mut store, &cfg.id,
+            "Private output", "recovery-orphan-terminal", false).unwrap();
+        assert!(launched);
+        let healthy: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&store.path).unwrap()
+        ).unwrap();
+        assert!(healthy["items"].as_array().unwrap().is_empty());
+        // Simulate a partial/legacy state transition. Normal native stop
+        // would settle the assignment in the same transaction.
+        store.db.execute(
+            "UPDATE sa_tickets SET state='completed',revision=revision+1 WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let before_audit: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let result: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&store.path).unwrap()
+        ).unwrap();
+        assert_eq!(result["items"].as_array().unwrap().len(), 1);
+        assert_eq!(result["items"][0]["ticketId"], ticket.id);
+        let recovery = &result["items"][0]["recovery"];
+        assert_eq!(recovery["terminal"], true);
+        assert_eq!(recovery["activeNativeAssignments"], 1);
+        assert_eq!(recovery["assignmentStateConsistent"], false);
+        assert_eq!(recovery["nextOperatorAction"], "investigate_native_assignment_state");
+        assert_eq!(result["automaticRecoveryPerformed"], false);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "completed");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), before_audit);
+        let path = store.path.clone();
+        drop(store);
+        // Read-only restart must preserve the anomaly for investigation,
+        // not run Store::open recovery and erase evidence prematurely.
+        let opened = Store::open_read_only(&path).unwrap();
+        assert_eq!(get_ticket(&opened, &ticket.id).unwrap().state, "completed");
+        let again: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap()
+        ).unwrap();
+        assert_eq!(again["items"][0]["recovery"]["assignmentStateConsistent"], false);
+        assert_eq!(again["items"][0]["recovery"]["nextOperatorAction"],
+            "investigate_native_assignment_state");
+    }
+
+    #[test]
+    fn headless_recovery_inbox_detects_expired_live_attempt_without_interrupting_it() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(&mut store, &cfg.id,
+            "Private running objective", "recovery-inbox-budget", false).unwrap();
+        assert!(launched);
+        let initial: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&store.path).unwrap()
+        ).unwrap();
+        assert!(initial["items"].as_array().unwrap().is_empty(),
+            "A healthy active provider is not an abandoned recovery item");
+        store.db.execute(
+            "UPDATE sa_assignments SET created_at=1 WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let overdue: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&store.path).unwrap()
+        ).unwrap();
+        assert_eq!(overdue["items"][0]["ticketId"], ticket.id);
+        assert_eq!(overdue["items"][0]["state"], "running");
+        assert_eq!(overdue["items"][0]["recovery"]["expiredNativeAssignments"], 1);
+        assert_eq!(overdue["items"][0]["recovery"]["nextOperatorAction"],
+            "investigate_expired_native_assignment_before_retry");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert_eq!(store.db.query_row(
+            "SELECT state FROM sa_assignments WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, String>(0)
+        ).unwrap(), "running");
+    }
+
+    #[test]
+    fn headless_recovery_inbox_is_bounded_across_many_unsettled_demands() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        for n in 0..201 {
+            let (ticket, launched) = admit(&mut store, &cfg.id,
+                "Private batch objective", &format!("recovery-page-{n}"), true).unwrap();
+            assert_eq!(ticket.state, "blocked");
+            assert!(!launched);
+        }
+        let inbox: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&store.path).unwrap()
+        ).unwrap();
+        assert_eq!(inbox["items"].as_array().unwrap().len(), 200);
+        assert_eq!(inbox["mayHaveMore"], true);
+        assert_eq!(inbox["pageLimit"], 200);
+        assert!(!serde_json::to_string(&inbox).unwrap()
+            .contains("Private batch objective"));
+    }
+
+    #[test]
     fn headless_recovery_inspection_is_read_only_and_never_replays_uncertain_effects() {
         let mut store = fixture();
         let cfg = enabled(&store);
@@ -4474,6 +4774,55 @@ mod tests {
         assert_eq!(stopped.attempt_insights[0].remaining_run_budget_ms, None);
     }
 
+
+    #[test]
+    fn headless_run_graph_is_durable_redacted_and_never_recovers_a_live_task() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, admitted) = admit(
+            &mut store, &config.id, "Private headless graph objective",
+            "headless-graph-1", false,
+        ).unwrap();
+        assert!(admitted);
+        let before_audit: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let before_mandates: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get(0),
+        ).unwrap();
+        let output = inspect_headless_ticket_graph(&store.path, &ticket.id).unwrap();
+        let view: serde_json::Value = serde_json::from_str(&output).unwrap();
+        assert_eq!(view["graph"]["ticketId"], ticket.id);
+        assert_eq!(view["graph"]["ticketRevision"], ticket.revision);
+        assert_eq!(view["graph"]["nodes"][0]["kind"], "ticket");
+        assert_eq!(view["graph"]["nodes"][1]["kind"], "assignment");
+        assert_eq!(view["graph"]["nodes"][1]["active"], true);
+        assert_eq!(view["graph"]["edges"][0]["relation"], "owns_attempt");
+        assert_eq!(view["observationalOnly"], true);
+        assert_eq!(view["dynamicSubagentsRepresented"], false);
+        assert_eq!(view["councilVerdictIncluded"], false);
+        assert_eq!(view["providerDispatchedByCommand"], false);
+        assert_eq!(view["recoveryPerformed"], false);
+        for private in ["Private headless graph objective", "headless-graph-1",
+            "authorizationId", "private provider result"] {
+            assert!(!output.contains(private), "Graph disclosed {private}");
+        }
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), before_audit);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), before_mandates);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = inspect_headless_ticket_graph(&path, &ticket.id).unwrap();
+        let after: serde_json::Value = serde_json::from_str(&reopened).unwrap();
+        assert_eq!(after["graph"], view["graph"]);
+        assert!(inspect_headless_ticket_graph(&path, "missing-ticket").is_err());
+    }
 
     #[test]
     fn native_run_graph_uses_only_durable_ticket_attempt_edges_and_is_redacted() {
@@ -4675,6 +5024,25 @@ mod tests {
         drop(store);
         let read_only = Store::open_read_only(&path).unwrap();
         assert_eq!(list_review_inbox(&read_only, 200).unwrap().len(), 2);
+        let headless = list_headless_review_inbox(&path).unwrap();
+        let projection:serde_json::Value = serde_json::from_str(&headless).unwrap();
+        let rows = projection["tickets"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().any(|item| item["ticketId"] == human.id
+            && item["state"] == "waiting_approval"
+            && item["nextOperatorAction"] == "inspect_current_revision_before_human_decision"));
+        assert!(rows.iter().any(|item| item["ticketId"] == council.id
+            && item["state"] == "waiting_review"
+            && item["nextOperatorAction"] == "await_fresh_task_bound_native_council"));
+        assert_eq!(projection["observationalOnly"],true);
+        assert_eq!(projection["startupRecoveryPerformed"],false);
+        assert_eq!(projection["mayHaveMore"],false);
+        assert!(!headless.contains("Human review only"));
+        assert!(!headless.contains("Council pending"));
+        assert!(!headless.contains("PRIVATE NATIVE EVIDENCE"));
+        assert!(list_headless_review_inbox(
+            &std::env::temp_dir().join(format!("absent-sa-review-{}.db",storage::id()))
+        ).is_err());
     }
 
     #[test]

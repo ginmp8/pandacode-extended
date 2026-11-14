@@ -235,10 +235,19 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 // no restart settlement, provider replay, or effect acknowledgment.
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
-                    .and_then(|dir| crate::superagent::list_headless_recovery_inbox_page(
-                        &dir.join("kingcode.sqlite3"),
-                        *before_priority,*before_updated_at,before_id.as_deref(),
-                    ));
+                    .and_then(|dir| {
+                        let database = dir.join("kingcode.sqlite3");
+                        if before_priority.is_none() && before_updated_at.is_none()
+                            && before_id.is_none()
+                        {
+                            crate::superagent::list_headless_recovery_inbox(&database)
+                        } else {
+                            crate::superagent::list_headless_recovery_inbox_page(
+                                &database, *before_priority, *before_updated_at,
+                                before_id.as_deref(),
+                            )
+                        }
+                    });
                 match result {
                     Ok(inbox) => { println!("{inbox}"); std::process::exit(0) }
                     Err(error) => {

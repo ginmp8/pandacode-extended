@@ -82,6 +82,14 @@ export async function invokeSuperagent<T>(
       blockedCount:(tickets.get(config.id)||[]).filter(ticket=>ticket.state==='blocked').length,
       lastActivityAt:Date.now(),
     }));break;
+    case 'superagent_roster':{
+      const c=get(args.orchestrationId);
+      value={orchestrationId:c.id,policyRevision:c.policyRevision,
+        coordinatorBotId:c.coordinatorBotId,workerBotIds:[...c.workerBotIds],
+        reviewerBotIds:[...c.reviewerBotIds],councilRequired:!!c.councilRequired,
+        executionReady:c.workerBotIds.length===1 && c.reviewerBotIds.length===0};
+      break;
+    }
     case 'superagent_tickets':value=tickets.get(args.orchestrationId)||[];break;
     case 'superagent_snapshot':
     case 'superagent_mandate':

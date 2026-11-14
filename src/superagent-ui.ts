@@ -10,6 +10,7 @@ interface Bot { id: string; name: string; paused: boolean;
 interface Config {
   id: string; name: string; coordinatorBotId: string; workerBotId: string;
   enabled: boolean; policyRevision: number; councilRequired?:boolean; projectId?:string;
+  workerBotIds?:string[]; reviewerBotIds?:string[];
   ticketCount?: number; runningCount?: number; blockedCount?: number; lastActivityAt?: number;
   workerCount?: number; reviewerCount?: number;
 }
@@ -652,7 +653,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const active = chosen ? '<section class="sa-pane" aria-label="Selected orchestration"><header><h3>' +
       safe(chosen.name) + '</h3><div class="sa-actions"><button type="button" data-sa-enable="' +
       safe(chosen.id) + '">' + (chosen.enabled ? 'Disable' : 'Enable manual') +
-      '</button><button type="button" data-sa-delete="' + safe(chosen.id) + '"' +
+      '</button><button type="button" data-sa-duplicate="' + safe(chosen.id) +
+      '">Duplicate as new Team</button><button type="button" data-sa-delete="' + safe(chosen.id) + '"' +
       (chosen.enabled ? ' disabled' : '') + '>Delete unused</button></div></header>' +
       '<form data-sa-form="edit"><label>Preset title<input name="name" required maxlength="120" value="' + safe(chosen.name) + '"></label>' +
       '<div class="sa-grid"><label>Edit coordinator<select name="coordinatorBotId" required>' +
@@ -1364,6 +1366,53 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (c) ask((c.enabled ? 'Disable ' : 'Enable manual mode for ') + c.name + '?', async () => {
         await call('superagent_set_enabled',{ orchestrationId:c.id, expectedRevision:c.policyRevision, enabled:!c.enabled });
         await reload();
+      });
+      return;
+    }
+    if (target.dataset.saDuplicate) {
+      const source = presets.find(item => item.id === target.dataset.saDuplicate);
+      if (!source || busy) return;
+      const base = source.name.trim() + ' copy';
+      let name = base;
+      for (let index = 2; presets.some(item => item.name.toLowerCase() === name.toLowerCase()); index++) {
+        name = base + ' ' + index;
+      }
+      if (new TextEncoder().encode(name).length > 120) {
+        error = 'The Team name is too long to duplicate. Rename the source Team first.';
+        render(); return;
+      }
+      ask('Create a disabled copy of ' + source.name +
+        ' with its existing role roster? Tickets, source subscriptions, permissions and approvals are not copied.', async () => {
+        // Read both authoritative native views again before creating a new
+        // versioned Team. Neither view is an execution grant.
+        const [roster, current] = await Promise.all([
+          call<TeamRoster>('superagent_roster',{orchestrationId:source.id}),
+          call<Config[]>('superagent_list').then(items => items.find(item => item.id === source.id)),
+        ]);
+        if (!current || current.policyRevision !== source.policyRevision ||
+            current.coordinatorBotId !== source.coordinatorBotId ||
+            current.workerBotId !== source.workerBotId ||
+            roster.orchestrationId !== source.id ||
+            roster.policyRevision !== source.policyRevision ||
+            roster.coordinatorBotId !== source.coordinatorBotId ||
+            roster.workerBotIds[0] !== source.workerBotId ||
+            !roster.workerBotIds.length) {
+          throw new Error('Source Team changed. Reload before duplicating.');
+        }
+        const created = await call<Config>('superagent_create', {input:{
+          name, coordinatorBotId:roster.coordinatorBotId,
+          workerBotId:roster.workerBotIds[0],
+          workerBotIds:[...roster.workerBotIds],
+          reviewerBotIds:[...roster.reviewerBotIds],
+          councilRequired:roster.councilRequired ?? source.councilRequired ?? false,
+        }});
+        if (created.enabled || created.id === source.id) {
+          throw new Error('Native duplication failed to create an independent disabled Team.');
+        }
+        selected = created.id; workspaceView = 'teams';
+        roleRoster = null; workerOrder = []; effectiveTeam = null;
+        await reload();
+        feedback = 'Disabled Team duplicated. Native roles were retained; no tasks or permissions copied.';
       });
       return;
     }

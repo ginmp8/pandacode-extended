@@ -27,6 +27,13 @@ each independent Demand is a durable Ticket bound to exactly one Team.
   decision, Needs attention and Finished or stopped. All column counts represent
   **only loaded pages for the selected Team scope**, not complete totals.
   Unknown or malformed Team IDs fail closed instead of showing false empty results.
+  Search objectives submits an explicit native SQLite substring query (ASCII
+  case-insensitive and literal, including percent/underscore) before pagination;
+  results do not depend on which pages were previously loaded. Search is
+  restricted to the Ticket objective and does not expose request keys, actor,
+  provider messages, private evidence or session IDs. The form accepts Enter
+  or its Search button; an empty search restores the unfiltered native index.
+  Searches are bounded to 128 UTF-8 bytes and cannot authorize an action.
 - **Review inbox:** a separate native, bounded cross-Team query shows actual
   `waiting_approval` (human decision) and `waiting_review` (native Council
   pending, **not** a verified pass) Tickets, even when they fall outside the
@@ -62,6 +69,11 @@ and the same theme tokens for desktop, narrow, light and dark views.
   checks 205-Ticket Team pagination, other-Team isolation, invalid filters and restart reads.
 - Playwright: native Team filter pages independently and resets pagination when changing Teams;
   its calls retain the exact selected native Team and page cursor without admitting work.
+- Rust: native_demand_search_is_pre_paginated_scoped_literal_and_restart_safe
+  validates >200 newer nonmatches, literal wildcard and SQL-injection text,
+  native Team/state intersection, cursor stability, invalid input and restart.
+- Playwright: native objective search invokes the indexed native Ticket projection,
+  supports Enter/clear, retains Board/List parity and issues no write commands.
 
 These tests must pass at the exact current SHA. This partial feature does not
 close #131 AC-01..31 or #148 UX/SA/DD/NS/EGM acceptance; full native Council,

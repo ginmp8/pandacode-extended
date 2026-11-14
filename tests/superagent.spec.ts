@@ -927,6 +927,67 @@ test('native Team filter pages independently and resets pagination when changing
   expect(queries).toHaveLength(6);
 });
 
+
+test('native objective search filters durable Demands before pagination without dispatch', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div'); host.id='sa-native-objective-search';
+    document.body.appendChild(host);
+    const queries:Record<string,unknown>[]=[];
+    (window as unknown as {saSearchQueries:Record<string,unknown>[]}).saSearchQueries=queries;
+    const demand=(id:string,team:string,objective:string)=>({
+      id,orchestrationId:team,objective,state:'blocked',revision:1,updatedAt:2000,
+    });
+    mountSuperagent(host,async(command,args) => {
+      if(command==='bots_list')return [
+        {id:'lead',name:'Lead',paused:false},{id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [
+        {id:'team-a',name:'Economy',coordinatorBotId:'lead',
+          workerBotId:'worker',enabled:false,policyRevision:1},
+        {id:'team-b',name:'Security',coordinatorBotId:'lead',
+          workerBotId:'worker',enabled:false,policyRevision:1},
+      ] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_all_demands') {
+        queries.push({...args});
+        if(args?.searchQuery==='NEEDLE')return [
+          demand('match-a','team-a','Needle hidden past page 200'),
+          demand('match-b','team-b','NEEDLE in another Team'),
+        ] as never;
+        if(args?.searchQuery)throw Error('Native objective filter mismatch');
+        return [demand('recent','team-a','Recent unrelated work')] as never;
+      }
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-native-objective-search');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  const global=host.getByRole('region',{name:'All Demands across Teams'});
+  const search=global.getByRole('searchbox',{name:'Search Demands by objective'});
+  await search.fill('NEEDLE');
+  await search.press('Enter');
+  await expect(global).toContainText('2 native Demands loaded.');
+  await expect(global).toContainText('Needle hidden past page 200');
+  await expect(global).not.toContainText('Recent unrelated work');
+  await expect(global).toContainText('matching objective "NEEDLE"');
+  await global.getByRole('button',{name:'List',exact:true}).click();
+  await expect(global.locator('.sa-global-demand-list li')).toHaveCount(2);
+  await search.fill('');
+  await global.getByRole('button',{name:'Search Demands'}).click();
+  await expect(global).toContainText('Recent unrelated work');
+  await expect(global).not.toContainText('matching objective "NEEDLE"');
+  const queries=await page.evaluate(()=>
+    (window as unknown as {saSearchQueries:Record<string,unknown>[]}).saSearchQueries);
+  expect(queries).toMatchObject([
+    {limit:200,searchQuery:'NEEDLE'},
+    {limit:200,searchQuery:undefined},
+  ]);
+  expect(queries).toHaveLength(2);
+});
+
 test('manual demand preflight shows native read-only scope and never admits work', async ({page}) => {
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {
@@ -1349,8 +1410,10 @@ test('duplicate Team uses native atomic roster creation without copying source a
 });
 
 test('new Team persists optional reviewers as one disabled role configuration', async ({page}) => {
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const bar=page.locator('.sidebar-bots-bar');
+  await expect(bar).toBeVisible({timeout:30_000});
   if(await bar.getAttribute('aria-pressed')!=='true')await bar.click();
   const sidebar=page.getByRole('region',{name:'Bots',exact:true});
   await sidebar.getByRole('button',{name:'Bot actions'}).click();

@@ -469,6 +469,21 @@ fn list_all_demands_page_filtered(
     store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
     orchestration_id: Option<&str>, state_filter: Option<&str>,
 ) -> Result<Vec<DemandIndex>> {
+    list_all_demands_page_searched(store, limit, before_updated_at, before_id,
+        orchestration_id, state_filter, None)
+}
+
+/// Objective search is scoped to the native, evidence-free Ticket index. It
+/// filters the durable database before keyset pagination, never a loaded page.
+fn list_all_demands_page_searched(
+    store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
+    orchestration_id: Option<&str>, state_filter: Option<&str>, search_query: Option<&str>,
+) -> Result<Vec<DemandIndex>> {
+    let search_query = search_query.map(str::trim);
+    if search_query.is_some_and(|query| query.is_empty() || query.len() > 128
+        || query.chars().any(char::is_control)) {
+        return Err("Demand search requires 1 to 128 non-control UTF-8 bytes.".into());
+    }
     if let Some(state) = state_filter {
         if !matches!(state, "queued" | "running" | "waiting_approval" |
             "waiting_review" | "blocked" | "completed" | "failed" |
@@ -503,9 +518,10 @@ fn list_all_demands_page_filtered(
                 OR (t.updated_at=?2 AND t.id < ?3))
            AND (?4 IS NULL OR t.orchestration_id=?4)
            AND (?5 IS NULL OR t.state=?5)
+           AND (?6 IS NULL OR instr(lower(t.objective),lower(?6)) > 0)
          ORDER BY t.updated_at DESC,t.id DESC LIMIT ?1",
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id,state_filter], |row| Ok(DemandIndex {
+    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id,state_filter,search_query], |row| Ok(DemandIndex {
         id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
         state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
     })).map_err(|e| e.to_string())?;
@@ -2836,12 +2852,13 @@ pub async fn superagent_all_demands(
     window: tauri::WebviewWindow, state: State<'_, AppState>, limit: Option<i64>,
     before_updated_at: Option<i64>, before_id: Option<String>,
     orchestration_id: Option<String>, state_filter: Option<String>,
+    search_query: Option<String>,
 ) -> Result<Vec<DemandIndex>> {
     require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    list_all_demands_page_filtered(
+    list_all_demands_page_searched(
         &store, limit.unwrap_or(200), before_updated_at, before_id.as_deref(),
-        orchestration_id.as_deref(), state_filter.as_deref(),
+        orchestration_id.as_deref(), state_filter.as_deref(), search_query.as_deref(),
     )
 }
 
@@ -4222,6 +4239,91 @@ mod tests {
         assert!(!serialized.contains("first-demand"));
         assert!(!serialized.contains("authorizationId"));
         assert!(!serialized.contains("sessionId"));
+    }
+
+
+    #[test]
+    fn native_demand_search_is_pre_paginated_scoped_literal_and_restart_safe() {
+        let store = fixture();
+        let first = create_configuration(&store, NewOrchestration {
+            name: "Searchable Team".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let other = create_configuration(&store, NewOrchestration {
+            name: "Unrelated Team".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        for index in 0..205_i64 {
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Unrelated newer demand','local-user','manual',
+                        ?4,'worker',?5,'blocked',?6,?6)",
+                params![format!("recent-{index:03}"), first.id,
+                    format!("recent-request-{index:03}"), first.project_id,
+                    first.policy_revision, 5000 + index],
+            ).unwrap();
+        }
+        for (id, objective, timestamp) in [
+            ("match-a", "Needle delivery", 3000_i64),
+            ("match-b", "Review 100%_NEEDLE evidence", 2000_i64),
+            ("match-c", "needle regression", 1000_i64),
+        ] {
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,?4,'local-user','manual',
+                        ?5,'worker',?6,'blocked',?7,?7)",
+                params![id,first.id,format!("{id}-request"),objective,
+                    first.project_id,first.policy_revision,timestamp],
+            ).unwrap();
+        }
+        store.db.execute(
+            "INSERT INTO sa_tickets
+             (id,orchestration_id,request_key,objective,actor,source,project_id,
+              worker_bot_id,policy_revision,state,created_at,updated_at)
+             VALUES('other-needle',?1,'other-needle-request','Needle other Team',
+                    'local-user','manual',?2,'worker',?3,'blocked',9000,9000)",
+            params![other.id,other.project_id,other.policy_revision],
+        ).unwrap();
+        let search = |before_at, before_id| list_all_demands_page_searched(
+            &store, 2, before_at, before_id, Some(&first.id), Some("blocked"),
+            Some("NEEDLE"),
+        );
+        let first_page = search(None, None).unwrap();
+        assert_eq!(first_page.iter().map(|item| item.id.as_str())
+            .collect::<Vec<_>>(), vec!["match-a", "match-b"]);
+        let second_page = search(Some(2000), Some("match-b")).unwrap();
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page[0].id, "match-c");
+        assert!(search(Some(1000), Some("match-c")).unwrap().is_empty());
+        assert_eq!(list_all_demands_page_searched(
+            &store, 200, None, None, Some(&first.id), Some("blocked"), Some("%_needle"),
+        ).unwrap()[0].id, "match-b");
+        assert!(list_all_demands_page_searched(
+            &store, 200, None, None, Some(&first.id), Some("running"), Some("needle"),
+        ).unwrap().is_empty());
+        assert!(list_all_demands_page_searched(
+            &store, 200, None, None, Some(&first.id), Some("blocked"),
+            Some("' OR 1=1 --"),
+        ).unwrap().is_empty());
+        for invalid in ["", "   ", "a\nneedle", "a\u{0000}needle"] {
+            assert!(list_all_demands_page_searched(
+                &store, 200, None, None, Some(&first.id), None, Some(invalid),
+            ).is_err());
+        }
+        let oversized = "n".repeat(129);
+        assert!(list_all_demands_page_searched(
+            &store, 200, None, None, None, None, Some(&oversized),
+        ).is_err());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(list_all_demands_page_searched(
+            &reopened, 200, None, None, Some(&first.id), Some("blocked"), Some("needle"),
+        ).unwrap().len(), 3);
     }
 
     #[test]

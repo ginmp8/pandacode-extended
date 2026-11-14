@@ -95,7 +95,7 @@ interface SourceIntegrity {
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
-  let demandTeamFilter = '', demandStateFilter = '';
+  let demandTeamFilter = '', demandStateFilter = '', demandSearch = '', demandSearchDraft = '';
   let teamSearch = '', teamStatusFilter: 'all' | 'enabled' | 'disabled' = 'all';
   let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false;
   let globalDemandLayout: 'board' | 'list' = 'board';
@@ -444,9 +444,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           (demandStateFilter === state ? ' selected' : '') + '>' +
           state.split('_').join(' ') + '</option>').join('') +
       '</select></label>' +
+      '<form data-sa-form="demand-search" role="search" aria-label="Search native Demands">' +
+      '<label>Search objectives<input type="search" name="searchQuery" maxlength="128" ' +
+      'aria-label="Search Demands by objective" data-sa-demand-search value="' +
+      safe(demandSearchDraft) + '"></label>' +
+      '<button type="submit">Search Demands</button></form>' +
       '<p>Native Tickets ' + (demandTeamFilter ? 'for this Team' : 'across Teams') +
       (demandStateFilter ? ' in state ' + safe(demandStateFilter) : '') +
-      ', loaded 200 at a time in newest-first order. Board counts cover ' +
+      (demandSearch ? ' matching objective "' + safe(demandSearch) + '"' : '') +
+      ', loaded 200 at a time in newest-first order. Search filters native records ' +
+      'before pagination (ASCII case-insensitive, literal text). Board counts cover ' +
       'only loaded pages, not all saved Demands. Open a Demand to act within its Team.</p>' +
       (!allDemandsLoaded ? '<p role="status">Load Demands for the selected Team scope.</p>' :
         '<div class="sa-demand-layout-toggle" role="group" aria-label="Demand presentation">' +
@@ -844,6 +851,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         const loaded = await call<DemandIndex[]>('superagent_all_demands',{
           limit:200, orchestrationId:filter || undefined,
           stateFilter:demandStateFilter || undefined,
+          searchQuery:demandSearch || undefined,
         });
         allDemands = loaded; allDemandsHasMore = loaded.length === 200;
         allDemandsLoaded = true;
@@ -865,6 +873,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         const loaded = await call<DemandIndex[]>('superagent_all_demands',{
           limit:200, orchestrationId:demandTeamFilter || undefined,
           stateFilter:filter || undefined,
+          searchQuery:demandSearch || undefined,
         });
         allDemands = loaded; allDemandsHasMore = loaded.length === 200;
         allDemandsLoaded = true;
@@ -886,6 +895,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   });
   host.addEventListener('input', event => {
     const target = event.target;
+    if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-demand-search')) {
+      demandSearchDraft = target.value;
+      return;
+    }
     if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-team-search')) {
       teamSearch = target.value;
       const selection = target.selectionStart;
@@ -1072,6 +1085,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         const loaded = await call<DemandIndex[]>('superagent_all_demands',{
           limit:200, orchestrationId:demandTeamFilter || undefined,
           stateFilter:demandStateFilter || undefined,
+          searchQuery:demandSearch || undefined,
         });
         allDemands = loaded;
         allDemandsHasMore = loaded.length === 200;
@@ -1087,6 +1101,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           limit:200, beforeUpdatedAt:last.updatedAt, beforeId:last.id,
           orchestrationId:demandTeamFilter || undefined,
           stateFilter:demandStateFilter || undefined,
+          searchQuery:demandSearch || undefined,
         });
         const seen = new Set(allDemands.map(item => item.id));
         allDemands = [...allDemands, ...loaded.filter(item => !seen.has(item.id))];
@@ -1365,6 +1380,27 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (!(form instanceof HTMLFormElement) || !host.contains(form)) return;
     event.preventDefault();
     const data = new FormData(form);
+    if (form.dataset.saForm === 'demand-search') {
+      const next = String(data.get('searchQuery') ?? '').trim();
+      if (new TextEncoder().encode(next).length > 128 ||
+          Array.from(next).some(char => char.charCodeAt(0) < 32 || char.charCodeAt(0) === 127)) {
+        return;
+      }
+      demandSearch = next;
+      demandSearchDraft = next;
+      allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
+      render();
+      void work(async () => {
+        const loaded = await call<DemandIndex[]>('superagent_all_demands',{
+          limit:200, orchestrationId:demandTeamFilter || undefined,
+          stateFilter:demandStateFilter || undefined,
+          searchQuery:demandSearch || undefined,
+        });
+        allDemands = loaded; allDemandsHasMore = loaded.length === 200;
+        allDemandsLoaded = true;
+      });
+      return;
+    }
     if (form.dataset.saForm === 'roster') {
       const cfg=current();
       if (!cfg || !roleRoster || roleRoster.orchestrationId!==cfg.id) return;

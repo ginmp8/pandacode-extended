@@ -55,6 +55,8 @@ struct BotProfile {
     model: String,
     mode: String,
     skills: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -98,7 +100,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
     }
     let manifest: Manifest = serde_json::from_value(document.clone())
         .map_err(|e| format!("Invalid SuperAgent companion manifest: {e}"))?;
-    if !matches!(manifest.schema_version, 1..=3) || manifest.orchestrations.len() > MAX_PRESETS {
+    if !matches!(manifest.schema_version, 1..=4) || manifest.orchestrations.len() > MAX_PRESETS {
         return Err("Unsupported SuperAgent manifest schema or too many presets.".into());
     }
     let bots = bots::list(store)?;
@@ -163,7 +165,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
             }
             reviewer_ids.push(bot.id.clone());
         }
-        // Version 3 pins the existing bot profile expectations by ordered role.
+        // Version 3 pins profiles; version 4 also pins reasoning effort.
         // Resolve against local bot IDs before taking any backup or inserting a
         // disabled Team. Import never installs Skills or changes existing bots.
         if manifest.schema_version < 3 {
@@ -179,13 +181,18 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
             if preset.bot_profiles.len()!=role_names.len() {
                 return Err("Version 3 requires an effective profile for every Team role.".into());
             }
+            if manifest.schema_version<4 && preset.bot_profiles.iter().any(|p|p.reasoning_effort.is_some()) {
+                return Err("Reasoning effort profiles require SuperAgent manifest version 4.".into());
+            }
             for (profile,name) in preset.bot_profiles.iter().zip(role_names.iter()) {
                 let bot=lookup(name)?;
                 if !profile.bot.eq_ignore_ascii_case(name)
                     || profile.provider!=bot.provider
                     || profile.model!=bot.model
                     || profile.mode!=bot.mode
-                    || profile.skills.as_slice()!=bot.skills.as_slice() {
+                    || profile.skills.as_slice()!=bot.skills.as_slice()
+                    || (manifest.schema_version==4
+                        && profile.reasoning_effort.as_deref()!=Some(bot.reasoning_effort.as_str())) {
                     return Err(format!(
                         "Portable bot profile mismatch for {name}; verify model, harness, mode and assigned Skills."
                     ));
@@ -330,6 +337,7 @@ fn export(store: &Store) -> Result<serde_json::Value> {
             bot_profiles.push(BotProfile {
                 bot:bot.name,provider:bot.provider,model:bot.model,
                 mode:bot.mode,skills:bot.skills,
+                reasoning_effort:Some(bot.reasoning_effort),
             });
         }
         let coordinator = bots::get(store, &config.coordinator_bot_id)?;
@@ -349,7 +357,7 @@ fn export(store: &Store) -> Result<serde_json::Value> {
         });
     }
     serde_json::to_value(Manifest {
-        schema_version:3,orchestrations:presets,
+        schema_version:4,orchestrations:presets,
     })
         .map_err(|e| e.to_string())
 }
@@ -485,7 +493,7 @@ mod tests {
         let snapshot: serde_json::Value = serde_json::from_slice(
             &std::fs::read(path).unwrap(),
         ).unwrap();
-        assert_eq!(snapshot["schemaVersion"], 3);
+        assert_eq!(snapshot["schemaVersion"], 4);
         assert_eq!(snapshot["orchestrations"].as_array().unwrap().len(), 0);
         let repeat = apply_with_backup(&store, &root, &document("Software Development"), true).unwrap();
         assert_eq!(repeat.unchanged, vec!["Software Development"]);
@@ -630,7 +638,7 @@ mod tests {
         assert!(!config.enabled);
         assert!(super::super::change_enabled(&store,&id,config.policy_revision,true).is_err());
         let exported=export(&store).unwrap();
-        assert_eq!(exported["schemaVersion"],3);
+        assert_eq!(exported["schemaVersion"], 4);
         assert_eq!(exported["orchestrations"][0]["extraWorkerBots"],json!(["Worker B","Worker C"]));
         assert_eq!(exported["orchestrations"][0]["reviewerBots"],json!(["Reviewer A","Reviewer B"]));
         assert!(!exported.to_string().contains("worker-project"));
@@ -683,14 +691,16 @@ mod tests {
     }
 
     #[test]
-    fn portable_v3_profiles_detect_drift_before_backup_and_map_local_bot_ids() {
+    fn portable_v4_profiles_pin_reasoning_and_accept_legacy_v3_imports() {
         let origin=fixture();
         origin.db.execute(
-            "UPDATE bots SET skills='[\"required-skill\"]' WHERE id='worker'",[],
+            "UPDATE bots SET skills='[\"required-skill\"]', reasoning_effort='high' WHERE id='worker'",[],
         ).unwrap();
         apply(&origin,&document("Pinned Team"),true).unwrap();
         let portable=export(&origin).unwrap();
-        assert_eq!(portable["schemaVersion"],3);
+        assert_eq!(portable["schemaVersion"], 4);
+        assert_eq!(portable["orchestrations"][0]["botProfiles"][1]["reasoningEffort"],
+            json!("high"));
         assert_eq!(portable["orchestrations"][0]["botProfiles"][1]["skills"],
             json!(["required-skill"]));
         let serialized=portable.to_string();
@@ -702,7 +712,7 @@ mod tests {
         target.db.execute("UPDATE bots SET id='local-router' WHERE id='router'",[]).unwrap();
         target.db.execute("UPDATE bots SET id='local-worker' WHERE id='worker'",[]).unwrap();
         let root=std::env::temp_dir().join(format!(
-            "sa-v3-import-rejected-{}",storage::id(),
+            "sa-v4-import-rejected-{}",storage::id(),
         ));
         // A missing required Skill must reject even a confirmed import before
         // creating any backup or orphaned Team.
@@ -711,7 +721,7 @@ mod tests {
         assert!(!root.join("bot-backups").exists());
 
         target.db.execute(
-            "UPDATE bots SET skills='[\"required-skill\"]' WHERE id='local-worker'",[],
+            "UPDATE bots SET skills='[\"required-skill\"]', reasoning_effort='high' WHERE id='local-worker'",[],
         ).unwrap();
         assert_eq!(preview(&target,&portable).unwrap().would_create,vec!["Pinned Team"]);
         target.db.execute(
@@ -721,6 +731,27 @@ mod tests {
         target.db.execute(
             "UPDATE bots SET model='default' WHERE id='local-worker'",[],
         ).unwrap();
+
+        target.db.execute(
+            "UPDATE bots SET reasoning_effort='low' WHERE id='local-worker'",[],
+        ).unwrap();
+        assert!(preview(&target,&portable).unwrap_err().contains("profile mismatch"));
+        target.db.execute(
+            "UPDATE bots SET reasoning_effort='high' WHERE id='local-worker'",[],
+        ).unwrap();
+
+        let mut missing_effort=portable.clone();
+        missing_effort["orchestrations"][0]["botProfiles"][1]
+            .as_object_mut().unwrap().remove("reasoningEffort");
+        assert!(preview(&target,&missing_effort).unwrap_err().contains("profile mismatch"));
+        let mut legacy_v3=portable.clone();
+        legacy_v3["schemaVersion"]=json!(3);
+        assert!(preview(&target,&legacy_v3).unwrap_err().contains("version 4"));
+        for profile in legacy_v3["orchestrations"][0]["botProfiles"]
+            .as_array_mut().unwrap() {
+            profile.as_object_mut().unwrap().remove("reasoningEffort");
+        }
+        assert_eq!(preview(&target,&legacy_v3).unwrap().would_create,vec!["Pinned Team"]);
 
         let mut missing=portable.clone();
         missing["orchestrations"][0]["botProfiles"]=json!([]);

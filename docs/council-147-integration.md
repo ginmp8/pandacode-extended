@@ -174,3 +174,9 @@ states and the fixed versus OnTrigger budget boundary.
 - Before root approval, every current-cycle child receipt must validate and correlate to a real native nested root reviewer seat. Duplicate receipts for one parent or records for unknown parent identities fail closed; old-cycle receipts remain audit history.
 - Added negative Rust tests for duplicate and phantom child receipts and historical-cycle isolation. This is additive to PR #155's existing child evidence, frozen policy, terminal CAS and task-correlation verification.
 - This does not introduce a duplicate child Council engine; exact-HEAD Rust tests remain unrun in this environment.
+
+## November 14: prohibit child-leaf harness failover
+
+- Reconciled PR #149's task-owned leaf failover restriction with PR #155's own nested Council runtime. A failed child reviewer keeps its frozen provider, model, native session and tool-policy boundary; a new independent review requires a new authorized seat.
+- Existing root/native worker fallback and the selected-bot freeze policy are unchanged.
+- Added a Rust regression using a nested Council fixture with two configured harnesses. Exact-HEAD Rust validation is delegated to CI; this change has not been locally compiled.

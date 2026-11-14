@@ -8657,6 +8657,17 @@ fn fail_over(store: &Store, team: &mut TeamSnapshot, index: usize, reason: &str)
     if worker.abandoned || worker.status != "failed" {
         return Ok(false);
     }
+    // A task-owned child Council leaf has a frozen native reviewer binding.
+    // Switching harnesses on its existing session would retain an authority
+    // snapshot issued for a different provider, model and tool boundary.
+    // Retry only through a newly admitted, independently authorized leaf.
+    if worker.council.is_some()
+        && (worker.reviewer_binding.as_ref()
+            .is_some_and(|binding| binding.parent_council.is_some())
+            || load_council_child_link(store, &team.session_id)?.is_some())
+    {
+        return Ok(false);
+    }
     // Named teams' pool is their roster.
     let pool = routing::pool(&team.config);
     let name = pool

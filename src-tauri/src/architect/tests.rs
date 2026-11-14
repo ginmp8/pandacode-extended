@@ -7244,6 +7244,37 @@ fn finished_composed_council_starts_a_strictly_new_cycle_even_when_old_review_is
 }
 
 #[test]
+fn task_owned_child_council_reviewer_never_fails_over_to_another_harness() {
+    let (state, _root_id, child_id, _) = nested_child_lifecycle_fixture();
+    let store = state.store.lock().unwrap();
+    let mut child = load(&store, &child_id).unwrap().unwrap();
+    let model = "nested-test-model";
+    child.config.catalog = vec![
+        profile("child-primary", "codex", model, model),
+        profile("child-fallback", "cline", model, model),
+    ];
+    assert!(routing::pool(&child.config).iter()
+        .any(|entry| entry.provider == "cline" && entry.model == model),
+        "the configured pool must offer another harness for this regression");
+    child.workers[0].provider = "codex".into();
+    child.workers[0].model = model.into();
+    child.workers[0].status = "failed".into();
+    child.workers[0].read_only = true;
+    child.workers[0].council = Some(CouncilSeat {
+        round: 1, ..CouncilSeat::default()
+    });
+    let frozen = child.workers[0].clone();
+
+    assert!(!fail_over(&store, &mut child, 0, "provider failure").unwrap(),
+        "a nested Council must admit a fresh native reviewer, never mutate the frozen one");
+    assert_eq!(child.workers[0].provider, frozen.provider);
+    assert_eq!(child.workers[0].model, frozen.model);
+    assert_eq!(child.workers[0].session_id, frozen.session_id);
+    assert_eq!(child.workers[0].status, "failed");
+    assert_eq!(child.workers[0].failovers, frozen.failovers);
+}
+
+#[test]
 fn composed_attempt_budget_counts_child_failures_and_all_rounds_without_refunds() {
     let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();
     let store = state.store.lock().unwrap();

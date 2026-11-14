@@ -2448,6 +2448,25 @@ fn admit_role_with_selected(
         headless_staging,selected_worker,None)
 }
 
+/// Exact, authenticated GitHub event identity. The payload is not authority;
+/// only the current native source grant can authorize its admission.
+struct AutoIntakeLink<'a> {
+    source_id: &'a str,
+    delivery_id: &'a str,
+    source_revision: i64,
+}
+
+/// Keep the existing admission transaction as the sole writer of the Auto
+/// Ticket, its provider session, authenticated source association and audit.
+fn admit_role_with_auto_intake(
+    store: &mut Store, config_id: &str, objective: &str,
+    request_key: &str, selected_worker: &str,
+    link: &AutoIntakeLink<'_>,
+) -> Result<(Ticket, bool)> {
+    admit_role_with_grant_inner(store,config_id,objective,request_key,
+        false,true,false,Some(selected_worker),None,Some(link))
+}
+
 /// App-managed exact-file writes are available only with a separately
 /// confirmed immutable WorkItem scope. No coordinator or legacy call
 /// acquires a write capability by choosing a different Worker.
@@ -2457,6 +2476,20 @@ fn admit_role_with_grant(
     selected_worker: Option<&str>,
     authorized_paths: Option<&[String]>,
 ) -> Result<(Ticket, bool)> {
+    admit_role_with_grant_inner(store,config_id,objective,request_key,
+        busy,coordinate,headless_staging,selected_worker,authorized_paths,None)
+}
+
+fn admit_role_with_grant_inner(
+    store: &mut Store, config_id: &str, objective: &str,
+    request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
+    selected_worker: Option<&str>, authorized_paths: Option<&[String]>,
+    auto_link: Option<&AutoIntakeLink<'_>>,
+) -> Result<(Ticket, bool)> {
+    if auto_link.is_some() && (!coordinate || headless_staging ||
+        authorized_paths.is_some() || selected_worker.is_none() || busy) {
+        return Err("GitHub Auto may reserve only a read-only native Coordinator.".into());
+    }
     if let Some(paths)=authorized_paths {
         if coordinate || headless_staging || selected_worker.is_none() ||
             !crate::workspace::scoped_writes_supported() {
@@ -2519,6 +2552,18 @@ fn admit_role_with_grant(
         }
         if originally_coordinated != coordinate {
             return Err("Manual request key cannot change between direct and coordinated dispatch.".into());
+        }
+        if let Some(link)=auto_link {
+            let linked:bool=store.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sa_auto_intake
+                  WHERE source_id=?1 AND delivery_id=?2 AND ticket_id=?3
+                    AND state='admitted' AND source_revision=?4)",
+                params![link.source_id,link.delivery_id,ticket.id,link.source_revision],
+                |row|row.get(0),
+            ).map_err(|e|e.to_string())?;
+            if !linked {
+                return Err("Existing Ticket lacks an atomic authenticated Auto association; manual reconciliation required.".into());
+            }
         }
         return Ok((ticket, false));
     }
@@ -2645,6 +2690,39 @@ fn admit_role_with_grant(
              else if coordinate { "manual readonly coordinator reserved" }
              else { "manual readonly worker reserved" },now],
     ).map_err(|e| e.to_string())?;
+    if let Some(link)=auto_link {
+        // Atomic association: a revoked/mutated grant, failed receipt or
+        // injected SQLite fault rolls back the Ticket, session and Assignment.
+        let changed=tx.execute(
+            "UPDATE sa_auto_intake SET state='admitted',ticket_id=?3,
+               reason=NULL,updated_at=?4
+             WHERE source_id=?1 AND delivery_id=?2 AND state='pending'
+               AND ticket_id IS NULL AND source_revision=?5
+               AND event_kind='issues.opened'
+               AND EXISTS(
+                 SELECT 1 FROM sa_auto_source_grants grant
+                 JOIN sa_event_sources source ON source.id=grant.source_id
+                 WHERE grant.source_id=?1 AND grant.source_revision=?5
+                   AND source.policy_revision=?5 AND source.mode='observe'
+                   AND grant.revoked_at IS NULL AND grant.expires_at>?4
+                   AND grant.repository=source.repository
+                   AND lower(grant.actor_filter)=lower(source.actor_filter)
+                   AND grant.event_kind='issues.opened'
+                   AND sa_auto_intake.repository=source.repository
+                   AND lower(sa_auto_intake.event_actor)=lower(source.actor_filter))",
+            params![link.source_id,link.delivery_id,ticket_id,now,link.source_revision],
+        ).map_err(|e|e.to_string())?;
+        if changed!=1 {
+            return Err("Authenticated Auto event was revoked, changed or already admitted.".into());
+        }
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'demand_auto_plan_requested',?2,?3)",
+            params![ticket_id,
+                format!("Verified GitHub source {} / delivery {} / source revision {}",
+                    link.source_id,link.delivery_id,link.source_revision),now],
+        ).map_err(|e|e.to_string())?;
+    }
     tx.commit().map_err(|e| e.to_string())?;
     Ok((get_ticket(store, &ticket_id)?, !blocked))
 }
@@ -6559,6 +6637,91 @@ mod tests {
         configuration(store,&cfg.id).unwrap()
     }
 
+
+    #[test]
+    fn github_auto_admission_and_source_receipt_commit_or_roll_back_together() {
+        let mut store=fixture();
+        let team=enabled(&store);
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_event_sources(
+                id,orchestration_id,repository,actor_filter,event_kind,
+                mode,policy_revision,created_at,updated_at)
+             VALUES('auto-source',?1,'example/repo','contributor',
+                'issues.opened','observe',1,?2,?2)",
+            params![team.id,now],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_event_decisions(
+               source_id,delivery_id,repository,actor,event_kind,
+               subject_key,sequence,decision,policy_revision,at)
+             VALUES('auto-source','delivery','example/repo','contributor',
+               'issues.opened','issue:42',42,'observed_permitted',1,?1)",
+            [now],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_auto_source_grants(
+               source_id,source_revision,repository,actor_filter,event_kind,
+               operator_login,max_daily_tasks,authorized_at,expires_at)
+             VALUES('auto-source',1,'example/repo','contributor',
+               'issues.opened','operator',2,?1,?2)",
+            params![now-1000,now+60_000],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_auto_intake(
+               source_id,delivery_id,subject_key,event_actor,repository,
+               event_kind,source_revision,occurred_at,state,created_at,updated_at)
+             VALUES('auto-source','delivery','issue:42','contributor',
+               'example/repo','issues.opened',1,?1,'pending',?1,?1)",
+            [now],
+        ).unwrap();
+        let link=AutoIntakeLink{
+            source_id:"auto-source",delivery_id:"delivery",source_revision:1,
+        };
+        store.db.execute_batch(
+            "CREATE TRIGGER reject_auto_link BEFORE UPDATE ON sa_auto_intake
+             BEGIN SELECT RAISE(ABORT,'injected link failure'); END;",
+        ).unwrap();
+        assert!(admit_role_with_auto_intake(
+            &mut store,&team.id,"Implement approved issue","github-auto.test",
+            "worker",&link,
+        ).is_err(),"Auto association failure must abort the native Ticket transaction");
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets",[],
+            |r|r.get::<_,i64>(0)).unwrap(),0);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_assignments",[],
+            |r|r.get::<_,i64>(0)).unwrap(),0);
+        store.db.execute_batch("DROP TRIGGER reject_auto_link;").unwrap();
+
+        let (ticket,launched)=admit_role_with_auto_intake(
+            &mut store,&team.id,"Implement approved issue","github-auto.test",
+            "worker",&link,
+        ).unwrap();
+        assert!(launched);
+        let associated:String=store.db.query_row(
+            "SELECT ticket_id FROM sa_auto_intake
+              WHERE source_id='auto-source' AND delivery_id='delivery'",[],
+            |r|r.get(0),
+        ).unwrap();
+        assert_eq!(associated,ticket.id);
+        let count:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+               WHERE ticket_id=?1 AND kind='demand_auto_plan_requested'",
+            [&ticket.id],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(count,1);
+        let (same,launched)=admit_role_with_auto_intake(
+            &mut store,&team.id,"Implement approved issue","github-auto.test",
+            "worker",&link,
+        ).unwrap();
+        assert_eq!(same.id,ticket.id);
+        assert!(!launched,"identical replay must not dispatch another Coordinator");
+        store.db.execute(
+            "UPDATE sa_auto_source_grants SET revoked_at=?1
+             WHERE source_id='auto-source'",[storage::now()],
+        ).unwrap();
+        assert!(!auto::ticket_authorized(&store,&ticket.id).unwrap(),
+            "revoking the source grant must fence the associated Demand");
+    }
 
     #[test]
     fn admitted_worker_profile_rejects_later_model_and_skill_changes() {

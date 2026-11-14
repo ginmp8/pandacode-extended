@@ -242,26 +242,15 @@ async fn admit(app:&tauri::AppHandle,item:PendingIssue)->Result<bool> {
         let key=Sha256::digest(format!("{}:{}",item.source_id,item.delivery_id).as_bytes())
             .iter().map(|b|format!("{b:02x}")).collect::<String>();
         let request_key=format!("github-auto.{}",&key[..48]);
-        let (ticket,launch)=superagent::admit_role_with_selected(
+        let link=superagent::AutoIntakeLink {
+            source_id:&item.source_id,
+            delivery_id:&item.delivery_id,
+            source_revision:item.source_revision,
+        };
+        let (ticket,launch)=superagent::admit_role_with_auto_intake(
             &mut store,&item.orchestration_id,&objective,&request_key,
-            false,true,false,Some(&config.worker_bot_id),
+            &config.worker_bot_id,&link,
         )?;
-        let changed=store.db.execute(
-            "UPDATE sa_auto_intake SET state='admitted',ticket_id=?3,
-               reason=NULL,updated_at=?4
-             WHERE source_id=?1 AND delivery_id=?2 AND state='pending'
-               AND source_revision=?5 AND ticket_id IS NULL",
-            params![item.source_id,item.delivery_id,ticket.id,storage::now(),item.source_revision],
-        ).map_err(|e|e.to_string())?;
-        if changed!=1 {return Err("Auto intake changed before native Ticket association.".into())}
-        store.db.execute(
-            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-             VALUES(?1,'demand_auto_plan_requested',?2,?3)",
-            params![ticket.id,
-                format!("Verified GitHub source {} / delivery {} / source revision {}",
-                    item.source_id,item.delivery_id,item.source_revision),
-                storage::now()],
-        ).map_err(|e|e.to_string())?;
         if launch {Some((ticket,config.coordinator_bot_id))} else {None}
     };
     let Some((ticket,coordinator_id))=admitted else {return Ok(false)};

@@ -853,6 +853,16 @@ fn validate_current_reviewer_authority(
     }
 }
 
+/// A direct preliminary OnTrigger review is scored by its own native
+/// callback. Only a separately authenticated child composite uses the child
+/// receipt as the source of its root-seat score.
+fn root_score_requires_native_callback(
+    composition_mode: Option<&str>,
+    direct_preliminary: bool,
+) -> bool {
+    composition_mode != Some("nested") || direct_preliminary
+}
+
 /// A composed Council's root seats must all have a recorded, current native
 /// capability binding. A plausible completed worker snapshot is not authority.
 fn composed_native_authority_current(
@@ -881,12 +891,23 @@ fn composed_native_authority_current(
         let Some(binding) = worker.reviewer_binding.as_ref() else {
             return false;
         };
-        // The native grant proves who may review, but cannot authenticate
-        // a score changed in a restored/injected worker snapshot. Direct and
-        // automatic root seats must still match their persisted assistant
-        // callback. Nested composite scores are verified independently from
-        // the child Council's signed terminal/evidence receipt.
-        let callback_score_is_current = binding.composition_mode.as_deref() == Some("nested")
+        // A nested seat may either hold a validated child composite or an
+        // OnTrigger direct preliminary review that never escalated. Only the
+        // actual child composite is exempt from having its score in this
+        // root worker's assistant transcript. Invalid native trigger state
+        // must not turn a direct reviewer into an exempt child.
+        let direct_preliminary = if binding.composition_mode.as_deref() == Some("nested") {
+            match is_completed_on_trigger_preliminary(store, team, worker) {
+                Ok(preliminary) => preliminary,
+                Err(_) => return false,
+            }
+        } else {
+            false
+        };
+        let needs_callback_score = root_score_requires_native_callback(
+            binding.composition_mode.as_deref(), direct_preliminary,
+        );
+        let callback_score_is_current = !needs_callback_score
             || worker.council.as_ref().and_then(|seat| seat.score)
                 == council::latest_score(store, &worker.session_id);
         callback_score_is_current

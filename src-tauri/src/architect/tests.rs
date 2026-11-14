@@ -3,6 +3,18 @@ use super::*;
 mod council_tests;
 
 #[test]
+fn preliminary_nested_reviews_require_a_native_root_score_callback() {
+    assert!(root_score_requires_native_callback(None, false),
+        "automatic root reviewers must be backed by persisted callbacks");
+    assert!(root_score_requires_native_callback(Some("direct"), false),
+        "selected direct root reviewers must be backed by persisted callbacks");
+    assert!(root_score_requires_native_callback(Some("nested"), true),
+        "an OnTrigger preliminary review without a child still needs its own callback");
+    assert!(!root_score_requires_native_callback(Some("nested"), false),
+        "an actual nested composite is bound to its independently validated child receipt");
+}
+
+#[test]
 fn nested_escalation_decision_recovers_same_seat_phase_trigger_and_child_link() {
     let (store, mut team) = fixture();
     team.council_since = 1000;

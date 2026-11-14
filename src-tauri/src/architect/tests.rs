@@ -7168,9 +7168,15 @@ fn composed_admission_test_config() -> council::CouncilConfig {
 
 #[test]
 fn composed_child_terminal_roster_rejects_phantom_and_duplicate_parent_seats() {
-    let mut team = team_with(composed_admission_test_config(), vec![]);
+    let (_, mut team) = fixture();
+    team.config.council = Some(composed_admission_test_config());
     team.council_since = 10;
-    let mut reviewer = seat("nested-root-parent", 1, Some(9.6), 11);
+    let mut reviewer = worker("nested-root-parent", "completed", &[], &[]);
+    reviewer.read_only = true;
+    reviewer.created_at = 11;
+    reviewer.council = Some(CouncilSeat {
+        round: 1, score: Some(9.6), ..CouncilSeat::default()
+    });
     let mut binding = reviewer_security::ReviewerBinding::native(
         &team, &reviewer.id, reviewer.created_at, &reviewer.provider,
         &reviewer.model, reviewer.council.as_ref().unwrap(),

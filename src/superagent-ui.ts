@@ -240,6 +240,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let writeGrantTicket = '', writeGrantRevision: number | null = null;
   let writePathsDraft = '', writePathsError = '';
   let commentRepository = '', commentIssueNumber = '', commentDraft = '';
+  // Never reuse a potentially private GitHub comment draft in another Ticket.
+  // Preserve fields across native refreshes of the *same* Ticket only.
+  let commentDraftTicketId = '';
   let issueCommentError = '', issueCommentStatus: IssueCommentStatus | null = null;
   let demandObjective = '', demandMode: 'coordinated' | 'direct' | 'auto' = 'coordinated';
   let workPlan: DemandPlanEvidence | null = null, workPlanLoaded = false;
@@ -332,6 +335,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   }
   function render(): void {
     if (!host.isConnected) return;
+    // A different Ticket is a different confidentiality boundary. Native
+    // refreshes can repaint the workspace without clearing the same draft.
+    if (commentDraftTicketId !== inspectedTicket) {
+      commentDraftTicketId = inspectedTicket;
+      commentRepository = '';
+      commentIssueNumber = '';
+      commentDraft = '';
+      issueCommentError = '';
+      issueCommentStatus = null;
+    }
     const roleSummary = (item:Config): string =>
       typeof item.workerCount === 'number' && typeof item.reviewerCount === 'number' &&
       Number.isInteger(item.workerCount) && Number.isInteger(item.reviewerCount) &&
@@ -1349,8 +1362,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if ((target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) &&
         target.closest('form[data-sa-form="issue-comment"]')) {
+      // Persist the user's in-progress local draft before any native refresh
+      // replaces the form. No model, external effect or repository call runs.
+      if (commentDraftTicketId !== inspectedTicket) return;
+      if (target.name === 'repository') commentRepository = target.value;
+      if (target.name === 'issueNumber') commentIssueNumber = target.value;
+      if (target.name === 'comment') commentDraft = target.value;
       issueCommentError = '';
       host.querySelector('[data-sa-comment-error]')?.remove();
+      return;
     }
     if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-team-search')) {
       teamSearch = target.value;

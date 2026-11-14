@@ -1674,6 +1674,13 @@ test('SuperAgent issue comments use a stable receipt and report uncertain state 
   await commentForm.getByRole('spinbutton',{name:'Issue number'}).fill('42');
   const comment=commentForm.getByRole('textbox',{name:'Comment'});
   await comment.fill('Reviewed; the fix is ready.');
+  // A view change rerenders the native projection, but the same Ticket's
+  // private draft and its focused action must remain available.
+  await host.getByRole('button',{name:'Teams',exact:true}).click();
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await expect(commentForm.getByRole('textbox',{name:'Repository (owner/name)'})).toHaveValue('acme/widget');
+  await expect(commentForm.getByRole('spinbutton',{name:'Issue number'})).toHaveValue('42');
+  await expect(comment).toHaveValue('Reviewed; the fix is ready.');
   await commentForm.getByRole('textbox',{name:'Repository (owner/name)'}).fill(' acme/widget ');
   await commentForm.getByRole('button',{name:'Authorize and post comment'}).click();
   await expect(commentForm.getByRole('alert')).toContainText('exact GitHub repository');

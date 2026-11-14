@@ -1,7 +1,7 @@
 # Extended SuperAgent orchestration
 
-> **Implementation status:** Incomplete. The persistent Orchestrations workspace, manual read-only Ticket flow, scoped-write candidate, exact-effect candidate and source-policy groundwork exist in the worktree. Team Builder creates and edits ordered worker/reviewer membership for disabled Teams with no Tickets; Ticket evidence displays the native immutable Team snapshot and its provenance. Multi-worker scheduling and reviewer execution/Council binding remain incomplete. The S4 manual one-shot Observe slice fetches bounded metadata for an exact linked thread across six event classes; Auto, all other event classes, durable recovery/headless parity, nested subagents and S6 exact-SHA evidence remain outstanding. S1 writes pass focused Windows checks but are disabled on Unix; one SuperAgent effects restart test fails. No overall acceptance is claimed.
-> **Requested push branch:** feat/issue-148-pe. No commit or push has been made.
+> **Implementation status:** Incomplete. The persistent Orchestrations workspace, manual read-only Ticket flow, scoped-write candidate, exact-effect candidate and source-policy groundwork exist on the pushed branch. Team Builder creates and edits ordered worker/reviewer membership for disabled Teams with no Tickets; Ticket evidence displays the native immutable Team snapshot and its provenance. Multi-worker scheduling remains incomplete. For a Ticket pinned to `council_required`, the native adapter binds the finished worker artifact (artifact digest, ticket revision, workspace identity, policy revision) and dispatches exact task-bound native reviewers; finalization requires a fresh verified native Council verdict or an attributed, reasoned human exception. Manual acceptance remains available when the policy is not `council_required`. At `697a93f6` the focused required-Council Rust tests failed (seven failures: non-reentrant dispatch-fence re-acquisition and a fixture admission-audit mismatch); this checkpoint repairs both and awaits CI. The S4 manual one-shot Observe slice fetches bounded metadata for an exact linked thread across six event classes; Auto, all other event classes, durable recovery/headless parity, nested subagents and S6 exact-SHA evidence remain outstanding. S1 writes pass focused Windows checks but are disabled on Unix; one SuperAgent effects restart test fails. No overall acceptance is claimed.
+> **Requested push branch:** feat/issue-148-pe. HEAD `697a93f6c2b47449caa17a396e630357d5fe385f` (`697a93f6`) is pushed on `origin/feat/issue-148-pe`. CI is red at that SHA, and local Rust/Playwright checks were not run for this docs update; no green-CI or executed-test claim is made.
 
 **Authoritative specification:** [Issue #148](https://github.com/ginmp8/pandacode-extended/issues/148), extending [Issue #131](https://github.com/ginmp8/pandacode-extended/issues/131). Addenda: [EGM-01–07](https://github.com/ginmp8/pandacode-extended/issues/148#issuecomment-6817527256), [DD-01–14](https://github.com/ginmp8/pandacode-extended/issues/148#issuecomment-6817744113), [SA-01–09](https://github.com/ginmp8/pandacode-extended/issues/148#issuecomment-6817864073), [NS-01–12](https://github.com/ginmp8/pandacode-extended/issues/148#issuecomment-6817979555).
 
@@ -46,8 +46,8 @@ The standalone design packet and source map are [here](extended-superagent-desig
 | S0 source map | Updated for #148 baseline and candidate boundaries |
 | S1 scoped writes | Partial: focused Windows checks pass; Unix disabled; one unrelated effects test fails |
 | S2 UX-P1 persistent workspace | Implemented and browser-verified; preserve non-modal route |
-| S2 multi-role Teams/work graph | Partial: Team Builder supports ordered Workers and Reviewers; Ticket evidence uses the immutable saved Team snapshot. Multi-worker scheduling and reviewer execution remain incomplete. |
-| S3 task-bound Council | Incomplete; adapter is advisory |
+| S2 multi-role Teams/work graph | Partial: Team Builder supports ordered Workers and Reviewers; Ticket evidence uses the immutable saved Team snapshot. Required-Council reviewer dispatch is native; multi-worker scheduling and the full work graph remain incomplete. |
+| S3 task-bound Council | Partial: required-Council admission freezes the reviewer policy, the worker result binds the exact artifact/workspace/ticket/policy identity, and native reviewers are dispatched and finalized only from a revalidated native verdict; an attributed human exception requires the same current binding and a recorded reason. At `697a93f6` seven focused required-Council Rust tests failed on a non-reentrant dispatch-fence re-acquisition and a fixture admission-audit mismatch; this checkpoint repairs both and awaits CI. S6 exact-SHA evidence remains outstanding. |
 | S4 manual Observe / Auto | One-shot linked-thread metadata intake supports exactly six event classes and has focused native/UI tests added; tests not run in this low-space worktree. Auto and background intake remain unavailable. |
 | S5 recovery/headless/subagents | Incomplete; Rust validation outstanding |
 | S6 exact-SHA evidence | Not started |
@@ -78,10 +78,13 @@ does not substitute the current Team if a saved snapshot is absent. `legacy-curr
 means the mutable Team row observed during upgrade; it may not represent the
 historical admission state. `legacy-unknown` preserves only older saved identity
 evidence; synthetic placeholders and missing profile data are labeled as
-unknown, not reconstructed. Reviewer membership is descriptive only until the
-S3 native Council adapter is bound to a Ticket. The multi-role editor does not
-claim parallel worker scheduling or reviewer execution; the S2 work graph and
-scheduler are still incomplete.
+unknown, not reconstructed. Reviewer membership becomes operative for a Ticket
+whose policy is `council_required`: admission freezes the exact reviewer roster
+and policy, and the finished worker artifact is bound and dispatched to those
+native reviewers. Council-off Tickets keep manual acceptance, and a complete
+below-target required round can be accepted only through the attributed,
+reasoned native command. The multi-role editor does not claim parallel worker
+scheduling; the S2 work graph and scheduler remain incomplete.
 
 The trusted local Ticket detail can link an exact issue:NUMBER or pull:NUMBER to
 a same-orchestration Off/Observe source. SQLite v42 stores up to 16 references,

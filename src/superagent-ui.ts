@@ -195,6 +195,76 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '</ol><details><summary>Inspect exact saved Team payload</summary><pre>' + safe(payload) +
       '</pre></details></section>';
   }
+  type CouncilPolicyMode = 'required' | 'optional' | 'off' | 'unknown';
+  // Only an exact native snapshot proves the policy captured at admission.
+  // Reconstructed legacy snapshots may describe the current Team instead.
+  function councilPolicyMode(snapshot: TeamSnapshot | null | undefined): CouncilPolicyMode {
+    if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot) ||
+        snapshot.provenance !== 'native') return 'unknown';
+    const policy = snapshot.policy;
+    if (!policy || typeof policy !== 'object' || Array.isArray(policy)) return 'unknown';
+    const record = policy as Record<string, unknown>;
+    if (record.councilRequired === true) return 'required';
+    if (record.councilRequired === false && record.councilEnabled === true) return 'optional';
+    if (record.councilRequired === false && record.councilEnabled === false) return 'off';
+    return 'unknown';
+  }
+  function renderCouncilObservation(details: TicketDetails): string {
+    const mode = councilPolicyMode(details.teamSnapshot);
+    const council = details.council && typeof details.council === 'object' ? details.council : null;
+    // An unavailable observation is only worth surfacing when the saved policy
+    // says Council is enabled; an Off/Unknown policy with no evidence adds none.
+    if (!council && mode !== 'required' && mode !== 'optional') return '';
+    const policy = mode === 'required' ? 'Council required.'
+      : mode === 'optional' ? 'Council optional (advisory).'
+        : mode === 'off' ? 'Council off in the saved Ticket policy.'
+          : 'Unknown; the saved Team snapshot does not prove whether Council is required.';
+    if (!council) {
+      return '<section class="sa-council-observation" role="note" aria-label="Native Council observation">' +
+        '<h5>Native Council</h5><p>Policy: ' + policy + '</p><p>' +
+        (mode === 'required'
+          ? 'The native Council observation is unavailable. Required Council gates completion, and without this observation a bound native review target is Unknown.'
+          : 'The native Council observation is unavailable. Optional Council is advisory for this Ticket and does not gate completion; no bound native review target is proven.') +
+        '</p></section>';
+    }
+    const binding = council.ticketArtifactBound === true ? 'Bound to this Ticket artifact.'
+      : council.ticketArtifactBound === false ? 'Not proven (Unknown).'
+        : 'Unknown.';
+    const nativeStatus = typeof council.nativeStatus === 'string' && council.nativeStatus.trim()
+      ? council.nativeStatus : 'Unknown';
+    const round = typeof council.nativeRound === 'number' && Number.isFinite(council.nativeRound)
+      ? String(council.nativeRound) : 'Unknown';
+    const stale = council.nativeStale === true ? ' · stale' : '';
+    const verified = council.nativePassVerified === true ? 'Yes'
+      : council.nativePassVerified === false ? 'No' : 'Unknown';
+    const bound = council.ticketArtifactBound === true;
+    const verifiedPass = council.nativePassVerified === true;
+    // A verified Council pass and a frozen review target are separate native
+    // facts. This line never upgrades one into proof of the other.
+    const meaning = mode === 'required'
+      ? (bound && verifiedPass
+        ? 'Required Council gates completion for this Ticket. The artifact is bound as the native review target; a native Council pass is verified.'
+        : bound
+          ? 'Required Council gates completion for this Ticket. The artifact is bound as the native review target; no verified native Council pass authorizes completion.'
+          : verifiedPass
+            ? 'Required Council gates completion for this Ticket. A native Council pass is verified, but this artifact is not proven as its review target, so the pass cannot authorize completion.'
+            : 'Required Council gates completion for this Ticket. Neither a verified native Council pass nor a bound review target is proven, so this observation cannot authorize completion.')
+      : mode === 'optional'
+        ? (bound && verifiedPass
+          ? 'Optional Council is advisory for this Ticket and does not gate completion. The artifact is bound as the native review target and a native Council pass is verified, but the review cannot authorize SuperAgent completion by itself.'
+          : bound
+            ? 'Optional Council is advisory for this Ticket and does not gate completion. The artifact is bound as the native review target, but the review cannot authorize SuperAgent completion by itself.'
+            : verifiedPass
+              ? 'Optional Council is advisory for this Ticket and does not gate completion. A native Council pass is verified, but this artifact is not proven as its review target, so it cannot authorize SuperAgent completion.'
+              : 'Optional Council is advisory for this Ticket and does not gate completion. Neither a bound native review target nor a verified native Council pass is proven, so it cannot authorize SuperAgent completion.')
+        : mode === 'off'
+          ? 'The saved Ticket policy says Council is off, so this observation does not authorize completion; its relationship to this Ticket is not proven.'
+          : 'The saved Team snapshot does not prove whether Council is required, so whether this observation gates completion is Unknown; it cannot authorize completion by itself.';
+    return '<section class="sa-council-observation" role="note" aria-label="Native Council observation">' +
+      '<h5>Native Council</h5><p>Policy: ' + policy + ' Review target binding: ' + binding + '</p>' +
+      '<p>Native team status: ' + safe(nativeStatus) + ' · Round ' + safe(round) + stale +
+      '. Verified native pass: ' + verified + '.</p><p>' + meaning + '</p></section>';
+  }
   function render(): void {
     if (!host.isConnected) return;
     const list = presets.map(item =>
@@ -324,14 +394,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
             'maxlength="24" placeholder="issue:42 or pull:123"></label>' +
             '<button type="submit">Link thread (context only)</button></form>'
           : '<p>Load event sources below before linking a thread.</p>') +
-        (ticketDetails.council
-          ? '<section class="sa-council-observation" role="note" aria-label="Native Council observation">' +
-            '<h5>Native Council (advisory)</h5><p>Native team status: ' +
-            safe(ticketDetails.council.nativeStatus) + ' · Round ' +
-            safe(ticketDetails.council.nativeRound) +
-            (ticketDetails.council.nativeStale ? ' · stale' : '') +
-            '. Not bound to this ticket artifact; cannot authorize SuperAgent completion.</p></section>'
-          : '') +
+        renderCouncilObservation(ticketDetails) +
         '<button type="button" data-sa-close-details>Close evidence</button></section>'
       : '';
     const sourceRows = sources.map(src =>
@@ -423,7 +486,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '<section class="sa-pane"><h3>Orchestrations</h3><ul class="sa-list">' +
       (list || '<li class="sa-empty">No orchestrations created.</li>') + '</ul></section>' +
       '<section class="sa-pane"><h3>Team Builder</h3>' +
-      '<p>Membership is saved in order. The existing manual dispatch path does not schedule multiple Workers, and Reviewer membership does not run Council review.</p>' +
+      '<p>Membership is saved in order. The existing manual dispatch path does not schedule multiple Workers. Native Council reviewer runs start only for a Ticket whose saved policy requires Council; Reviewer membership alone does not start a review.</p>' +
       '<form data-sa-form="create">' +
       '<label>Example preset<select data-sa-template aria-label="Example preset">' +
       '<option value="">Custom</option>' +

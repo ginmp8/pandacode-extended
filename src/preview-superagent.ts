@@ -10,7 +10,7 @@ type TeamSnapshot = {
   name:string; projectId:string; coordinatorBotId:string; workerBotIds:string[];
   reviewerBotIds:string[];
   policy:{policyRevision:number;autonomy:string;maxConcurrentTasks:number;
-    maxAttemptsPerAssignment:number;councilEnabled:boolean};
+    maxAttemptsPerAssignment:number;councilEnabled:boolean;councilRequired:boolean};
   roles:Array<{role:string;ordinal:number;botId:string;effectiveConfig:null;effectiveConfigSha256:null}>;
 };
 type Activity = { id:number; kind:string; detail:string; at:number };
@@ -59,7 +59,7 @@ export async function invokeSuperagent<T>(
     name:config.name,projectId:config.projectId,coordinatorBotId:config.coordinatorBotId,
     workerBotIds:[...config.workerBotIds],reviewerBotIds:[...config.reviewerBotIds],
     policy:{policyRevision:config.policyRevision,autonomy:'off',maxConcurrentTasks:1,
-      maxAttemptsPerAssignment:2,councilEnabled:false},
+      maxAttemptsPerAssignment:2,councilEnabled:false,councilRequired:false},
     roles:[
       {role:'coordinator',ordinal:0,botId:config.coordinatorBotId,effectiveConfig:null,effectiveConfigSha256:null},
       ...config.workerBotIds.map((botId,ordinal)=>({role:'worker',ordinal,botId,

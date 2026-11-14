@@ -4,7 +4,7 @@
 
 **Repository:** ginmp8/pandacode-extended
 
-**Source baseline:** f9efb3a1c7558dcf7d5688bb1687cfff9253f967, the limited #146 MVP SHA identified by #148. The worktree contains uncommitted implementation candidates; S6 must validate the final committed SHA.
+**Source baseline:** f9efb3a1c7558dcf7d5688bb1687cfff9253f967, the limited #146 MVP SHA identified by #148. Implementation candidates are pushed at `697a93f6` on `feat/issue-148-pe`; CI is red at that SHA and local Rust/Playwright checks were not run for this docs update. S6 must still validate the exact final SHA.
 
 **Requested push branch:** feat/issue-148-pe
 
@@ -75,7 +75,7 @@ Parallel writes require separate worktrees or non-overlapping exact path grants;
 | src-tauri/src/superagent.rs and storage.rs | Native Ticket/mandate/assignment/audit and additive migrations. Add Team-version snapshots, WorkItems, scheduler/lineage and run history. |
 | src-tauri/src/providers.rs and providers/host_tools.rs | Harness execution and native ToolHost. Built-in shell/file tools remain read-only for scoped workers; only exact app-mediated grants write. |
 | src-tauri/src/workspace.rs and superagent/write_grants.rs | Exact path validation and atomic replacement. Windows candidate is tested; Unix writes fail closed. Keep unsupported targets disabled until a secure primitive is proven. |
-| src-tauri/src/architect/reviewer_security.rs, architect/council.rs and superagent/council_adapter.rs | Native reviewer binding, freshness, rounds and verdict. Add exact Ticket/run/artifact/policy correlation and one replay-safe terminal transition. |
+| src-tauri/src/architect/reviewer_security.rs, architect/council.rs and superagent/council_adapter.rs | Native reviewer binding, freshness, rounds and verdict. The native candidate adds exact Ticket/assignment/run/artifact/workspace/policy/cycle/generation correlation, a frozen read-only review snapshot and one replay-safe terminal transition (`council_adapter.rs:812`, `:945`, `:1227`, `:1378`). At `697a93f6` seven focused required-Council tests failed on a non-reentrant dispatch-fence re-acquisition and a fixture admission-audit mismatch; this checkpoint repairs both and awaits CI. S6 must validate the final SHA. |
 | src-tauri/src/superagent/events.rs, github.rs and schedules.rs | Source policy and local authenticated gh polling. Add trusted delivery receipt/cursor, bounded overlap and source-to-Team route. Off performs no calls; source text is untrusted. |
 | src-tauri/src/superagent/effects.rs and headless.rs | Exact grant and receipt foundation. Add durable claim/settlement/read-back/recovery and a shared desktop/serve semantic path; never blind replay. |
 | src-tauri/src/superagent/manifest.rs | Preserve v1 as disabled single-worker mapping; add v2 role bindings and dependency preflight. Import no runtime authority or secrets. |

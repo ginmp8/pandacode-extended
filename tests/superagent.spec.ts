@@ -19,6 +19,55 @@ async function openOrchestrationWorkspace(page: Page) {
   return host;
 }
 
+async function mountCouncilTicket(page: Page, options: {
+  hostId: string; councilEnabled: boolean; councilRequired: boolean;
+  council: {
+    nativeStatus: string; nativeRound: number; nativeStale: boolean;
+    nativePassVerified: boolean; ticketArtifactBound: boolean;
+  } | null;
+}) {
+  await page.evaluate(async options => {
+    const { mountSuperagent } = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = options.hostId;
+    document.body.appendChild(host);
+    const ticket = {
+      id:'ticket-one', objective:'Review artifact',
+      state:options.councilRequired ? 'waiting_review' : 'waiting_approval',
+      revision:2, evidence:'worker evidence',
+    };
+    const policy = {
+      policyRevision:1, autonomy:'off', maxConcurrentTasks:1, maxAttemptsPerAssignment:2,
+      councilEnabled:options.councilEnabled, councilRequired:options.councilRequired,
+    };
+    mountSuperagent(host, async command => {
+      if (command === 'bots_list') return [
+        {id:'router',name:'Router',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if (command === 'superagent_list') return [{
+        id:'preset',name:'Council example',coordinatorBotId:'router',
+        workerBotId:'worker',enabled:true,policyRevision:2,
+      }] as never;
+      if (command === 'superagent_tickets') return [ticket] as never;
+      if (command === 'superagent_source_thread_links') return [] as never;
+      if (command === 'superagent_snapshot') return {
+        ticket,
+        teamSnapshot:{snapshotVersion:1,provenance:'native',orchestrationId:'preset',teamVersion:1,
+          name:'Council example',projectId:'fixture',coordinatorBotId:'router',workerBotIds:['worker'],
+          reviewerBotIds:[],policy,
+          roles:[{role:'coordinator',ordinal:0,botId:'router',effectiveConfig:null,effectiveConfigSha256:null},
+            {role:'worker',ordinal:0,botId:'worker',effectiveConfig:null,effectiveConfigSha256:null}]},
+        mandate:{actor:'local-user',authorizationId:'manual',policyRevision:2,
+          projectId:'fixture',expiresAt:1800000000000,revoked:false,
+          allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[],council:options.council,
+      } as never;
+      throw new Error('Unexpected Council command: ' + command);
+    });
+  }, options);
+}
+
 test('Orchestrations stays in the workspace across view navigation and reloads', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
@@ -392,53 +441,72 @@ test('native SuperAgent clears tickets when switching presets after a failed rea
   await expect(host.locator('[data-sa-accept]')).toHaveCount(0);
 });
 
-test('native Council observation is advisory and never authorizes task completion', async ({page}) => {
+test('required Council reports a bound verified native review without an advisory claim', async ({page}) => {
   await page.goto('/?bots=sample');
-  await page.evaluate(async () => {
-    const {mountSuperagent} = await import('/src/superagent-ui.ts');
-    const host = document.createElement('div');
-    host.id = 'sa-council-readonly-test';
-    document.body.appendChild(host);
-    mountSuperagent(host, async command => {
-      if (command === 'bots_list') return [
-        {id:'router',name:'Router',paused:false},
-        {id:'worker',name:'Worker',paused:false},
-      ] as never;
-      if (command === 'superagent_list') return [{
-        id:'preset',name:'Council example',coordinatorBotId:'router',
-        workerBotId:'worker',enabled:true,policyRevision:2
-      }] as never;
-      if (command === 'superagent_tickets') return [{
-        id:'ticket-one',objective:'Review artifact',state:'waiting_approval',
-        revision:2,evidence:'worker evidence'
-      }] as never;
-      if (command === 'superagent_source_thread_links') return [] as never;
-      if (command === 'superagent_snapshot') return {
-        ticket:{id:'ticket-one',objective:'Review artifact',
-          state:'waiting_approval',revision:2,evidence:'worker evidence'},
-        teamSnapshot:{snapshotVersion:1,provenance:'native',orchestrationId:'preset',teamVersion:1,
-          name:'Council example',projectId:'fixture',coordinatorBotId:'router',workerBotIds:['worker'],
-          reviewerBotIds:[],policy:{policyRevision:1,autonomy:'off',maxConcurrentTasks:1,
-            maxAttemptsPerAssignment:2,councilEnabled:false},
-          roles:[{role:'coordinator',ordinal:0,botId:'router',effectiveConfig:null,effectiveConfigSha256:null},
-            {role:'worker',ordinal:0,botId:'worker',effectiveConfig:null,effectiveConfigSha256:null}]},
-        mandate:{actor:'local-user',authorizationId:'manual',policyRevision:2,
-          projectId:'fixture',expiresAt:1800000000000,revoked:false,
-          allowedTools:[],allowedSideEffects:false},
-        assignments:[],activity:[],
-        council:{nativeStatus:'unverified',nativeRound:1,nativeStale:false,
-          nativePassVerified:false,ticketArtifactBound:false}
-      } as never;
-      throw new Error('Unexpected readonly Council command: '+command);
-    });
+  await mountCouncilTicket(page, {
+    hostId:'sa-council-required-bound', councilEnabled:true, councilRequired:true,
+    council:{nativeStatus:'passed',nativeRound:2,nativeStale:false,
+      nativePassVerified:true,ticketArtifactBound:true},
   });
-  const host = page.locator('#sa-council-readonly-test');
+  const host = page.locator('#sa-council-required-bound');
   await expect(host.getByRole('button',{name:'View evidence'})).toBeVisible();
   await host.getByRole('button',{name:'View evidence'}).click();
   const note = host.getByRole('note',{name:'Native Council observation'});
-  await expect(note).toContainText('unverified');
+  await expect(host.getByRole('heading',{name:'Native Council',exact:true})).toBeVisible();
+  await expect(note).toContainText('Policy: Council required. Review target binding: Bound to this Ticket artifact.');
+  await expect(note).toContainText('Native team status: passed · Round 2. Verified native pass: Yes.');
+  await expect(note).toContainText('Required Council gates completion for this Ticket.');
+  await expect(note).toContainText('The artifact is bound as the native review target; a native Council pass is verified.');
+  await expect(note).not.toContainText('(advisory)');
+  await expect(note).not.toContainText('Not bound to this ticket artifact');
+});
+
+test('required Council reports an unproven task binding as Unknown, not advisory', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await mountCouncilTicket(page, {
+    hostId:'sa-council-required-unbound', councilEnabled:true, councilRequired:true,
+    council:{nativeStatus:'unverified',nativeRound:1,nativeStale:false,
+      nativePassVerified:false,ticketArtifactBound:false},
+  });
+  const host = page.locator('#sa-council-required-unbound');
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const note = host.getByRole('note',{name:'Native Council observation'});
+  await expect(note).toContainText('Policy: Council required. Review target binding: Not proven (Unknown).');
+  await expect(note).toContainText('Native team status: unverified · Round 1. Verified native pass: No.');
+  await expect(note).toContainText('Neither a verified native Council pass nor a bound review target is proven');
+  await expect(note).not.toContainText('(advisory)');
+});
+
+test('required Council reports an unavailable native observation instead of advisory', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await mountCouncilTicket(page, {
+    hostId:'sa-council-required-unavailable', councilEnabled:true, councilRequired:true, council:null,
+  });
+  const host = page.locator('#sa-council-required-unavailable');
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const note = host.getByRole('note',{name:'Native Council observation'});
+  await expect(note).toContainText('Policy: Council required.');
+  await expect(note).toContainText('native Council observation is unavailable');
+  await expect(note).toContainText('a bound native review target is Unknown');
+  await expect(note).not.toContainText('(advisory)');
+});
+
+test('optional Council stays advisory and reports an unproven binding as Unknown', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await mountCouncilTicket(page, {
+    hostId:'sa-council-optional-unbound', councilEnabled:true, councilRequired:false,
+    council:{nativeStatus:'unverified',nativeRound:1,nativeStale:true,
+      nativePassVerified:false,ticketArtifactBound:false},
+  });
+  const host = page.locator('#sa-council-optional-unbound');
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const note = host.getByRole('note',{name:'Native Council observation'});
+  await expect(host.getByRole('heading',{name:'Native Council',exact:true})).toBeVisible();
+  await expect(note).toContainText('Policy: Council optional (advisory). Review target binding: Not proven (Unknown).');
+  await expect(note).toContainText('Native team status: unverified · Round 1 · stale. Verified native pass: No.');
+  await expect(note).toContainText('Optional Council is advisory for this Ticket and does not gate completion');
+  await expect(note).toContainText('Neither a bound native review target nor a verified native Council pass is proven');
   await expect(note).toContainText('cannot authorize SuperAgent completion');
-  await expect(host.getByRole('heading',{name:'Native Council (advisory)'})).toBeVisible();
 });
 
 test('SuperAgent examples only fill names and leave all authorization disabled', async ({page}) => {

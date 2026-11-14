@@ -1289,11 +1289,13 @@ fn finalization_exists(store: &Store, request: &RequiredRequest, verdict: &str) 
 
 fn persist_finalization(
     store: &Store, request: &RequiredRequest, team: &architect::TeamSnapshot,
-    verdict: &str, reason: Option<&str>,
+    verdict: &str, reason: Option<&str>, fence: &super::effects::DispatchFence,
 ) -> Result<bool> {
-    let _dispatch_fence = super::effects::lock_dispatch(&store.path)?;
-    // Recheck after acquiring the cross-process fence. Concurrent duplicate
-    // native callbacks then observe the committed receipt and become no-ops.
+    // The caller already holds the cross-process dispatch fence. It is not
+    // reentrant, so finalization must never acquire it again here.
+    let _held_fence = fence;
+    // Recheck under that fence. Concurrent duplicate native callbacks then
+    // observe the committed receipt and become no-ops.
     if finalization_exists(store,request,verdict)? { return Ok(true); }
     let ticket = super::get_ticket(store,&request.ticket_id)?;
     let binding_valid = current_binding_valid(store,request,&ticket,team)?;
@@ -1376,16 +1378,19 @@ fn persist_finalization(
 /// Incomplete work is left waiting; failed, stale, limited or stopped rounds
 /// revoke the Ticket and require an explicit retry.
 pub(super) fn finalize_after_native_run(store: &Store, reviewer_session_id: &str) -> Result<bool> {
-    finalize_after_native_run_inner(store, reviewer_session_id)
+    let fence = super::effects::lock_dispatch(&store.path)?;
+    finalize_after_native_run_inner(store, reviewer_session_id, &fence)
 }
 
 fn finalize_after_native_run_locked(
-    store: &Store, reviewer_session_id: &str, _fence: &super::effects::DispatchFence,
+    store: &Store, reviewer_session_id: &str, fence: &super::effects::DispatchFence,
 ) -> Result<bool> {
-    finalize_after_native_run_inner(store, reviewer_session_id)
+    finalize_after_native_run_inner(store, reviewer_session_id, fence)
 }
 
-fn finalize_after_native_run_inner(store: &Store, reviewer_session_id: &str) -> Result<bool> {
+fn finalize_after_native_run_inner(
+    store: &Store, reviewer_session_id: &str, fence: &super::effects::DispatchFence,
+) -> Result<bool> {
     let Some(native_session_id) = architect::parent_of(store,reviewer_session_id)? else { return Ok(false) };
     let Some(team) = architect::load(store,&native_session_id)? else { return Ok(false) };
     let Some(binding) = team.superagent_review.as_ref() else { return Ok(false) };
@@ -1416,7 +1421,7 @@ fn finalize_after_native_run_inner(store: &Store, reviewer_session_id: &str) -> 
     }
     if status.state == "reviewing" { return Ok(false); }
     if status.state == "passed" {
-        if persist_finalization(store,&request,&team,"passed",None)? { return Ok(true); }
+        if persist_finalization(store,&request,&team,"passed",None,fence)? { return Ok(true); }
         block_request(store,&request.id,"Native Council pass failed exact Ticket finalization checks.")?;
         return Ok(false);
     }
@@ -1463,6 +1468,14 @@ pub(super) fn prepare_human_accept(store: &Store, ticket_id: &str, expected_revi
 pub(super) fn finalize_human_accept(
     store: &Store, ticket_id: &str, expected_revision: i64, reason: &str,
 ) -> Result<Ticket> {
+    let fence = super::effects::lock_dispatch(&store.path)?;
+    finalize_human_accept_inner(store, ticket_id, expected_revision, reason, &fence)
+}
+
+fn finalize_human_accept_inner(
+    store: &Store, ticket_id: &str, expected_revision: i64, reason: &str,
+    fence: &super::effects::DispatchFence,
+) -> Result<Ticket> {
     let reason = reason.trim();
     if reason.is_empty() || reason.len() > 500 || reason.chars().any(char::is_control) {
         return Err("Provide a plain-text human acceptance reason of 1 to 500 characters.".into());
@@ -1475,7 +1488,7 @@ pub(super) fn finalize_human_accept(
     let native_session_id = request.native_session_id.as_deref().ok_or("Native Council session is missing.")?;
     let team = architect::load(store,native_session_id)?.ok_or("Native Council team is missing.")?;
     if !architect::verified_council_accept(store,&team)
-        || !persist_finalization(store,&request,&team,"human_accepted",Some(reason))?
+        || !persist_finalization(store,&request,&team,"human_accepted",Some(reason),fence)?
     {
         return Err("Attributed Council acceptance did not match the current native Ticket review.".into());
     }
@@ -1504,9 +1517,9 @@ pub(super) fn accept_and_finalize_human(
 
 fn finalize_human_accept_locked(
     store: &Store, ticket_id: &str, expected_revision: i64, reason: &str,
-    _fence: &super::effects::DispatchFence,
+    fence: &super::effects::DispatchFence,
 ) -> Result<Ticket> {
-    finalize_human_accept(store, ticket_id, expected_revision, reason)
+    finalize_human_accept_inner(store, ticket_id, expected_revision, reason, fence)
 }
 
 /// Atomically freeze a finished worker's exact ticket artifact against the
@@ -1801,7 +1814,7 @@ mod tests {
         ).unwrap();
         tx.execute(
             "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-             VALUES(?1,'admitted','manual worker with scoped write authorization reserved',?2)",
+             VALUES(?1,'admitted','manual readonly worker reserved',?2)",
             params![ticket_id,now],
         ).unwrap();
         let (reviewer_policy_json,reviewer_policy_sha256)=frozen_reviewer_policy(&snapshot).unwrap();
@@ -2150,6 +2163,33 @@ mod tests {
         assert_eq!(stored_snapshot_id,snapshot_id);
         assert_eq!(stored_snapshot_sha,snapshot_sha);
         assert!(!snapshot_root.exists());
+    }
+
+    #[test]
+    fn required_council_pass_finalizes_under_held_dispatch_fence_without_relocking() {
+        let mut store=fixture();
+        let workspace=workspace(&store);
+        std::fs::write(workspace.join("authorized-worker-write.md"),"reviewed bytes").unwrap();
+        let (ticket,worker_session_id,_)=required_worker(&mut store,"required-fenced-native-pass");
+        assert!(superagent::on_run_finished(&store,&worker_session_id,true,"Worker artifact").unwrap());
+        let (state,native_session_id)=start_required_review(store,&worker_session_id);
+        complete_native_reviewers(&state,&native_session_id,"9.5");
+        let store=state.store.lock().unwrap();
+        let team=architect::load(&store,&native_session_id).unwrap().unwrap();
+        assert_eq!(team.council_status.as_ref().unwrap().state,"passed");
+        let reviewer=team.workers.iter().find(|worker| worker.council.is_some()).unwrap();
+        // Production's app callback acquires this non-reentrant fence before the
+        // Store lock and passes it into the locked finalization path. Holding it
+        // here proves that path finalizes without acquiring a second fence.
+        let fence=crate::superagent::effects::lock_dispatch(&store.path).unwrap();
+        assert!(finalize_after_native_run_locked(&store,&reviewer.session_id,&fence).unwrap());
+        assert_eq!(superagent::get_ticket(&store,&ticket.id).unwrap().state,"completed");
+        assert_eq!(request_for_ticket(&store,&ticket.id).unwrap().unwrap().state,"passed");
+        let passed:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1 AND kind='council_passed'",
+            [&ticket.id],|row| row.get(0),
+        ).unwrap();
+        assert_eq!(passed,1);
     }
 
     #[test]

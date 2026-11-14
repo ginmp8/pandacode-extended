@@ -302,6 +302,9 @@ pub struct EffectiveTeam {
     pub policy_revision:i64,
     pub enabled:bool,
     pub execution_ready:bool,
+    /// Native read-side checks for the currently supported manual admission path.
+    /// Not proof of provider/tool support, Skill invocation or an issued grant.
+    pub manual_admission_blockers:Vec<String>,
     pub members:Vec<EffectiveMember>,
     pub grants_issued:bool,
 }
@@ -365,10 +368,37 @@ fn effective_team(
     for (position,id) in roster.reviewer_bot_ids.iter().enumerate() {
         add("reviewer",position,id)?;
     }
+    // Report the same locally observable topology, pause and primary-project
+    // barriers as the native manual admission path, without treating this
+    // read-only diagnosis as an authorization or a harness capability check.
+    let mut manual_admission_blockers=Vec::new();
+    if !roster.execution_ready {
+        manual_admission_blockers.push(
+            "Multi-role Team requires native scoped role admission; manual dispatch is unavailable.".into(),
+        );
+    }
+    if crate::feature_controls::get().bots_paused {
+        manual_admission_blockers.push(
+            "Bots are globally paused; native manual admission is unavailable.".into(),
+        );
+    }
+    for member in &members {
+        if (member.role=="coordinator" || (member.role=="worker" && member.position==0))
+            && member.paused {
+            manual_admission_blockers.push(format!(
+                "{} bot is paused; native manual admission is unavailable.",member.role,
+            ));
+        }
+        if member.role=="worker" && member.position==0 && member.project_id!=config.project_id {
+            manual_admission_blockers.push(
+                "Primary Worker project differs from the Team execution project.".into(),
+            );
+        }
+    }
     Ok(EffectiveTeam {
         orchestration_id:config.id,policy_revision:config.policy_revision,
         enabled:config.enabled,execution_ready:roster.execution_ready,
-        members,grants_issued:false,
+        manual_admission_blockers,members,grants_issued:false,
     })
 }
 
@@ -601,7 +631,14 @@ mod tests {
         }).unwrap();
         let one=effective_team(&store,&cfg.id,&HashMap::new()).unwrap();
         assert!(one.execution_ready);
+        assert!(one.manual_admission_blockers.is_empty());
         assert_eq!(one.members.len(),2);
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'",[]).unwrap();
+        let paused_primary=effective_team(&store,&cfg.id,&HashMap::new()).unwrap();
+        assert!(paused_primary.manual_admission_blockers.iter()
+            .any(|reason|reason.contains("worker bot is paused")));
+        assert!(!paused_primary.grants_issued);
+        store.db.execute("UPDATE bots SET paused=0 WHERE id='worker'",[]).unwrap();
         assert!(!one.grants_issued);
         assert_eq!(one.members[1].skills[0].library_status,"missing");
         let roster=set(&store,&cfg.id,cfg.policy_revision,&RosterInput {
@@ -652,6 +689,8 @@ mod tests {
             issue.contains("Paused bot")));
         assert!(!paused.grants_issued);
         assert!(!view.execution_ready);
+        assert!(view.manual_admission_blockers.iter()
+            .any(|reason|reason.contains("Multi-role Team")));
         assert!(!view.grants_issued);
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0)).unwrap(),0);

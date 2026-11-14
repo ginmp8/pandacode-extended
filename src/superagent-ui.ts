@@ -24,7 +24,7 @@ interface EffectiveMember {
 }
 interface EffectiveTeam {
   orchestrationId:string; policyRevision:number; enabled:boolean;
-  executionReady:boolean; grantsIssued:boolean; members:EffectiveMember[];
+  executionReady:boolean; grantsIssued:boolean; manualAdmissionBlockers:string[]; members:EffectiveMember[];
 }
 interface Ticket { id: string; orchestrationId: string; objective: string; state: string; revision: number; evidence: string | null }
 interface DemandIndex { id: string; orchestrationId: string; objective: string;
@@ -557,8 +557,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<p>Policy revision ' + effectiveTeam.policyRevision + ' · ' +
         (effectiveTeam.enabled ? 'Team enabled for manual checks' : 'Team Off') + ' · ' +
         (effectiveTeam.executionReady ? 'Single-worker topology' : 'Multi-role execution unavailable') +
-        ' · No task grant issued</p><ol>' +
-        effectiveTeam.members.map(member =>
+        ' · No task grant issued</p>' +
+        (effectiveTeam.manualAdmissionBlockers.length
+          ? '<p>Native manual admission blocked:</p><ul aria-label="Native manual admission blockers">' +
+            effectiveTeam.manualAdmissionBlockers.map(reason => '<li>' + safe(reason) + '</li>').join('') + '</ul>'
+          : '<p>Native manual topology and role preflight passed. Provider tools, Skills, grants and runtime capacity remain unverified.</p>') +
+        '<ol>' + effectiveTeam.members.map(member =>
           '<li><strong>' + safe(member.role) + ' ' + (member.position + 1) +
           ': ' + safe(member.name) + '</strong>' +
           ' · Harness ' + safe(member.provider) + ' · Model ' + safe(member.model) +

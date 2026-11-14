@@ -1306,7 +1306,9 @@ test('Team effective policy view is native-backed and never grants or launches t
       } as never;
       if(command==='superagent_effective_team') return {
         orchestrationId:'team',policyRevision:3,enabled:false,executionReady:false,
-        grantsIssued:false,members:[
+        grantsIssued:false,manualAdmissionBlockers:[
+          'Multi-role Team requires native scoped role admission; manual dispatch is unavailable.'
+        ],members:[
           {role:'coordinator',position:0,botId:'lead',name:'Lead',provider:'codex',
             model:'gpt-main',mode:'plan',reasoningEffort:'medium',projectId:'p',paused:false,skills:[],configurationIssues:[]},
           {role:'worker',position:0,botId:'worker',name:'Worker',provider:'claude',
@@ -1337,6 +1339,9 @@ test('Team effective policy view is native-backed and never grants or launches t
   await expect(view).toContainText('No local configuration issues detected. Harness/tool eligibility unverified.');
   await expect(view).toContainText('Harness eligibility not_verified');
   await expect(view).toContainText('Multi-role execution unavailable');
+  await expect(view.getByRole('list',{name:'Native manual admission blockers'}))
+    .toContainText('Multi-role Team requires native scoped role admission');
+  await expect(view).toContainText('Native manual admission blocked');
   await expect(view).toContainText('No task grant issued');
   const calls=await page.evaluate(()=>
     (window as unknown as {effectiveCalls:()=>string[]}).effectiveCalls());

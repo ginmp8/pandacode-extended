@@ -496,12 +496,25 @@ fn create_source(
     {
         return Err("Source requires an exact canonical repository, actor and supported event class.".into());
     }
-    let existing: Option<String> = store.db.query_row(
+    // GitHub logins and App slugs are case-insensitive. A case-only edit
+    // must reuse the same source, not create a second cursor and receipt stream.
+    // Preserve legacy rows as-is and deny ambiguous legacy case collisions.
+    let actor_key = actor_filter.to_ascii_lowercase();
+    let mut statement = store.db.prepare(
         "SELECT id FROM sa_event_sources
-         WHERE orchestration_id=?1 AND repository=?2 AND actor_filter=?3 AND event_kind=?4",
-        params![orchestration_id,repository,actor_filter,event_kind], |r| r.get(0),
-    ).optional().map_err(|e| e.to_string())?;
-    if let Some(id) = existing { return source(store, &id); }
+         WHERE orchestration_id=?1 AND repository=?2
+           AND actor_filter=?3 COLLATE NOCASE AND event_kind=?4
+         ORDER BY id LIMIT 2",
+    ).map_err(|e| e.to_string())?;
+    let matches = statement.query_map(
+        params![orchestration_id,repository,&actor_key,event_kind],
+        |row| row.get::<_,String>(0),
+    ).map_err(|e| e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+    if matches.len() > 1 {
+        return Err("Multiple legacy source actors differ only by case; reconcile before creating a source.".into());
+    }
+    if let Some(id) = matches.first() { return source(store, id); }
     let count: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM sa_event_sources WHERE orchestration_id=?1",
         [orchestration_id], |r| r.get(0),
@@ -512,7 +525,7 @@ fn create_source(
     store.db.execute(
         "INSERT INTO sa_event_sources(id,orchestration_id,repository,actor_filter,event_kind,
             mode,created_at,updated_at) VALUES (?1,?2,?3,?4,?5,'off',?6,?6)",
-        params![id,orchestration_id,repository,actor_filter,event_kind,now],
+        params![id,orchestration_id,repository,&actor_key,event_kind,now],
     ).map_err(|e| e.to_string())?;
     source(store, &id)
 }
@@ -1503,6 +1516,63 @@ mod tests {
         assert!(json.contains("observationalOnly"));
         assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
             |r| r.get::<_,i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn github_source_actor_case_aliases_share_one_durable_source_and_cursor() {
+        let (store, path) = fixture();
+        let first = create_source(&store, "orch", "owner/repo", "Trusted-Bot", "issues.opened").unwrap();
+        assert_eq!(first.actor_filter, "trusted-bot");
+        let alias = create_source(&store, "orch", "owner/repo", "TRUSTED-BOT", "issues.opened").unwrap();
+        assert_eq!(alias.id, first.id);
+        let active = set_mode(&store, &first.id, first.policy_revision, "observe").unwrap();
+        let events = serde_json::json!([{
+            "id":"5000003001", "type":"IssuesEvent",
+            "created_at":"2026-11-12T08:59:00Z",
+            "repo":{"name":"owner/repo"}, "actor":{"login":"TRUSTED-BOT"},
+            "payload":{"action":"opened", "issue":{"number":17,
+                "body":"Untrusted text is not a grant"}}
+        }]);
+        assert_eq!(poll_authenticated_events(&store, &active, 0, &events).unwrap().recorded, 1);
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        let later = create_source(&reopened, "orch", "owner/repo", "trusted-bot", "issues.opened").unwrap();
+        assert_eq!(later.id, first.id);
+        assert_eq!(later.policy_revision, active.policy_revision);
+        assert_eq!(later.last_sequence, 5_000_003_001);
+        assert_eq!(list_decisions(&reopened, &later.id, 10).unwrap().len(), 1);
+        let count: i64 = reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_event_sources WHERE orchestration_id='orch'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |row| row.get::<_,i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn ambiguous_legacy_case_aliases_fail_closed_without_changing_sources() {
+        let (store, _) = fixture();
+        create_source(&store, "orch", "owner/repo", "other-bot", "issues.opened").unwrap();
+        store.db.execute(
+            "INSERT INTO sa_event_sources
+             (id,orchestration_id,repository,actor_filter,event_kind,mode,created_at,updated_at)
+             VALUES('legacy-case','orch','owner/repo','Other-Bot','issues.opened','off',1,1)",
+            [],
+        ).unwrap();
+        let error = create_source(&store, "orch", "owner/repo", "OTHER-BOT", "issues.opened")
+            .unwrap_err();
+        assert!(error.contains("legacy source actors differ only by case"));
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_event_sources WHERE orchestration_id='orch'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 2);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_event_decisions", [],
+            |row| row.get::<_,i64>(0),
+        ).unwrap(), 0);
     }
 
     #[test]

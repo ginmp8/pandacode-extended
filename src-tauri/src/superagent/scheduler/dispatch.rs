@@ -345,16 +345,12 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
                             .map_err(|_|"WorkItem file scope is invalid.")?)
                     } else {None};
                     let request_key=format!("work.{}",item.id);
-                    let (child,launch)=superagent::admit_role_with_grant(
+                    let (child,launch)=superagent::admit_role_with_work_item(
                         &mut store,&root.orchestration_id,&item.objective,
-                        &request_key,false,false,false,Some(&item.worker),paths.as_deref(),
+                        &request_key,&item.worker,paths.as_deref(),&item.root,&item.id,
                     )?;
-                    let changed=store.db.execute(
-                        "UPDATE sa_work_items SET child_ticket_id=?2,state=?3,updated_at=?4
-                         WHERE id=?1 AND state='pending' AND child_ticket_id IS NULL",
-                        params![item.id,child.id,if launch {"running"} else {"blocked"},storage::now()],
-                    ).map_err(|e|e.to_string())?;
-                    if changed!=1 {return Err("WorkItem claim changed during native admission.".into())}
+                    // The child ID, native lease and immutable WorkItem
+                    // association are already committed as one transaction.
                     if launch {Some((child,paths))} else {None}
                 }
             }

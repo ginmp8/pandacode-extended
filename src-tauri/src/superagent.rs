@@ -2788,6 +2788,13 @@ struct AutoIntakeLink<'a> {
     source_revision: i64,
 }
 
+/// A native WorkItem must atomically own the child Ticket it admits.
+/// No orphaned worker authority may survive a failed DAG-link write.
+struct WorkItemAdmissionLink<'a> {
+    root_ticket_id: &'a str,
+    item_id: &'a str,
+}
+
 /// Keep the existing admission transaction as the sole writer of the Auto
 /// Ticket, its provider session, authenticated source association and audit.
 fn admit_role_with_auto_intake(
@@ -2796,7 +2803,7 @@ fn admit_role_with_auto_intake(
     link: &AutoIntakeLink<'_>,
 ) -> Result<(Ticket, bool)> {
     admit_role_with_grant_inner(store,config_id,objective,request_key,
-        false,true,false,Some(selected_worker),None,Some(link))
+        false,true,false,Some(selected_worker),None,Some(link),None)
 }
 
 /// App-managed exact-file writes are available only with a separately
@@ -2809,7 +2816,22 @@ fn admit_role_with_grant(
     authorized_paths: Option<&[String]>,
 ) -> Result<(Ticket, bool)> {
     admit_role_with_grant_inner(store,config_id,objective,request_key,
-        busy,coordinate,headless_staging,selected_worker,authorized_paths,None)
+        busy,coordinate,headless_staging,selected_worker,authorized_paths,None,None)
+}
+
+/// Native DAG admission reuses the same one-transaction Ticket/session/mandate
+/// writer as manual and authenticated-source admission. The WorkItem link
+/// is committed before the provider can receive the resulting child session.
+fn admit_role_with_work_item(
+    store: &mut Store, config_id: &str, objective: &str,
+    request_key: &str, selected_worker: &str, authorized_paths: Option<&[String]>,
+    root_ticket_id: &str, item_id: &str,
+) -> Result<(Ticket, bool)> {
+    let link = WorkItemAdmissionLink { root_ticket_id, item_id };
+    admit_role_with_grant_inner(
+        store, config_id, objective, request_key, false, false, false,
+        Some(selected_worker), authorized_paths, None, Some(&link),
+    )
 }
 
 fn admit_role_with_grant_inner(
@@ -2817,7 +2839,19 @@ fn admit_role_with_grant_inner(
     request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
     selected_worker: Option<&str>, authorized_paths: Option<&[String]>,
     auto_link: Option<&AutoIntakeLink<'_>>,
+    work_item_link: Option<&WorkItemAdmissionLink<'_>>,
 ) -> Result<(Ticket, bool)> {
+    if let Some(link) = work_item_link {
+        // The exact native WorkItem, not the model or an arbitrary request key,
+        // selects its source/root and the only Worker allowed to run it.
+        if auto_link.is_some() || coordinate || headless_staging || busy
+            || selected_worker.is_none()
+            || link.root_ticket_id.is_empty() || link.item_id.is_empty()
+            || request_key != format!("work.{}", link.item_id)
+        {
+            return Err("WorkItem admission requires an exact native root and Worker.".into());
+        }
+    }
     if auto_link.is_some() && (!coordinate || headless_staging ||
         authorized_paths.is_some() || selected_worker.is_none() || busy) {
         return Err("GitHub Auto may reserve only a read-only native Coordinator.".into());
@@ -2895,6 +2929,18 @@ fn admit_role_with_grant_inner(
             ).map_err(|e|e.to_string())?;
             if !linked {
                 return Err("Existing Ticket lacks an atomic authenticated Auto association; manual reconciliation required.".into());
+            }
+        }
+        if let Some(link)=work_item_link {
+            let linked: bool=store.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sa_work_items
+                 WHERE id=?1 AND ticket_id=?2 AND child_ticket_id=?3
+                   AND worker_bot_id=?4 AND state IN ('running','waiting_review','completed','blocked'))",
+                params![link.item_id,link.root_ticket_id,ticket.id,selected_worker],
+                |row|row.get(0),
+            ).map_err(|e|e.to_string())?;
+            if !linked {
+                return Err("Existing WorkItem Ticket has no atomic parent association; manual recovery required.".into());
             }
         }
         return Ok((ticket, false));
@@ -3060,6 +3106,23 @@ fn admit_role_with_grant_inner(
                 format!("Verified GitHub source {} / delivery {} / source revision {}",
                     link.source_id,link.delivery_id,link.source_revision),now],
         ).map_err(|e|e.to_string())?;
+    }
+    if let Some(link)=work_item_link {
+        // Validate the expected root, Worker, pending item and native mandate
+        // in the SAME transaction that issues the child Ticket and Assignment.
+        // Any rejected UPDATE (including an injected SQLite failure) rolls
+        // the entire Ticket, session, grant and audit back.
+        let changed=tx.execute(
+            "UPDATE sa_work_items
+             SET child_ticket_id=?3,state=?4,updated_at=?5
+             WHERE id=?1 AND ticket_id=?2 AND worker_bot_id=?6
+               AND state='pending' AND child_ticket_id IS NULL",
+            params![link.item_id,link.root_ticket_id,ticket_id,
+                if blocked {"blocked"} else {"running"},now,chosen_worker],
+        ).map_err(|e|e.to_string())?;
+        if changed!=1 || !scheduler::parent_active(store,&ticket_id)? {
+            return Err("WorkItem root changed or lost native authority during child admission.".into());
+        }
     }
     tx.commit().map_err(|e| e.to_string())?;
     Ok((get_ticket(store, &ticket_id)?, !blocked))
@@ -6638,6 +6701,73 @@ mod tests {
         assert_eq!(after.activity[0].kind, "stopped");
         assert!(ticket_snapshot(&store, &ticket.id, 0).is_err());
         assert!(ticket_snapshot(&store, &ticket.id, 201).is_err());
+    }
+
+    #[test]
+    fn native_work_item_child_link_failure_rolls_back_ticket_and_provider_authority() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (root,started)=admit_role(
+            &mut store,&cfg.id,"Native WorkItem admission root",
+            "atomic-work-item-root",false,true,
+        ).unwrap();
+        assert!(started);
+        let coordinator_session=assignment_session(&store,&root.id).unwrap().unwrap();
+        assert!(on_run_finished(&store,&coordinator_session,true,"Plan ready").unwrap());
+        let root=get_ticket(&store,&root.id).unwrap();
+        assert_eq!(root.state,"queued");
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_demand_plans
+             (ticket_id,ticket_revision,team_version,policy_revision,plan_sha256,
+              state,created_at,updated_at)
+             VALUES(?1,?2,?3,?4,?5,'active',?6,?6)",
+            params![&root.id,root.revision,cfg.team_version,cfg.policy_revision,
+                "a".repeat(64),now],
+        ).unwrap();
+        let item_id=storage::id();
+        store.db.execute(
+            "INSERT INTO sa_work_items
+             (id,ticket_id,item_key,ordinal,objective,worker_bot_id,state,created_at,updated_at)
+             VALUES(?1,?2,'implement',0,'Do bounded work','worker','pending',?3,?3)",
+            params![&item_id,&root.id,now],
+        ).unwrap();
+        let key=format!("work.{item_id}");
+        let total_before:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get(0),
+        ).unwrap();
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_work_item_link BEFORE UPDATE OF child_ticket_id
+             ON sa_work_items WHEN NEW.child_ticket_id IS NOT NULL
+             BEGIN SELECT RAISE(ABORT,'injected link failure'); END;",
+        ).unwrap();
+        assert!(admit_role_with_work_item(
+            &mut store,&cfg.id,"Do bounded work",&key,"worker",None,&root.id,&item_id,
+        ).is_err(),"A failed WorkItem association must reject the whole admission");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0),
+        ).unwrap(),total_before,"No native Ticket survives an aborted link");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id<>?1",
+            [&root.id],|r|r.get::<_,i64>(0),
+        ).unwrap(),0,"No child Assignment may retain provider authority");
+        store.db.execute_batch("DROP TRIGGER deny_work_item_link").unwrap();
+        let (child,launched)=admit_role_with_work_item(
+            &mut store,&cfg.id,"Do bounded work",&key,"worker",None,&root.id,&item_id,
+        ).unwrap();
+        assert!(launched);
+        let (linked,state):(String,String)=store.db.query_row(
+            "SELECT child_ticket_id,state FROM sa_work_items WHERE id=?1",
+            [&item_id],|r|Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        assert_eq!(linked,child.id);
+        assert_eq!(state,"running");
+        let (replayed,relaunched)=admit_role_with_work_item(
+            &mut store,&cfg.id,"Do bounded work",&key,"worker",None,&root.id,&item_id,
+        ).unwrap();
+        assert!(!relaunched,"Idempotent WorkItem replay must not dispatch twice");
+        assert_eq!(replayed.id,child.id);
+        assert!(scheduler::parent_active(&store,&child.id).unwrap());
     }
 
     #[test]

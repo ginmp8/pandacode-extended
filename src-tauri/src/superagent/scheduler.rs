@@ -9,7 +9,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
-use tauri::State;
+use tauri::{Manager,State};
 
 mod dispatch;
 pub(crate) use dispatch::{advance,parent_active,revoke_descendants,sessions_for_root};
@@ -535,6 +535,59 @@ pub(crate) fn capture_coordinator_plans(store:&Store)->Result<usize> {
         ).map_err(|error|error.to_string())?;
     }
     Ok(accepted)
+}
+
+
+/// Run native recovery and dependency progression in both the desktop app and
+/// \`pandacode serve\`. This does not introduce an autonomous source poll, new
+/// tool grant or external effect: only already-authorized local-user Demands
+/// with verifiable outstanding WorkItems are eligible.
+pub(crate) fn start_native(app:tauri::AppHandle) {
+    tauri::async_runtime::spawn(async move {
+        // AppState already exists before this service is installed. Allow
+        // the native bot/gateway service to finish the rest of setup.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        let mut last_error=String::new();
+        loop {
+            let state=app.state::<AppState>();
+            if state.shutdown.load(std::sync::atomic::Ordering::SeqCst)!=0 {
+                break;
+            }
+            let capture={
+                match state.store.lock() {
+                    Ok(store)=>capture_coordinator_plans(&store),
+                    Err(error)=>Err(error.to_string()),
+                }
+            };
+            let progressed=match capture {
+                Ok(_)=>advance(&app).await,
+                Err(error)=>Err(error),
+            };
+            match progressed {
+                Ok(_) => last_error.clear(),
+                Err(error) if last_error!=error => {
+                    eprintln!("SuperAgent native Demand recovery: {error}");
+                    last_error=error;
+                }
+                Err(_)=>{}
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+        }
+    });
+}
+
+/// Trusted one-shot headless inspection does not open a mutable Store; opening
+/// a live host's database must not run startup settlement or provider replay.
+pub(crate) fn headless_inspect_plan(
+    database_path:&std::path::Path,ticket_id:&str,
+)->Result<String> {
+    let store=Store::open_read_only(database_path)?;
+    let plan=inspect(&store,ticket_id)?;
+    serde_json::to_string(&serde_json::json!({
+        "ticketId":ticket_id,
+        "plan":plan,
+        "readOnly":true,
+    })).map_err(|error|error.to_string())
 }
 
 #[cfg(test)]

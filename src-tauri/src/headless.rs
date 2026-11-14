@@ -39,6 +39,7 @@ enum Command {
     },
     InspectTicket { ticket_id: String },
     InspectTicketGraph { ticket_id: String },
+    InspectDemandPlan { ticket_id: String },
     InspectTicketEffects { ticket_id: String },
     InspectTicketSource { ticket_id: String },
     InspectSourceHealth { source_id: String },
@@ -110,6 +111,23 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(status) => { println!("{status}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectDemandPlan { ticket_id } = &command {
+                // Only inspect the immutable native WorkItem graph. A separate
+                // CLI cannot invoke Store::open startup recovery while another
+                // serve/Desktop process holds live provider sessions.
+                let result=app.path().app_data_dir()
+                    .map_err(|error|error.to_string())
+                    .and_then(|directory| crate::superagent::scheduler::headless_inspect_plan(
+                        &directory.join("kingcode.sqlite3"),ticket_id,
+                    ));
+                match result {
+                    Ok(plan)=>{println!("{plan}");std::process::exit(0)}
+                    Err(error)=>{
+                        eprintln!("SuperAgent Demand plan inspection failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -407,6 +425,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         Command::InspectOrchestrations | Command::ListTickets | Command::ListReviewInbox
         | Command::ListRecoveryInbox | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
+        | Command::InspectDemandPlan { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
         | Command::InspectTicketEffects { .. }
         | Command::InspectTicketSource { .. } | Command::InspectSourceHealth { .. }
@@ -982,6 +1001,14 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--inspect-demand-plan" => {
+                let ticket_id=args.get(index+1)
+                    .ok_or("--inspect-demand-plan needs the exact root Ticket ID.")?;
+                validate_ticket_id(ticket_id)?;
+                command=Command::InspectDemandPlan{ticket_id:ticket_id.clone()};
+                ops+=1;
+                index+=1;
+            }
             "--inspect-ticket-graph" => {
                 let ticket_id = args.get(index + 1)
                     .ok_or_else(|| format!("--inspect-ticket-graph needs a Ticket ID.\n\n{}", help()))?;
@@ -1209,7 +1236,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1337,6 +1364,12 @@ mod tests {
         assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
         assert_eq!(parsed("--list-review-inbox"), Ok(Command::ListReviewInbox));
         assert_eq!(parsed("--list-recovery-inbox"), Ok(Command::ListRecoveryInbox));
+        assert_eq!(parsed("--inspect-demand-plan ticket_123"),
+            Ok(Command::InspectDemandPlan { ticket_id: "ticket_123".into() }));
+        for invalid in ["--inspect-demand-plan", "--inspect-demand-plan ../outside",
+                        "--inspect-demand-plan ticket_123 --stop-ticket ticket_123"] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert!(parsed("--list-recovery-inbox --stop-ticket ticket_1").is_err());
         assert_eq!(parsed("--inspect-source-health source_123"),
             Ok(Command::InspectSourceHealth { source_id: "source_123".into() }));
@@ -1562,6 +1595,7 @@ mod tests {
             "--inspect-team-roster",
             "--inspect-ticket",
             "--inspect-ticket-graph",
+            "--inspect-demand-plan",
             "--inspect-ticket-effects",
             "--inspect-ticket-source",
             "--unlink-source-thread",

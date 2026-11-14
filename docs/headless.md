@@ -9,6 +9,30 @@ is no webview and no window: the desktop frontend never runs on a server.
 Nothing changes for the desktop app. `pandacode` with no arguments is the ordinary GUI;
 `pandacode serve …` is the host and explicitly enables Connect and hosting for that invocation, even when the desktop's saved Connect switch was off.
 
+## Native SuperAgent Demand continuation
+
+After a configured local user explicitly starts a Demand in Bots → Orchestrations,
+the shared native scheduler wakes on startup, native Worker callbacks and bounded
+15-second checks in **both desktop and `pandacode serve`**. It inspects durable
+WorkItem dependencies, frozen Team policy, original local-user mandate and
+native Ticket results before admitting another existing Worker. It never infers
+a reviewed result from a provider reply or replays an uncertain external write.
+An interrupted Worker requiring fresh authorization remains blocked rather than
+being silently retried.
+
+Inspect an existing root plan without starting provider processes, opening a
+mutable database or running restart recovery:
+
+```sh
+pandacode serve --inspect-demand-plan ROOT_TICKET_ID
+```
+
+This returns a bounded JSON description of the saved WorkItems, predecessor
+keys, child Ticket statuses and requested/confirmed file scopes. It is a
+trusted local operator action; it is **not** a network API or a grant. Headless
+creation of a new scoped file-write permission remains unsupported: those
+grants require the native desktop confirmation dialog on a supported platform.
+
 ## What the server runs
 
 `serve` builds the real app — storage, provider credentials, the queue, bots, the

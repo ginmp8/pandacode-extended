@@ -4154,6 +4154,9 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     // Machine threads that settled while PandaCode was closed wake their idle tasks.
     remote::orchestrate::reconcile(app.handle());
     schedules::start(app.handle().clone());
+    // One native scheduler for desktop and serve. It resumes only already
+    // authorized Demand DAGs; no startup GitHub Auto or ambient grants.
+    superagent::scheduler::start_native(app.handle().clone());
     Ok(dir)
 }
 

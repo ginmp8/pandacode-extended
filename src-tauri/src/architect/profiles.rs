@@ -34,6 +34,7 @@ impl ModelSelection {
             "antigravity",
             "grok",
             "mimo",
+            "alibaba",
             "pi",
             "deepseek",
             "commandcode",
@@ -44,6 +45,7 @@ impl ModelSelection {
             "muse",
             "devin",
             "hermes",
+            "cursor",
         ]
         .contains(&self.provider.as_str())
             || self.model.len() > 200
@@ -57,7 +59,7 @@ impl ModelSelection {
         )
     }
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TeamSetup {
     pub architect: ModelSelection,
@@ -178,9 +180,11 @@ pub(crate) fn save_profile(
     store: &Store,
     id: Option<String>,
     name: String,
-    setup: TeamSetup,
+    mut setup: TeamSetup,
 ) -> Result<TeamLibrary> {
     setup.validate()?;
+    // Council is per task: a saved team profile never carries it.
+    setup.config.council = None;
     let name = validate_name(&name)?;
     let transaction = store
         .db
@@ -267,6 +271,9 @@ pub(super) fn remember(
         }
         library.active_profile_id = profile.map(|p| p.id.clone());
         library.enabled = true;
+        // Council is per task: it never becomes the default for new tasks.
+        let mut setup = setup;
+        setup.config.council = None;
         library.last_setup = Some(setup);
     } else {
         library.enabled = false;
@@ -316,6 +323,30 @@ pub(crate) fn create_user_task(
     mode: Option<&str>,
     details: Option<(&str, &str)>,
 ) -> Result<Session> {
+    create_task_with(store, project_id, provider, model, mode, details, true)
+}
+/// A user task without the saved default team. Callers: a remote `task.start` on a host without
+/// "Full access for remote tasks" (a team's workers always run in full access), the desktop's
+/// /btw side task (`create_session` with `team: false`), the remote `btw.ask`, and chat creation.
+pub(crate) fn create_task_without_team(
+    store: &Store,
+    project_id: &str,
+    provider: &str,
+    model: &str,
+    mode: Option<&str>,
+    details: Option<(&str, &str)>,
+) -> Result<Session> {
+    create_task_with(store, project_id, provider, model, mode, details, false)
+}
+fn create_task_with(
+    store: &Store,
+    project_id: &str,
+    provider: &str,
+    model: &str,
+    mode: Option<&str>,
+    details: Option<(&str, &str)>,
+    team: bool,
+) -> Result<Session> {
     let transaction = store
         .db
         .unchecked_transaction()
@@ -329,7 +360,9 @@ pub(crate) fn create_user_task(
     if let Some((title, description)) = details {
         store.update_task_details(&task.id, title, description)?;
     }
-    apply_default(store, &task.id)?;
+    if team {
+        apply_default(store, &task.id)?;
+    }
     let task = store.session(&task.id)?;
     transaction.commit().map_err(|e| e.to_string())?;
     Ok(task)

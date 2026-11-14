@@ -1,7 +1,7 @@
 # Provider integrations
 
 PandaCode launches each installed CLI directly. Claude, Codex, Kimi, OpenCode,
-Antigravity, Grok Build, Devin CLI, ZCode, and Hermes Agent own their authentication; sign in using their official
+Antigravity, Grok Build, Devin CLI, ZCode, Hermes Agent, and Cursor CLI own their authentication; sign in using their official
 CLI or extension.
 The optional Z.AI Coding Plan and MiMo Token Plan API keys are stored as separate
 entries in PandaCode's secrets store (see [secret storage](#secret-storage)) and injected only into their isolated Claude subprocesses. The app discovers executable paths
@@ -87,12 +87,13 @@ and variable); the file and the webview only see their names, and an edit that
 leaves a secret empty keeps the saved value. Deleting a connection removes its
 secrets and returns its tasks to the harness's own setup.
 
-The model picker lists each connection as its own group (`Claude Work · Claude
-Sonnet 5`); choosing a row sets the task's connection (`connection_assign`),
-and the composer label shows it. The assignment is kept per task in the same
-file, so no schema change was needed, and a task never changes connection on
-its own. A task without one, or whose harness no longer matches its connection,
-uses the global configuration exactly as before.
+The model picker offers each installed harness once, with one set of models.
+Named accounts are managed in Settings → Agents → Providers; they never add
+account tabs, duplicate model choices or search results, whether pooling is on
+or off. Selecting another model in the same harness keeps the task's account
+and resumable conversation. Existing per-task assignments remain saved in the
+connections file; a task without one, or whose harness no longer matches its
+connection, uses the harness's global setup unless its account pool is enabled.
 
 At launch (`run_inner` in `providers.rs`, and warm Claude agents in
 `providers/warm.rs`) the connection's executable replaces the discovered one,
@@ -133,15 +134,14 @@ rejected. Pool only accounts you own; each must be your own subscription, and
 Settings says so beside **Add account**.
 
 Each row shows the account's email, plan and how many tasks it runs, a status
-chip (**Ready**, **Near limit**, **5-hour limit · until 3:00 PM** or **Weekly
+icon (**Ready**, **Near limit**, **5-hour limit · until 3:00 PM** or **Weekly
 limit · until Sat 10:32 AM** when the CLI said which limit ran out, **Not signed
 in**, **Same login**, **Left out**) and up to two usage meters (such as the
 5-hour and weekly windows) with when each resets; a meter turns amber at 70 %
-and red at 90 %, and fresh usage at 90 % or more is what makes the chip read
-Near limit. While the pool is off the list is dimmed and only the neutral chips
-show. The email and plan are read locally from the CLI's own login files in the
+and red when full or held by a limit; fresh usage at 90 % or more makes the status read
+Near limit. Default accounts remain visible while pooling is off, even without named connections. Status icons expose their full state as an accessible label and tooltip. The email and plan are read locally from the CLI's own login files in the
 account's config folder and are only shown in the app; they are never sent
-anywhere. Usage comes from the same per-account limit check as the Usage view:
+anywhere. A missing local email can fall back to the same Codex account's `account/read` email returned with usage. Refresh re-reads local identity; unavailable limits retain known identity. Config-folder overrides use the same resolved path for identity and usage. External tokens and shared-login aliases never supply a fabricated identity. Usage comes from the same per-account limit check as the Usage view:
 once when the card first shows, then at most every 5 minutes when the window
 regains focus, or when you click the card's refresh button (the minute timer
 only re-reads PandaCode's own pool status). **Usage not available** means the
@@ -194,11 +194,13 @@ window at 90 % or more, or a model-family limit (`seven_day_opus`,
 `seven_day_sonnet`), which never marks the whole account out. Before a turn, a
 task leaves an account that is out or taken out of the pool, or one that is near
 its limit while another has room, so most switches happen between turns. A new
-conversation (nothing to resume yet) with no account picked for it also starts
+conversation (nothing to resume yet) with no saved account binding also starts
 on a quieter account when the default runs more tasks; this is how parallel tasks
-and team workers spread over the pool. An account picked in the model picker is
-kept while it has room, and a running conversation stays on its account until it
-nears a limit.
+and team workers spread over the pool. New pooled tasks do not explicitly inherit
+another task's named account; native routing chooses their account. Existing
+conversations keep their account while it has room, until pool policy needs to
+move them. Choosing a harness or model never changes the Account pool switch;
+pooling is opt-in in Settings and supports only Claude Code and Codex.
 
 Only a turn that fails at its limit moves; a limit inside a turn that still
 finished (a fallback model, overage) does not. Then PandaCode holds the account
@@ -207,8 +209,10 @@ copies the harness session file into the next account's config folder (Claude:
 `projects/<slug>/<id>.jsonl`; Codex: `sessions/YYYY/MM/DD/rollout-*-<id>.jsonl`;
 folders it creates are 0700), moves the task there and resumes the session
 with “Continue where you left off.” inside the same run. A first turn that has
-no session yet is sent again as is. A transcript note names the move and the
-composer shows the new account; there is no banner. Stop pressed before the
+no session yet is sent again as is. The transcript shows a compact **Account
+switched** disclosure, closed by default; opening it shows the full explanation
+and account names. It appears during the run and in saved history, including
+side threads. The composer keeps the harness/model label; there is no banner. Stop pressed before the
 first attempt runs nothing, and Stop during a switch ends the run before the
 next account starts. Other messages sent meanwhile wait for the next account; a
 steer is acknowledged at once as a next-turn message and delivered there. If
@@ -657,8 +661,9 @@ subprocess credential scrubbing is enabled.
 Antigravity launches Google's official `agy_acp_server.par` (`agy_acp_server.exe`
 on Windows), which can be selected in Settings. When that server is not found,
 PandaCode falls back to the standalone `agy` CLI and starts its ACP server with
-`agy acp`; an executable override named `agy` starts the same way. The executable
-and provider sign-in must already be installed. ACP initialization/session metadata supplies its model
+`agy acp --process-per-session` to enable HTTP MCP for PandaCode tools. An
+executable override named `agy` starts the same way. The executable and provider
+sign-in must already be installed. ACP initialization/session metadata supplies its model
 labels and supported controls; image, HTTP MCP, resume, and planning support are
 checked explicitly. No private API, unofficial adapter, or browser-cookie
 authentication is used. Antigravity's own policy applies, with ACP approval
@@ -1021,7 +1026,10 @@ instead of silently running in a different one.
 Accept edits → `edit`, Full access → `yolo`. Permission requests arrive as
 `interaction/requestPermission` reverse requests with ready-made response objects;
 PandaCode answers with the offered `allow`/`deny` response, never inventing a
-standing grant. Sessions use deferred persistence, so captures and failed starts
+standing grant. In Full access, a request that offers a one-time allow is answered
+with it automatically; one that offers only a lasting allow (such as `allow_project`)
+asks a person instead, and a team worker declines it with a plain deny (no offered
+deny option is needed). Sessions use deferred persistence, so captures and failed starts
 leave nothing in the user's ZCode history; `session/resume` keeps a task's session
 across turns.
 
@@ -1036,6 +1044,34 @@ note so the turn continues; slash-command discovery and the harness console are 
 offered. The protocol is ZCode's private surface and evolves with the CLI — frames
 are parsed defensively (unknown events ignored, unknown reverse requests answered
 `-32601`) and pinned per recorded version.
+
+ZCode can lead and join agent teams. A fresh session carries the host-tools MCP
+server inline in `session/create` (`mcpServers`, one entry from
+`mcp_host::zcode_config`: loopback HTTP, the same bearer the other harnesses use,
+`isolation: "session"`, `alwaysLoad: true` so ZCode does not defer the tools
+behind its tool search). `session/resume` takes no `mcpServers` and
+`session/update` is not implemented, so a resumed session pushes the run's fresh
+server through `mcp/list` in `connect` mode (recorded 2026-11-13 against CLI
+0.17.1). A required fresh session — a team worker, or a solo task whose tools
+are required — sends that same check before the prompt. An unreachable server
+does not fail `session/create`, and a subscribe reply can arrive first, so the
+prompt waits until the check settles. An optional fresh bridge (title
+suggestions) stays inline and does not wait on `mcp/list`. When the check
+fails, a required run stops with a clear message and an optional bridge drops
+out quietly.
+
+ZCode negotiates MCP revision 2026-07-28. It probes HTTP servers with
+`server/discover`, and `tools/list` / `tools/call` results must carry
+`resultType: "complete"` plus `ttlMs` and `cacheScope`. `mcp_host` answers
+accordingly for every harness, including those fields on `server/discover`.
+`ttlMs: 0` means immediately stale, so a client does not replay a host-tool
+call. The listed tools are this run's host catalog (name, description and input
+schema only) — the same catalog the other harnesses receive, not a wider one.
+A request may send `MCP-Protocol-Version: 2026-07-28`; that header is accepted
+alongside `2025-06-18` and `2025-03-26`, and `initialize` echoes it. The CLI
+bundled with an older ZCode.app may reject the create's `mcpServers` key with
+its own schema error — the bridge is recorded from 0.17.1, and the CLI tracks
+the installed app.
 
 Verified against the CLI bundled with ZCode.app (user-agent `ZCode/3.16.3`) on
 2026-10-25 by driving `zcode app-server` directly (create, subscribe, two turns,
@@ -1075,6 +1111,89 @@ drives it with the shared ACP adapter (`providers/hermes.rs`). Official docs: [h
 **Approvals.** Standard (`ask`) requests approval for shell commands and dangerous actions; Accept edits (`auto`) automatically allows file edits while prompting for commands; Plan mode (`plan`) enforces read-only investigation and declines state-changing actions; Full access (`full`) skips approvals (equivalent to Hermes' `--yolo` flag).
 
 **Interactive console.** Click Open terminal to start `hermes` in an interactive terminal session. PandaCode passes `--resume <session>` when continuing a task, and `--yolo` when the task is in Full access mode.
+
+## Cursor CLI
+
+Cursor CLI (install with `curl https://cursor.com/install -fsS | bash`) serves ACP v1
+with `agent acp`. Older installs and the current installer also expose `cursor-agent`;
+PandaCode launches whichever it finds first. The generic `agent` name is used only
+when that path resolves inside a Cursor install (the resolved path contains
+`cursor-agent`). A copy installed somewhere else can be selected in Settings.
+PandaCode drives it with the shared ACP adapter (`providers/cursor.rs` holds its
+quirks). Official docs: [CLI overview](https://cursor.com/docs/cli/overview) and
+[ACP](https://cursor.com/docs/cli/acp).
+
+**Sign-in.** Cursor keeps its own sign-in. Run `agent login` (or `cursor-agent login`)
+once, or set `CURSOR_API_KEY` or `CURSOR_AUTH_TOKEN` in the harness's environment
+variables. PandaCode does not put the key on the command line. After `initialize`,
+when the CLI advertises `cursor_login`, PandaCode calls `authenticate` with that
+method and then opens or resumes the session. A missing sign-in fails that call
+(or the session call) with ACP `-32000`, and the turn stops with “Cursor is not
+signed in. Run `agent login` (or `cursor-agent login`) in a terminal, or set
+CURSOR_API_KEY, then send again.” Prompts and model calls go to Cursor under your
+Cursor plan.
+
+**Models and effort.** PandaCode sets `_meta.parameterizedModelPicker` in
+`initialize`, so the `model` option lists base models (`claude-opus-5`, `gpt-5.5`,
+`composer-2.5`…), and each model's effort, context size and speed arrive as separate
+options. Discovery sends `authenticate` (when advertised) and then Cursor's own
+`cursor/list_available_models` request once (about 4 s, in an empty scratch folder):
+it returns every model with its options, opens no session, leaves nothing in
+Cursor's chat history and does not change Cursor's saved model. The result is
+cached like other ACP catalogs. Each model's efforts are its own `thought_level`
+values, named as Cursor names them. Some models offer both a Thinking switch and an
+Effort level; the picker shows the Effort level. **Default** keeps the model last
+chosen in Cursor. Choosing a model in a task sets it with `session/set_config_option`,
+and Cursor saves that choice as its own default too. Cursor's per-model Fast switch
+stays on the value saved in Cursor; PandaCode's Speed row is for Codex and Claude.
+
+**Approvals.** Cursor's Agent mode applies file edits without asking, and asks before
+shell commands outside your Cursor allowlist. Standard runs in Agent mode and shows
+those requests as approvals; Accept edits is not offered (a task already in it also
+runs in Agent mode). Plan mode → Cursor's `plan`, which is read-only on Cursor's side;
+any read, search, fetch or think request is allowed and anything else is declined.
+Full access runs in Agent mode and approves every request. Approving always chooses
+`allow-once`.
+
+**Plans and questions.** In Plan mode, Cursor ends with a `cursor/create_plan`
+request. PandaCode shows the plan as its own message and accepts it, and Cursor keeps
+it in its data folder. Edits stay declined for that mode, so accepting the plan does
+not start implementation. Cursor's `cursor/ask_question` tool is answered “skipped”
+with a note that includes the question, so the agent asks it in its reply instead.
+`cursor/update_todos`, `cursor/task` and `cursor/generate_image` are acknowledged.
+An image notice is not opened and its bytes are not sent back. Any other `cursor/*`
+request gets the shared unsupported-request answer.
+
+**Fewer round trips.** `session/new` and `session/load` report the mode, model and
+effort, so a setting that is already in place is not sent again. `session/load`
+replays the conversation before it answers; that replay is ignored.
+
+**Turn data.** Text, thoughts, tool calls, cancel, images
+(`promptCapabilities.image`) and steering (held for the next turn) use the common
+ACP paths. When Cursor advertises HTTP MCP, `session/new` and `session/load` include
+PandaCode's per-run tool server, the same way as other ACP harnesses. Servers in a
+project or user `.cursor/mcp.json` stay Cursor's; team MCP from the Cursor dashboard
+is not available over ACP. Cursor does not report plan usage over ACP, so the Usage
+dialog points to the Cursor dashboard.
+
+**Commands.** Cursor has no ACP session delete, so PandaCode does not open a session
+just to read the slash commands; they appear once a task has run.
+
+**Terminal console.** The console opens Cursor's interactive CLI with the task's
+`--model`, `--resume <chat-id>` for an existing task (ACP sessions and CLI chats are
+the same), `--plan` for Plan mode and `--force` for Full access.
+
+**Updates.** Cursor updates itself (`agent update`), so Settings shows a manual
+update link.
+
+Recorded frames from `cursor-agent` 2026.10.22 (2026-11-10) back the unit tests in
+`providers/cursor.rs`: initialize advertises `cursor_login`, and the catalog, session,
+permission, plan and question shapes are from that CLI. `authenticate` runs before
+the session because that is the flow in [Cursor's ACP docs](https://cursor.com/docs/cli/acp)
+and in the sign-in error those frames record. Live tests, which need a signed-in
+CLI: `cargo test --lib installed_cursor -- --ignored`
+(`installed_cursor_lists_models` reads the catalog without a prompt;
+`installed_cursor_runs_and_resumes_a_task` sends two short prompts to `composer-2.5`).
 
 ## Kilo Code
 
@@ -1298,3 +1417,23 @@ and settings (`app.pandacode.cloud`) and bot channel tokens (`app.pandacode.bots
   GLM read uses the file, else the noninteractive helper (`usage_keychain.rs`).
 - **Linux:** the Secret Service. **Windows:** Credential Manager. Neither prompts after an
   update.
+
+## Alibaba Token Plan
+
+Alibaba Cloud Model Studio's Token Plan runs the same way as MiMo: the installed
+Claude Code, pointed at the plan's Anthropic-compatible endpoint
+`https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic` with the plan's
+own key (`sk-sp-…`), sent as `ANTHROPIC_AUTH_TOKEN` (documented at
+https://www.alibabacloud.com/help/en/model-studio/claude-code-token-plan). The plan is
+sold in Singapore only, so there is no endpoint choice. Keys and base URLs of Token
+Plan, Coding Plan and pay-as-you-go are isolated: a Coding Plan or `sk-` key gets 401,
+which the missing-key error and the Settings card both say.
+
+The key lives in the secure store (`alibaba-token-plan`) or comes from
+`ALIBABA_TOKEN_PLAN_API_KEY`, which is scrubbed from the child with the other relay keys.
+Isolation is MiMo's: `--setting-sources ""`, the endpoint and model slots in `--settings`.
+Every Claude Code slot must name a plan model or requests fail, so main and Opus are
+`qwen3.8-max` and Sonnet and Haiku `qwen3.8-flash` (the documented mapping). The picker
+lists the text models from the Personal Edition overview's "Supported models"
+(Qwen 3.6–4 preview, `auto`, DeepSeek V4, GLM 5.2/5.3), read on 2026-11-12;
+`qwen4-max-preview` retires after November 25, 2026. Cloud machines do not run it yet.

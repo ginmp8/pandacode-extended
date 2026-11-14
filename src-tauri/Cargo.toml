@@ -1,6 +1,6 @@
 [package]
 name = "pandacode"
-version = "0.3.101"
+version = "0.3.126"
 description = "A lightweight native workspace for coding agents"
 authors = ["PandaCode contributors"]
 edition = "2021"
@@ -16,6 +16,9 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["macos-private-api", "unstable", "tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
+# The blocking error dialog when the desktop app cannot start (crash_guard/startup.rs); the
+# version tauri-plugin-dialog already brings in, which also picks its platform features.
+rfd = { version = "0.16", default-features = false }
 tauri-plugin-single-instance = "2"
 tauri-plugin-global-shortcut = "2"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "gif"] }
@@ -23,7 +26,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = { version = "=0.9.12", default-features = false, features = ["parse", "serde"] }
 tokio = { version = "1.53.3", features = ["full"] }
-rusqlite = { version = "0.38", features = ["bundled"] }
+rusqlite = { version = "0.41.1", features = ["bundled"] }
 uuid = { version = "1", features = ["v4", "v7"] }
 portable-pty = "0.9"
 ignore = "0.4.33"
@@ -36,7 +39,10 @@ hmac = "0.12"
 hkdf = "0.12"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 chacha20poly1305 = "0.10"
-reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "rustls-no-provider"] }
+# The app data dir before Tauri starts (crash guard): the same crate and major version Tauri
+# resolves `app_data_dir` with (its PathResolver needs an app, which the guard never has).
+dirs = "7"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 tokio-tungstenite = { version = "0.28", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
@@ -44,14 +50,18 @@ rustls = { version = "0.23.46", default-features = false, features = ["ring", "s
 webpki-roots = "0.26"
 des = "0.8"
 shell-words = "1"
-zip = { version = "=9.0.5", default-features = false, features = ["deflate"] }
-# Disable the updater\u0027s optional legacy Windows ZIP extraction (zip ^4); keep TLS transport.
-# Signed direct-update paths remain available. Revalidate .nsis.zip/.msi.zip if shipping Windows bundles.
-tauri-plugin-updater = { version = ">=2, <2.10", default-features = false, features = ["rustls-tls"] }
+zip = { version = "=9.5.1", default-features = false, features = ["deflate"] }
+# The 2.14 updater uses reqwest 0.13 and the OS certificate store (Rust 1.90).
+# Keep Extended's optional ZIP extraction disabled while retaining signed direct updates.
+tauri-plugin-updater = { version = ">=2.14.1, <2.15", default-features = false, features = ["rustls-tls"] }
 tauri-plugin-process = ">=2, <2.4"
 if-addrs = "=0.15.0"
 # Panda Router (src/panda_router): deterministic matcher; the ONNX profiler is target-gated below.
 libm = "0.2"
+cpal = "0.17"
+# On-device dictation (src/voice/local): 16 kHz resampling and the free-space check before downloads.
+rubato = "5"
+fs4 = "1.1"
 
 # Panda Router's ONNX profiler (static ONNX Runtime) only where a prebuilt runtime links and runs on
 # baseline hardware: none exists for Intel macOS, the x86_64 Linux one needs glibc 2.38 (releases build
@@ -62,8 +72,17 @@ libm = "0.2"
 ort = { version = "=2.0.0-rc.15", default-features = false, features = ["std", "download-binaries", "tls-rustls"] }
 tokenizers = { version = "0.22.2", default-features = false, features = ["fancy-regex"] }
 
+# On-device speech engine, linked statically and run in the `__speech-worker` child process.
+# Metal on Apple silicon; everything else is CPU only. x86 builds stay at SSE4.2/AVX/F16C via
+# TRANSCRIBE_CMAKE_ARGS set per x86_64 row in .github/workflows/release.yml (no AVX2+, unlike the ort crash noted above).
+[target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
+transcribe-cpp = { version = "=0.4.1", default-features = false, features = ["metal"] }
+[target.'cfg(not(all(target_os = "macos", target_arch = "aarch64")))'.dependencies]
+transcribe-cpp = { version = "=0.4.1", default-features = false }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3"
+objc2-av-foundation = { version = "0.3.2", default-features = false, features = ["std", "AVCaptureDevice", "AVMediaFormat", "block2"] }
 objc2 = "0.6.4"
 block2 = "0.6"
 objc2-web-kit = { version = "0.3.2", default-features = false, features = ["std", "WKWebView", "WKSnapshotConfiguration", "WKNavigation", "block2", "objc2-app-kit"] }
@@ -74,7 +93,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = ["s
 [target.'cfg(target_os = "windows")'.dependencies]
 dunce = "1"
 webview2-com = "0.39"
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_ProcessStatus", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_Security"] }
+windows = { version = "0.62", features = ["Devices_Enumeration", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_System_ProcessStatus", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_Security"] }
 keyring = { version = "3", default-features = false, features = ["windows-native"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
@@ -86,6 +105,10 @@ keyring = { version = "3", default-features = false, features = ["sync-secret-se
 # feature is not a default; it reaches Niri, Hyprland, KDE and GNOME's data-control.
 # WKWebView and WebView2 hand pasted images over as files, so other targets skip it.
 arboard = { version = "3", features = ["wayland-data-control"] }
+
+[dev-dependencies]
+# Paused tokio clock for deterministic usage-check timing tests (test builds only).
+tokio = { version = "1", features = ["test-util"] }
 
 [profile.release]
 lto = "thin"

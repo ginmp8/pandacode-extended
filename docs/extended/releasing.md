@@ -20,3 +20,19 @@ Creating a GitHub Release still requires an explicitly initiated `workflow_dispa
 - After merging, validate release resolution using `npm run test:release`, inspect exact-SHA CI, and test installers and upgrades on real supported platforms before approving public artifacts. A green CI build alone is not native upgrade acceptance.
 
 See the [Extended readiness checklist](0.11.0/release-checklist.md) and [upstream parity contract](upstream/parity-contract.md).
+
+## Manual publication requires main-push CI (2026-11-10)
+
+A successful `ci.yml` run must match **both** the exact source commit SHA being released and a **push event on `main`**. Successful PR and other-branch runs do not satisfy the release gate. Only an explicit `workflow_dispatch` with `publish=true` checks this gate and may create a GitHub Release; tag pushes still build workflow artifacts and never publish. Pending/failed/cancelled CI blocks manual publication, and cancelled CI must be rerun for that commit before retrying the release. The app version, Extended release identity and no-npm policy are unchanged.
+
+## Upstream CI retention and failed API lookups — 2026-11-10
+
+[source `bc323966a0e0`](https://github.com/ginmp8/pandacode/commit/bc323966a0e0f24b13dfd5732cc300f791a965fe) retains main-push CI runs when newer commits are pushed, and the release gate now rejects a nonzero `gh run list` exit before parsing its output. The Extended workflow applies both protections while preserving manual `workflow_dispatch` `publish=true` as the only GitHub Release publication path. Tag pushes build artifacts only; npm publishing stays disabled. A successful rerun of failed/flaky CI jobs is eligible for the exact-SHA gate, while actual release approval and native testing remain separate.
+
+## Upstream CI gate follow-up — 2026-11-10
+
+At [fork `9437b3a9`](https://github.com/ginmp8/pandacode/commit/9437b3a92cc3d41e899770f645f8a08449ce6bbf), the upstream manual release gate checks that the newest CI lookup result is an object, identifies the cancelled or failing CI run by ID, and provides `gh run rerun <id>` or `gh run rerun <id> --failed` for appropriate recovery. A main push run holding the concurrency slot is retained; pending runs waiting for that slot may be superseded by later pushes. The Extended gate incorporates these diagnostics **only** for explicitly approved manual `workflow_dispatch` publication. Tag pushes still build artifacts without publication, and there is no npm publish job. This source documentation update is not release authorization.
+
+## Upstream 0.3.109 CI behavior — 2026-11-11
+
+[Source `64996a1a`](https://github.com/ginmp8/pandacode/commit/64996a1a8b1d722eb10b0c4ec4b3c1ffef1fd197) protects running push CI from supersession, allows pending/PR/manual runs to be replaced, and adds macOS real-audio tests in an optimized release profile. The Extended workflow keeps manual-only `workflow_dispatch publish=true` GitHub Release publication, tag-build artifacts without auto-publish and no npm publication. CI evidence and actual installed Voice behavior are release-readiness checks, not publication authorization.

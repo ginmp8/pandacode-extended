@@ -2,8 +2,8 @@
 
 A small, native desktop workspace for coding agents. PandaCode runs the coding
 CLIs you already use — **Claude Code, Codex, Kimi Code, OpenCode, GLM Coding
-Plan and Xiaomi MiMo** (through Claude Code), **GitHub Copilot CLI, Antigravity,
-xAI's Grok Build, DeepSeek, Command Code, Cline, Kilo Code, Devin CLI and Hermes Agent** (through ACP), **ZCode** (through its app-server protocol), **Pi** and its
+Plan, Xiaomi MiMo and Alibaba Token Plan** (through Claude Code), **GitHub Copilot CLI, Antigravity,
+xAI's Grok Build, DeepSeek, Command Code, Cline, Kilo Code, Devin CLI, Hermes Agent and Cursor CLI** (through ACP), **ZCode** (through its app-server protocol), **Pi** and its
 fork **omp** (through Pi's RPC mode), and Meta's **Muse Code** (through its MSP
 protocol) — side by side, with your projects, Git, a
 terminal and a browser in one window.
@@ -102,8 +102,12 @@ embedded editor engine.
 - **Agent usage.** Account limits and cost estimates for each installed harness
   ([agent usage](docs/agent-usage.md)), and one-click CLI updates
   ([agent updates](docs/agent-updates.md)).
-- **Skills, recipes and capabilities.** Import a skill or rule once and turn it on per
-  agent ([skills library](docs/skills-library.md)), save multi-step
+- **Skills, rules, recipes and capabilities.** Settings → Tools → **Skills** lists every
+  skill installed for any agent in one place: switch one off for a project or everywhere
+  in PandaCode (agents PandaCode runs; some can only be asked not to use it), add skills
+  from skills.sh, GitHub, GitLab or a local folder, and uninstall with Undo
+  ([skill manager](docs/skill-manager.md)). Rules are imported once in **Rules & library**
+  and turned on per agent ([rules and library](docs/skills-library.md)). Save multi-step
   [recipes](docs/recipes.md) with a dry run per harness, and compare each agent's
   commands, MCP servers, hooks and skills ([capabilities](docs/capabilities.md)).
 - **Codex goals.** `/goal` sets an objective with an optional token budget. See
@@ -223,21 +227,73 @@ Discord, WhatsApp or a browser too.
   </tr>
 </table>
 
-**Settings in seven sections.** General, Appearance, Agents, Schedules, Tools,
-Connections and About, with colors and imported VS Code themes.
+**Settings in nine sections.** Recommended, General, Appearance, Voice, Agents,
+Schedules, Tools, Connections and About, with colors and imported VS Code themes.
 
-<img src="docs/screenshots/settings.webp" alt="Settings on the Appearance page, with the seven sections listed on the left and theme, color and VS Code theme controls" width="100%">
+<img src="docs/screenshots/settings.webp" alt="Settings on the Appearance page, with the nine sections listed on the left and theme, color and VS Code theme controls" width="100%">
 
 <sub>Screenshots come from the browser preview with sample data. Regenerate them with
 `npm run screenshots` (see [`scripts/screenshots`](scripts/screenshots/capture.spec.ts)).</sub>
 
+Voice dictation inserts a draft without sending it. Transcribe on your computer with a speech model you download in Settings → Voice, or send audio to a speech service you configure; see [voice input](docs/voice-input.md).
+
 ## Privacy
 
 - **No telemetry, no analytics, no accounts.** PandaCode does not phone home.
+- **Crash reports stay on your computer.** After a crash PandaCode restarts itself
+  and keeps a plain-text report in `crash-reports/` in its app data folder: the 10
+  newest crash reports and 5 window reports. A report holds the panic message, if any,
+  which can include file paths, text from your work or a credential that was in that
+  message (nothing is redacted), and a backtrace, so check it before you share it. Reports older than 90 days are deleted when a new report is written,
+  each time PandaCode starts and about once a day while it runs, so one stays longer only
+  while PandaCode is not running. `crash-guard.json` in the app data folder itself, not
+  in `crash-reports/` (`crash-guard-serve.json` for a headless `serve` host), holds the times of the
+  crashes in the 10 minutes before the latest one (at most 10; a time more than 10
+  minutes old is dropped at the next crash, when PandaCode or a `serve` host next starts
+  and about once a day while one runs, so it stays longer only while PandaCode is not
+  running) and, until the next launch of that app or host takes it, a short notice (when,
+  a cause such as "Panic" or "Crashed with SIGSEGV", whether it restarted, whether
+  running agents were stopped, and the file name of its report). A notice whose crash is more than 90 days old (or dated more than a day
+  ahead) is deleted at those same starts and daily checks.
+  A headless `serve` host restarted after a crash writes all its output, including
+  its startup line about the crash (which ends with the full path of `crash-reports/`,
+  naming your home folder), its Connect GitHub login and error messages, which can name threads and contain
+  project and file paths, to `serve-restart.log` (readable only by your user on macOS
+  and Linux; on Windows it gets the permissions of the profile folder it is in; moved to
+  `serve-restart.log.1` once past 1 MB, which the host checks every 30 seconds on macOS
+  and Linux, so it can pass 1 MB by what it writes in that time, and on Windows only when
+  a restart begins). The guard's own few lines go to `crash-guard.log` (moved to
+  `crash-guard.log.1` past 1 MB when a guard starts). Both logs and their `.1` files are
+  deleted once they have not been written for 90 days, checked when PandaCode starts and
+  about once a day while it runs; a restarted host never deletes its own
+  `serve-restart.log`, so that one goes at a later start. Empty `.lock` files beside
+  the two state files coordinate their updates.
+  The restart guard is a second PandaCode process; its command line, which other users
+  of the computer can see in the process list while PandaCode runs, includes the app data
+  folder's path and PandaCode's own arguments.
+  Nothing is sent; Settings → General can turn automatic restarts off. See
+  [crash recovery](docs/crash-recovery.md).
+- **Unsent drafts are kept as plain text.** What you type in the composer (or a
+  shared bot channel's) and haven't sent (up to 50,000 characters per draft) is saved unencrypted in the
+  app's local web storage for up to 30 days (cleared at launch and daily while the app
+  runs; longer only while PandaCode is not opened), so it usually survives a restart
+  (the web view may write it to disk slightly later, so the very last keystrokes before
+  a hard crash can be missing). A draft can include a secret you pasted. Turn off
+  Settings → General → **Keep unsent drafts** (on by default) to save none: that removes the
+  saved drafts at once and at every launch, and text in an open message box stays only until
+  you quit. **Clear saved drafts** removes the drafts kept so far and keeps saving new ones
+  (text showing in an open message box stays there until its next change). That storage is outside the app data folder on Windows and
+  macOS: on Windows it is under
+  `%LOCALAPPDATA%\ai.pandacode.desktop\`, on macOS WebKit normally keeps it under
+  `~/Library/WebKit/ai.pandacode.desktop/` (see
+  [what a launch restores](docs/crash-recovery.md#what-a-launch-restores)). On Linux
+  PandaCode makes that folder readable only by your user at every start; on Windows and
+  macOS it changes no permissions, so who can read drafts depends on what the web view
+  and the parent folders allow.
 - **Your code stays on your machine.** Projects, conversations and settings are
   stored locally in SQLite. Prompts go only to the coding CLI or service you
   pick, under that provider's own terms.
-- **It only talks to services you choose.** Provider keys (GLM, MiMo, DeepSeek, Command Code, cloud
+- **It only talks to services you choose.** Provider keys (GLM, MiMo, Alibaba Token Plan, DeepSeek, Command Code, cloud
   sandboxes, bot channels, connection secrets) are sent only to that provider.
   On macOS they live in `secrets.json` in PandaCode's app data folder, readable
   only by your user (0600), never the Keychain, so updates never ask for your
@@ -260,6 +316,7 @@ information:
 | --- | --- | --- |
 | Latest versions of installed coding CLIs | `formulae.brew.sh`, `downloads.claude.ai`, `api.github.com`, `cdn.kimi.com`, `registry.npmjs.org`, `releases.openai.com`, `storage.googleapis.com`, `pypi.org` | About every 6 hours |
 | Plan usage checks for your signed-in agents | That agent's provider | When you open the menu bar item or the Usage dialog, and in Settings → Providers when account pools are shown (once, then at most every 5 minutes on window focus, or when you click Refresh) |
+| Asking your Claude Code for usage when PandaCode can't read it (on by default; Settings → Providers → Claude Code → Let PandaCode ask Claude Code for usage when it can’t read it): PandaCode runs your installed Claude Code once, `claude -p /usage` (a local command: no model call, nothing billed), with only its config folder, network and process settings (its telemetry, error reports, nonessential traffic and self-update turned off for this run), which lets Claude Code refresh and save its own login if it needs to, as when you open it (it may answer from its own snapshot instead). PandaCode never writes Claude Code's credentials | Whatever Claude Code itself contacts to refresh its login and read usage (Anthropic) | Only during a Claude usage check that can't read usage (an expired, rejected or missing login, a Keychain or network problem, a rate limit with no saved reading; never for an API-key or other non-subscription setup, a locked Keychain or a Keychain read you denied unless you press Refresh), at most once per Claude setup every 15 minutes (a Refresh you press may run it once more), less often while runs keep failing (up to every 2 hours), never two at once, and never inside a rate limit's server-set wait (after it, a new rate limit with no or an old saved reading may run it); never while the setting is off |
 | Public model price list (for cost estimates) | `raw.githubusercontent.com` | Daily |
 | PandaCode's own updates (`latest.json` on this repository's latest release) | `github.com` | At launch and about every 6 hours unless Settings → About → Updates is Off |
 | Jev decision model list (optional) | `openrouter.ai` | Only when you choose OpenRouter for Jev decisions and open the model menu or press Refresh; no key is sent |
@@ -269,7 +326,10 @@ information:
 | Model routing profiler (optional): `model.int8.onnx` and `tokenizer.json`, from a pinned commit, verified by SHA-256 | `raw.githubusercontent.com` | Once, the first time you turn on a team (with routing on) or click Download or Route in Settings → Agents → Model routing; never at launch, and never on macOS older than 13.4 or on Intel Mac, x86_64 Linux and x86_64 Windows builds |
 | PandaCode Connect (optional): GitHub sign-in, then the relay that forwards your devices' end-to-end encrypted messages | `github.com`, the PandaCode relay | Only after you sign in under Settings → Connections → Remote access; nothing before |
 | Push notifications (optional, mobile app): the relay sends a generic alert ("A task finished") with a `pandacode://inbox` link to your phone's device token, never task content | Apple Push Notification service, Firebase Cloud Messaging (sent by the PandaCode relay) | Only after you allow notifications in the mobile app while signed in to Connect |
+| Voice input with a speech service (optional): recorded audio, selected model and optional language, authenticated with your speech key | The transcription endpoint you configure (OpenAI, Groq, Mistral or your local/custom server) | Only with that service chosen, when you stop or transcribe a recording (Stop, Enter, Transcribe recording, Retry) or when switching threads or anything else closes the prompt box mid-recording while PandaCode keeps running; automatic stops (the two-minute or 16 MiB limit, or a failing microphone) keep the audio until you press Transcribe recording; with **This device**, audio never leaves your computer |
+| Local speech models (optional): the model file you pick and, with the first one, the Silero voice-activity model (about 1 MB), from a pinned revision, verified by SHA-256 | `huggingface.co`, `*.huggingface.co` and the download CDN `*.hf.co` | Only when you click Download in Settings → Voice; nothing at launch, while browsing models or while dictating |
 | Netlify token check (optional): verifies the token and project you enter | `api.netlify.com` | Only when you save a Netlify token in Settings → Connections → Cloud sandboxes |
+| Adding skills (optional): `npx` fetches the `skills` CLI from the npm registry set in your `~/.npmrc`, which reads the source you choose: a GitHub or GitLab repository, or a local folder (telemetry off) | `registry.npmjs.org` (or your configured registry), `github.com` or `gitlab.com` | Only when you click Find skills, choose a folder or click Install in Settings → Tools → Skills; listing and switching skills are local |
 
 ## Install
 
@@ -286,20 +346,20 @@ Download the latest build from
 | Linux arm64 | [`PandaCode-Linux-aarch64.AppImage`](https://github.com/aicodeking/pandacode/releases/latest/download/PandaCode-Linux-aarch64.AppImage) | Ubuntu 24.04+ aarch64 or compatible, X11 or XWayland |
 
 Or from a terminal: `npx pandacode` downloads the latest build, verifies its
-signature and installs it (on macOS it is signed locally for you, so no
-Gatekeeper prompt). `npx pandacode --dry-run` only downloads and verifies.
+update signature and installs it (on macOS it also signs the installed app locally).
+`npx pandacode --dry-run` only downloads and verifies.
 
 With [Homebrew](https://brew.sh): `brew install --cask aicodeking/pandacode/pandacode`
 on macOS, or `brew install aicodeking/pandacode/pandacode` on Linux
 ([details](docs/homebrew.md)).
 
-Release builds are not code-signed, so your OS will warn the first time:
+The official macOS builds are Developer ID signed and notarized by Apple
+([verified for v0.3.103](https://github.com/aicodeking/pandacode/actions/runs/42462913784)).
+macOS may still ask you to confirm opening a downloaded app. Signing remains
+optional for [local and fork builds](docs/releasing.md#optional-signing), whose
+ad-hoc builds need the instructions there. Windows and Linux builds are not
+code-signed:
 
-- **macOS:** the build carries an ad-hoc signature and is not notarized, so macOS
-  refuses to open it, and **Open Anyway** in **System Settings → Privacy &
-  Security** does not always clear it. Run `xattr -dr com.apple.quarantine
-  /Applications/PandaCode.app` once instead; `npx pandacode` signs the app locally
-  and needs no such step.
 - **Windows:** if SmartScreen appears, click **More info → Run anyway**.
 - **Linux:** `chmod +x PandaCode-Linux-x86_64.AppImage` (or `-aarch64`), then run it. Some
   distributions need FUSE 2 (`libfuse2`), or set `APPIMAGE_EXTRACT_AND_RUN=1`.
@@ -331,7 +391,7 @@ PandaCode does not include provider plans or usage.
 
 Muse Code installs with Meta's launcher into `~/.local/bin/muse`; run `muse login` once in a terminal. PandaCode launches `muse serve` and speaks MSP, Muse's JSON-RPC session protocol, with its sandbox and approval modes; see [docs/providers.md](docs/providers.md#muse-code) for what each mode does and what Muse cannot express.
 
-Antigravity runs Google's `agy_acp_server`, or `agy acp` through the `agy` CLI when that server isn't installed. See [provider details](docs/providers.md).
+Antigravity runs Google's `agy_acp_server`, or `agy acp --process-per-session` through the `agy` CLI when that server isn't installed. See [provider details](docs/providers.md).
 
 [GitHub Copilot CLI](https://docs.github.com/en/copilot/how-tos/set-up/install-copilot-cli) installs with `npm install -g @github/copilot`; run `copilot login` in a terminal, then select **GitHub Copilot CLI** in PandaCode. PandaCode launches the local `copilot` executable over ACP. The CLI manages its own sign-in. See [provider details](docs/providers.md#github-copilot-cli).
 
@@ -340,6 +400,8 @@ Antigravity runs Google's `agy_acp_server`, or `agy acp` through the `agy` CLI w
 [ZCode](https://github.com/zai-org/ZCode) installs with its install script (`~/.local/bin/zcode`, Node 24); run `zcode` once in a terminal and sign in, then select **ZCode** in PandaCode. PandaCode talks to `zcode app-server` directly — the CLI's own protocol, since it exposes no ACP mode — listing every model the account can reach with its own reasoning levels. See [provider details](docs/providers.md#zcode).
 
 [Hermes Agent](https://hermes-agent.org) installs with `curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash`; run `hermes acp --setup` or configure `~/.hermes/config.yaml`, then select **Hermes Agent** in PandaCode. PandaCode launches `hermes acp` and uses Hermes' configured provider and models. See [provider details](docs/providers.md#hermes-agent).
+
+[Cursor CLI](https://cursor.com/docs/cli/overview) installs with `curl https://cursor.com/install -fsS | bash`; run `agent login` once in a terminal (or set `CURSOR_API_KEY`), then select **Cursor CLI** in PandaCode. PandaCode launches `agent acp` with the CLI's own sign-in and lists the models on your Cursor plan, each with its own thinking levels. See [provider details](docs/providers.md#cursor-cli).
 
 ## Build from source
 
@@ -478,3 +540,6 @@ open, and removing a project from the app never deletes its files.
 [PandaCode License](LICENSE) (MIT with an attribution requirement for forks) ©
 2026 PandaCode contributors. Provider names and logos belong to
 their owners and do not imply endorsement ([brand assets](docs/brand-assets.md)).
+Bundled third-party components and their licenses are listed in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). A copy ships inside the app, and
+Settings → About → Third-party notices opens it.

@@ -1,15 +1,19 @@
 import { decodeHandoff, historicalProvider } from './provider-handoff';
+import { ACCOUNT_SWITCH_PREFIX, accountSwitchDetail } from './account-switch-note';
+import { revealSetting } from './settings-reveal';
 import { bindThreadReordering, syncRovingFocus, threadGroupRows } from './thread-order';
 import { PROJECT_LIMIT, readCollapsed, shownTasks } from './sidebar-tree';
 import { COLLAPSED_SECTIONS_KEY, COMPLETED_OPEN_KEY, UNREVIEWED_KEY, readOpen, sectionOf, sidebarSections, type HeldSection } from './sidebar-sections';
 import { PER_PROJECT, PROJECT_ORDER_KEY, SORT_KEY, compareManual, matchesFilter, readProjectOrder, readSort, taskComparator, type SidebarSort } from './sidebar-sort';
 import './styles.css';
+import { createVoiceDictation, voiceButtonHtml } from './voice-dictation';
 import './design-system.css';
 import './model-picker.css';
 import './smooth.css';
 import './wallpapers.css';
 import './turn-changes.css';
 import './team-progress.css';
+import './council.css';
 import './motion.css';
 import './sidebar-tree.css';
 import './inspector-bar.css';
@@ -21,6 +25,7 @@ import './usage-limit.css';
 import './document-viewer.css';
 import './tool-trace.css';
 import './tool-cards.css';
+import './tool-images.css';
 import './trace-motion.css';
 import './action-dock.css';
 import './inset-shell.css';
@@ -30,20 +35,21 @@ import './redesign/inspector.css';
 import './redesign/settings.css';
 import './redesign/board.css';
 import './redesign/bots.css';
+import './voice-dictation.css';
 import { mountActionDock, mountAgents, snapDockDuring } from './action-dock';
 import { setDocumentView } from './document-viewer';
 import { onQueueReorder, queuePanel, type HoldReason, type QueuedMessage } from './message-queue';
-import { initWakeups, openWakeComposer, scheduledMark, wakeCommand, wakeGlyph, wakeStrip } from './schedules-thread';
+import { initWakeups, openWakeComposer, scheduledMark, schedulesVersion, wakeCommand, wakeGlyph, wakeStrip } from './schedules-thread';
 import { TRACE_HEADER } from './schedules-api';
 import { afterRun as turnChecksAfterRun, enabled as turnChecksEnabled, noteManualSend, setEnabled as turnChecksSetEnabled } from './turn-checks';
 import { limitActive, limitBanner, resetLabel } from './usage-limit';
-import { cascade, enterView, glideIn, glideOut, hidePanel, hideToast, holdDim, installDialogMotion, publishSpringEasings, releaseHold, syncPulses, revealIn, settleIn, showPanel, showToast } from './motion';
+import { cascade, enterView, glideIn, glideOut, hidePanel, hideToast, holdDim, installDialogMotion, materializeIn, materializeOut, publishSpringEasings, releaseHold, syncPulses, revealIn, settleIn, showPanel, showToast } from './motion';
 import { teamSignature, updateTeamProgress } from './team-progress';
 import { installedCatalog, setTeamRecency } from './team-catalog';
 import { classicTeamSetup, isTeam, namedTeams, teamDetail, TEAM_MODE_EVENT } from './team-mode';
 import { renderCoordination } from './coordination-message';
 import { renderTurnChanges, turnChangesFoot, changeRequest, captureChangeCards, restoreChangeCards, isCombined, mountCombinedReview } from './turn-changes';
-import { SKELETON_HTML, bridgeCard, fadeInFoot, fadeInReply, holdCard, keepReplyOpen, onReplyCollapse, replyHtml, timeHtml, watchReplies } from './turn-card';
+import { SKELETON_HTML, bridgeCard, fadeInFoot, fadeInReply, holdCard, keepReplyOpen, onReplyCollapse, openReply, measureReplies, replyHtml, replyOpen, timeHtml, watchReplies } from './turn-card';
 import { mountWallpapers } from './wallpapers';
 import { mountSky } from './sky-window';
 import { mountThreadTiles } from './thread-tiles';
@@ -51,12 +57,19 @@ import { parseSkyTime } from './sky-math';
 import type { AgentEvent, BrowserAttachment, ContextUsage, FileEntry, GitStatus, Message, MessagePage, Mode, Project, Provider, ProviderId, ProviderModel, Session, TaskLink, TaskStage, ToolActivity, TurnChanges, TurnChangeDiff } from './types';
 import type { BrowserPanel } from './browser';
 import { call, chooseFolder, preview, subscribe } from './bridge';
+import { isNetworkPath, MAX_RETRIES, NETWORK_PATH_ERROR, retryLater, toolImageCache, type ToolImageLoader } from './tool-images';
+import { attachToolImages, REVEAL_LABEL } from './tool-image-viewer';
 import { jjChip, showJjPanel, type JjStatus } from './jj';
 import { $, button, escape, fileIcon, fileIconsReady, icon, isImeKey, markdown, markdownCache, markdownHtml, morph, showsHtml } from './dom';
+import { MORE_TURNS, ROWS_MARGIN, ROW_BUDGET, drawRows, markupCache, parseRow, rowsIntact, swapRowNodes, turnIds, untouchedFields, viewIndex, windowAnchor, windowShort, windowStart, type DrawnRow } from './transcript-rows';
+import { LAZY_REPLY_CHARS, drawnFrom, lazyMarkdown, prepareMarkdown, touchedRows } from './transcript-window';
+import { leftRowsCache, leftViews, mountTileWindows, mountTranscriptView } from './transcript-view';
 import { botAvatarHtml } from './bot-avatars';
 import * as botThread from './bot-thread';
 import type { Activity as BotActivity, FailoverAsk } from './bots';
 import { mountExternalLinks } from './external-links';
+import { mountDesktopBrand } from './brand-mark';
+import { starPanda } from './star-panda';
 import { bindMessageActions, messageActionsHtml } from './message-actions';
 import { providerLogo } from './provider-logos';
 import { decodeToolActivity, groupToolRuns, renderToolActivity, renderToolGroup, renderToolStatus, toolStackHtml } from './tool-activity';
@@ -83,6 +96,7 @@ import { changeUiScale, initializeUiSizing, setUiScale } from './ui-size';
 import { approvalBarHtml } from './approval-bar';
 import { decorateTranscript, initOrchestration, lineageSource, syncOrchestration } from './machine-orchestration';
 import { createThreadFind } from './thread-find';
+import { captureAccountSwitches, captureTools, fillMatchingToolBodies, fillToolBody as fillDrawnToolBody, dispatchHeld, findCounter, lastHandoff, markupShared, mergeTaskDetails, restoreAccountSwitches, restoreToolViews, rowViews, takeAccountSwitch, turnMessages, type AccountSwitchView, type HeldQueueHost, type ToolView } from './transcript-host';
 import { installPointerDrag } from './pointer-drag';
 import type { RemoteHost, RemoteRepoCheck, RemoteStatus, RemoteTarget } from './remote-types';
 import type { RemoteStart } from './remote-progress';
@@ -97,19 +111,28 @@ import { createAgentInput, type AgentInput } from './agent-input';
 import { mountSlashCommands, type SlashCommand } from './slash-commands';
 import { mountFileMentions, type MentionEntry } from './file-mentions';
 import { createFileTabs } from './file-tabs';
+import { createFileExplorer } from './file-explorer';
 import { bindFileLinkContext, configureFileLinks, isPreviewableFile, refreshFileLinks, type FileLinkContext, type ResolvedFile } from './file-links';
 import { createWorktrees } from './worktrees';
 import { createGithub, githubEnabled } from './github';
 import { mountUpdatePill, startAppUpdates } from './app-updates';
+import { heldBackOpened, showCrashRecovery, takeCrashRecovery, tasksChanged } from './crash-recovery';
+import { addToastClose, labelToastShortcut, wireToastKeys } from './toast-keys';
+import { keepToastClear } from './toast-clearance';
+import { NEW_TASK_DRAFT, PersistedDrafts, channelDraftKey, dropRemovedChannelDrafts, WINDOW_STABLE_AFTER, beginThreadRestore, dropDeletedDrafts, dropRemovedProjectDrafts, expireDraftsWhileRunning, finishThreadRestore, finishThreadRestoreAfterPaint, leavePage, rememberOpenThread, threadToReopen, windowContentDied, windowStable } from './launch-restore';
 import { mountTextUndo } from './text-undo';
 import { projectIconHtml } from './project-icons';
 import { createPullView } from './github-pull';
 import { createSearchPanel } from './search-panel';
 import { createTokenSaver } from './token-saver-panel';
+import { createCouncil } from './council-panel';
+import { councilNotice } from './council';
+// No CSS of its own (architect.css arrives with ./architect): safe in the always-loaded bundle.
+import { workerActive } from './architect-worker-list';
 import { MAX_IMAGES, mountPromptAttachments, type PromptImage } from './attachments';
 import { attachmentChips, parseAttachments } from './message-attachments';
 import { compactSublines, infoMark, installTooltips } from './tooltip';
-import { isMac, isWindows, shortcut } from './platform';
+import { isMac, shortcut } from './platform';
 import { createGoalBanner, showGoalDialog, showCommandCenter, type GoalState, type GoalAction, type CommandPanel } from './command-center';
 import { LEAD_RETRY, teamActive, teamHeldUntil, type TeamSnapshot, type TeamEvent, type TeamLibrary, type TeamConfig, type WorkerProfile } from './architect-types';
 import type { ArchitectView } from './architect';
@@ -124,20 +147,27 @@ import { mountChangesView, type ChangesView } from './changes-view';
 import { INSPECTOR_VIEWS, closeTab, closedViews, loadTabs, openTab, sameTabs, saveTabs, threadDefault, type InspectorView } from './inspector-tabs';
 import { TailText } from './tail-text';
 import { noteChangedPaths, preloadDiffsAfterPaint } from './diff-prefetch';
+import { applyRestoredDraft, createCommittedDrafts } from './composer-restore';
+import { errorText } from './error-text';
+import { escapeClosesToast, globalErrorText, isBenignGlobalError, nextToastCount, queueToast, shouldShowGlobalError, shouldToastLiveError, toastTitle, type ToastTone } from './toast-model';
+import { DISMISS_BATCH, dismissJournal, errorKey, foldErrorTurns, hiddenRunErrors, parseDismissJournal, errorSummary, groupErrors, savedErrorId, shouldAnnounce, stripErrorPrefix, type ErrorGroup, type RunHide, type ShownTurn } from './thread-errors';
 
 /* Visual thesis: calm surfaces, system typography, yellow selection, and bamboo details.
  * Content: project navigation → conversation → contextual source review.
  * Interaction: quick drawer reveals, calm dialog entrances, coalesced text updates. */
 type WorkspaceView = 'conversation' | 'board' | 'github';
-type LiveTool = { key: string; content: string | ToolActivity; statusOnly?: boolean; commentary?: boolean };
-type Stream = { body: TailText; thought: TailText; readonly text: string; readonly thinking?: string; retainedMessageKey?: string; tools: LiveTool[]; status: string; approvals: Map<string, string>; inputs: Map<string, AgentInput>; revision: number; lastPromptAt?: number; lastResponseAt: number | null; startedAt: number; turnKey: string; omittedActivity: boolean; contextUsage?: ContextUsage; pendingChanges?: TurnChanges; earlier?: LiveEarlier };
+/** `count`: how many identical error events this one row stands for; `dismissed`: hidden by Dismiss, Undo shows it again;
+ * `savedIds`: the saved rows of those events (the event's `messageId`; an event never saved has none). */
+type LiveTool = { key: string; content: string | ToolActivity; statusOnly?: boolean; commentary?: boolean; count?: number; dismissed?: boolean; savedIds?: number[] };
+type LiveAccountSwitch = Message & { eventSeen?: boolean };
+type Stream = { body: TailText; thought: TailText; readonly text: string; readonly thinking?: string; retainedMessageKey?: string; tools: LiveTool[]; accountSwitches: LiveAccountSwitch[]; status: string; approvals: Map<string, string>; inputs: Map<string, AgentInput>; revision: number; lastPromptAt?: number; lastResponseAt: number | null; startedAt: number; turnKey: string; omittedActivity: boolean; contextUsage?: ContextUsage; pendingChanges?: TurnChanges; earlier?: LiveEarlier };
 /** The exchange a lead's wake run continues, drawn inside its live card (renderTranscript). */
 type LiveEarlier = { turn: TranscriptTurn; tools: ToolActivity[] };
 /** Views this platform can show; the inspector's open tabs and selection persist across launches. */
 const INSPECTOR_AVAILABLE = INSPECTOR_VIEWS.filter(view => view !== 'vm' || isMac);
 let inspectorTabs = loadTabs(localStorage, INSPECTOR_AVAILABLE);
-/** Open files is the inspector's per-task editor view: shown only while the task has file tabs, never saved in the strip's order. */
-type PanelView = InspectorView | 'file';
+/** Inspector tabs only. Open files live in the floating editor, not in this strip. */
+type PanelView = InspectorView;
 const INSPECTOR_TITLES: Record<InspectorView, string> = { files: 'Files', search: 'Search', changes: 'Changes', browser: 'Browser', pull: 'Pull request', simulator: 'Simulators', vm: 'Virtual machines', design: 'Design', btw: 'By the way' };
 const INSPECTOR_TIPS: Partial<Record<InspectorView, string>> = { simulator: 'iOS & Android simulators', design: 'Design canvas', btw: 'By the way: a side thread' };
 const INSPECTOR_ICONS: Record<InspectorView, string> = { files: 'file', search: 'search', changes: 'branch', browser: 'globe', pull: 'pull', simulator: 'phone', vm: 'monitor', design: 'sketch', btw: 'chat' };
@@ -155,12 +185,12 @@ const state = {
   git: null as GitStatus | null, jj: null as JjStatus | null, files: [] as FileEntry[], openFolders: new Set<string>(), folderFiles: new Map<string, FileEntry[]>(), gitError: '', filesError: '', inspectorLoading: false,
   selectedFile: '', selectedContent: '', selectedKind: '' as '' | 'diff', selectedStaged: false, filePreviewLoading: false,
   browserUrl: '',
-  attachments: [] as string[], drafts: new Map<string, string>(), defaultProvider: (localStorage.getItem('pandacode.defaultProvider') ?? localStorage.getItem('pandacode.provider') ?? 'claude') as ProviderId,
+  attachments: [] as string[], drafts: new PersistedDrafts(localStorage), defaultProvider: (localStorage.getItem('pandacode.defaultProvider') ?? localStorage.getItem('pandacode.provider') ?? 'claude') as ProviderId,
   browserAttachments: new Map<string, BrowserAttachment[]>(),
   moodboardAttachments: new Map<string, { id: string; projectId: string; name: string }[]>(),
   generation: 0, hasOlder: false,
   sharedChannelId: '', sharedChannelDetail: null as SharedChannelDetail | null, sharedChannelRequest: 0,
-  sharedChannelDrafts: new Map<string, string>(), sharedChannelLimits: new Map<string, number>(), sharedChannelFromBottom: null as number | null, sharedChannelScrollTop: 0, sharedChannelAtBottom: true, sharedChannelPosting: new Set<string>(),
+  sharedChannelLimits: new Map<string, number>(), sharedChannelFromBottom: null as number | null, sharedChannelScrollTop: 0, sharedChannelAtBottom: true, sharedChannelPosting: new Set<string>(),
 };
 let renderFrame = 0;
 /** Shows the open thread's scene behind the conversation (set once the sky mounts; `renderTranscript` calls it). */
@@ -170,6 +200,28 @@ let settledDock: HTMLElement | null = null;
 const settledResize = new ResizeObserver(() => { if (settledDock) $('#navigation').style.setProperty('--settled-height', `${settledDock.offsetHeight}px`); });
 type FinishingStream = { stream: Stream; finishedAt: number; error?: string };
 const finishingStreams = new Map<string, FinishingStream>();
+/* Thread error state (declared early: the first render reads it). */
+/** Disclosures the reader opened are remembered by scope and key, up to this many, across the live region's redraws. */
+const OPEN_ERRORS_MAX = 200;
+const openErrors = new Set<string>();
+/** Live disclosures the reader opened, by `sessionId|key`: the saved ids of that live row (addLiveError adds later
+ * ones), so its saved rows (or transient ones) open too when the live card hands off to the saved one. */
+const openLiveErrors = new Map<string, Set<number>>();
+/** Saved error rows a dismissal hid (deleted natively, or waiting on it); transient negative ids too. */
+const hiddenErrors = new Set<number>();
+/** Bumped whenever hiddenErrors changes, so a tile's cached rows redraw (drawTile). */
+let hiddenErrorsRevision = 0;
+/** Live errors dismissed in threads mirrored from another computer, by thread (RunHide): their events carry no saved id,
+ * and the run's copies arrive with new ids when it ends, so those copies are hidden by key (hiddenRunErrors) for the
+ * rest of the app session. At most RUN_HIDES_MAX in all; the oldest goes first. */
+const runHides = new Map<string, RunHide[]>();
+const RUN_HIDES_MAX = 200;
+/** The dismissal whose Undo the toast offers; its native delete runs when the toast settles (commitDismiss). */
+type PendingDismiss = { sessionId: string; saved: number[]; transient: number[]; liveTools: string[]; runHides: RunHide[]; focus: { key: string; scope: string; action: string } };
+let pendingDismiss: PendingDismiss | null = null;
+/** When each thread last announced each live error, by `sessionId|errorKey` (shouldAnnounce); the oldest goes past
+ * OPEN_ERRORS_MAX entries. Per thread, so the same error in another thread is still told. */
+const lastErrorToasts = new Map<string, number>();
 // Ignore late snapshots/events for IDs removed during this window's lifetime.
 const deletedSessions = new Set<string>();
 let inspectorRequest = 0;
@@ -226,7 +278,7 @@ void call<import('./jev').JevConfiguration>('jev_configuration').then(config => 
 window.addEventListener('pandacode:jev-settings', event => setJevAvailability(Boolean((event as CustomEvent<import('./jev').JevConfiguration>).detail.decisionsEnabled)));
 async function ensureArchitectView(): Promise<ArchitectView> {
   return architectLoading ??= import('./architect').then(({ ArchitectView }) => {
-    architectView = new ArchitectView({ setup: anchor => run(showArchitectSetup(anchor)), loadModels, updated: onArchitect, report, onFork: forkAtMessage, fileContext: sessionId => ({ projectId: state.projectId, sessionId }), assist: (sessionId, kind) => run(openJevAssist(kind, sessionId)), remote: sessionId => Boolean(state.sessions.find(task => task.id === sessionId)?.remoteDevice) });
+    architectView = new ArchitectView({ setup: anchor => run(showArchitectSetup(anchor)), loadModels, updated: onArchitect, report, onFork: forkAtMessage, fileContext: sessionId => ({ projectId: state.projectId, sessionId }), assist: (sessionId, kind) => run(openJevAssist(kind, sessionId)), remote: sessionId => Boolean(state.sessions.find(task => task.id === sessionId)?.remoteDevice), leadMode: sessionId => state.sessions.find(task => task.id === sessionId)?.mode ?? null });
     architectView.setAssistEnabled(jevDecisionsEnabled);
     $('#subagents-host').before(architectView.host);
     architectView.setTask(state.sessionId, teams.get(state.sessionId) ?? null, state.providers);
@@ -239,16 +291,18 @@ function onArchitect(team: TeamEvent): void {
   const current = teams.get(team.sessionId);
   if (current && current.revision > team.revision) return;
   // Pauses and failures the user did not ask for would otherwise only show inside the panel.
-  if (team.sessionId === state.sessionId && team.error && team.error !== current?.error && !/^Team (paused|stopped)\./.test(team.error) && !LEAD_RETRY.test(team.error)) notify(team.error);
+  // A Council refusal is written for the lead; the user gets its plain notice (and the card), never the refusal itself.
+  // Asking is announced once, by the composer's live region, so it gets no toast as well.
+  if (team.sessionId === state.sessionId && team.error && team.error !== current?.error && team.councilStatus?.state !== 'asking' && !/^Team (paused|stopped)\./.test(team.error) && !LEAD_RETRY.test(team.error)) notify(councilNotice(team) ?? team.error);
   const wasActive = teamActive(current);
   teams.set(team.sessionId, team);
   const task = state.sessions.find(s => s.id === team.sessionId), taskState = `${task?.status}:${task?.taskStage}`;
   if (task && teamActive(team)) { task.status = 'running'; task.taskStage = 'in_progress'; }
   if (task && !teamActive(team) && !state.streams.has(task.id)) task.status = 'idle';
-  void ensureArchitectView().then(view => { if (!deletedSessions.has(team.sessionId)) view.update(team); });
+  void ensureArchitectView().then(view => { if (!deletedSessions.has(team.sessionId)) view.update(team); }).catch(report);
   // A snapshot that only moved its revision shows nothing new: no composer, thread or sidebar paint.
   if (current && teamSignature(current) === teamSignature(team) && taskState === `${task?.status}:${task?.taskStage}`) return;
-  if (team.sessionId === state.sessionId) scheduleTeamRender(wasActive !== teamActive(team));
+  if (team.sessionId === state.sessionId) { scheduleTeamRender(wasActive !== teamActive(team)); if (!current) syncTeamRows(); }
   scheduleNavigation();
 }
 /** Team snapshots can arrive many times a frame: the composer (and thread worker lines) paint once per frame. */
@@ -268,7 +322,8 @@ async function loadTeam(id: string): Promise<TeamSnapshot | null> {
   // An update or a removal that arrived during the fetch is newer than this snapshot.
   if (teams.has(id) !== known || teams.get(id) !== before) return teams.get(id) ?? null;
   teams.set(id, loaded);
-  if (teams.size > 64) { const old = [...teams].find(([key, value]) => key !== state.sessionId && !teamActive(value)); if (old) teams.delete(old[0]); }
+  // A remembered thread keeps its answer: coming back to it must not wait for its team again (selectSession).
+  if (teams.size > 64) { const old = [...teams].find(([key, value]) => key !== state.sessionId && !threadPages.has(key) && !teamActive(value)); if (old) teams.delete(old[0]); }
   if (loaded) await ensureArchitectView();
   if (id === state.sessionId) architectView?.setTask(id, loaded, state.providers);
   return loaded;
@@ -481,6 +536,8 @@ async function setTeam(task: Session, on: boolean, render = true): Promise<boole
     onArchitect(saved ?? { sessionId: task.id, removed: true });
     await reloadSessions();
     teamToggles.delete(task.id); configuringSessions.delete(task.id);
+    // "Turn on for new threads": a team starting on a thread with no messages yet starts Council with it.
+    if (on && saved && task.id === state.sessionId && !state.messages.length) void council.enableForNewThread(task.id);
     if (task.id === state.sessionId) { if (render) renderComposer(); else syncTeamButton(); }
     return true;
   } finally {
@@ -496,23 +553,24 @@ const SORT_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="cur
 const $app = document.querySelector<HTMLDivElement>('#app')!;
 $app.innerHTML = `<div class="workspace" data-tauri-drag-region>
   <aside id="workspace-sidebar" class="sidebar" aria-label="Projects and tasks">
-    <div class="brand" data-tauri-drag-region><span class="brand-name" data-tauri-drag-region>PandaCode</span>${button('view-menu', 'Workspace view: Conversation', 'thread', 'view-menu', 'id="view-menu" aria-haspopup="menu" aria-expanded="false"')}</div>
+    <div class="brand" data-tauri-drag-region><button type="button" class="brand-name" aria-label="Replay PandaCode animation" data-tauri-drag-region="false">PandaCode</button>${button('view-menu', 'Workspace view: Conversation', 'thread', 'view-menu', 'id="view-menu" aria-haspopup="menu" aria-expanded="false"')}</div>
     <div class="sidebar-actions"><button class="new-task-button" data-action="new-task">${icon('plus')}<span>New task</span><kbd>${shortcut('N')}</kbd></button><button class="new-chat-button" data-action="new-chat" title="New chat (no project)">${icon('chat')}<span>New chat</span></button><button class="search-trigger" data-action="search">${icon('search')}<span>Search</span><kbd>${shortcut('K')}</kbd></button></div>
     <div class="sidebar-projects"><button id="project-filter" class="project-filter" data-action="filter-projects" aria-label="Filter projects" aria-haspopup="dialog" aria-expanded="false"><span data-filter-label>All projects</span>${icon('down')}</button><button id="sidebar-sort" class="icon-button sidebar-sort" data-action="sidebar-sort" aria-label="Sort and view" title="Sort and view" aria-haspopup="menu" aria-expanded="false">${SORT_ICON}</button>${button('import-conversations', 'Import conversations', 'download', 'import-trigger')}${button('add-project', 'Open project', 'plus')}</div>
     <div class="sidebar-search">${icon('search')}<input id="sidebar-filter" type="search" aria-label="Filter tasks" placeholder="Filter tasks" autocomplete="off" spellcheck="false" maxlength="200" aria-keyshortcuts="/"><button type="button" class="sidebar-search-clear" data-action="clear-sidebar-filter" tabindex="-1" aria-label="Clear filter" title="Clear filter">${icon('close')}</button></div>
     <div class="navigation-frame"><div id="navigation" class="navigation"></div></div>
     <section id="sidebar-bots-panel" class="bots-panel" aria-label="Bots"></section>
     <div id="sidebar-bots" class="sidebar-bots"></div>
-    <div class="sidebar-bottom">${button('support', 'Help & support', 'help', 'support-button', 'id="support-button"')}${button('agent-usage', 'Agent usage', 'activity', '', 'id="agent-usage-button"')}<button data-action="settings" title="Settings (${shortcut(',')})" aria-label="Settings">${icon('settings')}</button><button data-action="toggle-theme" id="theme-toggle" aria-label="Dark mode" aria-pressed="false"></button></div>
+    <div class="sidebar-bottom">${button('support', 'Help & support', 'help', 'support-button', 'id="support-button"')}${button('agent-usage', 'Agent usage', 'activity', '', 'id="agent-usage-button"')}<button data-action="settings" title="Settings (${shortcut(',')})" aria-label="Settings">${icon('settings')}</button>${starPanda()}<button data-action="toggle-theme" id="theme-toggle" aria-label="Dark mode" aria-pressed="false"></button></div>
   </aside>
   <main class="main-pane">
-    <header class="workspace-header" data-tauri-drag-region="deep"><div class="header-leading" data-tauri-drag-region>${button('toggle-sidebar', 'Hide sidebar', 'sidebar', 'sidebar-toggle', 'id="sidebar-toggle" aria-controls="workspace-sidebar" aria-expanded="true" aria-keyshortcuts="Meta+B Control+B"')}<span id="view-divider" class="header-divider" aria-hidden="true" hidden></span><div id="breadcrumb" class="breadcrumb" data-tauri-drag-region></div></div><div class="header-actions">${preview ? '<span class="preview-status">Browser preview · sample data</span>' : ''}</div><div id="agents-dock-host"></div><div id="action-dock" class="action-dock" role="toolbar" aria-label="Workspace actions" aria-orientation="vertical" data-tauri-drag-region="false"><div class="action-dock-group" data-group="panels">${button('toggle-inspector', 'Toggle inspector', 'panel', 'active', 'id="inspector-toggle" aria-keyshortcuts="Meta+Shift+B Control+Shift+B"', `Toggle inspector (${shortcut('B', true)})`)}${button('terminal', 'Toggle terminal', 'terminal', '', 'id="terminal-toggle" aria-controls="terminal-drawer" aria-expanded="false" aria-keyshortcuts="Meta+J Control+J"', `Toggle terminal (${shortcut('J')})`)}${button('browser', 'Open browser', 'globe', '', 'id="browser-toggle"')}${button('moodboards', 'Project moodboards', 'images')}<button type="button" id="agents-toggle" class="agents-toggle" aria-label="Agents" aria-haspopup="dialog" aria-expanded="false" aria-controls="agents-flyout" data-dock-notip hidden>${icon('team')}<b class="dock-badge" aria-hidden="true" hidden></b></button></div><div class="action-dock-group" data-group="actions"><button type="button" class="header-run" id="run-project-button" data-action="run-project" aria-label="Run project" title="Run pandacode-run.sh" hidden>${icon('play')}<span>Run</span></button>${button('deploy', 'Deploy', 'upload', '', 'id="deploy-button" aria-haspopup="dialog"')}${button('task-menu', 'Task actions', 'more', '', 'id="task-menu-trigger" aria-haspopup="dialog" aria-expanded="false"')}</div><div class="action-dock-group" data-group="status"><button type="button" id="update-status" class="update-status" hidden>${icon('refresh')}<span>Restart to update</span></button></div></div><div id="agents-flyout" class="agents-flyout" data-tauri-drag-region="false" hidden><div id="subagents-host" class="subagents-host" hidden></div><div id="lineage-host" class="lineage-host"></div></div></header>
+    <header class="workspace-header" data-tauri-drag-region="deep"><div class="header-leading" data-tauri-drag-region>${button('toggle-sidebar', 'Hide sidebar', 'sidebar', 'sidebar-toggle', 'id="sidebar-toggle" aria-controls="workspace-sidebar" aria-expanded="true" aria-keyshortcuts="Meta+B Control+B"')}<span id="view-divider" class="header-divider" aria-hidden="true" hidden></span><div id="breadcrumb" class="breadcrumb" data-tauri-drag-region></div></div><div class="header-actions">${preview ? '<span class="preview-status">Browser preview · sample data</span>' : ''}</div><div id="agents-dock-host"></div><div id="action-dock" class="action-dock" role="toolbar" aria-label="Workspace actions" aria-orientation="vertical" data-tauri-drag-region="false"><div class="action-dock-group" data-group="panels">${button('toggle-inspector', 'Toggle inspector', 'panel', 'active', 'id="inspector-toggle" aria-keyshortcuts="Meta+Shift+B Control+Shift+B"', `Toggle inspector (${shortcut('B', true)})`)}${button('terminal', 'Toggle terminal', 'terminal', '', 'id="terminal-toggle" aria-controls="terminal-drawer" aria-expanded="false" aria-keyshortcuts="Meta+J Control+J"', `Toggle terminal (${shortcut('J')})`)}${button('browser', 'Open browser', 'globe', '', 'id="browser-toggle"')}${button('toggle-files', 'Toggle file explorer', 'folder', '', 'id="files-toggle" aria-controls="inspector" aria-pressed="false"')}${button('toggle-file-editor', 'Toggle editor', 'edit', '', 'id="file-editor-toggle" aria-controls="file-panel" aria-expanded="false" hidden')}${button('moodboards', 'Project moodboards', 'images')}<button type="button" id="agents-toggle" class="agents-toggle" aria-label="Agents" aria-haspopup="dialog" aria-expanded="false" aria-controls="agents-flyout" data-dock-notip hidden>${icon('team')}<b class="dock-badge" aria-hidden="true" hidden></b></button></div><div class="action-dock-group" data-group="actions"><button type="button" class="header-run" id="run-project-button" data-action="run-project" aria-label="Run project" title="Run pandacode-run.sh" hidden>${icon('play')}<span>Run</span></button>${button('deploy', 'Deploy', 'upload', '', 'id="deploy-button" aria-haspopup="dialog"')}${button('task-menu', 'Task actions', 'more', '', 'id="task-menu-trigger" aria-haspopup="dialog" aria-expanded="false"')}</div><div class="action-dock-group" data-group="status"><button type="button" id="update-status" class="update-status" hidden>${icon('refresh')}<span>Restart to update</span></button></div></div><div id="agents-flyout" class="agents-flyout" data-tauri-drag-region="false" hidden><div id="subagents-host" class="subagents-host" hidden></div><div id="lineage-host" class="lineage-host"></div></div></header>
     <div class="work-area"><section id="project-board" class="project-board" aria-label="Project board" hidden></section><section id="github-hub" aria-label="GitHub" hidden></section><section class="conversation-pane"><div id="task-details-heading" class="task-details-heading" hidden></div><aside id="progress-pip" class="progress-pip" aria-label="Visual progress" hidden></aside><div id="transcript" class="transcript" role="log" aria-label="Conversation" aria-live="off"></div><div id="composer-area" class="composer-area"></div><div id="composer-live" class="sr-only" role="status" aria-live="polite"></div></section></div>
     <div id="terminal-drawer" class="terminal-drawer" hidden><div class="drawer-heading"><span>${icon('terminal')}<span id="terminal-project" class="muted"></span></span><div class="terminal-tabs" role="tablist" aria-label="Terminal tabs"></div><div class="terminal-heading-actions"><button class="icon-button" data-terminal-action="new" aria-label="New terminal" title="New terminal">${icon('plus')}</button><button class="icon-button" data-terminal-action="minimize" aria-label="Minimize terminal" title="Minimize terminal">${icon('minimize')}</button><button class="icon-button" data-terminal-action="close" aria-label="Close terminal" title="Close terminal" aria-haspopup="dialog">${icon('close')}</button></div></div><div id="terminal-host"></div></div>
   </main>
   <section id="settings-page" aria-label="Settings" hidden></section>
-  <aside id="inspector" class="inspector" aria-label="Project inspector"><div class="inspector-strip"><nav class="inspector-tabs" role="tablist" aria-label="Panel views"><div class="inspector-tab file-panel-tab" data-view="file" hidden><button class="inspector-tab-button" role="tab" aria-selected="false" tabindex="-1" data-action="tab-open-files" aria-label="Open files" title="Open files">${icon('file')}<span class="inspector-tab-label">Open files</span></button>${button('close-inspector-tab', 'Close open files', 'close', 'inspector-tab-close', 'data-view="file" tabindex="-1"')}</div>${INSPECTOR_AVAILABLE.map(view => `<div class="inspector-tab" data-view="${view}" hidden><button class="inspector-tab-button" role="tab" aria-selected="false" tabindex="-1" data-action="${INSPECTOR_ACTIONS[view]}" aria-label="${INSPECTOR_TITLES[view]}" title="${escape(INSPECTOR_TIPS[view] ?? INSPECTOR_TITLES[view])}">${icon(INSPECTOR_ICONS[view])}<span class="inspector-tab-label">${INSPECTOR_TITLES[view]}</span>${view === 'changes' ? '<span id="changes-count" class="inspector-tab-count"></span>' : ''}</button>${button('close-inspector-tab', `Close ${INSPECTOR_TITLES[view]}`, 'close', 'inspector-tab-close', `data-view="${view}" tabindex="-1"`)}</div>`).join('')}${button('inspector-add-tab', 'Open a view', 'plus', 'inspector-tab-add', 'aria-haspopup="dialog"')}</nav><h2 id="inspector-title" class="sr-only">${INSPECTOR_TITLES[inspectorTabs.selected]}</h2><div class="inspector-strip-actions">${button('refresh-inspector', 'Refresh project', 'refresh', '', 'id="inspector-refresh"')}${button('toggle-inspector', 'Hide inspector', 'panel', 'inspector-hide')}</div></div><div id="inspector-content" class="inspector-content"></div><section id="browser-panel" class="browser-panel" aria-label="Browser" hidden></section><section id="simulator-panel" class="simulator-panel" aria-label="Simulators" hidden></section><section id="vm-panel" class="vm-panel" aria-label="Virtual machines" hidden></section><section id="design-panel" class="design-panel" aria-label="Design" hidden></section><section id="file-panel" class="file-panel" aria-label="Open files" hidden><div id="file-tabs" class="file-tabs" role="tablist" aria-label="Open files" hidden></div><section id="file-view" class="file-view" role="tabpanel" aria-label="Open file" hidden></section></section></aside>
-</div><div id="toast" class="toast" role="status" hidden></div><dialog id="dialog"></dialog>`;
+  <aside id="inspector" class="inspector" aria-label="Project inspector"><div class="inspector-strip"><nav class="inspector-tabs" role="tablist" aria-label="Panel views">${INSPECTOR_AVAILABLE.map(view => `<div class="inspector-tab" data-view="${view}" hidden><button class="inspector-tab-button" role="tab" aria-selected="false" tabindex="-1" data-action="${INSPECTOR_ACTIONS[view]}" aria-label="${INSPECTOR_TITLES[view]}" title="${escape(INSPECTOR_TIPS[view] ?? INSPECTOR_TITLES[view])}">${icon(INSPECTOR_ICONS[view])}<span class="inspector-tab-label">${INSPECTOR_TITLES[view]}</span>${view === 'changes' ? '<span id="changes-count" class="inspector-tab-count"></span>' : ''}</button>${button('close-inspector-tab', `Close ${INSPECTOR_TITLES[view]}`, 'close', 'inspector-tab-close', `data-view="${view}" tabindex="-1"`)}</div>`).join('')}${button('inspector-add-tab', 'Open a view', 'plus', 'inspector-tab-add', 'aria-haspopup="dialog"')}</nav><h2 id="inspector-title" class="sr-only">${INSPECTOR_TITLES[inspectorTabs.selected]}</h2><div class="inspector-strip-actions">${button('refresh-inspector', 'Refresh project', 'refresh', '', 'id="inspector-refresh"')}${button('toggle-inspector', 'Hide inspector', 'panel', 'inspector-hide')}</div></div><div id="inspector-content" class="inspector-content"></div><section id="browser-panel" class="browser-panel" aria-label="Browser" hidden></section><section id="simulator-panel" class="simulator-panel" aria-label="Simulators" hidden></section><section id="vm-panel" class="vm-panel" aria-label="Virtual machines" hidden></section><section id="design-panel" class="design-panel" aria-label="Design" hidden></section><section id="file-panel" class="file-panel" aria-label="Open files" hidden><div id="file-tabs" class="file-tabs" role="tablist" aria-label="Open files" hidden></div><section id="file-view" class="file-view" role="tabpanel" aria-label="Open file" hidden></section></section></aside>
+</div><div id="toast" class="toast" hidden><span class="toast-text" role="status" aria-atomic="false"></span></div><dialog id="dialog"></dialog>`;
+mountDesktopBrand($('.brand-name'));
 // Design-system gallery (src/redesign/gallery.ts): browser preview only, with `?ds`.
 if (preview && new URLSearchParams(location.search).has('ds')) void import('./redesign/gallery').then(gallery => gallery.mountGallery());
 mountAgentsDock(document.querySelector<HTMLElement>('#agents-dock-host')!, { openTask: id => run((async () => { await reloadSessions(); await selectSession(id, true); })()) });
@@ -525,7 +583,7 @@ const projectRunner = new ProjectRunner({
   context: () => project() ? workspaceContext() : undefined,
   start: requestId => terminalPanel.runScript(requestId),
   navigate: openRunPreview,
-  notify,
+  notify, notifyError,
 });
 let sidebarDragging = false, orderingBusy = false;
 /** The open thread stays in the section it was opened from, so its row does not jump from under the click. */
@@ -564,7 +622,7 @@ bindThreadReordering($('#navigation'), {
 });
 /* Branch and worktree control, plus optional GitHub through the user's gh CLI. */
 const github = createGithub({
-  call, modal, closeModal, notify,
+  call, modal, closeModal, notify, notifyError,
   sessions: () => state.sessions,
   project: id => state.projects.find(p => p.id === id),
   defaultHarness: () => {
@@ -578,7 +636,7 @@ const github = createGithub({
 });
 /* Per-thread token saving: packs ride along with messages as folded guidance. */
 const tokenSaver = createTokenSaver({
-  call, notify,
+  call, notify, notifyError,
   contextUsage: sessionId => {
     const s = session();
     return s && s.id === sessionId ? state.streams.get(s.id)?.contextUsage ?? s.contextUsage ?? null : null;
@@ -590,6 +648,22 @@ const tokenSaver = createTokenSaver({
   },
 });
 void tokenSaver.loadTools();
+/* Council: an automatic team whose reviewers score the work until they reach the user's target. */
+const council = createCouncil({
+  call,
+  team: sessionId => teams.get(sessionId) ?? null,
+  loaded: sessionId => teams.has(sessionId),
+  startTeam: async sessionId => {
+    const task = state.sessions.find(s => s.id === sessionId);
+    // Redraws the composer once the team is on (placeholder, steer bar), like the Team menu does.
+    return Boolean(task) && setTeam(task!, true);
+  },
+  updated: onArchitect,
+  announce: text => announce(text),
+  keepFixing: sessionId => councilKeepFixing(sessionId),
+  classicSetup: () => classicTeamSetup(),
+  openClassicSetup: anchor => run(showArchitectSetup(anchor)),
+});
 const searchPanel = createSearchPanel({
   call,
   context: () => project() ? workspaceContext() : null,
@@ -602,8 +676,68 @@ const fileTabs = createFileTabs({
   preview: (path, context) => previewFile(path, context),
   notify: text => notify(text),
   report: error => report(error),
+  selection: async request => {
+    const task = session();
+    if (!task || task.projectId !== request.context.projectId || request.context.sessionId && request.context.sessionId !== task.id) throw new Error('Open this file in its project task before asking the model.');
+    if (task.archived || taskStage(task) === 'completed') throw new Error('Reopen this task before asking the model.');
+    const fence = '`'.repeat([...request.text.matchAll(/`+/g)].reduce((length, match) => Math.max(length, match[0].length + 1), 3));
+    const instruction = request.action === 'fix' ? 'Fix the selected code in this file. Keep the change focused and verify the fix.' : 'Answer the question about this selected code. Do not change files.';
+    const question = request.question || (request.action === 'fix' ? 'Fix any problems in this selection.' : 'Explain what this code does.');
+    const text = `${question}\n\nFile context: ${request.path}\nSelected lines: ${request.startLine}–${request.endLine}\n${instruction}${request.unsaved ? '\nSource: unsaved editor buffer; use the selected text below.' : ''}\n${fence}\n${request.text}\n${fence}`;
+    const entry = await call<QueuedMessage>('queue_add', { sessionId: task.id, text, attachments: [] });
+    setQueue(task.id, [...queueOf(task.id).filter(item => item.id !== entry.id), entry]);
+    renderComposer(); void run(dispatchQueue(task.id)); notify('Selection request added to this task');
+  },
   focusConversation: () => document.querySelector<HTMLElement>('#prompt')?.focus(),
-  emptied: () => { if (state.inspectorTab === 'file') { state.inspectorTab = threadDefault(inspectorTabs); renderInspector(); } },
+  changed: () => {
+    const toggle = $('#file-editor-toggle'); toggle.hidden = !fileTabs.count;
+    toggle.classList.toggle('active', fileTabs.visible); toggle.setAttribute('aria-expanded', String(fileTabs.visible));
+  },
+});
+const fileExplorer = createFileExplorer({
+  call,
+  menu: ({ anchor, ...options }) => run(showChoices(anchor, options)),
+  modal, closeModal,
+  open: async (path, context) => {
+    if (context.projectId !== state.projectId) await selectProject(context.projectId);
+    await openFile(path, 'file', false, context, /\.(html?|svg)$/i.test(path));
+  },
+  changed: (context, path, next) => {
+    fileTabs.remap(context, path, next);
+    if (context.projectId !== state.projectId || (context.sessionId ?? '') !== state.sessionId) return;
+    for (const folder of [...state.openFolders]) if (folder === path || folder.startsWith(path + '/')) {
+      state.openFolders.delete(folder); if (next) state.openFolders.add(next + folder.slice(path.length));
+    }
+    state.folderFiles.clear();
+  },
+  created: (context, parent) => { if (parent && context.projectId === state.projectId && (context.sessionId ?? '') === state.sessionId) state.openFolders.add(parent); },
+  hasChanges: (context, path) => fileTabs.hasChanges(context, path),
+  refresh: async () => { fileTabs.reload(); await refreshExplorerFiles(); },
+  notify, report,
+});
+document.querySelector<HTMLElement>('#inspector-content')!.addEventListener('contextmenu', event => {
+  const anchor = (event.target as Element).closest('.file-row')?.querySelector<HTMLElement>('button[data-path]');
+  if (!anchor) return;
+  event.preventDefault();
+  fileExplorer.menu(anchor, workspaceContext(), anchor.dataset.path!, anchor.hasAttribute('aria-expanded'), { x: event.clientX, y: event.clientY });
+});
+document.querySelector<HTMLElement>('#inspector-content')!.addEventListener('keydown', event => {
+  const anchor = (event.target as Element).closest<HTMLElement>('.file-row>button:first-child[data-path]');
+  if (!anchor || isImeKey(event)) return;
+  const path = anchor.dataset.path!, directory = anchor.hasAttribute('aria-expanded');
+  if (event.key === 'F10' && event.shiftKey || event.key === 'ContextMenu') {
+    event.preventDefault(); fileExplorer.menu(anchor, workspaceContext(), path, directory); return;
+  }
+  if (event.key === 'F2' || event.key === 'Delete') {
+    event.preventDefault(); fileExplorer.edit(workspaceContext(), event.key === 'F2' ? 'rename' : 'delete', path, directory); return;
+  }
+  if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault(); event.stopPropagation();
+  const rows = [...document.querySelectorAll<HTMLButtonElement>('#inspector-content .file-row>button:first-child')], index = rows.indexOf(anchor as HTMLButtonElement);
+  if (directory && (event.key === 'ArrowRight' && anchor.getAttribute('aria-expanded') === 'false' || event.key === 'ArrowLeft' && anchor.getAttribute('aria-expanded') === 'true')) { anchor.click(); return; }
+  const parent = path.split('/').slice(0, -1).join('/');
+  const next = event.key === 'Home' ? rows[0] : event.key === 'End' ? rows.at(-1) : event.key === 'ArrowLeft' ? rows.find(row => row.dataset.path === parent) : rows[index + (event.key === 'ArrowUp' ? -1 : 1)];
+  next?.focus();
 });
 const pullView = createPullView({
   call,
@@ -616,9 +750,9 @@ const pullView = createPullView({
     notify(`Pull request #${task.pullRequest?.number ?? ''} unlinked`);
   },
   merged: saved => { upsertSession(saved); renderNavigation(); renderHeader(); },
-  notify,
+  notify, notifyError,
 });
-function upsertSession(saved: Session): void { const index = state.sessions.findIndex(s => s.id === saved.id); if (index < 0) state.sessions.unshift(saved); else state.sessions[index] = saved; }
+function upsertSession(saved: Session): void { const index = state.sessions.findIndex(s => s.id === saved.id); if (index < 0) state.sessions.unshift(saved); else state.sessions[index] = saved; state.drafts.reclaim(saved.id); }
 /** Show a task's linked pull request in the inspector. */
 async function openPullRequest(sessionId: string): Promise<void> {
   if (sessionId !== state.sessionId) await selectSession(sessionId);
@@ -638,7 +772,7 @@ async function detectPullRequest(sessionId: string): Promise<void> {
   } catch { /* Detection is best effort; the branch menu can link it by hand. */ }
 }
 const worktrees = createWorktrees({
-  call, modal, closeModal, notify, showChoices,
+  call, modal, closeModal, notify, notifyError, showChoices,
   session, project,
   git: () => state.git, gitError: () => state.gitError,
   draft: () => document.querySelector<HTMLTextAreaElement>('#prompt')?.value ?? '',
@@ -665,6 +799,37 @@ const worktrees = createWorktrees({
 });
 window.addEventListener('pandacode-github-change', () => { renderComposer(); renderHeader(); renderInspector(); });
 window.addEventListener('focus', () => void github.refreshLinks(state.projectId));
+/** The prompt's aria-description, shared by the composer render and dictation's restore, so the bot-steering and
+ * GitHub-mention wording is the same everywhere. */
+function promptDescription(): string {
+  const running = isRunning(), task = session(), bot = running ? botForThread() : undefined;
+  let enter = 'Enter to send.';
+  if (running) {
+    const steering = task && !teams.get(task.id) ? ' Command Enter to steer the running turn.' : '';
+    enter = `Enter to queue for when the agent finishes.${steering}`;
+  }
+  if (bot) {
+    const steer = bot.whileWorking === 'steer';
+    enter = `Enter to ${steer ? 'steer current work' : 'queue for after it finishes'}. `
+      + `Command Enter to ${steer ? 'queue for after it finishes' : 'steer now'}.`;
+  }
+  const references = task && github.connected(task.projectId) ? ', issue, or pull request' : '';
+  return `${enter} Shift Enter for a new line. Type @ to mention a project file${references}.`;
+}
+const voiceDictation = createVoiceDictation({
+  call, subscribe: callback => subscribe('voice-event', callback),
+  thread: () => state.sharedChannelId ? null : session()?.id ?? null,
+  threadTitle: id => state.sessions.find(task => task.id === id)?.title || 'New task',
+  showThread: id => run(selectSession(id)),
+  settings: () => run(showVoiceSettings()), isImeKey, announce, describePrompt: promptDescription,
+  enter: element => {
+    if (document.documentElement.hasAttribute('data-ready')) {
+      materializeIn(element, { scale: 1, y: 0, spring: { response: 0.18 } });
+    }
+  },
+  leave: element => materializeOut(element, { scale: 1, y: 0 }),
+});
+
 const attachments = mountPromptAttachments({
   taskId: () => state.sessionId,
   blocked: taskId => {
@@ -778,7 +943,8 @@ async function openHarnessConsole(task: Session, command?: string): Promise<void
 async function instruction(task: Session, text: string): Promise<void> {
   if (task.id !== state.sessionId) return;
   const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
-  if (!prompt) return;
+  // A recording owns the locked draft: leave it untouched and say how to send.
+  if (!prompt || !voiceDictation.prepareSubmit()) return;
   prompt.value = text; state.drafts.set(task.id, text); await send();
 }
 async function exportTask(task: Session, name?: string): Promise<void> {
@@ -812,9 +978,11 @@ transcriptScroller.tabIndex = 0;
 /* Following the latest output is an intent, not a measurement. Growing content and a resizing
  * composer never clear it: only the reader scrolling up or opening a fold does, and reaching
  * the bottom sets it again. The observer re-pins before paint, so nothing jumps for a frame. */
-let stickToBottom = true, lastTranscriptTop = 0;
+let stickToBottom = true, lastTranscriptTop = 0, resumeFollow = true;
 const transcriptGap = (): number => transcriptScroller.scrollHeight - transcriptScroller.scrollTop - transcriptScroller.clientHeight;
 const readingTranscriptTool = (): boolean => Boolean(document.activeElement?.closest('.tool-activity, .turn-activity, .turn-changes, .agent-input'));
+/** Clear the floating header when a fold brings an off-screen card back into view. */
+const readingLine = (): number => transcriptScroller.getBoundingClientRect().top + (parseFloat(getComputedStyle(transcriptScroller).scrollPaddingTop) || 0);
 /** The live card shrinking (a result card or the trace folding) would clamp the scroll and slide everything above it down:
  * the height it gave up becomes blank room under it, which new content grows back into. Only while the card's top is in
  * view: a card taller than the window moves down until its top arrives, or the fold would leave the window empty. */
@@ -828,7 +996,7 @@ function keepTopOnShrink(): void {
   // At the end, the scroll has already lost what the card gave up (a clamp or scroll anchoring, in layout, before this runs).
   const end = transcriptScroller.scrollHeight - transcriptScroller.clientHeight, top = transcriptScroller.scrollTop;
   if (top < end - 1) return;
-  const clear = transcriptScroller.getBoundingClientRect().top + (parseFloat(getComputedStyle(transcriptScroller).scrollPaddingTop) || 0);
+  const clear = readingLine();
   const aim = Math.min(top + before.height - box.height, top + box.top - clear);
   if (aim <= top) return;
   tailSession = state.sessionId;
@@ -838,8 +1006,13 @@ function keepTopOnShrink(): void {
   lastTranscriptTop = transcriptScroller.scrollTop;
 }
 function followTranscript(): void {
+  if (!stickToBottom) {
+    liveCardSeen = undefined;
+    // Room below the window can go without clamping the reader or moving their line.
+    if (tailRoom && !tailBridging && transcriptGap() >= tailRoom) setTailRoom(0);
+    return;
+  }
   keepTopOnShrink();
-  if (!stickToBottom) return;
   if (readingTranscriptTool()) { if (transcriptGap() > 2) stickToBottom = false; return; }
   // A handoff's room easing (growTailRoom) holds the follow unless it was started to keep following.
   if (tailBridging && !tailFollows) return;
@@ -850,14 +1023,15 @@ function followTranscript(): void {
   // thread never lurches by the card's per-frame growth; a send (the bubble and the skeleton card) on a slower one
   // (SEND_RESPONSE); text, a switch or the composer still pin at once.
   if (grew && (state.streams.has(state.sessionId) || finishingStreams.has(state.sessionId)) && (followFrame !== 0 || sendFollow || traceUnfolding()) && transcriptGap() < FOLLOW_EASE_LIMIT && !matchMedia('(prefers-reduced-motion: reduce)').matches) {
-    if (!followFrame) { followVelocity = 0; followAt = performance.now(); followFrame = requestAnimationFrame(easeFollow); }
+    if (!followFrame) { followVelocity = 0; followStill = 0; followAt = performance.now(); followFrame = requestAnimationFrame(easeFollow); }
     // The spring steps before layout; this runs after it (the observer), so the frame's own growth is held to the cap too.
     const gap = transcriptGap();
-    if (!sendFollow && gap > FOLLOW_MAX_LAG) transcriptScroller.scrollTop += gap - FOLLOW_MAX_LAG;
+    if (!sendFollow && gap > FOLLOW_MAX_LAG) { transcriptScroller.scrollTop += gap - FOLLOW_MAX_LAG; lastTranscriptTop = transcriptScroller.scrollTop; }
     return;
   }
   cancelAnimationFrame(followFrame); followFrame = 0; sendFollow = false;
   transcriptScroller.scrollTop = transcriptScroller.scrollHeight;
+  lastTranscriptTop = transcriptScroller.scrollTop;
 }
 /** A result card's height animation (trace-motion.ts `expand`) is running in the live trace. */
 const traceUnfolding = (): boolean => Boolean(document.querySelector('#stream-region .live-tools')?.getAnimations({ subtree: true })
@@ -865,17 +1039,17 @@ const traceUnfolding = (): boolean => Boolean(document.querySelector('#stream-re
 /** The follow is a critically damped spring on the distance to the bottom (time-based, FOLLOW_RESPONSE s), so it
  * eases in, tracks a growing card without stepping and lands without overshoot. */
 const FOLLOW_RESPONSE = 0.1, SEND_RESPONSE = 0.26, FOLLOW_EASE_LIMIT = 480, FOLLOW_MAX_LAG = 24;
-let followFrame = 0, followedHeight = 0, followVelocity = 0, followAt = 0, sendFollow = false;
+let followFrame = 0, followedHeight = 0, followVelocity = 0, followAt = 0, sendFollow = false, followStill = 0;
 /** The next follow (a send's new bubble and card) eases on SEND_RESPONSE until it lands. */
 function followSend(): void {
-  sendFollow = true;
+  sendFollow = true; followStill = 0;
   cancelAnimationFrame(followFrame); followFrame = 0;
 }
 function easeFollow(now: number): void {
   followFrame = 0;
   const gap = transcriptGap();
   if (!stickToBottom || gap <= 0.5) { sendFollow = false; return; }
-  if (gap >= FOLLOW_EASE_LIMIT) { sendFollow = false; transcriptScroller.scrollTop = transcriptScroller.scrollHeight; return; }
+  if (gap >= FOLLOW_EASE_LIMIT) { sendFollow = false; stickTranscript(); return; }
   const dt = Math.min(0.05, Math.max(0, (now - followAt) / 1000)), omega = 2 * Math.PI / (sendFollow ? SEND_RESPONSE : FOLLOW_RESPONSE), decay = Math.exp(-omega * dt);
   followAt = now;
   // Position relative to the target is -gap; the closed-form critically damped step. The bottom never runs more than
@@ -883,7 +1057,12 @@ function easeFollow(now: number): void {
   // the start and the end.
   const y = -gap, base = followVelocity + omega * y, next = Math.max(sendFollow ? -Infinity : -FOLLOW_MAX_LAG, (y + base * dt) * decay);
   followVelocity = (followVelocity - omega * base * dt) * decay;
-  transcriptScroller.scrollTop += next - y;
+  const before = transcriptScroller.scrollTop;
+  transcriptScroller.scrollTop = before + next - y;
+  lastTranscriptTop = transcriptScroller.scrollTop;
+  // Compare this attempted step, not the previous post-write position: normal motion must not count as a stall.
+  followStill = dt > 0 && lastTranscriptTop === before ? followStill + 1 : 0;
+  if (followStill >= 2 && gap <= 4) { sendFollow = false; stickTranscript(); return; }
   followFrame = requestAnimationFrame(easeFollow);
 }
 /** Blank room under the last card after the handoff (handOffCard, foldInPlace) or a Show less: the card's top stays where it
@@ -899,18 +1078,40 @@ function absorbTailRoom(): void {
   const gap = transcriptGap();
   if (gap > 0.5) setTailRoom(tailRoom - gap);
 }
-function stickTranscript(): void { stickToBottom = true; transcriptScroller.scrollTop = transcriptScroller.scrollHeight; }
+function stickTranscript(): void { stickToBottom = true; transcriptScroller.scrollTop = transcriptScroller.scrollHeight; lastTranscriptTop = transcriptScroller.scrollTop; }
 const transcriptResize = new ResizeObserver(followTranscript);
 followTranscriptBottom(transcriptScroller, () => stickToBottom && !readingTranscriptTool());
 const observeTranscript = (): void => { transcriptResize.disconnect(); for (const node of [transcriptScroller, ...transcriptScroller.children]) transcriptResize.observe(node); };
 new MutationObserver(observeTranscript).observe(transcriptScroller, { childList: true });
 observeTranscript();
-const releaseTranscript = (): void => { if (transcriptScroller.scrollTop > 0) stickToBottom = false; };
-// Rebuilding or measuring the composer briefly shrinks it; a layout read then grows the transcript
-// and clamps its scroll up. Re-pin in the mutation's microtask, before that clamp can paint or
-// reach the scroll handler, where any upward scroll means the reader left.
-new MutationObserver(records => { if (records.some(record => !transcriptScroller.contains(record.target))) followTranscript(); })
-  .observe($('.conversation-pane'), { childList: true, subtree: true, attributes: true });
+// Images agents viewed (tool rows, cards, the live header) all come from `tool_image`: only paths the thread's tool
+// records name, absolute (/tmp screenshots included) or relative to the task's checkout. Network paths never load.
+// Rows and cards ask for a downscaled copy (`maxEdge`); only the viewer asks for the whole image.
+const toolImageLoader: ToolImageLoader = (sessionId, path, maxEdge) => isNetworkPath(path)
+  ? Promise.reject(new Error(NETWORK_PATH_ERROR))
+  : call<string>('tool_image', maxEdge ? { sessionId, path, maxEdge } : { sessionId, path });
+// Thumbnails load once near the viewport, whichever render inserted them, with the thread that rendered them (a
+// held transcript keeps showing the previous thread's rows after a switch); a click opens the viewer and never
+// toggles the row around it.
+attachToolImages(transcriptScroller, () => state.sessionId ?? '', toolImageLoader);
+const releaseTranscript = (): void => { resumeFollow = false; if (transcriptScroller.scrollTop > 0) stickToBottom = false; };
+// Composer mutations do not imply a resize; the transcript ResizeObserver handles actual size changes before paint.
+// What is skipped is NAMED here rather than inferred: the transcript's own subtree, the composer, and the progress pip with
+// everything inside it. The pip floats over the conversation — #progress-pip is position:absolute in the relatively
+// positioned pane — so no write inside it can move the flow it covers: place() re-sets --pp-top/--pp-bottom/--pp-room from
+// the pane's resize observer, a drag writes translate, and progress-pip.ts writes a frame's width and height and the stage's
+// aspect-ratio while a snapshot animates. A record inside the pip is skipped whatever its type, childList included; a real
+// size change to the transcript is the ResizeObserver's business above.
+// This replaces a getComputedStyle(target).position === 'absolute' | 'fixed' test. That test inferred the skip set from
+// runtime style: every attribute write in the pane paid a style resolution to ask whether its target happened to be out of
+// flow at that moment, so what was skipped could not be read off the source, changed with a class swap on the target, and
+// missed the pip's own descendants because it judged the record's target alone. A named list cannot drift that way.
+const composerArea = $('#composer-area');
+const progressPipHost = $('#progress-pip');
+const rePinsTranscript = (target: Node): boolean =>
+  !transcriptScroller.contains(target) && !composerArea.contains(target) && !progressPipHost.contains(target);
+new MutationObserver(records => { if (records.some(record => rePinsTranscript(record.target))) followTranscript(); })
+  .observe($('.conversation-pane'), { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class', 'data-state', 'hidden'] });
 transcriptScroller.addEventListener('scroll', () => {
   const top = transcriptScroller.scrollTop;
   // Scrolling up gives back the blank room a fold or handoff left under the last card: only the part now below the
@@ -918,25 +1119,43 @@ transcriptScroller.addEventListener('scroll', () => {
   // scroll back down to the end pins again). A clamp (the old top past the end, or the scroll still at the end after a
   // pixel's shrink) is not the reader moving.
   const scrollEnd = transcriptScroller.scrollHeight - transcriptScroller.clientHeight;
+  if (top >= scrollEnd - 2) transcriptView.scheduleTrim();
   if (top < lastTranscriptTop && tailRoom && !tailBridging && lastTranscriptTop <= scrollEnd + 1 && top < scrollEnd - 1) {
     absorbTailRoom(); stickToBottom = false; lastTranscriptTop = transcriptScroller.scrollTop;
     void loadOlderMessages(); return;
   }
-  // Following and not moving up (the observer's own pins): nothing can change, so skip measuring.
-  if (stickToBottom && top >= lastTranscriptTop) { lastTranscriptTop = top; void loadOlderMessages(); return; }
-  if (transcriptGap() <= 2) stickToBottom = true;
+  // Following and not moving up (the observer's own pins): nothing can change, so skip measuring. A pin is not the
+  // reader asking for history: drawing it here would widen every thread as it opens, only for the trim to cut it again.
+  if (stickToBottom && top >= lastTranscriptTop) { lastTranscriptTop = top; return; }
+  // Native focus/anchoring scrolls after Read more are not the reader asking to follow again.
+  if (resumeFollow && transcriptGap() <= 2) stickToBottom = true;
   // Content that shrank clamps the scroll up (the old top is past the end now): that is not the reader leaving.
   else if (stickToBottom && lastTranscriptTop > transcriptScroller.scrollHeight - transcriptScroller.clientHeight) followTranscript();
   else if (top < lastTranscriptTop) stickToBottom = false;
-  lastTranscriptTop = top;
-  void loadOlderMessages();
+  lastTranscriptTop = transcriptScroller.scrollTop;
+  if (!stickToBottom) void loadOlderMessages();
 }, { passive: true });
-transcriptScroller.addEventListener('click', event => { if ((event.target as Element).closest('summary, .turn-card-more, .team-progress-toggle')) stickToBottom = false; }, true);
+transcriptScroller.addEventListener('click', event => {
+  const target = event.target as Element;
+  // Before the fold opens, so it opens at its full height.
+  const tool = target.closest('details[data-tool-key] > summary')?.parentElement;
+  if (tool) fillToolBody(tool as HTMLDetailsElement);
+  const holdFold = stickToBottom && target.closest('summary');
+  if (target.closest('summary, .turn-card-more, .team-progress-toggle')) stickToBottom = false;
+  if (target.closest('.turn-card-more, .team-progress-toggle')) resumeFollow = false;
+  // A manual fold still gives its lost height back once, without re-arming continuous following.
+  if (holdFold) queueMicrotask(keepTopOnShrink);
+}, true);
+// Any other way a tool comes open (a restore, a script) still gets its body.
+transcriptScroller.addEventListener('toggle', event => { const tool = event.target as HTMLDetailsElement; if (tool.open && tool.matches('details[data-tool-key]')) fillToolBody(tool); }, true);
 // A page consisting mostly of folded tools may be shorter than the viewport.
 // Let upward wheel/keyboard intent fetch its history even without a scroll event.
-transcriptScroller.addEventListener('wheel', event => { if (event.deltaY < 0) { releaseTranscript(); void loadOlderMessages(); } }, { passive: true });
+transcriptScroller.addEventListener('wheel', event => { if (event.deltaY > 0) { resumeFollow = true; if (!stickToBottom && transcriptGap() <= 2) stickToBottom = true; } else if (event.deltaY < 0) { releaseTranscript(); void loadOlderMessages(); } }, { passive: true });
+transcriptScroller.addEventListener('pointerdown', event => { if (event.pointerType === 'touch' || event.target === transcriptScroller) resumeFollow = true; }, { passive: true });
 transcriptScroller.addEventListener('keydown', event => {
-  if (event.target === transcriptScroller && ['ArrowUp', 'PageUp', 'Home'].includes(event.key)) { releaseTranscript(); void loadOlderMessages(); }
+  if (event.target !== transcriptScroller) return;
+  if (['ArrowUp', 'PageUp', 'Home'].includes(event.key) || (event.key === ' ' && event.shiftKey)) { releaseTranscript(); void loadOlderMessages(); }
+  else if (['ArrowDown', 'PageDown', 'End', ' '].includes(event.key)) { resumeFollow = true; if (!stickToBottom && transcriptGap() <= 2) stickToBottom = true; }
 });
 /* While the window's size changes, transcript rows off screen skip layout and paint (styles.css):
  * in a long thread they are most of each step's cost. A reader scrolled up gets their row back
@@ -956,7 +1175,11 @@ addEventListener('resize', () => {
   windowSettle = window.setTimeout(() => {
     windowSettle = 0;
     transcriptScroller.removeAttribute('data-window-resizing');
-    if (windowReaderTask === state.sessionId) restoreWindowReader?.();
+    if (windowReaderTask === state.sessionId) {
+      if (restoreWindowReader && !stickToBottom) restoreWindowReader();
+      else if (resumeFollow) { stickToBottom = true; followTranscript(); }
+      lastTranscriptTop = transcriptScroller.scrollTop;
+    }
     restoreWindowReader = undefined;
   }, WINDOW_SETTLE_MS);
 });
@@ -985,9 +1208,10 @@ const tiles = mountThreadTiles({
   signal: id => { const s = state.sessions.find(item => item.id === id); if (!s) return { status: '', label: '', word: '' }; const { status, statusLabel, word } = taskSignal(s, Date.now()); return { status, label: statusLabel, word }; },
   exists: id => state.sessions.some(s => s.id === id) && !deletedSessions.has(id),
   running: id => isRunning(id),
-  open: async (id, scrollTop) => { await selectSession(id); if (scrollTop !== undefined) { transcriptScroller.scrollTop = scrollTop; releaseTranscript(); } },
+  open: (id, scrollTop) => openFromTile(id, scrollTop),
   focusPrompt: () => document.querySelector<HTMLTextAreaElement>('#prompt')?.focus(),
   draw: (id, rows, scroller) => drawTile(id, rows, scroller),
+  more: (id, rows, scroller) => tileWindows.showMore(id, rows, scroller),
   scene: (tile, id) => { const scene = mountSky(tile, $('.workspace'), { wanted: () => !wallpapers.preferences.enabled, fixedMinutes: skyTime, tileRoot: $('.work-area') }); scene.setThread(id); return scene; },
   notify,
 });
@@ -1031,7 +1255,7 @@ function restoreThreadPanel(task?: Session): void {
   const sameWorkspace = saved?.workspace === workspaceKey();
   // Without saved state the conversation opens the panel on the selected tab, unless the user closed it or it would cover the chat.
   state.inspector = saved?.open ?? (state.view === 'conversation' && inspectorChosen && !matchMedia('(max-width: 920px)').matches);
-  state.inspectorTab = saved?.tab && (saved.tab === 'file' || inspectorTabs.open.includes(saved.tab)) ? saved.tab : threadDefault(inspectorTabs); state.openFolders = new Set(sameWorkspace ? saved?.folders : []);
+  state.inspectorTab = saved?.tab && inspectorTabs.open.includes(saved.tab) ? saved.tab : threadDefault(inspectorTabs); state.openFolders = new Set(sameWorkspace ? saved?.folders : []);
   state.selectedFile = sameWorkspace ? saved?.file ?? '' : ''; state.selectedKind = sameWorkspace ? saved?.kind ?? '' : ''; state.selectedStaged = saved?.staged ?? false;
   state.browserUrl = sameWorkspace ? saved?.browserUrl ?? '' : ''; selectedFileContext = sameWorkspace && saved?.context ? { ...saved.context } : undefined;
   fileTabs.show(state.sessionId, workspaceKey());
@@ -1080,11 +1304,12 @@ function saveCollapsedFolders(): void { try { localStorage.setItem('pandacode.co
 function listedSessions(): Session[] { return state.sessions.filter(task => !task.draft); }
 /** Leaving an untouched draft discards it; one with typed text, attachments or a worktree stays hidden and New task reopens it. */
 function leaveDraft(nextId: string): void {
+  if (nextId !== state.sessionId) voiceDictation.detach();
   const draft = session();
   if (!draft?.draft || draft.id === nextId || isRunning(draft.id) || state.messages.length || configuringSessions.has(draft.id) || draft.worktreePath) return;
   const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
   const typed = prompt?.dataset.sessionId === draft.id ? prompt.value : state.drafts.get(draft.id) ?? '';
-  if (typed.trim() || attachments.list(draft.id).length || state.browserAttachments.get(draft.id)?.length || state.moodboardAttachments.get(draft.id)?.length) return;
+  if (voiceDictation.ownsThread(draft.id) || typed.trim() || attachments.list(draft.id).length || state.browserAttachments.get(draft.id)?.length || state.moodboardAttachments.get(draft.id)?.length) return;
   state.sessions = state.sessions.filter(task => task.id !== draft.id);
   state.drafts.delete(draft.id);
   void call<boolean>('discard_draft', { sessionId: draft.id }).catch(() => undefined);
@@ -1104,13 +1329,18 @@ function teamHeld(id = state.sessionId): boolean {
 /** The empty-thread layout (no header underlap) changes only once the thread's page is known, in the
  * frame that draws it: a switch never moves the transcript 39px while it loads or mid-settle. */
 function syncNewTaskPage(): void { if (!state.messagesLoading) $('.conversation-pane').classList.toggle('new-task-page', newTaskView()); }
+/** The first load of a thread whose page is drawn while its task's details and team are still on the way: what acts on
+ *  the task (sending, editing) waits until that load's details settle, whatever redraws the page meanwhile (a run
+ *  finishing): a send before the team is known would go to a team thread as a plain message. Another load ends it. */
+let taskDetailsPending: { id: string; generation: number } | undefined;
+const threadLoading = (): boolean => state.messagesLoading || (taskDetailsPending?.id === state.sessionId && taskDetailsPending.generation === state.generation);
 function newTaskView(): boolean { const s = session(); return Boolean(s && !s.resumeId && !isRunning() && !state.messagesLoading && !state.messagesError && state.messages.length === 0); }
 function stream(id: string): Stream {
   let s = state.streams.get(id);
   if (!s) {
     finishingStreams.delete(id);
     const now = Date.now();
-    s = { body: new TailText(), thought: new TailText(), get text() { return this.body.value; }, get thinking() { return this.thought.value || undefined; }, tools: [], status: '', approvals: new Map(), inputs: new Map(), revision: 0, lastResponseAt: null, startedAt: now, turnKey: 'turn:live:' + id, omittedActivity: false };
+    s = { body: new TailText(), thought: new TailText(), get text() { return this.body.value; }, get thinking() { return this.thought.value || undefined; }, tools: [], accountSwitches: [], status: '', approvals: new Map(), inputs: new Map(), revision: 0, lastResponseAt: null, startedAt: now, turnKey: 'turn:live:' + id, omittedActivity: false };
     state.streams.set(id, s);
   }
   return s;
@@ -1142,21 +1372,24 @@ function finishLiveMessage(current: Stream, sessionId: string): void {
   current.tools.push({ key: current.retainedMessageKey, content: current.text.length > 16384 ? current.text.slice(0, 16384) + '\n[Activity preview truncated]' : current.text, commentary: true });
   trimLiveActivity(current, sessionId); current.revision++;
 }
- function shortProvider(id: ProviderId): string { return ({ claude: 'Claude', codex: 'Codex', kimi: 'Kimi', opencode: 'OpenCode', glm: 'GLM', antigravity: 'Antigravity', grok: 'Grok', mimo: 'MiMo', pi: 'Pi', deepseek: 'DeepSeek', commandcode: 'Command Code', cline: 'Cline', kilo: 'Kilo', omp: 'omp', 'github-copilot': 'GitHub Copilot CLI', muse: 'Muse Code', devin: 'Devin', zcode: 'ZCode', hermes: 'Hermes' })[id]; }
+ function shortProvider(id: ProviderId): string { return ({ claude: 'Claude', codex: 'Codex', kimi: 'Kimi', opencode: 'OpenCode', glm: 'GLM', antigravity: 'Antigravity', grok: 'Grok', mimo: 'MiMo', alibaba: 'Alibaba', pi: 'Pi', deepseek: 'DeepSeek', commandcode: 'Command Code', cline: 'Cline', kilo: 'Kilo', omp: 'omp', 'github-copilot': 'GitHub Copilot CLI', muse: 'Muse Code', devin: 'Devin', zcode: 'ZCode', hermes: 'Hermes', cursor: 'Cursor' })[id]; }
 function selectedModel(s: Session): ProviderModel { return provider(s.provider)?.models.find(model => model.id === (s.model || 'default')) ?? fallbackModel(s.provider, s.model); }
 function modelLabel(s?: Session, withEffort = true): string {
   if (!s) return 'Default model';
   const named = teams.get(s.id)?.config;
   if (named?.rosterOnly && named.name) return named.name;
-  const model = selectedModel(s), connection = taskConnection(s);
-  const name = connection ? `${connection.name} · ${model.name === 'Default' ? 'Default' : model.name}` : model.name === 'Default' ? 'Default model' : model.name;
+  const model = selectedModel(s);
+  const name = model.name === 'Default' ? 'Default model' : model.name;
   const effort = withEffort && effortLabel(s);
   return effort ? `${name} · ${effort}` : name;
 }
-/** The trigger's effort word; none for a named team, whose workers set their own. */
+/** The trigger's effort word and a faster speed's name; none for a named team, whose workers set their own. */
 function effortLabel(s: Session): string {
-  if (!s.reasoningEffort || teams.get(s.id)?.config.rosterOnly) return '';
-  return selectedModel(s).reasoningEfforts?.find(effort => effort.id === s.reasoningEffort)?.name ?? s.reasoningEffort;
+  if (teams.get(s.id)?.config.rosterOnly) return '';
+  const model = selectedModel(s), tier = s.codexSettings?.serviceTier;
+  const effort = s.reasoningEffort ? model.reasoningEfforts?.find(effort => effort.id === s.reasoningEffort)?.name ?? s.reasoningEffort : '';
+  const speed = tier ? model.speedTiers?.find(speed => speed.id === tier)?.name ?? '' : '';
+  return [effort, speed].filter(Boolean).join(' · ');
 }
 /** The trigger's logo, or a named team's stacked roster. */
 function triggerLogo(s: Session): string {
@@ -1204,44 +1437,196 @@ function refreshModelLabels(): void {
     modeTrigger.innerHTML = modeFaceHtml(mode);
     trayStateChanged();
   }
+  council.sync(s.id);
   refreshTeamProgress();
 }
 function formatTime(timestamp: number): string { return new Date(timestamp < 1e12 ? timestamp * 1000 : timestamp).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
-/** The toast's Undo, while it shows; ⌘Z runs it too. */
-let toastUndo: (() => void) | undefined, toastGeneration = 0;
-/** A short notice; a function adds Undo, `{ label, run }` one other button that stays a little longer. */
-function notify(text: string, undo?: (() => void) | { label: string; run: () => void }): void {
-  const toast = $('#toast'), generation = ++toastGeneration;
-  const action = typeof undo === 'function' ? undefined : undo;
-  toast.textContent = text; toastUndo = typeof undo === 'function' ? undo : undefined;
+/** The toast's Undo, while it shows; ⌘Z runs it too. `toastSettle` runs once when that toast leaves without its Undo
+ * (expires, is closed, or another toast replaces it): work an Undo can still cancel waits for it. */
+let toastUndo: (() => void) | undefined, toastSettle: (() => void) | undefined, toastDismiss: (() => void) | undefined, toastGeneration = 0, toastShown: { text: string; count: number; plain: boolean; tone: ToastTone } | null = null, toastShownAt = 0;
+const toastVisible = (toast: HTMLElement): boolean => !toast.hidden;
+/** The thread boot held back (the stuck-thread rule); the crash notice names it. */
+let heldBackThread: Session | undefined, heldBackNotLast = false;
+/** Boot opened no thread by itself in case one caused the crash, and how the window's content died before this page, if it did. */
+let bootOpenedNothing = false, windowDeath: import('./crash-recovery-model').WindowDeath | undefined;
+/** `important`: the notice asks the user to act (an approval, a question), so it is never dropped from the queue.
+ * `holdMs`: how long it stays (Infinity: until closed or its action is used). `dismiss` makes it a lasting notice
+ * (toast-clearance.ts places it) whose close button (Escape too, with focus in the toast) runs it. `quiet`: it comes
+ * back as it was, unannounced and without its entrance. */
+type ToastOptions = { tone?: ToastTone; settle?: () => void; important?: boolean; holdMs?: number; dismiss?: () => void; quiet?: boolean };
+/** `name`: an accessible name fuller than the label (it should start with it); `keep`: using it leaves the toast showing. */
+type ToastAction = { label: string; run: () => void; name?: string; keep?: boolean; quiet?: boolean };
+function settleToast(): void { const settle = toastSettle; toastSettle = undefined; toastUndo = undefined; settle?.(); }
+/** Runs the toast's Undo (its button or ⌘Z); its settle work is cancelled, not run. */
+function runToastUndo(): boolean {
+  const undo = toastUndo;
+  if (!undo) return false;
+  toastUndo = undefined; toastSettle = undefined; toastShown = null; releaseToastRoom(); void hideToast($('#toast')); undo();
+  leaveToastFocus();
+  showQueuedToast();
+  return true;
+}
+/** Notices that arrived while a dismissal's Undo toast showed (queueToast); shown one by one once it settles. */
+type QueuedToast = { text: string; tone?: ToastTone; important?: boolean; undo?: (() => void) | ToastAction | readonly ToastAction[]; options: ToastOptions };
+let toastQueue: QueuedToast[] = [];
+function showQueuedToast(): void {
+  const [next, ...rest] = toastQueue;
+  if (!next) return;
+  toastQueue = rest;
+  notify(next.text, next.undo, next.options);
+}
+const toastCountHtml = (count: number): string => `<span class="toast-count" aria-hidden="true">×${count}</span><span class="sr-only">Repeated ${count} times</span>`;
+/** A short notice; a function adds Undo, `{ label, run }` one other button that stays a little longer, and a list adds
+ * the first as that button and the rest as quieter text buttons after it. `tone: 'danger'`
+ * marks a notice raised by a failure. An identical notice while it shows only bumps its count, so a screen reader hears
+ * "Repeated N times" rather than the whole message again. */
+function notify(text: string, undo?: (() => void) | ToastAction | readonly ToastAction[], options: ToastOptions = {}): void {
+  const toast = $('#toast'), wasVisible = toastVisible(toast), plain = !undo && !options.settle;
+  const queued = queueToast({ holding: wasVisible && Boolean(toastSettle), queue: toastQueue }, { text, tone: options.tone, important: options.important, undo, options }, Boolean(options.settle));
+  toastQueue = queued.queue;
+  if (!queued.show) return;
+  const count = nextToastCount(toastShown, text, wasVisible, plain, options.tone);
+  const generation = ++toastGeneration;
+  if (count > 1 && toast.querySelector('.toast-counter')) {
+    toastShown = { text, count, plain, tone: options.tone };
+    toast.querySelector('.toast-counter')!.innerHTML = toastCountHtml(count);
+    hideToastLater(toast, generation, 4500);
+    return;
+  }
+  settleToast();
+  // The toast's controls are about to be replaced: focus in them goes back where the last toast was raised from.
+  leaveToastFocus();
+  const raisedFrom = document.activeElement;
+  toastOrigin = raisedFrom instanceof HTMLElement && raisedFrom !== document.body ? raisedFrom : null;
+  const actions: readonly ToastAction[] = typeof undo === 'function' || !undo ? [] : Array.isArray(undo) ? undo : [undo as ToastAction];
+  toastShown = { text, count, plain, tone: options.tone }; toastUndo = typeof undo === 'function' ? undo : undefined; toastSettle = options.settle; toastDismiss = options.dismiss;
+  // The live region is the text alone (never the buttons), kept from toast to toast so each new text is announced once,
+  // and not atomic: a count bump says only "Repeated N times". It is in the markup from the start, empty, so the first
+  // toast (often the crash notice at boot) is a change to it, which screen readers announce, not its initial content.
+  const label = toast.querySelector<HTMLElement>(':scope>.toast-text') ?? document.createElement('span');
+  label.className = 'toast-text'; label.setAttribute('role', 'status'); label.setAttribute('aria-atomic', 'false');
+  // A lasting notice is never clamped, and its text is rewritten in place: a tooltip would only repeat it, then go stale.
+  if (options.dismiss) label.removeAttribute('title'); else label.title = toastTitle(text);
+  const counter = document.createElement('span');
+  counter.className = 'toast-counter';
+  if (count > 1) counter.innerHTML = toastCountHtml(count);
+  label.replaceChildren(text, counter);
+  for (const child of [...toast.children]) if (child !== label) child.remove();
+  if (!label.isConnected) toast.append(label);
+  // `quiet`: shown again after another toast, already announced once.
+  for (const live of [toast, label]) if (options.quiet) live.setAttribute('aria-live', 'off'); else live.removeAttribute('aria-live');
+  toast.toggleAttribute('data-danger', options.tone === 'danger');
+  if (options.tone === 'danger') {
+    const mark = document.createElement('span');
+    mark.className = 'toast-icon'; mark.dataset.stateTone = 'danger'; mark.setAttribute('aria-hidden', 'true'); mark.innerHTML = icon('alert');
+    toast.prepend(mark);
+  }
   if (typeof undo === 'function') {
     const button = document.createElement('button');
     button.type = 'button'; button.className = 'toast-undo'; button.textContent = 'Undo'; button.setAttribute('aria-keyshortcuts', 'Meta+Z Control+Z');
-    button.addEventListener('click', () => { if (toastUndo !== undo) return; toastUndo = undefined; void hideToast(toast); undo(); });
-    toast.append(button);
-  } else if (action) {
-    const button = document.createElement('button');
-    button.type = 'button'; button.className = 'toast-action'; button.textContent = action.label;
-    button.addEventListener('click', () => { void hideToast(toast); action.run(); });
+    button.addEventListener('click', () => { if (toastUndo === undo) runToastUndo(); });
     toast.append(button);
   }
-  showToast(toast);
-  hideToastLater(toast, generation, action ? 9000 : undo ? 5000 : 4500);
+  actions.forEach((item, index) => {
+    const button = document.createElement('button');
+    button.type = 'button'; button.className = index || item.quiet ? 'toast-secondary' : 'toast-action'; button.textContent = item.label;
+    if (item.name) button.setAttribute('aria-label', item.name);
+    button.addEventListener('click', () => {
+      if (!item.keep) { releaseToastRoom(); void hideToast(toast); }
+      item.run();
+      if (!item.keep) leaveToastFocus();
+    });
+    toast.append(button);
+  });
+  const dismissible = Boolean(options.dismiss);
+  toast.classList.toggle('toast-dismissible', dismissible);
+  addToastClose(toast, dismissToast);
+  labelToastShortcut(toast);
+  toastShownAt = Date.now();
+  showToast(toast, options.quiet);
+  placeToast(toast);
+  const composerArea = document.querySelector('#composer-area');
+  if (composerArea) toastPlacement.observe(composerArea);
+  // Infinity: it stays until the user closes it or uses its action.
+  const delay = options.holdMs ?? (actions.length ? 9000 : undo ? 5000 : 4500);
+  if (Number.isFinite(delay)) hideToastLater(toast, generation, delay);
 }
-/** The toast stays while the pointer rests on it, then leaves shortly after. */
+/** The toast keeps its bottom-right corner unless that would cover the composer (narrow windows, where the composer
+ * reaches the corner): then it sits just above it. Placed before its first frame, never animated. */
+const TOAST_COMPOSER_GAP = 8;
+/** While a toast shows, a composer that grows or shrinks (a run starts, the prompt wraps) places it again. */
+const toastPlacement = new ResizeObserver(() => { const toast = $('#toast'); if (toastVisible(toast)) placeToast(toast); else toastPlacement.disconnect(); });
+function placeToast(toast: HTMLElement): void {
+  toast.style.removeProperty('bottom');
+  // A lasting notice is placed by toast-clearance.ts, which gives the transcript its own room (`--toast-room`).
+  if (toast.classList.contains('toast-dismissible')) { document.querySelector<HTMLElement>('#transcript')?.style.removeProperty('--toast-clear'); return; }
+  const composer = document.querySelector('#composer-area')?.getBoundingClientRect(), box = toast.getBoundingClientRect();
+  if (composer?.width && !(box.left >= composer.right || box.right <= composer.left || box.top >= composer.bottom || box.bottom <= composer.top)) {
+    toast.style.bottom = `${Math.round(window.innerHeight - composer.top + TOAST_COMPOSER_GAP)}px`;
+  }
+  makeToastRoom(toast);
+}
+/** A toast over the end of the open thread would cover its live errors' controls: while it shows, the transcript ends
+ * that much higher (`--toast-clear`, extra room after the last row, turn-card.css), followed to the bottom when it was
+ * there. A jump, never animated; a reader scrolled up is left where they are. */
+function makeToastRoom(toast: HTMLElement): void {
+  const transcript = document.querySelector<HTMLElement>('#transcript'), live = transcript?.querySelector<HTMLElement>('#stream-region .live-errors');
+  if (!transcript) return;
+  const current = parseFloat(transcript.style.getPropertyValue('--toast-clear')) || 0;
+  const atBottom = transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight < 2;
+  const box = toast.hidden ? null : toast.getBoundingClientRect(), errors = live?.childElementCount ? live.getBoundingClientRect() : null;
+  if (!atBottom && box) return;
+  const across = box && errors && errors.height && box.left < errors.right && box.right > errors.left;
+  const room = across ? Math.max(0, Math.ceil(current + errors.bottom + TOAST_COMPOSER_GAP - box.top)) : 0;
+  if (room === current) return;
+  if (room) transcript.style.setProperty('--toast-clear', `${room}px`); else transcript.style.removeProperty('--toast-clear');
+  if (atBottom) transcript.scrollTop = transcript.scrollHeight;
+}
+/** The toast is leaving: the room it took goes with it. */
+function releaseToastRoom(): void { toastPlacement.disconnect(); document.querySelector<HTMLElement>('#transcript')?.style.removeProperty('--toast-clear'); }
+function dismissToast(): void {
+  const toast = $('#toast');
+  if (!toastVisible(toast)) return;
+  const dismiss = toastDismiss;
+  toastGeneration++; toastShown = null; toastDismiss = undefined; settleToast(); leaveToastFocus(); releaseToastRoom(); void hideToast(toast);
+  dismiss?.();
+  showQueuedToast();
+}
+/** What had focus when the toast was raised (for an error dismissal, the next row's control or the composer). */
+let toastOrigin: HTMLElement | null = null;
+/** The toast is leaving or being replaced: focus in it moves to where it was raised from if that is still shown, else
+ * the composer; never left on <body>. */
+function leaveToastFocus(): void {
+  const toast = $('#toast');
+  if (!toast.contains(document.activeElement)) return;
+  const back = toastOrigin?.isConnected && !toast.contains(toastOrigin) && toastOrigin.getClientRects().length ? toastOrigin : document.querySelector<HTMLElement>('#prompt');
+  back?.focus({ preventScroll: true });
+}
+/** The toast stays while the pointer rests on it or focus is in it (WCAG 2.2.1), then leaves shortly after. */
 function hideToastLater(toast: HTMLElement, generation: number, delay: number): void {
   window.setTimeout(() => {
     if (generation !== toastGeneration) return;
-    if (toast.matches(':hover')) { hideToastLater(toast, generation, 1200); return; }
-    toastUndo = undefined; void hideToast(toast);
+    if (toast.matches(':hover, :focus-within')) { hideToastLater(toast, generation, 1200); return; }
+    toastShown = null; toastDismiss = undefined; settleToast(); releaseToastRoom(); void hideToast(toast);
+    showQueuedToast();
   }, delay);
 }
-function errorText(error: unknown): string {
-  if (typeof error === 'string') return error;
-  if (error instanceof Error) return error.message;
-  try { return JSON.stringify(error) ?? String(error); } catch { return String(error); }
+/** A notice raised by a failure (danger tone); modules get it as `host.notifyError`. */
+function notifyError(text: string): void { notify(text, undefined, { tone: 'danger' }); }
+function report(error: unknown): void { console.error(error); notifyError(errorText(error, 'Something went wrong. Please try again.')); }
+/** Rejections and errors nothing caught: logged in full, shown once and calmly (globalErrorText). Never throws. */
+let lastGlobalError: { key: string; at: number } | null = null;
+function onGlobalError(reason: unknown, message: string): void {
+  try {
+    if (isBenignGlobalError(reason, message)) return;
+    console.error('Uncaught error', reason ?? message);
+    const text = globalErrorText(reason), now = Date.now();
+    if (!shouldShowGlobalError(lastGlobalError, text, now)) return;
+    lastGlobalError = { key: text, at: now }; notifyError(text);
+  } catch (inner) { console.error(inner); }
 }
-function report(error: unknown): void { console.error(error); notify(typeof error === 'string' ? error : error instanceof Error ? error.message : 'Something went wrong. Please try again.'); }
+window.addEventListener('unhandledrejection', event => onGlobalError(event.reason, errorText(event.reason, '')));
+window.addEventListener('error', event => onGlobalError(event.error, event.message || ''));
 function run(work: Promise<unknown>): void { void work.catch(report); }
 async function openSupport(): Promise<void> {
   if (openingSupport) return;
@@ -1414,6 +1799,8 @@ function taskSignal(s: Session, now: number): { status: string; statusLabel: str
 }
 function renderNavigation(): void {
   queueMicrotask(() => tiles.refresh());
+  // The crash notice's agents sentence goes once no task is left Interrupted.
+  tasksChanged();
   // Preserve the native drag source while agent updates arrive in the background.
   if (sidebarDragging) return;
   const now = Date.now();
@@ -1567,8 +1954,9 @@ function renderNavigation(): void {
     settledResize.disconnect(); settledDock = dock;
     if (dock) settledResize.observe(dock); else nav.style.removeProperty('--settled-height');
   }
-  // A row action that moved its task to another section hands focus to the task's row.
-  syncRovingFocus(nav);
+  // A row action that moved its task to another section hands focus to the task's row. Its tab stops read layout,
+  // so unless focus is in the list (keyboard use, kept instant) they settle in the frame, after the thread's own work.
+  syncNavigationFocus(nav);
   if (focusSelector) (nav.querySelector<HTMLElement>(focusSelector) ?? (focused?.dataset.task ? nav.querySelector<HTMLElement>(`.task-item[data-id="${CSS.escape(focused.dataset.task)}"]`) : null))?.focus({ preventScroll: true });
   renderBoardView();
   updateWorkTimer();
@@ -1642,27 +2030,32 @@ function botCrumb(bot: import('./bots').Bot): string {
   return botThread.crumbHtml(bot, { where, status: bot.paused ? 'Paused' : working ? 'Working' : 'Ready', nextModel: s && next ? { running: modelLabel(s), next: next.label } : undefined });
 }
 /** Where a turn's spawned workers appear: right after what the architect said in that turn. */
-function workerSlot(turn: { user?: Message; coordination?: Message; workerStart?: number }, sessionId = state.sessionId): string {
+function workerSlot(turn: { user?: Message; coordination?: Message; workerStart?: number }, sessionId = state.sessionId, topLevel = false): string {
   const start = turn.workerStart ?? turn.user?.createdAt ?? turn.coordination?.createdAt;
-  return teams.has(sessionId) && start !== undefined ? `<div class="team-progress-slot" data-turn-start="${start}" hidden></div>` : '';
+  // A card always carries its (hidden) slot, so a team landing after the rows fills slots rather than redrawing every
+  // card. A slot that would be a row of its own (chat rows, a turn with no card) is drawn only with a team.
+  return start !== undefined && (!topLevel || teams.get(sessionId)) ? `<div class="team-progress-slot" data-turn-start="${start}" hidden></div>` : '';
 }
 /** Each spawned worker shows in the turn it was spawned in; while that turn is still running,
  *  it follows the live activity at the end of the thread. */
 function refreshTeamProgress(): void {
-  const live = document.querySelector<HTMLElement>('#team-progress-host');
-  if (!live) return;
+  const liveHost = document.querySelector<HTMLElement>('#team-progress-host');
+  if (!liveHost) return;
   const team = teams.get(state.sessionId), workers = team?.workers ?? [];
   const slots = [...document.querySelectorAll<HTMLElement>('#transcript .team-progress-slot')].map(slot => ({ slot, start: Number(slot.dataset.turnStart) }));
-  const placed = new Map<HTMLElement, typeof workers>([[live, []], ...slots.map(({ slot }) => [slot, []] as [HTMLElement, typeof workers])]);
+  const placed = new Map<HTMLElement, typeof workers>([[liveHost, []], ...slots.map(({ slot }) => [slot, []] as [HTMLElement, typeof workers])]);
   // Only a turn that is still streaming has no saved place yet. Workers spawned before it
   // started (a coordination turn whose message hasn't loaded yet) keep their saved place.
   const startedAt = state.streams.get(state.sessionId)?.startedAt;
   for (const worker of workers) {
     let index = -1;
     slots.forEach((slot, at) => { if (slot.start <= worker.createdAt) index = at; });
+    // Its turn is older than the ones drawn so far; it takes its place when that turn is. A worker of the running turn
+    // always shows, whatever the drawn rows hold.
+    const live = startedAt !== undefined && worker.createdAt >= startedAt;
+    if (index < 0 && !live && transcriptView.view.first !== null && transcriptView.view.sessionId === state.sessionId) continue;
     const turn = slots[Math.max(index, 0)];
-    const host = !turn || (startedAt !== undefined && worker.createdAt >= startedAt && index === slots.length - 1) ? live : turn.slot;
-    placed.get(host)!.push(worker);
+    placed.get(!turn || (live && index === slots.length - 1) ? liveHost : turn.slot)!.push(worker);
   }
   const asking = (sessionId: string) => architectView?.needsInput(sessionId) ?? false;
   for (const [host, shown] of placed) updateTeamProgress(host, team, state.providers, shown, asking);
@@ -1693,22 +2086,27 @@ function drawTile(id: string, rows: HTMLElement, scroller: HTMLElement): void {
   // Until the fresh page is in, the saved rows stay alone: a wake's exchange joins its live card only once its message is known.
   const live = tilePages.has(id) ? state.streams.get(id) : undefined;
   let messages = page.messages;
-  if (live) { let lastUser = -1; messages.forEach((m, i) => { if (m.role === 'user' || m.role === 'coordination' || m.role === 'changes') lastUser = i; }); messages = messages.slice(0, lastUser + 1); }
-  const key = `${messages.length}:${messages.at(-1)?.id ?? ''}:${live ? 'live' : ''}`;
+  if (live) messages = liveVisibleMessages(messages, live);
+  const key = `${messages.length}:${messages.at(-1)?.id ?? ''}:${live ? 'live' : ''}:${hiddenErrorsRevision}`;
   if (rows.dataset.key !== key) {
+    const switches = captureAccountSwitches(rows);
     rows.dataset.key = key;
     const thread = { messages: page.messages, provider: state.sessions.find(task => task.id === id)?.provider ?? state.defaultProvider };
-    const turns = mergeLeadTurns(groupTurns(messages));
+    const turns = mergeLeadTurns(withErrorTurns(groupTurns(messages)));
     const { saved, earlier } = live ? splitLiveExchange(turns) : { saved: turns, earlier: undefined };
-    rows.innerHTML = `${saved.map(turn => turnHtml(turn, id, false, thread)).join('')}${earlier ? turnLeadHtml(earlier, thread) : ''}<div class="thread-mirror-live" data-earlier-ms="${earlier?.durationMs ?? 0}">${live ? tileLiveCard(earlier, id, thread) : ''}</div>`;
+    const env = markupEnv(id, false, thread);
+    const { from, added } = tileWindows.draw(rows, saved, turn => savedTurnHtml(turn, id, false, env, thread), `${earlier ? turnLeadHtml(earlier, thread) : ''}<div class="thread-mirror-live" data-earlier-ms="${earlier?.durationMs ?? 0}">${live ? tileLiveCard(earlier, id, thread) : ''}</div>`, () => restoreAccountSwitches(rows, switches));
     rows.querySelectorAll('[id]').forEach(node => node.removeAttribute('id'));
     const byId = new Map(messages.map(message => [String(message.id), message]));
-    rows.querySelectorAll<HTMLElement>('[data-markdown]').forEach(node => { const message = byId.get(node.dataset.markdown!); if (message) void markdown(node, message.content, scroller).catch(report); });
-    watchReplies(rows);
+    // Only what was just drawn, the live card included: kept rows already hold their formatted text.
+    for (const node of added) if (node instanceof Element) node.querySelectorAll<HTMLElement>('[data-markdown]').forEach(target => { const message = byId.get(target.dataset.markdown!); if (message) void markdown(target, message.content, scroller).catch(report); });
+    watchReplies(added);
+    if (from > 0 && windowShort(scroller.scrollHeight, scroller.clientHeight)) tileWindows.showMore(id, rows, scroller);
   }
   const slot = rows.querySelector<HTMLElement>('.thread-mirror-live');
   if (!slot) return;
   if (!live) { slot.replaceChildren(); return; }
+  paintAccountSwitches(slot.querySelector<HTMLElement>('.live-account-switches')!, live.accountSwitches);
   const records = liveToolRecords(live);
   slot.querySelector<HTMLElement>('.turn-activity-label')!.innerHTML = records.length ? foldedLabelHtml(records) : 'Thinking';
   slot.querySelector<HTMLElement>('.thread-mirror-time')!.innerHTML = timeHtml(Date.now() - live.startedAt + Number(slot.dataset.earlierMs), true);
@@ -1716,11 +2114,15 @@ function drawTile(id: string, rows: HTMLElement, scroller: HTMLElement): void {
   reply.hidden = !live.text;
   if (live.text && reply.dataset.source !== live.text) { reply.dataset.source = live.text; void markdown(reply.querySelector<HTMLElement>('.markdown')!, live.text, scroller).catch(report); }
 }
+/** What each tile view has drawn, and the steps that draw more of it (transcript-view.ts). */
+const tileWindows = mountTileWindows<TranscriptTurn>({
+  redraw: (id, rows, scroller) => drawTile(id, rows, scroller), turnIds, messagesOf: turns => turnsMessages(turns), fillToolBody: tool => fillToolBody(tool), report,
+});
 /** A tile's live card: its read-only header and reply, with the exchange a wake continues folded between them. */
 function tileLiveCard(earlier: TranscriptTurn | undefined, sessionId: string, thread: Thread): string {
   const tools = earlier?.activity.flatMap(message => { const tool = message.role === 'tool' ? decodeToolActivity(message.content) : undefined; return tool ? [tool] : []; }) ?? [];
   const trace = earlier?.activity.length ? activityHtml(earlier.key, tools.length ? foldedLabelHtml(tools) : 'Earlier in this turn', `<div class="live-earlier">${savedActivityHtml(earlier.activity, activityExpanded(), thread)}</div>`) : '';
-  return `<section class="turn-card is-live"><div class="turn-card-head"><span class="turn-activity-label"></span><span class="thread-mirror-time"></span></div>${trace}<div class="turn-card-reply ds-card-inner"><article class="message agent-message"><div class="message-content markdown"></div></article></div>${earlier ? cardErrorsHtml(earlier, thread) + cardFootHtml(sessionId, earlierChangeSets(earlier)) : ''}</section>${earlier ? notesHtml(earlier, thread) : ''}`;
+  return `<section class="turn-card is-live"><div class="turn-card-head"><span class="turn-activity-label"></span><span class="thread-mirror-time"></span></div>${trace}<div class="turn-card-reply ds-card-inner"><article class="message agent-message"><div class="message-content markdown"></div></article></div>${earlier ? cardErrorsHtml(earlier, sessionId) + cardFootHtml(sessionId, earlierChangeSets(earlier)) : ''}</section>${earlier ? notesHtml(earlier, thread) : ''}<div class="live-account-switches"></div>`;
 }
 /** A wake's earlier rows in the live trace: one closed line, so the card does not grow as the wake starts. */
 function liveEarlierFold(earlier: TranscriptTurn, tools: ToolActivity[]): string {
@@ -1731,35 +2133,71 @@ function turnLeadHtml(turn: TranscriptTurn, thread = shownThread()): string {
   return (turn.user ? messageHtml(turn.user, false, true, thread) : '') + (turn.handoff ? messageHtml(turn.handoff, false, true, thread) : '') + (turn.coordination ? renderCoordination(turn.coordination) : '');
 }
 const notesHtml = (turn: TranscriptTurn, thread: Thread): string => turn.notes.map(message => messageHtml(message, false, true, thread)).join('');
-const cardErrorsHtml = (turn: TranscriptTurn, thread: Thread): string => turn.errors.length ? `<div class="turn-card-errors">${turn.errors.map(message => messageHtml(message, false, true, thread)).join('')}</div>` : '';
+const cardErrorsHtml = (turn: TranscriptTurn, sessionId: string): string => savedErrorsHtml(turn.errors, turn.key, sessionId, 'turn-card-errors');
 const earlierChangeSets = (turn: TranscriptTurn): TurnChanges[] => [...(turn.earlierChanges ?? []), ...(turn.changes ? [turn.changes] : [])];
 /** A card's one footer: a single run's snapshot as it is, several runs of a merged exchange combined (combineChanges). */
 function cardFootHtml(sessionId: string, changes: TurnChanges[]): string {
   const shown = changes.filter(set => set.attributed && set.files.length);
   return shown.length > 1 ? changesFoot(sessionId, combineChanges(shown)) : shown[0] ? changesFoot(sessionId, shown[0]) : '';
 }
+/** Each saved turn's markup in the open thread, kept while nothing it is drawn from changed, so a redraw compares
+ *  strings rather than rebuilding every drawn card. Keyed by the turn's first message: the turn is the same while it
+ *  holds the same message objects (saved messages are never edited in place, and a pending one, id <= 0, is never kept)
+ *  and `markupEnv` (everything else the markup reads) is unchanged. RULE: a new input to turnHtml or what it calls goes
+ *  into `parts` or `markupEnv` (tests/transcript-markup.test.mjs flags any change to turnHtml's code). */
+const turnMarkup = markupCache<Message>();
+/** What every saved turn's markup reads from outside the app's state (transcript-host.ts markupShared). */
+const turnInputs = markupShared();
+/** What a turn's markup reads besides its own messages; computed once per draw. `thread` is a tile's (the open thread's otherwise). */
+function markupEnv(sessionId: string, chatRows: boolean, thread = shownThread()): string {
+  const task = state.sessions.find(item => item.id === sessionId);
+  // A later handoff names the harness of every reply before it (historicalProvider).
+  // Whether the thread is the open one: only its changes cards act (changesRow, changesFoot); a tile of it does not.
+  return JSON.stringify([sessionId, sessionId === state.sessionId, chatRows, thread.provider, task?.remoteDevice?.id ?? '', chatRows && Boolean(teams.get(sessionId)), activityExpanded(), state.view === 'board', projectRunner.available(), lastHandoff(thread.messages), state.providers.length, schedulesVersion(), ...turnInputs.inputs()]);
+}
+/** A saved turn's markup, from turnMarkup when it still holds: the open thread's, or a tile's with its `thread`. */
+function savedTurnHtml(turn: TranscriptTurn, sessionId: string, chatRows: boolean, env: string, thread?: Thread): string {
+  const messages = turnMessages(turn);
+  const head = messages.find(Boolean);
+  if (!head || (!thread && sessionId !== state.sessionId) || messages.some(message => message && message.id <= 0)) return turnHtml(turn, sessionId, chatRows, thread);
+  const parts = [...messages, ...(turn.timeline ?? []), turn.changes, ...(turn.earlierChanges ?? []), turn.key, turn.durationMs, turn.estimated, turn.workerStart, state.providers, replyOpen(turn.key), cardless(turn) && Boolean(teams.get(sessionId)), (turn as ShownTurn).dismissedErrors, (turn as ShownTurn).errorsDismissed, errorsOpenKey(turn, sessionId)];
+  return turnMarkup(head, parts, env, () => turnHtml(turn, sessionId, chatRows, thread));
+}
+/** Which of a saved turn's error rows are expanded (errorRowHtml reads openErrors and openLiveErrors): part of what
+ *  its cached markup depends on (savedTurnHtml). */
+const errorsOpenKey = (turn: TranscriptTurn, sessionId: string): string => turn.errors.length ? groupErrors(turn.errors).map(group => openErrors.has(`${turn.key}|${group.key}`) || liveErrorOpen(group, sessionId, false) ? '1' : '0').join('') : '';
+/** A turn drawn without a card (no activity, reply or error): its workers slot is a row of its own (workerSlot). */
+const cardless = (turn: TranscriptTurn): boolean => !turn.activity.length && !turn.final && !turn.errors.length && !(turn as ShownTurn).errorsDismissed;
 function turnHtml(turn: TranscriptTurn, sessionId: string, chatRows: boolean, thread = shownThread()): string {
   const lead = turnLeadHtml(turn, thread);
   const notes = notesHtml(turn, thread);
-  if (chatRows) return lead + (turn.activity.length ? savedTurnActivity(turn.key, turnLabel(turn.durationMs, turn.estimated), turn.activity, thread) : '') + turn.errors.map(message => messageHtml(message, false, true, thread)).join('') + (turn.final ? messageHtml(turn.final, turn.activity.some(message => message.role === 'tool'), true, thread) : '') + notes + workerSlot(turn, sessionId) + changesRow(sessionId, turn.changes);
-  if (!turn.activity.length && !turn.final && !turn.errors.length) return lead + notes + workerSlot(turn, sessionId) + changesRow(sessionId, turn.changes);
+  if (chatRows) return lead + (turn.activity.length ? savedTurnActivity(turn.key, turnLabel(turn.durationMs, turn.estimated), turn.activity, thread) : '') + savedErrorsHtml(turn.errors, turn.key, sessionId) + dismissedNoteHtml(turn) + (turn.final ? messageHtml(turn.final, turn.activity.some(message => message.role === 'tool'), true, thread) : '') + notes + workerSlot(turn, sessionId, true) + changesRow(sessionId, turn.changes);
+  if (cardless(turn)) return lead + notes + workerSlot(turn, sessionId, true) + changesRow(sessionId, turn.changes);
   return lead + turnCardHtml(turn, sessionId, thread) + notes;
 }
 function turnCardHtml(turn: TranscriptTurn, sessionId: string, thread: Thread): string {
   const decoded = turn.activity.map(message => message.role === 'tool' ? decodeToolActivity(message.content) : undefined);
   const tools = decoded.filter((tool): tool is ToolActivity => Boolean(tool)), steps = decoded.every(Boolean);
   const time = timeHtml(turn.durationMs);
-  const label = tools.length ? foldedLabelHtml(tools) : escape(turn.final ? 'Replied' : turn.errors.length ? 'Stopped' : 'Worked');
+  const label = tools.length ? foldedLabelHtml(tools) : escape(turn.final ? 'Replied' : turn.errors.length || (turn as ShownTurn).errorsDismissed ? 'Stopped' : 'Worked');
   const head = turn.activity.length
-    ? activityHtml(turn.key, label, savedActivityHtml(turn.activity, steps || activityExpanded(), thread), { steps, meta: time })
+    ? activityHtml(turn.key, label, savedActivityHtml(turn.activity, steps || activityExpanded(), thread, true), { steps, meta: time })
     : `<div class="turn-card-head"><span class="turn-activity-label">${label}</span>${time}</div>`;
   const final = turn.final;
-  const reply = final ? replyHtml(messageHtml(final, true, false, thread), turn.key, messageActionsHtml(final.sessionId, final.id, final.id > 0)) : '';
-  return `<section class="turn-card" data-turn-card="${escape(turn.key)}">${head}${reply}${workerSlot(turn, sessionId)}${cardErrorsHtml(turn, thread)}${cardFootHtml(sessionId, earlierChangeSets(turn))}</section>`;
+  const reply = final ? replyHtml(messageHtml(final, true, false, thread), turn.key, messageActionsHtml(final.sessionId, final.id, final.id > 0), false, String(final.id)) : '';
+  return `<section class="turn-card" data-turn-card="${escape(turn.key)}">${head}${reply}${workerSlot(turn, sessionId)}${cardErrorsHtml(turn, sessionId)}${dismissedNoteHtml(turn)}${cardFootHtml(sessionId, earlierChangeSets(turn))}</section>`;
 }
 /** On a first visit, the previous thread's rows stay (inert, dimmed to 0.7) for at most
  *  TRANSCRIPT_HOLD_MS while the page loads; then the loading line takes over at once. */
 const TRANSCRIPT_HOLD_MS = 150;
+/** Whether the open thread's rows were drawn with a team: a turn with no card draws its workers slot only then. A
+ *  thread found to have none reads as before its team was known, so learning that redraws nothing. */
+let rowsTeam = false;
+/** The open thread's team became known (or went) after its rows drew: rows whose markup depends on it redraw (drawRows
+ *  keeps the rest); otherwise the workers just move into their slots. */
+function syncTeamRows(): void {
+  if (transcriptRows === state.sessionId && rowsTeam !== Boolean(teams.get(state.sessionId))) renderTranscript(); else refreshTeamProgress();
+}
 let transcriptRows: string | undefined, transcriptHold: { expired: boolean; timer: number } | undefined;
 function holdTranscript(transcript: HTMLElement, id: string, rows: string | undefined): boolean {
   if (transcriptHold) { if (transcriptHold.expired) return false; transcriptRows = rows; return true; }
@@ -1773,6 +2211,77 @@ function releaseTranscriptHold(transcript: HTMLElement, settle: boolean): void {
   clearTimeout(transcriptHold.timer); transcriptHold = undefined;
   releaseHold(transcript, settle);
 }
+/** What a reader had set in a row: its folds, change cards and open account notes. */
+type RowViews = { turns: TurnView[]; groups: ToolGroupView[]; tools: Map<string, ToolView>; changes: Map<string, boolean>; notes: AccountSwitchView[] };
+/** What the reader set in a row; undefined for a row they never touched, which redraws as it was. */
+const rowViewsKept = rowViews<RowViews>(transcriptScroller, roots => ({
+  turns: roots.flatMap(root => captureTurns(root)), groups: roots.flatMap(captureToolGroups),
+  tools: new Map(roots.flatMap(root => [...captureTools(root)])), changes: new Map(roots.flatMap(root => [...captureChangeCards(root)])),
+  notes: roots.flatMap(root => root.matches('details[data-account-switch]') ? [{ node: root as HTMLDetailsElement, focused: false }] : captureAccountSwitches(root)).filter(note => note.node.open),
+}), (root, views) => { restoreTurns(root, views.turns); restoreToolGroups(root, views.groups); restoreChangeCards(root, views.changes); restoreTools(root, views.tools); });
+const captureRowViews = rowViewsKept.capture, restoreRowViews = rowViewsKept.restore;
+const turnsMessages = (turns: readonly TranscriptTurn[], all = false): (Message | undefined)[] => turns.flatMap(turn => [all || !lazyReply(turn) ? turn.final : undefined, ...turn.activity]);
+/** What the transcript has drawn, and the steps that widen and narrow it (transcript-view.ts). */
+const transcriptView = mountTranscriptView<TranscriptTurn, RowViews>({
+  scroller: transcriptScroller,
+  openId: () => state.sessionId,
+  drawsWhole: () => Boolean(botForThread()),
+  elsewhere: () => Boolean(state.sharedChannelId),
+  visible: transcriptVisible,
+  savedTurns: sessionId => shownTurns(sessionId, false).saved,
+  turnIds,
+  messagesOf: (turns, all) => turnsMessages(turns, all),
+  markup: sessionId => { const env = markupEnv(sessionId, false); return turn => savedTurnHtml(turn, sessionId, false, env); },
+  captureViews: captureRowViews,
+  restoreViews: restoreRowViews,
+  prepare: (fragment, back) => {
+    const swaps = restoreAccountSwitches(fragment, back.flatMap(views => views?.notes ?? []));
+    // Formatted in the fragment, in one pass: already-prepared text lands before anything lays out.
+    paintSavedMarkdown(fragment, state.messages, new Map(), workspaceContext(), followTranscript, transcriptScroller);
+    return swaps;
+  },
+  redrawRow,
+  rowsChanged: workersOnly => { refreshTeamProgress(); if (!workersOnly) decorateTranscript(); },
+  watch: (nodes, defer) => measureReplies(nodes, defer),
+  placed: top => { lastTranscriptTop = top; },
+  trimBlocked: () => transcriptGap() > 2 || Boolean(tailRoom) || tailBridging || Boolean(followFrame) || threadFind.isOpen(),
+  findInput: () => document.querySelector<HTMLInputElement>('.thread-find input'),
+  findCount: (turn, query) => turnMatches(turn, query),
+  prepareCounts: turns => findCounts.prepare(turns),
+  deferredReplies: () => lazyReplies.pending().map(el => ({ role: 'assistant', content: savedMarkdownSources.get(el) ?? '' })),
+  paintDeferred: () => lazyReplies.flush(el => markdownCache.get(savedMarkdownSources.get(el) ?? '') !== undefined),
+  // A page that failed is asked for again only by the reader scrolling, never by every redraw.
+  fetchOlder: () => { if (state.messages.find(message => message.id > 0)?.id !== olderFailedAt) void loadOlderMessages(true, false); },
+  report,
+});
+let rowsSeed: { sessionId: string; first: string | null } | undefined;
+/** The last threads left, kept to reattach (transcript-view.ts). Bot threads are not kept: their decorations span rows. */
+const leftRows = leftRowsCache<RowViews>();
+function keepLeftRows(): void {
+  const view = transcriptView.view, task = state.sessions.find(item => item.id === view.sessionId);
+  if (task && !sidebarBots.some(bot => bot.projectId === task.projectId) && rowsIntact(transcriptScroller, view.rows)) leftRows.keep(view.sessionId, { rows: view.rows, trimmed: view.trimmed, keys: view.ids.slice(drawnFrom(view)).map(ids => ids.at(-1)!) });
+}
+/** A tile opened in the pane. A reader who left the bottom of the tile keeps their place, so the pane draws from the
+ *  tile's oldest drawn turn; when the pane's page does not hold that turn (it keeps fewer messages), the same scroll
+ *  offset would land on other content, so the pane stays at its bottom instead. */
+async function openFromTile(id: string, scrollTop: number | undefined): Promise<void> {
+  const tile = scrollTop === undefined ? undefined : tileWindows.ofThread(id);
+  const anchor = tile?.ids[drawnFrom(tile)]?.[0];
+  rowsSeed = tile ? { sessionId: id, first: tile.first } : undefined;
+  await selectSession(id);
+  const view = transcriptView.view;
+  if (scrollTop === undefined || anchor === undefined || view.sessionId !== id || state.sessionId !== id || !view.ids[drawnFrom(view)]?.includes(anchor)) return;
+  transcriptScroller.scrollTop = scrollTop; releaseTranscript();
+}
+/** A thread's turns as drawn, and what a live card takes over from the last one. */
+function shownTurns(sessionId: string, bot: boolean): { saved: TranscriptTurn[]; earlier: TranscriptTurn | undefined; running: Stream | undefined } {
+  const grouped = withErrorTurns(groupTurns(visibleMessages(sessionId)));
+  const turns = bot ? grouped : mergeLeadTurns(grouped);
+  // A lead's wake run takes the exchange it continues into its live card, so one reply is one card while it streams too.
+  const running = bot || wakeHolds.has(sessionId) ? undefined : state.streams.get(sessionId) ?? finishingStreams.get(sessionId)?.stream;
+  const { saved, earlier } = running ? splitLiveExchange(turns) : { saved: turns, earlier: undefined };
+  return { saved, earlier, running };
+}
 function renderTranscript(preservePosition = false): void {
   closeContentMenus();
   const open = session();
@@ -1780,9 +2289,12 @@ function renderTranscript(preservePosition = false): void {
   const heldRows = transcriptRows; transcriptRows = undefined;
   syncNewTaskPage();
   const transcript = $('#transcript');
-  const restoreAnchor = preservePosition || !stickToBottom ? captureTranscriptAnchor(transcript) : undefined;
   transcript.removeAttribute('aria-busy');
-  const toolViews = captureTools(transcript), groupViews = captureToolGroups(transcript), turnViews = captureTurns(transcript), changeViews = captureChangeCards(transcript), scrollTop = transcript.scrollTop;
+  // Another thread's rows are about to go: nothing in them carries over, so don't read them (it forces their layout).
+  const leaving = Boolean(transcriptView.view.sessionId) && transcriptView.view.sessionId !== open?.id && document.getElementById('stream-region')?.dataset.sessionId !== open?.id;
+  if (leaving) keepLeftRows();
+  const toolViews = leaving ? new Map<string, ToolView>() : captureTools(transcript), groupViews = leaving ? [] : captureToolGroups(transcript), turnViews = leaving ? [] : captureTurns(transcript), changeViews = leaving ? new Map<string, boolean>() : captureChangeCards(transcript), scrollTop = transcript.scrollTop;
+  const switches = captureAccountSwitches(transcript);
   const liveTurn = transcript.querySelector<HTMLElement>('#stream-region .live-activity[open]:not([data-folded])');
   const unfolded = liveTurn && !liveTurnStaysOpen(liveTurn) ? captureTurns(liveTurn.parentElement!, true)[0] : undefined;
   const readingTool = readingTranscriptTool();
@@ -1839,11 +2351,7 @@ function renderTranscript(preservePosition = false): void {
     transcript.innerHTML = `<div class="new-task-welcome"><span class="new-task-mark" aria-hidden="true">${icon('bamboo')}</span><h1 aria-label="What should we build in ${escape(name)}?">What should we build in <button id="welcome-project" class="welcome-project" data-action="change-task-project" aria-label="Change task project" aria-haspopup="dialog" aria-expanded="false" title="${escape(project()?.path)}" ${s.worktreePath ? 'disabled' : ''}>${escape(name)}</button>?</h1></div><div id="stream-region"></div>`;
     return;
   }
-  const grouped = groupTurns(visibleMessages());
-  const turns = bot ? grouped : mergeLeadTurns(grouped);
-  // A lead's wake run takes the exchange it continues into its live card, so one reply is one card while it streams too.
-  const running = bot || wakeHolds.has(s.id) ? undefined : state.streams.get(s.id) ?? finishingStreams.get(s.id)?.stream;
-  const { saved, earlier } = running ? splitLiveExchange(turns) : { saved: turns, earlier: undefined };
+  const { saved, earlier, running } = shownTurns(s.id, Boolean(bot));
   if (running) running.earlier = earlier && { turn: earlier, tools: earlier.activity.flatMap(message => { const tool = message.role === 'tool' ? decodeToolActivity(message.content) : undefined; return tool ? [tool] : []; }) };
   // Whether the earlier rows show is the reader's: a trace open before the wake, or the fold as they left it.
   if (earlier && turnViews.some(view => view.key === earlier.key && view.open)) wakeOpenTraces.add(earlier.key);
@@ -1854,6 +2362,14 @@ function renderTranscript(preservePosition = false): void {
   const liveCard = liveRegion?.dataset.sessionId === s.id ? liveRegion.querySelector<HTMLElement>('.turn-card.is-live') : null;
   const shownCards = liveCard ? new Set([...transcript.querySelectorAll<HTMLElement>('[data-turn-card]')].map(card => card.dataset.turnCard)) : undefined;
   // finishResponse measures the live card before the composer lets go of the steer row (which clamps the scroll).
+  // Open the saved reply before layout can clamp the paused reader, and transfer its live reading anchor.
+  const completed = liveCard && !running ? saved.at(-1) : undefined;
+  if (completed?.final) {
+    openReply(completed.key);
+    const reply = liveCard!.querySelector<HTMLElement>('.turn-card-reply');
+    if (reply) reply.dataset.turnKey = `reply:${completed.key}`;
+  }
+  const restoreAnchor = preservePosition || !stickToBottom ? captureTranscriptAnchor(transcript) : undefined;
   const liveRect = liveCard ? handoffRect ?? liveCard.getBoundingClientRect() : undefined; handoffRect = undefined;
   const focusRole = liveCard ? focusedRole(liveCard) : undefined;
   // A wake's live card already shows the exchange's footer; the saved card's replaces it in place rather than fading in.
@@ -1861,11 +2377,29 @@ function renderTranscript(preservePosition = false): void {
   const liveTrace = liveCard?.querySelector<HTMLDetailsElement>(':scope > details.turn-activity'), liveTraceOpen = Boolean(liveTrace?.open && liveTrace.dataset.folded === undefined);
   // A trace that folded as the reply started and the reader opened again stays open in the saved card.
   const traceReopened = Boolean(liveTrace?.open && liveTrace.dataset.folded !== undefined && liveTrace.dataset.closing === undefined);
+  // Back on a thread left a moment ago: its rows go back in first, and drawRows keeps every one whose markup still matches.
+  const left = leaving && !bot ? leftRows.take(s.id) : undefined;
+  if (left) transcript.replaceChildren(...left.rows.flatMap(row => row.nodes));
   const previousMarkdown = new Map([...transcript.querySelectorAll<HTMLElement>('[data-markdown]')]
     .map(node => [node.dataset.markdown!, node]));
-  transcript.innerHTML = `${state.messages.length === 0 && !bot ? '<div class="empty-conversation"><h2>What would you like to do?</h2><div class="prompt-suggestions"><button data-action="suggest" data-text="Explore this project and explain its architecture.">Explore this project '+icon('chevron')+'</button><button data-action="suggest" data-text="Review the current changes for bugs and suggest improvements.">Review my changes '+icon('chevron')+'</button></div></div>' : ''}${saved.map(turn => turnHtml(turn, s.id, Boolean(bot))).join('')}${earlier ? turnLeadHtml(earlier) : ''}<div id="stream-region"></div><div id="team-progress-host" class="turn-changes-row" hidden></div>`;
+  const emptyHtml = state.messages.length === 0 && !bot ? '<div class="empty-conversation"><h2>What would you like to do?</h2><div class="prompt-suggestions"><button data-action="suggest" data-text="Explore this project and explain its architecture.">Explore this project '+icon('chevron')+'</button><button data-action="suggest" data-text="Review the current changes for bugs and suggest improvements.">Review my changes '+icon('chevron')+'</button></div></div>' : '';
+  // A thread opens from its newest turns; a redraw keeps the window and every row that did not change.
+  // Bot threads draw whole: bot-thread.ts decorates and groups the transcript's children across all of them.
+  const rowsView = transcriptView.view, intact = rowsView.sessionId === s.id && rowsIntact(transcript, rowsView.rows);
+  // A running thread draws before its page arrives: the seed waits for that page, and those rows are not a window yet.
+  const pageIn = !state.messagesLoading && saved.length > 0;
+  const ids = saved.map(turnIds);
+  // A tile's anchor this page does not list (it keeps fewer messages) opens from the newest turns, as any open does.
+  const seed = pageIn && rowsSeed?.sessionId === s.id && (rowsSeed.first === null || ids.some(list => list.includes(rowsSeed!.first!))) ? rowsSeed.first : undefined;
+  if (pageIn || rowsSeed?.sessionId !== s.id) rowsSeed = undefined;
+  const from = bot ? 0 : windowStart(ids, intact ? rowsView.first : seed), env = markupEnv(s.id, Boolean(bot));
+  const { rows: drawn, added } = drawRows(transcript, intact && !bot ? rowsView.rows : left?.rows ?? [], saved.slice(from).map(turn => savedTurnHtml(turn, s.id, Boolean(bot), env)), `${emptyHtml}${earlier ? turnLeadHtml(earlier) : ''}<div id="stream-region"></div><div id="team-progress-host" class="turn-changes-row" hidden></div>`);
+  // Folds the reader opened in rows of a widened window the reopened one leaves out come back with those rows.
+  const lastIds = left ? new Map(ids.map((list, index) => [list.at(-1)!, index])) : undefined;
+  const trimmed = intact ? rowsView.trimmed : left ? leftViews(left, drawn, key => (lastIds!.get(key) ?? from) < from, captureRowViews) : new Map<string, RowViews>();
+  transcriptView.view = { sessionId: s.id, first: windowAnchor(ids, from), ids, turns: saved, rows: state.messagesLoading ? [] : drawn, trimmed };
   paintSavedMarkdown(transcript, state.messages, previousMarkdown, workspaceContext(), followTranscript);
-  watchReplies(transcript);
+  watchReplies(added);
   reusableMarkdown = previousMarkdown;
   renderStream();
   reusableMarkdown = undefined;
@@ -1879,13 +2413,18 @@ function renderTranscript(preservePosition = false): void {
   if (restoreAnchor) restoreAnchor();
   else if (readingTool) transcript.scrollTop = scrollTop;
   else followTranscript();
+  lastTranscriptTop = transcript.scrollTop;
   // After every restore and the pin, so the saved card is measured where it will stay.
   if (shownCards && liveRect) handOffCard(transcript, shownCards, liveRect, !restoreAnchor && !readingTool && stickToBottom, liveTraceOpen, focusRole, traceReopened, liveFoot);
+  // A note the reader had open goes back in place of the redrawn one, so the row lists the node that is on screen.
+  transcriptView.view = { ...transcriptView.view, rows: swapRowNodes(transcriptView.view.rows, restoreAccountSwitches(transcript, switches)) };
   if (bot) {
     botThread.decorateTranscript(transcript, bot, s.id, state.messages, botSwitches.get(s.id) ?? [], botMessages.get(s.id) ?? []);
     if (!botThreadMetaLoaded.has(s.id)) void refreshBotThreadMeta(bot, s.id);
   }
-  transcriptRows = s.id;
+  transcriptView.fill();
+  transcriptView.syncFarRows();
+  transcriptRows = s.id; rowsTeam = Boolean(teams.get(s.id));
 }
 /** The live card is gone and the saved one stands in its place, in the same task: its reply stays open and the
  * footer fades in. If the live trace was still open (no reply folded it), the saved trace opens in its place and
@@ -1927,6 +2466,7 @@ function handOffCard(transcript: HTMLElement, shown: Set<string | undefined>, li
   const end = Math.max(0, room), start = timing && delta ? Math.max(0, room + delta) : end;
   setTailRoom(start);
   transcriptScroller.scrollTop = target;
+  lastTranscriptTop = transcriptScroller.scrollTop;
   if (timing && start !== end) growTailRoom(start, end, timing, () => {}, true); else followTranscript();
 }
 /** The control in the live card that has focus, as a selector the saved card answers (header, a trace step, Read
@@ -1953,7 +2493,8 @@ function refocusCard(card: HTMLElement, selector: string): void {
 /** Folds the saved card's trace starting from the live card's height, so its bottom never steps: the card closes from
  * there to its folded height on the fold's own timing (`holdCard`). Pinned, its top stays where the live card's was
  * and the height it gives up (and any the composer just let go of) grows as blank room under it on the same timing
- * (the room is `#transcript::after`), so nothing above it moves; the room stays until content or the reader takes it. */
+ * (the room is `#transcript::after`), so nothing above it moves; the room stays until content or the reader takes it.
+ * An off-screen card comes down to the reading line so the fold cannot leave only blank room in view. */
 function foldInPlace(card: HTMLElement, trace: HTMLDetailsElement, live: DOMRect, pinned: boolean): void {
   const open = card.offsetHeight, total = transcriptScroller.scrollHeight, from = tailRoom;
   trace.open = false;
@@ -1965,10 +2506,12 @@ function foldInPlace(card: HTMLElement, trace: HTMLDetailsElement, live: DOMRect
   if (!pinned) return;
   tailSession = state.sessionId;
   // The room must let the scroll reach the held top with the card at its starting height.
-  const shown = timing ? live.height : shut, target = transcriptScroller.scrollTop + card.getBoundingClientRect().top - live.top;
+  const shown = timing ? live.height : shut, keepTop = Math.max(live.top, readingLine());
+  const target = Math.max(0, transcriptScroller.scrollTop + card.getBoundingClientRect().top - keepTop);
   const start = Math.max(from, target + transcriptScroller.clientHeight - (total - open - from) - shown), end = Math.max(0, start + shown - shut);
   setTailRoom(Math.max(start, end));
   transcriptScroller.scrollTop = target;
+  lastTranscriptTop = transcriptScroller.scrollTop;
   if (!timing) { setTailRoom(end); return; }
   growTailRoom(start, end, timing);
 }
@@ -2004,33 +2547,57 @@ onReplyCollapse((shrink, timing) => {
 });
 /** A side thread's saved turns: the By the way panel keeps the plain chat rows, since its live turn has no card to hand off to. */
 function turnRowsHtml(sessionId: string, visible: Message[], thread = shownThread()): string {
-  return groupTurns(visible).map(turn => turnHtml(turn, sessionId, true, thread)).join('');
+  return withErrorTurns(groupTurns(visible)).map(turn => turnHtml(turn, sessionId, true, thread)).join('');
 }
 /** Formats saved answers, reusing nodes whose source is unchanged so nothing reparses. */
-function paintSavedMarkdown(root: HTMLElement, messages: Message[], previousMarkdown: Map<string, HTMLElement>, context: FileLinkContext, follow: () => void): void {
+function paintSavedMarkdown(root: ParentNode, messages: Message[], previousMarkdown: Map<string, HTMLElement>, context: FileLinkContext, follow: () => void, scroller = root as HTMLElement): void {
   const byId = new Map(messages.map(message => [String(message.id), message]));
   root.querySelectorAll<HTMLElement>('[data-markdown]').forEach(el => {
     const message = byId.get(el.dataset.markdown!);
     if (!message) return;
     const previous = previousMarkdown.get(el.dataset.markdown!);
-    if (previous && savedMarkdownSources.get(previous) === message.content) {
-      // Prepending history must not reparse responses the reader already loaded.
-      el.replaceWith(previous);
+    if (previous && savedMarkdownSources.get(previous) === message.content && !staleMarkdown.has(previous)) {
+      // Prepending history must not reparse responses the reader already loaded; a kept row already holds its own.
+      if (previous !== el) el.replaceWith(previous);
       bindFileLinkContext(previous, context);
     } else {
       savedMarkdownSources.set(el, message.content);
+      staleMarkdown.delete(el);
       bindFileLinkContext(el, context);
-      // Following skips the paint's own pin (the ResizeObserver pins before paint); pin now so no task sees the gap.
-      void markdown(el, message.content, root).then(follow, report);
+      const lazy = message.content.length > LAZY_REPLY_CHARS && markdownCache.get(message.content) === undefined && el.closest('.turn-card-reply') && !el.closest('.turn-card-reply[data-open]');
+      if (lazy && lazyReplies.defer(el, follow)) return;
+      paintMarkdown(el, message.content, scroller, follow);
     }
   });
 }
-function savedActivityHtml(messages: Message[], expanded = activityExpanded(), thread = shownThread()): string {
-  return groupToolRuns(messages, message => message.role === 'tool' ? savedToolKey(message) : undefined)
-    .map(run => run.kind === 'tools'
-      ? renderToolGroup(run.items.map(message => ({ key: savedToolKey(message), content: message.content })), expanded)
-      : messageHtml(run.item, false, false, thread)).join('');
+/** Following skips the paint's own pin (the ResizeObserver pins before paint); pin now so no task sees the gap. A
+ *  paint that finished while its node was out of the document wrote nothing: the node is marked, and formatted again
+ *  when it comes back (a thread's rows kept across a switch). */
+function paintMarkdown(el: HTMLElement, content: string, scroller: HTMLElement, follow: () => void): void {
+  void markdown(el, content, scroller).then(() => { if (!el.isConnected) staleMarkdown.add(el); follow(); }, report);
 }
+const staleMarkdown = new WeakSet<HTMLElement>();
+/** Long folded replies, formatted as they near the reader (transcript-window.ts LAZY_REPLY_CHARS). */
+const lazyReplies = lazyMarkdown(transcriptScroller, (el, follow) => { const content = savedMarkdownSources.get(el); if (content !== undefined) paintMarkdown(el, content, transcriptScroller, follow); }, el => leftRows.holds(el));
+/** Whether a saved reply is left to format lazily rather than ahead of its step (see LAZY_REPLY_CHARS). */
+const lazyReply = (turn: TranscriptTurn): boolean => Boolean(turn.final && turn.final.content.length > LAZY_REPLY_CHARS && !replyOpen(turn.key));
+/** `lazy` leaves each tool's body to `fillToolBody`. Narration is always drawn, so Find can reach it inside a closed fold. */
+function savedActivityHtml(messages: Message[], expanded = activityExpanded(), thread = shownThread(), lazy = false): string {
+  return groupToolRuns(messages, message => message.role === 'tool' ? savedToolKey(message) : undefined)
+    .map(run => {
+      if (run.kind !== 'tools') return messageHtml(run.item, false, false, thread);
+      return renderToolGroup(run.items.map(message => ({ key: savedToolKey(message), content: message.content, id: String(message.id) })), expanded, false, lazy);
+    }).join('');
+}
+/** Draws a saved tool's body the first time it is needed, from the messages of the view it is in: the open thread's
+ *  `state.messages` in the transcript, the turns a tile drew in a tile. */
+function fillToolBody(tool: HTMLDetailsElement): void {
+  const rows = tool.closest<HTMLElement>('.thread-mirror-rows');
+  fillDrawnToolBody(tool, rows ? tileWindows.of(rows)?.turns.flatMap(turn => turn.activity) ?? [] : state.messages);
+}
+/** Find's in-memory counts (transcript-host.ts findCounter). */
+const findCounts = findCounter({ userHtml: message => messageHtml(message, false, false), version: schedulesVersion });
+const turnMatches = findCounts.turn;
 /** A turn of only tool calls folds to its summary sentence and mark stack (`Ran 2 searches and read 3 sources`),
  * opening onto the step rail; turns with narration keep `Worked for …` over their groups. */
 function savedTurnActivity(key: string, label: string, activity: Message[], thread = shownThread()): string {
@@ -2039,8 +2606,11 @@ function savedTurnActivity(key: string, label: string, activity: Message[], thre
   return activityHtml(key, foldedLabelHtml(tools as ToolActivity[]), savedActivityHtml(activity, true, thread), { steps: true, title: label });
 }
 function foldedLabelHtml(tools: ToolActivity[]): string {
-  const [sentence, failures] = summarizeTools(tools).split(' · ');
-  return `<span class="trace-summary-text">${escape(sentence)}${failures ? `<span class="tool-group-status has-failure"> · ${escape(failures)}</span>` : ''}</span>${toolStackHtml(tools)}`;
+  // Tallies after the sentence (`2 running`, `1 failed`, `1 blocked`, `1 interrupted`): only failures read as a failure.
+  const [sentence, ...tallies] = summarizeTools(tools).split(' · ');
+  const status = tallies.map(tally => `<span class="tool-group-status${/\bfailed$/.test(tally) ? ' has-failure' : /\b(blocked|denied|interrupted)$/.test(tally) ? ' is-blocked' : /\brunning$/.test(tally) ? ' is-running' : ''}"><span class="tool-group-sep"> · </span>${escape(tally)}</span>`).join('');
+  // The sentence ellipsizes; the tallies after it never shrink, so a narrow header still says what failed.
+  return `<span class="trace-summary-text"><span class="trace-summary-sentence">${escape(sentence)}</span>${status}</span>${toolStackHtml(tools)}`;
 }
 function savedToolKey(message: Message): string {
   const tool = decodeToolActivity(message.content);
@@ -2062,11 +2632,12 @@ function captureToolGroups(root: ParentNode): ToolGroupView[] {
   }));
 }
 function restoreToolGroups(root: ParentNode, views: ToolGroupView[]): void {
+  if (!views.length) return;
+  const find = viewIndex(views);
   root.querySelectorAll<HTMLDetailsElement>('.tool-group').forEach(group => {
-    const keys = new Set([...group.querySelectorAll<HTMLElement>('[data-tool-key]')].map(tool => tool.dataset.toolKey));
-    const view = views.find(view => view.key === group.dataset.toolGroupKey || view.toolKeys.some(key => keys.has(key)));
+    const view = find(group.dataset.toolGroupKey, [...group.querySelectorAll<HTMLElement>('[data-tool-key]')].map(tool => tool.dataset.toolKey));
     if (!view) return;
-    group.open = view.open;
+    if (group.open !== view.open) group.open = view.open;
     if (view.focused) group.querySelector<HTMLElement>('.tool-group-summary')?.focus({ preventScroll: true });
   });
 }
@@ -2088,13 +2659,14 @@ function foldSavedTurn(root: ParentNode, live: TurnView): void {
   foldTurn(turn);
 }
 function restoreTurns(root: ParentNode, views: TurnView[]): void {
+  if (!views.length) return;
+  const find = viewIndex(views);
   root.querySelectorAll<HTMLDetailsElement>('.turn-activity').forEach(turn => {
-    const keys = new Set([...turn.querySelectorAll<HTMLElement>('[data-tool-key]')].map(tool => tool.dataset.toolKey));
     // A live trace holds a wake's earlier tools, but a saved card's folded state is not its own.
     const live = turn.classList.contains('live-activity');
-    const view = views.find(view => view.key === turn.dataset.turnKey || (!live && view.toolKeys.some(key => keys.has(key))));
+    const view = find(turn.dataset.turnKey, live ? [] : [...turn.querySelectorAll<HTMLElement>('[data-tool-key]')].map(tool => tool.dataset.toolKey));
     if (!view) return;
-    turn.open = view.open;
+    if (turn.open !== view.open) turn.open = view.open;
     if (view.focused) turn.querySelector<HTMLElement>('.turn-activity-summary')?.focus({ preventScroll: true });
   });
 }
@@ -2115,8 +2687,8 @@ function messageHtml(m: Message, afterTrace = false, actions = true, thread = sh
     return renderToolActivity(tool ?? m.content, tool ? 'tool:' + tool.id : 'message:' + m.id);
   }
   if (m.role === 'status') return renderToolStatus(m.content);
-  if (m.role === 'error') return `<div class="message-error">${icon('alert')}<span>${escape(m.content)}</span></div>`;
-  if (m.role === 'system') return `<p class="message-note">${escape(m.content)}</p>`;
+  if (m.role === 'error') return errorRowHtml({ key: errorKey(m.content), content: m.content, count: 1, ids: [m.id] }, 'message:' + m.id, m.sessionId);
+  if (m.role === 'system') return accountSwitchHtml(m) ?? `<p class="message-note">${escape(m.content)}</p>`;
   const isUser = m.role === 'user';
   const author = historicalProvider(m, thread.messages, thread.provider);
   return `<article class="message ${isUser ? 'user-message' : 'agent-message'}${afterTrace && !isUser ? ' after-trace' : ''}" data-message-id="${m.id}"><div class="message-meta"><span class="message-avatar ${isUser ? 'user-avatar' : ''}">${isUser ? 'Y' : providerLogo(author)}</span><strong>${isUser ? 'You' : escape(provider(author)?.name || 'Agent')}</strong><time>${formatTime(m.createdAt)}</time></div><div class="message-content ${isUser ? '' : 'markdown'}" ${isUser ? '' : `data-markdown="${m.id}"`}>${isUser ? scheduledMark(m.content) + userContent(m.content, m.id) : escape(m.content)}</div>${isUser && m.id < 0 ? steerStateHtml(m) : ''}${actions ? messageActionsHtml(m.sessionId, m.id, m.id > 0 && (isUser || m.role === 'assistant'), isUser && m.id > 0) : ''}</article>`;
@@ -2136,7 +2708,7 @@ function userContent(content: string, messageId: number): string {
   const items = parseAttachments(blocks);
   for (const item of items) if (item.kind === 'image' && item.imageId) loadSentImage(item.imageId);
   const details = wake.length ? `<details class="message-context"><summary>${icon('clock')}Wake-up details</summary><pre>${escape(wake.join('\n\n'))}</pre></details>` : '';
-  return escape(typed) + attachmentChips(items, messageId, sentImages) + details;
+  return `<div class="user-prose" dir="auto">${escape(typed)}</div>` + attachmentChips(items, messageId, sentImages) + details;
 }
 // Sent images live in the capture registry for a week; null marks one that is gone.
 const sentImages = new Map<string, string | null>();
@@ -2146,6 +2718,7 @@ function loadSentImage(id: string): void {
   call<string | null>('prompt_image', { id }).then(url => {
     if (!url?.startsWith('data:image/')) return;
     sentImages.set(id, url);
+    turnInputs.bump();
     for (const img of document.querySelectorAll<HTMLImageElement>(`img[data-prompt-image="${id}"]`)) {
       img.src = url; img.hidden = false;
       if (img.nextElementSibling?.matches('svg.icon')) img.nextElementSibling.remove();
@@ -2172,39 +2745,47 @@ async function openMessageAttachment(element: HTMLElement): Promise<void> {
   if (!/^(?:\/|[A-Za-z]:[\\/])/.test(item.path)) throw new Error(`${item.name} was dropped from a browser, so its location is unknown.`);
   await call('reveal_path', { path: item.path });
 }
-type ToolView = { open: boolean; rawOpen: boolean; controls: { selector: string; top: number; left: number; focused: boolean }[] };
-function captureTools(root: ParentNode): Map<string, ToolView> {
-  const views = new Map<string, ToolView>();
-  const selectors = ['summary', '.tool-trace-raw > summary', '.tool-trace-card pre', '[data-tool-section="input"] pre', '[data-tool-section="output"] pre', '.tool-activity-legacy-body'];
-  root.querySelectorAll<HTMLDetailsElement>('details[data-tool-key]').forEach(tool => {
-    const controls: ToolView['controls'] = [];
-    for (const selector of selectors) {
-      const control = tool.querySelector<HTMLElement>(selector);
-      if (control) controls.push({ selector, top: control.scrollTop, left: control.scrollLeft, focused: control === document.activeElement });
-    }
-    views.set(tool.dataset.toolKey!, { open: tool.open, rawOpen: Boolean(tool.querySelector<HTMLDetailsElement>('.tool-trace-raw')?.open), controls });
-  });
-  return views;
+/** A saved tool's folds and scroll offsets, put back after a redraw (transcript-host.ts restoreToolViews). */
+const restoreTools = (root: ParentNode, views: Map<string, ToolView>): void => restoreToolViews(root, views, fillToolBody);
+function accountSwitchHtml(message: Message): string | null {
+  const detail = accountSwitchDetail(message.content);
+  return detail === null ? null : `<details class="account-switch-note" data-account-switch="${escape(message.sessionId)}:${message.id}" data-account-switch-session="${escape(message.sessionId)}"><summary>${icon('refresh')}<span>Account switched</span>${icon('chevron')}</summary><p>${escape(detail)}</p></details>`;
 }
-function restoreTools(root: ParentNode, views: Map<string, ToolView>): void {
-  root.querySelectorAll<HTMLDetailsElement>('details[data-tool-key]').forEach(tool => {
-    const view = views.get(tool.dataset.toolKey!); if (!view) return;
-    tool.open = view.open;
-    const raw = tool.querySelector<HTMLDetailsElement>('.tool-trace-raw');
-    if (raw) raw.open = view.rawOpen;
-    for (const saved of view.controls) {
-      const control = tool.querySelector<HTMLElement>(saved.selector);
-      if (saved.focused) (control ?? tool.querySelector<HTMLElement>('summary'))?.focus({ preventScroll: true });
-      if (control) { control.scrollTop = saved.top; control.scrollLeft = saved.left; }
-    }
+function paintAccountSwitches(host: HTMLElement, messages: LiveAccountSwitch[]): void {
+  const views = captureAccountSwitches(host), keys = new Set(messages.map(message => `${message.sessionId}:${message.id}`));
+  const notes = [...messages].reverse().map(message => {
+    const key = `${message.sessionId}:${message.id}`, detail = accountSwitchDetail(message.content)!;
+    const view = takeAccountSwitch(views, key, message.sessionId, detail, keys);
+    let node = view?.node;
+    if (!node) { const template = document.createElement('template'); template.innerHTML = accountSwitchHtml(message)!; node = template.content.firstElementChild as HTMLDetailsElement; }
+    node.dataset.accountSwitch = key;
+    return { node, focused: view?.focused };
+  }).reverse();
+  notes.forEach(({ node, focused }, index) => {
+    if (host.children[index] !== node) { host.insertBefore(node, host.children[index] ?? null); if (focused) node.querySelector('summary')!.focus({ preventScroll: true }); }
   });
+  for (const view of views) view.node.remove();
+}
+/** Keep saved pool notes from the hidden streaming tail, including a run opened midway through. */
+function liveVisibleMessages(messages: Message[], current: Stream): Message[] {
+  let boundary = -1; messages.forEach((message, index) => { if (message.role === 'user' || message.role === 'coordination' || message.role === 'changes') boundary = index; });
+  const pending = [...current.accountSwitches], saved: LiveAccountSwitch[] = [];
+  for (const message of messages.slice(boundary + 1)) {
+    const detail = message.role === 'system' ? accountSwitchDetail(message.content) : null;
+    if (detail === null) continue;
+    const content = ACCOUNT_SWITCH_PREFIX + detail;
+    const index = pending.findIndex(note => note.id === message.id || note.content === content);
+    const previous = index < 0 ? undefined : pending.splice(index, 1)[0];
+    saved.push({ ...message, content, eventSeen: previous?.eventSeen ?? message.createdAt < current.startedAt });
+  }
+  const notes = [...saved, ...pending];
+  if (notes.length !== current.accountSwitches.length || notes.some((note, index) => note.id !== current.accountSwitches[index].id || note.content !== current.accountSwitches[index].content)) current.revision++;
+  current.accountSwitches = notes;
+  return messages.slice(0, boundary + 1);
 }
 function visibleMessages(sessionId = state.sessionId, messages = state.messages): Message[] {
-  if ((state.streams.has(sessionId) || finishingStreams.has(sessionId)) && !wakeHolds.has(sessionId)) {
-    let lastUser = -1; messages.forEach((m, i) => { if (m.role === 'user' || m.role === 'coordination' || m.role === 'changes') lastUser = i; });
-    return messages.slice(0, lastUser + 1);
-  }
-  return messages.slice();
+  const current = state.streams.get(sessionId) ?? finishingStreams.get(sessionId)?.stream;
+  return current && !wakeHolds.has(sessionId) ? liveVisibleMessages(messages, current) : messages.slice();
 }
 function renderStream(): void {
   if (!transcriptVisible() || wakeHolds.has(state.sessionId)) { updateWorkTimer(); return; }
@@ -2231,8 +2812,11 @@ function paintStream(region: HTMLElement, sessionId: string, transcript: HTMLEle
     const trace = (meta = '', before = '') => activityHtml(current.turnKey, '', `${before}<div class="live-tools"></div><div class="live-status"></div>`, { live: true, meta });
     const earlier = main ? current.earlier?.turn : undefined;
     // Bot threads and the side panel keep their chat rows; every other turn streams into its card (turn-card.ts).
-    region.innerHTML = (!main || botForThread() ? thinkingHtml + trace() + liveMessageHtml + '<div class="live-errors"></div>'
-      : `<section class="turn-card is-live">${trace(timeHtml(Date.now() - workStart(current), true), earlier?.activity.length ? liveEarlierFold(earlier, current.earlier!.tools) : '')}${thinkingHtml}${replyHtml(SKELETON_HTML + liveMessageHtml, 'live', '', true)}${earlier ? workerSlot(earlier, sessionId) + cardErrorsHtml(earlier, shownThread()) : ''}<div class="live-errors turn-card-errors"></div>${earlier ? cardFootHtml(sessionId, earlierChangeSets(earlier)) : ''}</section>${earlier ? notesHtml(earlier, shownThread()) : ''}`) + '<div class="live-approvals"></div><div class="live-inputs"></div>';
+    const switches = captureAccountSwitches(region);
+    region.innerHTML = (!main || botForThread() ? thinkingHtml + trace() + liveMessageHtml + '<div class="live-errors thread-errors"></div>'
+      : `<section class="turn-card is-live">${trace(timeHtml(Date.now() - workStart(current), true), earlier?.activity.length ? liveEarlierFold(earlier, current.earlier!.tools) : '')}${thinkingHtml}${replyHtml(SKELETON_HTML + liveMessageHtml, current.turnKey, '', true)}${earlier ? workerSlot(earlier, sessionId) + cardErrorsHtml(earlier, sessionId) : ''}<div class="live-errors thread-errors turn-card-errors"></div>${earlier ? cardFootHtml(sessionId, earlierChangeSets(earlier)) : ''}</section>${earlier ? notesHtml(earlier, shownThread()) : ''}`) + '<div class="live-account-switches"></div><div class="live-approvals"></div><div class="live-inputs"></div>';
+    paintAccountSwitches(region.querySelector<HTMLElement>('.live-account-switches')!, current.accountSwitches);
+    restoreAccountSwitches(region, switches);
     if (earlier) paintSavedMarkdown(region, state.messages, reusableMarkdown ?? new Map(), context, followTranscript);
     watchReplies(region);
     region.dataset.sessionId = sessionId; region.dataset.revision = '-1';
@@ -2244,10 +2828,9 @@ function paintStream(region: HTMLElement, sessionId: string, transcript: HTMLEle
   paintLiveHeader(activity, current, finishing ? finishing.finishedAt - workStart(current) : undefined, answered);
   scheduleAnswerFolds(answered, main ? 'main' : sessionId, main ? renderStream : () => paintStream(region, sessionId, transcript));
   if (region.dataset.revision !== String(current.revision)) {
+    paintAccountSwitches(parts.accountSwitches, current.accountSwitches);
     paintLiveActivity(region, current, transcript, context);
-    const errors = parts.errors;
-    const errorHtml = current.tools.filter(tool => tool.statusOnly).map(tool => `<div class="message-error">${icon('alert')}<span>${escape(tool.content as string)}</span></div>`).join('') + (finishing?.error ? `<div class="message-error" role="alert"><span>Couldn't load the saved response. ${escape(finishing.error)}</span><button class="secondary-button" data-action="retry-response">Retry loading response</button></div>` : '');
-    if (liveErrorHtml.get(errors) !== errorHtml) { errors.innerHTML = errorHtml; liveErrorHtml.set(errors, errorHtml); }
+    paintLiveErrors(parts.errors, current, sessionId, finishing?.error);
     // Approvals live in the bar above the prompt, not in the transcript.
     if (parts.approvals.firstChild) parts.approvals.replaceChildren();
     if (main) renderApprovalBar();
@@ -2295,11 +2878,11 @@ function paintStream(region: HTMLElement, sessionId: string, transcript: HTMLEle
   if (bot) botThread.paintWorking(region, bot, provider()?.name || 'the agent', () => state.streams.get(sessionId), Boolean(finishing));
   updateWorkTimer();
   // Following needs no pin here: Markdown paints pin after themselves, and the ResizeObserver after layout.
-  if (readingTool) transcript.scrollTop = scrollTop;
+  if (readingTool) { transcript.scrollTop = scrollTop; if (main) lastTranscriptTop = transcript.scrollTop; }
 }
 type StreamParts = {
   activity: HTMLDetailsElement; thinking: HTMLDetailsElement; thought: HTMLElement; tools: HTMLElement; status: HTMLElement;
-  message: HTMLElement; streaming: HTMLElement; output: HTMLElement; errors: HTMLElement; approvals: HTMLElement; inputs: HTMLElement;
+  message: HTMLElement; streaming: HTMLElement; output: HTMLElement; errors: HTMLElement; accountSwitches: HTMLElement; approvals: HTMLElement; inputs: HTMLElement;
 };
 /** renderStream's elements, kept until the region's markup is rebuilt. */
 const streamParts = new WeakMap<HTMLElement, StreamParts>();
@@ -2312,12 +2895,305 @@ function queryStreamParts(region: HTMLElement): StreamParts {
   return {
     activity: part<HTMLDetailsElement>('.turn-activity'), thinking, thought: thinking.lastElementChild as HTMLElement,
     tools: part('.live-tools'), status: part('.live-status'), message: part('.live-message'), streaming: part('.streaming-label'),
-    output: part('.live-text'), errors: part('.live-errors'), approvals: part('.live-approvals'), inputs: part('.live-inputs'),
+    output: part('.live-text'), errors: part('.live-errors'), accountSwitches: part('.live-account-switches'), approvals: part('.live-approvals'), inputs: part('.live-inputs'),
   };
 }
 const setHidden = (node: HTMLElement, hidden: boolean): void => { if (node.hidden !== hidden) node.hidden = hidden; };
 const liveGroupEntries = new WeakMap<HTMLElement, LiveTool[]>();
 const liveErrorHtml = new WeakMap<Element, string>();
+/* Thread errors (pure helpers in thread-errors.ts): identical errors are one row with a count, the full text folds
+ * open under a disclosure, and a row (or every row of a turn) can be dismissed, with Undo in the toast. Clicks reach
+ * `action` by delegation. */
+/** A transient error row a turn boundary wrote for a live row (materializeTurn): `count` events in one row, and the
+ * saved rows of those events, which dismissing the transient row deletes. */
+type CountedMessage = Message & { count?: number; savedIds?: number[] };
+/** "3 errors dismissed" where an emptied turn's error box was; plain muted text, not announced (the toast was). */
+function dismissedNoteHtml(turn: ShownTurn): string {
+  const count = turn.dismissedErrors ?? 0;
+  return count && !turn.errors.length ? `<p class="errors-dismissed-note">${count === 1 ? '1 error' : `${count} errors`} dismissed</p>` : '';
+}
+/** Drops dismissed error rows (hiddenErrors, and a mirrored thread's run copies, runHides) and folds errors-only turns
+ * into the turn before (foldErrorTurns). */
+function withErrorTurns(turns: TranscriptTurn[]): ShownTurn[] {
+  const sessionId = turns.find(turn => turn.errors.length)?.errors[0].sessionId, hides = sessionId ? runHides.get(sessionId) : undefined;
+  const fromRun = hides?.length ? hiddenRunErrors(turns.flatMap(turn => [turn.user, turn.coordination, ...turn.activity, turn.final, ...turn.errors, ...turn.notes].filter((message): message is Message => Boolean(message))), hides) : undefined;
+  if (!hiddenErrors.size && !fromRun?.size) return foldErrorTurns(turns, () => false);
+  return foldErrorTurns(turns, message => hiddenErrors.has(message.id) || Boolean(fromRun?.has(message.id)));
+}
+/** Whether a live disclosure the reader opened carries over to this row: the live row itself, or the run's saved rows. */
+function liveErrorOpen(group: ErrorGroup, sessionId: string, live: boolean): boolean {
+  const saved = openLiveErrors.get(`${sessionId}|${group.key}`);
+  if (!saved) return false;
+  return live || group.ids.some(id => typeof id === 'number' && (id < 0 || saved.has(id)));
+}
+function errorRowHtml(group: ErrorGroup, scope: string, sessionId: string, live = false): string {
+  const { summary, detail } = errorSummary(group.content);
+  // Unique per session, scope and row; the By the way panel prefixes its copies (scopeErrorIds), tiles drop ids.
+  const baseId = `err-${[sessionId, scope, String(group.ids[0])].join('-').replace(/[^\w-]/g, '_')}`, detailId = `${baseId}-detail`;
+  const open = detail !== null && (openErrors.has(`${scope}|${group.key}`) || liveErrorOpen(group, sessionId, live));
+  const count = group.count > 1 ? `<span class="error-row-count"><span aria-hidden="true">×${group.count}</span><span class="sr-only">Repeated ${group.count} times</span></span>` : '';
+  const toggle = detail === null ? '' : `<button type="button" class="error-row-button error-row-toggle" data-action="toggle-error" aria-label="Error details" aria-describedby="${baseId}-summary" aria-expanded="${open}" aria-controls="${detailId}">${icon('chevron')}</button>`;
+  const dismiss = `<button type="button" class="error-row-button error-row-dismiss" data-action="dismiss-error" aria-label="Dismiss error" aria-describedby="${baseId}-summary">${icon('close')}</button>`;
+  // Focusable so the keyboard can scroll a long detail (WKWebView does not scroll an unfocusable overflow box); a named
+  // region, so a screen reader reads its text after the summary that names it.
+  const body = detail === null ? '' : `<pre class="error-row-detail" id="${detailId}" role="region" aria-labelledby="${baseId}-summary" tabindex="0"${open ? '' : ' hidden'}>${escape(detail)}</pre>`;
+  return `<div class="message-error error-row" data-error-key="${escape(group.key)}" data-error-scope="${escape(scope)}" data-error-ids="${escape(group.ids.join(' '))}" data-error-count="${group.count}" data-session="${escape(sessionId)}"${live ? ' data-live' : ''}><div class="error-row-head"><span class="error-row-icon" data-state-tone="danger" aria-hidden="true">${icon('alert')}</span><span class="error-row-summary" id="${baseId}-summary">${escape(summary)}</span>${count}${toggle}${dismiss}</div>${body}</div>`;
+}
+/** The By the way panel can show the open thread too: its error rows get their own ids (and references to them). */
+function scopeErrorIds(root: HTMLElement): void {
+  root.querySelectorAll<HTMLElement>('.message-error [id^="err-"]').forEach(node => { node.id = 'btw-' + node.id; });
+  for (const attribute of ['aria-controls', 'aria-labelledby', 'aria-describedby']) {
+    root.querySelectorAll<HTMLElement>(`.message-error [${attribute}^="err-"]`).forEach(node => node.setAttribute(attribute, 'btw-' + node.getAttribute(attribute)));
+  }
+}
+const dismissAllHtml = (groups: number): string => groups > 1 ? '<div class="error-dismiss-all-row"><button type="button" class="error-dismiss-all" data-action="dismiss-errors">Dismiss all</button></div>' : '';
+/** A turn's saved errors, grouped, in one `.thread-errors` box (none at all when every error was dismissed). */
+function savedErrorsHtml(errors: Message[], scope: string, sessionId: string, extraClass = ''): string {
+  if (!errors.length) return '';
+  // A transient row (materializeTurn) stands in for saved rows too: dismissing it deletes those.
+  const savedOf = new Map(errors.map(error => [error.id, (error as CountedMessage).savedIds ?? []]));
+  const groups = groupErrors(errors).map(group => ({ ...group, ids: [...group.ids, ...group.ids.flatMap(id => savedOf.get(id as number) ?? [])] }));
+  return `<div class="thread-errors${extraClass ? ' ' + extraClass : ''}">${groups.map(group => errorRowHtml(group, scope, sessionId)).join('')}${dismissAllHtml(groups.length)}</div>`;
+}
+/** A live error row keeps at most the last this many characters (the tool path bounds its text the same way). */
+const LIVE_ERROR_CHARS = 8192;
+const isLiveError = (tool: LiveTool): boolean => Boolean(tool.statusOnly) && typeof tool.content === 'string';
+/** The live turn's errors (one row per key, already counted by addLiveError) and a failed saved-page load. Redrawn only
+ * when its markup changes; a focused control in it is focused again in the new markup. */
+function paintLiveErrors(container: HTMLElement, current: Stream, sessionId: string, loadError?: string): void {
+  const tools = current.tools.filter(tool => isLiveError(tool) && !tool.dismissed);
+  // The stream key first (it names the row), then the saved rows its events became.
+  const groups = tools.map(tool => ({ key: errorKey(tool.content as string), content: stripErrorPrefix(tool.content as string), count: tool.count ?? 1, ids: [tool.key, ...(tool.savedIds ?? [])] }));
+  const html = groups.map(group => errorRowHtml(group, 'live:' + current.turnKey, sessionId, true)).join('') + dismissAllHtml(groups.length);
+  paintRetryRow(container, sessionId, loadError);
+  if (liveErrorHtml.get(container) === html) return;
+  const focused = container.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
+  const focusKey = focused?.closest<HTMLElement>('.message-error')?.dataset.errorKey, focusAction = focused?.dataset.action;
+  // The Retry row (paintRetryRow) is left in place: only the live rows before it are rewritten.
+  for (const child of [...container.children]) if (!child.classList.contains('live-retry')) child.remove();
+  container.insertAdjacentHTML('afterbegin', html); liveErrorHtml.set(container, html);
+  if (focusAction) refocusError(container, focusKey, focusAction);
+  // After this frame's follow-to-bottom, so the room is measured where the rows end up.
+  requestAnimationFrame(() => { const toast = $('#toast'); if (!toast.hidden) makeToastRoom(toast); });
+}
+/** The load error each session's Retry row has already announced (paintRetryRow). */
+const announcedLoadErrors = new Map<string, string>();
+/** A failed saved-page load: its own node after the live rows, rewritten only when its text changes, and `role=alert`
+ * only the first time that error shows for the session, so a redraw (a new live row, a dismissal rebuilding the region)
+ * does not announce it again. Not saved, so no dismiss: Retry is its one action. */
+function paintRetryRow(container: HTMLElement, sessionId: string, loadError?: string): void {
+  let retry = container.querySelector<HTMLElement>(':scope>.live-retry');
+  if (!loadError) { retry?.remove(); announcedLoadErrors.delete(sessionId); return; }
+  if (retry?.dataset.loadError === loadError) return;
+  retry?.remove();
+  retry = document.createElement('div');
+  retry.className = 'message-error error-row live-retry'; retry.dataset.loadError = loadError;
+  if (announcedLoadErrors.get(sessionId) !== loadError) { retry.setAttribute('role', 'alert'); announcedLoadErrors.set(sessionId, loadError); }
+  retry.innerHTML = `<div class="error-row-head"><span class="error-row-icon" data-state-tone="danger" aria-hidden="true">${icon('alert')}</span><span class="error-row-summary">Couldn't load the saved response. ${escape(loadError)}</span><button type="button" class="secondary-button" data-action="retry-response">Retry loading response</button></div>`;
+  container.append(retry);
+}
+function refocusError(root: ParentNode, key: string | undefined, action: string, scope?: string): void {
+  const row = key ? `.message-error[data-error-key="${CSS.escape(key)}"]${scope ? `[data-error-scope="${CSS.escape(scope)}"]` : ''} ` : '';
+  root.querySelector<HTMLElement>(`${row}[data-action="${CSS.escape(action)}"]`)?.focus({ preventScroll: true });
+}
+/** An identical error bumps its row's count (a dismissed row stays dismissed: the repeat starts a new row, which an Undo
+ * merges back, mergeLiveErrors). Its toast
+ * shows once per `shouldAnnounce` window, and only when the row is not already in front of the reader
+ * (shouldToastLiveError). */
+function addLiveError(current: Stream, sessionId: string, text: string, savedId?: number): void {
+  // Bounded like a tool row's text (the saved row keeps the backend's own bound); identity is savedId, never the text.
+  const content = 'Error: ' + (text.length > LIVE_ERROR_CHARS ? text.slice(-LIVE_ERROR_CHARS) : text), key = errorKey(content);
+  const saved = savedId === undefined ? [] : [savedId];
+  const same = current.tools.find(tool => isLiveError(tool) && !tool.dismissed && errorKey(tool.content as string) === key);
+  if (same) current.tools = current.tools.map(tool => tool === same ? { ...tool, count: (tool.count ?? 1) + 1, savedIds: [...(tool.savedIds ?? []), ...saved] } : tool);
+  else { current.tools.push({ key: 'error:' + transientId--, content, statusOnly: true, savedIds: saved }); trimLiveActivity(current, sessionId); }
+  // A disclosure opened on this row stays open on the saved row this event became.
+  const open = openLiveErrors.get(`${sessionId}|${key}`);
+  if (open && savedId !== undefined) openLiveErrors.set(`${sessionId}|${key}`, new Set([...open, savedId]));
+  current.revision++;
+  const onScreen = sessionId === state.sessionId && state.view === 'conversation' && !settingsView;
+  const toastKey = `${sessionId}|${key}`, last = lastErrorToasts.get(toastKey);
+  const now = Date.now(), fresh = shouldAnnounce(last === undefined ? null : { key, at: last }, key, now);
+  if (fresh) {
+    lastErrorToasts.delete(toastKey); lastErrorToasts.set(toastKey, now);
+    if (lastErrorToasts.size > OPEN_ERRORS_MAX) lastErrorToasts.delete(lastErrorToasts.keys().next().value!);
+  }
+  // The row in front of the reader needs no toast, but the toast was also what a screen reader heard.
+  if (!shouldToastLiveError({ onScreen, attended: !document.hidden && document.hasFocus(), undoShowing: Boolean(toastUndo) })) { if (fresh) announce(stripErrorPrefix(content)); return; }
+  if (fresh) notifyError(errorSummary(text).summary);
+}
+function toggleError(button: HTMLElement): void {
+  const row = button.closest<HTMLElement>('.message-error'), detail = row?.querySelector<HTMLElement>('.error-row-detail');
+  if (!row || !detail) return;
+  const open = button.getAttribute('aria-expanded') !== 'true', id = `${row.dataset.errorScope}|${row.dataset.errorKey}`;
+  const liveId = `${row.dataset.session}|${row.dataset.errorKey}`;
+  openErrors.delete(id); openLiveErrors.delete(liveId);
+  if (open && row.hasAttribute('data-live')) openLiveErrors.set(liveId, new Set(rowSavedIds(row)));
+  else if (open) openErrors.add(id);
+  if (openErrors.size > OPEN_ERRORS_MAX) openErrors.delete(openErrors.values().next().value!);
+  if (openLiveErrors.size > OPEN_ERRORS_MAX) openLiveErrors.delete(openLiveErrors.keys().next().value!);
+  button.setAttribute('aria-expanded', String(open)); detail.hidden = !open;
+}
+/** Redraws every view of a thread's errors: the open transcript, the By the way panel and its tile. */
+function redrawErrors(sessionId: string): void {
+  hiddenErrorsRevision++;
+  if (sessionId === state.sessionId) { renderTranscript(true); renderStream(); }
+  btwPanel.refresh();
+  tiles.event(sessionId);
+}
+/** The loaded page of a thread's saved messages: the open thread's, else its tile's or cached page. */
+const threadMessages = (sessionId: string): Message[] | undefined => sessionId === state.sessionId ? state.messages : (tilePages.get(sessionId) ?? threadPages.get(sessionId))?.messages;
+const errorStream = (sessionId: string): Stream | undefined => state.streams.get(sessionId) ?? finishingStreams.get(sessionId)?.stream;
+/** The saved row ids a rendered error row stands for (positive ids in `data-error-ids`). */
+const rowSavedIds = (row: HTMLElement): number[] => (row.dataset.errorIds ?? '').split(' ').map(Number).filter(id => Number.isSafeInteger(id) && id > 0);
+/* Dismissing live errors. The backend saves each error event as a row before it emits the event, and the event carries
+ * that row's id (`data.messageId`, lib.rs `attach_message_id`; savedErrorId). The live row keeps the ids of the events it
+ * stands for (LiveTool.savedIds, also on the transient row materializeTurn writes), so dismissing it is dismissing those
+ * saved rows: they hide at once (hiddenErrors, the live row by its `dismissed` flag), Undo shows them again, and the
+ * native delete runs when the Undo toast settles, as for any saved row. An event without an id (the backend could not
+ * save it, or a task mirrored from another computer, whose ids name the host's rows) is dismissed in the view only.
+ * Deletes not yet confirmed are kept in localStorage (journalDismissals) and replayed at the next launch, since quitting
+ * can end the webview before an IPC call finishes. */
+/** Dismisses one row or every row of a `.thread-errors` box: the rows hide at once and the toast offers Undo; saved rows
+ * are deleted natively only when that toast settles (commitDismiss). */
+function dismissErrors(target: HTMLElement | null): void {
+  const rows = !target ? [] : target.matches('.message-error') ? [target] : [...target.querySelectorAll<HTMLElement>('.message-error[data-error-key]')];
+  const sessionId = rows[0]?.dataset.session;
+  if (!target || !sessionId) return;
+  const single = target.matches('.message-error');
+  const box = rows[0].closest('.thread-errors'), siblings = box ? [...box.querySelectorAll<HTMLElement>('.message-error[data-error-key]')] : [];
+  const neighbour = single ? siblings[siblings.indexOf(target) + 1] ?? siblings[siblings.indexOf(target) - 1] : undefined;
+  const pending: PendingDismiss = { sessionId, saved: [], transient: [], liveTools: [], runHides: [], focus: { key: rows[0].dataset.errorKey!, scope: rows[0].dataset.errorScope!, action: single ? 'dismiss-error' : 'dismiss-errors' } };
+  // A thread that runs on another computer shows this computer's copies, which the mirror's backfill could copy again:
+  // dismissing there only hides them for this app session (with the transient ids), never deletes them. Its live rows
+  // carry no saved id, so the run's copies, which arrive when it ends, are hidden by key (runHides).
+  const task = state.sessions.find(item => item.id === sessionId), mirrored = Boolean(task?.remoteDevice);
+  // A bot thread's failover reads the failed turn's error rows when the run ends (bots/failover.rs failed_turn), so
+  // errors dismissed while it runs are hidden for this app session and never deleted.
+  const viewOnly = mirrored || (sidebarBots.some(bot => bot.projectId === task?.projectId || bot.desktopSession === sessionId) && isRunning(sessionId));
+  const newest = mirrored ? threadMessages(sessionId)?.reduce((max, message) => Math.max(max, message.id), 0) : undefined;
+  for (const row of rows) {
+    const ids = (row.dataset.errorIds ?? '').split(' ').filter(Boolean);
+    if (row.hasAttribute('data-live')) pending.liveTools.push(ids[0]);
+    if (row.hasAttribute('data-live') && newest !== undefined) pending.runHides.push({ key: row.dataset.errorKey!, after: newest });
+    (viewOnly ? pending.transient : pending.saved).push(...rowSavedIds(row));
+    pending.transient.push(...ids.map(Number).filter(id => Number.isInteger(id) && id < 0));
+  }
+  applyDismiss(pending);
+  redrawErrors(sessionId);
+  if (neighbour) refocusError(document, neighbour.dataset.errorKey, 'dismiss-error', neighbour.dataset.errorScope);
+  // The last error went with its box: the keyboard continues from the composer, not from <body>.
+  const active = document.activeElement;
+  if (!active || active === document.body || !active.isConnected) document.querySelector<HTMLTextAreaElement>('#prompt')?.focus({ preventScroll: true });
+  // Replacing this toast with another dismissal settles (commits) the one before; other notices wait (toastQueue).
+  notify(rows.length === 1 ? 'Error dismissed' : `${rows.length} errors dismissed`, () => undoDismiss(pending), { settle: () => commitDismiss(pending) });
+  pendingDismiss = pending;
+  journalDismissals();
+}
+function setLiveDismissed(pending: PendingDismiss, dismissed: boolean): void {
+  const current = errorStream(pending.sessionId);
+  if (!current || !pending.liveTools.length) return;
+  const tools = current.tools.map(tool => pending.liveTools.includes(tool.key) ? { ...tool, dismissed } : tool);
+  current.tools = dismissed ? tools : mergeLiveErrors(tools); current.revision++;
+}
+/** One shown live row per key: a restored row takes in the repeat that started a new row while it was dismissed
+ * (addLiveError), at the earlier row's place, so a later dismissal carries every saved id. */
+function mergeLiveErrors(tools: LiveTool[]): LiveTool[] {
+  const merged: LiveTool[] = [], at = new Map<string, number>();
+  for (const tool of tools) {
+    const key = isLiveError(tool) && !tool.dismissed ? errorKey(tool.content as string) : undefined, index = key === undefined ? undefined : at.get(key);
+    if (index === undefined) { if (key !== undefined) at.set(key, merged.length); merged.push(tool); continue; }
+    const kept = merged[index];
+    merged[index] = { ...kept, count: (kept.count ?? 1) + (tool.count ?? 1), savedIds: [...(kept.savedIds ?? []), ...(tool.savedIds ?? [])] };
+  }
+  return merged;
+}
+function applyDismiss(pending: PendingDismiss): void {
+  for (const id of [...pending.saved, ...pending.transient]) hiddenErrors.add(id);
+  if (pending.runHides.length) {
+    runHides.set(pending.sessionId, [...(runHides.get(pending.sessionId) ?? []), ...pending.runHides]);
+    let total = [...runHides.values()].reduce((sum, hides) => sum + hides.length, 0);
+    for (const [sessionId, hides] of runHides) {
+      if (total <= RUN_HIDES_MAX) break;
+      const drop = Math.min(hides.length, total - RUN_HIDES_MAX);
+      if (drop === hides.length) runHides.delete(sessionId); else runHides.set(sessionId, hides.slice(drop));
+      total -= drop;
+    }
+  }
+  setLiveDismissed(pending, true);
+}
+/** Undo: the rows come back where they were, and focus returns to the control that dismissed them. */
+function undoDismiss(pending: PendingDismiss): void {
+  if (pendingDismiss !== pending) return;
+  pendingDismiss = null;
+  for (const id of [...pending.saved, ...pending.transient]) hiddenErrors.delete(id);
+  const hides = (runHides.get(pending.sessionId) ?? []).filter(hide => !pending.runHides.includes(hide));
+  if (hides.length) runHides.set(pending.sessionId, hides); else runHides.delete(pending.sessionId);
+  setLiveDismissed(pending, false);
+  journalDismissals();
+  redrawErrors(pending.sessionId);
+  const active = document.activeElement;
+  if (active && active !== document.body && active.isConnected && !$('#toast').contains(active)) return;
+  const { key, scope, action } = pending.focus;
+  const row = document.querySelector<HTMLElement>(`.message-error[data-error-key="${CSS.escape(key)}"][data-error-scope="${CSS.escape(scope)}"]`);
+  const control = action === 'dismiss-errors' ? row?.closest('.thread-errors')?.querySelector<HTMLElement>('[data-action="dismiss-errors"]') : row?.querySelector<HTMLElement>('[data-action="dismiss-error"]');
+  control?.focus({ preventScroll: true });
+}
+/** The undo window passed: delete the saved rows (in any thread, open or not, the run over or not: they exist). */
+function commitDismiss(pending: PendingDismiss): void {
+  if (pendingDismiss !== pending) return;
+  pendingDismiss = null;
+  if (pending.saved.length) void deleteSavedErrors(pending.sessionId, pending.saved);
+  journalDismissals();
+}
+/** Commits a dismissal still waiting on its Undo (the toast leaves with it): on leaving or hiding the window, and on a
+ * thread switch. */
+function flushPendingDismiss(): void {
+  if (!pendingDismiss) return;
+  if (toastSettle) dismissToast(); else commitDismiss(pendingDismiss);
+}
+window.addEventListener('pagehide', flushPendingDismiss);
+document.addEventListener('visibilitychange', () => { if (document.hidden) flushPendingDismiss(); });
+/** Saved ids whose native delete has started but not answered yet. */
+const unconfirmedDeletes = new Map<string, Set<number>>();
+async function deleteSavedErrors(sessionId: string, ids: number[]): Promise<void> {
+  const unconfirmed = unconfirmedDeletes.get(sessionId) ?? new Set<number>();
+  unconfirmedDeletes.set(sessionId, unconfirmed);
+  for (const id of ids) unconfirmed.add(id);
+  journalDismissals();
+  const failed: number[] = [];
+  for (let start = 0; start < ids.length; start += DISMISS_BATCH) {
+    const batch = ids.slice(start, start + DISMISS_BATCH);
+    try { await call<number>('dismiss_error_messages', { sessionId, ids: batch }); }
+    catch (error) { console.error('dismiss_error_messages failed', error); failed.push(...batch); }
+  }
+  for (const id of ids) unconfirmed.delete(id);
+  if (!unconfirmed.size) unconfirmedDeletes.delete(sessionId);
+  journalDismissals();
+  if (!failed.length) return;
+  for (const id of failed) hiddenErrors.delete(id);
+  redrawErrors(sessionId);
+  notifyError("Couldn't dismiss the error. It's shown again.");
+}
+const DISMISS_JOURNAL_KEY = 'pandacode.errors.pendingDeletes';
+/** Stores what a quit right now would lose: unconfirmed deletes and the pending dismissal (leaving commits it).
+ * Replayed by replayDismissals at the next launch. */
+function journalDismissals(): void {
+  const saved = new Map([...unconfirmedDeletes].map(([sessionId, ids]) => [sessionId, new Set(ids)]));
+  if (pendingDismiss?.saved.length) saved.set(pendingDismiss.sessionId, new Set([...(saved.get(pendingDismiss.sessionId) ?? []), ...pendingDismiss.saved]));
+  const raw = dismissJournal(saved);
+  try { if (raw) localStorage.setItem(DISMISS_JOURNAL_KEY, raw); else localStorage.removeItem(DISMISS_JOURNAL_KEY); }
+  catch (error) { console.error('Could not keep dismissed errors for the next launch', error); }
+}
+/** At launch: hides and deletes what the last session dismissed but could not finish deleting (journalDismissals),
+ * for threads that still exist. */
+function replayDismissals(): void {
+  let raw: string | null = null;
+  try { raw = localStorage.getItem(DISMISS_JOURNAL_KEY); } catch (error) { console.error('Could not read dismissed errors', error); }
+  const saved = parseDismissJournal(raw), known = new Set(state.sessions.map(task => task.id));
+  for (const [sessionId, ids] of saved) if (known.has(sessionId)) { for (const id of ids) hiddenErrors.add(id); void deleteSavedErrors(sessionId, ids); }
+  journalDismissals();
+}
 /** Patch only changed groups; text frames do not recreate tool controls or open details. */
 function paintLiveActivity(region: HTMLElement, current: Stream, transcript: HTMLElement, context: FileLinkContext): void {
   const host = region.querySelector<HTMLElement>('.live-tools')!;
@@ -2329,7 +3205,9 @@ function paintLiveActivity(region: HTMLElement, current: Stream, transcript: HTM
   let narratedAt = -1;
   // Live worker lines follow the call that spawned them, so later activity stays below them.
   // ponytail: anchors every live worker after the turn's first dispatch; a second dispatch's workers join them.
-  const tools = current.tools.filter(tool => !tool.statusOnly), workers = region.parentElement?.querySelector<HTMLElement>(':scope > #team-progress-host') ?? null;
+  const tools = current.tools.filter(tool => !tool.statusOnly);
+  // The host sits after the region, or in the trace once a dispatch placed it there.
+  const workers = region.parentElement?.querySelector<HTMLElement>(':scope > #team-progress-host') ?? host.querySelector<HTMLElement>(':scope > #team-progress-host');
   const dispatch = workers ? tools.findIndex(tool => typeof tool.content !== 'string' && /dispatch_workers/.test(tool.content.name)) : -1;
   const toolRuns = (entries: LiveTool[]) => groupToolRuns(entries, tool => tool.commentary ? undefined : tool.key);
   const runs = dispatch < 0 ? toolRuns(tools) : [...toolRuns(tools.slice(0, dispatch + 1)), null, ...toolRuns(tools.slice(dispatch + 1))];
@@ -2484,7 +3362,8 @@ function paintLiveHeader(activity: HTMLDetailsElement, current: Stream, workedMs
   } else if (last && !status) {
     const trace = describeTool(last);
     mode = 'step'; step = last.id;
-    const thumb = carded ? stepImage(last) : '';
+    // An image row already carries its thumbnail in the sentence (traceRowHtml).
+    const thumb = carded && !trace.image ? stepImage(last) : '';
     html = `${answerMs >= 0 ? traceGlyphHtml('bars') : traceGlyphHtml('step', trace.icon ?? kindIcon(trace.kind))}<span class="trace-sentence">${traceRowHtml(trace)}</span>${thumb ? `<img class="turn-card-thumb" alt="" data-thumb="${escape(thumb)}" hidden>` : ''}`;
   } else {
     mode = 'status';
@@ -2530,13 +3409,29 @@ function stepImage(tool: ToolActivity): string {
   const match = /"(?:file_path|path|image_path)"\s*:\s*"([^"]+\.(?:png|jpe?g|gif|webp))"/i.exec(tool.input) ?? /^\s*(\S+\.(?:png|jpe?g|gif|webp))\s*$/i.exec(tool.input);
   return match?.[1] ?? '';
 }
-const stepImages = new Map<string, Promise<string | null>>();
-function loadStepImage(label: HTMLElement): void {
-  const image = label.querySelector<HTMLImageElement>('img[data-thumb]'), sessionId = state.sessionId;
-  if (!image) return;
-  const path = image.dataset.thumb!, key = sessionId + '\0' + path;
-  if (!stepImages.has(key)) stepImages.set(key, call<string>('workspace_image', { sessionId, path }).then(url => url.startsWith('data:image/') ? url : null, () => null));
-  void stepImages.get(key)!.then(url => { if (url && image.isConnected) { image.src = url; image.hidden = false; } });
+/** The header thumbnail shares the tool rows' image cache: a success stays cached, and a failure is asked again
+ * when the header re-renders and a few times after `RETRY_MS` while the image stays. */
+/** Forced retries the header has asked per session and image: it re-renders on every step, so without a cap a
+ * missing image would be asked again about once a second for as long as it stays. */
+const stepImageForced = new Map<string, number>();
+const STEP_IMAGE_FORCED_LIMIT = 64;
+function forceStepImage(sessionId: string, path: string): boolean {
+  const key = sessionId + '\0' + path, tries = stepImageForced.get(key) ?? 0;
+  if (tries >= MAX_RETRIES) return false;
+  stepImageForced.delete(key);
+  stepImageForced.set(key, tries + 1);
+  while (stepImageForced.size > STEP_IMAGE_FORCED_LIMIT) stepImageForced.delete(stepImageForced.keys().next().value!);
+  return true;
+}
+function loadStepImage(label: HTMLElement, retry = true, sessionId = state.sessionId): void {
+  const image = label.querySelector<HTMLImageElement>('img[data-thumb]');
+  if (!image || !sessionId) return;
+  const path = image.dataset.thumb!;
+  void toolImageCache(toolImageLoader).get(sessionId, path, { retry: retry && forceStepImage(sessionId, path) }).then(url => {
+    if (!image.isConnected) return;
+    if (url) { image.src = url; image.hidden = false; return; }
+    retryLater(image, () => loadStepImage(label, false, sessionId));
+  });
 }
 function workingLabel(current: Stream): string {
   let label = current.inputs.size ? 'Waiting for your answer' : current.approvals.size ? 'Waiting for approval' : current.status;
@@ -2616,6 +3511,105 @@ const settleUnfolded = (element: HTMLElement): void => settleIn(element, 4, { re
 /** The reference's steer arrow (↳) and effort gauge; dom.ts has no such glyphs. */
 const STEER_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4v7a3 3 0 0 0 3 3h10m-4-4 4 4-4 4"/></svg>';
 const GAUGE_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.2 16.5a8.5 8.5 0 1 1 15.6 0"/><path d="m12 13 3.5-4"/></svg>';
+/* The height the text needs is the one thing a keystroke costs a layout read: releasing the box and asking it for its
+ * scrollHeight is the only way to know how many lines the text now wraps to. What the fit memo saves is a second layout,
+ * not that one: the old code wrote the height and then read the box back to decide the overflow switch, so every keystroke
+ * laid the text out twice. It now takes the overflow from the same measurement, and a call whose text is already fitted
+ * (the resizePrompt() that follows a queued message, a redraw between keystrokes) returns without writing and without
+ * laying anything out. A keystroke is not one of those: no focus path calls resizePrompt, and a keystroke's own call always
+ * sees a value the memo has not fitted yet, so typing measures exactly once.
+ * The text is not the fit's only input though: how many lines it wraps to depends on the width it wraps at, and the prompt
+ * is a column of a resizable pane beside a send control that is not one width: 62x36 for Send and Stop
+ * (redesign/conversation.css sizes `.composer-pill>.send-button` 62x36, overriding the 28x28 `--control` square in
+ * styles.css), then content-width for the wider "Checking…" and "Retry connection" secondary buttons, so one draft needs a
+ * taller box in a narrower prompt. The fit is therefore also remembered at a width, and the PROMPT's own ResizeObserver
+ * re-measures it when that width changes — its callbacks run after layout, so the width costs no layout read, and only a
+ * WIDTH counts: the height written below changes the observed box height on every keystroke and must not make the fit stale
+ * (that is the loop guard).
+ * Text and width are not the whole memo key, because a fit can go stale without either changing. `rows` is one input: the
+ * template sets rows="2" and renderComposer() copies the fresh template's rows onto the reused textarea, so a template
+ * that chose a different row count would leave the box at the height fitted for the old one. The box's own height limits
+ * are the other: `min-height` floors a short draft (redesign/conversation.css `.composer-input textarea` sets 60px) and a
+ * `max-height` would cap it, so the limits are keyed too, through a single getComputedStyle(prompt) of just those two
+ * properties. That read sits where the answer can change — in the early-return test, and right after a fit — and costs no
+ * layout: both limits resolve to lengths and keywords the style engine answers from the style it already has, and the
+ * post-fit read runs after scrollHeight forced the layout above it. A font metric is the one input not in the key: the
+ * prompt's font-size is a rem of the root, so the only thing that moves it is the interface scale, whose event re-fits
+ * unconditionally.
+ * The state below sits here rather than beside the listener that also uses it, because renderComposer() — the first caller —
+ * is only a few lines down: a const or let declared below its function's first caller leaves a window where a call (a
+ * redraw, a future top-level one) throws instead of returning. */
+const PROMPT_MAX_HEIGHT = 180;
+/** Everything the fitted height depends on that can change without the text changing: the box's row count and its height
+ *  limits. `rows` is an integer, the limits a serialization of the two computed lengths. */
+type PromptFit = { prompt: HTMLTextAreaElement; value: string; rows: number; limits: string };
+let promptFit: PromptFit | undefined;
+let promptBoxWidth = -1;
+let promptObserved: HTMLTextAreaElement | null = null;
+const promptResize = new ResizeObserver(entries => {
+  const width = entries.at(-1)?.contentRect.width ?? 0;
+  // No box to fit (a view without a composer, the prompt hidden or collapsed): forget the width, so the width it comes back
+  // at re-fits even when that is the width it left at. A sub-pixel change wraps nothing.
+  if (!width) { promptBoxWidth = -1; return; }
+  if (Math.abs(width - promptBoxWidth) < .5) return;
+  promptBoxWidth = width;
+  // An empty prompt is one line at any width, so a width change must not lay it out. The first
+  // character still measures, at the width just recorded.
+  const current = promptObserved;
+  if (current && current.value === '' && promptFit?.prompt === current && promptFit.rows === current.rows && current.style.height) return;
+  resizePrompt(true);
+});
+// Created once, never per render, and watching the prompt itself: its own inline size is exactly the quantity the fit
+// depends on, so the send pill (62 px for Send and Stop) swapping for the wider, content-sized secondary button re-fits the
+// draft even though the composer row's own box never changes. The node survives a redraw of the same thread
+// (renderComposer() puts the old textarea back), so nothing to re-attach there; a thread switch leaves the template's fresh
+// node in place, so resizePrompt() re-attaches below — one identity compare, no layout read.
+function watchPrompt(prompt: HTMLTextAreaElement | null): void {
+  if (prompt === promptObserved) return;
+  if (promptObserved) promptResize.unobserve(promptObserved);
+  promptObserved = prompt;
+  // A different box is measured from scratch, at whatever width it lands at.
+  promptBoxWidth = -1;
+  if (prompt) promptResize.observe(prompt);
+}
+function resizePrompt(remeasure = false): void {
+  const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
+  watchPrompt(prompt);
+  if (!prompt) { promptFit = undefined; return; }
+  const fit = promptFit?.prompt === prompt ? promptFit : undefined;
+  // An empty prompt is one line at any width (docs/agent-reference.md). Every composer render asks, and resolving
+  // min/max height here would restyle the page on each one, so an empty box that is already fitted returns before that
+  // read. `rows` stays in the key: the template copies its row count onto the reused textarea. Interface scale passes
+  // `remeasure` and refits, because the line height changed even though the width did not.
+  if (!remeasure && fit && prompt.value === '' && fit.value === '' && fit.rows === prompt.rows && prompt.style.height) return;
+  // The same text, the same rows and the same height limits in a box that is already fitted, at a width promptResize has
+  // accounted for, needs the height it has: this call writes nothing and lays nothing out. `value` and `rows` are a string
+  // and an integer, so a keystroke short-circuits on the value before the only read here is reached, and a redraw that
+  // changed the row count or the limits re-fits instead of trusting the last fit.
+  if (!remeasure && fit && fit.value === prompt.value && prompt.style.height && fit.rows === prompt.rows && fit.limits === promptHeightLimits(prompt)) return;
+  prompt.style.height = 'auto';
+  const natural = prompt.scrollHeight;
+  // A pane that is not laid out reports no content height: forget the fit and the width it was taken at, so the next layout
+  // — the pane shown again, or the prompt's observer seeing it at a real width — measures instead of trusting it.
+  if (!natural) { promptFit = undefined; promptBoxWidth = -1; return; }
+  const height = Math.min(natural, PROMPT_MAX_HEIGHT);
+  prompt.style.height = `${height}px`;
+  // Scroll only past the cap; a pixel of rounding at rest must not show a scroll bar. At any height the box scrolls
+  // exactly when the text is taller than it, so this is the same test, one measurement cheaper.
+  const overflow = natural > height + 1 ? 'auto' : 'hidden';
+  if (prompt.style.overflowY !== overflow) prompt.style.overflowY = overflow;
+  promptFit = { prompt, value: prompt.value, rows: prompt.rows, limits: promptHeightLimits(prompt) };
+}
+/** The fitted height also depends on the box's own limits, and they can change without the text or the width changing (a
+ *  rule above it in the cascade, a unit change). Read once where the answer is decided or recorded, never per keystroke. */
+function promptHeightLimits(prompt: HTMLTextAreaElement): string {
+  const style = getComputedStyle(prompt);
+  return `${style.minHeight}|${style.maxHeight}`;
+}
+// An interface-size change can leave the prompt's box the same width and still change how the text wraps (the preview scales
+// the root font while the actions keep their px widths), so the observer above stays silent and the fit has to be re-taken
+// from the event.
+window.addEventListener('pandacode-ui-scale-change', () => resizePrompt(true));
 function renderComposer(): void {
   refreshTeamProgress();
   syncProgressPip();
@@ -2625,6 +3619,10 @@ function renderComposer(): void {
   slashPicker?.dispose(); slashPicker = undefined;
   fileMentionPicker?.dispose(); fileMentionPicker = undefined;
   closeContentMenus();
+  const voiceDetails = document.querySelector<HTMLElement>('#composer-area .voice-details');
+  const voiceDetailsState = voiceDetails ? { focused: document.activeElement === voiceDetails, top: voiceDetails.scrollTop } : null;
+  const voiceFocus = document.activeElement?.closest<HTMLElement>('[data-voice]')?.dataset.voice;
+  const voiceStatusFocus = document.activeElement?.matches('.voice-pill');
   const oldPrompt = document.querySelector<HTMLTextAreaElement>('#prompt');
   if (oldPrompt?.dataset.sessionId && !deletedSessions.has(oldPrompt.dataset.sessionId)) state.drafts.set(oldPrompt.dataset.sessionId, oldPrompt.value);
   // Re-rendering replaces the textarea; keep typing focus and the caret, since people type while agents work.
@@ -2633,6 +3631,7 @@ function renderComposer(): void {
   const barControl = document.activeElement?.closest<HTMLElement>('#composer-area :is(.composer-steer-bar [data-action],[data-action="stop"])')?.dataset.action;
   const hadSteerBar = oldPrompt?.dataset.sessionId === session()?.id && Boolean(document.querySelector('#composer-area .composer-steer-bar'));
   if (state.sharedChannelId) {
+    voiceDictation.bind(null);
     const channel = state.sharedChannelDetail;
     // Refreshes rewrite the actions; an open Reassign menu for the same message stays open.
     const reassign = document.querySelector<HTMLElement>('#composer-area .bc-reassign-menu:not([hidden]) [data-message]')?.dataset.message;
@@ -2641,15 +3640,15 @@ function renderComposer(): void {
     if (menu) { menu.hidden = false; menu.previousElementSibling?.setAttribute('aria-expanded', 'true'); }
     const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
     const posting = state.sharedChannelPosting.has(state.sharedChannelId);
-    if (prompt) { prompt.value = state.sharedChannelDrafts.get(state.sharedChannelId) ?? ''; prompt.disabled = Boolean(channel?.archived) || !channel?.memberIds.length || posting; }
+    if (prompt) { prompt.value = state.drafts.get(channelDraftKey(state.sharedChannelId)) ?? ''; prompt.disabled = Boolean(channel?.archived) || !channel?.memberIds.length || posting; }
     const send = document.querySelector<HTMLButtonElement>('#shared-channel-composer button[type="submit"]');
     if (send) send.disabled = posting;
     return;
   }
   const s = session();
-  if (!s) { $('#composer-area').innerHTML = ''; browserPanel?.refresh(); return; }
+  if (!s) { voiceDictation.bind(null); $('#composer-area').innerHTML = ''; browserPanel?.refresh(); return; }
   syncOverlayContext({ projectId: s.projectId, provider: s.provider, model: s.model || 'default', mode: s.mode, reasoningEffort: s.reasoningEffort ?? null });
-  if (taskStage(s) === 'completed') { $('#composer-area').innerHTML = `<div class="board-completed-note">This task is settled.${state.view === 'conversation' ? '<button type="button" class="secondary-button" data-action="board-reopen">Reopen task</button>' : ' Reopen it above to continue.'}</div>`; browserPanel?.refresh(); return; }
+  if (taskStage(s) === 'completed') { voiceDictation.bind(null); $('#composer-area').innerHTML = `<div class="board-completed-note">This task is settled.${state.view === 'conversation' ? '<button type="button" class="secondary-button" data-action="board-reopen">Reopen task</button>' : ' Reopen it above to continue.'}</div>`; browserPanel?.refresh(); return; }
   const previous = state.drafts.get(s.id) ?? '';
   const running = isRunning();
   // A bot's next model can be picked mid-turn; it applies from the next turn.
@@ -2662,7 +3661,7 @@ function renderComposer(): void {
     : `<button type="submit" class="send-button" title="Send message (${shortcut('Enter')})" aria-label="Send message" ${togglingTeam ? 'disabled' : ''}>${icon('arrow')}</button>`;
   // The composer redraws on every session change; the orchestration slot's nodes outlive it.
   const orchestrationSlot = document.querySelector('#machine-orchestration');
-  $('#composer-area').innerHTML = `<form id="composer" class="composer ${running ? 'composer-running' : ''}">${wakeStrip(s.id)}${queuePanel({ entries: state.queues.get(s.id) ?? [], hold: state.queueHolds.get(s.id) ?? null, running, steerable: !team && !offline, sendable: !botProjects.has(s.projectId) && !offline, editingId: state.queueEditing || null, busy: state.queueBusy.has(s.id), steering: steeringQueued, notSteered, agentName: botForThread()?.name ?? provider(s.provider)?.name })}<div id="attachments" class="attachments">${attachmentBar(s)}</div>${running && !team ? `<div class="composer-steer-bar"><button type="button" class="icon-button composer-steer-edit" data-action="steer-edit" title="Edit draft" aria-label="Edit draft">${icon('edit')}</button><button type="button" class="steer-button" data-action="steer" title="Steer: send into the running turn (${shortcut('Enter')})" aria-label="Steer the running turn">${STEER_ICON}<span class="sr-only">Steer</span></button><button type="button" class="icon-button composer-steer-clear" data-action="steer-clear" title="Clear draft" aria-label="Clear draft">${icon('close')}</button></div>` : !team && finishingStreams.has(s.id) && !finishingStreams.get(s.id)!.error ? '<div class="composer-steer-bar" data-holding aria-hidden="true"></div>' : ''}<div class="composer-input"><textarea id="prompt" data-session-id="${escape(s.id)}" aria-label="Message your coding agent" placeholder="${running ? (team ? 'Queue a follow-up…' : 'Queue a follow-up · ⌘↩ steers now') : composerPlaceholder()}" aria-description="${running ? `Enter to queue for when the agent finishes.${team ? '' : ' Command Enter to steer the running turn.'}` : 'Enter to send. Shift Enter for a new line.'}" rows="2"></textarea><div class="composer-actions">${button('attach', 'Attach files for context', 'attach', '', 'type="button"')}<span class="composer-pill">${sendControl}</span></div></div><div class="composer-toolbar composer-tray"><div class="composer-tools">${modelTriggerHtml(s, modelLocked, true)}${modeTriggerHtml(s, running || togglingTeam, true)}${teamButton(s)}${tokenSaver.button(s.id)}</div>${contextBarHtml(s, newTaskView())}</div></form>`;
+  $('#composer-area').innerHTML = `<form id="composer" class="composer ${running ? 'composer-running' : ''}">${wakeStrip(s.id)}${queuePanel({ entries: state.queues.get(s.id) ?? [], hold: state.queueHolds.get(s.id) ?? null, running, steerable: !team && !offline, sendable: !botProjects.has(s.projectId) && !offline, editingId: state.queueEditing || null, busy: state.queueBusy.has(s.id), steering: steeringQueued, notSteered, agentName: botForThread()?.name ?? provider(s.provider)?.name })}${s.remoteDevice ? '' : council.strip(s.id)}<div id="attachments" class="attachments">${attachmentBar(s)}</div>${running && !team ? `<div class="composer-steer-bar"><button type="button" class="icon-button composer-steer-edit" data-action="steer-edit" title="Edit draft" aria-label="Edit draft">${icon('edit')}</button><button type="button" class="steer-button" data-action="steer" title="Steer: send into the running turn (${shortcut('Enter')})" aria-label="Steer the running turn">${STEER_ICON}<span class="sr-only">Steer</span></button><button type="button" class="icon-button composer-steer-clear" data-action="steer-clear" title="Clear draft" aria-label="Clear draft">${icon('close')}</button></div>` : !team && finishingStreams.has(s.id) && !finishingStreams.get(s.id)!.error ? '<div class="composer-steer-bar" data-holding aria-hidden="true"></div>' : ''}<div class="composer-input"><textarea id="prompt" dir="auto" data-session-id="${escape(s.id)}" aria-label="Message your coding agent" placeholder="${running ? (team ? 'Queue a follow-up…' : 'Queue a follow-up · ⌘↩ steers now') : composerPlaceholder()}" aria-description="${escape(promptDescription())}" rows="2"></textarea><div class="composer-actions">${button('attach', 'Attach files for context', 'attach', '', 'type="button"')}${voiceButtonHtml}<span class="composer-pill">${sendControl}</span></div></div><div class="composer-toolbar composer-tray"><div class="composer-tools">${modelTriggerHtml(s, modelLocked, true)}${modeTriggerHtml(s, running || togglingTeam, true)}${teamButton(s)}${tokenSaver.button(s.id)}${s.remoteDevice ? '' : council.button(s.id)}</div>${contextBarHtml(s, newTaskView())}</div></form>`;
   // A refresh replaces the textarea and its native undo history with it (#277); the same thread's node goes back in carrying the refresh's attributes.
   if (oldPrompt && oldPrompt.dataset.sessionId === s.id) {
     const fresh = document.querySelector<HTMLTextAreaElement>('#prompt');
@@ -2689,14 +3688,13 @@ function renderComposer(): void {
   if (prompt && activeBot) {
     const entersSteer = activeBot.whileWorking === 'steer';
     prompt.placeholder = `Enter ${entersSteer ? 'steers' : 'queues'} for ${activeBot.name} · ⌘↩ ${entersSteer ? 'queues' : 'steers'}`;
-    prompt.setAttribute('aria-description', `Enter to ${entersSteer ? 'steer current work' : 'queue for after it finishes'}. Command Enter to ${entersSteer ? 'queue for after it finishes' : 'steer now'}.`);
     const action = document.querySelector<HTMLButtonElement>('#composer-area .steer-button');
     if (action) { const label = entersSteer ? 'Queue' : 'Steer'; action.setAttribute('aria-label', `${label} while ${activeBot.name} is working`); action.title = `${label} while ${activeBot.name} is working`; action.querySelector('span')!.textContent = label; }
   }
   // The prompt stays open during a run: messages typed then are queued or steered.
   // A finished run whose history failed to load waits for Retry before anything else is sent.
   // Writing an unchanged value would still clear the reused field's undo history in some engines.
-  if (prompt) { if (prompt.value !== previous) prompt.value = previous; prompt.disabled = state.messagesLoading || Boolean(state.messagesError) || Boolean(finishingStreams.get(s.id)?.error); }
+  if (prompt) { if (prompt.value !== previous) prompt.value = previous; prompt.disabled = threadLoading() || Boolean(state.messagesError) || Boolean(finishingStreams.get(s.id)?.error); }
   if (prompt && typing?.id === s.id && !prompt.disabled) { prompt.focus({ preventScroll: true }); prompt.setSelectionRange(typing.start, typing.end); }
   if (barControl) {
     // Redrawn while the run goes on: the same control keeps focus. Gone or hidden: the prompt takes it.
@@ -2704,6 +3702,10 @@ function renderComposer(): void {
     again?.focus({ preventScroll: true });
     if (document.activeElement !== again) prompt?.focus({ preventScroll: true });
   }
+  // Dictation binds once, to the final prompt node (the reused one on a same-thread refresh), before its focus returns.
+  voiceDictation.bind(prompt);
+  if (voiceStatusFocus) document.querySelector<HTMLElement>('#composer-area .voice-pill:not([hidden])')?.focus({ preventScroll: true });
+  if (voiceFocus) document.querySelector<HTMLElement>(`#composer-area [data-voice="${voiceFocus}"]`)?.focus({ preventScroll: true });
   syncSteerAvailability();
   const steerBar = document.querySelector<HTMLElement>('#composer-area .composer-steer-bar');
   if (steerBar && !hadSteerBar && oldPrompt?.dataset.sessionId === s.id) settleUnfolded(steerBar);
@@ -2718,8 +3720,6 @@ function renderComposer(): void {
       load: force => call<{ commands: SlashCommand[]; warnings: string[] }>('list_slash_commands', { sessionId: s.id, force }).then(withWake),
       select: () => state.drafts.set(s.id, prompt.value),
     });
-    const enter = running ? `Enter to queue for when the agent finishes.${!team ? ' Command Enter to steer the running turn.' : ''}` : 'Enter to send.';
-    prompt.setAttribute('aria-description', `${enter} Shift Enter for a new line. Type @ to mention a project file${github.connected(s.projectId) ? ', issue, or pull request' : ''}.`);
     fileMentionPicker = mountFileMentions(prompt, {
       contextKey: () => `${state.sessionId}:${workspacePath()}:${github.connected(s.projectId)}`,
       // Files and GitHub work share one picker; GitHub leads when the query is a number.
@@ -2732,6 +3732,11 @@ function renderComposer(): void {
       },
       select: () => state.drafts.set(s.id, prompt.value),
     });
+  }
+  if (voiceDetailsState) {
+    const details = document.querySelector<HTMLElement>('#composer-area .voice-details');
+    if (voiceDetailsState.focused) details?.focus({ preventScroll: true });
+    if (details) details.scrollTop = voiceDetailsState.top;
   }
   syncRemoteConnection();
   renderedRemoteKey = remoteComposerKey(s);
@@ -2797,13 +3802,13 @@ function renderBoardView(): void {
   else { pane.removeAttribute('role'); pane.removeAttribute('aria-label'); }
   $('#project-board').hidden = !board;
   $('#task-details-heading').hidden = !board && !(hub && state.boardPanel);
-  if (hub && state.boardPanel) renderTaskDetails($('#task-details-heading'), session(), project(), isRunning(), state.messagesLoading || Boolean(state.messagesError));
+  if (hub && state.boardPanel) renderTaskDetails($('#task-details-heading'), session(), project(), isRunning(), threadLoading() || Boolean(state.messagesError));
   if (!board) return;
   const boardProject = state.projectFilter || project()?.id || state.projects[0]?.id || '';
   if (boardProject) void github.status(boardProject);
   const boardNow = Date.now(), boardSignal = (s: Session) => ({ ...taskSignal(s, boardNow), unread: Boolean(unreviewed?.has(s.id)) && s.id !== state.sessionId });
   renderTaskBoard($('#project-board'), listedSessions(), state.projects, state.boardPanel ? state.sessionId : '', state.projectFilter, isRunning, github.connected(boardProject), boardSignal);
-  renderTaskDetails($('#task-details-heading'), session(), project(), isRunning(), state.messagesLoading || Boolean(state.messagesError));
+  renderTaskDetails($('#task-details-heading'), session(), project(), isRunning(), threadLoading() || Boolean(state.messagesError));
 }
 /** The GitHub view, mounted the first time it is shown and refreshed with the workspace. */
 let githubHub: import('./github-hub').HubView | undefined;
@@ -2822,7 +3827,7 @@ function syncGithubHub(shown: boolean): void {
       openTask: id => run(openHubTask(id)),
       startTask: input => startHubTask(input),
       showChoices: (anchor, options) => showChoices(anchor, options),
-      chooseFolder, notify,
+      chooseFolder, notify, notifyError,
       projectsChanged: async () => { state.projects = await call<Project[]>('list_projects'); renderNavigation(); },
     });
     // The hub fades in once it has drawn (opacity only: a transform would move its full-height repository list).
@@ -2848,7 +3853,7 @@ async function startHubTask({ projectId, prompt, title, link, send: start }: { p
   if (title) { await call('update_session', { sessionId: task.id, title }); const current = state.sessions.find(item => item.id === task.id); if (current) current.title = title; }
   renderNavigation(); renderHeader();
   const field = document.querySelector<HTMLTextAreaElement>('#prompt');
-  if (!field || field.dataset.sessionId !== task.id) return;
+  if (!field || field.dataset.sessionId !== task.id || !voiceDictation.prepareSubmit()) return;
   field.value = prompt;
   field.dispatchEvent(new Event('input', { bubbles: true }));
   field.focus();
@@ -2936,7 +3941,7 @@ function setWorkspaceView(view: WorkspaceView): void {
 }
 async function editBoardTask(): Promise<void> {
   const task = session(), generation = state.generation;
-  if (!task || task.archived || isRunning() || state.messagesLoading || state.messagesError) return;
+  if (!task || task.archived || isRunning() || threadLoading() || state.messagesError) return;
   const details = await call<Session>('get_task', { sessionId: task.id });
   if (task.id !== state.sessionId || generation !== state.generation || isRunning()) return;
   fullTaskDescription = { id: task.id, value: details.taskDescription ?? '' };
@@ -3032,6 +4037,13 @@ async function startBoardTask(id: string): Promise<void> {
 }
 
 function render(): void { renderNavigation(); renderHeader(); renderTranscript(); renderComposer(); }
+let navigationFocusFrame = 0;
+/** The sidebar's one tab stop (thread-order.ts syncRovingFocus): at once while focus is in the list, else in the next
+ *  frame, so a thread switch lays out once with everything it changed instead of for these reads first. */
+function syncNavigationFocus(nav: HTMLElement): void {
+  if (nav.contains(document.activeElement)) { cancelAnimationFrame(navigationFocusFrame); navigationFocusFrame = 0; syncRovingFocus(nav); return; }
+  navigationFocusFrame ||= requestAnimationFrame(() => { navigationFocusFrame = 0; syncRovingFocus(nav); });
+}
 let navigationAfterFrame = 0;
 /** Redraws the sidebar just after the next paint (one at a time), for work that need not hold up the frame. */
 function navigationAfterPaint(): void {
@@ -3093,9 +4105,16 @@ async function latestMessagePage(sessionId: string): Promise<MessagePage> {
   return latest;
 }
 
-async function loadOlderMessages(anywhere = false): Promise<void> {
+/** `anywhere`: a host's backfill or the window filling itself, not the reader near the top; `whole` draws the page in
+ *  one step (a backfill), otherwise it joins and the usual steps follow. */
+/** The oldest loaded message when an older page last failed to load. */
+let olderFailedAt = 0;
+async function loadOlderMessages(anywhere = false, whole = anywhere): Promise<void> {
   const transcript = $('#transcript'), sessionId = state.sessionId, generation = state.generation;
-  if (!sessionId || !state.hasOlder || state.messagesLoading || state.messagesError || !transcriptVisible() || (!anywhere && transcript.scrollTop > 200)) return;
+  if (!sessionId || state.sharedChannelId || state.messagesLoading || state.messagesError || !transcriptVisible() || (!anywhere && transcript.scrollTop > ROWS_MARGIN)) return;
+  // Turns already loaded but not drawn yet come first; a host's backfill (`anywhere`) is not the reader asking for them.
+  if (!anywhere && transcriptView.showOlder(undefined, undefined, () => void loadOlderMessages())) return;
+  if (!state.hasOlder) return;
   if (olderMessagesRequest?.sessionId === sessionId && olderMessagesRequest.generation === generation) return;
   const beforeId = state.messages.find(message => message.id > 0)?.id;
   if (!beforeId) return;
@@ -3106,14 +4125,47 @@ async function loadOlderMessages(anywhere = false): Promise<void> {
     if (sessionId !== state.sessionId || generation !== state.generation || state.messages.find(message => message.id > 0)?.id !== beforeId) return;
     const ids = new Set(state.messages.map(message => message.id));
     const earlier = older.messages.filter(message => message.id < beforeId && !ids.has(message.id));
+    // What draws at once (the turn the page's end joins to) is formatted first, so it never lands as raw text that
+    // reflows under the reader; each later step formats its own turns. A long reply waits until it nears the reader.
+    let joined = earlier.length - 1;
+    while (joined > 0 && earlier[joined].role !== 'user') joined--;
+    await prepareMarkdown(earlier.slice(joined).filter(message => message.content.length <= LAZY_REPLY_CHARS)).catch(report);
+    if (sessionId !== state.sessionId || generation !== state.generation || state.messages.find(message => message.id > 0)?.id !== beforeId) return;
     state.hasOlder = Boolean(earlier.length && older.hasOlder);
-    if (earlier.length) { state.messages = [...earlier, ...state.messages]; renderTranscript(true); }
+    if (earlier.length) showFetchedPage(earlier, whole);
   } catch {
-    if (sessionId === state.sessionId && generation === state.generation) notify('Could not load earlier messages. Scroll up to retry.');
+    olderFailedAt = beforeId;
+    if (sessionId === state.sessionId && generation === state.generation) notifyError('Could not load earlier messages. Scroll up to retry.');
   } finally {
     if (olderMessagesRequest === request) { olderMessagesRequest = undefined; transcript.removeAttribute('aria-busy'); }
     if (mirrorOlderPending === sessionId) { mirrorOlderPending = ''; void mirrorMessages({ sessionId, older: true }); }
   }
+}
+
+/** Adds an older page under the window: the rows stay, then one step draws above them. A host's backfill draws its
+ *  whole page in that step, once, with no scroll waiting on it; the reader's scroll takes the usual step and the rest follows. */
+function showFetchedPage(earlier: Message[], backfill: boolean): void {
+  const view = transcriptView.view, wholeDrawn = view.first === null && transcriptView.onScreen(view);
+  state.messages = [...earlier, ...state.messages];
+  if (!transcriptView.joinPage()) {
+    if (wholeDrawn) transcriptView.view = { ...view, first: view.ids[0][0] };
+    renderTranscript(true);
+  }
+  // Everything above the window is this page (the whole thread was drawn before it).
+  if (wholeDrawn) transcriptView.showOlder(backfill ? Infinity : MORE_TURNS, backfill ? Infinity : ROW_BUDGET);
+}
+/** Redraws one row in place, keeping its folds and formatted text; the caller holds the reader's position. */
+function redrawRow(row: DrawnRow, html: string): DrawnRow {
+  const transcript = transcriptScroller, roots = row.nodes.filter((node): node is HTMLElement => node instanceof HTMLElement);
+  const switches = captureAccountSwitches(transcript), views = captureRowViews(row);
+  const previous = new Map(roots.flatMap(root => [...root.querySelectorAll<HTMLElement>('[data-markdown]')]).map(node => [node.dataset.markdown!, node]));
+  const fresh = parseRow(html), inserted = document.createDocumentFragment();
+  inserted.append(...fresh.nodes);
+  paintSavedMarkdown(inserted, state.messages, previous, workspaceContext(), followTranscript, transcript);
+  transcript.insertBefore(inserted, row.nodes[0]);
+  row.nodes.forEach(node => node.remove());
+  if (views) restoreRowViews(fresh, views);
+  return swapRowNodes([fresh], restoreAccountSwitches(transcript, switches))[0];
 }
 
 /* A mirror's history arrives from its host newest page first, then older pages beneath it
@@ -3190,15 +4242,19 @@ const pageSignature = (messages: Message[]): string => messages.filter(message =
 // The menu bar item lists finished tasks until they are viewed.
 function markTraySeen(sessionId: string): void { void call('tray_seen', { sessionId }).catch(() => undefined); }
 function selectSession(id: string, focusComposer = false): Promise<void> {
+  if (id !== state.sessionId) voiceDictation.detach();
   return id === state.sessionId ? openThread(id, focusComposer) : snapDockDuring(() => openThread(id, focusComposer));
 }
+/** What a thread's load sends from its queue once the team is known (transcript-host.ts dispatchHeld). */
+const heldQueue: HeldQueueHost = { queued: id => queueOf(id).length > 0, hasTeam: id => teams.has(id), loadTeam, dispatch: id => dispatchQueue(id), run };
 async function openThread(id: string, focusComposer: boolean): Promise<void> {
   if (deletedSessions.has(id)) return;
   const s = state.sessions.find(s => s.id === id); if (!s) return;
   closeMenus();
   if (document.querySelector('#dialog')?.classList.contains('change-review-dialog')) closeModal();
   const previousTask = session(), changingTask = previousTask?.id !== id;
-  if (changingTask) { if (previousTask) rememberThread(previousTask.id); leaveDraft(id); saveThreadPanel(); }
+  // A first load left before its details landed never clears its own wait: its page, remembered, must not come back disabled.
+  if (changingTask) { if (previousTask) rememberThread(previousTask.id); leaveDraft(id); saveThreadPanel(); transcriptView.forgetFind(); taskDetailsPending = undefined; flushPendingDismiss(); }
   // However it is opened (click, ⌘1…9, ⌘⇧[ / ], board, palette), the thread holds the sidebar
   // section its row is in while it stays open, so the row never jumps from under the pointer.
   if (changingTask) {
@@ -3213,60 +4269,110 @@ async function openThread(id: string, focusComposer: boolean): Promise<void> {
   // A bot's conversation lives in the Bots section; it never re-points the project filter.
   if (state.projectFilter && state.projectFilter !== s.projectId && !botProjects.has(s.projectId) && !chatTask(s)) setProjectFilter(s.projectId);
   state.sessionId = s.id; markTraySeen(s.id); activateProject(s.projectId, false); if (changingTask) restoreThreadPanel(s); state.attachments = [];
+  // Marked until it has painted, however it is opened: one that takes the app down is held back at the next boot.
+  beginThreadRestore(localStorage, id);
+  // The thread boot kept closed is open now, by the crash notice's button or any other way.
+  // Any thread or New task open: "no thread was opened" is no longer true, and the notice says so.
+  const openedNothing = bootOpenedNothing; bootOpenedNothing = false;
+  if (heldBackThread?.id === id) { heldBackThread = undefined; heldBackOpened(); } else if (openedNothing) tasksChanged();
   const remembered = changingTask ? threadPages.get(id) : undefined;
   state.messages = withMirrorPrompt(id, remembered ? [...remembered.messages] : []); state.messagesLoading = !remembered; state.messagesError = ''; state.hasOlder = remembered?.hasOlder ?? false;
   const generation = ++state.generation;
+  // What acts on the task waits for this load's details and team. A remembered page whose team is already known has
+  // been usable since it was left; one left before its team landed waits again, so a send never goes out as a plain
+  // message to what turns out to be a team thread.
+  taskDetailsPending = remembered && teams.has(id) ? undefined : { id, generation };
   renderInspector();
   if (changingTask) run(restoreSelectedFile());
   const requestedMessages = state.messages;
   const requestedStream = state.streams.get(id), requestedFinishing = finishingStreams.get(id);
-  stickToBottom = true; render();
+  stickToBottom = true; resumeFollow = true; lastTranscriptTop = 0; render();
   if (remembered) stickTranscript();
   // A thread switch settles in once, after its real content draws: here for a remembered page,
   // below once the page arrives (never on the loading placeholder).
   const settle = changingTask && Boolean(previousTask);
   if (settle && remembered) settleIn($('#transcript'));
   if (focusComposer) document.querySelector<HTMLTextAreaElement>('#prompt')?.focus();
-  let page: MessagePage, details: Session;
-  try { [page, details] = await Promise.all([latestMessagePage(id), call<Session>('get_task', { sessionId: id }), loadTeam(id)]); }
-  catch (error) {
-    if (generation !== state.generation) return;
+  // The rows draw the moment the page is in; the task's details and team land after, and a failure of theirs is met below.
+  // The task as it was when its details were asked for: a field changed here since (a rename, a model picked, a run
+  // starting) is newer than what the details say.
+  const askedTask = state.sessions.find(task => task.id === id), asked = askedTask ? { ...askedTask } : undefined;
+  const taskLoad = Promise.all([call<Session>('get_task', { sessionId: id }), loadTeam(id)]);
+  taskLoad.catch(() => undefined);
+  /* A load another one took over (a switch, the same thread opened again) never reaches its own dispatch, while a
+   * dispatch made meanwhile waited for it (dispatchQueue): what the queue holds goes once the team is known. If this
+   * thread is the open one loading again, dispatchQueue leaves it to that load. */
+  // Superseded: its restore mark goes (a later thread's stays), unless the same thread opened again and that load,
+  // not yet painted, owns the mark now.
+  const superseded = (): void => { if (state.sessionId !== id) finishThreadRestore(localStorage, id); dispatchHeld(heldQueue, id, taskLoad); };
+  const failLoad = (error: unknown, shownMessages: Message[]): boolean => {
+    if (generation !== state.generation) { superseded(); return false; }
+    // A failed load did not take the app down; a later thread's mark stays.
+    finishThreadRestore(localStorage, id);
+    taskDetailsPending = undefined;
+    // What the queue held back for this load goes now, once the team is known (asked again if its load is what failed).
+    dispatchHeld(heldQueue, id);
+    // A failed thread load still owns the inspector cleared during the switch.
+    run(refreshInspector());
     state.messagesLoading = false;
-    if (state.messages !== requestedMessages) return;
-    state.messagesError = errorText(error); renderTranscript(); renderComposer(); throw error;
-  }
-  if (generation !== state.generation) return;
-  fullTaskDescription = { id, value: details.taskDescription ?? '' };
-  const loaded = state.sessions.find(task => task.id === id);
+    if (state.messages !== shownMessages) { renderComposer(); return false; }
+    state.messagesError = errorText(error); renderTranscript(); renderComposer();
+    return true;
+  };
+  let page: MessagePage;
+  try { page = await latestMessagePage(id); }
+  catch (error) { if (failLoad(error, requestedMessages)) throw error; return; }
+  if (generation !== state.generation) { superseded(); return; }
   // A send or completed turn can replace the transcript while this earlier
   // history request is in flight. Keep that newer state instead of erasing it.
-  const shown = pageSignature(state.messages);
-  if (state.messages === requestedMessages) {
-    if (loaded && state.streams.get(id) === requestedStream && finishingStreams.get(id) === requestedFinishing) {
-      Object.assign(loaded, details, { pinned: loaded.pinned, sidebarOrder: loaded.sidebarOrder }); if (state.streams.has(id)) { loaded.taskStage = 'in_progress'; loaded.status = 'running'; }
-    }
-    setMessagePage(page);
-  }
+  const shown = pageSignature(state.messages), pageTaken = state.messages === requestedMessages;
+  const steady = pageTaken && state.streams.get(id) === requestedStream && finishingStreams.get(id) === requestedFinishing;
+  if (pageTaken) setMessagePage(page);
   state.messagesLoading = false;
   if (!state.streams.has(id) && finishingStreams.get(id) === requestedFinishing) finishingStreams.delete(id);
   // A remembered page that is still current is already on screen; leave it untouched.
   const changed = !remembered || pageSignature(state.messages) !== shown;
-  renderHeader(); if (changed) renderTranscript(); renderComposer();
+  if (changed) renderTranscript();
   if (settle && !remembered && changed) settleIn($('#transcript'));
+  if (changed) stickTranscript();
+  // Its messages are rendered: once they have painted too, a crash (in the details or inspector refresh below,
+  // say) is not this thread's opening. Until then a transcript that kills the app while painting stays marked.
+  rememberThread(id); rememberOpenThread(localStorage, id, askedTask?.draft); finishThreadRestoreAfterPaint(localStorage, id);
+  const pageMessages = state.messages;
+  let details: Session;
+  try { [details] = await taskLoad; }
+  catch (error) { if (failLoad(error, pageMessages)) throw error; return; }
+  if (generation !== state.generation) { superseded(); return; }
+  taskDetailsPending = undefined;
+  // Its details say whether it is still a New task draft (the next launch reopens it as one).
+  rememberOpenThread(localStorage, id, details.draft);
+  fullTaskDescription = { id, value: details.taskDescription ?? '' };
+  // A run that started or ended since the details were asked for owns the run's own fields; the rest still apply.
+  applyTaskDetails(id, details, asked, steady && state.streams.get(id) === requestedStream && finishingStreams.get(id) === requestedFinishing);
+  renderHeader(); renderComposer();
+  // What the queue held back while the team was unknown goes now.
+  if (queueOf(id).length) run(dispatchQueue(id));
   // A saved team can select a harness whose catalog has not been opened this run.
   // Resolve its display name in place, without delaying the task or replacing input.
   if (provider(details.provider)?.installed) void loadModels(details.provider).catch(() => { /* Keep the exact model ID if discovery is unavailable. */ });
   if (focusComposer) document.querySelector<HTMLTextAreaElement>('#prompt')?.focus();
-  if (changed) stickTranscript();
-  rememberThread(id);
   if (generation !== state.generation) return;
-  await refreshInspector(); renderHeader();
+  await refreshInspectorIfStale(); renderHeader();
 }
+/** A thread's details and team, landing after its rows: applied by thread (the caller checked the load is still the
+ *  current one), whatever redrew the page meanwhile (transcript-host.ts mergeTaskDetails). Redraws only if they change
+ *  how the rows read. */
+function applyTaskDetails(id: string, details: Session, asked: Session | undefined, steady: boolean): void {
+  const loaded = state.sessions.find(task => task.id === id);
+  if (loaded && mergeTaskDetails(loaded, details, asked, steady, state.streams.has(id))) renderTranscript(); else syncTeamRows();
+}
+/** Nothing selected; the next launch opens the newest thread of the current project, not the last one. */
+function clearOpenSession(): void { state.sessionId = ''; rememberOpenThread(localStorage, ''); }
 async function selectProject(id: string): Promise<void> {
   const first = listedSessions().find(s => s.projectId === id && !s.archived);
   if (first) { await selectSession(first.id); return; }
   leaveDraft(''); saveThreadPanel();
-  const generation = ++state.generation; activateProject(id, false); state.sessionId = ''; restoreThreadPanel(); renderInspector(); state.messages = []; state.attachments = [];
+  const generation = ++state.generation; activateProject(id, false); clearOpenSession(); restoreThreadPanel(); renderInspector(); state.messages = []; state.attachments = [];
   render(); if (generation !== state.generation) return; await refreshInspector();
 }
 /** Every worker change asks for a listing, so at most one runs and one waits. A waiter's listing starts after its call, so `await` still means "at least as new as this call". */
@@ -3288,6 +4394,8 @@ async function loadSessions(): Promise<void> {
   const listedIds = new Set(sessions.map(task => task.id));
   const drafts = state.sessions.filter(task => task.draft && !listedIds.has(task.id)).map(task => task.id === selectedId && details ? details : task);
   state.sessions = [...sessions, ...drafts].filter(task => !deletedSessions.has(task.id));
+  // A task's New task state may have changed (a failed first send left it a draft): its kept text follows.
+  state.drafts.reclaimAll();
   scheduleLimitResumes();
   if (details && state.sessionId === selectedId && state.generation === generation && fullTaskDescription === previousDetails) fullTaskDescription = { id: selectedId, value: details.taskDescription ?? '' };
   const selected = session();
@@ -3306,6 +4414,8 @@ async function loadSessions(): Promise<void> {
   renderNavigation(); renderHeader(); refreshModelLabels(); syncCloudStrip();
 }
 function removeDeletedSessions(ids: string[]): void {
+  voiceDictation.discardThreads(ids);
+  committedDrafts.forget(ids);
   terminalPanel.forget(ids);
   const removed = new Set(ids);
   for (const id of removed) {
@@ -3323,7 +4433,7 @@ function removeDeletedSessions(ids: string[]): void {
   if (removed.has(state.sessionId)) {
     ++state.generation; ++overlayOpenRequest;
     closeMenus(); subagents.close(false); architectView?.close();
-    state.sessionId = ''; state.messages = []; state.messagesLoading = false; state.messagesError = '';
+    clearOpenSession(); state.messages = []; state.messagesLoading = false; state.messagesError = '';
     state.attachments = []; state.hasOlder = false; state.boardPanel = false;
     restoreThreadPanel(); renderInspector();
     render(); run(refreshInspector());
@@ -3331,7 +4441,11 @@ function removeDeletedSessions(ids: string[]): void {
 }
 async function removeProject(id: string): Promise<void> {
   await call('remove_project', { projectId: id });
+  // The listed threads the removal deleted (at most 500, no worker threads); drafts of the rest go
+  // at the next launch (`dropDeletedDrafts`).
   removeDeletedSessions(state.sessions.filter(s => s.projectId === id).map(s => s.id));
+  // Its unsent New task text goes with it.
+  state.drafts.delete(NEW_TASK_DRAFT + id);
   state.projects = await call<Project[]>('list_projects');
   if (state.projectFilter === id) setProjectFilter('');
   if (state.projectId === id) activateProject(userProjects()[0]?.id ?? '');
@@ -3351,7 +4465,7 @@ async function addProject(path: string): Promise<void> {
     notify(`Opened ${added.name}`); return;
   }
   leaveDraft(''); saveThreadPanel();
-  const generation = ++state.generation; activateProject(added.id, false); setProjectFilter(added.id); state.sessionId = ''; restoreThreadPanel(); renderInspector(); state.messages = []; state.attachments = []; state.hasOlder = false;
+  const generation = ++state.generation; activateProject(added.id, false); setProjectFilter(added.id); clearOpenSession(); restoreThreadPanel(); renderInspector(); state.messages = []; state.attachments = []; state.hasOlder = false;
   closeModal(); render(); if (generation !== state.generation) return; await refreshInspector();
   notify(`Opened ${added.name}`);
 }
@@ -3426,7 +4540,7 @@ async function performSlashAction(action: string, argumentsText: string, task: S
     case 'plan': case 'fast': {
       if (action === 'fast' && argumentsText && !['on', 'off'].includes(argumentsText)) throw new Error('Use /fast, /fast on, or /fast off.');
       const settings = task.codexSettings;
-      const current = action === 'plan' ? settings?.collaborationMode?.mode === 'plan' : settings?.serviceTier === 'fast';
+      const current = action === 'plan' ? settings?.collaborationMode?.mode === 'plan' : Boolean(settings?.serviceTier);
       const enabled = argumentsText === 'off' ? false : argumentsText === 'on' || (action === 'plan' && Boolean(argumentsText)) ? true : !current;
       const updated = await call<Session>('set_task_preference', { sessionId: task.id, request: { action, enabled } }); Object.assign(task, updated);
       notify(`${action === 'plan' ? 'Plan mode' : 'Fast service tier'} ${enabled ? 'enabled' : 'disabled'}`);
@@ -3484,13 +4598,19 @@ async function botMessageFromComposer(s: Session, bot: import('./bots').Bot, tex
     || (imageIds.length || moodboardItems.length ? 'Please review the attached material.' : '');
   await call('bot_message', { botId: bot.id, text: content, imageIds, moodboardIds: moodboardItems.map(item => item.id), forceQueue });
 }
+/** Clears a draft whose send already began (`beginSubmit` retired its dictation anchor). */
 function clearComposer(s: Session): void {
   const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
+  noteCommittedDraft(s, prompt?.dataset.sessionId === s.id ? prompt.value : state.drafts.get(s.id) ?? '');
   if (prompt) prompt.value = '';
   state.drafts.delete(s.id); attachments.clear(s.id); state.attachments = [];
 }
 /** Queues the composer's message to send when the agent finishes. */
 async function enqueueFromComposer(forceQueue = false): Promise<void> {
+  if (!voiceDictation.prepareSubmit()) return;
+  await enqueueDraft(forceQueue);
+}
+async function enqueueDraft(forceQueue: boolean): Promise<void> {
   if (btwFromComposer()) return;
   const s = session(); if (!s) return;
   if (remoteOffline(s)) { renderComposer(); return; }
@@ -3502,6 +4622,7 @@ async function enqueueFromComposer(forceQueue = false): Promise<void> {
     const browserItems = [...(state.browserAttachments.get(s.id) ?? [])];
     const moodboardItems = (state.moodboardAttachments.get(s.id) ?? []).filter(item => item.projectId === s.projectId);
     if (!text && !paths.length && !browserItems.length && !moodboardItems.length && !promptItems.length) return;
+    const finishSubmit = voiceDictation.beginSubmit(s.id); if (!finishSubmit) return;
     clearComposer(s);
     state.browserAttachments.delete(s.id);
     const sentBoards = new Set(moodboardItems.map(item => item.id));
@@ -3516,13 +4637,14 @@ async function enqueueFromComposer(forceQueue = false): Promise<void> {
       if (browserItems.length) state.browserAttachments.set(s.id, browserItems);
       if (moodboardItems.length) state.moodboardAttachments.set(s.id, [...moodboardItems, ...(state.moodboardAttachments.get(s.id) ?? [])]);
       throw error;
-    } finally { if (s.id === state.sessionId) renderComposer(); }
+    } finally { if (s.id === state.sessionId) renderComposer(); finishSubmit(); }
     return;
   }
   if (!text && !items.length) return;
   clearComposerNote(s);
   // Clear at once so the next message can be typed while this one is saved.
   const promptItems = attachments.list(s.id), paths = [...state.attachments];
+  const finishSubmit = voiceDictation.beginSubmit(s.id); if (!finishSubmit) return;
   clearComposer(s); renderComposer(); document.querySelector<HTMLTextAreaElement>('#prompt')?.focus();
   try {
     const entry = await call<QueuedMessage>('queue_add', { sessionId: s.id, text, attachments: items });
@@ -3530,13 +4652,43 @@ async function enqueueFromComposer(forceQueue = false): Promise<void> {
   } catch (error) {
     restoreComposer(s, text, promptItems, paths);
     throw error;
-  } finally { if (s.id === state.sessionId) renderComposer(); }
+  } finally { if (s.id === state.sessionId) renderComposer(); finishSubmit(); }
 }
-/** Puts an unsent message back unless something new was typed meanwhile. */
-function restoreComposer(s: Session, text: string, promptItems: ReturnType<typeof attachments.list>, paths: string[]): void {
+/** A committed send owns this draft; later typing belongs to the next message. The field keeps its height until the
+ * send's own render (after followSend) rebuilds it: shrinking it here, before the follow is armed, grows the transcript
+ * early and leaves it unpinned (ui.spec "streaming keeps the transcript at the bottom after sending"). */
+function clearComposerDraft(s: Session): void {
   const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
-  if (prompt?.dataset.sessionId === s.id && !prompt.value.trim()) prompt.value = text;
-  else if (!state.drafts.get(s.id)) state.drafts.set(s.id, text);
+  const shown = prompt?.dataset.sessionId === s.id;
+  noteCommittedDraft(s, shown ? prompt.value : state.drafts.get(s.id) ?? '');
+  if (shown) prompt.value = '';
+  state.drafts.delete(s.id);
+}
+/** Settings' Clear saved drafts: every stored draft goes; text in an open composer (the thread's,
+ * a shared channel's) stays on screen and in memory, unstored until its next change. */
+function clearSavedDrafts(): void {
+  const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
+  const shown = new Set<string>();
+  if (prompt?.dataset.sessionId && prompt.value) shown.add(prompt.dataset.sessionId);
+  if (state.sharedChannelId && document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt')?.value) shown.add(channelDraftKey(state.sharedChannelId));
+  state.drafts.clearStored(id => shown.has(id));
+  notify('Saved drafts cleared.');
+}
+/** Rejected sends come back before newer draft text, in written order (composer-restore.ts). */
+const committedDrafts = createCommittedDrafts();
+function noteCommittedDraft(s: Session, text: string): void { committedDrafts.note(s.id, text); }
+/** Restores a rejected message before newer draft text (after earlier rejected ones) without losing its selection. */
+function restoreComposerDraft(s: Session, text: string): void {
+  const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
+  const shown = prompt?.dataset.sessionId === s.id;
+  const current = shown ? prompt.value : state.drafts.get(s.id) ?? '';
+  const restored = committedDrafts.restore(s.id, text, current);
+  state.drafts.set(s.id, restored.text);
+  if (shown) { applyRestoredDraft(prompt, current, restored.text, restored.at); resizePrompt(); }
+}
+/** Restores an unsent message and its attachments alongside any newer draft. */
+function restoreComposer(s: Session, text: string, promptItems: ReturnType<typeof attachments.list>, paths: string[]): void {
+  restoreComposerDraft(s, text);
   if (promptItems.length) attachments.restore(s.id, promptItems);
   if (paths.length && s.id === state.sessionId) state.attachments = [...new Set([...paths, ...state.attachments])];
 }
@@ -3587,8 +4739,8 @@ async function requeueSteer(sessionId: string, text: string, reason: string): Pr
   const entry = await call<QueuedMessage>('queue_add', { sessionId, text, attachments: [] }).catch(() => null);
   const s = state.sessions.find(item => item.id === sessionId);
   if (entry) notSteered.set(entry.id, reason);
-  if (entry) { setQueue(sessionId, [...queueOf(sessionId), entry]); notify('The agent could not take that message, so it was queued.'); }
-  else { if (s) restoreComposer(s, text, [], []); notify('The agent could not take that message; it is back in the prompt.'); }
+  if (entry) { setQueue(sessionId, [...queueOf(sessionId), entry]); notifyError('The agent could not take that message, so it was queued.'); }
+  else { if (s) restoreComposer(s, text, [], []); notifyError('The agent could not take that message; it is back in the prompt.'); }
   if (sessionId === state.sessionId) renderComposer();
 }
 function steerStateHtml(m: Message): string {
@@ -3599,6 +4751,10 @@ function steerStateHtml(m: Message): string {
 }
 /** Sends the composer's text into the running turn; anything that cannot steer is queued instead. */
 async function steerFromComposer(): Promise<void> {
+  if (!voiceDictation.prepareSubmit()) return;
+  await steerDraft();
+}
+async function steerDraft(): Promise<void> {
   if (btwFromComposer()) return;
   const s = session(); if (!s) return;
   if (remoteOffline(s)) { renderComposer(); return; }
@@ -3614,8 +4770,9 @@ async function steerFromComposer(): Promise<void> {
     notify(items.length ? 'Attachments travel with queued messages, so this one was queued.' : 'A team takes messages between runs, so this one was queued.');
     return enqueueFromComposer();
   }
+  const finishSubmit = voiceDictation.beginSubmit(s.id); if (!finishSubmit) return;
   clearComposerNote(s); clearComposer(s); renderComposer();
-  await steerOrQueue(s, text);
+  try { await steerOrQueue(s, text); } finally { finishSubmit(); }
 }
 /** Steers `text` into the running turn of `s`; whatever cannot steer is queued, or put back in its composer. */
 async function steerOrQueue(s: Session, text: string): Promise<void> {
@@ -3634,8 +4791,8 @@ async function steerOrQueue(s: Session, text: string): Promise<void> {
     // A host that has not approved this device would refuse it queued too: say so, keep the text.
     if (remoteRefusal(s, error)) { restoreComposer(s, text, [], []); refreshComposer(s); return; }
     // Not taken mid-turn: keep it for after the run instead of losing it.
-    const reason = error instanceof Error ? error.message : String(error);
-    notify(/\bqueued\b/i.test(reason) ? reason : `${reason} Queued instead.`);
+    const reason = errorText(error);
+    notifyError(/\bqueued\b/i.test(reason) ? reason : `${reason} Queued instead.`);
     const entry = await call<QueuedMessage>('queue_add', { sessionId: s.id, text, attachments: [] }).catch(() => null);
     if (entry) notSteered.set(entry.id, reason);
     if (entry) setQueue(s.id, [...queueOf(s.id), entry]); else restoreComposer(s, text, [], []);
@@ -3651,7 +4808,7 @@ async function steerQueued(s: Session, id: string): Promise<void> {
   steeringQueued.add(id); refreshComposer(s);
   try {
     await steer(s, entry.text);
-    await call('queue_remove', { id }); setQueue(s.id, queueOf(s.id).filter(item => item.id !== id));
+    await call('queue_take_steered', { id }); setQueue(s.id, queueOf(s.id).filter(item => item.id !== id));
   } finally { steeringQueued.delete(id); refreshComposer(s); }
 }
 async function saveQueueEdit(s = session()): Promise<void> {
@@ -3718,6 +4875,9 @@ async function dispatchQueue(id: string): Promise<void> {
   const task = state.sessions.find(item => item.id === id);
   const first = sendFirst.get(id), next = queueOf(id).find(item => item.id === first?.id) ?? queueOf(id)[0];
   if (first && next?.id !== first.id) sendFirst.delete(id);
+  // The open thread's team may not be known yet: like sendDraft, wait for its load (openThread dispatches again then),
+  // so a team thread's message never goes out as a plain one.
+  if (id === state.sessionId && threadLoading()) return;
   if (!task || !next || botProjects.has(task.projectId) || (state.queueHolds.has(id) && next.id !== first?.id) || state.queueBusy.has(id) || steeringQueued.has(next.id) || next.id === state.queueEditing || isRunning(id) || finishingStreams.has(id) || configuringSessions.has(id) || task.archived) return;
   if (limitActive(task)) { state.queueHolds.set(id, 'limited'); if (id === state.sessionId) renderComposer(); return; }
   state.queueBusy.add(id);
@@ -3728,7 +4888,7 @@ async function dispatchQueue(id: string): Promise<void> {
     setQueue(id, queueOf(id).filter(item => item.id !== entry.id));
     await deliverQueued(task, entry);
   } catch (error) {
-    state.queueHolds.set(id, 'failed'); if (!remoteRefusal(task, error)) notify(error instanceof Error ? error.message : String(error));
+    state.queueHolds.set(id, 'failed'); if (!remoteRefusal(task, error)) notifyError(errorText(error));
   } finally { state.queueBusy.delete(id); if (id === state.sessionId) renderComposer(); renderNavigation(); }
 }
 /** Starts a turn with a queued message, for the open task or one in the background. */
@@ -3743,6 +4903,8 @@ async function deliverQueued(task: Session, entry: QueuedMessage): Promise<void>
     const content = entry.text + files.join('') + attachments.contextFor(promptItems) + (context?.text ?? '');
     const sentAt = Date.now();
     task.lastPromptAt = sentAt; task.draft = false; pendingPromptActivity.set(task.id, sentAt);
+    // Published: text typed since the message was queued is the thread's own now, not its project's New task text.
+    state.drafts.reclaim(task.id);
     stream(task.id).lastPromptAt = sentAt; stream(task.id).startedAt = Math.min(stream(task.id).startedAt, sentAt); stream(task.id).status = 'Starting agent'; task.status = 'running'; task.taskStage = 'in_progress'; task.completedAt = null;
     sent = sentPrompt(task, content, sentAt);
     if (task.id === state.sessionId) { state.messages = [...state.messages, sent]; render(); } else renderNavigation();
@@ -3757,7 +4919,7 @@ async function deliverQueued(task: Session, entry: QueuedMessage): Promise<void>
     if (entry.id) {
       const restored = await call<QueuedMessage>('queue_restore', { entry }).catch(() => null);
       if (restored) setQueue(task.id, [restored, ...queueOf(task.id).filter(item => item.id !== restored.id)]);
-      else notify('A queued message could not be put back; it was not sent.');
+      else notifyError('A queued message could not be put back; it was not sent.');
     }
     state.queueHolds.set(task.id, 'failed');
     throw error;
@@ -3790,7 +4952,7 @@ async function continueAfterLimit(task: Session, text = 'Continue where you left
     const at = Date.now();
     await deliverQueued(task, { id: '', sessionId: task.id, position: 0, text, attachments: [], createdAt: at, updatedAt: at });
     task.limitedAt = null; task.limitedUntil = null;
-  } catch (error) { notify(error instanceof Error ? error.message : String(error)); }
+  } catch (error) { notifyError(errorText(error)); }
   finally { state.queueBusy.delete(task.id); if (task.id === state.sessionId) renderComposer(); renderNavigation(); }
 }
 /** The harness's other named connections a limited task can continue on (issue #137). */
@@ -3889,14 +5051,32 @@ function remoteRefusal(s: Session, error: unknown): boolean {
   if (text) showComposerNote(s, text);
   return Boolean(text);
 }
+/** The asking card's Keep fixing: a follow-up to the lead with its own text and no attachments, sent the way a queued
+ *  message is (`deliverQueued`), so the prompt's draft and attachments are never touched. */
+async function councilKeepFixing(sessionId: string): Promise<void> {
+  const task = state.sessions.find(item => item.id === sessionId);
+  if (!task) throw new Error('This task is gone.');
+  if (isRunning(task.id)) throw new Error('The team is already working.');
+  // Its failure is the card's to show: the user's real queue keeps whatever hold it had.
+  const hold = state.queueHolds.get(task.id), at = Date.now();
+  try { await deliverQueued(task, { id: '', sessionId: task.id, position: 0, text: 'Keep fixing until every reviewer reaches the target.', attachments: [], createdAt: at, updatedAt: at }); }
+  catch (error) { if (hold === undefined) state.queueHolds.delete(task.id); else state.queueHolds.set(task.id, hold); throw error; }
+}
+/** Threads whose first send waits on Council turning on: a second Enter meanwhile sends nothing. */
+const councilFirstSends = new Set<string>();
 async function send(): Promise<void> {
+  if (!voiceDictation.prepareSubmit()) return;
+  await sendDraft();
+}
+async function sendDraft(): Promise<void> {
   if (btwFromComposer()) return;
   const draft = document.querySelector<HTMLTextAreaElement>('#prompt')?.value ?? ''; const text = draft.trim(); const s = session();
   if (!s) return;
   if (isWake(text)) { await wakeFromComposer(s, text); return; }
   const bot = sidebarBots.find(item => item.desktopSession === s.id);
   const hasBotAttachments = Boolean(bot && (state.attachments.length || state.browserAttachments.get(s.id)?.length || attachments.list(s.id).length || state.moodboardAttachments.get(s.id)?.some(item => item.projectId === s.projectId)));
-  if ((!text && !hasBotAttachments) || s.archived || taskStage(s) === 'completed' || isRunning() || finishingStreams.has(s.id) || state.messagesLoading || state.messagesError || configuringSessions.has(s.id)) return;
+  if (councilFirstSends.has(s.id)) return;
+  if ((!text && !hasBotAttachments) || s.archived || taskStage(s) === 'completed' || isRunning() || finishingStreams.has(s.id) || threadLoading() || state.messagesError || configuringSessions.has(s.id)) return;
   clearComposerNote(s);
   if (remoteOffline(s)) { renderComposer(); return; }
   const fresh = !s.remoteDevice && newTaskView();
@@ -3907,6 +5087,14 @@ async function send(): Promise<void> {
   clearRemoteStart(s.id);
   const cloud = !s.remoteDevice && !s.cloud && newTaskView() ? cloudTargets.find(item => item.ready && item.provider === cloudProvider(remoteChoice)) : undefined;
   if (cloud) return sendCloud(s, cloud, draft, text);
+  // "Turn on for new threads": a local first send starts the team and Council before it goes. The guard holds a second
+  // Enter meanwhile; a failure is shown, and the message still goes.
+  if (!s.remoteDevice && !state.messages.length && !bot) {
+    councilFirstSends.add(s.id);
+    try { const failed = await council.enableForNewThread(s.id); if (failed) notifyError(`Council did not turn on: ${failed}`); }
+    finally { councilFirstSends.delete(s.id); }
+    if (state.sessionId !== s.id) return;
+  }
   // Preparing attachments or awaiting admission blocks only this task.
   configuringSessions.add(s.id);
   noteManualSend(s.id);
@@ -3930,17 +5118,20 @@ async function send(): Promise<void> {
         if (state.sessionId !== s.id) throw new Error('Return to the task to run this command.');
         const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
         if (prompt?.value !== draft) throw new Error('Your message changed while commands were loading. Send it again.');
+        const finishSubmit = voiceDictation.beginSubmit(s.id); if (!finishSubmit) return;
         prompt.value = ''; state.drafts.delete(s.id); resizePrompt();
         try { await performSlashAction(resolved.action, resolved.arguments, s); }
         catch (error) {
-          if (prompt.isConnected && !prompt.value) prompt.value = draft;
-          if (!state.drafts.has(s.id)) state.drafts.set(s.id, draft);
+          restoreComposerDraft(s, draft);
           throw error;
-        }
+        } finally { finishSubmit(); }
         return;
       }
     }
   } catch (error) { configuringSessions.delete(s.id); throw error; }
+  const finishSubmit = voiceDictation.beginSubmit(s.id);
+  if (!finishSubmit) { configuringSessions.delete(s.id); return; }
+  clearComposerDraft(s);
   const sentAt = Date.now();
   const listed = state.sessions.find(task => task.id === s.id) ?? s;
   // The first prompt publishes a New task draft; native storage confirms it when the prompt is saved.
@@ -3965,9 +5156,6 @@ async function send(): Promise<void> {
     state.moodboardAttachments.set(s.id, (state.moodboardAttachments.get(s.id) ?? []).filter(item => !boardIds.has(item.id)));
     moodboardItemsConsumed = true;
     stream(s.id).lastPromptAt = sentAt; stream(s.id).startedAt = Math.min(stream(s.id).startedAt, sentAt); stream(s.id).status = 'Starting agent'; s.status = 'running'; s.taskStage = 'in_progress'; s.completedAt = null;
-    const currentPrompt = document.querySelector<HTMLTextAreaElement>('#prompt');
-    if (currentPrompt?.dataset.sessionId === s.id && currentPrompt.value === draft) currentPrompt.value = '';
-    if (state.drafts.get(s.id) === draft) state.drafts.delete(s.id);
     sent = sentPrompt(s, content, Date.now());
     if (isCurrent()) {
       stickToBottom = true; followSend();
@@ -3984,12 +5172,14 @@ async function send(): Promise<void> {
   } catch (error) {
     pendingPromptActivity.delete(s.id); if (sent) dropMirrorPrompt(s.id, sent);
     state.streams.delete(s.id); s.status = 'idle';
-    // A rejected first prompt may not have been saved; follow native storage on whether the task is listed.
-    if (wasDraft) void call<Session>('get_task', { sessionId: s.id }).then(saved => { listed.draft = saved.draft; renderNavigation(); }).catch(() => undefined);
-    // A rejected start must restore its own draft, even after navigating away.
-    const currentPrompt = document.querySelector<HTMLTextAreaElement>('#prompt');
-    if (currentPrompt?.dataset.sessionId === s.id && !currentPrompt.value) currentPrompt.value = draft;
-    if (!state.drafts.get(s.id)) state.drafts.set(s.id, draft);
+    // A rejected first prompt may not have been saved: it is a New task again until native storage
+    // says otherwise, so its restored text is kept under its project (an empty draft session is
+    // discarded at the next launch, and text under its id with it).
+    if (wasDraft) {
+      listed.draft = true; state.drafts.reclaim(s.id);
+      void call<Session>('get_task', { sessionId: s.id }).then(saved => { listed.draft = saved.draft; state.drafts.reclaim(s.id); renderNavigation(); }).catch(() => undefined);
+    }
+    restoreComposerDraft(s, draft);
     if (promptItemsConsumed) attachments.restore(s.id, promptItems);
     if (moodboardItemsConsumed && moodboardItems.length) {
       const sent = new Set(moodboardItems.map(item => item.id));
@@ -4008,7 +5198,7 @@ async function send(): Promise<void> {
     }
     if (remoteRefusal(s, error)) return;
     throw error;
-  } finally { pendingPromptActivity.delete(s.id); configuringSessions.delete(s.id); }
+  } finally { pendingPromptActivity.delete(s.id); configuringSessions.delete(s.id); finishSubmit(); }
 }
 // /btw side threads (docs/btw.md): a second task beside this one, fed what the main thread said.
 const btwPanel = new BtwPanel({
@@ -4023,16 +5213,22 @@ const btwPanel = new BtwPanel({
   mainRunning: () => isRunning(),
   draft: sideId => state.drafts.get(sideId) ?? '',
   setDraft: (sideId, text) => { if (text) state.drafts.set(sideId, text); else state.drafts.delete(sideId); },
-  visible: (sideId, messages) => visibleMessages(sideId, messages),
+  // Dismissed error rows leave the list the panel keys its redraws on; the rows themselves get the whole list, so
+  // withErrorTurns can drop them and say how many went (dismissedNoteHtml).
+  visible: (sideId, messages) => visibleMessages(sideId, messages).filter(message => !(message.role === 'error' && hiddenErrors.has(message.id))),
   renderRows: (log, region, side, visible, all, follow) => {
     const toolViews = captureTools(log), groupViews = captureToolGroups(log), turnViews = captureTurns(log), changeViews = captureChangeCards(log);
+    const switches = captureAccountSwitches(log);
     const previous = new Map([...log.querySelectorAll<HTMLElement>('[data-markdown]')].map(node => [node.dataset.markdown!, node]));
     for (const row of [...log.children]) if (row !== region) row.remove();
-    region.insertAdjacentHTML('beforebegin', turnRowsHtml(side.id, visible, { messages: all, provider: side.provider }));
+    region.insertAdjacentHTML('beforebegin', turnRowsHtml(side.id, visibleMessages(side.id, all), { messages: all, provider: side.provider }));
     paintSavedMarkdown(log, all, previous, workspaceContext(side), follow);
     restoreTurns(log, turnViews); restoreToolGroups(log, groupViews); restoreChangeCards(log, changeViews); restoreTools(log, toolViews);
+    // A finished turn's live notes leave with the stream region; the saved rows inherit them.
+    restoreAccountSwitches(log, switches, state.streams.has(side.id) || finishingStreams.has(side.id) ? undefined : region);
+    scopeErrorIds(log);
   },
-  paintStream: (region, sideId, log) => paintStream(region, sideId, log),
+  paintStream: (region, sideId, log) => { paintStream(region, sideId, log); scopeErrorIds(region); },
   aboveHtml: side => {
     const running = isRunning(side.id);
     return `<div class="btw-approvals">${taskApprovalsHtml(side.id)}</div>` + queuePanel({ entries: state.queues.get(side.id) ?? [], hold: state.queueHolds.get(side.id) ?? null, running, steerable: !teams.get(side.id), sendable: true, editingId: state.queueEditing || null, busy: state.queueBusy.has(side.id), steering: steeringQueued, notSteered, agentName: provider(side.provider)?.name });
@@ -4095,15 +5291,14 @@ async function btwPanelQueue(side: Session, text: string): Promise<void> {
 /* Model, effort and permissions picked in the panel before a side thread exists: kept per main thread
  * on a stand-in task and applied to the side thread createBtw makes, before its first message. */
 const BTW_DRAFT = 'btw-draft:';
-type BtwDraft = Session & { connection?: string | null };
-const btwDrafts = new Map<string, BtwDraft>();
+const btwDrafts = new Map<string, Session>();
 const isBtwDraft = (task: Session): boolean => task.id.startsWith(BTW_DRAFT);
-function btwDraftTask(): BtwDraft | undefined {
+function btwDraftTask(): Session | undefined {
   const main = session();
   return main && (btwDrafts.get(main.id) ?? { ...main, id: BTW_DRAFT + main.id, status: 'idle', contextUsage: null, title: 'Side thread' });
 }
 /** Records a pick on the stand-in task; the next side thread starts with it. */
-function saveBtwDraft(task: Session, change: Partial<BtwDraft>): void {
+function saveBtwDraft(task: Session, change: Partial<Session>): void {
   const mainId = task.id.slice(BTW_DRAFT.length);
   // createBtw is applying (then clearing) the picks; a late pick from a picker opened before the send would vanish.
   if (btwSending.has(mainId)) throw new Error('The side thread is starting. Change it once it has started.');
@@ -4120,7 +5315,6 @@ async function applyBtwDraft(mainId: string, side: Session): Promise<Session> {
   };
   let current = side;
   if (draft.provider !== current.provider || (draft.model || 'default') !== (current.model || 'default')) current = await step('model', () => call<Session>('configure_session', { sessionId: current.id, provider: draft.provider, model: draft.model }));
-  if (draft.connection !== undefined && draft.connection !== (namedConnections.tasks[current.id] ?? null)) namedConnections = await step('connection', () => call<typeof namedConnections>('connection_assign', { sessionId: current.id, connectionId: draft.connection }));
   if ((draft.reasoningEffort ?? null) !== (current.reasoningEffort ?? null)) current = await step('reasoning effort', () => call<Session>('set_reasoning_effort', { sessionId: current.id, reasoningEffort: draft.reasoningEffort ?? null }));
   if (draft.mode !== current.mode) { await step('permissions', () => call('update_session', { sessionId: current.id, mode: draft.mode })); current = { ...current, mode: draft.mode }; }
   return current;
@@ -4153,14 +5347,14 @@ function btwFromComposer(): boolean {
   if (text && (composerPayload(s).items.length || state.browserAttachments.get(s.id)?.length || state.moodboardAttachments.get(s.id)?.length)) {
     notify('Side questions cannot carry attachments. Remove them, or send without /btw.'); return true;
   }
+  const draft = prompt.value;
+  voiceDictation.draftCleared(s.id);
   prompt.value = ''; state.drafts.delete(s.id); resizePrompt(); openBtw();
   if (!text) { btwPanel.focus(); return true; }
-  run(sendBtw(text).catch(error => {
-    const current = document.querySelector<HTMLTextAreaElement>('#prompt');
-    if (current?.dataset.sessionId === s.id && !current.value) { current.value = `/btw ${text}`; resizePrompt(); }
-    else if (!state.drafts.get(s.id)) state.drafts.set(s.id, `/btw ${text}`);
+  run(voiceDictation.submit(() => sendBtw(text).catch(error => {
+    restoreComposerDraft(s, draft);
     throw error;
-  }));
+  })));
   return true;
 }
 /** A new side thread in the main thread's project, harness, model and checkout. */
@@ -4174,7 +5368,8 @@ async function createBtw(main: Session, prompt: string): Promise<BtwLink> {
     side = await call<Session>('fork_session_at_message', { sessionId: main.id, messageId: last.id });
     link = { sideId: side.id, seenId: last.id, hiddenThrough: 0 };
   } else {
-    side = await call<Session>('create_session', { projectId: main.projectId, provider: main.provider, model: main.model, mode: main.mode });
+    // `team: false`: a side thread never picks up the saved default team.
+    side = await call<Session>('create_session', { projectId: main.projectId, provider: main.provider, model: main.model, mode: main.mode, team: false, mainSessionId: main.id });
     link = { sideId: side.id, seenId: 0 };
   }
   const title = sideTitle(prompt);
@@ -4299,17 +5494,29 @@ function completeTurnChanges(event: AgentEvent): void {
 function materializeTurn(sessionId: string, changes: TurnChanges): void {
   const current = state.streams.get(sessionId);
   if (current) current.pendingChanges = undefined;
-  if (sessionId === state.sessionId && !state.messages.some(message => message.turnChanges?.id === changes.id)) {
-    const messages = visibleMessages();
+  const page = tilePages.get(sessionId) ?? threadPages.get(sessionId);
+  const existing = sessionId === state.sessionId ? state.messages : page?.messages;
+  if (existing && !existing.some(message => message.turnChanges?.id === changes.id)) {
+    const messages = current ? liveVisibleMessages(existing, current) : existing.slice();
     // Materialize only at a turn boundary; tokens keep their existing incremental path.
     if (current) {
-      for (const entry of current.tools) messages.push({ id: transientId--, sessionId: sessionId, role: entry.commentary ? 'assistant' : entry.statusOnly ? 'error' : 'tool', content: entry.key === current.retainedMessageKey ? current.text : typeof entry.content === 'string' ? entry.content : JSON.stringify({ type: 'tool_activity', version: 1, ...entry.content }), createdAt: Date.now() });
+      for (const entry of current.tools) {
+        // A dismissed error leaves no row; a counted one is one row carrying its count (groupErrors sums it).
+        if (entry.statusOnly && entry.dismissed) continue;
+        const row: CountedMessage = { id: transientId--, sessionId: sessionId, role: entry.commentary ? 'assistant' : entry.statusOnly ? 'error' : 'tool', content: entry.key === current.retainedMessageKey ? current.text : typeof entry.content === 'string' ? entry.content : JSON.stringify({ type: 'tool_activity', version: 1, ...entry.content }), createdAt: Date.now(), ...(entry.count ? { count: entry.count } : {}), ...(entry.savedIds?.length ? { savedIds: entry.savedIds } : {}) };
+        messages.push(row);
+      }
       if (current.text && !current.tools.some(entry => entry.key === current.retainedMessageKey)) messages.push({ id: transientId--, sessionId: sessionId, role: 'assistant', content: current.text, createdAt: Date.now() });
+      messages.push(...current.accountSwitches);
     }
     messages.push({ id: transientId--, sessionId: sessionId, role: 'changes', content: '', createdAt: Date.now(), turnChanges: changes });
-    state.messages = messages;
+    if (sessionId === state.sessionId) state.messages = messages;
+    else {
+      tilePages.set(sessionId, { messages, hasOlder: page!.hasOlder });
+      if (threadPages.has(sessionId)) threadPages.set(sessionId, { messages, hasOlder: page!.hasOlder, chars: messages.reduce((total, message) => total + message.content.length, 0) });
+    }
   }
-  if (current) { current.body.set(''); current.thought.set(''); current.retainedMessageKey = undefined; current.tools = []; current.omittedActivity = false; current.revision++; current.startedAt = Date.now(); current.turnKey = 'turn:live:' + transientId--; }
+  if (current) { current.body.set(''); current.thought.set(''); current.retainedMessageKey = undefined; current.tools = []; current.accountSwitches = []; current.omittedActivity = false; current.revision++; current.startedAt = Date.now(); current.turnKey = 'turn:live:' + transientId--; }
   if (sessionId === state.sessionId) {
     renderTranscript();
     // A task on another computer has its messages copied when the run ends; its `done` reloads them.
@@ -4331,7 +5538,7 @@ function loadWakeExchange(sessionId: string, current: Stream): void {
   if (sessionId !== state.sessionId || botForThread()) return;
   const generation = state.generation;
   const endHold = (): void => { if (wakeHolds.get(sessionId) === timer) { clearTimeout(timer); wakeHolds.delete(sessionId); } };
-  const timer = window.setTimeout(() => { endHold(); renderStream(); }, WAKE_LOAD_HOLD_MS);
+  const timer = window.setTimeout(() => { endHold(); renderTranscript(); }, WAKE_LOAD_HOLD_MS);
   clearTimeout(wakeHolds.get(sessionId));
   wakeHolds.set(sessionId, timer);
   // Only the newest page: a wake's coordination message is saved just before its run starts, so it is there. A run
@@ -4347,7 +5554,7 @@ function loadWakeExchange(sessionId: string, current: Stream): void {
     const page = newest.hasOlder && known !== undefined && newest.messages[0]?.id > known ? await latestMessagePage(sessionId) : newest;
     if (!fresh()) return;
     endHold(); setMessagePage(page); renderTranscript();
-  }).catch(report).finally(() => { if (wakeHolds.get(sessionId) === timer) { endHold(); renderStream(); } });
+  }).catch(report).finally(() => { if (wakeHolds.get(sessionId) === timer) { endHold(); renderTranscript(); } });
 }
 /** `MESSAGE_LIMIT` in lib.rs. */
 const MESSAGE_LIMIT = 16 * 1024 * 1024;
@@ -4365,10 +5572,15 @@ function onAgent(event: AgentEvent): void {
     void ensureArchitectView().then(view => {
       if (deletedSessions.has(event.sessionId)) return;
       view.receive(event);
-      // A worker's approval or question must reach the user even with the panel closed.
-      if (event.kind === 'approval' || event.kind === 'input_request') notify('A worker needs your input. Open Architect & workers.');
+      // Worker questions are auto-answered and approvals auto-granted; current hosts never leave either pending, but an
+      // older or unusual host can still forward one. It notifies only while that worker is still at work, by the
+      // panel's own definition (a worker not yet in any team snapshot counts as active).
+      if (event.kind === 'approval' || event.kind === 'input_request') {
+        const owner = [...teams.values()].flatMap(team => team?.workers ?? []).find(worker => worker.sessionId === event.sessionId);
+        if (workerActive(owner)) notify(event.kind === 'approval' ? 'A worker needs your approval. Open Architect & workers.' : 'A worker needs your input. Open Architect & workers.', undefined, { important: true });
+      }
       if (['approval', 'approval_cancelled', 'input_request', 'input_cancelled', 'done'].includes(event.kind)) refreshTeamProgress();
-    });
+    }).catch(report);
     return;
   }
   onAccountPoolSwitch(event);
@@ -4446,6 +5658,19 @@ function onAgent(event: AgentEvent): void {
   if (pendingChanges) materializeTurn(event.sessionId, pendingChanges);
   const firstEvent = !state.streams.has(event.sessionId); const current = stream(event.sessionId); if (s) { s.status = 'running'; s.taskStage = 'in_progress'; }
   if (firstEvent) loadWakeExchange(event.sessionId, current);
+  if ((event.kind as string) === 'note') {
+    const pool = (event.data as { accountPool?: { connectionId?: unknown } } | undefined)?.accountPool;
+    const marked = pool && (pool.connectionId === null || typeof pool.connectionId === 'string');
+    const detail = accountSwitchDetail(event.text) ?? (marked && !event.text.startsWith(ACCOUNT_SWITCH_PREFIX) && event.text.trim() ? event.text : null);
+    if (detail !== null) {
+      const content = ACCOUNT_SWITCH_PREFIX + detail;
+      const saved = current.accountSwitches.find(note => !note.eventSeen && note.content === content);
+      if (saved) saved.eventSeen = true;
+      else current.accountSwitches.push({ id: transientId--, sessionId: event.sessionId, role: 'system', content, createdAt: Date.now(), eventSeen: true });
+      current.revision++;
+      if (event.sessionId === state.sessionId) announce('Account switched');
+    }
+  }
   let becameActive = false;
   if (event.kind === 'message_start') finishLiveMessage(current, event.sessionId);
   if (event.kind === 'text') {
@@ -4477,8 +5702,8 @@ function onAgent(event: AgentEvent): void {
     updateStreamStatus(current, event.text);
     if (event.text === 'Stopping agent') clearAgentInputs(current);
   }
-  if (event.kind === 'error') { if (runEndings.get(event.sessionId) !== 'limited') runEndings.set(event.sessionId, 'failed'); current.tools.push({ key: 'error:' + transientId--, content: 'Error: ' + event.text.slice(0, 8192), statusOnly: true }); trimLiveActivity(current, event.sessionId); current.revision++; notify(event.text); }
-  if (event.kind === 'approval' && event.requestId) { current.approvals.set(event.requestId, event.text); current.revision++; updateStreamStatus(current, 'Waiting for approval'); if (event.sessionId !== state.sessionId) notify(`${(s?.title ?? 'Task').replace(/ · You$/, '')} needs approval`); }
+  if (event.kind === 'error') { if (runEndings.get(event.sessionId) !== 'limited') runEndings.set(event.sessionId, 'failed'); addLiveError(current, event.sessionId, event.text, savedErrorId(event.data)); }
+  if (event.kind === 'approval' && event.requestId) { current.approvals.set(event.requestId, event.text); current.revision++; updateStreamStatus(current, 'Waiting for approval'); if (event.sessionId !== state.sessionId) notify(`${(s?.title ?? 'Task').replace(/ · You$/, '')} needs approval`, undefined, { important: true }); }
   if (event.kind === 'approval_cancelled' && event.requestId && current.approvals.delete(event.requestId)) {
     current.revision++; if (!current.approvals.size && current.status === 'Waiting for approval') updateStreamStatus(current, 'Continuing task');
   }
@@ -4492,7 +5717,7 @@ function onAgent(event: AgentEvent): void {
       scheduleNavigation();
     }, Boolean(s?.remoteDevice)));
     current.revision++; updateStreamStatus(current, 'Waiting for your answer');
-    if (event.sessionId !== state.sessionId) notify(`${(s?.title ?? 'Task').replace(/ · You$/, '')} needs your answer`);
+    if (event.sessionId !== state.sessionId) notify(`${(s?.title ?? 'Task').replace(/ · You$/, '')} needs your answer`, undefined, { important: true });
   }
   if (event.kind === 'input_cancelled' && event.requestId) {
     current.inputs.get(event.requestId)?.dispose(); current.inputs.delete(event.requestId); current.revision++;
@@ -4501,12 +5726,45 @@ function onAgent(event: AgentEvent): void {
   // Tokens and tool snapshots do not change task navigation. Four busy agents
   // share one navigation frame only when a running/recency/approval state changes.
   if (firstEvent || becameActive || event.kind === 'approval' || event.kind === 'approval_cancelled' || event.kind === 'input_request' || event.kind === 'input_cancelled') {
-    if (firstEvent && event.sessionId === state.sessionId && !document.hidden) { renderHeader(); if (document.querySelector<HTMLTextAreaElement>('#prompt')?.disabled === false) renderComposer(); }
+    if (firstEvent && event.sessionId === state.sessionId && !document.hidden) { renderHeader();
+      // A prompt held only by the thread's load (its details land after its rows) still shows the run starting.
+      if (document.querySelector<HTMLTextAreaElement>('#prompt')?.disabled === false || threadLoading()) renderComposer();
+    }
     scheduleNavigation();
   }
+  if (firstEvent && event.sessionId === state.sessionId && !wakeHolds.has(event.sessionId)) renderTranscript();
   if (!renderFrame && event.sessionId === state.sessionId && transcriptVisible()) renderFrame = requestAnimationFrame(() => { renderFrame = 0; renderStream(); });
 }
 
+async function refreshExplorerFiles(): Promise<void> {
+  if (!project() || session()?.remoteDevice || state.inspectorTab !== 'files' || !state.inspector || state.inspectorLoading) return;
+  const key = workspaceKey(), context = workspaceContext(), folders = ['', ...state.openFolders];
+  const results = await Promise.allSettled(folders.map(path => call<FileEntry[]>('list_files', { ...context, path })));
+  if (key !== workspaceKey()) return;
+  const same = (current: FileEntry[] | undefined, next: FileEntry[]) => JSON.stringify(current ?? []) === JSON.stringify(next);
+  let changed = false;
+  results.forEach((result, i) => {
+    if (result.status !== 'fulfilled') return;
+    if (!folders[i]) {
+      if (!same(state.files, result.value) || state.filesError) { state.files = result.value; state.filesError = ''; changed = true; }
+    } else if (state.openFolders.has(folders[i]) && !same(state.folderFiles.get(folders[i]), result.value)) {
+      state.folderFiles.set(folders[i], result.value); changed = true;
+    }
+  });
+  if (changed) renderInspector();
+}
+
+/** A thread switch within the workspace whose status loaded this long ago (ms) reuses it rather than reloading the
+ *  status, file list and jj state and redrawing the inspector; anything that changes the files refreshes it itself. */
+const INSPECTOR_FRESH_MS = 5000;
+/** The workspace refreshInspector last loaded cleanly, and when. */
+let inspectorLoaded: { key: string; at: number } | undefined;
+/** refreshInspector, unless the same workspace loaded cleanly a moment ago and nothing cleared it since. */
+async function refreshInspectorIfStale(): Promise<void> {
+  const fresh = inspectorLoaded?.key === workspaceKey() && Date.now() - inspectorLoaded.at < INSPECTOR_FRESH_MS;
+  if (fresh && !state.inspectorLoading && state.git && !state.gitError && !state.filesError) return;
+  await refreshInspector();
+}
 async function refreshInspector(): Promise<void> {
   void projectRunner.refresh();
   const request = ++inspectorRequest;
@@ -4524,13 +5782,16 @@ async function refreshInspector(): Promise<void> {
     if (result.status === 'fulfilled' && state.openFolders.has(path)) state.folderFiles.set(path, result.value);
   });
   state.inspectorLoading = false;
-  state.git = results[0].status === 'fulfilled' ? results[0].value : null;
+  // An unchanged status keeps its object, so the Changes view does not refetch every loaded diff for nothing.
+  const git = results[0].status === 'fulfilled' ? results[0].value : null;
+  state.git = git && state.git && JSON.stringify(git) === JSON.stringify(state.git) ? state.git : git;
+  inspectorLoaded = results.every(result => result.status === 'fulfilled') ? { key, at: Date.now() } : undefined;
   if (state.git) noteChangedPaths(state.git.files.map(file => file.path));
   state.gitError = results[0].status === 'rejected' ? errorText(results[0].reason) || 'Git status could not be loaded.' : '';
   state.files = results[1].status === 'fulfilled' ? results[1].value : [];
   state.jj = results[2].status === 'fulfilled' ? results[2].value : null;
   state.filesError = results[1].status === 'rejected' ? errorText(results[1].reason) || 'The folder could not be read.' : '';
-  renderInspector(); renderHeader(); if (state.inspector && state.inspectorTab === 'file') fileTabs.reload();
+  renderInspector(); renderHeader(); fileTabs.reload();
 }
 /** The simulator panel stays mounted once opened; hiding it stops its frames. */
 function syncSimulatorPanel(): void {
@@ -4541,7 +5802,7 @@ function syncSimulatorPanel(): void {
   if (simulatorPanel) { simulatorPanel.show(); return; }
   simulatorLoading ??= import('./simulator').then(({ mountSimulator }) => {
     simulatorPanel = mountSimulator($('#simulator-panel'), {
-      call, notify,
+      call, notify, notifyError,
       choose: (anchor, title, items, onSelect) => void showChoices(anchor, { title, width: 300, items, onSelect: id => { closeChoiceMenu(); onSelect(id); } }),
       listen: (name, callback) => subscribe(name, callback),
     });
@@ -4570,7 +5831,7 @@ function syncProgressPip(): void {
   if (progressPip) { progressPip.update(id, allowed, allowed && isRunning()); return; }
   if (!id) return;
   progressPipLoading ??= import('./progress-pip').then(({ mountProgressPip }) => {
-    progressPip = mountProgressPip($('#progress-pip'), { call, notify });
+    progressPip = mountProgressPip($('#progress-pip'), { call, notify, notifyError });
     syncProgressPip();
   }).catch(error => { progressPipLoading = undefined; report(error); });
 }
@@ -4583,7 +5844,7 @@ function syncDesignPanel(): void {
   if (designPanel) { designPanel.show(); return; }
   designLoading ??= import('./design-canvas').then(({ mountDesignCanvas }) => {
     designPanel = mountDesignCanvas($('#design-panel'), {
-      call, notify,
+      call, notify, notifyError,
       context: () => state.projectId ? { projectId: state.projectId, sessionId: state.sessionId || null } : null,
       compose: text => { const prompt = document.querySelector<HTMLTextAreaElement>('#prompt'); if (prompt) { prompt.value = text; prompt.dispatchEvent(new Event('input', { bubbles: true })); prompt.focus(); } },
     });
@@ -4621,7 +5882,7 @@ function syncBrowserPanel(): void {
     const mount = document.createElement('div'); mount.className = 'browser-panel browser-instance';
     $('#browser-panel').append(mount);
     const panel = await mountBrowser(mount, {
-      task: () => state.sessionId === owner && session() && !isRunning() && !state.messagesLoading ? owner : undefined,
+      task: () => state.sessionId === owner && session() && !isRunning() && !threadLoading() ? owner : undefined,
       session: () => owner || undefined,
       navigated: url => { if (revision === browserRevision && state.sessionId === owner) state.browserUrl = url; },
       attach: attachBrowserContext,
@@ -4709,26 +5970,22 @@ $('.inspector-tabs').addEventListener('focusout', event => {
   if (!nav.contains(event.relatedTarget as Node | null)) rovingTabs(nav);
 });
 function renderInspectorTabs(pullLinked: boolean): void {
-  const tabs = state.inspectorTab === 'file' ? inspectorTabs : openTab(inspectorTabs, state.inspectorTab);
+  const tabs = openTab(inspectorTabs, state.inspectorTab);
   if (!sameTabs(tabs, inspectorTabs)) { inspectorTabs = tabs; saveTabs(localStorage, tabs); }
   const nav = $('.inspector-tabs'), add = nav.querySelector<HTMLElement>('.inspector-tab-add')!;
   const shown = tabs.open.filter(view => view !== 'pull' || pullLinked);
-  const files = nav.querySelector<HTMLElement>(':scope>.file-panel-tab')!;
-  files.hidden = !fileTabs.count;
-  const items = [files, ...nav.querySelectorAll<HTMLElement>(':scope>.inspector-tab:not(.file-panel-tab)')];
+  const items = [...nav.querySelectorAll<HTMLElement>(':scope>.inspector-tab')];
   for (const item of items) {
     const view = item.dataset.view as PanelView, selected = view === state.inspectorTab;
-    if (item !== files) {
-      item.hidden = !shown.includes(view as InspectorView);
-      item.querySelector<HTMLElement>('.inspector-tab-close')!.hidden = shown.length < 2;
-    }
+    item.hidden = !shown.includes(view);
+    item.querySelector<HTMLElement>('.inspector-tab-close')!.hidden = shown.length < 2;
     const tab = item.querySelector<HTMLElement>('.inspector-tab-button')!;
     tab.classList.toggle('selected', selected);
     tab.setAttribute('aria-selected', String(selected));
   }
   rovingTabs(nav);
   // Move nodes only when the order changed, so a focused tab keeps focus.
-  if (items.filter(item => !item.hidden && item !== files).map(item => item.dataset.view).join() !== shown.join()) for (const view of shown) nav.insertBefore(items.find(item => item.dataset.view === view)!, add);
+  if (items.filter(item => !item.hidden).map(item => item.dataset.view).join() !== shown.join()) for (const view of shown) nav.insertBefore(items.find(item => item.dataset.view === view)!, add);
   add.hidden = !closedViews(tabs, INSPECTOR_AVAILABLE.filter(view => view !== 'pull' || pullLinked)).length;
   revealSelectedTab();
 }
@@ -4737,13 +5994,6 @@ function openInspectorView(view: InspectorView): void {
   if (tab) run(action(tab.dataset.action!, tab));
 }
 function closeInspectorTab(view: PanelView): void {
-  if (view === 'file') {
-    fileTabs.forget(state.sessionId);
-    if (state.inspectorTab === 'file') state.inspectorTab = threadDefault(inspectorTabs);
-    renderInspector();
-    document.querySelector<HTMLElement>(`.inspector-tab[data-view="${state.inspectorTab}"] .inspector-tab-button`)?.focus();
-    return;
-  }
   const next = closeTab(inspectorTabs, view);
   if (next === inspectorTabs) return;
   const wasSelected = state.inspectorTab === view;
@@ -4772,7 +6022,7 @@ function showChangesView(target: HTMLElement, key: string): void {
       commit: async message => { const result = await call<string>('git_commit', { ...context, message }); await refreshInspector(); notify(result || 'Changes committed'); },
       openFile: path => { state.inspectorTab = 'files'; run(openFile(path, 'file')); },
       refresh: () => run(refreshInspector()),
-      notify,
+      notify, notifyError,
       choose: (anchor, title, items, onSelect) => void showChoices(anchor, { title, width: 260, actions: !items.some(item => item.selected !== undefined), items, onSelect: id => { closeChoiceMenu(); onSelect(id); } }),
       worktree: () => worktrees.openDialog(newTaskView() ? 'attach' : 'new'),
     });
@@ -4784,7 +6034,7 @@ function showChangesView(target: HTMLElement, key: string): void {
 function fileTree(files: FileEntry[], depth: number): string {
   return files.map(file => {
     const open = file.isDir && state.openFolders.has(file.path), path = escape(file.path);
-    const row = `<div class="file-row" style="--depth:${depth}"><button data-action="${file.isDir ? 'toggle-file-folder' : isPreviewableFile(file.path) && !OPENS_IN_TAB.test(file.path) ? 'preview-file' : 'open-file'}" data-path="${path}"${file.isDir ? ` aria-expanded="${open}"` : ''}>${file.isDir ? icon('chevron', 'file-twisty') : '<span class="file-twisty"></span>'}${fileIcon(file.name, file.isDir)}<span>${escape(file.name)}</span></button>${!file.isDir && /\.(html?|svg)$/i.test(file.path) ? button('view-source', 'View source of ' + file.name, 'file', 'file-attach', `data-path="${path}"`) : ''}${!file.isDir ? button('attach-file', 'Attach ' + file.name, 'plus', 'file-attach', `data-path="${path}"`) : ''}</div>`;
+    const row = `<div class="file-row" data-id="file:${path}" style="--depth:${depth}"><button data-action="${file.isDir ? 'toggle-file-folder' : 'open-file'}" data-path="${path}"${file.isDir ? ` aria-expanded="${open}"` : ''}>${file.isDir ? icon('chevron', 'file-twisty') : '<span class="file-twisty"></span>'}${fileIcon(file.name, file.isDir)}<span>${escape(file.name)}</span></button>${!file.isDir && /\.svg$/i.test(file.path) ? button('view-source', 'View source of ' + file.name, 'file', 'file-attach', `data-path="${path}"`) : ''}${!file.isDir ? button('attach-file', 'Attach ' + file.name, 'plus', 'file-attach', `data-path="${path}"`) : ''}${button('file-menu', 'Actions for ' + file.name, 'more', 'file-attach', `data-path="${path}" data-directory="${file.isDir}" aria-haspopup="menu"`)}</div>`;
     return row + (open ? fileTree(state.folderFiles.get(file.path) ?? [], depth + 1) : '');
   }).join('');
 }
@@ -4830,15 +6080,18 @@ function renderInspector(): void {
   else hidePanel(inspector, animate, () => { if (inspector.hidden) workspace.classList.add('inspector-closed'); }, $('#inspector-toggle'));
   inspectorDrawn = true; inspectorView = state.view;
   $('#inspector-toggle').classList.toggle('active', visible);
+  const filesOpen = visible && state.inspectorTab === 'files';
+  $('#files-toggle').classList.toggle('active', filesOpen);
+  $('#files-toggle').setAttribute('aria-pressed', String(filesOpen));
+  $('#files-toggle').hidden = !project() || Boolean(state.sharedChannelId);
   const pullTask = githubEnabled() && session()?.pullRequest ? session() : undefined;
   if (state.inspectorTab === 'pull' && !pullTask) { const shown = inspectorTabs.open.filter(view => view !== 'pull'); state.inspectorTab = shown.includes('changes') || !shown.length ? 'changes' : shown[0]; }
-  if (state.inspectorTab === 'file' && !fileTabs.count) state.inspectorTab = threadDefault(inspectorTabs);
   renderInspectorTabs(Boolean(pullTask));
   const pullTab = $('.inspector-tabs').querySelector<HTMLButtonElement>('[data-action="tab-pull"]')!;
   if (pullTask) { pullTab.title = `Pull request #${pullTask.pullRequest!.number}`; pullTab.setAttribute('aria-label', `Pull request #${pullTask.pullRequest!.number}`); }
   const changeCount = state.git?.files.length ?? 0;
   $('.inspector-tabs [data-action="tab-changes"]').setAttribute('aria-label', changeCount ? `Changes, ${changeCount} changed ${changeCount === 1 ? 'file' : 'files'}` : 'Changes');
-  $('#inspector-title').textContent = state.inspectorTab === 'file' ? 'Open files' : INSPECTOR_TITLES[state.inspectorTab];
+  $('#inspector-title').textContent = INSPECTOR_TITLES[state.inspectorTab];
   $('#changes-count').textContent = state.git?.files.length ? String(state.git.files.length) : '';
   const changesKey = `${state.projectId}\0${state.sessionId}\0${workspacePath()}`;
   const keepChanges = state.inspectorTab === 'changes' && !state.selectedKind && Boolean(project()) && !session()?.remoteDevice && !(state.jj?.isRepo && !state.jj.colocated) && changesViewKey === changesKey && (state.inspectorLoading || (!state.gitError && Boolean(state.git?.isRepo)));
@@ -4847,10 +6100,7 @@ function renderInspector(): void {
   syncSimulatorPanel();
   syncVmPanel();
   syncDesignPanel();
-  const showFiles = state.inspectorTab === 'file';
-  $('#file-panel').hidden = !showFiles;
-  if (showFiles) { $('#inspector-content').hidden = true; $('#inspector-refresh').hidden = true; }
-  if (showFiles || state.inspectorTab === 'browser' || state.inspectorTab === 'simulator' || state.inspectorTab === 'vm' || state.inspectorTab === 'design') { pullView.dispose(); return; }
+  if (state.inspectorTab === 'browser' || state.inspectorTab === 'simulator' || state.inspectorTab === 'vm' || state.inspectorTab === 'design') { pullView.dispose(); return; }
   const target = $('#inspector-content');
   if (state.inspectorTab === 'pull' && pullTask && visible) { pullView.show(target, pullTask); return; }
   pullView.dispose();
@@ -4878,7 +6128,8 @@ function renderInspector(): void {
       const host = target.querySelector<HTMLElement>('.inspector-diff-host')!;
       const patch = state.selectedContent, path = state.selectedFile;
       host.innerHTML = '<p class="inspector-hint" role="status">Loading diff…</p>';
-      void import('./diff-viewer').then(({ mountDiffViewer }) => {
+      // Mounted after the next paint: a thread switch restoring its file paints the thread first.
+      void import('./diff-viewer').then(module => new Promise<typeof module>(resolve => requestAnimationFrame(() => setTimeout(() => resolve(module))))).then(({ mountDiffViewer }) => {
         if (diffEpoch !== inspectorDiffEpoch || !host.isConnected) return;
         inspectorDiff = mountDiffViewer(host, { patch, path, layout: 'unified', truncated: patch.includes('[Diff truncated') });
       }).catch(error => { if (host.isConnected && diffEpoch === inspectorDiffEpoch) host.textContent = errorText(error); });
@@ -4887,13 +6138,13 @@ function renderInspector(): void {
   }
   if (state.inspectorTab === 'files') {
     // Morphed once the tree is up, so a folder's chevron survives to turn.
-    const tree = `<div class="file-folder-path"><span>${escape(project()?.name)}</span>${state.openFolders.size ? button('collapse-folders', 'Collapse folders', 'minimize') : ''}</div><div class="file-list">${fileTree(state.files, 0) || '<div class="inspector-empty">This folder is empty.</div>'}</div>`;
-    if (target.querySelector(':scope>.file-list')) morph(target, tree); else target.innerHTML = tree;
+    const tree = `<section class="file-explorer" aria-label="File explorer"><div class="file-folder-path"><span title="${escape(workspacePath())}">${escape(project()?.name)}</span><div class="file-explorer-tools">${button('new-workspace-file', 'New file', 'file')}${button('new-workspace-folder', 'New folder', 'folder')}${button('file-menu', 'File actions', 'more', '', 'data-path="" data-directory="true" aria-haspopup="menu"')}${state.openFolders.size ? button('collapse-folders', 'Collapse folders', 'minimize') : ''}</div></div><div class="file-list">${fileTree(state.files, 0) || '<div class="inspector-empty">This folder is empty.</div>'}</div></section>`;
+    if (target.querySelector(':scope>.file-explorer')) morph(target, tree, 6); else target.innerHTML = tree;
     return;
   }
   if (state.jj?.isRepo && !state.jj.colocated) {
     showJjPanel(target, state.jj, {
-      call, notify, context: () => workspaceContext(), changed: status => { state.jj = status; },
+      call, notify, notifyError, context: () => workspaceContext(), changed: status => { state.jj = status; },
       openDiff: (path, patch) => { selectedFileContext = workspaceContext(); state.selectedFile = path; state.selectedContent = patch; state.selectedKind = 'diff'; state.selectedStaged = false; state.filePreviewLoading = false; state.inspector = true; renderInspector(); },
     });
     return;
@@ -4925,13 +6176,12 @@ async function previewFile(path: string, context = workspaceContext(), active?: 
 }
 async function openFile(path: string, kind: 'file' | 'diff', staged = false, context = workspaceContext(), source = false): Promise<void> {
   const p = project(); if (!p) return;
-  // Files open as tabs in the inspector's Open files view beside their task's conversation.
   if (kind === 'file') {
     if (context.sessionId && context.sessionId !== state.sessionId) await selectSession(context.sessionId);
     if (context.sessionId && context.sessionId !== state.sessionId) return;
     if (state.view !== 'conversation' && !state.boardPanel) setWorkspaceView('conversation');
     fileTabs.open(path, context, source);
-    ++fileRequest; inspectorSuppressed = false; state.inspector = true; state.inspectorTab = 'file'; state.selectedKind = ''; renderInspector(); return;
+    ++fileRequest; state.selectedKind = ''; renderInspector(); return;
   }
   const request = ++fileRequest, generation = state.generation; const content = await call<string>('git_diff', { ...context, path, staged }); if (request !== fileRequest || p.id !== state.projectId || generation !== state.generation) return;
   selectedFileContext = { ...context };
@@ -5131,10 +6381,8 @@ async function showModel(anchor: HTMLElement, target = session()): Promise<void>
         if (inPanel) btwPanel.refresh(); else if (selected.id === state.sessionId) { renderComposer(); renderHeader(); }
       } finally { configuringSessions.delete(selected.id); }
     },
-    anchor, providers: device ? [] : state.providers, current: { provider: selected.provider, model: selected.model || 'default', reasoningEffort: selected.reasoningEffort ?? null, contextUsage: selected.contextUsage },
+    anchor, providers: device ? [] : state.providers, current: { provider: selected.provider, model: selected.model || 'default', reasoningEffort: selected.reasoningEffort ?? null, serviceTier: selected.codexSettings?.serviceTier ?? null, contextUsage: selected.contextUsage },
     canSwitchProvider: true,
-    // Connections are this computer's; a task on another computer uses that host's setup.
-    connections: device ? [] : namedConnections.connections, currentConnection: device ? null : isBtwDraft(selected) ? (selected as BtwDraft).connection ?? null : taskConnection(selected)?.id ?? null,
     loadModels: device ? id => remoteModels(device, id) : loadModels, loadProviders: device ? () => remoteProviders(device) : undefined,
     recent: device ? undefined : recentModels, onClose: () => { modelPickerCleanup = undefined; },
     onEffortSelect: async reasoningEffort => {
@@ -5151,17 +6399,28 @@ async function showModel(anchor: HTMLElement, target = session()): Promise<void>
         }
       } finally { configuringSessions.delete(selected.id); }
     },
-    onSelect: async (providerId, model, connection) => {
+    // Speed is stored natively per task (Codex service tier, Claude fast mode); a side-thread draft has no task yet.
+    onSpeedSelect: isBtwDraft(selected) || !['codex', 'claude'].includes(selected.provider) ? undefined : async tier => {
+      if (!current() || generation !== state.generation || isRunning(selected.id)) throw new Error('Select the task again to change its speed.');
+      configuringSessions.add(selected.id);
+      try {
+        const updated = await call<Session>('set_task_preference', { sessionId: selected.id, request: { action: 'speed', tier } });
+        const index = state.sessions.findIndex(s => s.id === selected.id); if (index >= 0) state.sessions[index] = updated;
+        if (inPanel) btwPanel.refresh();
+        else if (selected.id === state.sessionId) refreshModelLabels();
+      } finally { configuringSessions.delete(selected.id); }
+    },
+    onSelect: async (providerId, model) => {
       if (botNext && isRunning(selected.id) && current()) {
         const changed = providerId !== selected.provider || (model || 'default') !== (selected.model || 'default');
         botThread.setNextModel(selected.id, changed ? { provider: providerId, model, label: model && model !== 'default' ? model : provider(providerId)?.name ?? providerId } : undefined);
         renderHeader(); return;
       }
       if (!current() || generation !== state.generation || isRunning(selected.id)) throw new Error('Select the task again to change its model.');
-      if (isBtwDraft(selected)) { saveBtwDraft(selected, { provider: providerId, model, reasoningEffort: null, connection: connection ?? null }); return; }
+      if (isBtwDraft(selected)) { saveBtwDraft(selected, { provider: providerId, model, reasoningEffort: null }); return; }
       configuringSessions.add(selected.id);
       try {
-        // A plain model leaves a named agent team, back to a single agent.
+        // A plain model leaves a named team.
         if (teams.get(selected.id)?.config.rosterOnly) {
           await call<TeamSnapshot | null>('architect_configure', { sessionId: selected.id, config: null, architect: null, profileId: null });
           onArchitect({ sessionId: selected.id, removed: true });
@@ -5174,7 +6433,8 @@ async function showModel(anchor: HTMLElement, target = session()): Promise<void>
         }
         const updated = await call<Session>('configure_session', { sessionId: selected.id, provider: providerId, model });
         const index = state.sessions.findIndex(s => s.id === selected.id); if (index >= 0) state.sessions[index] = updated;
-        if (!device && (connection ?? null) !== (namedConnections.tasks[selected.id] ?? null)) namedConnections = await call('connection_assign', { sessionId: selected.id, connectionId: connection });
+        // Same-harness model choices keep the account and its resumable conversation.
+        if (!device && providerId !== selected.provider && namedConnections.tasks[selected.id]) namedConnections = await call('connection_assign', { sessionId: selected.id, connectionId: null });
         if (!device) {
           if (!localStorage.getItem('pandacode.defaultProvider')) state.defaultProvider = providerId;
           localStorage.setItem('pandacode.provider', providerId); localStorage.setItem('pandacode.model.' + providerId, model);
@@ -5272,7 +6532,9 @@ async function createChat(from?: Session): Promise<void> {
   try {
     created = await call<Session>('chat_create', from ? { provider: from.provider, model: from.model, mode: from.mode } : { provider: harness.id, model: rememberedModel(harness.id), mode: 'full' });
     if (from?.reasoningEffort) created = await call<Session>('set_reasoning_effort', { sessionId: created.id, reasoningEffort: from.reasoningEffort });
-    const connection = from && taskConnection(from)?.id;
+    // Fresh pooled conversations choose their own account when the native run starts.
+    const pooled = from && (from.provider === 'claude' || from.provider === 'codex') && namedConnections.pools?.includes(from.provider);
+    const connection = from && !pooled && taskConnection(from)?.id;
     if (connection) namedConnections = await call<typeof namedConnections>('connection_assign', { sessionId: created.id, connectionId: connection });
     state.projects = await call<Project[]>('list_projects');
   } finally { creatingTask = false; }
@@ -5340,6 +6602,7 @@ async function showMode(anchor: HTMLElement, target = session()): Promise<void> 
         await call('update_session', { sessionId: s.id, mode: id as Mode });
       }
       const saved = state.sessions.find(item => item.id === s.id); if (saved) saved.mode = id as Mode;
+      architectView?.modeChanged();
       if (inPanel) btwPanel.refresh();
       else if (s.id === state.sessionId) {
         if (saved) syncOverlayContext({ projectId: saved.projectId, provider: saved.provider, model: saved.model || 'default', mode: saved.mode, reasoningEffort: saved.reasoningEffort ?? null });
@@ -5483,7 +6746,7 @@ async function showFolderMenu(heading: HTMLElement, point?: { x: number; y: numb
   await showChoices(anchor, { title: 'Project actions', point, actions: true, width: 280, items: [
     { id: 'new', label: 'New task', icon: 'plus' },
     { id: 'collapse', label: 'Collapse other projects', icon: 'folder' },
-    { id: 'reveal', label: isMac ? 'Reveal in Finder' : isWindows ? 'Show in Explorer' : 'Open folder', icon: 'folder', separator: true },
+    { id: 'reveal', label: REVEAL_LABEL, icon: 'folder', separator: true },
     { id: 'remove', label: 'Remove project…', icon: 'trash', danger: true, separator: true },
   ], onSelect: async choice => {
     closeChoiceMenu();
@@ -5554,8 +6817,8 @@ function sidebarShortcut(event: KeyboardEvent): boolean {
   if (event.key === '/' && !command && !event.altKey && !control && filter.getClientRects().length) {
     event.preventDefault(); filter.focus(); return true;
   }
-  if (command && !event.shiftKey && !event.altKey && event.key.toLowerCase() === 'z' && toastUndo) {
-    event.preventDefault(); const undo = toastUndo; toastUndo = undefined; void hideToast($('#toast')); undo(); return true;
+  if (command && !event.shiftKey && !event.altKey && event.code === 'KeyZ' && toastUndo) {
+    event.preventDefault(); runToastUndo(); return true;
   }
   return false;
 }
@@ -5674,9 +6937,11 @@ async function showSettings(section?: import('./settings').SettingsSection, inte
       github: target => github.mountSettings(target, project()?.id ?? state.projects[0]?.id ?? ''),
       teams: { loadModels, call },
       cloud: { call, listen: (name, callback) => subscribe(name, callback) },
-      skills: { call, projects: () => userProjects().map(p => ({ id: p.id, name: p.name })) },
+      skills: { call, projects: () => userProjects().map(p => ({ id: p.id, name: p.name })), activeProject: () => project()?.id ?? '' },
       remote: remoteHost,
       schedules: { intent, openThread: id => { closeSettings(); run(selectSession(id, true)); } },
+      clearDrafts: clearSavedDrafts,
+      keepDrafts: { get: () => state.drafts.keepsDrafts, set: on => state.drafts.setKeeping(on) },
       embed: {
         colors: async target => (await import('./theme-settings')).mountThemeSettings(target, { call, notify, chooseVsix: () => import('./bridge').then(bridge => bridge.chooseVsix()) }),
         wallpapers: async target => {
@@ -5701,8 +6966,32 @@ async function showSettings(section?: import('./settings').SettingsSection, inte
   }).finally(() => { settingsOpening = undefined; });
   await settingsOpening;
 }
+/** Dictation's setup opens Settings → Voice on its missing step (where audio goes, or a model to download), not the top of the page. */
+async function showVoiceSettings(): Promise<void> {
+  const opening = showSettings('voice');
+  // Settings hides the workspace (and the mic that was focused) before its module has loaded and drawn: hold focus on
+  // the Settings region meanwhile, so it never falls to the page body on the way to the missing step.
+  const page = $('#settings-page');
+  const held = !page.hidden && !page.contains(document.activeElement);
+  if (held) { page.tabIndex = -1; page.focus({ preventScroll: true }); }
+  try {
+    await opening;
+    // The Voice page is mounted once Settings has opened (voice-settings.ts arrived with it): land on the missing step.
+    const host = document.querySelector<HTMLElement>('#settings-page:not([hidden]) #voice-settings');
+    if (host) (await import('./voice-settings')).focusVoiceSetup(host);
+  } finally { if (held && document.activeElement !== page) page.removeAttribute('tabindex'); }
+}
+/** The crash notice's Crash settings: Settings → General, scrolled to Crash recovery with its switch focused. */
+async function showCrashSettings(): Promise<void> {
+  await showSettings('general');
+  const group = document.querySelector<HTMLElement>('#settings-page:not([hidden]) #crash-restart-settings');
+  group?.scrollIntoView({ block: 'nearest' });
+  group?.querySelector<HTMLElement>('#crash-restart-enabled')?.focus({ preventScroll: true });
+}
 function closeSettings(): void {
   settingsView?.dispose(); settingsView = undefined;
+  // Shortcut mode and local models change without a configuration event; dictation re-reads them on the way out.
+  void voiceDictation.refreshPreferences();
   run(refreshCloudTargets());
   const host = $('#settings-page');
   host.hidden = true; host.replaceChildren();
@@ -5877,7 +7166,7 @@ async function showConversationImport(): Promise<void> {
 /** What the Bots window and a bot's page share: native calls, live turns and approvals. */
 function botsOptions(providers: Provider[]): import('./bots').BotsOptions {
   return {
-    call, providers, notify, loadModels,
+    call, providers, notify, notifyError, loadModels,
     defaultModel: provider => rememberedModel(provider),
     running: id => isRunning(id),
     openTask: id => run((async () => { closeModal(); await reloadSessions(); await selectSession(id, true); })()),
@@ -5906,7 +7195,7 @@ async function showBotSettings(botId: string, tab?: import('./bots').Section): P
   try {
     const [{ mountBots }, providers] = await Promise.all([import('./bots'), state.providers.length ? Promise.resolve(state.providers) : call<Provider[]>('list_providers')]);
     if (!dialog.open || !host.isConnected) return;
-    botsView = mountBots(host, { ...botsOptions(providers), layout: 'settings', initialBot: botId, initialTab: tab, onDeleted: () => run((async () => { closeModal(); await reloadBotProjects(); await reloadSessions(); if (!session()) state.sessionId = ''; render(); })()) });
+    botsView = mountBots(host, { ...botsOptions(providers), layout: 'settings', initialBot: botId, initialTab: tab, onDeleted: () => run((async () => { closeModal(); await reloadBotProjects(); await reloadSessions(); if (!session()) clearOpenSession(); render(); })()) });
   } catch {
     if (dialog.open && host.isConnected) host.innerHTML = '<p role="alert">Unable to open bot settings. Close this window and try again.</p>';
   }
@@ -5915,19 +7204,27 @@ async function showBotSettings(botId: string, tab?: import('./bots').Section): P
  * conversations deliver queued messages natively, so the window never sends them twice. */
 let sidebarBots: import('./bots').Bot[] = [];
 let sidebarChannels: SharedChannelSummary[] = [];
+/** Kept channel drafts have been checked against a loaded channel list this launch. */
+let channelDraftsChecked = false;
 let botProjects = new Set<string>();
 let botProjectsLoad: Promise<void> | undefined;
 const botSwitches = new Map<string, BotActivity[]>();
 const botMessages = new Map<string, botThread.BotMessageMarker[]>();
 const botFailovers = new Map<string, FailoverAsk>();
 const botFailoverErrors = new Map<string, string>();
+/** The failover error each thread last announced (renderBotFailover). */
+const announcedFailoverErrors = new Map<string, string>();
 const botThreadMetaLoaded = new Set<string>();
 const botThreadMetaRequests = new Map<string, number>();
 function ensureBotProjects(): Promise<void> { return botProjectsLoad ??= reloadBotProjects(false); }
 async function reloadBotProjects(withProjects = true): Promise<void> {
   const [nextBots, nextChannels] = await Promise.all([
     call<import('./bots').Bot[]>('bots_list').catch(() => sidebarBots),
-    call<SharedChannelSummary[]>('bot_shared_channels').catch(() => sidebarChannels),
+    call<SharedChannelSummary[]>('bot_shared_channels').then(channels => {
+      // Kept composer text of channels deleted since; only from a list that loaded (a failure keeps the old one).
+      if (!channelDraftsChecked && Array.isArray(channels)) { channelDraftsChecked = true; dropRemovedChannelDrafts(state.drafts, channels.map(channel => channel.id)); }
+      return channels;
+    }).catch(() => sidebarChannels),
   ]);
   sidebarBots = nextBots;
   sidebarChannels = nextChannels;
@@ -5980,7 +7277,7 @@ const userProjects = (): Project[] => state.projects.filter(project => !botProje
 const chatTask = (task: Session | undefined): boolean => Boolean(task && isChatProject(state.projects.find(p => p.id === task.projectId)));
 /* PandaCode Connect. A new task can start on another computer: the context bar offers the
  * signed-in account's targets; the started task is an ordinary session with `remoteDevice`. */
-const remoteHost: RemoteHost = { call, listen: (name, callback) => subscribe(name as 'remote://status', callback), notify, openUrl: url => call('open_external_url', { url }) };
+const remoteHost: RemoteHost = { call, listen: (name, callback) => subscribe(name as 'remote://status', callback), notify, notifyError, openUrl: url => call('open_external_url', { url }) };
 type RemoteAccountDevice = Omit<RemoteTarget, 'deviceId'> & { id: string; current: boolean; host: boolean };
 let remoteTargets: RemoteTarget[] = [], remoteChoice = LOCAL, remoteSignedIn = false, remoteConnected = false, remotePresenceReady = false;
 /** The chosen computer's last known name, for when it leaves the list (signed out or revoked). */
@@ -6141,7 +7438,7 @@ async function showCloudMenu(anchor: HTMLElement): Promise<void> {
     closeChoiceMenu();
     if (id === 'delete' && !await confirmDeleteMachine(s)) return;
     try { await call('cloud_agent_action', { sessionId: s.id, action: id }); }
-    catch (error) { notify(errorText(error)); return; }
+    catch (error) { notifyError(errorText(error)); return; }
     if (id === 'open') openVm();
     else if (id === 'delete') notify('Deleted the cloud machine. Your next message creates a new one.');
   } });
@@ -6160,24 +7457,28 @@ async function sendCloud(s: Session, target: CloudTarget, draft: string, text: s
   const refusal = harnessRefusal(s.provider, provider(s.provider)?.name ?? s.provider);
   if (refusal) throw new Error(refusal);
   if ((state.browserAttachments.get(s.id) ?? []).length || (state.moodboardAttachments.get(s.id) ?? []).length || attachments.imageIds(promptItems).length) throw new Error(`Images and browser captures can’t be sent to a cloud machine yet. Remove them, or run on this computer.`);
+  const finishSubmit = voiceDictation.beginSubmit(s.id); if (!finishSubmit) return;
+  // A cloud start opens a new task and nothing re-renders while it waits, so the emptied field shrinks now.
+  clearComposerDraft(s); resizePrompt();
+  let accepted = false;
   configuringSessions.add(s.id);
   try {
     const contexts = await Promise.all(filePaths.map(path => fileContext(s, path)));
     const content = text + contexts.join('') + attachments.contextFor(promptItems) + await github.contextFor(s.projectId, s.id, text) + tokenSaver.contextFor(s.id);
-    const prompt = () => document.querySelector<HTMLTextAreaElement>('#prompt');
-    if (state.sessionId !== s.id || prompt()?.value !== draft) throw new Error('Your task or message changed. Send it again.');
     const started = await call<Session>('cloud_agent_start', {
       // The empty New task draft becomes the cloud task, so no stray draft is left behind.
       sessionId: s.id, projectId: s.projectId, provider: target.provider, prompt: content, harness: s.provider, model: s.model, mode: s.mode, effort: s.reasoningEffort ?? null,
     });
+    accepted = true;
     attachments.consume(s.id, promptItems);
     state.attachments = state.attachments.filter(path => !filePaths.includes(path));
-    const field = prompt(); if (field?.dataset.sessionId === s.id) field.value = '';
-    state.drafts.delete(s.id);
     remoteChoice = LOCAL;
     await reloadSessions();
     state.query = ''; await selectSession(started.id, true);
-  } finally { configuringSessions.delete(s.id); }
+  } catch (error) {
+    if (!accepted) restoreComposerDraft(s, draft);
+    throw error;
+  } finally { configuringSessions.delete(s.id); finishSubmit(); }
 }
 async function initRemote(): Promise<void> {
   let signedIn = false;
@@ -6220,13 +7521,14 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
   // Images and screenshots are copied to the other computer natively (remote/images.rs).
   const imageIds = [...browserItems.filter(a => a.kind === 'screenshot').map(a => a.id), ...attachments.imageIds(promptItems)];
   if (imageIds.length > MAX_IMAGES) throw new Error(`Attach up to ${MAX_IMAGES} images per message, including browser screenshots.`);
+  const finishSubmit = voiceDictation.beginSubmit(s.id); if (!finishSubmit) return;
+  clearComposerDraft(s);
+  let accepted = false;
   configuringSessions.add(s.id); remoteChecks.add(s.id); renderComposer();
   try {
     const check = await call<RemoteRepoCheck>('remote_repo_check', { projectId: s.projectId });
     if (!check.repo) throw new Error(`${project()?.name ?? 'This project'} has no GitHub remote, so it can’t run on another computer.`);
     if (behindText(check) && !await confirmBehind(target.name, check)) return;
-    const prompt = () => document.querySelector<HTMLTextAreaElement>('#prompt');
-    if (state.sessionId !== s.id || prompt()?.value !== draft) throw new Error('Your task or message changed. Send it again.');
     const contexts = await Promise.all(filePaths.map(path => fileContext(s, path)));
     const content = text + contexts.join('') + browserContextText(browserItems) + attachments.contextFor(promptItems) + await github.contextFor(s.projectId, s.id, text) + tokenSaver.contextFor(s.id);
     remoteChecks.delete(s.id);
@@ -6238,8 +7540,6 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
     addMirrorPrompt(s.id, sent, 0);
     const live = stream(s.id); live.lastPromptAt = sentAt; live.startedAt = Math.min(live.startedAt, sentAt); live.status = `Connecting to ${target.name}…`;
     s.status = 'running'; s.taskStage = 'in_progress';
-    const sentField = prompt(); if (sentField?.dataset.sessionId === s.id && sentField.value === draft) sentField.value = '';
-    if (state.drafts.get(s.id) === draft) state.drafts.delete(s.id);
     if (state.sessionId === s.id) {
       stickToBottom = true; followSend(); state.messages = [...state.messages, sent]; render();
       const shown = $('#transcript').querySelectorAll<HTMLElement>('.user-message');
@@ -6257,6 +7557,7 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
       sessionId: s.id, deviceId: target.deviceId, projectId: s.projectId, prompt: content, provider: s.provider, model: s.model, mode: s.mode,
       effort: s.reasoningEffort ?? null, worktree: Boolean(s.worktreePath), branch: s.worktreeBranch || state.git?.branch || check.branch || null, startId, imageIds,
     }), undefined, onStage).catch((error: unknown) => { if (!remoteStartCancels.has(s.id)) console.error(error); return undefined; });
+    accepted = Boolean(started);
     if (!started || started.sessionId !== s.id) {
       // The prompt leaves the transcript: back to the composer on failure, to the mirror's own row otherwise.
       dropMirrorPrompt(s.id, sent);
@@ -6265,8 +7566,6 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
       for (const task of new Set([s, state.sessions.find(task => task.id === s.id)])) if (task) Object.assign(task, before);
       if (state.sessionId === s.id) state.messages = state.messages.filter(message => message !== sent);
       if (!started) {
-        const field = prompt(); if (field?.dataset.sessionId === s.id && !field.value) field.value = draft;
-        if (!state.drafts.get(s.id)) state.drafts.set(s.id, draft);
         if (remoteStartCancels.has(s.id) && runEndings.get(s.id) === 'stopped') runEndings.delete(s.id);
         if (state.sessionId === s.id) render(); else renderNavigation();
         return;
@@ -6293,8 +7592,10 @@ async function sendRemote(s: Session, target: RemoteTarget, draft: string, text:
       await call('stop_session', { sessionId });
     }
   } finally {
+    if (!accepted) restoreComposerDraft(s, draft);
     configuringSessions.delete(s.id); remoteStartCancels.delete(s.id);
     if (remoteChecks.delete(s.id) && s.id === state.sessionId) renderComposer();
+    finishSubmit();
   }
 }
 /** The sidebar shows tasks or bots; the bar at its bottom switches between them. */
@@ -6445,16 +7746,17 @@ async function refreshSharedChannel(channelId = state.sharedChannelId): Promise<
     state.sharedChannelAtBottom = history.scrollHeight - history.clientHeight - history.scrollTop < 32;
   }
   const prompt = document.querySelector<HTMLTextAreaElement>('#shared-channel-prompt');
-  if (prompt && state.sharedChannelId) state.sharedChannelDrafts.set(state.sharedChannelId, prompt.value);
+  if (prompt && state.sharedChannelId) state.drafts.set(channelDraftKey(state.sharedChannelId), prompt.value);
   try {
     const detail = await call<SharedChannelDetail>('bot_shared_channel_detail', { channelId, limit: state.sharedChannelLimits.get(channelId) ?? CHANNEL_PAGE });
     if (request !== state.sharedChannelRequest || channelId !== state.sharedChannelId) return;
     state.sharedChannelDetail = detail;
     renderHeader(); renderTranscript(true); renderComposer(); renderBots();
     syncChannelWorkingLabel();
-  } catch (error) { if (channelId === state.sharedChannelId) notify(error instanceof Error ? error.message : String(error)); }
+  } catch (error) { if (channelId === state.sharedChannelId) notifyError(errorText(error)); }
 }
 function activateSharedChannel(channelId: string): void {
+  voiceDictation.detach();
   state.sharedChannelId = channelId;
   state.sharedChannelDetail = null;
   state.sharedChannelScrollTop = 0;
@@ -6464,13 +7766,14 @@ function activateSharedChannel(channelId: string): void {
   void refreshSharedChannel(channelId);
 }
 function closeSharedChannel(): void {
+  voiceDictation.detach();
   state.sharedChannelId = ''; state.sharedChannelDetail = null;
   state.sharedChannelRequest++;
   syncChannelWorkingLabel();
   render(); renderInspector(); renderBots();
 }
 function sharedChannelUi(): SharedChannelUiOptions {
-  return { call, bots: sidebarBots, modal, closeModal, changed: () => reloadBotProjects(false), openChannel: activateSharedChannel, notify };
+  return { call, bots: sidebarBots, modal, closeModal, changed: () => reloadBotProjects(false), openChannel: activateSharedChannel, notify, notifyError };
 }
 async function createSharedChannel(): Promise<void> {
   const { openCreateChannel } = await import('./bot-shared-channels');
@@ -6497,7 +7800,7 @@ async function sharedChannelMenuAction(action: string, channel: SharedChannelSum
       await call('bot_shared_channel_archive', { channelId: channel.id, archived: action !== 'restore' });
       await reloadBotProjects(false);
     }
-  } catch (error) { notify(error instanceof Error ? error.message : String(error)); }
+  } catch (error) { notifyError(errorText(error)); }
 }
 async function botMenuAction(id: string, botId: string): Promise<void> {
   const bot = sidebarBots.find(item => item.id === botId); if (!bot) return;
@@ -6512,7 +7815,7 @@ async function setBotPaused(bot: import('./bots').Bot, paused: boolean): Promise
     await call('bot_set_paused', { botId: bot.id, paused });
     notify(paused ? `${bot.name} paused` : `${bot.name} resumed`);
   } catch (error) {
-    notify(`Couldn’t ${paused ? 'pause' : 'resume'} ${bot.name}: ${error instanceof Error ? error.message : String(error)}`);
+    notifyError(`Couldn’t ${paused ? 'pause' : 'resume'} ${bot.name}: ${errorText(error)}`);
   }
   await reloadBotProjects(false);
 }
@@ -6523,18 +7826,18 @@ async function duplicateBot(bot: import('./bots').Bot): Promise<void> {
     await call('bot_create', { input });
     notify(`${input.name} created`);
   } catch (error) {
-    notify(`Couldn’t duplicate ${bot.name}: ${error instanceof Error ? error.message : String(error)}`);
+    notifyError(`Couldn’t duplicate ${bot.name}: ${errorText(error)}`);
   }
   await reloadBotProjects();
 }
 async function deleteBot(bot: import('./bots').Bot): Promise<void> {
   if (!await confirmBotDelete(bot.name)) return;
   try { await call('bot_delete', { botId: bot.id }); }
-  catch (error) { notify(`Couldn’t delete ${bot.name}: ${error instanceof Error ? error.message : String(error)}`); return; }
+  catch (error) { notifyError(`Couldn’t delete ${bot.name}: ${errorText(error)}`); return; }
   setBotPinned(bot.id, false);
   notify(`${bot.name} deleted`);
   await reloadBotProjects(); await reloadSessions();
-  if (!session()) state.sessionId = '';
+  if (!session()) clearOpenSession();
   render();
 }
 function confirmBotFullAccess(name: string): Promise<boolean> {
@@ -6603,7 +7906,12 @@ async function refreshBotThreadMeta(bot: import('./bots').Bot, sessionId: string
 function renderBotFailover(): void {
   const host = document.querySelector<HTMLElement>('#bot-failover-bar');
   const ask = botFailovers.get(state.sessionId);
-  if (host) host.innerHTML = `${botThread.failoverHtml(ask)}${ask && botFailoverErrors.has(state.sessionId) ? `<p class="bot-failover-error" role="alert">${escape(botFailoverErrors.get(state.sessionId)!)}</p>` : ''}`;
+  if (!ask) botFailoverErrors.delete(state.sessionId);
+  const error = ask ? botFailoverErrors.get(state.sessionId) : undefined;
+  // Every composer rebuild redraws this bar: the alert is said only the first time an error shows (as paintRetryRow).
+  const fresh = error !== undefined && announcedFailoverErrors.get(state.sessionId) !== error;
+  if (error === undefined) announcedFailoverErrors.delete(state.sessionId); else announcedFailoverErrors.set(state.sessionId, error);
+  if (host) host.innerHTML = `${botThread.failoverHtml(ask)}${error !== undefined ? `<div class="bot-failover-error message-error error-row"><div class="error-row-head"><span class="error-row-icon" data-state-tone="danger" aria-hidden="true">${icon('alert')}</span><span class="error-row-summary"${fresh ? ' role="alert"' : ''}>${escape(error)}</span><button type="button" class="error-row-button error-row-dismiss" data-action="dismiss-failover-error" aria-label="Dismiss error">${icon('close')}</button></div></div>` : ''}`;
 }
 /** A model picked during a bot's turn takes over once the turn ends; if the next turn already
  *  started (a queued message), it stays pending and is tried again at that turn's end. */
@@ -6659,7 +7967,7 @@ async function toggleTerminal(): Promise<void> {
 
 async function action(name: string, element: HTMLElement): Promise<void> {
   if (element.dataset.command) closeModal();
-  if (['tab-files', 'tab-changes', 'browser', 'back-inspector'].includes(name) || name === 'toggle-inspector' && !state.filePreviewLoading) ++fileRequest;
+  if (['tab-files', 'toggle-files', 'tab-changes', 'browser', 'back-inspector'].includes(name) || name === 'toggle-inspector' && !state.filePreviewLoading) ++fileRequest;
   if (name.startsWith('queue-')) { await queueAction(name, element); return; }
   if (name.startsWith('limit-')) { await limitAction(name, element); return; }
   switch (name) {
@@ -6722,9 +8030,18 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'ui-size-reset': setUiScale(1); break;
     case 'delete-task': showDeleteTask(); break;
     case 'search': showCommands(); break;
+    case 'toggle-error': toggleError(element); break;
+    case 'dismiss-error': dismissErrors(element.closest<HTMLElement>('.message-error')); break;
+    case 'dismiss-failover-error': {
+      botFailoverErrors.delete(state.sessionId); renderBotFailover();
+      // The bar was rewritten: the keyboard continues from the hold card's first button, else the composer.
+      (document.querySelector<HTMLElement>('#bot-failover-bar button') ?? document.querySelector<HTMLElement>('#prompt'))?.focus({ preventScroll: true });
+      break;
+    }
+    case 'dismiss-errors': dismissErrors(element.closest<HTMLElement>('.thread-errors')); break;
     case 'retry-response': { const id = actionTask(element)?.id ?? state.sessionId, finishing = finishingStreams.get(id); if (finishing) await finishResponse(id, finishing); break; }
     case 'settings': case 'refresh-settings': await showSettings(); break;
-    case 'settings-page': await showSettings(element.dataset.id as import('./settings').SettingsSection); break;
+    case 'settings-page': await showSettings(element.dataset.id as import('./settings').SettingsSection); if (element.dataset.reveal) revealSetting(element.dataset.reveal); break;
     case 'wallpaper-settings': await showWallpaperSettings(); break;
     case 'provider-connections': await showProviderConnections(); break;
     case 'opencode-models': await showOpenCodeModels(); break;
@@ -6774,15 +8091,20 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'copy-path': await navigator.clipboard.writeText(workspacePath()); notify(session()?.worktreePath ? 'Worktree path copied' : 'Project path copied'); break;
     case 'terminal': await toggleTerminal(); break;
     case 'toggle-inspector': state.inspector = inspectorChosen = inspectorSuppressed || !state.inspector; inspectorSuppressed = false; renderInspector(); break;
+    case 'toggle-files': state.inspector = inspectorChosen = inspectorSuppressed || !state.inspector || state.inspectorTab !== 'files'; inspectorSuppressed = false; state.inspectorTab = 'files'; state.selectedKind = ''; renderInspector(); break;
     case 'tab-vm': openVm(); break;
     case 'tab-btw': openBtw(); btwPanel.focus(); break;
     case 'inspector-add-tab': await showInspectorViews(element); break;
     case 'close-inspector-tab': closeInspectorTab(element.dataset.view as PanelView); break;
-    case 'tab-open-files': state.inspectorTab = 'file'; state.selectedKind = ''; renderInspector(); break;
+    case 'toggle-file-editor': fileTabs.toggle(); break;
     case 'tab-design': inspectorSuppressed = false; state.inspector = true; state.inspectorTab = 'design'; state.selectedKind = ''; renderInspector(); break;
     case 'deploy': await showDeploy(element); break;
     case 'tab-simulator': case 'simulator': if (name === 'simulator' && state.inspector && state.inspectorTab === 'simulator' && !inspectorSuppressed) { state.inspectorTab = 'changes'; renderInspector(); } else openSimulator(); break;
     case 'token-saver': tokenSaver.open(element, state.sessionId); break;
+    case 'council': if (element.getAttribute('aria-disabled') !== 'true') council.open(element, state.sessionId, element.dataset.councilFocus === 'target' || element.dataset.councilFocus === 'maxRounds' ? element.dataset.councilFocus : undefined); break;
+    case 'council-keep-fixing': case 'council-accept': if (element.closest<HTMLElement>('.council-strip')?.dataset.sessionId === state.sessionId) await council.act(state.sessionId, name === 'council-accept' ? 'accept' : 'keep', element); break;
+    case 'council-strip-toggle': council.toggle(state.sessionId); break;
+    case 'council-dismiss': council.dismiss(state.sessionId); break;
     case 'tab-pull': state.inspectorTab = 'pull'; state.selectedKind = ''; renderInspector(); break;
     case 'open-pull': if (element.dataset.sessionId) await openPullRequest(element.dataset.sessionId); break;
     case 'tab-changes': case 'tab-files': state.inspectorTab = name === 'tab-files' ? 'files' : 'changes'; state.selectedKind = ''; renderInspector(); break;
@@ -6790,6 +8112,8 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'browser': inspectorSuppressed = false; state.inspector = true; state.inspectorTab = 'browser'; state.selectedKind = ''; renderInspector(); break;
     case 'refresh-inspector': if (state.inspectorTab === 'btw') { await btwPanel.reload(); break; } if (state.inspectorTab === 'pull') { pullView.forget(state.sessionId); renderInspector(); break; } if (state.inspectorTab === 'search') searchPanel.refresh(); refreshFileLinks(workspaceContext()); await refreshInspector(); break;
     case 'locate-project-folder': await locateProjectFolder(); break;
+    case 'file-menu': fileExplorer.menu(element, workspaceContext(), element.dataset.path!, element.dataset.directory === 'true'); break;
+    case 'new-workspace-file': case 'new-workspace-folder': fileExplorer.edit(workspaceContext(), name === 'new-workspace-file' ? 'new-file' : 'new-folder', '', true); break;
     case 'toggle-file-folder': await toggleFolder(element.dataset.path!); break;
     case 'collapse-folders': state.openFolders = new Set(); state.folderFiles = new Map(); renderInspector(); document.querySelector<HTMLElement>('#inspector-content .file-row button')?.focus(); break;
     case 'run-project': if (!element.dataset.sessionId || element.dataset.sessionId === state.sessionId) await projectRunner.run(); break;
@@ -6810,11 +8134,11 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'stage-all': case 'unstage-all': await stage(state.git?.files.map(f => f.path) ?? [], name === 'stage-all'); break;
     case 'toggle-diff-stage': await stage([state.selectedFile], !state.selectedStaged); break;
     case 'open-team-progress': case 'open-team-worker': {
-      const taskId = element.closest<HTMLElement>('.team-progress')?.dataset.sessionId;
+      const taskId = element.closest<HTMLElement>('.team-progress, .council-strip, .council-summary')?.dataset.sessionId;
       if (!taskId || taskId !== state.sessionId) break;
       const view = await ensureArchitectView();
       if (taskId !== state.sessionId) break;
-      if (name === 'open-team-worker' && element.dataset.workerId) await view.openWorker(element.dataset.workerId);
+      if (name === 'open-team-worker' && element.dataset.workerId) await view.openWorker(element.dataset.workerId, undefined, element);
       else view.open();
       break;
     }
@@ -6825,6 +8149,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'steer-edit': document.querySelector<HTMLTextAreaElement>('#prompt')?.focus(); break;
     case 'steer-clear': {
       const prompt = document.querySelector<HTMLTextAreaElement>('#prompt'); if (!prompt) break;
+      voiceDictation.draftCleared(state.sessionId);
       prompt.value = ''; state.drafts.set(state.sessionId, '');
       prompt.dispatchEvent(new Event('input', { bubbles: true }));
       prompt.focus();
@@ -6836,7 +8161,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'approval-allow-all': case 'approval-deny-all': { const sessionId = actionTask(element)?.id ?? state.sessionId; for (const id of [...state.streams.get(sessionId)?.approvals.keys() ?? []]) await respondApproval(sessionId, id, name === 'approval-allow-all'); break; }
     case 'approval-group': { const id = actionTask(element)?.id ?? state.sessionId; if (!approvalGroupsOpen.delete(id)) approvalGroupsOpen.add(id); renderApprovalBar(); btwPanel.refresh(); break; }
     case 'approval-details': { const key = (actionTask(element)?.id ?? state.sessionId) + element.dataset.request; if (!approvalDetails.delete(key)) approvalDetails.add(key); renderApprovalBar(); btwPanel.refresh(); break; }
-    case 'suggest': { const prompt = document.querySelector<HTMLTextAreaElement>('#prompt'); if (prompt) { prompt.value = element.dataset.text!; prompt.focus(); } break; }
+    case 'suggest': { const prompt = document.querySelector<HTMLTextAreaElement>('#prompt'); if (prompt) { prompt.value = element.dataset.text!; prompt.dispatchEvent(new Event('input', { bubbles: true })); prompt.focus(); } break; }
   }
 }
 mountExternalLinks(document, url => call('open_external_url', { url }), report);
@@ -6854,9 +8179,9 @@ document.addEventListener('click', event => {
     run(refreshSharedChannel(channelId));
     return;
   }
-  if (action === 'stop') run(call('bot_shared_channel_stop', { channelId }).then(() => refreshSharedChannel(channelId)).catch(error => notify(String(error))));
-  else if (action === 'continue' && messageId) run(call('bot_shared_channel_continue', { channelId, messageId }).then(() => refreshSharedChannel(channelId)).catch(error => notify(String(error))));
-  else if (action === 'reassign' && messageId && button.dataset.bot) run(call('bot_shared_channel_reassign', { channelId, messageId, botId: button.dataset.bot }).then(() => refreshSharedChannel(channelId)).catch(error => notify(String(error))));
+  if (action === 'stop') run(call('bot_shared_channel_stop', { channelId }).then(() => refreshSharedChannel(channelId)).catch(error => notifyError(errorText(error))));
+  else if (action === 'continue' && messageId) run(call('bot_shared_channel_continue', { channelId, messageId }).then(() => refreshSharedChannel(channelId)).catch(error => notifyError(errorText(error))));
+  else if (action === 'reassign' && messageId && button.dataset.bot) run(call('bot_shared_channel_reassign', { channelId, messageId, botId: button.dataset.bot }).then(() => refreshSharedChannel(channelId)).catch(error => notifyError(errorText(error))));
 });
 document.addEventListener('click', event => { const target = event.target as Element; if (target.closest('.markdown,.streaming-content,.message-content') && !target.closest('.message-attachments')) return; const element = target.closest<HTMLElement>('[data-action]'); if (!element || element instanceof HTMLButtonElement && element.disabled) return; event.preventDefault(); run(action(element.dataset.action!, element)); });
 document.addEventListener('click', event => {
@@ -6874,7 +8199,7 @@ document.addEventListener('click', event => {
       botFailovers.delete(sessionId);
       if (state.sessionId === sessionId) renderComposer();
     } catch (error) {
-      botFailoverErrors.set(sessionId, error instanceof Error ? error.message : String(error));
+      botFailoverErrors.set(sessionId, errorText(error));
       if (state.sessionId === sessionId) renderComposer();
       if (button.isConnected) button.disabled = false;
     }
@@ -6885,7 +8210,7 @@ document.addEventListener('submit', event => {
   if (form.id === 'shared-channel-composer' && state.sharedChannelId) {
     const channelId = state.sharedChannelId, text = String(new FormData(form).get('text') ?? '').trim();
     if (!text) return;
-    state.sharedChannelDrafts.delete(channelId);
+    state.drafts.delete(channelDraftKey(channelId));
     const channel = state.sharedChannelDetail;
     const recipients = (channel?.memberIds ?? []).filter(id => {
       const name = sidebarBots.find(bot => bot.id === id)?.name;
@@ -6895,8 +8220,8 @@ document.addEventListener('submit', event => {
     // A failed post goes back to its own channel's draft, unless something new was typed there.
     run(call('bot_shared_channel_post', { channelId, text, ...(recipients.length ? { recipients } : {}) }).then(() => { state.sharedChannelPosting.delete(channelId); return refreshSharedChannel(channelId); }).catch(error => {
       state.sharedChannelPosting.delete(channelId);
-      if (!state.sharedChannelDrafts.get(channelId)?.trim()) state.sharedChannelDrafts.set(channelId, text);
-      notify(error instanceof Error ? error.message : String(error));
+      if (!state.drafts.get(channelDraftKey(channelId))?.trim()) state.drafts.set(channelDraftKey(channelId), text);
+      notifyError(errorText(error));
       if (channelId === state.sharedChannelId) renderComposer();
     }));
     return;
@@ -6916,15 +8241,7 @@ document.addEventListener('submit', event => {
     } finally { if (submitter?.isConnected) submitter.disabled = false; }
   })());
 });
-function resizePrompt(): void {
-  const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
-  if (!prompt) return;
-  prompt.style.height = 'auto'; prompt.style.height = Math.min(prompt.scrollHeight, 180) + 'px';
-  // Scroll only past the cap; a pixel of rounding at rest must not show a scroll bar.
-  prompt.style.overflowY = prompt.scrollHeight > prompt.clientHeight + 1 ? 'auto' : 'hidden';
-}
-window.addEventListener('pandacode-ui-scale-change', resizePrompt);
-document.addEventListener('input', event => { const input = event.target as HTMLInputElement; if (input.id === 'command-query') renderCommands(input.value); if (input.id === 'prompt') resizePrompt(); if (input.id === 'shared-channel-prompt' && state.sharedChannelId) state.sharedChannelDrafts.set(state.sharedChannelId, input.value); if (input.id === 'sidebar-filter') { state.query = input.value; renderNavigation(); } });
+document.addEventListener('input', event => { const input = event.target as HTMLInputElement; if (input.id === 'command-query') renderCommands(input.value); if (input.id === 'prompt') { resizePrompt(); if (input.dataset.sessionId && !deletedSessions.has(input.dataset.sessionId)) state.drafts.set(input.dataset.sessionId, input.value); } if (input.id === 'shared-channel-prompt' && state.sharedChannelId) state.drafts.set(channelDraftKey(state.sharedChannelId), input.value); if (input.id === 'sidebar-filter') { state.query = input.value; renderNavigation(); } });
 document.addEventListener('scroll', event => {
   if (!state.sharedChannelId) return;
   const history = (event.target as Element | null)?.closest?.('.bc-history') as HTMLElement | null;
@@ -6944,21 +8261,36 @@ document.addEventListener('change', event => {
 });
 mountTextUndo();
 document.addEventListener('keydown', event => {
-  if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey || event.isComposing || event.defaultPrevented || event.key.toLowerCase() !== 'b' || state.view !== 'conversation' || document.querySelector<HTMLDialogElement>('#dialog')!.open) return;
+  if (!(event.metaKey || event.ctrlKey) || event.shiftKey || event.altKey || isImeKey(event) || event.defaultPrevented || event.code !== 'KeyB' || state.view !== 'conversation' || document.querySelector<HTMLDialogElement>('#dialog')!.open) return;
   event.preventDefault(); event.stopPropagation(); toggleSidebar();
 }, true);
 const threadFind = createThreadFind({
   pane: () => document.querySelector<HTMLElement>('.conversation-pane'),
-  transcript: () => document.querySelector<HTMLElement>('#transcript'),
+  // Find asks for the transcript before each search: a query the reader gave this thread draws down to its newest
+  // older match, and a closed tool whose details match draws its body so the match can be found.
+  transcript: query => {
+    const transcript = document.querySelector<HTMLElement>('#transcript');
+    if (query) { transcriptView.showForFind(query); if (transcript) fillMatchingToolBodies(transcript, query, state.messages, (message, text) => findCounts.count(message, text, true)); }
+    return transcript;
+  },
+  older: query => transcriptView.olderMatches(query),
+  settled: () => transcriptView.countsSettled(),
+  extend: (query, all, done) => transcriptView.extendFind(query, all, done),
   release: () => { stickToBottom = false; },
   openReply: keepReplyOpen,
   restoreFocus: () => document.querySelector<HTMLTextAreaElement>('#prompt')?.focus(),
 });
+// Capture, so the thread is noted before the bar's own handler searches.
+const noteFind = (): void => transcriptView.noteFind(state.sessionId);
+document.addEventListener('input', event => { if ((event.target as Element).matches?.('.thread-find input')) noteFind(); }, true);
+document.addEventListener('keydown', event => { if (event.key === 'Enter' && (event.target as Element).matches?.('.thread-find input')) noteFind(); }, true);
+document.addEventListener('click', event => { if ((event.target as Element).closest?.('.thread-find [data-find-step]')) noteFind(); }, true);
 document.addEventListener('keydown', event => {
-  if (event.defaultPrevented) return;
-  const command = event.metaKey || event.ctrlKey;
+  // IME conversions own their keys; letter shortcuts otherwise follow the physical layout.
+  if (event.defaultPrevented || isImeKey(event)) return;
+  const command = (event.metaKey || event.ctrlKey) && !event.altKey;
   const dialog = document.querySelector<HTMLDialogElement>('#dialog')!;
-  if (command && event.key.toLowerCase() === 'k') { event.preventDefault(); showCommands(); return; }
+  if (command && event.code === 'KeyK') { event.preventDefault(); showCommands(); return; }
   if (dialog.open) {
     if (dialog.classList.contains('command-dialog') && ['ArrowUp', 'ArrowDown', 'Enter'].includes(event.key) && !isImeKey(event)) {
       event.preventDefault(); const buttons = [...dialog.querySelectorAll<HTMLButtonElement>('#command-results button')]; const current = buttons.findIndex(b => b.classList.contains('command-selected'));
@@ -6966,16 +8298,21 @@ document.addEventListener('keydown', event => {
     }
     return;
   }
-  // An Escape that cancels an IME conversion belongs to the IME: it never stops a run or clears a field.
-  if (event.key === 'Escape' && isImeKey(event)) return;
+  if (event.key === ' ' && !command && !event.altKey && !event.shiftKey && !isImeKey(event)) {
+    const summary = (event.target as Element).closest<HTMLElement>('details[data-account-switch] > summary');
+    if (summary) {
+      // Moving the retained notice at handoff cancels WebKit's delayed native Space activation.
+      event.preventDefault(); if (!event.repeat) summary.click(); return;
+    }
+  }
   // ⌘F finds in the open thread; ⌘G and ⇧⌘G step through its matches.
-  if (command && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'f') { if (session() && transcriptVisible()) { event.preventDefault(); threadFind.open(); } return; }
-  if (command && !event.altKey && event.key.toLowerCase() === 'g' && threadFind.isOpen()) { event.preventDefault(); threadFind.step(event.shiftKey ? -1 : 1); return; }
+  if (command && !event.shiftKey && event.code === 'KeyF') { if (session() && transcriptVisible()) { event.preventDefault(); noteFind(); threadFind.open(); } return; }
+  if (command && event.code === 'KeyG' && threadFind.isOpen()) { event.preventDefault(); noteFind(); threadFind.step(event.shiftKey ? -1 : 1); return; }
   if (sidebarShortcut(event)) return;
-  if (command && event.key.toLowerCase() === 'n') { event.preventDefault(); if (state.view === 'board') showBoardTaskForm(); else run(createTask()); }
-  else if (command && event.key.toLowerCase() === 'j') { event.preventDefault(); run(toggleTerminal()); }
-  else if (command && event.key === ',') { event.preventDefault(); run(showSettings()); }
-  else if (command && event.shiftKey && event.key.toLowerCase() === 'b') { event.preventDefault(); state.inspector = inspectorChosen = inspectorSuppressed || !state.inspector; inspectorSuppressed = false; renderInspector(); }
+  if (command && event.code === 'KeyN') { event.preventDefault(); if (state.view === 'board') showBoardTaskForm(); else run(createTask()); }
+  else if (command && event.code === 'KeyJ') { event.preventDefault(); run(toggleTerminal()); }
+  else if (command && event.code === 'Comma') { event.preventDefault(); run(showSettings()); }
+  else if (command && event.shiftKey && event.code === 'KeyB') { event.preventDefault(); state.inspector = inspectorChosen = inspectorSuppressed || !state.inspector; inspectorSuppressed = false; renderInspector(); }
   else if (event.key === 'Enter' && (event.target as HTMLElement).id === 'prompt' && !event.shiftKey && !isImeKey(event)) {
     event.preventDefault();
     // While an agent works, Enter queues the message and Command/Ctrl Enter steers the running turn.
@@ -6984,11 +8321,30 @@ document.addEventListener('keydown', event => {
   }
   else if (event.key === 'Enter' && (event.target as HTMLElement).id === 'shared-channel-prompt' && !event.shiftKey && !isImeKey(event)) { event.preventDefault(); (event.target as HTMLTextAreaElement).form?.requestSubmit(); }
   else if (event.key === 'Enter' && (event.target as HTMLElement).classList.contains('queue-edit') && (event.metaKey || event.ctrlKey) && !isImeKey(event)) { event.preventDefault(); run(saveQueueEdit(actionTask(event.target as HTMLElement))); }
+  // A toast the reader is in, or an urgent one (danger, Undo) that just appeared, takes Escape before Settings, the board panel and Stop do.
+  else if (event.key === 'Escape' && toastVisible($('#toast')) && escapeClosesToast({ visible: true, focusInToast: $('#toast').contains(document.activeElement), urgent: $('#toast').hasAttribute('data-danger') || Boolean(toastUndo), shownAt: toastShownAt, now: Date.now(), blocked: escapeTaken(event) })) { event.preventDefault(); dismissToast(); }
   else if (event.key === 'Escape' && settingsView && !event.defaultPrevented && !document.querySelector<HTMLDialogElement>('#dialog')?.open && !document.querySelector('.floating-menu')) { event.preventDefault(); closeSettings(); }
   else if (event.key === 'Escape' && state.view !== 'conversation' && state.boardPanel && !event.defaultPrevented) { event.preventDefault(); closeMenus(); state.boardPanel = false; renderBoardView(); }
   else if (event.key === 'Escape' && (event.target as Element).closest?.('.composer-steer-bar') && !event.defaultPrevented) { event.preventDefault(); document.querySelector<HTMLTextAreaElement>('#prompt')?.focus({ preventScroll: true }); }
   else if (event.key === 'Escape' && isRunning() && !terminalPanel.open && !event.defaultPrevented) { event.preventDefault(); if (session()) run(stopTask(session()!)); }
+  // Last, so menus, dialogs, the composer and Stop keep Escape; it only closes a toast nothing else wanted it for. A lasting
+  // notice (the crash notice) closes by Escape only with focus in it (toast-keys.ts).
+  else if (event.key === 'Escape' && toastVisible($('#toast')) && !$('#toast').classList.contains('toast-dismissible') && !escapeTaken(event)) { event.preventDefault(); dismissToast(); }
 });
+/** `:popover-open` is WebKit 17+ (macOS 12's WKWebView throws a SyntaxError on it): probed once, falling back to any
+ * `[popover]` that has a box. The same probe as `foreground()` in voice-dictation.ts. */
+let openPopoverSelector: string | undefined;
+function popoverOpen(): boolean {
+  if (openPopoverSelector === undefined) {
+    try { document.querySelector(':popover-open'); openPopoverSelector = '[popover]:popover-open'; }
+    catch { openPopoverSelector = '[popover]'; }
+  }
+  return [...document.querySelectorAll(openPopoverSelector)].some(node => node.getClientRects().length > 0);
+}
+/** Escape belongs to something else: a handler already took it, an IME is composing, or a dialog or menu is open. */
+function escapeTaken(event: KeyboardEvent): boolean {
+  return event.defaultPrevented || isImeKey(event) || Boolean(document.querySelector<HTMLDialogElement>('#dialog')?.open) || Boolean(document.querySelector('.floating-menu')) || popoverOpen();
+}
 let dialogBackdropPressed = false;
 function outsideDialog(event: MouseEvent): boolean {
   const dialog = event.currentTarget as HTMLDialogElement, rect = dialog.getBoundingClientRect();
@@ -7010,7 +8366,11 @@ if (localStorage.getItem('pandacode.compact') === 'true') document.body.classLis
 // Material file icons arrive in a lazy chunk and have light-theme variants; markup is baked at render time.
 // A full render() here would close open menus mid-click; other icon spots pick the icons up on their next render.
 function refreshFileIcons(): void { if (state.inspector && state.inspectorTab === 'files' && !state.selectedFile) renderInspector(); }
+/** Read before anything else marks this page alive. */
+const windowDied = windowContentDied(localStorage);
 async function boot(): Promise<void> {
+  // Asked first: paused crash restarts skip reopening the last thread.
+  const crashRecovery = takeCrashRecovery();
   await subscribe('agent-event', onAgent);
   await subscribe('provider-models-changed', event => invalidateModels(event.provider));
   await subscribe('architect-event', onArchitect);
@@ -7046,7 +8406,7 @@ async function boot(): Promise<void> {
   }).then(() => undefined));
   run(initRemote());
   run(initCloudAgents());
-  run(initOrchestration({ call, listen: (name, callback) => (subscribe as (name: string, callback: (event: any) => void) => Promise<() => void>)(name, callback), notify, modal, closeModal, openSession: id => run(selectSession(id, true)), sessionId: () => state.sessionId, running: () => isRunning(), visible: () => !$('.conversation-pane').hidden, title: id => state.sessions.find(s => s.id === id)?.title }));
+  run(initOrchestration({ call, listen: (name, callback) => (subscribe as (name: string, callback: (event: any) => void) => Promise<() => void>)(name, callback), notify, notifyError, modal, closeModal, openSession: id => run(selectSession(id, true)), sessionId: () => state.sessionId, running: () => isRunning(), visible: () => !$('.conversation-pane').hidden, title: id => state.sessions.find(s => s.id === id)?.title }));
   run(subscribe('bot-notification', event => { if (event?.text) notify(String(event.text).replace(/\s+/g, ' ').slice(0, 160)); }).then(() => undefined));
   run(subscribe('bot-failover', (ask: FailoverAsk) => {
     if (!ask?.sessionId) return;
@@ -7064,7 +8424,7 @@ async function boot(): Promise<void> {
   }).then(() => undefined));
   // Bots appear in the sidebar once loaded; startup does not wait for them.
   botProjectsLoad = reloadBotProjects(false); run(botProjectsLoad);
-  run(subscribe('bot-pairing', event => { if (event?.code) notify(`${event.senderName || 'Someone'} wants to talk to a bot. Approve code ${event.code} in Bots.`); }).then(() => undefined));
+  run(subscribe('bot-pairing', event => { if (event?.code) notify(`${event.senderName || 'Someone'} wants to talk to a bot. Approve code ${event.code} in Bots.`, undefined, { important: true }); }).then(() => undefined));
   // Wake-ups for the open thread and the sidebar's clocks; refreshed on schedules-changed.
   // Motion only when the user opens these: a remembered thread or a redraw restores them still.
   document.addEventListener('click', event => {
@@ -7110,6 +8470,11 @@ async function boot(): Promise<void> {
   await connectAgentUiActions(() => transcriptVisible() ? state.sessionId : '', performAgentUiAction);
   [state.projects, state.sessions, state.providers] = await Promise.all([call<Project[]>('list_projects'), call<Session[]>('list_sessions'), call<Provider[]>('list_providers')]);
   projectsListed = true;
+  // Drafts of threads deleted while the app was closed go (the list leaves out older threads, so ask).
+  void dropDeletedDrafts(state.drafts, ids => call<string[]>('sessions_missing', { ids }));
+  // New task text of projects removed some other way than this window's Remove (a failed list throws above).
+  if (Array.isArray(state.projects)) dropRemovedProjectDrafts(state.drafts, state.projects.map(project => project.id));
+  replayDismissals();
   run(call<import('./connections').ConnectionSnapshot>('connections_list').then(onNamedConnections));
   // Queues from an earlier launch wait for an explicit Resume.
   for (const entry of await call<QueuedMessage[]>('queue_list').catch(() => [])) {
@@ -7119,11 +8484,27 @@ async function boot(): Promise<void> {
   scheduleLimitResumes();
   if (state.projectFilter && !state.projects.some(p => p.id === state.projectFilter)) setProjectFilter('');
   const savedProject = localStorage.getItem('pandacode.project');
-  const recent = state.sessions.find(s => !s.archived);
-  activateProject(state.projects.find(p => p.id === savedProject)?.id ?? recent?.projectId ?? state.projects[0]?.id ?? '');
-  const first = state.sessions.find(s => !s.archived && s.projectId === state.projectId);
+  // The thread open at the last exit (clean or a crash) comes back; otherwise the newest one.
+  const recovery = await crashRecovery;
+  const { task: reopened, stuck, stuckNotLast, newTask: lastNewTask, fallback, windowDiedAgain } = threadToReopen(localStorage, state.sessions.filter(s => state.projects.some(p => p.id === s.projectId)), { crashed: Boolean(recovery), paused: recovery?.restartsPaused ?? false, windowDied });
+  windowDeath = windowDiedAgain ? windowDied ? 'again' : 'before' : windowDied ? 'reloaded' : undefined;
+  // A thread whose opening took the app down last time is not opened by itself again.
+  const candidates = state.sessions.filter(s => !s.archived && s.id !== stuck);
+  heldBackThread = stuck ? state.sessions.find(s => s.id === stuck && !s.archived) : undefined;
+  heldBackNotLast = Boolean(stuckNotLast);
+  const recent = candidates[0];
+  // A New task open at exit comes back with its kept text, even when boot holds threads back (it has
+  // no transcript to suspect); otherwise, after repeated crashes, nothing opens by itself.
+  const newTask = lastNewTask ? state.projects.find(p => p.id === savedProject)?.id : undefined;
+  bootOpenedNothing = !fallback && !newTask;
+  activateProject(reopened?.projectId ?? newTask ?? state.projects.find(p => p.id === savedProject)?.id ?? recent?.projectId ?? state.projects[0]?.id ?? '');
+  // A remembered New task whose project is gone (removed elsewhere) falls back like any launch.
+  const first = reopened ?? (fallback && !newTask ? candidates.find(s => s.projectId === state.projectId) : undefined);
+  if (newTask) run(createTask(newTask));
   // selectSession bumps the generation before its first await; a later bump means the user picked a task meanwhile.
   const selecting = first ? selectSession(first.id) : undefined, bootGeneration = state.generation;
+  showCrashNotice();
+  // openThread marks the thread until it has painted and clears the mark when it fails.
   if (selecting) await selecting; else { render(); await refreshInspector(); }
   run(fileIconsReady.then(refreshFileIcons));
   window.addEventListener('pandacode-theme-change', refreshFileIcons);
@@ -7131,16 +8512,40 @@ async function boot(): Promise<void> {
   if (!preview && !state.providers.some(p => p.installed)) notify('Open Settings to check your installed agent CLIs.');
 }
 // PandaCode's own updates: checked on GitHub Releases, installed when no agent is working.
-mountUpdatePill($('#update-status') as HTMLButtonElement, startAppUpdates({ busy: () => state.sessions.some(task => isRunning(task.id)), notify }));
+mountUpdatePill($('#update-status') as HTMLButtonElement, startAppUpdates({ busy: () => state.sessions.some(task => isRunning(task.id)), notify, notifyError }));
 const agentUpdates = initializeAgentUpdates({
   modal, closeModal, report, providers: () => state.providers,
   providersChanged: async () => { await discoverSettingsProviders(); refreshModelLabels(); slashPicker?.refresh(true); },
 });
 window.addEventListener('pagehide', () => agentUpdates.dispose(), { once: true });
+// A New task's text is kept per project, since its draft session does not outlive the launch.
+state.drafts.newTaskKey = id => { const task = state.sessions.find(s => s.id === id); return task?.draft ? NEW_TASK_DRAFT + task.projectId : undefined; };
+expireDraftsWhileRunning(state.drafts);
 renderThemeToggle(); render(); renderInspector();
 // A failed boot still ends in a usable empty state (its error is reported by run()).
 bootPending = boot().finally(() => { bootPending = undefined; if (!projectsListed) { projectsListed = true; render(); } });
 run(bootPending);
+// After a crash restart, say so once the tasks are listed (boot calls it); a failed boot still gets the notice.
+function showCrashNotice(): void {
+  void showCrashRecovery({
+    notify: (text, actions, holdMs, dismiss, quiet, tone) => notify(text, actions, { holdMs, dismiss, quiet, tone }), toast: $('#toast'), tasks: () => state.sessions, nothingOpened: () => bootOpenedNothing, openThread: id => run(selectSession(id)), openCrashSettings: () => run(showCrashSettings()), windowDied: () => windowDeath, hide: () => { toastDismiss = undefined; dismissToast(); },
+    // Asked each time the notice is written: a thread deleted or archived since is no longer offered.
+    heldBack: () => {
+      const id = heldBackThread?.id, thread = id && !deletedSessions.has(id) ? state.sessions.find(s => s.id === id && !s.archived) : undefined;
+      return thread && { id: thread.id, title: thread.title, notLast: heldBackNotLast };
+    },
+  });
+}
+// An orderly unload (reload, quit that reaches the page) is never a thread that took the app down.
+// WKWebView may not fire pagehide on Cmd+Q, so a committed quit's native `app-quitting` event does the same.
+const leave = () => leavePage(localStorage);
+window.addEventListener('pagehide', leave);
+void subscribe('app-quitting', leave).catch(error => console.warn('Could not listen for quitting:', error));
+// A page that outlives the native reload budget is stable: an earlier window death is forgotten.
+window.setTimeout(() => windowStable(localStorage), WINDOW_STABLE_AFTER);
+wireToastKeys($('#toast'));
+keepToastClear($('#toast'), $('#composer-area'));
+void bootPending.catch(() => undefined).then(showCrashNotice);
 // The diff engine (module, highlighter workers, themes) starts right after the first paint.
 preloadDiffsAfterPaint();
 if (!preview) initializeNativeAppearance();

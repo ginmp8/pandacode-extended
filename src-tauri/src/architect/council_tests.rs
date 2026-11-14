@@ -2349,7 +2349,8 @@ fn finding_receipt_and_usage_contracts_validate_correlation_and_unknown_measurem
     unsafe_location.location.as_mut().unwrap().file = "../private.txt".into();
     assert!(matches!(unsafe_location.validate(), Err(council::CouncilCompositionError::InvalidFinding(_))));
     let disposition = council::CouncilFindingDisposition {
-        finding_id: finding.id.clone(), disposition: DispositionKind::Addressed, actor_id: "user:local".into(),
+        finding_id: finding.id.clone(), cycle_id: finding.cycle_id.clone(),
+        artifact_digest: finding.artifact_digest.clone(), disposition: DispositionKind::Addressed, actor_id: "user:local".into(),
         rationale: "The change is included in the new revision.".into(), timestamp_ms: 1,
         artifact_links: vec!["artifact:revision-2".into()],
     };
@@ -2395,6 +2396,109 @@ fn finding_receipt_and_usage_contracts_validate_correlation_and_unknown_measurem
     let mut fabricated = usage;
     fabricated.elapsed_ms = council::CouncilUsageValue { status: ValueStatus::Unknown, value: Some(100) };
     assert!(matches!(fabricated.validate(), Err(council::CouncilCompositionError::InvalidUsageRecord(_))));
+}
+
+#[test]
+fn critical_findings_require_verified_or_current_human_disposition() {
+    use council::{CouncilFindingDispositionKind as Kind, CouncilFindingSeverity as Severity};
+    let make_finding = |seat: &str, summary: &str| {
+        let mut finding = council::CouncilFinding {
+            id: String::new(), content_digest: String::new(), cycle_id: "root:cycle-4".into(),
+            round_id: "root:cycle-4:2".into(), seat_id: seat.into(),
+            artifact_digest: "a".repeat(64), criterion_id: "security".into(),
+            severity: Severity::Critical, category: "authorization".into(),
+            summary: summary.into(), evidence_refs: vec!["file:src/auth.rs#sha256:".to_string() + &"b".repeat(64)],
+            location_status: council::CouncilFindingLocationStatus::Missing, location: None,
+            suggested_fix: None,
+        };
+        finding.content_digest = finding.calculated_content_digest();
+        finding.id = format!("finding-{}", finding.content_digest);
+        finding
+    };
+    let first = make_finding("seat-a", "Cross-task access is possible.");
+    let second = make_finding("seat-b", "An untrusted caller can change scope.");
+    assert_ne!(first.id, second.id);
+    assert!(first.validate().is_ok());
+    assert!(second.validate().is_ok());
+    let findings = vec![first.clone(), second.clone()];
+    assert_eq!(
+        council::unresolved_critical_findings(&findings, &[], "root:cycle-4"),
+        vec![first.id.clone(), second.id.clone()],
+    );
+
+    let disposition = |finding_id: &str, actor: &str, kind| {
+        council::CouncilFindingDisposition {
+            finding_id: finding_id.into(), cycle_id: "root:cycle-4".into(),
+            artifact_digest: "a".repeat(64), disposition: kind, actor_id: actor.into(),
+            rationale: "Reviewed against the current artifact.".into(), timestamp_ms: 10,
+            artifact_links: Vec::new(),
+        }
+    };
+    let forged_waiver = disposition(
+        &first.id, "architect", Kind::WaivedByAuthorizedHuman,
+    );
+    let stale_waiver = disposition(
+        "finding-stale-cycle", "user", Kind::WaivedByAuthorizedHuman,
+    );
+    let stale_artifact = disposition(
+        "finding-stale-artifact", "user", Kind::WaivedByAuthorizedHuman,
+    );
+    let model_addressed = disposition(
+        &first.id, "architect", Kind::Addressed,
+    );
+    assert_eq!(
+        council::unresolved_critical_findings(
+            &findings, &[forged_waiver, stale_waiver, stale_artifact, model_addressed],
+            "root:cycle-4",
+        ),
+        vec![first.id.clone(), second.id.clone()],
+    );
+    let mut wrong_cycle = disposition(&first.id, "user", Kind::WaivedByAuthorizedHuman);
+    wrong_cycle.cycle_id = "root:old-cycle".into();
+    let mut wrong_artifact = disposition(&first.id, "user", Kind::WaivedByAuthorizedHuman);
+    wrong_artifact.artifact_digest = "c".repeat(64);
+    assert_eq!(
+        council::unresolved_critical_findings(
+            &findings, &[wrong_cycle, wrong_artifact], "root:cycle-4",
+        ),
+        vec![first.id.clone(), second.id.clone()],
+        "a matching ID cannot let a stale cycle or artifact disposition close the finding"
+    );
+    let valid_waiver = disposition(
+        &first.id, "user", Kind::WaivedByAuthorizedHuman,
+    );
+    assert_eq!(
+        council::unresolved_critical_findings(&findings, &[valid_waiver], "root:cycle-4"),
+        vec![second.id],
+    );
+    let native_verification = disposition(
+        &first.id, "native:verification", Kind::Addressed,
+    );
+    assert_eq!(
+        council::unresolved_critical_findings(
+            &findings, &[native_verification], "root:cycle-4",
+        ),
+        vec![second.id],
+    );
+}
+
+#[test]
+fn every_structured_finding_requires_evidence_even_when_criterion_evidence_is_optional() {
+    let mut finding = council::CouncilFinding {
+        id: "finding-empty-evidence".into(), content_digest: String::new(),
+        cycle_id: "root:cycle-1".into(), round_id: "root:cycle-1:1".into(),
+        seat_id: "reviewer".into(), artifact_digest: "a".repeat(64),
+        criterion_id: "lens".into(), severity: council::CouncilFindingSeverity::Low,
+        category: "quality".into(), summary: "The report has no supporting evidence.".into(),
+        evidence_refs: Vec::new(), location_status: council::CouncilFindingLocationStatus::Missing,
+        location: None, suggested_fix: None,
+    };
+    finding.content_digest = finding.calculated_content_digest();
+    finding.id = format!("finding-{}", finding.content_digest);
+    assert!(matches!(
+        finding.validate(),
+        Err(council::CouncilCompositionError::InvalidFinding(_))
+    ));
 }
 
 #[test]

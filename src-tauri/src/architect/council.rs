@@ -465,6 +465,12 @@ pub enum CouncilFindingDispositionKind {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CouncilFindingDisposition {
     pub finding_id: String,
+    /// Exact native review cycle to which this disposition applies.
+    #[serde(default)]
+    pub cycle_id: String,
+    /// Digest of the reviewed artifact; stale dispositions cannot close a finding.
+    #[serde(default)]
+    pub artifact_digest: String,
     pub disposition: CouncilFindingDispositionKind,
     pub actor_id: String,
     pub rationale: String,
@@ -778,8 +784,8 @@ impl CouncilFinding {
         if !safe_contract_text(&self.category, 128) || !safe_contract_text(&self.summary, MAX_CRITERION_DESCRIPTION_CHARS) {
             return Err(CouncilCompositionError::InvalidFinding("category or summary is empty, unsafe, or too long"));
         }
-        if !unique_refs(&self.evidence_refs, MAX_RESULT_REFS) {
-            return Err(CouncilCompositionError::InvalidFinding("evidenceRefs must be unique bounded references"));
+        if self.evidence_refs.is_empty() || !unique_refs(&self.evidence_refs, MAX_RESULT_REFS) {
+            return Err(CouncilCompositionError::InvalidFinding("evidenceRefs must contain at least one unique bounded verified reference"));
         }
         match (self.location_status, self.location.as_ref()) {
             (CouncilFindingLocationStatus::Verified, Some(location))
@@ -797,6 +803,8 @@ impl CouncilFinding {
 impl CouncilFindingDisposition {
     pub fn validate(&self) -> std::result::Result<(), CouncilCompositionError> {
         if !contract_token(&self.finding_id, MAX_CONTRACT_ID_CHARS)
+            || !contract_token(&self.cycle_id, MAX_CONTRACT_ID_CHARS)
+            || !sha256_digest(&self.artifact_digest)
             || !contract_token(&self.actor_id, MAX_CONTRACT_ID_CHARS)
             || !safe_contract_text(&self.rationale, MAX_CRITERION_DESCRIPTION_CHARS)
             || self.timestamp_ms == 0
@@ -804,6 +812,35 @@ impl CouncilFindingDisposition {
         { return Err(CouncilCompositionError::InvalidDisposition("finding, actor, rationale, timestamp, or artifact links")); }
         Ok(())
     }
+}
+
+/// Structured critical findings can be closed only by native verification or a
+/// separate user action. Model-written dispositions never grant approval.
+pub(super) fn unresolved_critical_findings(
+    findings: &[CouncilFinding],
+    dispositions: &[CouncilFindingDisposition],
+    cycle_id: &str,
+) -> Vec<String> {
+    let mut unresolved = findings.iter().filter(|finding| {
+        finding.validate().is_ok()
+            && finding.cycle_id == cycle_id
+            && finding.severity == CouncilFindingSeverity::Critical
+    }).filter(|finding| {
+        !dispositions.iter().any(|disposition| {
+            disposition.validate().is_ok()
+                && disposition.finding_id == finding.id
+                && disposition.cycle_id == finding.cycle_id
+                && disposition.artifact_digest == finding.artifact_digest
+                && match disposition.disposition {
+                    CouncilFindingDispositionKind::Addressed => disposition.actor_id == "native:verification",
+                    CouncilFindingDispositionKind::WaivedByAuthorizedHuman => disposition.actor_id == "user",
+                    _ => false,
+                }
+        })
+    }).map(|finding| finding.id.clone()).collect::<Vec<_>>();
+    unresolved.sort();
+    unresolved.dedup();
+    unresolved
 }
 
 impl ChildCouncilReceipt {

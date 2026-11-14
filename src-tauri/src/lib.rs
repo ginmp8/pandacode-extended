@@ -4619,6 +4619,7 @@ pub fn run() {
                 architect::architect_set_council,
                 architect::architect_council_reviewer_options,
                 architect::architect_council_accept,
+                architect::architect_council_waive_finding,
                 architect::architect_start,
                 architect::architect_control,
                 architect::architect_worker_messages,

@@ -2694,6 +2694,194 @@ fn architect_cannot_claim_a_finding_was_addressed_without_native_verification() 
         "rationale":"The model says it fixed the issue."
     })).unwrap_err();
     assert!(error.contains("council_disposition_unverified"), "{error}");
+    let error = record_council_finding_disposition_state(&state, &session_id, generation, &coordination::Actor::Architect, json!({
+        "findingId":"finding-current",
+        "disposition":"waived_by_authorized_human",
+        "rationale":"The model claims the user approved it."
+    })).unwrap_err();
+    assert!(error.contains("explicit user action"), "{error}");
+}
+
+#[test]
+fn native_human_waiver_command_persists_reason_and_finding_artifact_scope() {
+    let (store, mut team) = fixture();
+    let criterion = council::CouncilCriterion {
+        id: "authorization".into(),
+        lens: "authorization".into(),
+        description: "Keep access within the task scope.".into(),
+        required: true,
+        target: 9.0,
+        evidence_required: true,
+        source: council::CouncilCriterionOrigin::User,
+    };
+    team.config.council = Some(CouncilConfig {
+        target: 9.0,
+        max_rounds: 2,
+        reviewers: 2,
+        composition: Some(council::CouncilComposition {
+            schema_version: 1,
+            automatic: council::CouncilAutomaticReviewers {
+                enabled: true,
+                count: council::AutomaticReviewerCount::Fixed(2),
+            },
+            selected: Vec::new(),
+            criteria_source: council::CouncilCriteriaSource::User,
+            criteria: vec![criterion],
+            strategy: council::CouncilStrategy::Parallel,
+            limits: council::CouncilCompositionLimits {
+                max_depth: 2,
+                max_root_seats: 8,
+                max_concurrent_leaves: 4,
+                max_leaf_reviews_per_round: 32,
+                timeout_ms: 3_600_000,
+                max_estimated_cost_micros: None,
+            },
+        }),
+        ..CouncilConfig::default()
+    });
+    team.status = "completed".into();
+    let session_id = team.session_id.clone();
+    let cycle_id = format!("{}:{}", session_id, team.council_since);
+    let mut finding = council::CouncilFinding {
+        id: String::new(),
+        content_digest: String::new(),
+        cycle_id: cycle_id.clone(),
+        round_id: format!("{cycle_id}:1"),
+        seat_id: "reviewer-1".into(),
+        artifact_digest: "a".repeat(64),
+        criterion_id: "authorization".into(),
+        severity: council::CouncilFindingSeverity::Critical,
+        category: "authorization".into(),
+        summary: "A caller can access another task's artifact.".into(),
+        evidence_refs: vec![format!("file:src/auth.rs#sha256:{}", "b".repeat(64))],
+        location_status: council::CouncilFindingLocationStatus::Missing,
+        location: None,
+        suggested_fix: None,
+    };
+    finding.content_digest = finding.calculated_content_digest();
+    finding.id = format!("finding-{}", finding.content_digest);
+    finding.validate().unwrap();
+    persist_council_record(
+        &store,
+        &session_id,
+        "native-council-test-finding",
+        "council_finding",
+        &finding,
+        "reviewer-1",
+    ).unwrap();
+    save(&store, &mut team).unwrap();
+    let state = AppState {
+        store: Arc::new(std::sync::Mutex::new(store)),
+        agents: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        terminals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        shutdown: std::sync::atomic::AtomicU8::new(0),
+    };
+
+    let stale_error = waive_council_finding_state(
+        &state,
+        &session_id,
+        CouncilFindingWaiverInput {
+            finding_id: "finding-from-another-cycle".into(),
+            rationale: "This was explicitly reviewed.".into(),
+        },
+    ).unwrap_err();
+    assert!(stale_error.contains("not part of the current root cycle"), "{stale_error}");
+
+    let empty_reason_error = waive_council_finding_state(
+        &state,
+        &session_id,
+        CouncilFindingWaiverInput {
+            finding_id: finding.id.clone(),
+            rationale: String::new(),
+        },
+    ).unwrap_err();
+    assert!(empty_reason_error.contains("disposition is invalid"), "{empty_reason_error}");
+
+    waive_council_finding_state(
+        &state,
+        &session_id,
+        CouncilFindingWaiverInput {
+            finding_id: finding.id.clone(),
+            rationale: "The owner accepts this scoped risk for the reviewed revision.".into(),
+        },
+    ).unwrap();
+    let store = state.store.lock().unwrap();
+    let dispositions = council_records::<council::CouncilFindingDisposition>(
+        &store,
+        &session_id,
+        "council_finding_disposition",
+    ).unwrap();
+    assert_eq!(dispositions.len(), 1);
+    let waiver = &dispositions[0];
+    assert_eq!(waiver.disposition, council::CouncilFindingDispositionKind::WaivedByAuthorizedHuman);
+    assert_eq!(waiver.actor_id, "user");
+    assert_eq!(waiver.rationale, "The owner accepts this scoped risk for the reviewed revision.");
+    assert_eq!(waiver.cycle_id, finding.cycle_id);
+    assert_eq!(waiver.artifact_digest, finding.artifact_digest);
+    assert_eq!(waiver.artifact_links, vec![format!("artifact:{}", finding.artifact_digest)]);
+}
+
+#[test]
+fn unvalidated_current_disposition_blocks_native_finish_and_acceptance() {
+    let (store, mut team) = fixture();
+    team.config.council = Some(CouncilConfig {
+        target: 9.0,
+        max_rounds: 2,
+        reviewers: 2,
+        composition: Some(council::CouncilComposition {
+            schema_version: 1,
+            automatic: council::CouncilAutomaticReviewers {
+                enabled: true,
+                count: council::AutomaticReviewerCount::Fixed(2),
+            },
+            selected: Vec::new(),
+            criteria_source: council::CouncilCriteriaSource::User,
+            criteria: vec![council::CouncilCriterion {
+                id: "authorization".into(),
+                lens: "authorization".into(),
+                description: "Keep access within the task scope.".into(),
+                required: true,
+                target: 9.0,
+                evidence_required: true,
+                source: council::CouncilCriterionOrigin::User,
+            }],
+            strategy: council::CouncilStrategy::Parallel,
+            limits: council::CouncilCompositionLimits {
+                max_depth: 2,
+                max_root_seats: 8,
+                max_concurrent_leaves: 4,
+                max_leaf_reviews_per_round: 32,
+                timeout_ms: 3_600_000,
+                max_estimated_cost_micros: None,
+            },
+        }),
+        ..CouncilConfig::default()
+    });
+    let cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    let unvalidated = council::CouncilFindingDisposition {
+        finding_id: "finding-forged".into(),
+        cycle_id,
+        artifact_digest: String::new(),
+        disposition: council::CouncilFindingDispositionKind::WaivedByAuthorizedHuman,
+        actor_id: "user".into(),
+        rationale: "This record is malformed and must not authorize completion.".into(),
+        timestamp_ms: 1,
+        artifact_links: Vec::new(),
+    };
+    persist_council_record(
+        &store,
+        &team.session_id,
+        "test-unvalidated-current-disposition",
+        "council_finding_disposition",
+        &unvalidated,
+        "user",
+    ).unwrap();
+
+    let refusal = native_council_finish_refusal(&store, &team).unwrap();
+    assert!(refusal.contains("council_finding_disposition_invalid"), "{refusal}");
+    assert!(ensure_no_unresolved_critical_findings(&store, &team).unwrap_err().contains(
+        "council_finding_disposition_invalid"
+    ));
 }
 
 fn claim(
@@ -5824,6 +6012,8 @@ fn persisted_council_criterion_receipts_drive_the_gate_and_dispositions_project_
     let finding = &inputs[0].2;
     let disposition = council::CouncilFindingDisposition {
         finding_id: finding.id.clone(),
+        cycle_id: finding.cycle_id.clone(),
+        artifact_digest: finding.artifact_digest.clone(),
         disposition: council::CouncilFindingDispositionKind::Addressed,
         actor_id: "user:local".into(),
         rationale: "The access check is covered by the current implementation.".into(),
@@ -5839,12 +6029,31 @@ fn persisted_council_criterion_receipts_drive_the_gate_and_dispositions_project_
         "user:local",
     )
     .unwrap();
+    let mut stale_disposition = disposition.clone();
+    stale_disposition.artifact_digest = "c".repeat(64);
+    stale_disposition.timestamp_ms = stale_disposition.timestamp_ms.saturating_add(1);
+    persist_council_record(
+        &store,
+        &team.session_id,
+        "test-council-stale-finding-disposition",
+        "council_finding_disposition",
+        &stale_disposition,
+        "user:local",
+    )
+    .unwrap();
     let projected = council_ledger_projection(&store, &team);
     assert_eq!(projected.council_finding_dispositions, vec![disposition]);
 }
 
 fn nested_child_lifecycle_fixture() -> (AppState, String, String, CouncilChildLink) {
     let (state, root_id) = state_fixture();
+    nested_child_lifecycle_fixture_for_root(state, root_id)
+}
+
+fn nested_child_lifecycle_fixture_for_root(
+    state: AppState,
+    root_id: String,
+) -> (AppState, String, String, CouncilChildLink) {
     let store = state.store.lock().unwrap();
     let project_id = store.session(&root_id).unwrap().project_id;
     let child_session = store.create_session(&project_id, "codex", "default", "ask").unwrap();
@@ -5911,6 +6120,58 @@ fn nested_child_lifecycle_fixture() -> (AppState, String, String, CouncilChildLi
     ).unwrap();
     drop(store);
     (state, root_id, child_id, link)
+}
+
+#[test]
+fn failed_nested_child_restart_preserves_one_link_and_terminal_reason() {
+    let path = std::env::temp_dir().join(format!("pandacode-nested-restart-{}.db", storage::id()));
+    let (state, root_id, child_id, link) = {
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let root_session = store.create_session(&project.id, "claude", "default", "ask").unwrap();
+        let root_id = root_session.id.clone();
+        let mut root = new_team(root_id.clone(), config());
+        save(&store, &mut root).unwrap();
+        let state = AppState {
+            store: Arc::new(std::sync::Mutex::new(store)),
+            agents: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            terminals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            shutdown: std::sync::atomic::AtomicU8::new(0),
+        };
+        nested_child_lifecycle_fixture_for_root(state, root_id)
+    };
+
+    let reason = "Nested Council timed out before producing a terminal receipt.";
+    {
+        let store = state.store.lock().unwrap();
+        cancel_nested_child_team(&store, &std::collections::HashMap::new(), &link, reason).unwrap();
+    }
+    drop(state);
+
+    let reopened = Store::open(&path).unwrap();
+    let recovered_link = load_council_child_link(&reopened, &child_id).unwrap().unwrap();
+    assert_eq!(recovered_link, link);
+    assert_eq!(
+        reopened.db.query_row("SELECT COUNT(*) FROM sessions WHERE id=?1", [&child_id], |row| row.get::<_, i64>(0)).unwrap(),
+        1,
+        "restart must retain the original child session, not allocate a replacement"
+    );
+
+    let mut root = load(&reopened, &root_id).unwrap().unwrap();
+    root.status = "running".into();
+    assert!(reconcile_nested_child_seats(&reopened, &std::collections::HashMap::new(), &mut root).unwrap());
+    assert_eq!(root.workers[0].status, "failed");
+    assert_eq!(root.workers[0].error.as_deref(), Some(reason));
+    assert!(!reconcile_nested_child_seats(&reopened, &std::collections::HashMap::new(), &mut root).unwrap());
+    assert_eq!(root.workers[0].error.as_deref(), Some(reason));
+    save(&reopened, &mut root).unwrap();
+    assert_eq!(
+        reopened.db.query_row("SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1 AND kind='council_child_link'", [&root_id], |row| row.get::<_, i64>(0)).unwrap(),
+        1,
+        "restart must keep one durable child ownership link"
+    );
+    drop(reopened);
+    let _ = std::fs::remove_file(path);
 }
 
 #[test]

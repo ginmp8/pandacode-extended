@@ -127,7 +127,7 @@ function messageHtml(message: SharedChannelMessage, bots: Bot[]): string {
         : '';
       return `${escape(reviewer.name)} (${escape(reviewer.lens ?? 'review')})${reviewer.score == null ? '' : ` ${reviewer.score.toFixed(1)}`}${skillNote}`;
     }).join(' · ') ?? '';
-    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${reviewerSummary}</span>${council.notice ? `<span class="bc-council-notice">${escape(council.notice)}</span>` : ''}${council.acceptanceReason ? `<span class="bc-council-acceptance">Accepted by local user: ${escape(council.acceptanceReason)}</span>` : ''}${council.followupStatus ? `<span class="bc-council-followup">GitHub follow-up: ${escape(council.followupStatus)}${council.followupError ? ` · ${escape(council.followupError)}` : ''}${council.followupUrl?.startsWith('https://github.com/') ? ` · <a href="${escape(council.followupUrl)}" target="_blank" rel="noopener noreferrer">Open issue</a>` : ''}</span>` : ''}${council.sessionId ? `<button type="button" class="secondary-button bc-council-report" data-action="channel-council-report" data-session-id="${escape(council.sessionId)}">View Council report</button>` : ''}${council.round > 0 && ['Limit reached', 'Needs correction', 'Inconclusive'].includes(council.state) && message.status !== 'Stopped' && message.status !== 'Failed' ? `<button type="button" class="secondary-button" data-action="channel-council-accept" data-delivery-id="${escape(message.id)}">Accept with reason</button>` : ''}</span>` : '';
+    const verdict = council ? `<span class="bc-council-summary" aria-label="Delivery Council status"><strong>Council: ${escape(council.state)}</strong>${council.round ? ` · round ${council.round}` : ''}${council.lowest != null ? ` · lowest ${council.lowest.toFixed(1)}/10` : ''}<span class="bc-council-reviewers">${reviewerSummary}</span>${council.notice ? `<span class="bc-council-notice">${escape(council.notice)}</span>` : ''}${council.acceptanceReason ? `<span class="bc-council-acceptance">Accepted by local user: ${escape(council.acceptanceReason)}</span>` : ''}${council.followupStatus ? `<span class="bc-council-followup">GitHub follow-up: ${escape(council.followupStatus)}${council.followupError ? ` · ${escape(council.followupError)}` : ''}${council.followupUrl?.startsWith('https://github.com/') ? ` · <a href="${escape(council.followupUrl)}" target="_blank" rel="noopener noreferrer">Open issue</a>` : ''}</span>` : ''}${council.sessionId ? `<button type="button" class="secondary-button bc-council-report" data-action="channel-council-report" data-delivery-id="${escape(message.id)}" data-cycle-id="${escape(council.cycleId)}" data-artifact-revision="${escape(council.artifactRevision)}" data-session-id="${escape(council.sessionId)}">View Council report</button>` : ''}${council.round > 0 && ['Limit reached', 'Needs correction', 'Inconclusive'].includes(council.state) && message.status !== 'Stopped' && message.status !== 'Failed' ? `<button type="button" class="secondary-button" data-action="channel-council-accept" data-delivery-id="${escape(message.id)}">Accept with reason</button>` : ''}</span>` : '';
     return `<div class="bc-assigned" role="note" data-message-id="${escape(message.id)}"><span>${escape(description)}</span>${message.status ? `<small>${escape(message.status)}</small>` : ""}${verdict}</div>`;
   }
   const bot = message.authorBotId ? bots.find(item => item.id === message.authorBotId) : undefined;
@@ -759,20 +759,24 @@ export async function openSharedChannel(channelId: string, options: SharedChanne
 }
 
 /** Use the same current-cycle ledger presenter as the Workers inspector, with no editable controls. */
-export function sharedChannelCouncilReportHtml(team: TeamSnapshot): string {
+export function sharedChannelCouncilReportHtml(team: TeamSnapshot, cycleId: string): string {
   const status = team.councilStatus;
   const score = status?.lowest == null ? 'lowest score Unknown' : `lowest score ${status.lowest.toFixed(1)} / ${status.target.toFixed(1)}`;
-  return `<section class="bc-council-report" data-session-id="${escape(team.sessionId)}" aria-label="Council report"><p class="bc-council-report-state"><strong>Council: ${escape(status?.state ?? 'Unknown')}</strong> · ${score}</p>${councilLedgerHtmlForTeam(team)}</section>`;
+  return `<section class="bc-council-report" data-session-id="${escape(team.sessionId)}" data-cycle-id="${escape(cycleId)}" aria-label="Council report"><p class="bc-council-report-state"><strong>Council: ${escape(status?.state ?? 'Unknown')}</strong> · ${score}</p>${councilLedgerHtmlForTeam(team)}</section>`;
 }
 
 /** Open the report from a channel without leaving its current conversation route. */
-export async function openSharedChannelCouncilReport(sessionId: string, options: SharedChannelUiOptions): Promise<void> {
+export async function openSharedChannelCouncilReport(sessionId: string, cycleId: string, artifactRevision: string, options: SharedChannelUiOptions): Promise<void> {
   if (!options.loadCouncilSnapshot) { options.notify('This Council delivery report is unavailable.'); return; }
   let team: TeamSnapshot | null;
   try { team = await options.loadCouncilSnapshot(sessionId); }
   catch { options.notify('This Council delivery report is unavailable.'); return; }
-  if (!team || team.sessionId !== sessionId) { options.notify('This Council delivery report is unavailable.'); return; }
-  const dialog = options.modal('Council report', sharedChannelCouncilReportHtml(team), 'bot-shared-dialog');
+  const expectedSince = Number(artifactRevision.split(':', 1)[0]);
+  if (!team || team.sessionId !== sessionId || !cycleId || !Number.isSafeInteger(expectedSince)
+      || team.councilSince !== expectedSince) {
+    options.notify('This Council delivery report is unavailable.'); return;
+  }
+  const dialog = options.modal('Council report', sharedChannelCouncilReportHtml(team, cycleId), 'bot-shared-dialog');
   const report = dialog.querySelector<HTMLElement>('.bc-council-report');
   if (report) options.bindCouncilEvidence?.(report, sessionId);
 }

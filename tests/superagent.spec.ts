@@ -337,10 +337,20 @@ test('Off and Observe source controls expose durable native receipts without Aut
   await expect(kinds.locator('option[value="pull_request_review.submitted"]')).toHaveCount(1);
   await expect(kinds.locator('option[value="pull_request_review_comment.created"]')).toHaveCount(1);
   await expect(kinds.locator('option[value="pull_request_review.dismissed"]')).toHaveCount(1);
+  // New source classes are native-backed and stay Off until explicitly enabled.
+  for(const kind of [
+    'issues.assigned','issues.unassigned','issues.labeled','issues.unlabeled',
+    'pull_request.merged','pull_request.assigned','pull_request.unassigned',
+    'pull_request.labeled','pull_request.unlabeled'
+  ]) {
+    await expect(kinds.locator('option[value="'+kind+'"]')).toHaveCount(1);
+  }
+  await kinds.selectOption('pull_request.merged');
   await host.getByRole('textbox',{name:'Repository (owner/name)'}).fill('test/fixture');
   await host.getByRole('textbox',{name:'Exact actor'}).fill('trusted-bot');
   await host.getByRole('button',{name:'Add source (Off)'}).click();
   await expect(host.locator('.sa-source-list')).toContainText('test/fixture');
+  await expect(host.locator('.sa-source-list')).toContainText('pull_request.merged');
   await expect(host.locator('.sa-source-list')).toContainText('off');
   await host.getByRole('button',{name:'Enable Observe'}).click();
   await host.getByRole('button',{name:'Confirm',exact:true}).click();

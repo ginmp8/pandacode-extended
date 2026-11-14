@@ -48,13 +48,15 @@ pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Res
     // A receipt is not a grant. Require the live worker assignment and every
     // immutable scope field to still agree before allowing a caller to attempt
     // an effect. Current production mandates are read-only.
-    let authorized: bool=tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sa_tickets t
+    let active_worker: Option<(String, String, i64, String, String)> = tx.query_row(
+        "SELECT a.session_id,a.bot_id,a.attempt,o.coordinator_bot_id,t.worker_bot_id
+         FROM sa_tickets t
          JOIN sa_mandates m ON m.ticket_id=t.id
          JOIN sa_orchestrations o ON o.id=t.orchestration_id
          JOIN sa_assignments a ON a.id=t.active_assignment_id
            AND a.ticket_id=t.id AND a.state='running'
            AND a.bot_id=t.worker_bot_id
+         JOIN sessions s ON s.id=a.session_id AND s.project_id=t.project_id
          JOIN bots b ON b.id=a.bot_id
          WHERE t.id=?1 AND t.state='running' AND m.revoked=0
            AND m.expires_at>?2
@@ -63,12 +65,32 @@ pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Res
            AND t.project_id=m.project_id AND m.project_id=o.project_id
            AND t.actor=m.actor AND m.authorization_id<>''
            AND b.project_id=t.project_id AND b.paused=0
+           AND a.bot_id<>o.coordinator_bot_id
            AND a.created_at>0 AND a.created_at<=?2
            AND (?2-a.created_at)<?3
-           AND m.allowed_side_effects=1 AND o.enabled=1)",
-        params![ticket_id,now,super::MAX_ASSIGNMENT_RUN_MS],|r|r.get(0)
-    ).map_err(|e|e.to_string())?;
-    if !authorized {return Err("Native effect authorization unavailable.".into());}
+           AND (SELECT COUNT(*) FROM sa_assignments other
+                WHERE other.ticket_id=t.id AND other.state='running')=1
+           AND m.allowed_side_effects=1 AND o.enabled=1",
+        params![ticket_id,now,super::MAX_ASSIGNMENT_RUN_MS],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+    ).optional().map_err(|e|e.to_string())?;
+    let Some((session_id,bot_id,attempt,coordinator_id,worker_id))=active_worker else {
+        return Err("Native effect authorization unavailable.".into());
+    };
+    // Receipts do not authorize a remote call. Before any future dispatch,
+    // require the original task-owned thread, role and admitted session
+    // profile, not merely a matching bot ID or an unrevoked mandate.
+    let session=store.session(&session_id)?;
+    if !super::assignment_thread_current(store,&session_id,ticket_id)?
+        || !super::assignment_role_authorized(
+            store,ticket_id,&bot_id,attempt,&coordinator_id,&worker_id,
+        )?
+        || !super::admitted_session_matches_profile(
+            store,ticket_id,&bot_id,"worker",&session,
+        )?
+    {
+        return Err("Native effect authorization unavailable: worker session changed.".into());
+    }
     let existing: Option<(String,String)>=tx.query_row(
         "SELECT payload_sha256,state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key=?2",
         params![ticket_id,key],|r|Ok((r.get(0)?,r.get(1)?))
@@ -364,6 +386,78 @@ mod tests{
         store.db.execute("UPDATE sa_assignments SET state='finished' WHERE ticket_id=?1",[&id]).unwrap();
         assert!(reserve(&store,&id,"github:issue:finished",b"body").is_err());
         assert_eq!(unresolved_count(&store,&id).unwrap(),0);
+    }
+
+    #[test]
+    fn effect_reservation_denies_detached_moved_or_modified_worker_session() {
+        for mutation in ["detached_thread", "moved_session", "changed_model"] {
+            let (store,id)=fixture();
+            store.db.execute(
+                "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+                [&id],
+            ).unwrap();
+            let session_id: String=store.db.query_row(
+                "SELECT session_id FROM sa_assignments
+                 WHERE ticket_id=?1 AND state='running'",
+                [&id], |row| row.get(0),
+            ).unwrap();
+            let changed=match mutation {
+                "detached_thread"=>store.db.execute(
+                    "UPDATE bot_threads SET external_id='detached'
+                     WHERE session_id=?1 AND channel_id=?2",
+                    params![&session_id,superagent::CHANNEL],
+                ).unwrap(),
+                "moved_session"=>{
+                    store.db.execute(
+                        "INSERT INTO projects(id,name,path)
+                         VALUES('outside','Outside','/tmp/outside-sa-effects')", [],
+                    ).unwrap();
+                    store.db.execute(
+                        "UPDATE sessions SET project_id='outside' WHERE id=?1",
+                        [&session_id],
+                    ).unwrap()
+                },
+                "changed_model"=>store.db.execute(
+                    "UPDATE sessions SET model='unapproved-model' WHERE id=?1",
+                    [&session_id],
+                ).unwrap(),
+                _=>unreachable!(),
+            };
+            assert_eq!(changed,1, "fixture must change the native {mutation}");
+            assert!(reserve(&store,&id,"github:issue:session-fence",b"body").is_err(),
+                "{mutation} cannot reserve any external effect");
+            assert_eq!(unresolved_count(&store,&id).unwrap(),0);
+        }
+    }
+
+    #[test]
+    fn effect_reservation_denies_multiple_active_attempts_on_one_ticket() {
+        let (store,id)=fixture();
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+            [&id],
+        ).unwrap();
+        // Simulate an inconsistent legacy database; the native lease trigger
+        // normally forbids this. The effect guard must fail closed regardless.
+        store.db.execute_batch(
+            "DROP TRIGGER sa_project_lease_insert;
+             DROP TRIGGER sa_project_lease_update;",
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_assignments
+             (id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
+             VALUES(?1,?2,'co','orphan-legacy-session','running',2,?3,?3)",
+            params![storage::id(),&id,storage::now()],
+        ).unwrap();
+        assert!(reserve(&store,&id,"github:issue:duplicate",b"body").is_err());
+        assert_eq!(unresolved_count(&store,&id).unwrap(),0);
+        store.db.execute(
+            "UPDATE sa_assignments SET state='stopped'
+             WHERE ticket_id=?1 AND attempt=2",
+            [&id],
+        ).unwrap();
+        assert_eq!(reserve(&store,&id,"github:issue:duplicate",b"body").unwrap(),
+            Reservation::Reserved);
     }
 
     #[test]

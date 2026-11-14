@@ -1516,6 +1516,18 @@ fn checkout_path(store:&Store,project_id:&str)->Result<String> {
     Ok(path)
 }
 
+/// Two distinct stored project paths may resolve to the same physical checkout
+/// (for example, a symlink or a /./ alias). Preserve literal matching for
+/// legacy/nonexistent paths, and check resolved identity whenever possible.
+/// This is an admission fence, not permission to write to a checkout.
+fn checkout_paths_equivalent(left: &str, right: &str) -> bool {
+    if left == right { return true; }
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
 /// Native admission must account for ordinary running chats/direct tasks,
 /// not just persisted SuperAgent leases. Unknown live sessions fail closed.
 fn active_manual_conflict(
@@ -1526,7 +1538,9 @@ fn active_manual_conflict(
         let session = store.session(session_id)
             .map_err(|_| "Active provider session is unavailable; checkout admission denied.".to_string())?;
         if session.project_id == project_id
-            || checkout_path(store,&session.project_id)?==requested_path {
+            || checkout_paths_equivalent(
+                &checkout_path(store,&session.project_id)?, &requested_path,
+            ) {
             return Ok(true);
         }
         if bots::owner_of(store, session_id)?
@@ -1541,9 +1555,9 @@ fn active_manual_conflict(
 fn manual_candidate_occupied(
     store: &Store, candidate_id: &str, team_project: &str, candidate_project: &str,
 ) -> Result<bool> {
-    checkout_path(store,team_project)?;
-    checkout_path(store,candidate_project)?;
-    store.db.query_row(
+    let team_path=checkout_path(store,team_project)?;
+    let candidate_path=checkout_path(store,candidate_project)?;
+    let exact:bool=store.db.query_row(
         "SELECT EXISTS(
            SELECT 1 FROM sa_assignments a
            JOIN sa_tickets previous ON previous.id=a.ticket_id
@@ -1557,7 +1571,31 @@ fn manual_candidate_occupied(
                                AND old_checkout.path=new_checkout.path))
          )",
         params![candidate_id,team_project,candidate_project], |row| row.get(0),
-    ).map_err(|e| e.to_string())
+    ).map_err(|e| e.to_string())?;
+    if exact { return Ok(true); }
+    // SQL equality cannot detect different stored paths for one real checkout.
+    // Resolve only live native assignments; a missing origin fails closed.
+    let mut statement=store.db.prepare(
+        "SELECT previous.project_id, active_session.project_id
+         FROM sa_assignments a
+         JOIN sa_tickets previous ON previous.id=a.ticket_id
+         LEFT JOIN sessions active_session ON active_session.id=a.session_id
+         WHERE a.state='running'",
+    ).map_err(|e|e.to_string())?;
+    let active=statement.query_map([],|r|Ok((
+        r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,
+    ))).map_err(|e|e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
+    for (original,session_project) in active {
+        for id in std::iter::once(original.as_str()).chain(session_project.as_deref()) {
+            let path=checkout_path(store,id)?;
+            if checkout_paths_equivalent(&path,&team_path)
+                || checkout_paths_equivalent(&path,&candidate_path) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// Read-only, time-sensitive advisory from the same native source data as
@@ -2099,6 +2137,29 @@ pub(crate) fn guard_run_admission(
     if leased_by_other {
         return Err("Project is reserved by another native SuperAgent assignment.".into());
     }
+    // Keep ordinary chats unchanged when there is no competing native lease.
+    // With a lease, compare physical checkouts as well as persisted path text.
+    let mut statement=store.db.prepare(
+        "SELECT t.project_id, assigned.project_id
+         FROM sa_assignments a
+         JOIN sa_tickets t ON t.id=a.ticket_id AND t.active_assignment_id=a.id
+         LEFT JOIN sessions assigned ON assigned.id=a.session_id
+         WHERE a.state='running' AND t.state='running' AND a.session_id<>?1",
+    ).map_err(|e|e.to_string())?;
+    let leased=statement.query_map([session_id],|r|Ok((
+        r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,
+    ))).map_err(|e|e.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
+    if !leased.is_empty() {
+        let session_path=checkout_path(store,&session.project_id)?;
+        for (ticket_project,assigned_project) in leased {
+            for id in std::iter::once(ticket_project.as_str()).chain(assigned_project.as_deref()) {
+                if checkout_paths_equivalent(&session_path,&checkout_path(store,id)?) {
+                    return Err("Physical checkout is reserved by another native SuperAgent assignment.".into());
+                }
+            }
+        }
+    }
     if superagent_run {
         let session_path=checkout_path(store,&session.project_id)?;
         for other_id in running_sessions {
@@ -2106,7 +2167,9 @@ pub(crate) fn guard_run_admission(
             // A disappeared active session is not proof that a lease is free.
             let other = store.session(other_id)?;
             if other.project_id == session.project_id
-                || checkout_path(store,&other.project_id)?==session_path {
+                || checkout_paths_equivalent(
+                    &checkout_path(store,&other.project_id)?, &session_path,
+                ) {
                 return Err("Project has another active agent; SuperAgent dispatch denied.".into());
             }
         }
@@ -6781,6 +6844,51 @@ mod tests {
         ).unwrap();
         assert_eq!(count,0);
         assert!(admit(&mut store,&config.id,&"x".repeat(MAX_OBJECTIVE_BYTES),"max-accepted",false).is_ok());
+    }
+
+    #[test]
+    fn physical_checkout_aliases_block_native_and_ordinary_cross_project_admission() {
+        let mut store=fixture();
+        let checkout=std::env::temp_dir().join(format!(
+            "sa-checkout-identity-{}",storage::id(),
+        ));
+        std::fs::create_dir_all(&checkout).unwrap();
+        let physical=checkout.to_string_lossy().to_string();
+        let alias=checkout.join(".").to_string_lossy().to_string();
+        assert_ne!(physical,alias);
+        assert!(checkout_paths_equivalent(&physical,&alias));
+        store.db.execute(
+            "UPDATE projects SET path=?1 WHERE id='project'",[&physical],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('alias-project','Alias',?1)",
+            [&alias],
+        ).unwrap();
+        let cfg=enabled(&store);
+        let (ticket,started)=admit(
+            &mut store,&cfg.id,"Protect the physical checkout","physical-alias",false,
+        ).unwrap();
+        assert!(started);
+        let native=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        let ordinary=store.create_session(
+            "alias-project","codex","default","plan",
+        ).unwrap();
+        assert!(active_manual_conflict(
+            &store,&[ordinary.id.clone()],"worker","project",
+        ).unwrap());
+        assert!(manual_candidate_occupied(
+            &store,"unrelated-worker","alias-project","alias-project",
+        ).unwrap());
+        assert!(guard_run_admission(&store,&ordinary.id,&[]).is_err());
+        assert!(guard_run_admission(
+            &store,&native,&[ordinary.id.clone()],
+        ).is_err());
+        stop(&store,&ticket.id).unwrap();
+        assert!(!manual_candidate_occupied(
+            &store,"unrelated-worker","alias-project","alias-project",
+        ).unwrap());
+        assert!(guard_run_admission(&store,&ordinary.id,&[]).is_ok());
+        std::fs::remove_dir(&checkout).unwrap();
     }
 
     #[test]

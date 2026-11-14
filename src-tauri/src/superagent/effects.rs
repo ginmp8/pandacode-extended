@@ -521,6 +521,39 @@ fn exact_grant(db: &Connection, intent: &IssueCommentIntent) -> Result<ActiveSco
     Ok(scope)
 }
 
+/// Revalidate the exact task-owned Worker immediately before reserving or
+/// dispatching a remote effect. Immutable receipt/grant IDs alone are not
+/// sufficient authority after a bot thread or session profile changes.
+fn attested_worker_scope(
+    store: &Store, intent: &IssueCommentIntent, scope: &ActiveScope,
+) -> Result<()> {
+    let assignment: Option<(String, i64)> = store.db.query_row(
+        "SELECT bot_id,attempt FROM sa_assignments
+         WHERE id=?1 AND ticket_id=?2 AND session_id=?3 AND state='running'",
+        params![scope.assignment_id, intent.ticket_id, scope.session_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let (bot_id, attempt) = assignment
+        .ok_or("Native effect worker assignment is no longer active.")?;
+    let snapshot = super::ticket_team_snapshot(store, &intent.ticket_id)?;
+    let ordinal = snapshot.worker_bot_ids.iter().position(|id| id == &bot_id)
+        .ok_or("Native effect assignment is not an authorized Worker.")?;
+    let session = store.session(&scope.session_id)?;
+    if session.project_id != scope.project_id
+        || !super::assignment_thread_current(store, &scope.session_id, &intent.ticket_id)?
+        || !super::assignment_role_authorized(store, &intent.ticket_id, &bot_id, attempt)?
+        || !super::admitted_session_matches_profile(
+            &snapshot, &bot_id, "worker", ordinal, &session,
+        )
+        || !super::snapshot_role_profile_matches(
+            &store.db, &snapshot, "worker", ordinal, &bot_id,
+        )?
+    {
+        return Err("Native effect Worker session or admitted role profile changed.".into());
+    }
+    Ok(())
+}
+
 pub(crate) fn has_exact_grant(store: &Store, intent: &IssueCommentIntent) -> Result<bool> {
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let existing: Option<String> = tx
@@ -662,7 +695,8 @@ pub(crate) fn reserve(store: &Store, intent: &IssueCommentIntent) -> Result<Rese
             }
         }
         None => {
-            exact_grant(&tx, intent)?;
+            let scope = exact_grant(&tx, intent)?;
+            attested_worker_scope(store, intent, &scope)?;
             let now = storage::now();
             tx.execute(
                 "INSERT INTO sa_effect_receipts(ticket_id,effect_key,payload_sha256,state,created_at,updated_at,readback_state)
@@ -680,6 +714,7 @@ pub(crate) fn reserve(store: &Store, intent: &IssueCommentIntent) -> Result<Rese
 fn validate_pending_dispatch(store: &Store, intent: &IssueCommentIntent) -> Result<ActiveScope> {
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let scope = exact_grant(&tx, intent)?;
+    attested_worker_scope(store, intent, &scope)?;
     let state: Option<String> = tx
         .query_row(
             "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key=?2
@@ -1162,6 +1197,38 @@ mod tests {
             .execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1", [&id])
             .unwrap();
         assert_eq!(reserve(&store, &intent).unwrap(), Reservation::AlreadyApplied);
+    }
+
+    #[test]
+    fn changed_worker_session_identity_denies_native_effect_reservation() {
+        for mutation in ["changed_model", "detached_thread"] {
+            let (store, id) = fixture();
+            let intent = make_intent(&id, "worker-session-identity");
+            authorize(&store, &intent).unwrap();
+            let session_id: String = store.db.query_row(
+                "SELECT a.session_id FROM sa_tickets t
+                 JOIN sa_assignments a ON a.id=t.active_assignment_id
+                 WHERE t.id=?1", [&id], |row| row.get(0),
+            ).unwrap();
+            match mutation {
+                "changed_model" => {
+                    store.db.execute(
+                        "UPDATE sessions SET model='unadmitted-model' WHERE id=?1",
+                        [&session_id],
+                    ).unwrap();
+                }
+                "detached_thread" => {
+                    store.db.execute(
+                        "DELETE FROM bot_threads WHERE session_id=?1",
+                        [&session_id],
+                    ).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(reserve(&store, &intent).is_err(),
+                "{mutation} must deny effect reservation");
+            assert_eq!(unresolved_count(&store, &id).unwrap(), 0);
+        }
     }
 
     #[test]

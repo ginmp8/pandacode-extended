@@ -4480,6 +4480,8 @@ pub fn run() {
                 bots::bot_project_ids,
                 bots::bot_message,
                 superagent::superagent_create,
+                superagent::work_items::superagent_work_plan_create,
+                superagent::work_items::superagent_work_plan,
                 superagent::events::superagent_source_create,
                 superagent::events::superagent_source_list,
                 superagent::events::superagent_source_decisions,

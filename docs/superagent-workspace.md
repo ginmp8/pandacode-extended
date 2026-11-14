@@ -214,3 +214,20 @@ remains explicit. GitHub Auto, multi-Worker execution and nested subagent
 admission are labelled unsupported until the corresponding native runtime
 capabilities exist. The five-step UI is a configuration aid, not proof of
 S2/S3/S4/S5 autonomous execution completion.
+
+### Native persisted Work Plans (DD-03/S2 planning slice)
+
+A bounded, immutable dependency DAG can now be attached to a blocked,
+revision-bound local-user Ticket. The schema stores up to 64 ordered work
+items, 192 dependency edges and independently bounded acceptance criteria.
+Native admission verifies the original read-only mandate, exact Ticket state
+and revision, nonempty work item identity and acyclicity, then atomically
+records the plan and audit digest. Replaying the same plan is idempotent; a
+different plan cannot silently replace its evidence. A read-only inspector
+exposes the initial ready frontier and explicit `executionGrantedByPlan:false`
+and `evidenceVerified:false` signals.
+
+This delivers **real persisted planning data**, not the outstanding
+dependency-aware execution scheduler. Multi-worker dispatch, advancement
+after actual verified work, retries, budgets and Council-backed completion
+still require additional task-bound native runtime integration.

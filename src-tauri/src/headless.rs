@@ -32,6 +32,8 @@ enum Command {
     EnableOrchestration { orchestration_id: String, expected_revision: i64 },
     RetryTicket { ticket_id: String, expected_revision: i64 },
     InspectRetryRequest { ticket_id: String, expected_revision: i64 },
+    CreateWorkPlan { path: PathBuf },
+    InspectWorkPlan { ticket_id: String },
     ImportOrchestrations { path: PathBuf },
     ExportOrchestrations { path: PathBuf },
     InspectOrchestrations,
@@ -129,6 +131,20 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(status) => { println!("{status}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("Headless retry receipt inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectWorkPlan { ticket_id } = &command {
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::work_items::headless_inspect(
+                        &dir.join("kingcode.sqlite3"), ticket_id,
+                    ));
+                match result {
+                    Ok(plan) => { println!("{plan}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("Work plan inspection failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -333,6 +349,19 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::CreateWorkPlan { path } = &command {
+                let result = (|| -> Result<String, String> {
+                    let input: crate::superagent::work_items::WorkPlanInput =
+                        read_bounded_json_input(path)?;
+                    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+                    crate::superagent::work_items::headless_create(
+                        &dir.join("kingcode.sqlite3"), input)
+                })();
+                match result {
+                    Ok(plan) => { println!("{plan}"); std::process::exit(0) }
+                    Err(error) => { eprintln!("Work plan registration failed: {error}"); std::process::exit(1) }
+                }
+            }
             if let Command::CreateOrchestration { path } = &command {
                 let result = (|| -> Result<String, String> {
                     let input: crate::superagent::OrchestrationInput =
@@ -470,6 +499,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::CreateOrchestration { .. } | Command::ConfigureTeamRoles { .. }
         | Command::EnableOrchestration { .. } | Command::QueueDemand { .. }
         | Command::RetryTicket { .. } | Command::InspectRetryRequest { .. }
+        | Command::CreateWorkPlan { .. } | Command::InspectWorkPlan { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
         | Command::StopTicket { .. } | Command::DisableOrchestration { .. }
         | Command::RenameOrchestration { .. } | Command::IssueComment { .. } => {
@@ -879,6 +909,22 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                     .get(index + 1)
                     .ok_or_else(|| format!("--export-bots needs a file path.\n\n{}", help()))?;
                 command = Command::ExportBots { path: PathBuf::from(value) };
+                ops += 1;
+                index += 1;
+            }
+            "--create-work-plan" => {
+                let path = args.get(index + 1)
+                    .ok_or("--create-work-plan needs a local JSON file.")?;
+                if path.starts_with("--") { return Err("Provide a work-plan file path.".into()); }
+                command=Command::CreateWorkPlan { path: PathBuf::from(path) };
+                ops += 1;
+                index += 1;
+            }
+            "--inspect-work-plan" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or("--inspect-work-plan needs a Ticket ID.")?;
+                validate_ticket_id(ticket_id)?;
+                command=Command::InspectWorkPlan { ticket_id:ticket_id.clone() };
                 ops += 1;
                 index += 1;
             }
@@ -1404,6 +1450,12 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --queue-demand <team-id> <request-key> <objective-file>
                          Persist a blocked, read-only manual Ticket from a local UTF-8 file
                          (max 16 KiB). Does not grant tools or dispatch a provider.
+  --create-work-plan <file>
+                         Persist an immutable, bounded dependency DAG for one
+                         blocked local-user Ticket. Never dispatch or grant work.
+  --inspect-work-plan <ticket-id>
+                         Inspect stored dependency frontier and explicit lack
+                         of work-item admission; no provider or startup recovery.
   --inspect-ticket <id>  Inspect redacted native Ticket/mandate/attempt metadata; exit.
   --inspect-ticket-graph <id>
                          Inspect bounded native Ticket/attempt topology without task
@@ -1493,6 +1545,15 @@ mod tests {
             Ok(Command::ImportOrchestrations { path: PathBuf::from("presets.json") }));
         assert_eq!(parsed("--export-orchestrations presets.json"),
             Ok(Command::ExportOrchestrations { path: PathBuf::from("presets.json") }));
+        assert_eq!(parsed("--create-work-plan plan.json"),
+            Ok(Command::CreateWorkPlan { path:PathBuf::from("plan.json") }));
+        assert_eq!(parsed("--inspect-work-plan ticket_1"),
+            Ok(Command::InspectWorkPlan { ticket_id:"ticket_1".into() }));
+        for invalid in ["--create-work-plan","--create-work-plan --stop-ticket",
+            "--inspect-work-plan","--inspect-work-plan ../bad",
+            "--inspect-work-plan ticket_1 --stop-ticket ticket_1"] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert_eq!(parsed("--create-orchestration team.json"),
             Ok(Command::CreateOrchestration { path: PathBuf::from("team.json") }));
         assert_eq!(parsed("--configure-team-roles team_1 2 roles.json"),

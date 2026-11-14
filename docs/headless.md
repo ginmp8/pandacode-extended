@@ -726,3 +726,40 @@ redelivery is attempted. The receipt distinguishes `queued`, `claimed`,
 Stop, revoked policy and stale Ticket revisions block future action.
 This does not enable GitHub Auto, privileged writes, arbitrary shell access,
 MCP effects, or unsupervised recovery.
+
+### Immutable native Work Plans (planning only)
+
+An authorized local operator can attach a bounded DAG of work items to an
+existing **blocked** native Ticket before provider dispatch. It records actual
+dependencies and a deterministic initial ready frontier; it does **not**
+authorize the next Worker's session, declare tests passing or advance a
+Ticket's final status.
+
+```sh
+pandacode serve --create-work-plan /path/to/plan.json
+pandacode serve --inspect-work-plan TICKET_ID
+```
+
+`plan.json` uses the following strict native contract (the one-shot CLI
+accepts a maximum 64 KiB JSON file):
+
+```json
+{
+  "ticketId": "EXISTING_BLOCKED_TICKET_ID",
+  "expectedRevision": 0,
+  "items": [
+    {"key":"setup","title":"Set up fixture","acceptance":"Baseline verified","dependsOn":[]},
+    {"key":"build","title":"Implement change","acceptance":"Source diff exists","dependsOn":["setup"]},
+    {"key":"review","title":"Verify acceptance","acceptance":"Independent check recorded","dependsOn":["build"]}
+  ]
+}
+```
+
+The storage layer rejects duplicate keys, missing dependencies, self-edges,
+cycles, oversize nodes or edges and stale Ticket revisions. Plan insertion is
+atomic with a native audit record. The same input is idempotent and a changed
+plan is rejected; no existing work is rewritten. Every work item remains
+`planned`, with `executionAdmitted:false` and `evidenceVerified:false`
+until a separate native work-item scheduler and test/evidence contracts are
+implemented. `readyFrontier` currently describes nodes without prerequisites,
+not permission to run or proof that earlier items were completed.

@@ -11,6 +11,7 @@ pub(crate) mod council_adapter;
 pub mod effects;
 pub(crate) mod write_grants;
 pub(crate) mod headless_dispatch;
+pub(crate) mod work_items;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -4407,6 +4408,53 @@ pub async fn superagent_revoke_worker_write_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn headless_work_plan_is_version_bound_immutable_and_never_grants_execution() {
+        use crate::superagent::work_items::{WorkItemInput,WorkPlanInput};
+        let mut store=fixture();
+        let team=enabled(&store);
+        let (ticket,dispatched)=admit_role_with_staging(
+            &mut store,&team.id,"Build a disposable feature",
+            "headless-work-plan",true,false,true,
+        ).unwrap();
+        assert!(!dispatched);
+        let plan=WorkPlanInput {
+            ticket_id:ticket.id.clone(), expected_revision:ticket.revision,
+            items:vec![
+                WorkItemInput{key:"setup".into(),title:"Set up".into(),
+                    acceptance:"Baseline reviewed".into(),depends_on:vec![]},
+                WorkItemInput{key:"implement".into(),title:"Implement".into(),
+                    acceptance:"Changes recorded".into(),depends_on:vec!["setup".into()]},
+                WorkItemInput{key:"review".into(),title:"Review".into(),
+                    acceptance:"Independent verification".into(),
+                    depends_on:vec!["implement".into()]},
+            ],
+        };
+        let saved=work_items::headless_create(&store.path,plan.clone()).unwrap();
+        let view:serde_json::Value=serde_json::from_str(&saved).unwrap();
+        assert_eq!(view["readyFrontier"],serde_json::json!(["setup"]));
+        assert_eq!(view["executionGrantedByPlan"],false);
+        assert_eq!(view["items"].as_array().unwrap().len(),3);
+        assert_eq!(view["items"][0]["evidenceVerified"],false);
+        assert_eq!(saved,work_items::headless_create(&store.path,plan.clone()).unwrap());
+        assert_eq!(saved,work_items::headless_inspect(&store.path,&ticket.id).unwrap());
+        let mut changed=plan.clone();
+        changed.items[2].title="Altered review".into();
+        assert!(work_items::headless_create(&store.path,changed).is_err());
+        let count:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_work_plans WHERE ticket_id=?1",
+            [&ticket.id],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(count,1);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
+            [&ticket.id],|row|row.get::<_,i64>(0),
+        ).unwrap(),0);
+        stop(&store,&ticket.id).unwrap();
+        assert!(work_items::headless_create(&store.path,plan).is_err());
+        assert_eq!(saved,work_items::headless_inspect(&store.path,&ticket.id).unwrap());
+    }
 
     #[test]
     fn headless_retry_request_is_durable_deduplicated_and_revision_bound() {

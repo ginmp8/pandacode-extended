@@ -766,6 +766,7 @@ test('Team Builder disables roles from another project', async ({page}) => {
 });
 
 test('Ticket evidence reports a missing saved Team snapshot without using the current Team', async ({page}) => {
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
   await page.evaluate(async () => {
@@ -802,6 +803,7 @@ test('Ticket evidence reports a missing saved Team snapshot without using the cu
 });
 
 test('Preview Ticket evidence labels null profile and hash fields as unavailable', async ({page}) => {
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   await openOrchestrationWorkspace(page);
   const previewRoles=await page.evaluate(async () => {

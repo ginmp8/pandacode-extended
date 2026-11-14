@@ -2526,7 +2526,7 @@ async fn launch_operation_admitted(
             } else if matches!(
                 config.reviewer_policy.as_ref(),
                 Some(architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly)
-            ) {
+            ) && team.is_some() {
                 let result = team.as_ref()
                     .ok_or_else(|| "policy_unsupported: native reviewer admission is missing.".to_string())
                     .and_then(|admission| architect::reviewer_host(

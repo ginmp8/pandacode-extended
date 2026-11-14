@@ -2206,7 +2206,7 @@ async fn native_reviewer_host_records_pinned_skills_and_file_evidence_and_reject
     let verified = (host.handler)("pandacode_reviewer_skill_verify".into(), skill_args).await.unwrap();
     assert_eq!(verified["pinnedInputIntegrityVerified"], true);
     assert!((host.handler)("pandacode_reviewer_skill_open".into(), json!({"skillId":"unassigned"})).await.is_err());
-    let mut finding = json!({"criterionId":"coverage","criterionScore":9.5,"severity":"info",
+    let mut finding = json!({"criterionId":"coverage","criterionScore":4.0,"severity":"critical",
         "category":"coverage","summary":"Verified frozen file evidence.","evidenceFiles":["../outside.txt"]});
     assert!((host.handler)("pandacode_council_record_finding".into(), finding.clone()).await.unwrap_err()
         .contains("reviewer_evidence_invalid"));
@@ -2232,11 +2232,73 @@ async fn native_reviewer_host_records_pinned_skills_and_file_evidence_and_reject
         changed.workers[0].attempt += 1;
         save(&store, &mut changed).unwrap();
     }
-    assert!((host.handler)("pandacode_council_record_finding".into(), finding).await.unwrap_err()
+    assert!((host.handler)("pandacode_council_record_finding".into(), finding.clone()).await.unwrap_err()
         .contains("reviewer_session_mismatch"));
+    std::fs::write(&evidence_path, "Resolved review evidence.\n").unwrap();
+    let fresh_sid = {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.workers[0].attempt = reviewer.attempt;
+        team.dispatch_revision += 1;
+        let project = store.session(&sid).unwrap().project_id;
+        let session = store.create_session(&project, "codex", "independent-review", "plan").unwrap();
+        let mut fresh = worker("independent-host-leaf", "waiting", &[], &[]);
+        fresh.session_id = session.id.clone();
+        fresh.model = "independent-review".into();
+        fresh.read_only = true;
+        fresh.council = Some(CouncilSeat { round: 2, lens: "coverage".into(), ..CouncilSeat::default() });
+        let binding = reviewer_security::ReviewerBinding::native(&team, &fresh.id, fresh.created_at,
+            &fresh.provider, &fresh.model, fresh.council.as_ref().unwrap());
+        reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+        fresh.reviewer_binding = Some(binding);
+        team.workers.push(fresh);
+        save(&store, &mut team).unwrap();
+        session.id
+    };
+    let fresh_host = native_reviewer_test_host(state.clone(), fresh_sid, admission.clone()).unwrap();
+    finding["severity"] = json!("info");
+    finding["criterionScore"] = json!(9.5);
+    finding["summary"] = json!("Independent review confirms the fix with current evidence.");
+    (fresh_host.handler)("pandacode_council_record_finding".into(), finding).await.unwrap();
+    let disposition = (fresh_host.handler)("pandacode_council_verify_finding".into(),
+        json!({"findingId":receipt["findingId"]})).await.unwrap();
+    assert_eq!(disposition["verified"], true);
+    assert_eq!(disposition["disposition"], "addressed");
+    assert_eq!(std::fs::read_to_string(&evidence_path).unwrap(), "Resolved review evidence.\n");
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.workers[0].attempt = reviewer.attempt;
+        team.council_since += 1;
+        save(&store, &mut team).unwrap();
+    }
+    assert!((host.handler)("pandacode_reviewer_skill_open".into(), json!({"skillId":"pinned-review"}))
+        .await.unwrap_err().contains("reviewer_session_mismatch"));
     assert!(NativeReviewerAccess::resolve(&state.store.lock().unwrap(), "wrong-session", &admission).is_err());
     assert!(NativeReviewerAccess::resolve(&state.store.lock().unwrap(), &reviewer.session_id,
         &Admission { generation: 2, ..admission }).is_err());
+}
+
+#[tokio::test]
+async fn native_reviewer_host_without_criteria_or_skills_never_falls_back_to_general_tools() {
+    let (state, sid) = state_fixture();
+    let state = Arc::new(state);
+    let session_id = {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        let mut reviewer = worker("legacy-empty-host", "waiting", &[], &[]);
+        reviewer.read_only = true;
+        reviewer.council = Some(CouncilSeat { round: 1, lens: "coverage".into(), ..CouncilSeat::default() });
+        let session_id = reviewer.session_id.clone();
+        team.workers.push(reviewer);
+        save(&store, &mut team).unwrap();
+        session_id
+    };
+    let host = native_reviewer_test_host(state, session_id, Admission { parent: sid, generation: 1 }).unwrap();
+    assert!(host.tools.is_empty());
+    assert_native_reviewer_host_denials(&host, false).await;
+    assert!((host.handler)("pandacode_reviewer_skill_open".into(), json!({"skillId":"ambient"}))
+        .await.unwrap_err().contains("capability_not_authorized"));
 }
 
 #[test]

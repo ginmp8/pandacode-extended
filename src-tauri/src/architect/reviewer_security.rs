@@ -492,16 +492,18 @@ impl ReviewerBinding {
             && revision[1].parse::<u64>().is_ok_and(|r| r <= team.dispatch_revision)
             && revision[2] == worker.created_at.to_string()
             && revision[3] == worker.id.as_str();
-        // A composed plan pins the total root allocation separately from its
-        // selected-bot roster (one selected + one automatic is a quorum of two).
+        // A single-bot composed plan pins the total root allocation separately
+        // from its selected roster (one selected + one automatic is a quorum of two).
         // Legacy M2 still requires 2–8 selected bots and no automatic substitute.
         let roster_quorum_matches = self.roster_bot_ids.is_empty() || {
             let composed = team.config.council.as_ref().filter(|config| config.composition.is_some());
-            if let Some(config) = composed {
-                config.validate().is_ok()
-                    && self.required_reviewers == Some(config.needed())
-                    && self.roster_bot_ids.iter().map(String::as_str)
-                        .eq(config.composition.as_ref().unwrap().selected_bot_ids())
+            if self.roster_bot_ids.len() == 1 {
+                composed.is_some_and(|config| {
+                    config.validate().is_ok()
+                        && self.required_reviewers == Some(config.needed())
+                        && self.roster_bot_ids.iter().map(String::as_str)
+                            .eq(config.composition.as_ref().unwrap().selected_bot_ids())
+                })
             } else {
                 self.required_reviewers == Some(self.roster_bot_ids.len())
             }

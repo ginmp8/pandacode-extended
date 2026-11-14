@@ -939,6 +939,20 @@ mod tests {
         })
     }
 
+    fn test_criterion_outcome(
+        team: &architect::TeamSnapshot, worker: &architect::Worker,
+        root_cycle: &str, artifact_revision: &str, parent_seat: Option<&str>,
+    ) -> Value {
+        let cycle = format!("{}:{}", team.session_id, team.council_since);
+        json!({
+            "schemaVersion":1,"rootCycleId":root_cycle,"taskId":team.session_id,
+            "taskCycleId":cycle,"childCycleId":parent_seat.map(|_| cycle.as_str()),
+            "round":1,"seatId":worker.id,"parentSeatId":parent_seat,"attempt":1,
+            "artifactRevision":artifact_revision,
+            "outcome":{"criterionId":"coverage","score":9.5,"verifiedEvidenceRefs":[]}
+        })
+    }
+
     /// Persist the same authority, composed quota, child ownership and
     /// terminal contracts consumed by the real native gate, without launching a CLI.
     fn completed_composed_task(store: &mut Store, mode: &str) -> (superagent::Ticket, String) {
@@ -975,7 +989,10 @@ mod tests {
         }).collect::<Vec<_>>();
         let composition = json!({
             "schemaVersion":1,"automatic":{"enabled":true,"count":1},"selected":selected,
-            "criteriaSource":"architect","criteria":[],"strategy":"parallel",
+            "criteriaSource":"architect","criteria":[{
+                "id":"coverage","lens":"coverage","description":"Review the frozen artifact.",
+                "required":true,"target":9.0,"evidenceRequired":false,"source":"architect"
+            }],"strategy":"parallel",
             "limits":{"maxDepth":2,"maxRootSeats":8,"maxConcurrentLeaves":8,
                       "maxLeafReviewsPerRound":32,"timeoutMs":3600000,"maxEstimatedCostMicros":null}
         });
@@ -1051,6 +1068,15 @@ mod tests {
                     leaf.reviewer_binding = Some(leaf_binding);
                     test_council_record(store, &session, &format!("leaf-receipt-{leaf_index}"),
                         "council_review_receipt", test_review_receipt(&child, &leaf));
+                    test_council_record(store, &session, &format!("child-outcome-{leaf_index}"),
+                        "council_criterion_outcome", test_criterion_outcome(
+                            &child, &leaf, &cycle, &binding.artifact_revision, Some(&worker.id),
+                        ));
+                    test_council_record(store, &child.session_id, &format!("leaf-outcome-{leaf_index}"),
+                        "council_criterion_outcome", test_criterion_outcome(
+                            &child, &leaf, &child_cycle,
+                            &leaf.reviewer_binding.as_ref().unwrap().artifact_revision, None,
+                        ));
                     child.workers.push(leaf);
                 }
                 save_test_team(store, &child);
@@ -1081,6 +1107,10 @@ mod tests {
             } else {
                 test_council_record(store, &session, &format!("root-receipt-{index}"),
                     "council_review_receipt", test_review_receipt(&team, &worker));
+                test_council_record(store, &session, &format!("root-outcome-{index}"),
+                    "council_criterion_outcome", test_criterion_outcome(
+                        &team, &worker, &cycle, &binding.artifact_revision, None,
+                    ));
             }
             team.workers.push(worker);
         }
@@ -1138,8 +1168,8 @@ mod tests {
     #[test]
     fn composed_receipts_do_not_authorize_missing_foreign_stale_or_nonpassing_seats() {
         for mode in ["M3", "M5", "M7"] {
-            for fault in ["missing_automatic", "stale_start", "accepted", "missing_receipt", "foreign_child"] {
-                if mode == "M3" && fault == "foreign_child" { continue; }
+            for fault in ["missing_automatic", "stale_start", "accepted", "missing_receipt", "foreign_child", "stale_child_start"] {
+                if mode == "M3" && matches!(fault, "foreign_child" | "stale_child_start") { continue; }
                 let mut store = fixture();
                 let (ticket, session) = completed_composed_task(&mut store, mode);
                 let mut team = architect::load(&store, &session).unwrap().unwrap();
@@ -1154,6 +1184,23 @@ mod tests {
                         store.db.execute("UPDATE architect_requests SET content=json_set(content,'$.rootCycleId','foreign:1')
                             WHERE parent_session_id=?1 AND kind='council_child_receipt'", [&session]).unwrap();
                     }
+                    "stale_child_start" => {
+                        let parent = team.workers.iter().find(|worker| {
+                            worker.reviewer_binding.as_ref().unwrap().composition_mode.as_deref() == Some("nested")
+                        }).unwrap();
+                        let mut child = architect::load(&store, &parent.session_id).unwrap().unwrap();
+                        child.workers[0].council.as_mut().unwrap().started_at = 1;
+                        save_test_team(&store, &child);
+                        let snapshot = serde_json::to_vec(&(
+                            &child.session_id, child.council_since, child.dispatch_revision,
+                            child.changed_at, &child.config.council, &child.workers,
+                        )).unwrap();
+                        store.db.execute("UPDATE architect_requests SET content=json_set(content,'$.snapshotFingerprint',?2)
+                            WHERE parent_session_id=?1 AND kind='council_child_receipt'",
+                            params![session, sha256(&snapshot)]).unwrap();
+                        assert!(architect::verified_council_pass(&store, &team),
+                            "{mode}: native pass alone does not prove child review started after task binding");
+                    }
                     _ => unreachable!(),
                 }
                 save_test_team(&store, &team);
@@ -1164,6 +1211,48 @@ mod tests {
                 assert!(!observation.approval_receipt.unwrap().approved);
             }
         }
+    }
+
+    #[test]
+    fn legacy_m2_selected_roster_still_authorizes_receipt_evidence_and_replay() {
+        let mut store = fixture();
+        let (ticket, session) = completed_native_task(&mut store, "legacy-selected");
+        let mut team = architect::load(&store, &session).unwrap().unwrap();
+        let roster = vec!["legacy-a".to_string(), "legacy-b".to_string()];
+        let config = team.config.council.as_mut().unwrap();
+        config.reviewer_bot_ids = roster.clone();
+        config.reviewers = 0;
+        assert!(config.composition.is_none());
+        save_test_team(&store, &team);
+        let client = test_task_client(&store, &ticket.id, None);
+        bind_finished(&store, &ticket.id, &client.assignment_id, &session).unwrap();
+        attach_correlated_passing_reviews(&store, &session);
+        team = architect::load(&store, &session).unwrap().unwrap();
+        store.db.execute("DELETE FROM architect_requests WHERE parent_session_id=?1
+            AND kind IN ('reviewer_authority','council_review_receipt')", [&session]).unwrap();
+        for (index, bot_id) in roster.iter().enumerate() {
+            store.db.execute("INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                VALUES(?1,?1,'project','codex','default','plan',1,1)", [bot_id]).unwrap();
+            let worker = &mut team.workers[index];
+            let binding = worker.reviewer_binding.as_mut().unwrap();
+            binding.reviewer_bot_id = Some(bot_id.clone());
+            binding.roster_bot_ids = roster.clone();
+            binding.required_reviewers = Some(roster.len());
+            binding.snapshot.bot_context = Some(architect::reviewer_security::ReviewerBotContext::from_bot(
+                &bots::get(&store, bot_id).unwrap(),
+            ));
+            architect::reviewer_security::record_native_authority(&store, &session, binding).unwrap();
+        }
+        for worker in &team.workers {
+            test_council_record(&store, &session, &format!("legacy-receipt-{}", worker.id),
+                "council_review_receipt", test_review_receipt(&team, worker));
+        }
+        save_test_team(&store, &team);
+        let first = request_task_review(&store, &client).unwrap().unwrap();
+        assert!(first.native_approved, "{first:?}");
+        let receipt = first.approval_receipt.clone().unwrap();
+        assert!(read_task_evidence(&store, &client, &receipt.request_id, &first.evidence_refs[0]).is_ok());
+        assert_eq!(request_task_review(&store, &client).unwrap().unwrap().approval_receipt, Some(receipt));
     }
 
     #[test]

@@ -5608,7 +5608,7 @@ pub fn host(
     stopped: Arc<AtomicBool>,
     admission: &Admission,
 ) -> Option<ToolHost> {
-    let (actor, nested_link) = {
+    let (actor, nested_link, nested_skill_identity) = {
         let state = app.state::<AppState>();
         let store = state.store.lock().ok()?;
         let team = load(&store, &admission.parent).ok()??;
@@ -5629,7 +5629,13 @@ pub fn host(
         if saved_link.is_some() && nested_link.is_none() {
             return None;
         }
-        (actor, nested_link)
+        let nested_skill_identity = if let Some(link) = &nested_link {
+            let root = load(&store, &link.root_session_id).ok()??;
+            let worker = root.workers.iter().find(|w| w.id == link.root_worker_id)?;
+            Some((link.root_session_id.clone(), root.generation,
+                coordination::Actor::Worker { id: worker.id.clone(), attempt: worker.attempt }))
+        } else { None };
+        (actor, nested_link, nested_skill_identity)
     };
     let generation = admission.generation;
     let parent = admission.parent.clone();
@@ -5699,13 +5705,13 @@ pub fn host(
         tools,
         approval_tools: HashSet::new(),
         handler: Arc::new(move |name, args| {
-            let (app, sid, stopped, actor, caller, nested_link) = (
+            let (app, sid, stopped, actor, caller, nested_skill_identity) = (
                 app.clone(),
                 parent.clone(),
                 stopped.clone(),
                 actor.clone(),
                 caller.clone(),
-                nested_link.clone(),
+                nested_skill_identity.clone(),
             );
             Box::pin(async move {
                 if stopped.load(Ordering::SeqCst) {
@@ -5715,31 +5721,8 @@ pub fn host(
                     name.as_str(),
                     "pandacode_reviewer_skill_open" | "pandacode_reviewer_skill_verify"
                 ) {
-                    let (skill_parent, skill_generation, skill_actor) = if let Some(link) =
-                        nested_link.as_ref()
-                    {
-                        let state = app.state::<AppState>();
-                        let store = state.store.lock().map_err(|e| e.to_string())?;
-                        let root = load(&store, &link.root_session_id)?
-                            .ok_or("reviewer_session_mismatch: nested Council root is missing.")?;
-                        let worker = root
-                            .workers
-                            .iter()
-                            .find(|worker| worker.id == link.root_worker_id)
-                            .ok_or(
-                                "reviewer_session_mismatch: nested Council parent seat is missing.",
-                            )?;
-                        (
-                            link.root_session_id.clone(),
-                            root.generation,
-                            coordination::Actor::Worker {
-                                id: worker.id.clone(),
-                                attempt: worker.attempt,
-                            },
-                        )
-                    } else {
-                        (sid.clone(), generation, actor.clone())
-                    };
+                    let (skill_parent, skill_generation, skill_actor) = nested_skill_identity
+                        .unwrap_or_else(|| (sid.clone(), generation, actor.clone()));
                     let (result, changed) = reviewer_skill_evidence::dispatch_state(
                         &app.state::<AppState>(),
                         &skill_parent,
@@ -5840,6 +5823,7 @@ struct NativeReviewerAccess {
     coordinator: bool,
     binding: Option<reviewer_security::ReviewerBinding>,
     attempt: usize,
+    root_generation: Option<u64>,
     cycle_id: String,
     findings: bool,
 }
@@ -5855,24 +5839,24 @@ impl NativeReviewerAccess {
         {
             return Err("capability_not_authorized: native read-only reviewer policy is required.".into());
         }
-        let (coordinator, mut binding, attempt, findings) = if sid == admission.parent {
+        let (coordinator, mut binding, attempt, root_generation, findings) = if sid == admission.parent {
             let link = validate_council_child_link(store, sid)?
                 .ok_or("reviewer_session_mismatch: coordinator has no native child link.")?;
             let root = load(store, &link.root_session_id)?.ok_or("Council root is missing.")?;
             let worker = root.workers.iter().find(|w| w.id == link.root_worker_id)
                 .ok_or("Council parent seat is missing.")?;
-            (true, Some(link.binding), worker.attempt, false)
+            (true, Some(link.binding), worker.attempt, Some(root.generation), false)
         } else {
             let worker = team.workers.iter().find(|w| w.session_id == sid
                 && active(&w.status) && !w.abandoned && w.council.is_some())
                 .ok_or("reviewer_session_mismatch: Council leaf is no longer active.")?;
-            (false, worker.reviewer_binding.clone(), worker.attempt,
+            (false, worker.reviewer_binding.clone(), worker.attempt, None,
                 council_finding_tool_enabled(store, &admission.parent, &worker.id)?)
         };
         if let Some(binding) = &mut binding {
             binding.skill_evidence.clear();
         }
-        Ok(Self { coordinator, binding, attempt,
+        Ok(Self { coordinator, binding, attempt, root_generation,
             cycle_id: format!("{}:{}", team.session_id, team.council_since), findings })
     }
 
@@ -7006,9 +6990,11 @@ fn dispatch_as_inner(
                         if let Some(bot) = &selected_bot {
                             binding.reviewer_bot_id = Some(bot.id.clone());
                             binding.roster_bot_ids = bot.roster_bot_ids.clone();
-                            // Compositions pin their combined selected/automatic quorum;
-                            // legacy selected-only rounds pin the selected roster size.
-                            if team.config.council.as_ref().is_none_or(|c| c.composition.is_none()) {
+                            // A single selected bot keeps the composed total quorum.
+                            // Preserve the historical selected-roster pin for 2–8 bots.
+                            if bot.roster_bot_ids.len() >= 2
+                                || team.config.council.as_ref().is_none_or(|c| c.composition.is_none())
+                            {
                                 binding.required_reviewers = Some(bot.roster_bot_ids.len());
                             }
                             binding.composition_mode =

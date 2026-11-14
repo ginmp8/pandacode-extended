@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "autonomous-feature-delivery": {
+      "source": "../autonomous-feature-delivery",
+      "sourceType": "local",
+      "computedHash": "60979f6cd125bbab1a52e2f2b9042e11fc905aa32e43ec56f171563878c2cada"
+    }
+  }
+}

@@ -188,3 +188,8 @@ states and the fixed versus OnTrigger budget boundary.
 - This is an additional native guard, not a substitute for the existing immutable child terminal receipt or the root final approval gate.
 
 - Callback authorization uses the existing validated child-to-parent decision link rather than requiring the parent reviewer's session ID to equal the child coordinator's session ID; OnTrigger escalation legitimately allocates a distinct child session. The 7×3 native dispatch test now asserts child callback authorization for configured nested modes.
+
+## November 14: reject ambiguous child ownership records
+
+- Reconciled PR #149's unique child-parent binding invariant with PR #155's existing immutable child links. The native child lookup now examines up to two matching records and fails closed on duplicate ownership rather than selecting an arbitrary first row.
+- Added a negative Rust regression using two stored native links for the same child session. No new Council storage format or subsystem was introduced.

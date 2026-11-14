@@ -3220,23 +3220,25 @@ fn load_council_child_link(
     store: &Store,
     child_session_id: &str,
 ) -> Result<Option<CouncilChildLink>> {
-    let raw: Option<String> = store
-        .db
-        .query_row(
-            "SELECT content FROM architect_requests
+    // The child session must have exactly one authoritative root owner.
+    // LIMIT 1 would silently accept an ambiguous or forged second link.
+    let mut statement = store.db.prepare(
+        "SELECT content FROM architect_requests
          WHERE kind='council_child_link' AND json_valid(content)
-           AND json_extract(content,'$.childSessionId')=?1 LIMIT 1",
-            [child_session_id],
-            |row| row.get(0),
-        )
-        .optional()
+           AND json_extract(content,'$.childSessionId')=?1 LIMIT 2",
+    ).map_err(|e| e.to_string())?;
+    let matches = statement.query_map([child_session_id], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
-    raw.map(|raw| {
+    if matches.len() > 1 {
+        return Err("reviewer_session_mismatch: duplicate native Council child ownership links.".into());
+    }
+    matches.into_iter().next().map(|raw| {
         serde_json::from_str(&raw).map_err(|_| {
             "reviewer_session_mismatch: invalid nested Council ownership link.".to_string()
         })
-    })
-    .transpose()
+    }).transpose()
 }
 
 fn council_child_links_for_root(

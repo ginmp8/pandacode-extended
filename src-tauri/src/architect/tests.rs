@@ -7247,6 +7247,20 @@ fn finished_composed_council_starts_a_strictly_new_cycle_even_when_old_review_is
 }
 
 #[test]
+fn duplicate_task_owned_council_child_links_fail_closed() {
+    let (state, root_id, child_id, link) = nested_child_lifecycle_fixture();
+    let store = state.store.lock().unwrap();
+    assert_eq!(load_council_child_link(&store, &child_id).unwrap(), Some(link.clone()));
+    let content = serde_json::to_string(&link).unwrap();
+    record_request(
+        &store, &root_id, "duplicate-child-owner", "council_child_link",
+        &content, &link.root_worker_id,
+    ).unwrap();
+    let error = load_council_child_link(&store, &child_id).unwrap_err();
+    assert!(error.contains("duplicate native Council child ownership"), "{error}");
+}
+
+#[test]
 fn stale_nested_council_callback_cannot_mutate_child_after_parent_revocation() {
     let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();
     assert!(nested_council_callback_current(&state.store.lock().unwrap(), &root_id),

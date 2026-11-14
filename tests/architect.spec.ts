@@ -968,7 +968,7 @@ test.describe('architect teams', () => {
     await expect(summary.locator('.council-ledger-unavailable')).toHaveText('This host snapshot does not include Council ledger records.');
   });
 
-  test('the Council inspector nests projected bot, child round and reviewer evidence with explicit unknown scores', async ({ page }) => {
+  test('the Council inspector nests projected bot, child round and verified numeric reviewer scores with criterion outcomes', async ({ page }) => {
     await page.setViewportSize({ width: 360, height: 760 });
     const councilSince = 1_800_000_000_000, rootCycleId = `session-2:${councilSince}`, childCycleId = 'child-cycle:1';
     const composition = {
@@ -993,7 +993,14 @@ test.describe('architect teams', () => {
       workers: [worker('review', { id: 'root-seat', name: 'Security reviewer', status: 'completed', createdAt: councilSince, council: { round: 1, lens: 'Security', score: 9.4 }, reviewerBinding: { reviewerBotId: 'root-bot', councilCycleId: rootCycleId } })],
       councilStatus: { state: 'passed', round: 1, lowest: 9.4, target: 9, stale: true },
       councilFindings: [{ id: 'child-finding', cycleId: childCycleId, roundId: `${childCycleId}:2`, seatId: 'child-seat', artifactDigest: 'child-artifact', criterionId: 'security', severity: 'high', category: 'Security', summary: 'A projected child Council finding.', evidenceRefs: ['src/child.ts'], locationStatus: 'verified', location: { file: 'src/child.ts', line: 12 } }],
-      councilChildReceipts: [{ rootCycleId, parentSeatId: 'root-seat', childCycleId, botId: 'root-bot', artifactRevision: 'revision-2', policyFingerprint: 'child-policy', status: 'stale', minScore: 9.6, leafScoreRefs: ['opaque-score-ref'], findingsRefs: ['child-finding'], evidenceRefs: ['src/child.ts'], snapshotFingerprint: 'child-snapshot' }],
+      councilChildReceipts: [{ rootCycleId, parentSeatId: 'root-seat', childCycleId, botId: 'root-bot', artifactRevision: 'revision-2', policyFingerprint: 'child-policy', status: 'passed', minScore: 9.6, leafScoreRefs: ['child-seat:1'], findingsRefs: ['child-finding'], evidenceRefs: ['src/child.ts'], snapshotFingerprint: 'child-snapshot' }],
+      councilChildLeafScores: [
+        { rootCycleId, parentSeatId: 'root-seat', childCycleId, childSeatId: 'child-seat', reviewerId: 'leaf-reviewer', attempt: 1, round: 2, score: 9.7, criterionOutcomes: [{ criterionId: 'security', score: 9.7, verifiedEvidenceRefs: ['src/child.ts'] }], artifactRevision: 'revision-2', receiptRef: 'child-seat:1' },
+        // Duplicate receipt reference, wrong artifact epoch, and an earlier root cycle stay out.
+        { rootCycleId, parentSeatId: 'root-seat', childCycleId, childSeatId: 'duplicate-leaf', reviewerId: 'duplicate-reviewer', attempt: 1, round: 2, score: 9.8, criterionOutcomes: [], artifactRevision: 'revision-2', receiptRef: 'child-seat:1' },
+        { rootCycleId, parentSeatId: 'root-seat', childCycleId, childSeatId: 'stale-leaf', reviewerId: 'stale-reviewer', attempt: 1, round: 2, score: 9.9, criterionOutcomes: [], artifactRevision: 'revision-1', receiptRef: 'stale-leaf:1' },
+        { rootCycleId: `session-2:older`, parentSeatId: 'root-seat', childCycleId, childSeatId: 'older-leaf', reviewerId: 'older-reviewer', attempt: 1, round: 2, score: 9.5, criterionOutcomes: [], artifactRevision: 'revision-2', receiptRef: 'child-seat:1' },
+      ],
       councilReviewReceipts: [{ schemaVersion: 1, requestId: 'child-review-request', cycleId: childCycleId, taskId: 'child-task', assignmentId: 'child-seat', policyFingerprint: 'child-policy', artifactDigest: 'child-artifact', verdict: 'passed', findingsRefs: ['child-finding'], evidenceRefs: ['src/child.ts'], terminalRevision: 3, idempotencyKey: 'child-terminal' }],
       councilUsage: [usage],
     });
@@ -1010,6 +1017,7 @@ test.describe('architect teams', () => {
       direct.id = 'council-direct-fixture';
       direct.innerHTML = councilReadOnlyPresenterHtml({
         ...councilLedgerForCurrentCycle(value),
+        councilChildLeafScores: value.councilChildLeafScores,
         progress: councilProgress(value),
         workers: value.workers,
         status: value.councilStatus,
@@ -1035,8 +1043,9 @@ test.describe('architect teams', () => {
     await bot.locator(':scope > summary').focus();
     await page.keyboard.press('Enter');
     await expect(bot).toHaveAttribute('open', '');
-    await expect(child.locator(':scope > summary')).toContainText('Child Council · stale · minimum score 9.6 / 10');
-    await expect(child).toHaveAttribute('data-stale', 'true');
+    await expect(child.locator(':scope > summary')).toContainText('Child Council · passed · minimum score 9.6 / 10');
+    await expect(child).toHaveAttribute('data-stale', 'false');
+    await expect(child).toHaveAttribute('data-leaf-scores', '1');
     await child.locator(':scope > summary').focus();
     await page.keyboard.press('Enter');
     await round.locator(':scope > summary').focus();
@@ -1044,13 +1053,20 @@ test.describe('architect teams', () => {
     await expect(round.locator(':scope > summary')).toContainText(`Round 2 · ${childCycleId}:2`);
     await reviewer.locator(':scope > summary').focus();
     await page.keyboard.press('Enter');
-    await expect(reviewer.locator(':scope > summary')).toContainText('Reviewer leaf-reviewer · Score Unknown · passed');
-    await expect(reviewer).toContainText('child reviewer scores are not included in this projection');
+    await expect(reviewer.locator(':scope > summary')).toContainText('Reviewer leaf-reviewer · Score 9.7 / 10 · passed');
+    await expect(reviewer).toHaveAttribute('data-score-verified', 'true');
+    await expect(reviewer.locator('.council-inspector-criteria')).toContainText('security');
+    await expect(reviewer.locator('.council-inspector-criteria')).toContainText('9.7 / 10');
+    await expect(reviewer).not.toContainText('Score Unknown');
+    await expect(hierarchy).not.toContainText('duplicate-leaf');
+    await expect(hierarchy).not.toContainText('stale-leaf');
+    await expect(hierarchy).not.toContainText('older-leaf');
     const evidence = reviewer.locator('.council-inspector-evidence');
     await evidence.locator(':scope > summary').focus();
     await page.keyboard.press('Enter');
     await expect(evidence).toContainText('src/child.ts');
-    await expect(child).toContainText('Numeric reviewer scores are not included in this projection.');
+    await expect(child).toContainText('Verified numeric scores and criterion outcomes are shown in the reviewer rows.');
+    await expect(child).not.toContainText('Numeric reviewer scores are not included in this projection.');
     const fit = await hierarchy.evaluate(node => ({ width: node.clientWidth, scrollWidth: node.scrollWidth, right: node.getBoundingClientRect().right }));
     expect(fit.scrollWidth).toBeLessThanOrEqual(fit.width + 1);
     expect(fit.right).toBeLessThanOrEqual(361);

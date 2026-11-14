@@ -467,7 +467,7 @@ export function createPreviewArchitect(host: PreviewHost) {
   }
   /** `?council` in the preview: a team partway through a council, in the named state. */
   function seedCouncil(sessionId: string, kind: string): void {
-    const parent = host.parent(sessionId), council = { target: 9.5, maxRounds: kind === 'limit' ? 2 : 10, reviewers: 0, ...(['composition', 'ledger'].includes(kind) ? { composition: newCouncilComposition() } : {}) };
+    const parent = host.parent(sessionId), council = { target: 9.5, maxRounds: kind === 'limit' ? 2 : 10, reviewers: 0, ...(['composition', 'ledger', 'leaf-scores'].includes(kind) ? { composition: newCouncilComposition() } : {}) };
     const rounds: Record<string, (number | null)[][]> = {
       fixing: [[8.3, 9.1, 8.8]],
       finished: [[8.3, 9.1, 8.8]],
@@ -476,6 +476,7 @@ export function createPreviewArchitect(host: PreviewHost) {
       passed: [[8.3, 9.1, 8.8], [9.5, 9.6, 9.7]],
       limit: [[8.3, 9.1, 8.8], [8.7, 9.6, 9]],
       ledger: [[9.6, 9.8]],
+      'leaf-scores': [[9.6, 9.8]],
     };
     const lenses = ['Correctness', 'Security', 'User experience'], models = host.models(parent.provider);
     // What native reports for each scenario.
@@ -484,6 +485,7 @@ export function createPreviewArchitect(host: PreviewHost) {
       passed: { state: 'passed', round: 2, lowest: 9.5 }, limit: { state: 'limit', round: 2, lowest: 8.7 },
       accepted: { state: 'accepted', round: 1, lowest: 8.3 }, cycle: { state: 'reviewing', round: 1, lowest: 9.2 },
       ledger: { state: 'passed', round: 1, lowest: 9.6 },
+      'leaf-scores': { state: 'passed', round: 1, lowest: 9.6 },
     };
     const base = Date.now() - 3_600_000;
     const profile = { provider: parent.provider, model: models[0]?.id ?? parent.model, reasoningEffort: null };
@@ -503,7 +505,7 @@ export function createPreviewArchitect(host: PreviewHost) {
     const asking = kind === 'asking';
     if (asking) host.append(parent.id, 'assistant', 'Round 1 scored 8.3 on correctness: the search index still rebuilds on every keystroke. **Should I keep fixing, or would you like to lower the target to 8.5?**');
     const snapshot: TeamSnapshot = { sessionId: parent.id, config, status: running ? 'running' : asking ? 'ready' : 'completed', round: 1, revision: 1, councilSince, workers, updatedAt: Date.now() };
-    if (kind === 'ledger') {
+    if (kind === 'ledger' || kind === 'leaf-scores') {
       const cycleId = `${parent.id}:${councilSince}`, childCycleId = 'nested-review-task:1';
       const rootSeat = seats.find(worker => worker.council?.lens === 'Security') ?? seats[0];
       rootSeat.reviewerBinding = { reviewerBotId: 'reviewer-alpha', councilCycleId: cycleId, artifactRevision: 'preview-revision-1' };
@@ -530,9 +532,16 @@ export function createPreviewArchitect(host: PreviewHost) {
         { findingId: 'preview-finding-old', disposition: 'addressed', actorId: 'old-cycle-user', rationale: 'Earlier cycle only.', timestampMs: Date.now() - 5000, artifactLinks: [] },
       ];
       snapshot.councilChildReceipts = [
-        { rootCycleId: cycleId, parentSeatId: rootSeat.id, childCycleId, botId: 'reviewer-nested', artifactRevision: 'preview-revision-1', policyFingerprint: 'preview-policy', status: 'passed', minScore: 9.6, leafScoreRefs: ['score:child'], findingsRefs: [childFindingId], evidenceRefs: ['src/main.ts'], snapshotFingerprint: 'preview-snapshot' },
+        { rootCycleId: cycleId, parentSeatId: rootSeat.id, childCycleId, botId: 'reviewer-nested', artifactRevision: 'preview-revision-1', policyFingerprint: 'preview-policy', status: 'passed', minScore: 9.6, leafScoreRefs: kind === 'leaf-scores' ? ['nested-review-seat:1', 'nested-review-seat-2:1'] : ['score:child'], findingsRefs: [childFindingId], evidenceRefs: ['src/main.ts'], snapshotFingerprint: 'preview-snapshot' },
         { rootCycleId: `${parent.id}:older-cycle`, parentSeatId: 'old-seat', childCycleId: 'old-child:1', botId: 'old-reviewer', artifactRevision: 'old-revision', policyFingerprint: 'old-policy', status: 'stale', leafScoreRefs: [], findingsRefs: [], evidenceRefs: [], snapshotFingerprint: 'old-snapshot' },
       ];
+      if (kind === 'leaf-scores') {
+        snapshot.councilChildLeafScores = [
+          { rootCycleId: cycleId, parentSeatId: rootSeat.id, childCycleId, childSeatId: 'nested-review-seat', reviewerId: 'reviewer-nested', attempt: 1, round: 1, score: 9.6, criterionOutcomes: [{ criterionId: 'security', score: 9.6, verifiedEvidenceRefs: ['src/main.ts'] }], artifactRevision: 'preview-revision-1', receiptRef: 'nested-review-seat:1' },
+          { rootCycleId: cycleId, parentSeatId: rootSeat.id, childCycleId, childSeatId: 'nested-review-seat-2', reviewerId: 'reviewer-nested-2', attempt: 1, round: 1, score: 9.7, criterionOutcomes: [{ criterionId: 'security', score: 9.7, verifiedEvidenceRefs: ['src/main.ts'] }], artifactRevision: 'preview-revision-1', receiptRef: 'nested-review-seat-2:1' },
+          { rootCycleId: `${parent.id}:older-cycle`, parentSeatId: 'old-seat', childCycleId: 'old-child:1', childSeatId: 'old-child-seat', reviewerId: 'old-reviewer', attempt: 1, round: 1, score: 9.9, criterionOutcomes: [], artifactRevision: 'old-revision', receiptRef: 'old-child-seat:1' },
+        ];
+      }
       snapshot.councilReviewReceipts = [
         { schemaVersion: 1, requestId: 'preview-request-root', cycleId, taskId: parent.id, assignmentId: rootSeat.id, policyFingerprint: 'preview-policy', artifactDigest: 'sha256:root-artifact', verdict: 'passed', findingsRefs: [rootFindingId], evidenceRefs: ['src/main.ts'], terminalRevision: 1, idempotencyKey: 'preview-terminal-root' },
         { schemaVersion: 1, requestId: 'preview-request-child', cycleId: childCycleId, taskId: 'nested-review-task', assignmentId: 'nested-review-seat', policyFingerprint: 'preview-child-policy', artifactDigest: 'sha256:child-artifact', verdict: 'passed', findingsRefs: [childFindingId], evidenceRefs: ['src/main.ts'], terminalRevision: 1, idempotencyKey: 'preview-terminal-child' },

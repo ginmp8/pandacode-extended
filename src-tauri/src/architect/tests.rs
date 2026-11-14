@@ -7024,6 +7024,250 @@ fn nested_child_lifecycle_fixture_for_root(
     (state, root_id, child_id, link)
 }
 
+/// A complete nested child Council: two scored child leaves, their persisted
+/// child-ledger criterion outcomes, and the validated parent child receipt.
+fn nested_leaf_score_fixture() -> (
+    AppState,
+    String,
+    String,
+    CouncilChildLink,
+    council::ChildCouncilReceipt,
+) {
+    let (state, root_id, child_id, link) = nested_child_lifecycle_fixture();
+    let store = state.store.lock().unwrap();
+    let mut root = load(&store, &root_id).unwrap().unwrap();
+    let root_cycle_id = format!("{}:{}", root.session_id, root.council_since);
+    let parent_index = root
+        .workers
+        .iter()
+        .position(|worker| worker.id == link.root_worker_id)
+        .unwrap();
+    root.workers[parent_index]
+        .council
+        .as_mut()
+        .unwrap()
+        .score = Some(9.4);
+    root.workers[parent_index].status = "completed".into();
+    save(&store, &mut root).unwrap();
+
+    let mut child = load(&store, &child_id).unwrap().unwrap();
+    let child_cycle_id = format!("{}:{}", child.session_id, child.council_since);
+    assert_eq!(child_cycle_id, link.child_council_cycle_id);
+    let mut leaves = Vec::new();
+    for (index, (id, profile_id, score)) in [
+        ("leaf-a", "reviewer-a", 9.4),
+        ("leaf-b", "reviewer-b", 9.6),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let created_at = child.council_since + 1 + index as i64;
+        let seat = council::CouncilSeat {
+            round: 1,
+            lens: format!("child-lens-{index}"),
+            score: Some(score),
+            closed_by_selection: false,
+            started_at: created_at,
+        };
+        let mut leaf = worker(id, "completed", &["src"], &[]);
+        leaf.session_id = format!("{child_id}:{id}");
+        leaf.profile_id = profile_id.into();
+        leaf.read_only = true;
+        leaf.created_at = created_at;
+        leaf.updated_at = created_at;
+        leaf.council = Some(seat.clone());
+        let mut binding = reviewer_security::ReviewerBinding::native(
+            &child,
+            id,
+            created_at,
+            &leaf.provider,
+            &leaf.model,
+            &seat,
+        );
+        binding.composition_mode = Some("direct".into());
+        leaf.reviewer_binding = Some(binding.clone());
+        reviewer_security::record_native_authority(&store, &child_id, &binding).unwrap();
+        leaves.push(leaf);
+    }
+    child.workers = leaves;
+    child.status = "completed".into();
+    child.summary = Some("The nested child Council passed.".into());
+    save(&store, &mut child).unwrap();
+
+    for (leaf_id, score) in [("leaf-a", 9.4), ("leaf-b", 9.6)] {
+        let leaf = child
+            .workers
+            .iter()
+            .find(|worker| worker.id == leaf_id)
+            .unwrap();
+        let binding = leaf.reviewer_binding.as_ref().unwrap();
+        let child_outcome = council::CouncilCriterionOutcomeReceipt {
+            schema_version: 1,
+            root_cycle_id: child_cycle_id.clone(),
+            task_id: child_id.clone(),
+            task_cycle_id: child_cycle_id.clone(),
+            child_cycle_id: None,
+            round: 1,
+            seat_id: leaf.id.clone(),
+            parent_seat_id: None,
+            attempt: leaf.attempt,
+            artifact_revision: binding.artifact_revision.clone(),
+            outcome: council::CouncilCriterionOutcome {
+                criterion_id: "security".into(),
+                score,
+                verified_evidence_refs: Vec::new(),
+            },
+        };
+        child_outcome.validate().unwrap();
+        persist_council_record(
+            &store,
+            &child_id,
+            &format!("test-child-outcome-{leaf_id}"),
+            "council_criterion_outcome",
+            &child_outcome,
+            leaf_id,
+        )
+        .unwrap();
+        let root_outcome = council::CouncilCriterionOutcomeReceipt {
+            root_cycle_id: root_cycle_id.clone(),
+            child_cycle_id: Some(child_cycle_id.clone()),
+            parent_seat_id: Some(link.root_worker_id.clone()),
+            artifact_revision: link.root_artifact_revision.clone(),
+            ..child_outcome
+        };
+        root_outcome.validate().unwrap();
+        persist_council_record(
+            &store,
+            &root_id,
+            &format!("test-root-leaf-outcome-{leaf_id}"),
+            "council_criterion_outcome",
+            &root_outcome,
+            leaf_id,
+        )
+        .unwrap();
+    }
+
+    let policy_fingerprint = council_policy_fingerprint(&link.binding).unwrap();
+    let receipt = council::ChildCouncilReceipt {
+        root_cycle_id: root_cycle_id.clone(),
+        parent_seat_id: link.root_worker_id.clone(),
+        child_cycle_id: child_cycle_id.clone(),
+        bot_id: link.binding.reviewer_bot_id.clone().unwrap(),
+        artifact_revision: link.root_artifact_revision.clone(),
+        policy_fingerprint: policy_fingerprint.clone(),
+        status: council::ChildCouncilStatus::Passed,
+        min_score: Some(9.4),
+        leaf_score_refs: vec!["leaf-a:1".into(), "leaf-b:1".into()],
+        findings_refs: Vec::new(),
+        evidence_refs: Vec::new(),
+        snapshot_fingerprint: council_snapshot_fingerprint(&child).unwrap(),
+    };
+    receipt
+        .validate_for(
+            &root_cycle_id,
+            &link.root_worker_id,
+            link.binding.reviewer_bot_id.as_deref().unwrap(),
+            &link.root_artifact_revision,
+            &policy_fingerprint,
+        )
+        .unwrap();
+    persist_council_record(
+        &store,
+        &root_id,
+        "test-verified-nested-leaf-score-receipt",
+        "council_child_receipt",
+        &receipt,
+        &link.root_worker_id,
+    )
+    .unwrap();
+    drop(store);
+    (state, root_id, child_id, link, receipt)
+}
+
+#[test]
+fn nested_child_leaf_scores_project_verified_numeric_rows_and_fail_closed() {
+    let (state, root_id, _child_id, link, receipt) = nested_leaf_score_fixture();
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &root_id).unwrap().unwrap();
+    let ledger = council_ledger_projection(&store, &root);
+    assert_eq!(ledger.council_child_receipts, vec![receipt.clone()]);
+    assert_eq!(ledger.council_child_leaf_scores.len(), 2);
+    let first = ledger
+        .council_child_leaf_scores
+        .iter()
+        .find(|row| row.child_seat_id == "leaf-a")
+        .unwrap();
+    let second = ledger
+        .council_child_leaf_scores
+        .iter()
+        .find(|row| row.child_seat_id == "leaf-b")
+        .unwrap();
+    assert_eq!(first.parent_seat_id, link.root_worker_id);
+    assert_eq!(first.child_cycle_id, link.child_council_cycle_id);
+    assert_eq!(first.reviewer_id, "reviewer-a");
+    assert_eq!(first.attempt, 1);
+    assert_eq!(first.round, 1);
+    assert_eq!(first.score, 9.4);
+    assert_eq!(first.artifact_revision, link.root_artifact_revision);
+    assert_eq!(first.receipt_ref, "leaf-a:1");
+    assert_eq!(
+        first.criterion_outcomes,
+        vec![council::CouncilCriterionOutcome {
+            criterion_id: "security".into(),
+            score: 9.4,
+            verified_evidence_refs: Vec::new(),
+        }]
+    );
+    assert_eq!(second.score, 9.6);
+    assert_eq!(second.criterion_outcomes[0].score, 9.6);
+    let serialized = serde_json::to_value(&ledger).unwrap();
+    assert_eq!(serialized["councilChildLeafScores"][0]["childSeatId"], "leaf-a");
+    assert_eq!(serialized["councilChildLeafScores"][0]["criterionOutcomes"][0]["criterionId"], "security");
+    drop(store);
+
+    for case in ["foreign", "stale", "ref-mismatched", "duplicate"] {
+        let (state, root_id, _child_id, _link, receipt) = nested_leaf_score_fixture();
+        let store = state.store.lock().unwrap();
+        store
+            .db
+            .execute(
+                "DELETE FROM architect_requests WHERE parent_session_id=?1 AND kind='council_child_receipt'",
+                params![root_id],
+            )
+            .unwrap();
+        let mut invalid = receipt;
+        match case {
+            "foreign" => {
+                invalid.root_cycle_id = "other-task:1".into();
+                invalid.parent_seat_id = "foreign-seat".into();
+            }
+            "stale" => invalid.artifact_revision.push_str(":stale"),
+            "ref-mismatched" => {
+                invalid.leaf_score_refs = vec!["leaf-a:1".into(), "ghost-leaf:1".into()];
+            }
+            "duplicate" => {
+                invalid.leaf_score_refs = vec!["leaf-a:1".into(), "leaf-a:1".into()];
+            }
+            _ => unreachable!(),
+        }
+        persist_council_record(
+            &store,
+            &root_id,
+            "test-invalid-nested-leaf-score-receipt",
+            "council_child_receipt",
+            &invalid,
+            "review-seat",
+        )
+        .unwrap();
+        let root = load(&store, &root_id).unwrap().unwrap();
+        let ledger = council_ledger_projection(&store, &root);
+        assert!(
+            ledger.council_child_leaf_scores.is_empty(),
+            "{case} child receipt must not project leaf scores"
+        );
+    }
+}
+
 #[test]
 fn failed_nested_child_restart_preserves_one_link_and_terminal_reason() {
     let path = std::env::temp_dir().join(format!("pandacode-nested-restart-{}.db", storage::id()));

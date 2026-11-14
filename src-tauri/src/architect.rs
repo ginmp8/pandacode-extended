@@ -1156,6 +1156,26 @@ fn save_settled(store: &Store, team: &mut TeamSnapshot) -> bool {
         }
     }
 }
+/// One verified numeric score and its criterion outcomes for a nested child
+/// Council leaf. It is derived from the persisted child receipt and the child
+/// seat's frozen binding; the receipt reference is the exact `leafScoreRefs`
+/// entry this row satisfies.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChildCouncilLeafScore {
+    root_cycle_id: String,
+    parent_seat_id: String,
+    child_cycle_id: String,
+    child_seat_id: String,
+    reviewer_id: String,
+    attempt: usize,
+    round: usize,
+    score: f64,
+    criterion_outcomes: Vec<council::CouncilCriterionOutcome>,
+    artifact_revision: String,
+    receipt_ref: String,
+}
+
 /// A team as events carry it. No listener reads the catalog (up to 1000 models), the objective or
 /// the pending prompt (up to 16 MiB each), and every save sends an event.
 #[derive(Clone, Debug, Serialize)]
@@ -1166,6 +1186,7 @@ pub struct ArchitectReadSnapshot {
     council_findings: Vec<council::CouncilFinding>,
     council_finding_dispositions: Vec<council::CouncilFindingDisposition>,
     council_child_receipts: Vec<council::ChildCouncilReceipt>,
+    council_child_leaf_scores: Vec<ChildCouncilLeafScore>,
     council_review_receipts: Vec<council::CouncilReviewReceipt>,
     council_criterion_outcomes: Vec<council::CouncilCriterionOutcomeReceipt>,
     council_usage: Vec<council::CouncilUsageRecord>,
@@ -1217,6 +1238,7 @@ fn empty_council_ledger(team: TeamSnapshot) -> ArchitectReadSnapshot {
         council_findings: Vec::new(),
         council_finding_dispositions: Vec::new(),
         council_child_receipts: Vec::new(),
+        council_child_leaf_scores: Vec::new(),
         council_review_receipts: Vec::new(),
         council_criterion_outcomes: Vec::new(),
         council_usage: Vec::new(),
@@ -1570,6 +1592,8 @@ fn council_ledger_projection(store: &Store, team: &TeamSnapshot) -> ArchitectRea
         return empty();
     };
     let mut child_receipts = Vec::new();
+    let mut child_leaf_scores = Vec::new();
+    let mut verified_child_leaf_refs = std::collections::BTreeSet::new();
     for receipt in raw_child_receipts {
         let Some((worker, binding, link, child)) =
             nested_roots.iter().find(|(worker, _, link, _)| {
@@ -1643,6 +1667,85 @@ fn council_ledger_projection(store: &Store, team: &TeamSnapshot) -> ArchitectRea
             || !receipt_evidence.is_subset(&evidence_refs)
         {
             continue;
+        }
+        // Only a leaf that the frozen child snapshot still verifies can carry a
+        // numeric score. Every ref must resolve, or this receipt contributes no
+        // partial rows: a foreign, stale or duplicate ref fails closed.
+        let round = status.as_ref().map_or(0, |status| status.round);
+        let mut rows = Vec::new();
+        let mut refs_verified = !receipt.leaf_score_refs.is_empty();
+        for reference in &receipt.leaf_score_refs {
+            let Some(leaf) = child.workers.iter().find(|leaf| {
+                format!("{}:{}", leaf.id, leaf.attempt) == *reference
+            }) else {
+                refs_verified = false;
+                break;
+            };
+            let Some((leaf_seat, leaf_binding)) =
+                leaf.council.as_ref().zip(leaf.reviewer_binding.as_ref())
+            else {
+                refs_verified = false;
+                break;
+            };
+            let Some(score) = leaf_seat.score else {
+                refs_verified = false;
+                break;
+            };
+            if leaf.status != "completed"
+                || leaf_seat.round != round
+                || leaf_binding.validate(child, leaf).is_err()
+                || reviewer_security::validate_issued_authority(
+                    store,
+                    &child.session_id,
+                    leaf_binding,
+                )
+                .is_err()
+                || !verified_child_leaf_refs.insert((
+                    child.session_id.clone(),
+                    leaf.id.clone(),
+                    leaf.attempt,
+                ))
+            {
+                refs_verified = false;
+                break;
+            }
+            let mut outcomes = criterion_outcomes
+                .iter()
+                .filter(|outcome| {
+                    outcome.root_cycle_id == root_cycle_id
+                        && outcome.task_id == child.session_id
+                        && outcome.task_cycle_id == link.child_council_cycle_id
+                        && outcome.child_cycle_id.as_deref()
+                            == Some(link.child_council_cycle_id.as_str())
+                        && outcome.parent_seat_id.as_deref() == Some(worker.id.as_str())
+                        && outcome.seat_id == leaf.id
+                        && outcome.round == leaf_seat.round
+                        && outcome.attempt == leaf.attempt
+                        && outcome.artifact_revision == receipt.artifact_revision
+                })
+                .map(|outcome| outcome.outcome.clone())
+                .collect::<Vec<_>>();
+            outcomes.sort_by(|left, right| left.criterion_id.cmp(&right.criterion_id));
+            outcomes.dedup_by(|left, right| left.criterion_id == right.criterion_id);
+            rows.push(ChildCouncilLeafScore {
+                root_cycle_id: receipt.root_cycle_id.clone(),
+                parent_seat_id: receipt.parent_seat_id.clone(),
+                child_cycle_id: receipt.child_cycle_id.clone(),
+                child_seat_id: leaf.id.clone(),
+                reviewer_id: leaf_binding
+                    .reviewer_bot_id
+                    .clone()
+                    .unwrap_or_else(|| leaf.profile_id.clone()),
+                attempt: leaf.attempt,
+                round: leaf_seat.round,
+                score,
+                criterion_outcomes: outcomes,
+                artifact_revision: receipt.artifact_revision.clone(),
+                receipt_ref: reference.clone(),
+            });
+        }
+        if refs_verified && rows.len() == receipt.leaf_score_refs.len() {
+            child_leaf_scores.extend(rows);
         }
         child_receipts.push(receipt);
     }
@@ -1742,6 +1845,7 @@ fn council_ledger_projection(store: &Store, team: &TeamSnapshot) -> ArchitectRea
     projected.council_findings = findings;
     projected.council_criterion_outcomes = criterion_outcomes.clone();
     projected.council_child_receipts = child_receipts;
+    projected.council_child_leaf_scores = child_leaf_scores;
     projected.council_review_receipts = review_receipts;
     projected.council_usage = usage;
     let Ok(raw_dispositions) = council_records::<council::CouncilFindingDisposition>(

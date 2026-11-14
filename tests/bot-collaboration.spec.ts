@@ -133,7 +133,7 @@ test.describe('bot collaboration', () => {
 
   test('a channel Council report opens its populated nested Architect inspection', async ({ page }) => {
     test.setTimeout(120_000);
-    await page.goto('/?bots=sample&council=ledger');
+    await page.goto('/?bots=sample&council=leaf-scores');
     const botSidebar = page.getByRole('region', { name: 'Bots', exact: true });
     const botsBar = page.locator('.sidebar-bots-bar');
     if (await botsBar.getAttribute('aria-pressed') !== 'true') await botsBar.click();
@@ -189,9 +189,16 @@ test.describe('bot collaboration', () => {
     const child = rootSeat.locator('[data-level="child-council"][data-child-cycle="nested-review-task:1"]');
     await expect(child).toBeVisible();
     await expect(child.locator(':scope > summary')).toContainText('Child Council · passed · minimum score 9.6');
+    await expect(child).toHaveAttribute('data-leaf-scores', '2');
+    await expect(child).toContainText('Score 9.6 / 10');
+    await expect(child).toContainText('Score 9.7 / 10');
+    await expect(child.locator('[data-level="reviewer"][data-score-verified="true"]')).toHaveCount(2);
+    await expect(child.locator('.council-inspector-criteria').first()).toContainText('security');
+    await expect(child).not.toContainText('Score Unknown');
     await expect(child).toContainText('A finding from the correlated child Council.');
     await expect(child).toContainText('src/main.ts');
     await expect(reportDialog).not.toContainText('This earlier-cycle finding must stay hidden.');
+    await expect(reportDialog).not.toContainText('old-child-seat');
     await expect(reportDialog.locator('input, textarea, select, [contenteditable="true"]')).toHaveCount(0);
   });
 

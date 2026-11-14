@@ -358,6 +358,35 @@ test('read-only inspector renders supplied findings, receipts, usage, stale stat
   await expect(exception).toHaveAttribute('open', '');
 });
 
+test('nested child leaf scores render verified numbers and criterion outcomes, withholding stale and foreign rows', async ({ page }) => {
+  await open(page, '/?council=composition');
+  const markup = await page.evaluate(async () => {
+    const { councilReadOnlyPresenterHtml } = await import('/src/council-panel.ts');
+    return councilReadOnlyPresenterHtml({
+      cycleId: 'root:2',
+      childReceipts: [{ rootCycleId: 'root:2', parentSeatId: 'seat-2', childCycleId: 'child:4', botId: 'reviewer-a', artifactRevision: 'rev-4', policyFingerprint: 'policy-hash', status: 'passed', minScore: 9.4, leafScoreRefs: ['leaf-a:1'], findingsRefs: [], evidenceRefs: [], snapshotFingerprint: 'snapshot-hash' }],
+      councilChildLeafScores: [
+        { rootCycleId: 'root:2', parentSeatId: 'seat-2', childCycleId: 'child:4', childSeatId: 'leaf-a', reviewerId: 'reviewer-leaf', attempt: 1, round: 1, score: 9.4, criterionOutcomes: [{ criterionId: 'security', score: 9.4, verifiedEvidenceRefs: ['src/a.ts'] }], artifactRevision: 'rev-4', receiptRef: 'leaf-a:1' },
+        { rootCycleId: 'root:2', parentSeatId: 'seat-2', childCycleId: 'child:4', childSeatId: 'stale-leaf', reviewerId: 'stale-reviewer', attempt: 1, round: 1, score: 9.9, criterionOutcomes: [], artifactRevision: 'rev-3', receiptRef: 'stale-leaf:1' },
+        { rootCycleId: 'older:1', parentSeatId: 'seat-2', childCycleId: 'child:4', childSeatId: 'older-leaf', reviewerId: 'older-reviewer', attempt: 1, round: 1, score: 9.8, criterionOutcomes: [], artifactRevision: 'rev-4', receiptRef: 'leaf-a:1' },
+      ],
+    } as any);
+  });
+  await page.evaluate(markup => {
+    const host = document.createElement('section'); host.id = 'council-nested-leaf-test'; host.innerHTML = markup; document.body.append(host);
+  }, markup);
+  const child = page.locator('#council-nested-leaf-test [data-level="child-council"]');
+  await expect(child).toHaveAttribute('data-leaf-scores', '1');
+  const reviewer = child.locator('[data-level="reviewer"][data-score-verified="true"]');
+  await expect(reviewer).toHaveCount(1);
+  await expect(reviewer.locator(':scope > summary')).toContainText('Score 9.4 / 10');
+  await expect(reviewer.locator('.council-inspector-criteria')).toContainText('security');
+  await expect(reviewer.locator('.council-inspector-criteria')).toContainText('9.4 / 10');
+  await expect(child).not.toContainText('Score Unknown');
+  await expect(child).not.toContainText('stale-leaf');
+  await expect(child).not.toContainText('older-leaf');
+});
+
 test('current-cycle projected records hide stale cycles and open evidence only through the workspace file view', async ({ page }) => {
   await open(page, '/?council=ledger');
   await page.locator('#agents-toggle').click();

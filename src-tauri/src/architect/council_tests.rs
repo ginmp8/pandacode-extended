@@ -3278,6 +3278,8 @@ fn child_council_admits_real_read_only_native_leaves_only_after_root_review_barr
     };
     assert_eq!(inspected.len(), 2);
     assert!(inspected.iter().all(|view| view.status == "reviewing"));
+    assert!(inspected.iter().all(|view| view.observed_leaf_usage.as_ref().is_some_and(|usage|
+        usage.unique_attempts == 2 && usage.token_count.is_none() && usage.cost_amount.is_none())));
     let mut distinct = std::collections::HashSet::new();
     for view in &inspected {
         let store = state.store.lock().unwrap();
@@ -3342,6 +3344,9 @@ fn child_council_admits_real_read_only_native_leaves_only_after_root_review_barr
         let store = state.store.lock().unwrap();
         load(&store, &sid).unwrap().unwrap()
     };
+    assert_eq!(council::status(&resumed).unwrap().state, "accepted");
+    assert!(council::finish_refusal(&resumed).is_none(),
+        "an explicit user acceptance remains a distinct terminal exception");
     let (answer, _) = dispatch_state(
         &state, &sid, resumed.generation, "pandacode_finish_team",
         json!({"summary":"User explicitly accepted an incomplete nested review."}),
@@ -3412,6 +3417,9 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     assert!(child_council::admit_leaves(&store, &root).unwrap());
     let inspected = child_council::inspect(&store, &root).unwrap();
     assert_eq!(inspected.len(), 2);
+    assert!(inspected.iter().all(|view| view.observed_leaf_usage.as_ref().is_some_and(|usage|
+        usage.unique_attempts == 2 && usage.token_count.is_none()
+            && usage.cost_amount.is_none() && usage.cost_currency.is_none())));
     assert!(inspected.iter().all(|view| {
         view.status == "child_evidence_ready_root_pending"
             && view.verified_child_receipt.as_ref().is_some_and(|receipt|

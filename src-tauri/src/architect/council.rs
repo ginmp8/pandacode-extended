@@ -1572,11 +1572,12 @@ fn two_phase_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view: &Round
 
 /// The verdict from a view the caller already computed.
 fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Option<(String, bool)> {
-    if !config.nested_bot_reviewers.is_empty() {
-        return Some(("child_council_unavailable: nested native Council evidence has not been admitted.".into(), false));
-    }
+    // Explicit attributed user acceptance is distinct from native verified Council approval.
     if accepted(team) {
         return None;
+    }
+    if !config.nested_bot_reviewers.is_empty() {
+        return Some(("child_council_unavailable: nested native Council evidence has not been admitted.".into(), false));
     }
     let round = view.latest;
     let needed = required_reviewers(team, config, round);
@@ -1697,9 +1698,16 @@ pub(super) fn status(team: &TeamSnapshot) -> Option<CouncilStatus> {
 }
 fn status_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> CouncilStatus {
     if !config.nested_bot_reviewers.is_empty() {
+        let user_accepted = accepted(team);
         return CouncilStatus {
-            state: "blocked".into(), round: view.latest, lowest: None, target: config.target,
-            stale: true, notice: Some("Nested Council requires a task-isolated native child review before any root approval.".into()),
+            state: if user_accepted { "accepted" } else { "blocked" }.into(),
+            round: view.latest, lowest: None, target: config.target,
+            stale: !user_accepted,
+            notice: Some(if user_accepted {
+                "Accepted by user; nested native Council has not passed."
+            } else {
+                "Nested Council requires a task-isolated native child review before any root approval."
+            }.into()),
         };
     }
     let round = view.latest;

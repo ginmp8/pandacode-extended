@@ -42,6 +42,9 @@ pub struct ChildReservationView {
     pub root_cycle_id: String,
     pub required_leaf_reviewers: usize,
     pub status: &'static str,
+    /// Issued native child leaves only; reservations are not measured work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_leaf_usage: Option<super::council::CouncilUsageTotals>,
     /// Native verified leaf result, not a verified composite parent vote.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified_child_receipt: Option<VerifiedChildReceipt>,
@@ -574,6 +577,10 @@ pub(super) fn has_pending_leaves(store: &Store, root: &TeamSnapshot) -> Result<b
 /// the existing task launch/callback path. Every callback rechecks recorded
 /// grants, frozen root cycle and current child/worker ownership.
 pub(super) fn authorize_leaf(store: &Store, sid: &str, admission: &Admission) -> Result<()> {
+    // A child coordinator is never its own reviewer, including when forged active.
+    if sid == admission.parent {
+        return Err("child_council_denied: a child coordinator cannot admit itself as a reviewer.".into());
+    }
     let root_sid = super::parent_of(store, &admission.parent)?
         .ok_or("child_council_denied: no root cycle owns this child.")?;
     let root = super::load(store, &root_sid)?
@@ -732,6 +739,9 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
             child_session_id: record.child_session_id,
             root_cycle_id: record.root_cycle_id,
             required_leaf_reviewers: child.child_reviewers,
+            observed_leaf_usage: (!team.workers.is_empty())
+                .then(|| super::council::inspection(&team, false).map(|view| view.usage))
+                .flatten(),
             status: if verified_child_receipt.is_some() {
                 "child_evidence_ready_root_pending"
             } else if active { "reviewing" } else { "blocked_until_native_child_review" },

@@ -219,6 +219,9 @@ test('native child receipt inspector shows independent evidence without promotin
     reservedChildren: [
       { botId: 'security-child', childSessionId: 'child-session', rootCycleId: 'task:1000',
         requiredLeafReviewers: 2, status: 'child_evidence_ready_root_pending',
+        observedLeafUsage: { uniqueAttempts: 2, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
+          cumulativeQueueWaitMs: 150, cumulativeObservedSpanMs: 950,
+          tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
         verifiedChildReceipt: receipt },
       { botId: 'stale-child', childSessionId: 'other-child', rootCycleId: 'task:1000',
         requiredLeafReviewers: 2, status: 'reviewing',
@@ -235,6 +238,9 @@ test('native child receipt inspector shows independent evidence without promotin
   await page.keyboard.press('Enter');
   await expect(children).toContainText('Native child evidence recorded (root approval pending)');
   await expect(children).toContainText('minimum score 9.5/10');
+  await expect(children).toContainText('Child-observed native leaf attempts: 2');
+  await expect(children).toContainText('Provider tokens unknown');
+  await expect(children).toContainText('Cost unknown');
   await expect(children.getByRole('list', { name: 'Child reviewer evidence identifiers' }).locator('li')).toHaveCount(2);
   await expect(children.getByText('<img src=x onerror=alert(1)>', { exact: true })).toBeVisible();
   await expect(children.locator('img')).toHaveCount(0);

@@ -105,6 +105,18 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
           && Number.isFinite(receipt.lowestScore) && receipt.lowestScore >= 0 && receipt.lowestScore <= 10
           && Array.isArray(ids) && ids.length === child.requiredLeafReviewers
           && ids.length >= 2 && ids.length <= 8 && new Set(ids).size === ids.length;
+        const measured = child.observedLeafUsage;
+        const childUsageHtml = measured
+          ? '<p>Child-observed native leaf attempts: ' + escape(String(measured.uniqueAttempts)) +
+            ' · Queue ' + escape(observedDuration('', measured.cumulativeQueueWaitMs).trim()) +
+            ' (' + escape(String(measured.queueMeasuredAttempts)) + ' measured)' +
+            ' · Observed span ' + escape(observedDuration('', measured.cumulativeObservedSpanMs).trim()) +
+            ' (' + escape(String(measured.spanMeasuredAttempts)) + ' measured)' +
+            ' · Provider tokens ' + (measured.tokenCount == null ? 'unknown' : escape(String(measured.tokenCount))) +
+            ' · Cost ' + (measured.costAmount == null || !measured.costCurrency
+              ? 'unknown' : escape(String(measured.costAmount) + ' ' + measured.costCurrency)) +
+            '</p>'
+          : '<p>No child leaf attempts have been admitted.</p>';
         const receiptHtml = receipt ? (correlated
           ? '<p>Native child evidence recorded (root approval pending): minimum score ' +
             escape(receipt.lowestScore.toFixed(1)) + '/10 · ' +
@@ -118,7 +130,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
           '<p>Configured leaf reviewers: ' + escape(String(child.requiredLeafReviewers)) +
           ' · Task session: ' + escape(child.childSessionId) +
           ' · Parent cycle: ' + escape(child.rootCycleId) +
-          '</p>' + receiptHtml + '</details></li>';
+          '</p>' + childUsageHtml + receiptHtml + '</details></li>';
       }).join('') + '</ul></section>'
     : '';
   const hidden = inspection.attempts.length - shown.length;

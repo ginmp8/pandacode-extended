@@ -97,7 +97,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await expect(details.locator('form[data-sa-form="issue-comment"]')).toHaveCount(0);
   await expect(details).toContainText('Attempt 1');
   await expect(details).toContainText('admitted');
-  await expect(details.locator('ol li').first()).toContainText(' · admitted · ');
+  await expect(details.getByRole('heading',{name:'Native activity',exact:true}).locator('xpath=following-sibling::ol[1] li').first()).toContainText(' · admitted · ');
   await row.getByRole('button',{name:'Stop'}).click();
   await workspace.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(row).toContainText('stopped');

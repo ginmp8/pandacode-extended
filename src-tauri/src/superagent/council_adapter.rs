@@ -817,7 +817,6 @@ pub(super) fn bind_required_finished(
         .ok_or("Council-required worker assignment has no frozen review request.")?;
     if !matches!(request.state.as_str(),"admitted")
         || request.worker_session_id != worker_session_id
-        || request.policy_revision != ticket.policy_revision
         || ticket.state != "waiting_review"
         || ticket.revision != request.admitted_ticket_revision.saturating_add(1)
         || ticket.evidence.as_deref().is_none_or(str::is_empty)
@@ -860,7 +859,7 @@ pub(super) fn bind_required_finished(
     Ok(())
 }
 
-pub(super) fn required_worker_session(store: &Store, worker_session_id: &str) -> Result<bool> {
+pub(crate) fn required_worker_session(store: &Store, worker_session_id: &str) -> Result<bool> {
     Ok(request_for_worker(store,worker_session_id)?.is_some_and(|request| {
         request.state == "admitted"
     }))
@@ -1008,7 +1007,6 @@ fn start_after_worker_completion_inner(
             .map_err(|_| "Frozen Council configuration is malformed.")?;
         let policy_ok = request.reviewer_policy_sha256 == sha256(request.reviewer_policy_json.as_bytes())
             && request.council_config_sha256 == sha256(config_bytes)
-            && request.policy_revision == ticket.policy_revision
             && snapshot.policy.council_required
             && snapshot.policy.policy_revision == request.policy_revision
             && snapshot.reviewer_bot_ids == config.reviewer_bot_ids
@@ -1254,7 +1252,7 @@ fn current_binding_valid(
     Ok(request.state == "dispatched"
         && ticket.id == request.ticket_id && ticket.state == "waiting_review"
         && ticket.revision == request.ticket_revision
-        && ticket.policy_revision == request.policy_revision
+        && snapshot.policy.policy_revision == request.policy_revision
         && request.cycle_started_at > 0 && request.generation > 0
         && sha256(evidence.as_bytes()) == artifact
         && sha256(request.reviewer_policy_json.as_bytes()) == request.reviewer_policy_sha256
@@ -1972,6 +1970,26 @@ mod tests {
         assert_eq!(state,"bound");
         assert_eq!(superagent::history(&store,&ticket.id,20).unwrap()
             .iter().filter(|event| event.kind=="council_passed").count(),0);
+    }
+
+    #[test]
+    fn required_worker_binding_rejects_ticket_policy_drift() {
+        let mut store = fixture();
+        let (ticket, session, assignment_id) = required_worker(&mut store, "policy-drift");
+        store
+            .db
+            .execute(
+                "UPDATE sa_tickets SET state='waiting_review',revision=revision+1,
+                   evidence='Worker artifact',policy_revision=policy_revision+1 WHERE id=?1",
+                [&ticket.id],
+            )
+            .unwrap();
+
+        let error = bind_required_finished(&store, &ticket.id, &assignment_id, &session).unwrap_err();
+        assert!(
+            error.contains("bindings disagree with its owning Ticket row"),
+            "{error}"
+        );
     }
 
     #[test]

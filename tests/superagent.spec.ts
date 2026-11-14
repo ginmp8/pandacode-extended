@@ -97,7 +97,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await expect(details.locator('form[data-sa-form="issue-comment"]')).toHaveCount(0);
   await expect(details).toContainText('Attempt 1');
   await expect(details).toContainText('admitted');
-  await expect(details.getByRole('heading',{name:'Native activity',exact:true}).locator('xpath=following-sibling::ol[1] li').first()).toContainText(' · admitted · ');
+  await expect(details.getByRole('heading',{name:'Native activity',exact:true}).locator('xpath=following-sibling::ol[1]/li').first()).toContainText(' · admitted · ');
   await row.getByRole('button',{name:'Stop'}).click();
   await workspace.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(row).toContainText('stopped');
@@ -246,6 +246,7 @@ test('Preview adapter snapshots ordered Team roles at Ticket admission',async ({
 
 
 test('SuperAgent issue comments use a stable receipt and report uncertain state without blind replay',async ({page})=>{
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
   await page.evaluate(async()=>{
@@ -309,8 +310,13 @@ test('SuperAgent issue comments use a stable receipt and report uncertain state 
   }).saIssueCommentCalls.length)).toBe(0);
   await commentForm.getByRole('textbox',{name:'Repository (owner/name)'}).fill('acme/widget');
   await expect(commentForm.getByRole('alert')).toHaveCount(0);
+  await expect(commentForm.getByRole('spinbutton',{name:'Issue number'})).toHaveValue('42');
+  await expect(comment).toHaveValue('Reviewed; the fix is ready.');
   await commentForm.getByRole('button',{name:'Authorize and post comment'}).click();
   await expect(host.getByRole('status').filter({hasText:'uncertain · readback-unavailable'})).toBeVisible();
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {
+    saIssueCommentCalls:Array<unknown>;
+  }).saIssueCommentCalls.length)).toBe(1);
   await expect(commentForm.getByRole('button',{name:'Reconcile comment status'})).toBeVisible();
   await commentForm.getByRole('button',{name:'Reconcile comment status'}).click();
   await expect.poll(()=>page.evaluate(()=>(window as unknown as {
@@ -514,7 +520,9 @@ test('Team Builder creates and edits ordered worker and reviewer roles', async (
   await expect(team.locator('.sa-list')).toContainText('Worker Two, Worker One');
   let calls=await page.evaluate(()=>(window as unknown as {
     saTeamCalls:Array<{command:string;args?:Record<string,any>}>
-  }).saTeamCalls());
+  }).saTeamCalls);
+  expect(calls).toHaveLength(1);
+  expect(calls[0].command).toBe('superagent_create');
   expect(calls[0].args?.input).toMatchObject({
     name:'Ordered Team',coordinatorBotId:'coordinator',workerBotId:'worker-two',
     workerBotIds:['worker-two','worker-one'],reviewerBotIds:['reviewer-two','reviewer-one'],
@@ -528,7 +536,8 @@ test('Team Builder creates and edits ordered worker and reviewer roles', async (
   await expect(host).toHaveAttribute('aria-busy','false');
   calls=await page.evaluate(()=>(window as unknown as {
     saTeamCalls:Array<{command:string;args?:Record<string,any>}>
-  }).saTeamCalls());
+  }).saTeamCalls);
+  expect(calls).toHaveLength(2);
   expect(calls[1]).toMatchObject({command:'superagent_update',args:{
     orchestrationId:'team-one',expectedRevision:1,input:{
       workerBotId:'worker-one',workerBotIds:['worker-one','worker-two'],

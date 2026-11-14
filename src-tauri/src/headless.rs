@@ -1017,7 +1017,7 @@ mod tests {
             None,
             |_, _| {
                 missing_dispatch_calls.set(missing_dispatch_calls.get() + 1);
-                Err(std::io::Error::other("unexpected issue-comment dispatch").into())
+                Err("unexpected issue-comment dispatch".into())
             },
         )
         .unwrap_err();
@@ -1045,7 +1045,7 @@ mod tests {
             Some(&wrong_confirmation),
             |_, _| {
                 mismatched_dispatch_calls.set(mismatched_dispatch_calls.get() + 1);
-                Err(std::io::Error::other("unexpected issue-comment dispatch").into())
+                Err("unexpected issue-comment dispatch".into())
             },
         )
         .unwrap_err();

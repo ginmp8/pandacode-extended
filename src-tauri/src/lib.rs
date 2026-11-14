@@ -291,6 +291,34 @@ mod pending_request_tests {
     }
 }
 
+fn native_reviewer_admission(
+    superagent_reviewer_boundary: bool,
+    admission: Option<&architect::Admission>,
+) -> Result<Option<&architect::Admission>> {
+    if superagent_reviewer_boundary {
+        return Ok(None);
+    }
+    admission
+        .map(Some)
+        .ok_or_else(|| "policy_unsupported: native reviewer admission is missing.".into())
+}
+
+#[cfg(test)]
+mod reviewer_host_initialization_tests {
+    use super::*;
+
+    #[test]
+    fn superagent_read_only_needs_no_architect_admission() {
+        assert!(native_reviewer_admission(true, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn native_read_only_policy_without_team_admission_is_unsupported() {
+        let error = native_reviewer_admission(false, None).unwrap_err();
+        assert_eq!(error, "policy_unsupported: native reviewer admission is missing.");
+    }
+}
+
 #[cfg(test)]
 mod concurrent_task_tests;
 
@@ -586,6 +614,88 @@ impl AppState {
             .workspace_root(project_id, session_id)
     }
 }
+
+/// Shared command-boundary logic. The exported Tauri commands and their
+/// regressions use these functions so no caller-supplied label can bypass the
+/// bearer capability check.
+fn superagent_council_task_request_for_client(
+    store: &storage::Store,
+    ticket_id: &str,
+    task_client_capability: &str,
+) -> Result<Option<superagent::council_adapter::CouncilObservation>> {
+    let task_client = superagent::authorize_task_client_capability(
+        store,
+        ticket_id,
+        task_client_capability,
+    )?;
+    superagent::council_adapter::request_task_review(store, &task_client)
+}
+
+fn superagent_council_evidence_read_for_client(
+    store: &storage::Store,
+    ticket_id: &str,
+    task_client_capability: &str,
+    request_id: &str,
+    evidence_ref: &str,
+) -> Result<serde_json::Value> {
+    let task_client = superagent::authorize_task_client_capability(
+        store,
+        ticket_id,
+        task_client_capability,
+    )?;
+    superagent::council_adapter::read_task_evidence(
+        store,
+        &task_client,
+        request_id,
+        evidence_ref,
+    )
+}
+
+/// Request the existing Council result for a finished native task. A random,
+/// assignment-bound bearer capability is checked here before creating a task
+/// client context; caller labels and ticket IDs alone never authenticate.
+#[tauri::command]
+async fn superagent_council_task_request(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    ticket_id: String,
+    task_client_capability: String,
+) -> Result<Option<superagent::council_adapter::CouncilObservation>> {
+    if window.label() != "main" {
+        return Err("Council task requests require the main window.".into());
+    }
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    superagent_council_task_request_for_client(
+        &store,
+        &ticket_id,
+        &task_client_capability,
+    )
+}
+
+/// Resolve one opaque evidence reference from the current approved Council
+/// receipt. The adapter revalidates the task and mandate on every read.
+#[tauri::command]
+async fn superagent_council_evidence_read(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    ticket_id: String,
+    task_client_capability: String,
+    request_id: String,
+    evidence_ref: String,
+) -> Result<serde_json::Value> {
+    if window.label() != "main" {
+        return Err("Council evidence reads require the main window.".into());
+    }
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    superagent_council_evidence_read_for_client(
+        &store,
+        &ticket_id,
+        &task_client_capability,
+        &request_id,
+        &evidence_ref,
+    )
+}
+
 /// Fixed instructions for every task turn: sidebar titles, the run script, change tracking.
 /// Projectless chats have nothing to run, so they skip the run script. Managed team workers
 /// report to their lead, not the user: no titles (they never get a title run), run script,
@@ -1596,6 +1706,8 @@ struct PreparedRun {
     assistant: Arc<Mutex<String>>,
     last_event: Arc<std::sync::atomic::AtomicI64>,
     team: Option<architect::Admission>,
+    /// The policy came from the SuperAgent assignment, not from an Architect Council seat.
+    superagent_reviewer_boundary: bool,
 }
 
 #[cfg(test)]
@@ -1811,9 +1923,16 @@ fn prepare_task_run_in_project(
         error
     };
     let prompt = architect::prompt(&store, &session_id, &prompt, admission.team.as_ref()).map_err(restore)?;
+    let superagent_reviewer_boundary;
     let reviewer_policy = match superagent::read_only_policy(&store, &session_id).map_err(restore)? {
-        Some(policy) => Some(policy),
-        None => architect::reviewer_policy(&store, &session_id, admission.team.as_ref()).map_err(restore)?,
+        Some(policy) => {
+            superagent_reviewer_boundary = true;
+            Some(policy)
+        }
+        None => {
+            superagent_reviewer_boundary = false;
+            architect::reviewer_policy(&store, &session_id, admission.team.as_ref()).map_err(restore)?
+        }
     };
     let reviewer_boundary = reviewer_policy.is_some();
     let config = RunConfig {
@@ -1856,6 +1975,7 @@ fn prepare_task_run_in_project(
         assistant,
         last_event,
         team: admission.team,
+        superagent_reviewer_boundary,
     })
 }
 
@@ -1906,6 +2026,7 @@ fn prepare_cloud_attach(
         assistant: agent.assistant.clone(),
         last_event: agent.last_event.clone(),
         team: None,
+        superagent_reviewer_boundary: false,
     };
     agents.insert(session_id, agent);
     Ok(prepared)
@@ -2149,6 +2270,7 @@ async fn launch_operation_admitted(
         assistant,
         last_event,
         team,
+        superagent_reviewer_boundary,
     } = prepare_task_run_in_project(
         &state,
         session_id.clone(),
@@ -2445,14 +2567,18 @@ async fn launch_operation_admitted(
                 config.reviewer_policy.as_ref(),
                 Some(architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly)
             ) {
-                // Read-only reviewers still need the two task-scoped, native skill
-                // retrieval/verification tools. Never expose Architect or bot tools.
-                let host = team.as_ref().and_then(|admission| {
-                    architect::reviewer_skill_host(
-                        app.clone(), session_id.clone(), stopped.clone(), admission,
-                    )
-                });
-                (host, false, None)
+                let result = native_reviewer_admission(superagent_reviewer_boundary, team.as_ref())
+                    .and_then(|admission| match admission {
+                        Some(admission) => architect::reviewer_host(
+                            app.clone(), session_id.clone(), stopped.clone(), admission,
+                        ).map(Some),
+                        // SuperAgent read-only sessions have no Architect admission.
+                        None => Ok(None),
+                    });
+                match result {
+                    Ok(host) => (host, false, None),
+                    Err(error) => (None, false, Some(error)),
+                }
             } else {
                 (None, false, None)
             };
@@ -4454,6 +4580,8 @@ pub fn run() {
                 superagent::superagent_assignments,
                 superagent::superagent_activity,
                 superagent::superagent_snapshot,
+                superagent_council_task_request,
+                superagent_council_evidence_read,
                 superagent::superagent_submit,
                 superagent::superagent_submit_coordinated,
                 superagent::superagent_dispatch_worker,
@@ -4535,6 +4663,7 @@ pub fn run() {
                 architect::architect_set_council,
                 architect::architect_council_reviewer_options,
                 architect::architect_council_accept,
+                architect::architect_council_waive_finding,
                 architect::architect_start,
                 architect::architect_control,
                 architect::architect_worker_messages,

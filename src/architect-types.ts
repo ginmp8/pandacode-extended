@@ -84,10 +84,18 @@ export interface CouncilUsageTotals {
 export interface CouncilUsageGroup {
   round: number; reviewerSource: 'automatic' | 'direct_bot'; usage: CouncilUsageTotals;
 }
-/** Read-only task-owned native reservation, not a child score or authorization to run it. */
+/** Native evidence derived from fresh independently admitted child leaves, not a root approval. */
+export interface CouncilVerifiedChildReceipt {
+  rootCycleId: string; childSessionId: string; botId: string;
+  objectiveSha256: string; policySha256: string; childConfigSha256: string;
+  lowestScore: number; leafWorkerIds: string[];
+}
+/** Read-only task-owned native reservation, never authorization to approve the root. */
 export interface CouncilChildReservation {
   botId: string; childSessionId: string; rootCycleId: string;
   requiredLeafReviewers: number; status: string;
+  /** Absent for unadmitted, incomplete, failed, or legacy child reviews. */
+  verifiedChildReceipt?: CouncilVerifiedChildReceipt | null;
 }
 export interface CouncilInspection {
   mode: 'm1' | 'm2' | 'm3' | 'm4' | 'm5' | 'm6' | 'm7';

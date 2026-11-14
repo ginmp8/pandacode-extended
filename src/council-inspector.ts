@@ -97,12 +97,29 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     ? '<section aria-label="Task-owned child Councils" class="council-child-reservations">' +
       '<h4>Task-owned child Councils (not approvals)</h4>' +
       '<p>Reservations are not executed reviews or parent Council votes.</p><ul>' +
-      children.map(child => '<li><details><summary>' + escape(child.botId) +
-        ' · ' + escape(child.status.replaceAll('_', ' ')) + '</summary>' +
-        '<p>Configured leaf reviewers: ' + escape(String(child.requiredLeafReviewers)) +
-        ' · Task session: ' + escape(child.childSessionId) +
-        ' · Parent cycle: ' + escape(child.rootCycleId) +
-        '</p></details></li>').join('') + '</ul></section>'
+      children.map(child => {
+        const receipt = child.verifiedChildReceipt;
+        const ids = receipt?.leafWorkerIds;
+        const correlated = receipt && receipt.rootCycleId === child.rootCycleId
+          && receipt.childSessionId === child.childSessionId && receipt.botId === child.botId
+          && Number.isFinite(receipt.lowestScore) && receipt.lowestScore >= 0 && receipt.lowestScore <= 10
+          && Array.isArray(ids) && ids.length === child.requiredLeafReviewers
+          && ids.length >= 2 && ids.length <= 8 && new Set(ids).size === ids.length;
+        const receiptHtml = receipt ? (correlated
+          ? '<p>Native child evidence recorded (root approval pending): minimum score ' +
+            escape(receipt.lowestScore.toFixed(1)) + '/10 · ' +
+            escape(String(ids.length)) + ' independent leaf identifiers.</p>' +
+            '<ul aria-label="Child reviewer evidence identifiers">' +
+            ids.map(id => '<li>' + escape(id) + '</li>').join('') + '</ul>'
+          : '<p role="alert">Child evidence receipt correlation or reviewer count mismatch; no approval.</p>')
+          : '<p>No verified child receipt is available; no parent vote.</p>';
+        return '<li><details><summary>' + escape(child.botId) +
+          ' · ' + escape(child.status.replaceAll('_', ' ')) + '</summary>' +
+          '<p>Configured leaf reviewers: ' + escape(String(child.requiredLeafReviewers)) +
+          ' · Task session: ' + escape(child.childSessionId) +
+          ' · Parent cycle: ' + escape(child.rootCycleId) +
+          '</p>' + receiptHtml + '</details></li>';
+      }).join('') + '</ul></section>'
     : '';
   const hidden = inspection.attempts.length - shown.length;
   const usage = inspection.usage;

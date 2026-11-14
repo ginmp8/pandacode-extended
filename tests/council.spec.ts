@@ -205,6 +205,46 @@ test('Council blocked child state remains non-passing in shared native inspector
   await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
 });
 
+test('native child receipt inspector shows independent evidence without promoting root approval', async ({ page }) => {
+  const receipt = {
+    rootCycleId: 'task:1000', childSessionId: 'child-session', botId: 'security-child',
+    objectiveSha256: 'sha-objective', policySha256: 'sha-policy',
+    childConfigSha256: 'sha-config', lowestScore: 9.5,
+    leafWorkerIds: ['leaf-one', '<img src=x onerror=alert(1)>'],
+  };
+  const inspection = {
+    mode: 'm4', cycleStartedAt: 1000, teamRevision: 11,
+    status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: true },
+    verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
+    reservedChildren: [
+      { botId: 'security-child', childSessionId: 'child-session', rootCycleId: 'task:1000',
+        requiredLeafReviewers: 2, status: 'child_evidence_ready_root_pending',
+        verifiedChildReceipt: receipt },
+      { botId: 'stale-child', childSessionId: 'other-child', rootCycleId: 'task:1000',
+        requiredLeafReviewers: 2, status: 'reviewing',
+        verifiedChildReceipt: { ...receipt, botId: 'wrong-owner' } },
+    ],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const children = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await expect(children.locator('summary')).toHaveCount(2);
+  await children.locator('summary').first().focus();
+  await page.keyboard.press('Enter');
+  await expect(children).toContainText('Native child evidence recorded (root approval pending)');
+  await expect(children).toContainText('minimum score 9.5/10');
+  await expect(children.getByRole('list', { name: 'Child reviewer evidence identifiers' }).locator('li')).toHaveCount(2);
+  await expect(children.getByText('<img src=x onerror=alert(1)>', { exact: true })).toBeVisible();
+  await expect(children.locator('img')).toHaveCount(0);
+  await children.locator('summary').nth(1).focus();
+  await page.keyboard.press('Enter');
+  await expect(children.getByRole('alert')).toContainText('correlation or reviewer count mismatch');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
 test('native Council findings remain attributed unverified and safe to render', async ({ page }) => {
   const inspection = {
     cycleStartedAt: 1000, teamRevision: 9,

@@ -1554,6 +1554,24 @@ mod tests {
     }
 
     #[test]
+    fn terminal_orphan_quarantine_requires_exact_revision_and_exclusive_cli_action() {
+        assert_eq!(parsed("--quarantine-terminal-orphan ticket_123 7"),
+            Ok(Command::QuarantineTerminalOrphan {
+                ticket_id: "ticket_123".into(), expected_revision: 7,
+            }));
+        for invalid in [
+            "--quarantine-terminal-orphan",
+            "--quarantine-terminal-orphan ticket_123",
+            "--quarantine-terminal-orphan ticket_123 0",
+            "--quarantine-terminal-orphan ticket_123 nope",
+            "--quarantine-terminal-orphan ../unsafe 7",
+            "--quarantine-terminal-orphan ticket_123 7 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+    }
+
+    #[test]
     fn flags_parse_in_any_order() {
         assert_eq!(parsed(""), Ok(Command::Serve));
         assert_eq!(parsed("--sign-in"), Ok(Command::SignIn { name: None }));

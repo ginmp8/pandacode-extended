@@ -214,7 +214,7 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
     let conflicting: Option<String> = tx.query_row(
         "SELECT l.ticket_id FROM sa_source_thread_links l
          JOIN sa_event_sources linked ON linked.id=l.source_id
-         WHERE linked.orchestration_id=?1 AND linked.repository=?2
+         WHERE linked.orchestration_id=?1 AND linked.repository=?2 COLLATE NOCASE
            AND l.subject_key=?3 AND l.ticket_id<>?4 LIMIT 1",
         params![&ticket.orchestration_id, &src.repository, subject_key, ticket_id],
         |row| row.get(0),
@@ -272,7 +272,7 @@ fn link_issue_to_pull(store: &Store, source_id: &str, ticket_id: &str,
          WHERE l.ticket_id=?2 AND l.subject_key=?3
            AND initial.orchestration_id=t.orchestration_id
            AND target.orchestration_id=t.orchestration_id
-           AND initial.repository=target.repository LIMIT 1",
+           AND initial.repository=target.repository COLLATE NOCASE LIMIT 1",
         params![source_id,ticket_id,issue_key], |r| r.get(0),
     ).optional().map_err(|e| e.to_string())?;
     if issue_linked.is_none() {
@@ -294,7 +294,7 @@ fn link_issue_to_pull(store: &Store, source_id: &str, ticket_id: &str,
     let conflicting: Option<String> = tx.query_row(
         "SELECT l.ticket_id FROM sa_source_thread_links l
          JOIN sa_event_sources s ON s.id=l.source_id
-         WHERE s.orchestration_id=?1 AND s.repository=?2
+         WHERE s.orchestration_id=?1 AND s.repository=?2 COLLATE NOCASE
            AND l.subject_key=?3 AND l.ticket_id<>?4 LIMIT 1",
         params![&ticket.orchestration_id,&src.repository,pull_key,ticket_id],
         |r|r.get(0),
@@ -502,7 +502,7 @@ fn create_source(
     let actor_key = actor_filter.to_ascii_lowercase();
     let mut statement = store.db.prepare(
         "SELECT id FROM sa_event_sources
-         WHERE orchestration_id=?1 AND repository=?2
+         WHERE orchestration_id=?1 AND repository=?2 COLLATE NOCASE
            AND actor_filter=?3 COLLATE NOCASE AND event_kind=?4
          ORDER BY id LIMIT 2",
     ).map_err(|e| e.to_string())?;
@@ -1399,7 +1399,7 @@ fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<Ev
              SELECT 1 FROM sa_source_thread_links l
              JOIN sa_event_sources linked ON linked.id=l.source_id
              WHERE l.ticket_id=?1 AND l.subject_key=d.subject_key
-               AND linked.repository=observed.repository
+               AND linked.repository=observed.repository COLLATE NOCASE
                AND linked.orchestration_id=observed.orchestration_id
            )
          ORDER BY d.at DESC,d.source_id DESC,d.delivery_id DESC LIMIT ?3",
@@ -2600,6 +2600,49 @@ mod tests {
         assert!(link_thread(&store,&src.id,"two","pull:52").is_err());
         let count:i64=store.db.query_row("SELECT COUNT(*) FROM sa_source_thread_links",[],|row|row.get(0)).unwrap();
         assert_eq!(count,1);
+    }
+
+    #[test]
+    fn legacy_repository_case_aliases_share_ticket_links_without_cross_ticket_leaks() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "one", "orch");
+        insert_manual_ticket(&store, "two", "orch");
+        let issue = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let review = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request_review.submitted").unwrap();
+        let pull = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request.opened").unwrap();
+        // Older databases may contain mixed-case repository identities even
+        // though newly created sources require canonical lower-case names.
+        for id in [&review.id, &pull.id] {
+            store.db.execute(
+                "UPDATE sa_event_sources SET repository='Test/Fixture' WHERE id=?1",
+                [id],
+            ).unwrap();
+        }
+        assert_eq!(create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request.opened").unwrap().id, pull.id,
+            "A legacy case alias must retain its source ID, revision and cursor");
+        let observed = set_mode(&store, &issue.id, issue.policy_revision, "observe").unwrap();
+        observe(&store, &event("alias-event", &observed, 1)).unwrap();
+        link_thread(&store, &issue.id, "one", "issue:42").unwrap();
+        assert!(link_thread(&store, &review.id, "two", "issue:42").is_err(),
+            "Case-only source aliases cannot give a thread to another Ticket");
+        assert!(link_issue_to_pull(&store, &pull.id, "two", "issue:42", "pull:99").is_err());
+        let associated = link_issue_to_pull(&store, &pull.id, "one", "issue:42", "pull:99").unwrap();
+        assert_eq!(associated.subject_key, "pull:99");
+        link_thread(&store, &review.id, "one", "issue:42").unwrap();
+        unlink_thread(&store, &issue.id, "one", "issue:42").unwrap();
+        // A legacy alias exposes authenticated receipt metadata only to its
+        // explicitly linked Ticket, not an unrelated Demand.
+        assert_eq!(linked_decisions(&store, "one", 50).unwrap()[0].delivery_id, "alias-event");
+        assert!(linked_decisions(&store, "two", 50).unwrap().is_empty());
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(linked_decisions(&reopened, "one", 50).unwrap().len(), 1);
+        assert!(link_thread(&reopened, &issue.id, "two", "issue:42").is_err());
+        assert!(linked_decisions(&reopened, "two", 50).unwrap().is_empty());
     }
 
     #[test]

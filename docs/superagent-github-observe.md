@@ -94,3 +94,12 @@ and replay of the same delivery with a case-only actor variation is
 idempotent. Existing receipts and cursors are preserved across restarts.
 No wider repository filter, new subscription, Auto execution or write
 authorization is introduced.
+
+Legacy source rows with mixed-case repository identities are compared with
+ASCII case-insensitive equality when reusing a source or correlating an
+operator-linked issue/PR thread. A case-only alias cannot associate the same
+Team/repository/thread with a different Ticket, and cross-source authenticated
+receipts are visible only through an explicit link to that Ticket. Existing
+source IDs, cursors and audit records are not rewritten; ambiguous case-only
+legacy duplicates still fail closed. This remains Observe-only context, never
+a GitHub grant or inferred demand.

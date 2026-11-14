@@ -1911,6 +1911,73 @@ fn synthetic_composition_gate_fixtures_cover_modes_and_strategies() {
     }
 }
 
+
+#[test]
+fn all_seven_compositions_and_three_strategies_reject_unverified_terminal_counterpaths() {
+    use council::AutomaticReviewerCount as Count;
+    let cases = [
+        ("M1", composition(true, Count::Auto(council::AutomaticReviewerCountAuto::Auto), vec![])),
+        ("M2", composition(false, Count::Fixed(0), vec![direct_reviewer("d-a"), direct_reviewer("d-b")])),
+        ("M3", composition(true, Count::Fixed(1), vec![direct_reviewer("d-a")])),
+        ("M4", composition(false, Count::Fixed(0), vec![nested_reviewer("n-a"), nested_reviewer("n-b")])),
+        ("M5", composition(true, Count::Fixed(1), vec![nested_reviewer("n-a")])),
+        ("M6", composition(false, Count::Fixed(0), vec![direct_reviewer("d-a"), nested_reviewer("n-a")])),
+        ("M7", composition(true, Count::Fixed(1), vec![direct_reviewer("d-a"), nested_reviewer("n-a")])),
+    ];
+    for (mode, plan) in cases {
+        for strategy in [
+            council::CouncilStrategy::Parallel,
+            council::CouncilStrategy::Escalated,
+            council::CouncilStrategy::TwoPhase,
+        ] {
+            let mut plan = plan.clone();
+            plan.strategy = strategy;
+            let config = config_for_composition(plan);
+            let rounds = if strategy == council::CouncilStrategy::TwoPhase { 2 } else { 1 };
+            let (team, receipts) = executable_composition_fixture(config.clone(), rounds);
+            let status = |snapshot: &TeamSnapshot, evidence: &[council::CouncilCriterionOutcomeReceipt]| {
+                council::status_with_criterion_outcomes(snapshot, evidence).unwrap().state
+            };
+            assert_eq!(status(&team, &receipts), "passed",
+                "{mode} x {strategy:?} positive fixture must reach its native gate");
+
+            let mut absent_result = team.clone();
+            let worker = absent_result.workers.last_mut().unwrap();
+            worker.council.as_mut().unwrap().score = None;
+            worker.status = "failed".into();
+            assert_ne!(status(&absent_result, &receipts), "passed",
+                "{mode} x {strategy:?}: absent last-seat score cannot be averaged away");
+
+            let mut below_target = team.clone();
+            below_target.workers.last_mut().unwrap().council.as_mut().unwrap().score = Some(8.0);
+            assert_ne!(status(&below_target, &receipts), "passed",
+                "{mode} x {strategy:?}: below-target seat blocks the entire root");
+
+            assert_ne!(status(&team, &[]), "passed",
+                "{mode} x {strategy:?}: numeric scores without required criterion receipts are not approval");
+
+            let mut mismatched_receipts = receipts.clone();
+            for receipt in &mut mismatched_receipts {
+                receipt.root_cycle_id = "stale-root:old-cycle".into();
+            }
+            assert_ne!(status(&team, &mismatched_receipts), "passed",
+                "{mode} x {strategy:?}: stale-cycle evidence cannot validate current reviewers");
+
+            let mut duplicate_session = team.clone();
+            duplicate_session.workers.last_mut().unwrap().session_id = team.workers[0].session_id.clone();
+            assert_ne!(status(&duplicate_session, &receipts), "passed",
+                "{mode} x {strategy:?}: a reused native reviewer session cannot provide independent approval");
+
+            if strategy == council::CouncilStrategy::TwoPhase {
+                let (only_first_phase, phase1_receipts) =
+                    executable_composition_fixture(config, 1);
+                assert_ne!(status(&only_first_phase, &phase1_receipts), "passed",
+                    "{mode} x {strategy:?}: first-phase approval cannot bypass independent challengers");
+            }
+        }
+    }
+}
+
 fn executable_composition_fixture(
     mut config: CouncilConfig,
     rounds: usize,

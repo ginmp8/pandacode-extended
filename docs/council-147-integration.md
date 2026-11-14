@@ -229,3 +229,10 @@ Added Rust negative tests for changed detail identity, forged detail mutation, u
 PR #149 advanced to `fcf6a0f00d126a7e1e9d5d78547864d6a65a78ec` with separate automatic, direct and native-child source admission. The unified implementation already owns the same semantics through `CouncilComposition`, `CouncilSeatPlan` (`automatic`, `direct_bots`, `nested_bots`), frozen reviewer binding and the existing native 7×3 dispatch test. Copying the source's incompatible `CouncilConfig` fields would introduce duplicate Council engines and break the unified persistence contract.
 
 The root Architect instruction text now explicitly communicates exact M4-M7 nested/direct/automatic quotas, one composite parent vote per child, no root vote for child leaves, OnTrigger preliminary/child separation, and mandatory matching native terminal receipts. New Rust tests assert the M4-M7 plan and preserve M1 guidance. This reconciles the user-visible guidance while retaining the already native-enforced seat plan.
+
+
+## Full 7 × 3 score and evidence counterpath matrix (W5 / AC-18/30/40)
+
+The native Council strategy/status regression now iterates all seven A/D/N combinations with Parallel, Escalated and TwoPhase. For each pair, a complete executable synthetic source-aware fixture reaches the native passing gate, while independently exercised negative paths block approval: an unscored or failed required reviewer, a below-target reviewer, absent mandatory criterion receipts, stale root-cycle evidence and replayed reviewer session identity. TwoPhase additionally rejects a first-phase-only result.
+
+This matrix validates the core native status/score/receipt logic, not live provider execution or the independent persisted terminal callback CAS. The existing 7 × 3 persisted runtime-dispatch fixture remains separate. Exact-HEAD test execution stays subject to CI, which must not be conflated with test source coverage.

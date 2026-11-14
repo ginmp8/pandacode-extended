@@ -37,6 +37,10 @@ interface TeamSnapshot {
 interface Ticket { id: string; orchestrationId: string; objective: string; state: string; revision: number; evidence: string | null }
 interface DemandIndex { id: string; orchestrationId: string; objective: string;
   state: string; revision: number; updatedAt: number }
+interface DemandQuery {
+  limit?: number; beforeUpdatedAt?: number; beforeId?: string;
+  orchestrationId?: string; stateFilter?: string; searchQuery?: string;
+}
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
 interface ImportResult { created: string[]; unchanged: string[]; backupPath?: string }
 interface WorkerWriteDispatchRequest extends Record<string, unknown> {
@@ -146,7 +150,7 @@ async function issueCommentEffectKey(
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
-  let demandTeamFilter = '', demandStateFilter = '';
+  let demandTeamFilter = '', demandStateFilter = '', demandSearch = '', demandSearchDraft = '';
   let teamSearch = '', teamStatusFilter: 'all' | 'enabled' | 'disabled' = 'all';
   let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false;
   let globalDemandLayout: 'board' | 'list' = 'board';
@@ -183,6 +187,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let sourceIntegrity: SourceIntegrity | null = null;
   let linkedDecisions: SourceDecision[] = [], linkedDecisionsLoaded = false;
   const safe = (value: unknown) => escape(String(value ?? ''));
+  const fetchDemandPage = (query: DemandQuery) =>
+    call<DemandIndex[]>('superagent_all_demands', { query });
   const current = () => presets.find(item => item.id === selected);
   const botName = (id: string) => bots.find(bot => bot.id === id)?.name ?? 'Missing bot';
   const activityTime = (timestamp?: number): string => typeof timestamp === 'number' &&
@@ -604,8 +610,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           (demandStateFilter === state ? ' selected' : '') + '>' +
           state.split('_').join(' ') + '</option>').join('') +
       '</select></label>' +
+      '<form data-sa-form="demand-search" role="search" aria-label="Search native Demands">' +
+      '<label>Search objectives<input type="search" name="searchQuery" data-sa-demand-search maxlength="128" ' +
+      'placeholder="Literal objective fragment" value="' + safe(demandSearchDraft) + '"></label>' +
+      '<button type="submit">Search Demands</button></form>' +
       '<p>Native Tickets ' + (demandTeamFilter ? 'for this Team' : 'across Teams') +
       (demandStateFilter ? ' in state ' + safe(demandStateFilter) : '') +
+      (demandSearch ? ' matching ' + safe(demandSearch) : '') +
       ', loaded 200 at a time in newest-first order. Board counts cover ' +
       'only loaded pages, not all saved Demands. Open a Demand to act within its Team.</p>' +
       (!allDemandsLoaded ? '<p role="status">Load Demands for the selected Team scope.</p>' :
@@ -1020,9 +1031,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
       render();
       void work(async () => {
-        const loaded = await call<DemandIndex[]>('superagent_all_demands',{
+        const loaded = await fetchDemandPage({
           limit:200, orchestrationId:filter || undefined,
           stateFilter:demandStateFilter || undefined,
+          searchQuery:demandSearch || undefined,
         });
         allDemands = loaded; allDemandsHasMore = loaded.length === 200;
         allDemandsLoaded = true;
@@ -1041,9 +1053,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
       render();
       void work(async () => {
-        const loaded = await call<DemandIndex[]>('superagent_all_demands',{
+        const loaded = await fetchDemandPage({
           limit:200, orchestrationId:demandTeamFilter || undefined,
           stateFilter:filter || undefined,
+          searchQuery:demandSearch || undefined,
         });
         allDemands = loaded; allDemandsHasMore = loaded.length === 200;
         allDemandsLoaded = true;
@@ -1065,6 +1078,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   });
   host.addEventListener('input', event => {
     const target = event.target;
+    if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-demand-search')) {
+      demandSearchDraft = target.value;
+      return;
+    }
     if (target instanceof Element && guidedBuilder.handleInput(target)) return;
     if ((target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) &&
         target.closest('form[data-sa-form="issue-comment"]')) {
@@ -1240,9 +1257,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       void work(async () => {
         allDemands = [];
         allDemandsLoaded = false; allDemandsHasMore = false;
-        const loaded = await call<DemandIndex[]>('superagent_all_demands',{
+        const loaded = await fetchDemandPage({
           limit:200, orchestrationId:demandTeamFilter || undefined,
           stateFilter:demandStateFilter || undefined,
+          searchQuery:demandSearch || undefined,
         });
         allDemands = loaded;
         allDemandsHasMore = loaded.length === 200;
@@ -1254,10 +1272,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const last = allDemands[allDemands.length - 1];
       if (!allDemandsLoaded || !allDemandsHasMore || !last) return;
       void work(async () => {
-        const loaded = await call<DemandIndex[]>('superagent_all_demands',{
+        const loaded = await fetchDemandPage({
           limit:200, beforeUpdatedAt:last.updatedAt, beforeId:last.id,
           orchestrationId:demandTeamFilter || undefined,
           stateFilter:demandStateFilter || undefined,
+          searchQuery:demandSearch || undefined,
         });
         const seen = new Set(allDemands.map(item => item.id));
         allDemands = [...allDemands, ...loaded.filter(item => !seen.has(item.id))];
@@ -1706,6 +1725,25 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         if (inspectedTicket !== nativeTicket.id) return;
         workPlan = saved; workPlanLoaded = true;
         feedback = 'Native work-plan DAG saved without dispatch or acceptance.';
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'demand-search') {
+      const next = String(data.get('searchQuery') ?? '').trim();
+      if (next.length > 128 || /[\x00-\x1f\x7f]/.test(next)) {
+        error = 'Search requires at most 128 characters without control characters.';
+        render(); return;
+      }
+      demandSearch = next; demandSearchDraft = next;
+      allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
+      void work(async () => {
+        const loaded = await fetchDemandPage({
+          limit:200, orchestrationId:demandTeamFilter || undefined,
+          stateFilter:demandStateFilter || undefined, searchQuery:demandSearch || undefined,
+        });
+        allDemands = loaded;
+        allDemandsHasMore = loaded.length === 200;
+        allDemandsLoaded = true;
       });
       return;
     }

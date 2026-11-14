@@ -581,10 +581,10 @@ mod tests {
     #[test]
     fn authenticated_auto_receipts_are_unique_quota_bound_and_revocable() {
         let store=test_store();
-        let created=super::create_source(
+        let created=super::super::create_source(
             &store,"team","owner/repo","trusted-bot","issues.opened",
         ).unwrap();
-        let source=super::set_mode(
+        let source=super::super::set_mode(
             &store,&created.id,created.policy_revision,"observe",
         ).unwrap();
         let now=storage::now();
@@ -606,13 +606,13 @@ mod tests {
                 sequence,
             };
             let tx=store.db.unchecked_transaction().unwrap();
-            let decision=super::observe_authenticated_in_tx(
+            let decision=super::super::observe_authenticated_in_tx(
                 &tx,&source,&event,"local-operator",
             ).unwrap();
             assert_eq!(decision.decision,"observed_permitted");
             stage(&tx,&source,&event,&decision,now+1).unwrap();
             // Reusing the delivery cannot mint a second native receipt.
-            let repeated=super::observe_authenticated_in_tx(
+            let repeated=super::super::observe_authenticated_in_tx(
                 &tx,&source,&event,"local-operator",
             ).unwrap();
             assert!(repeated.duplicate);
@@ -648,10 +648,10 @@ mod tests {
     #[test]
     fn disabled_team_never_activates_github_auto() {
         let store=test_store();
-        let created=super::create_source(
+        let created=super::super::create_source(
             &store,"team","owner/repo","trusted-bot","issues.opened",
         ).unwrap();
-        let source=super::set_mode(
+        let source=super::super::set_mode(
             &store,&created.id,created.policy_revision,"observe",
         ).unwrap();
         let status=current(&store,&source.id).unwrap();

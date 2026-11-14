@@ -1413,7 +1413,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           ticketId,
         });
         if (inspectedTicket!==ticketId || observed.ticketId!==ticketId ||
-            observed.teamVersion!==ticketDetails?.teamSnapshot.teamVersion) {
+            observed.teamVersion!==ticketDetails?.teamSnapshot?.teamVersion) {
           throw new Error('Provider child evidence changed before inspection.');
         }
         childTree=observed;childTreeLoaded=true;

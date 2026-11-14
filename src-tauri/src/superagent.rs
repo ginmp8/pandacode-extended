@@ -2645,7 +2645,7 @@ fn manual_preflight(
         })
     } else { None };
     Ok(ManualPreflight {
-        orchestration_id: cfg.id, policy_revision: cfg.policy_revision,
+        orchestration_id: cfg.id.clone(), policy_revision: cfg.policy_revision,
         project_id: cfg.project_id, selected_bot_id: candidate.id.clone(),
         selected_role: if coordinate { "coordinator" } else { "worker" }.into(),
         eligible: reason.is_none(), reason,

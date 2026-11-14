@@ -2514,7 +2514,16 @@ fn dispatch_as(
                     if check_reviewer_executables {
                         bot_reviewers::seat_bot(&store, &team, seat.round, assignment.replaces.as_deref(), library)?
                     } else {
-                        bot_reviewers::seat_bot_inner(&store, &team, seat.round, assignment.replaces.as_deref(), false)?
+                        // Keep executable checks mandatory in production. Tests can use an
+                        // unconfigured fake harness for reviewer bot fixtures.
+                        #[cfg(test)]
+                        {
+                            bot_reviewers::seat_bot_inner(&store, &team, seat.round, assignment.replaces.as_deref(), false)?
+                        }
+                        #[cfg(not(test))]
+                        {
+                            bot_reviewers::seat_bot(&store, &team, seat.round, assignment.replaces.as_deref(), library)?
+                        }
                     }
                 } else { None };
                 let unchosen = assignment.profile_id.is_none() && assignment.provider.is_none() && assignment.model.is_none();

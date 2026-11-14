@@ -2739,10 +2739,8 @@ async fn launch_operation_admitted(
         drop(registry);
         // Persist a just-finished native Council reviewer result before its
         // SuperAgent callback inspects the native score and skill receipts.
-        if let Ok(db) = store.lock() {
-            if let Err(error) = superagent::council_adapter::finalize_after_native_run(&db,&session_id) {
-                eprintln!("SuperAgent Council finalization failed: {error}");
-            }
+        if let Err(error) = superagent::council_adapter::finalize_after_native_run_from_app(&app,&session_id) {
+            eprintln!("SuperAgent Council finalization failed: {error}");
         }
         // Successful bot workers have no failover path. Settle their Ticket
         // synchronously so the exact artifact is frozen before actual native
@@ -4131,6 +4129,9 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     app.manage(architect::Runtime::default());
     architect::watchdog::watch(app.handle().clone());
     bots::start(app.handle());
+    // Fail closed on starts interrupted before their exact native session was
+    // linked. Startup recovery never replays reviewer dispatch.
+    superagent::council_adapter::recover_starting(app.handle());
     skills::begin_startup_sync(app.handle().clone());
     // Machine threads that settled while PandaCode was closed wake their idle tasks.
     remote::orchestrate::reconcile(app.handle());

@@ -32,7 +32,7 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   const dialog=page.getByRole('region',{name:'Orchestrations'});
   await expect(dialog).toBeVisible();
   await expect(dialog.getByText('No orchestrations created.')).toBeVisible();
-  await dialog.getByRole('textbox',{name:'Name'}).fill('Software Development');
+  await dialog.getByRole('textbox',{name:'Name',exact:true}).fill('Software Development');
   const coordinator=dialog.getByRole('combobox',{name:'Coordinator'});
   const worker=dialog.getByRole('combobox',{name:'Worker'});
   await coordinator.selectOption({label:'Scout'});
@@ -89,6 +89,44 @@ test('guided SuperAgent Team Builder validates five native-backed stages and sav
   await expect(host.getByRole('button',{name:'Enable manual'})).toBeVisible();
 });
 
+test('guided Team Builder scopes Workers to the primary checkout without restricting reviewers', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await openOrchestrationWorkspace(page);
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const previous=document.querySelector<HTMLElement>('#superagent-host')!;
+    const host=document.createElement('div');
+    host.id='superagent-host'; previous.replaceWith(host);
+    const bots=[
+      {id:'coordinator',name:'Coordinator',paused:false,projectId:'coord-project'},
+      {id:'worker-one',name:'Primary Worker',paused:false,projectId:'project-one'},
+      {id:'worker-two',name:'Same Project Worker',paused:false,projectId:'project-one'},
+      {id:'foreign-worker',name:'Different Project Worker',paused:false,projectId:'project-two'},
+      {id:'independent-reviewer',name:'Independent Reviewer',paused:false,projectId:'council-project'},
+    ];
+    mountSuperagent(host, async(command) => {
+      if(command==='bots_list') return bots as never;
+      if(command==='superagent_list') return [] as never;
+      if(command==='superagent_tickets') return [] as never;
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#superagent-host');
+  await expect(host).toHaveAttribute('aria-busy','false');
+  await host.getByRole('button',{name:'Guided Team setup (five steps)'}).click();
+  const builder=host.getByRole('region',{name:'Guided Team Builder'});
+  await builder.getByRole('textbox',{name:'Team name'}).fill('Project scoped Team');
+  await builder.getByRole('button',{name:'Next'}).click();
+  await builder.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
+  await builder.getByRole('combobox',{name:'Primary Worker'}).selectOption('worker-one');
+  const workers=builder.locator('select[name="builderWorkers"]');
+  await expect(workers.locator('option[value="foreign-worker"]')).toBeDisabled();
+  await expect(workers.locator('option[value="worker-two"]')).toBeEnabled();
+  const reviewers=builder.locator('select[name="builderReviewers"]');
+  await expect(reviewers.locator('option[value="independent-reviewer"]')).toBeEnabled();
+  await expect(builder.getByRole('combobox',{name:'Coordinator'})).toHaveValue('coordinator');
+});
+
 test('native SuperAgent manual dispatch requires opt-in and supports explicit revocation',async ({page})=>{
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
@@ -99,7 +137,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await sidebar.getByRole('button',{name:'Bot actions'}).click();
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
   const dialog=page.getByRole('region',{name:'Orchestrations'});
-  await dialog.getByRole('textbox',{name:'Name'}).fill('Issue Resolution');
+  await dialog.getByRole('textbox',{name:'Name',exact:true}).fill('Issue Resolution');
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();
@@ -145,7 +183,7 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
   await sidebar.getByRole('button',{name:'Bot actions'}).click();
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
   const dialog=page.getByRole('region',{name:'Orchestrations'});
-  await dialog.getByRole('textbox',{name:'Name'}).fill('Safe default');
+  await dialog.getByRole('textbox',{name:'Name',exact:true}).fill('Safe default');
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();

@@ -682,7 +682,7 @@ mod tests {
             (running,session_id,grant,old_snapshot)
         };
         {
-            let store=fixture.store();
+            let mut store=fixture.store();
             let (project,provider): (String,String)=store.db.query_row(
                 "SELECT project_id,provider FROM bots WHERE id='worker-a'",[],
                 |r| Ok((r.get(0)?,r.get(1)?)),

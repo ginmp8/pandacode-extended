@@ -188,12 +188,17 @@ export class GuidedTeamBuilder {
           (selectedId === bot.id ? ' selected' : '') +
           (bot.paused ? ' disabled' : '') + '>' +
           safe(bot.name) + (bot.paused ? ' (paused)' : '') + '</option>').join('');
-    const multiselectOptions = (selectedIds: string[], exclude: string[]) =>
-      bots.filter(bot => !exclude.includes(bot.id))
-        .map(bot => '<option value="' + safe(bot.id) + '"' +
+    const multiselectOptions = (
+      selectedIds: string[], exclude: string[], workerProjectId?: string,
+    ) => bots.filter(bot => !exclude.includes(bot.id))
+      .map(bot => {
+        const crossProject = !!workerProjectId && bot.projectId !== workerProjectId;
+        return '<option value="' + safe(bot.id) + '"' +
           (selectedIds.includes(bot.id) ? ' selected' : '') +
-          (bot.paused ? ' disabled' : '') + '>' +
-          safe(bot.name) + (bot.paused ? ' (paused)' : '') + '</option>').join('');
+          (bot.paused || crossProject ? ' disabled' : '') + '>' +
+          safe(bot.name) + (bot.paused ? ' (paused)' :
+            crossProject ? ' (different Worker project)' : '') + '</option>';
+      }).join('');
     const steps = ['Purpose', 'Team roles', 'Models and Skills',
       'Execution and review', 'Preflight and Save'];
     let content = '';
@@ -213,7 +218,8 @@ export class GuidedTeamBuilder {
         '<label>Primary Worker<select name="builderWorker">' +
         selectOptions(this.primaryWorkerId) + '</select></label>' +
         '<label>Additional Workers (up to 15)<select name="builderWorkers" multiple size="5">' +
-        multiselectOptions(this.workers, [this.coordinatorId, this.primaryWorkerId, ...this.reviewers]) +
+        multiselectOptions(this.workers, [this.coordinatorId, this.primaryWorkerId, ...this.reviewers],
+          bots.find(bot => bot.id === this.primaryWorkerId)?.projectId) +
         '</select></label>' +
         '<ol aria-label="Configured Worker order">' +
         this.workers.map((id, index) =>

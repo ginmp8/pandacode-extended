@@ -1399,12 +1399,13 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
 under `xvfb-run -a pandacode serve …` (a display is required to start, none is used).
 
+  --help, -h             Show this help and exit.
   --sign-in              First run: sign in with the GitHub device flow, enable hosting, then serve.
   --sign-out             Forget the Connect sign-in on this server and exit.
   --full-access          Let remote devices pick Full access (no approvals); exits after saving.
@@ -1798,6 +1799,11 @@ mod tests {
             .lines()
             .find(|line| line.starts_with("Usage:"))
             .unwrap();
+        for alias in ["--help", "-h"] {
+            assert_eq!(parse(&argv(alias)), Err(text.clone()), "{alias} is accepted by parse");
+            assert!(usage.contains(alias), "{alias} is in Usage");
+            assert!(text.lines().any(|line| line.starts_with("  --help, -h") && line.contains(alias)), "{alias} has a help detail");
+        }
         assert!(usage.contains("--preview-orchestrations <file>"));
         for flag in [
             "--sign-in",
@@ -1906,8 +1912,9 @@ mod tests {
     #[test]
     fn first_issue_comment_requires_an_exact_confirmation_before_dispatch() {
         let (path, ticket_id) = issue_comment_fixture();
+        let missing_dispatch_calls = std::cell::Cell::new(0);
 
-        let missing = crate::superagent::headless_issue_comment(
+        let missing = crate::superagent::headless_issue_comment_with_dispatch(
             &path,
             &ticket_id,
             0,
@@ -1916,6 +1923,10 @@ mod tests {
             "github:comment:7",
             "reviewed comment",
             None,
+            |_, _| {
+                missing_dispatch_calls.set(missing_dispatch_calls.get() + 1);
+                Err(std::io::Error::other("unexpected issue-comment dispatch").into())
+            },
         )
         .unwrap_err();
         assert!(
@@ -1923,9 +1934,15 @@ mod tests {
             "{missing}"
         );
         assert!(missing.contains("--confirm-issue-comment"), "{missing}");
+        assert_eq!(
+            missing_dispatch_calls.get(),
+            0,
+            "missing confirmation must not invoke the dispatcher"
+        );
 
         let wrong_confirmation = "0".repeat(64);
-        let mismatched = crate::superagent::headless_issue_comment(
+        let mismatched_dispatch_calls = std::cell::Cell::new(0);
+        let mismatched = crate::superagent::headless_issue_comment_with_dispatch(
             &path,
             &ticket_id,
             0,
@@ -1934,11 +1951,20 @@ mod tests {
             "github:comment:7",
             "reviewed comment",
             Some(&wrong_confirmation),
+            |_, _| {
+                mismatched_dispatch_calls.set(mismatched_dispatch_calls.get() + 1);
+                Err(std::io::Error::other("unexpected issue-comment dispatch").into())
+            },
         )
         .unwrap_err();
         assert_eq!(
             mismatched,
             "The issue-comment confirmation hash does not match this exact payload."
+        );
+        assert_eq!(
+            mismatched_dispatch_calls.get(),
+            0,
+            "mismatched confirmation must not invoke the dispatcher"
         );
 
         let store = crate::superagent::effects::open_effect_store(&path).unwrap();

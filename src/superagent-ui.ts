@@ -9,7 +9,7 @@ interface Bot { id: string; name: string; paused: boolean;
   provider?: string; model?: string; mode?: string; projectId?: string; skills?: string[] }
 interface Config {
   id: string; name: string; coordinatorBotId: string; workerBotId: string;
-  enabled: boolean; policyRevision: number; councilRequired?:boolean;
+  enabled: boolean; policyRevision: number; councilRequired?:boolean; projectId?:string;
   ticketCount?: number; runningCount?: number; blockedCount?: number; lastActivityAt?: number;
   workerCount?: number; reviewerCount?: number;
 }
@@ -692,12 +692,18 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<div class="sa-actions"><button type="submit" class="primary-button">Submit rejection</button>' +
           '<button type="button" data-sa-reject-cancel>Cancel</button></div></form>' : '') +
         details + '</section>' : '';
-    const roleOptions = (selectedRoles:string[]) => bots
+    const roleOptions = (selectedRoles:string[], workerProjectId?:string) => bots
       .filter(bot => chosen && bot.id !== chosen.coordinatorBotId && bot.id !== chosen.workerBotId)
-      .map(bot => '<option value="' + safe(bot.id) + '"' +
-        (selectedRoles.includes(bot.id) ? ' selected' : '') +
-        (bot.paused ? ' disabled' : '') + '>' + safe(bot.name) +
-        (bot.paused ? ' (paused)' : '') + '</option>').join('');
+      .map(bot => {
+        // Native admission scopes executor Workers to one checkout. Council
+        // reviewers remain independently isolated and may use other projects.
+        const crossProject = !!workerProjectId && bot.projectId !== workerProjectId;
+        return '<option value="' + safe(bot.id) + '"' +
+          (selectedRoles.includes(bot.id) ? ' selected' : '') +
+          (bot.paused || crossProject ? ' disabled' : '') + '>' + safe(bot.name) +
+          (bot.paused ? ' (paused)' : crossProject ? ' (different Worker project)' : '') +
+          '</option>';
+      }).join('');
     const effectivePolicy = chosen && effectiveTeam &&
       effectiveTeam.orchestrationId === chosen.id &&
       effectiveTeam.policyRevision === chosen.policyRevision
@@ -737,7 +743,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             ' · Policy revision ' + roleRoster.policyRevision + '</p>' +
             '<form data-sa-form="roster">' +
               '<label>Additional Workers (up to 15)<select name="additionalWorkers" data-sa-worker-select multiple size="5">' +
-              roleOptions(workerOrder) + '</select></label>' +
+              roleOptions(workerOrder, chosen.projectId ||
+                bots.find(bot => bot.id === chosen.workerBotId)?.projectId) + '</select></label>' +
               '<ol class="sa-worker-order" aria-label="Additional Worker order">' +
               workerOrder.map((id,index) => '<li><span>' + (index + 2) + '. ' + safe(botName(id)) +
                 '</span><button type="button" data-sa-worker-move="' + safe(id) +
@@ -1706,6 +1713,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const cfg=current();
       if (!cfg || !roleRoster || roleRoster.orchestrationId!==cfg.id) return;
       const workerBotIds=[cfg.workerBotId,...workerOrder];
+      const workerProject = cfg.projectId ||
+        bots.find(bot => bot.id === cfg.workerBotId)?.projectId;
+      if (workerOrder.some(id =>
+        !bots.some(bot => bot.id === id && !bot.paused &&
+          (!workerProject || bot.projectId === workerProject)))) {
+        error = 'All additional Workers must be active and share the primary Worker project.';
+        render();
+        return;
+      }
       const reviewerBotIds=data.getAll('reviewers').map(String);
       // Freeze the visible policy before async work; reload may clear the
       // selected roster while the native compare-and-swap request is pending.

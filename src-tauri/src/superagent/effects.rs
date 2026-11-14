@@ -1243,7 +1243,15 @@ mod tests {
             "stopped"
         );
         assert!(superagent::mandate(&store, &id).unwrap().revoked);
-        assert!(!has_exact_grant(&store, &intent).unwrap());
+        let exact_grant_count: i64 = store
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM sa_effect_grants WHERE ticket_id=?1 AND effect_key=?2",
+                params![&id, &intent.effect_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(exact_grant_count, 0, "Stop must leave no exact effect grant");
     }
 
     #[test]

@@ -107,15 +107,10 @@ pub(crate) fn revoke_descendants(tx:&Connection,root:&str,now:i64)->Result<()> {
 
 fn reconcile(store:&Store)->Result<()> {
     let now=storage::now();
-    // Only actual native Ticket completion satisfies dependency edges.
-    store.db.execute(
-        "UPDATE sa_work_items SET state='completed',last_reason=NULL,updated_at=?1
-         WHERE state IN ('running','waiting_review') AND child_ticket_id IN
-         (SELECT id FROM sa_tickets WHERE state='completed')
-           AND NOT EXISTS(SELECT 1 FROM sa_subagent_nodes child
-              WHERE child.parent_ticket_id=sa_work_items.child_ticket_id
-                AND child.state<>'completed')",[now],
-    ).map_err(|e|e.to_string())?;
+    // Do not accept model-reported completion or a mutable Ticket state.
+    // Persist the exact independent human/Council decision first, under the
+    // existing native effect/dispatch fence.
+    evidence::record_accepted(store,now)?;
     store.db.execute(
         "UPDATE sa_work_items SET state='waiting_review',updated_at=?1
          WHERE state='running' AND child_ticket_id IN
@@ -125,6 +120,16 @@ fn reconcile(store:&Store)->Result<()> {
         "UPDATE sa_work_items SET state='blocked',last_reason='Child Ticket needs recovery',updated_at=?1
          WHERE state IN ('running','waiting_review') AND child_ticket_id IN
          (SELECT id FROM sa_tickets WHERE state IN ('failed','blocked','stopped','interrupted','inconclusive'))",[now],
+    ).map_err(|e|e.to_string())?;
+    // Historical completed child Tickets without proof cannot become an
+    // implicitly verified dependency during a restart.
+    store.db.execute(
+        "UPDATE sa_work_items SET state='waiting_review',
+         last_reason='Native child approval receipt unavailable',updated_at=?1
+         WHERE state IN ('running','waiting_review') AND child_ticket_id IN
+           (SELECT id FROM sa_tickets WHERE state='completed')
+           AND NOT EXISTS(SELECT 1 FROM sa_work_item_evidence_receipts receipt
+             WHERE receipt.item_id=sa_work_items.id)",[now],
     ).map_err(|e|e.to_string())?;
     // A local user authorized the full Demand once. All child Tickets
     // already passed their own native human/Council/effect gates, so no
@@ -150,7 +155,10 @@ fn reconcile(store:&Store)->Result<()> {
                  LEFT JOIN sa_tickets child ON child.id=item.child_ticket_id
                  WHERE item.ticket_id=plan.ticket_id
                    AND (item.state<>'completed' OR child.state IS NULL
-                        OR child.state<>'completed'))
+                        OR child.state<>'completed'
+                        OR NOT EXISTS(SELECT 1 FROM sa_work_item_evidence_receipts evidence
+                          WHERE evidence.item_id=item.id
+                            AND evidence.child_ticket_id=item.child_ticket_id)))
                AND NOT EXISTS(
                  SELECT 1 FROM sa_subagent_nodes descendant
                  WHERE descendant.root_ticket_id=plan.ticket_id
@@ -189,7 +197,10 @@ fn reconcile(store:&Store)->Result<()> {
                  LEFT JOIN sa_tickets child ON child.id=item.child_ticket_id
                  WHERE item.ticket_id=?1
                    AND (item.state<>'completed' OR child.state IS NULL
-                        OR child.state<>'completed'))",
+                        OR child.state<>'completed'
+                        OR NOT EXISTS(SELECT 1 FROM sa_work_item_evidence_receipts evidence
+                          WHERE evidence.item_id=item.id
+                            AND evidence.child_ticket_id=item.child_ticket_id)))",
             params![root,now],
         ).map_err(|e|e.to_string())?;
         if moved==1 {
@@ -238,7 +249,10 @@ fn ready(store:&Store)->Result<Vec<ReadyItem>> {
               AND prerequisite.item_key=edge.depends_on
              WHERE edge.ticket_id=item.ticket_id
                AND edge.item_key=item.item_key
-               AND prerequisite.state<>'completed')
+               AND (prerequisite.state<>'completed'
+                  OR NOT EXISTS(SELECT 1 FROM sa_work_item_evidence_receipts evidence
+                      WHERE evidence.item_id=prerequisite.id
+                        AND evidence.child_ticket_id=prerequisite.child_ticket_id)))
          ORDER BY plan.created_at,item.ordinal,item.id LIMIT 32"
     ).map_err(|e|e.to_string())?;
     let rows=query.query_map([storage::now()],|r|Ok(ReadyItem {

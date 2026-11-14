@@ -228,3 +228,18 @@ physical checkouts; a priority preference never grants parallel writes.
 Older saved Teams and Tickets retain safe default settings. Team edits require
 an exact policy revision, a disabled Team and settled historical assignments;
 previous Ticket snapshots and Council/effect receipts are never rewritten.
+
+
+### Evidence-bound WorkItem progression (additive schema v59)
+
+The executable `sa_demand_plans`/`sa_work_items` scheduler is preserved.
+An immutable `sa_work_item_evidence_receipts` sidecar records the exact child
+Ticket, its final finished assignment, SHA-256 of the matching Worker result,
+and an independently stored human or verified native Council acceptance.
+A provider response or Ticket state alone cannot complete a WorkItem, unblock
+a dependent edge or finalize the root Demand. Pending or uncertain remote
+effects and unsettled descendants remain hard gates. Historical completed
+children can acquire the same receipt when attributable native approval
+exists; unverifiable children remain gated. The Inspector displays the digest,
+review source and timestamp, not raw responses. The source PR's incompatible
+`sa_work_plans` schema was deliberately not copied into the runnable DAG.

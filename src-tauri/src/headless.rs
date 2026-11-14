@@ -32,7 +32,7 @@ enum Command {
     InspectOrchestrations,
     ListTickets,
     ListReviewInbox,
-    ListRecoveryInbox,
+    ListRecoveryInbox { before_priority: Option<i64>, before_updated_at: Option<i64>, before_id: Option<String> },
     ListDemands {
         state: String, before_updated_at: Option<i64>, before_id: Option<String>,
         search_query: Option<String>,
@@ -230,13 +230,14 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
-            if matches!(&command, Command::ListRecoveryInbox) {
+            if let Command::ListRecoveryInbox { before_priority,before_updated_at,before_id } = &command {
                 // Recovery planning is read-only even beside a live serve host:
                 // no restart settlement, provider replay, or effect acknowledgment.
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
-                    .and_then(|dir| crate::superagent::list_headless_recovery_inbox(
+                    .and_then(|dir| crate::superagent::list_headless_recovery_inbox_page(
                         &dir.join("kingcode.sqlite3"),
+                        *before_priority,*before_updated_at,before_id.as_deref(),
                     ));
                 match result {
                     Ok(inbox) => { println!("{inbox}"); std::process::exit(0) }
@@ -428,7 +429,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
     match command {
         // Inspection exits before setup_common and must never reach this branch.
         Command::InspectOrchestrations | Command::ListTickets | Command::ListReviewInbox
-        | Command::ListRecoveryInbox | Command::ListDemands { .. }
+        | Command::ListRecoveryInbox { .. } | Command::ListDemands { .. }
         | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
@@ -865,7 +866,26 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
             }
             "--list-recovery-inbox" => {
-                command = Command::ListRecoveryInbox;
+                let (before_priority,before_updated_at,before_id)=
+                    if args.get(index+1).map(String::as_str)==Some("--before") {
+                        let priority=args.get(index+2).ok_or(
+                            "--before requires priority 0..2, timestamp and Ticket ID."
+                        )?.parse::<i64>().map_err(|_|"Invalid recovery cursor priority.")?;
+                        if !(0..=2).contains(&priority) {
+                            return Err("Recovery priority must be between 0 and 2.".into());
+                        }
+                        let updated_at=args.get(index+3).ok_or(
+                            "--before requires priority 0..2, timestamp and Ticket ID."
+                        )?.parse::<i64>().map_err(|_|"Invalid recovery cursor timestamp.")?;
+                        if updated_at<=0 {return Err("Recovery cursor timestamp must be positive.".into());}
+                        let id=args.get(index+4).ok_or(
+                            "--before requires priority 0..2, timestamp and Ticket ID."
+                        )?;
+                        validate_ticket_id(id)?;
+                        index+=4;
+                        (Some(priority),Some(updated_at),Some(id.clone()))
+                    } else {(None,None,None)};
+                command = Command::ListRecoveryInbox { before_priority,before_updated_at,before_id };
                 ops += 1;
             }
             "--list-review-inbox" => {
@@ -1229,7 +1249,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1257,8 +1277,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --list-tickets         List up to 200 redacted native SuperAgent tickets; exit.
   --list-review-inbox    List up to 200 pending human/Council decisions across Teams;
                          redact objectives, never approve or run a reviewer; exit.
-  --list-recovery-inbox  Prioritize up to 200 actual recovery/decision Tickets across Teams;
-                         identify stale native runs and uncertain remote effects, read-only; exit.
+  --list-recovery-inbox [--before <priority> <ms> <ticket-id>]
+                         Page native recovery/decision Tickets across Teams by stable priority
+                         then update time and ID; no provider or remote replay; exit.
   --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>]
                          Page the global native Demand queue across Teams, read-only and redacted.
   --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>]
@@ -1356,7 +1377,19 @@ mod tests {
         assert_eq!(parsed("--inspect-orchestrations"), Ok(Command::InspectOrchestrations));
         assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
         assert_eq!(parsed("--list-review-inbox"), Ok(Command::ListReviewInbox));
-        assert_eq!(parsed("--list-recovery-inbox"), Ok(Command::ListRecoveryInbox));
+        assert_eq!(parsed("--list-recovery-inbox"), Ok(Command::ListRecoveryInbox {
+            before_priority:None,before_updated_at:None,before_id:None
+        }));
+        assert_eq!(parsed("--list-recovery-inbox --before 1 12345 ticket_1"),
+            Ok(Command::ListRecoveryInbox {
+                before_priority:Some(1),before_updated_at:Some(12345),before_id:Some("ticket_1".into())
+            }));
+        for invalid in [
+            "--list-recovery-inbox --before",
+            "--list-recovery-inbox --before 3 12345 ticket_1",
+            "--list-recovery-inbox --before 1 0 ticket_1",
+            "--list-recovery-inbox --before 1 12345 ../private",
+        ] { assert!(parsed(invalid).is_err(),"{invalid}"); }
         assert!(parsed("--list-recovery-inbox --stop-ticket ticket_1").is_err());
         assert_eq!(parsed("--inspect-source-health source_123"),
             Ok(Command::InspectSourceHealth { source_id: "source_123".into() }));

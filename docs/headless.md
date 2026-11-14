@@ -457,7 +457,15 @@ flags duplicate running attempts even when one active link looks valid.
 Healthy running assignments and genuinely settled terminal Tickets are excluded. Unresolved effects are prioritized; the
 returned JSON includes Ticket/Team IDs, revision, state, a redacted native
 recovery assessment, `mayHaveMore`, and an explicit next operator action.
-The cap is not pagination or proof of an additional page.
+A page is limited to 200 Tickets. When `mayHaveMore` is true, `nextCursor`
+contains the last returned `priority` (0 = unresolved remote effects,
+1 = live/inconsistent assignment, 2 = other decisions), `updatedAt` in
+milliseconds, and `ticketId`. Request the next page with
+`pandacode serve --list-recovery-inbox --before <priority> <ms> <ticket-id>`.
+Cursor ordering preserves older unresolved effects that would otherwise be
+hidden by the first-page cap. Each invocation is a new read-only snapshot:
+concurrent state changes may reorder candidates, so do not treat several pages
+as an atomic audit or as authorization to act.
 
 The command deliberately does **not** run startup recovery, inspect a live
 provider handle, resend/acknowledge a remote write, resume an assignment,

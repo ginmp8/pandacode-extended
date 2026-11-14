@@ -1158,48 +1158,75 @@ pub(crate) fn list_headless_all_demands_searched(
 /// a healthy running provider is deliberately omitted. This is NOT recovery
 /// admission, permission issuance, or proof that a remote effect was applied.
 /// One read transaction provides a consistent ordered operational snapshot.
+/// Retain the legacy first-page entrypoint for desktop and existing callers.
 pub(crate) fn list_headless_recovery_inbox(database_path: &std::path::Path) -> Result<String> {
+    list_headless_recovery_inbox_page(database_path,None,None,None)
+}
+
+/// Cursor pagination keeps old unresolved remote effects discoverable beyond
+/// the initial 200 results. Each call is a fresh read-only SQLite snapshot:
+/// after concurrent changes, operators must reconcile current native state
+/// again before attempting any authorized recovery.
+pub(crate) fn list_headless_recovery_inbox_page(
+    database_path: &std::path::Path, before_priority: Option<i64>,
+    before_updated_at: Option<i64>, before_id: Option<&str>,
+) -> Result<String> {
+    match (before_priority,before_updated_at,before_id) {
+        (None,None,None)=>{},
+        (Some(priority),Some(updated_at),Some(id))
+            if (0..=2).contains(&priority) && updated_at>0
+               && !id.is_empty() && id.len()<=128
+               && id.bytes().all(|c|c.is_ascii_alphanumeric() || matches!(c,b'-'|b'_'))=>{},
+        _=>return Err("Invalid recovery cursor: supply priority 0..2, positive timestamp and bounded Ticket ID.".into()),
+    }
     let store = Store::open_read_only(database_path)?;
     let snapshot = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let observed_at = storage::now();
     let cutoff = observed_at.saturating_sub(MAX_ASSIGNMENT_RUN_MS);
     let ids = {
         let mut stmt = store.db.prepare(
-            "SELECT t.id FROM sa_tickets t
-             WHERE t.state IN ('queued','blocked','waiting_approval','waiting_review',
-                               'failed','interrupted','inconclusive')
-                OR EXISTS(SELECT 1 FROM sa_effect_receipts e
-                          WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
-                OR (t.state<>'running' AND EXISTS(
-                    SELECT 1 FROM sa_assignments a
-                    WHERE a.ticket_id=t.id AND a.state='running'))
-                OR (t.state='running' AND (
-                    t.active_assignment_id IS NULL
-                    OR (SELECT COUNT(*) FROM sa_assignments a
-                        WHERE a.ticket_id=t.id AND a.state='running')<>1
-                    OR NOT EXISTS(SELECT 1 FROM sa_assignments a
-                                  WHERE a.id=t.active_assignment_id
-                                    AND a.ticket_id=t.id AND a.state='running'
-                                    AND a.created_at>0 AND a.created_at<=?1
-                                    AND a.created_at>?2)))
-             ORDER BY CASE WHEN EXISTS(
-                 SELECT 1 FROM sa_effect_receipts e
-                 WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain')
-               ) THEN 0 WHEN EXISTS(
-                   SELECT 1 FROM sa_assignments a
-                   WHERE a.ticket_id=t.id AND a.state='running'
-               ) THEN 1 ELSE 2 END,
-               t.updated_at DESC,t.id DESC
+            "WITH candidates AS (
+               SELECT t.id,t.updated_at,
+                 CASE WHEN EXISTS(SELECT 1 FROM sa_effect_receipts e
+                                  WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
+                      THEN 0 WHEN EXISTS(SELECT 1 FROM sa_assignments a
+                                         WHERE a.ticket_id=t.id AND a.state='running')
+                      THEN 1 ELSE 2 END AS priority
+               FROM sa_tickets t
+               WHERE t.state IN ('queued','blocked','waiting_approval','waiting_review',
+                                 'failed','interrupted','inconclusive')
+                  OR EXISTS(SELECT 1 FROM sa_effect_receipts e
+                            WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
+                  OR (t.state<>'running' AND EXISTS(
+                      SELECT 1 FROM sa_assignments a
+                      WHERE a.ticket_id=t.id AND a.state='running'))
+                  OR (t.state='running' AND (
+                      t.active_assignment_id IS NULL
+                      OR (SELECT COUNT(*) FROM sa_assignments a
+                          WHERE a.ticket_id=t.id AND a.state='running')<>1
+                      OR NOT EXISTS(SELECT 1 FROM sa_assignments a
+                                    WHERE a.id=t.active_assignment_id
+                                      AND a.ticket_id=t.id AND a.state='running'
+                                      AND a.created_at>0 AND a.created_at<=?1
+                                      AND a.created_at>?2)))
+             )
+             SELECT id,priority,updated_at FROM candidates
+             WHERE ?3 IS NULL OR priority>?3
+                OR (priority=?3 AND (updated_at<?4
+                    OR (updated_at=?4 AND id<?5)))
+             ORDER BY priority ASC,updated_at DESC,id DESC
              LIMIT 201",
         ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map(params![observed_at, cutoff],
-            |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(
+            params![observed_at,cutoff,before_priority,before_updated_at,before_id],
+            |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?)),
+        ).map_err(|e| e.to_string())?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
     };
     let mut items = Vec::with_capacity(ids.len().min(200));
-    for id in ids.iter().take(200) {
-        let ticket = get_ticket(&store, id)?;
-        let recovery = headless_recovery_summary(&store, &ticket, observed_at)?;
+    for (id,_,_) in ids.iter().take(200) {
+        let ticket = get_ticket(&store,id)?;
+        let recovery = headless_recovery_summary(&store,&ticket,observed_at)?;
         items.push(serde_json::json!({
             "ticketId": ticket.id,
             "orchestrationId": ticket.orchestration_id,
@@ -1209,11 +1236,19 @@ pub(crate) fn list_headless_recovery_inbox(database_path: &std::path::Path) -> R
             "recovery": recovery
         }));
     }
+    let next_cursor=if ids.len()>200 {
+        ids.get(199).map(|(id,priority,updated_at)| serde_json::json!({
+            "priority": priority,
+            "updatedAt": updated_at,
+            "ticketId": id
+        }))
+    } else {None};
     snapshot.commit().map_err(|e| e.to_string())?;
     serde_json::to_string_pretty(&serde_json::json!({
         "observedAt": observed_at,
         "pageLimit": 200,
         "mayHaveMore": ids.len() > 200,
+        "nextCursor": next_cursor,
         "items": items,
         "observationalOnly": true,
         "automaticRecoveryPerformed": false,
@@ -3761,7 +3796,26 @@ mod tests {
         assert_eq!(inbox["items"].as_array().unwrap().len(), 200);
         assert_eq!(inbox["mayHaveMore"], true);
         assert_eq!(inbox["pageLimit"], 200);
+        let cursor=&inbox["nextCursor"];
+        assert_eq!(cursor["priority"],2);
+        let second:serde_json::Value=serde_json::from_str(
+            &list_headless_recovery_inbox_page(
+                &store.path,cursor["priority"].as_i64(),
+                cursor["updatedAt"].as_i64(),cursor["ticketId"].as_str(),
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(second["items"].as_array().unwrap().len(),1);
+        assert_eq!(second["mayHaveMore"],false);
+        assert!(second["nextCursor"].is_null());
+        let first_ids:std::collections::HashSet<&str>=inbox["items"].as_array().unwrap()
+            .iter().map(|item|item["ticketId"].as_str().unwrap()).collect();
+        assert!(!first_ids.contains(second["items"][0]["ticketId"].as_str().unwrap()));
+        assert!(list_headless_recovery_inbox_page(&store.path,Some(3),Some(1),Some("valid-id")).is_err());
+        assert!(list_headless_recovery_inbox_page(&store.path,Some(2),Some(1),Some("../escape")).is_err());
+        assert!(list_headless_recovery_inbox_page(&store.path,Some(2),None,Some("valid-id")).is_err());
         assert!(!serde_json::to_string(&inbox).unwrap()
+            .contains("Private batch objective"));
+        assert!(!serde_json::to_string(&second).unwrap()
             .contains("Private batch objective"));
     }
 

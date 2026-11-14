@@ -4155,6 +4155,9 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     app.manage(architect::Runtime::default());
     architect::watchdog::watch(app.handle().clone());
     bots::start(app.handle());
+    // Fail closed on starts interrupted before their exact native session was
+    // linked. Startup recovery never replays reviewer dispatch.
+    superagent::council_adapter::recover_starting(app.handle());
     skills::begin_startup_sync(app.handle().clone());
     // Machine threads that settled while PandaCode was closed wake their idle tasks.
     remote::orchestrate::reconcile(app.handle());

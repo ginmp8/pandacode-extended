@@ -877,6 +877,54 @@ pub(crate) fn required_worker_session(store: &Store, worker_session_id: &str) ->
     }))
 }
 
+/// Fail closed on a start that was interrupted before its native session ID
+/// was durably linked. Startup never replays reviewer dispatch.
+pub(crate) fn recover_starting(app: &tauri::AppHandle) {
+    let state = app.state::<crate::AppState>();
+    let database_path = match state.store.lock() {
+        Ok(store) => store.path.clone(),
+        Err(error) => {
+            eprintln!("SuperAgent Council startup recovery could not access Store: {error}");
+            return;
+        }
+    };
+    let _dispatch_fence = match super::effects::lock_dispatch(&database_path) {
+        Ok(fence) => fence,
+        Err(error) => {
+            eprintln!("SuperAgent Council startup recovery could not acquire dispatch fence: {error}");
+            return;
+        }
+    };
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(error) => {
+            eprintln!("SuperAgent Council startup recovery could not access Store: {error}");
+            return;
+        }
+    };
+    let request_ids: rusqlite::Result<Vec<String>> = (|| {
+        let mut statement = store.db.prepare("SELECT id FROM sa_council_requests WHERE state='starting'")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let collected = rows.collect();
+        collected
+    })();
+    let request_ids = match request_ids {
+        Ok(ids) => ids,
+        Err(error) => {
+            eprintln!("SuperAgent Council startup recovery could not list pending starts: {error}");
+            return;
+        }
+    };
+    for request_id in request_ids {
+        if let Err(error) = block_request(&store, &request_id,
+            "Native Council start was interrupted before its exact session could be recovered.")
+        {
+            eprintln!("SuperAgent Council startup recovery failed closed: {error}");
+        }
+    }
+}
+
+
 fn block_request(store: &Store, request_id: &str, detail: &str) -> Result<()> {
     let tx = store.db.unchecked_transaction().map_err(|error| error.to_string())?;
     let now = storage::now();

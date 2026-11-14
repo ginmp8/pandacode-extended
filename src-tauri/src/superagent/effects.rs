@@ -346,12 +346,16 @@ fn active_scope_if_current(
          JOIN sa_orchestrations o ON o.id=t.orchestration_id
          JOIN sa_assignments a ON a.id=t.active_assignment_id
            AND a.ticket_id=t.id AND a.state='running' AND a.bot_id=t.worker_bot_id
+         JOIN sessions s ON s.id=a.session_id AND s.project_id=t.project_id
          JOIN bots b ON b.id=a.bot_id
          WHERE t.id=?1 AND t.revision=?2 AND t.state='running' AND m.revoked=0
            AND m.expires_at>?3 AND t.policy_revision=m.policy_revision
            AND m.policy_revision=o.policy_revision AND t.project_id=m.project_id
            AND m.project_id=o.project_id AND t.actor=m.actor AND m.authorization_id<>''
-           AND b.project_id=t.project_id AND b.paused=0 AND o.enabled=1",
+           AND b.project_id=t.project_id AND b.paused=0 AND o.enabled=1
+           AND a.bot_id<>o.coordinator_bot_id
+           AND (SELECT COUNT(*) FROM sa_assignments other
+                WHERE other.ticket_id=t.id AND other.state='running')=1",
         params![intent.ticket_id, intent.expected_revision, storage::now()],
         |row| Ok(ActiveScope {
             project_id: row.get(0)?,
@@ -372,6 +376,24 @@ fn active_scope(db: &Connection, intent: &IssueCommentIntent) -> Result<ActiveSc
     active_scope_if_current(db, intent)?.ok_or_else(|| {
         "The Ticket, revision, mandate, or active worker no longer permits this effect.".into()
     })
+}
+
+/// An effect grant is not a provider-session grant. Recheck the original
+/// task-owned worker thread, admitted role and frozen model before any write.
+fn effect_worker_session_current(store: &Store, intent: &IssueCommentIntent) -> Result<bool> {
+    let scope = active_scope(&store.db, intent)?;
+    let (bot_id, attempt): (String, i64) = store.db.query_row(
+        "SELECT bot_id,attempt FROM sa_assignments
+         WHERE id=?1 AND ticket_id=?2 AND state='running'",
+        params![scope.assignment_id,intent.ticket_id],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    ).map_err(|e| e.to_string())?;
+    let session = store.session(&scope.session_id)?;
+    Ok(super::assignment_thread_current(store,&scope.session_id,&intent.ticket_id)?
+        && super::assignment_role_authorized(store,&intent.ticket_id,&bot_id,attempt)?
+        && super::admitted_session_matches_profile(
+            store,&intent.ticket_id,&bot_id,"worker",&session,
+        )?)
 }
 
 // Keep durable consent separate from current execution authority. A stored
@@ -662,6 +684,9 @@ pub(crate) fn reserve(store: &Store, intent: &IssueCommentIntent) -> Result<Rese
             }
         }
         None => {
+            if !effect_worker_session_current(store, intent)? {
+                return Err("Native effect authorization unavailable: worker session changed.".into());
+            }
             exact_grant(&tx, intent)?;
             let now = storage::now();
             tx.execute(
@@ -693,6 +718,9 @@ fn validate_pending_dispatch(store: &Store, intent: &IssueCommentIntent) -> Resu
         return Err("The effect receipt is no longer pending; dispatch was not attempted.".into());
     }
     tx.commit().map_err(|e| e.to_string())?;
+    if !effect_worker_session_current(store, intent)? {
+        return Err("Native effect authorization unavailable: worker session changed.".into());
+    }
     Ok(scope)
 }
 

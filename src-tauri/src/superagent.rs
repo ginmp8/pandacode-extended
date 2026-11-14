@@ -375,22 +375,33 @@ UPDATE sa_tickets SET state='interrupted',revision=revision+1,active_assignment_
 UPDATE sa_mandates SET revoked=1 WHERE revoked=0 AND ticket_id IN (
  SELECT id FROM sa_tickets WHERE state='interrupted'
 );
--- Native reviewer sessions are not resumed after restart. Invalidate their
--- exact Ticket binding so a delayed or replayed pass can never finalize it.
+-- A `starting` request may have committed its frozen snapshot before the
+-- native team/session ID was linked. Keep that one narrow transition pending
+-- until the app-level Council reconciler can either bind its exact saved seats
+-- or block it without replaying a reviewer dispatch.
 INSERT INTO sa_audit(ticket_id,kind,detail,at)
  SELECT id,'council_interrupted','Required native review interrupted by restart; explicit recovery is required',
  CAST(strftime('%s','now') AS INTEGER)*1000
- FROM sa_tickets WHERE state='waiting_review';
+ FROM sa_tickets t WHERE state='waiting_review' AND NOT EXISTS (
+  SELECT 1 FROM sa_council_requests r WHERE r.ticket_id=t.id AND r.state='starting'
+ );
 UPDATE sa_mandates SET revoked=1 WHERE revoked=0 AND ticket_id IN (
- SELECT id FROM sa_tickets WHERE state='waiting_review'
+ SELECT t.id FROM sa_tickets t WHERE t.state='waiting_review' AND NOT EXISTS (
+  SELECT 1 FROM sa_council_requests r WHERE r.ticket_id=t.id AND r.state='starting'
+ )
 );
 UPDATE sa_council_requests SET state='blocked',updated_at=CAST(strftime('%s','now') AS INTEGER)*1000
- WHERE state IN ('admitted','bound','starting','dispatched') AND ticket_id IN (
-  SELECT id FROM sa_tickets WHERE state IN ('waiting_review','interrupted','blocked','failed','stopped','inconclusive')
- );
+ WHERE (state IN ('admitted','bound','dispatched') AND ticket_id IN (
+   SELECT id FROM sa_tickets WHERE state IN ('waiting_review','interrupted','blocked','failed','stopped','inconclusive')
+  ))
+  OR (state='starting' AND ticket_id IN (
+   SELECT id FROM sa_tickets WHERE state IN ('interrupted','blocked','failed','stopped','inconclusive')
+  ));
 UPDATE sa_tickets SET state='blocked',active_assignment_id=NULL,revision=revision+1,
  updated_at=CAST(strftime('%s','now') AS INTEGER)*1000
- WHERE state='waiting_review';
+ WHERE state='waiting_review' AND NOT EXISTS (
+  SELECT 1 FROM sa_council_requests r WHERE r.ticket_id=sa_tickets.id AND r.state='starting'
+ );
 ";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -716,11 +727,13 @@ fn insert_team_version(db: &Connection, snapshot: &TeamSnapshot) -> Result<()> {
     insert_member.execute(params![snapshot.orchestration_id,snapshot.team_version,"coordinator",0,
         snapshot.coordinator_bot_id]).map_err(|e| e.to_string())?;
     for (ordinal, bot_id) in snapshot.worker_bot_ids.iter().enumerate() {
-        insert_member.execute(params![snapshot.orchestration_id,snapshot.team_version,"worker",ordinal as i64,bot_id])
+        let ordinal = i64::try_from(ordinal).map_err(|_| "Team worker ordinal exceeds SQLite range.")?;
+        insert_member.execute(params![snapshot.orchestration_id,snapshot.team_version,"worker",ordinal,bot_id])
             .map_err(|e| e.to_string())?;
     }
     for (ordinal, bot_id) in snapshot.reviewer_bot_ids.iter().enumerate() {
-        insert_member.execute(params![snapshot.orchestration_id,snapshot.team_version,"reviewer",ordinal as i64,bot_id])
+        let ordinal = i64::try_from(ordinal).map_err(|_| "Team reviewer ordinal exceeds SQLite range.")?;
+        insert_member.execute(params![snapshot.orchestration_id,snapshot.team_version,"reviewer",ordinal,bot_id])
             .map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -2106,7 +2119,7 @@ pub(crate) fn headless_issue_comment(
     )
 }
 
-fn headless_issue_comment_with_dispatch(
+pub(crate) fn headless_issue_comment_with_dispatch(
     database_path: &std::path::Path,
     ticket_id: &str,
     expected_revision: i64,
@@ -2766,6 +2779,33 @@ fn assignment_role_authorized(
     })
 }
 
+/// Verify the actual provider session against the immutable admitted Team role.
+/// Changes to session-level model, provider, mode or reasoning cannot inherit a
+/// valid bot's permissions merely because the assignment and thread still match.
+fn admitted_session_matches_profile(
+    store: &Store, ticket_id: &str, bot_id: &str, role: &str,
+    session: &storage::Session,
+) -> Result<bool> {
+    let snapshot = ticket_team_snapshot(store, ticket_id)?;
+    if snapshot.provenance == TeamSnapshotProvenance::LegacyUnknown {
+        return Ok(false);
+    }
+    let Some(role_profile) = snapshot.roles.iter()
+        .find(|entry| entry.role == role && entry.bot_id == bot_id)
+    else {
+        return Ok(false);
+    };
+    let Some(config) = role_profile.effective_config.as_ref() else {
+        return Ok(false);
+    };
+    Ok(config.get("projectId").and_then(serde_json::Value::as_str) == Some(session.project_id.as_str())
+        && config.get("provider").and_then(serde_json::Value::as_str) == Some(session.provider.as_str())
+        && config.get("model").and_then(serde_json::Value::as_str) == Some(session.model.as_str())
+        && config.get("mode").and_then(serde_json::Value::as_str) == Some(session.mode.as_str())
+        && config.get("reasoningEffort").and_then(serde_json::Value::as_str)
+            == Some(session.reasoning_effort.as_deref().unwrap_or("")))
+}
+
 /// Only the active, user-admitted read-only assignment is allowed to run.
 /// Leverages the existing provider-level Council isolation (native plan,
 /// tool-host removal, external MCP checks and permission denial), not a prompt.
@@ -2861,7 +2901,12 @@ pub(crate) fn read_only_policy(
         } else {
             false
         };
+        let admitted_profile_current = admitted_session_matches_profile(
+            store, &scope.ticket_id, &scope.bot_id,
+            if is_worker { "worker" } else { "coordinator" }, &assigned_session,
+        )?;
         if coordinator.paused || active_bot.paused || active_bot.project_id != assigned_session.project_id
+            || !admitted_profile_current
             || !coordinator_profile_current || !active_profile_current
             || (is_worker && active_bot.project_id != scope.project_id)
             || (is_worker && !coordinator_plan_current(

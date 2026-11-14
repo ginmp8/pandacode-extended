@@ -127,7 +127,8 @@ jobs:
           if cargo metadata --locked --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null; then
             exit 0
           fi
-          cargo generate-lockfile --manifest-path src-tauri/Cargo.toml
+          # Update only entries that actually require reconciliation; do not globally re-resolve packages.
+          cargo metadata --format-version 1 --manifest-path src-tauri/Cargo.toml > /dev/null
           echo '--- BEGIN GENERATED CARGO LOCK DIFF ---'
           git diff -- src-tauri/Cargo.lock
           echo '--- END GENERATED CARGO LOCK DIFF ---'

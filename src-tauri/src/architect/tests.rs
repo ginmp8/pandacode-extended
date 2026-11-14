@@ -2068,14 +2068,15 @@ fn assignment(key: &str, profile: &str, file: &str) -> Value {
 }
 
 // Exercise the production host constructor and native handlers without starting
-// a desktop webview or a provider process. Only model availability is bypassed
-// by the existing dispatch_state_runtime_test adapter.
+// a desktop webview or a provider process. Only the `check_executable` harness/
+// model availability probe is bypassed (no provider CLI on Linux CI); all
+// generation, authorization, identity, link and findings checks still run.
 fn native_reviewer_test_host(state: Arc<AppState>, sid: String, admission: Admission) -> Result<ToolHost> {
     let resolver_state = state.clone();
     let resolver_sid = sid.clone();
     let resolver_admission = admission.clone();
     let resolver = Arc::new(move || {
-        NativeReviewerAccess::resolve(&resolver_state.store.lock().unwrap(), &resolver_sid, &resolver_admission)
+        NativeReviewerAccess::resolve_without_executable(&resolver_state.store.lock().unwrap(), &resolver_sid, &resolver_admission)
     });
     let actor = {
         let store = state.store.lock().unwrap();
@@ -2138,6 +2139,92 @@ async fn assert_native_reviewer_host_denials(host: &ToolHost, coordinator: bool)
                 .contains("capability_not_authorized"));
         }
     }
+}
+
+#[test]
+fn native_reviewer_test_host_bypasses_only_the_frozen_executable_probe() {
+    // The Linux CI runner has no provider CLIs. If every harness executable is
+    // installed on this machine there is nothing to simulate, so skip rather
+    // than invent a failure.
+    let Some(provider) = HARNESSES.iter().copied()
+        .find(|provider| crate::providers::executable(provider).is_none())
+    else {
+        eprintln!("all harness executables are installed; executable-gate regression check skipped");
+        return;
+    };
+    let (state, sid) = state_fixture();
+    let state = Arc::new(state);
+    let project = state.store.lock().unwrap().session(&sid).unwrap().project_id;
+    let session = state.store.lock().unwrap()
+        .create_session(&project, provider, "test-model", "ask").unwrap();
+    let store = state.store.lock().unwrap();
+    store.db.execute(
+        "INSERT INTO bots(id,name,role,instructions,goals,soul,project_id,provider,model,mode,created_at,updated_at,skills) VALUES('unavailable-bot','Unavailable bot','Reviewer','Review only the assigned task.','','',?1,?2,'test-model','full',1,1,'[]')",
+        params![project, provider],
+    ).unwrap();
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    team.council_since = storage::now().max(1);
+    team.config.council = Some(council::CouncilConfig {
+        target: 9.0,
+        max_rounds: 3,
+        reviewers: 2,
+        composition: Some(council::CouncilComposition {
+            schema_version: 1,
+            automatic: council::CouncilAutomaticReviewers {
+                enabled: true,
+                count: council::AutomaticReviewerCount::Fixed(2),
+            },
+            selected: Vec::new(),
+            criteria_source: council::CouncilCriteriaSource::User,
+            criteria: vec![council::CouncilCriterion {
+                id: "coverage".into(), lens: "coverage".into(),
+                description: "Verify the task coverage.".into(), required: true,
+                target: 9.0, evidence_required: false,
+                source: council::CouncilCriterionOrigin::User,
+            }],
+            strategy: council::CouncilStrategy::Parallel,
+            limits: council::CouncilCompositionLimits {
+                max_depth: 2, max_root_seats: 8, max_concurrent_leaves: 4,
+                max_leaf_reviews_per_round: 32, timeout_ms: 3_600_000,
+                max_estimated_cost_micros: None,
+            },
+        }),
+        ..council::CouncilConfig::default()
+    });
+    let seat = CouncilSeat { round: 1, lens: "coverage".into(), ..CouncilSeat::default() };
+    let mut reviewer = worker("unavailable-executable-reviewer", "waiting", &["src"], &[]);
+    reviewer.session_id = session.id.clone();
+    reviewer.provider = provider.into();
+    reviewer.model = "test-model".into();
+    reviewer.read_only = true;
+    reviewer.council = Some(seat.clone());
+    let mut binding = reviewer_security::ReviewerBinding::native(
+        &team, &reviewer.id, reviewer.created_at, &reviewer.provider, &reviewer.model, &seat,
+    );
+    binding.reviewer_bot_id = Some("unavailable-bot".into());
+    binding.composition_mode = Some("direct".into());
+    binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+        name: "Unavailable bot".into(), role: "Reviewer".into(), instructions: String::new(),
+        goals: String::new(), soul: String::new(), reasoning_effort: String::new(),
+        skill_ids: Vec::new(),
+    });
+    reviewer.reviewer_binding = Some(binding.clone());
+    reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+    team.workers.push(reviewer);
+    save(&store, &mut team).unwrap();
+    let admission = Admission { parent: sid.clone(), generation: team.generation };
+
+    // Production keeps enforcing harness/model availability even though the
+    // test-only host path deliberately skips only that executable probe.
+    let error = reviewer_policy(&store, &session.id, Some(&admission)).unwrap_err();
+    assert!(error.contains("reviewer_unavailable"), "{error}");
+    let error = NativeReviewerAccess::resolve(&store, &session.id, &admission).unwrap_err();
+    assert!(error.contains("reviewer_unavailable"), "{error}");
+    drop(store);
+
+    let host = native_reviewer_test_host(state, session.id, admission)
+        .expect("the test host must not require an installed provider CLI");
+    assert_eq!(host.tools, vec![council_finding_tool(), council_finding_verification_tool()]);
 }
 
 #[tokio::test]

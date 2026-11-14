@@ -3779,6 +3779,18 @@ pub(crate) fn reviewer_policy(
     sid: &str,
     admission: Option<&Admission>,
 ) -> Result<Option<reviewer_security::ReviewerToolPolicy>> {
+    reviewer_policy_with_executable(store, sid, admission, true)
+}
+
+/// Shared reviewer policy validation. Production always requires an installed,
+/// healthy frozen harness/model; the test-only reviewer host reuses every other
+/// check with `check_executable = false`.
+fn reviewer_policy_with_executable(
+    store: &Store,
+    sid: &str,
+    admission: Option<&Admission>,
+    check_executable: bool,
+) -> Result<Option<reviewer_security::ReviewerToolPolicy>> {
     let Some(admission) = admission else {
         return Ok(None);
     };
@@ -3829,7 +3841,7 @@ pub(crate) fn reviewer_policy(
     let policy = if let Some(binding) = &worker.reviewer_binding {
         binding.validate(&team, worker)?;
         reviewer_security::validate_issued_authority(store, &team.session_id, binding)?;
-        bot_reviewers::validate_frozen_seat_for_task(store, &team.session_id, binding, true)?;
+        bot_reviewers::validate_frozen_seat_for_task(store, &team.session_id, binding, check_executable)?;
         if let Some(parent) = &binding.parent_council {
             let link = validate_council_child_link(store, &team.session_id)?.ok_or(
                 "reviewer_session_mismatch: child reviewer has no native parent Council link.",
@@ -6009,11 +6021,24 @@ struct NativeReviewerAccess {
 
 impl NativeReviewerAccess {
     fn resolve(store: &Store, sid: &str, admission: &Admission) -> Result<Self> {
+        Self::resolve_with(store, sid, admission, true)
+    }
+
+    /// Shared identity resolution. Every authorization and correlation check is
+    /// identical; only the frozen harness/model availability probe
+    /// (`check_executable`) is selectable, and production callers always pass
+    /// `true`.
+    fn resolve_with(
+        store: &Store,
+        sid: &str,
+        admission: &Admission,
+        check_executable: bool,
+    ) -> Result<Self> {
         let team = load(store, &admission.parent)?.ok_or("reviewer_session_mismatch: team is missing.")?;
         if team.generation != admission.generation || !active(&team.status) {
             return Err("reviewer_session_mismatch: team generation is no longer active.".into());
         }
-        if reviewer_policy(store, sid, Some(admission))?
+        if reviewer_policy_with_executable(store, sid, Some(admission), check_executable)?
             != Some(reviewer_security::ReviewerToolPolicy::NativeReadOnly)
         {
             return Err("capability_not_authorized: native read-only reviewer policy is required.".into());
@@ -6037,6 +6062,14 @@ impl NativeReviewerAccess {
         }
         Ok(Self { coordinator, binding, attempt, root_generation,
             cycle_id: format!("{}:{}", team.session_id, team.council_since), findings })
+    }
+
+    /// Test hosts never launch a provider, so they deliberately bypass only the
+    /// `check_executable` availability probe (model routing/health and CLI
+    /// discovery) while keeping every other native authorization check.
+    #[cfg(test)]
+    fn resolve_without_executable(store: &Store, sid: &str, admission: &Admission) -> Result<Self> {
+        Self::resolve_with(store, sid, admission, false)
     }
 
     fn tools(&self) -> Vec<Value> {

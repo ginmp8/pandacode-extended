@@ -81,3 +81,45 @@ contain multiple case-only aliases for the same Team, repository and event
 kind, source creation fails with an explicit ambiguity until an operator
 reconciles the configuration. This never enables a source, admits a Ticket,
 or authorizes a GitHub effect.
+
+## GitHub repository display-case stability
+
+Configured source repositories remain exact canonical lowercase `owner/repo`
+identities. Authenticated GitHub Events API responses can display the same
+repository with different capitalization; the native feed validator and typed
+event parser compare that identity case-insensitively without permitting
+similar prefixes, extra path segments, foreign repositories or missing IDs.
+The stored decision retains the configured canonical repository identity,
+and replay of the same delivery with a case-only actor variation is
+idempotent. Existing receipts and cursors are preserved across restarts.
+No wider repository filter, new subscription, Auto execution or write
+authorization is introduced.
+
+Legacy source rows with mixed-case repository identities are compared with
+ASCII case-insensitive equality when reusing a source or correlating an
+operator-linked issue/PR thread. A case-only alias cannot associate the same
+Team/repository/thread with a different Ticket, and cross-source authenticated
+receipts are visible only through an explicit link to that Ticket. Existing
+source IDs, cursors and audit records are not rewritten; ambiguous case-only
+legacy duplicates still fail closed. Authenticated events for a legacy
+mixed-case source are compared against its exact GitHub repository identity
+and recorded under the canonical lowercase repository key, without losing
+existing receipts or creating a Ticket. This remains Observe-only context,
+never a GitHub grant or inferred demand.
+
+## Per-window repository identity consistency
+
+Every explicit live Observe poll now authenticates the operator through
+`gh api user`, resolves `gh api repos/{owner}/{repo}`, and requires an exact
+repository `full_name` (case-insensitive) and positive numeric `id`. Every
+event in the subsequently fetched bounded Events window must contain that
+same repository ID. A renamed, deleted/recreated, redirected, foreign or
+inconsistent repository cannot reuse the previous display name and silently
+advance the source cursor. The entire failed poll leaves decision receipts
+and the cursor unchanged. An empty verified feed is valid.
+
+The internal legacy-fixture parser still accepts all-ID-free test windows for
+backward compatibility; the **live authenticated adapter** does not. This is
+a read-only extra repository-metadata request after explicit Observe opt-in,
+not a durable GitHub subscription or Auto authorization. Source configuration
+still defaults Off, and no Ticket, Worker, Council or external write is created.

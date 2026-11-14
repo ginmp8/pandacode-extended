@@ -229,7 +229,7 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
     let conflicting: Option<String> = tx.query_row(
         "SELECT l.ticket_id FROM sa_source_thread_links l
          JOIN sa_event_sources linked ON linked.id=l.source_id
-         WHERE linked.orchestration_id=?1 AND linked.repository=?2
+         WHERE linked.orchestration_id=?1 AND linked.repository=?2 COLLATE NOCASE
            AND l.subject_key=?3 AND l.ticket_id<>?4 LIMIT 1",
         params![&ticket.orchestration_id, &src.repository, subject_key, ticket_id],
         |row| row.get(0),
@@ -287,7 +287,7 @@ fn link_issue_to_pull(store: &Store, source_id: &str, ticket_id: &str,
          WHERE l.ticket_id=?2 AND l.subject_key=?3
            AND initial.orchestration_id=t.orchestration_id
            AND target.orchestration_id=t.orchestration_id
-           AND initial.repository=target.repository LIMIT 1",
+           AND initial.repository=target.repository COLLATE NOCASE LIMIT 1",
         params![source_id,ticket_id,issue_key], |r| r.get(0),
     ).optional().map_err(|e| e.to_string())?;
     if issue_linked.is_none() {
@@ -309,7 +309,7 @@ fn link_issue_to_pull(store: &Store, source_id: &str, ticket_id: &str,
     let conflicting: Option<String> = tx.query_row(
         "SELECT l.ticket_id FROM sa_source_thread_links l
          JOIN sa_event_sources s ON s.id=l.source_id
-         WHERE s.orchestration_id=?1 AND s.repository=?2
+         WHERE s.orchestration_id=?1 AND s.repository=?2 COLLATE NOCASE
            AND l.subject_key=?3 AND l.ticket_id<>?4 LIMIT 1",
         params![&ticket.orchestration_id,&src.repository,pull_key,ticket_id],
         |r|r.get(0),
@@ -517,7 +517,7 @@ fn create_source(
     let actor_key = actor_filter.to_ascii_lowercase();
     let mut statement = store.db.prepare(
         "SELECT id FROM sa_event_sources
-         WHERE orchestration_id=?1 AND repository=?2
+         WHERE orchestration_id=?1 AND repository=?2 COLLATE NOCASE
            AND actor_filter=?3 COLLATE NOCASE AND event_kind=?4
          ORDER BY id LIMIT 2",
     ).map_err(|e| e.to_string())?;
@@ -600,7 +600,8 @@ fn observe_authenticated_in_tx(
                r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)),
     ).optional().map_err(|e| e.to_string())?;
     if let Some((repository,actor,kind,subject,seq,decision,policy_revision,at)) = existing {
-        if repository != event.repository || actor != event.actor
+        if !repository.eq_ignore_ascii_case(&event.repository)
+            || !actor.eq_ignore_ascii_case(&event.actor)
             || kind != event.event_kind || subject != event.subject_key || seq != event.sequence
         {
             return Err("Reused source delivery ID has a conflicting envelope.".into());
@@ -626,7 +627,7 @@ fn observe_authenticated_in_tx(
     ).map_err(|e| e.to_string())?;
     let decision = if event.sequence <= thread_cursor { "ignored_stale" }
         else if src.mode == "off" { "ignored_off" }
-        else if src.repository != event.repository
+        else if !src.repository.eq_ignore_ascii_case(&event.repository)
             || !src.actor_filter.eq_ignore_ascii_case(&event.actor)
             || src.event_kind != event.event_kind
             // The signed-in operator cannot infer work from their own events,
@@ -704,6 +705,32 @@ fn authenticated_login(raw: &serde_json::Value) -> Result<String> {
     Ok(login.to_owned())
 }
 
+/// Resolve the exact repository identity through an independently
+/// authenticated GitHub repository metadata request. A renamed repository
+/// or an alias that redirects elsewhere cannot silently reuse this source.
+fn authenticated_repository_id(raw: &serde_json::Value, requested: &str) -> Result<u64> {
+    let name = raw.get("full_name").and_then(|value| value.as_str())
+        .ok_or("Authenticated GitHub repository has no full name.")?;
+    if !name.eq_ignore_ascii_case(requested) {
+        return Err("Authenticated GitHub repository identity differs from the configured source.".into());
+    }
+    raw.get("id").and_then(|value| value.as_u64()).filter(|id| *id > 0)
+        .ok_or_else(|| "Authenticated GitHub repository ID is missing or invalid.".into())
+}
+
+/// A GitHub Events window must belong to the exact ID resolved from the
+/// signed-in repository API on this request, not merely share its display
+/// name. Reject the entire window before any receipt or cursor transaction.
+fn require_authenticated_feed_repository(raw: &serde_json::Value, repository_id: u64) -> Result<()> {
+    let events = raw.as_array().ok_or("Authenticated GitHub Events response is not an array.")?;
+    if events.iter().any(|event| event.pointer("/repo/id")
+        .and_then(|value| value.as_u64()) != Some(repository_id))
+    {
+        return Err("GitHub Events repository ID differs from authenticated repository metadata; cursor unchanged.".into());
+    }
+    Ok(())
+}
+
 /// Verify the feed's descending GitHub event identities while collecting a
 /// finite pagination window. A short page, an older persisted identity, or
 /// a pre-activation timestamp anchors the historical boundary. Without an
@@ -774,9 +801,26 @@ fn combine_github_pages(pages: &[serde_json::Value], since: i64, cursor: i64)
 fn github_feed_watermark(events: &[serde_json::Value], repository: &str) -> Result<Option<i64>> {
     let mut newest = None;
     let mut previous = None;
+    // A finite repository feed must not mix the histories of distinct GitHub
+    // repository IDs that happen to share an owner/name. Existing older
+    // fixtures without IDs remain valid only when all events omit the ID.
+    let mut feed_repository_id: Option<Option<u64>> = None;
     for item in events {
-        if item.pointer("/repo/name").and_then(|v| v.as_str()) != Some(repository) {
+        if !item.pointer("/repo/name").and_then(|v| v.as_str())
+            .is_some_and(|name| name.eq_ignore_ascii_case(repository))
+        {
             return Err("GitHub Events feed contains a foreign or missing repository; cursor unchanged.".into());
+        }
+        let current_repository_id = item.pointer("/repo/id")
+            .map(|value| value.as_u64().filter(|id| *id > 0)
+                .ok_or("GitHub Events feed has an invalid repository ID."))
+            .transpose()?;
+        if let Some(expected) = feed_repository_id {
+            if expected != current_repository_id {
+                return Err("GitHub Events feed changes repository identity; cursor unchanged.".into());
+            }
+        } else {
+            feed_repository_id = Some(current_repository_id);
         }
         let id = item.get("id").and_then(|v| v.as_str())
             .ok_or("GitHub Events feed has no numeric identity.")?;
@@ -832,7 +876,9 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
 {
     let Some(kind) = github_kind(raw) else { return Ok(None); };
     if kind != source.event_kind { return Ok(None); }
-    if raw.pointer("/repo/name").and_then(|v| v.as_str()) != Some(source.repository.as_str()) {
+    if !raw.pointer("/repo/name").and_then(|v| v.as_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case(&source.repository))
+    {
         return Err("Authenticated GitHub event repository differs from the configured source.".into());
     }
     let actor = raw.pointer("/actor/login").and_then(|v| v.as_str())
@@ -883,7 +929,7 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
     let event = EventEnvelope {
         source_id:source.id.clone(),
         delivery_id:raw_id.to_string(),
-        repository:source.repository.clone(),
+        repository:source.repository.to_ascii_lowercase(),
         actor:actor.to_string(),
         event_kind:kind.into(),
         subject_key,
@@ -992,6 +1038,13 @@ fn fetch_authenticated_github_window(
         &root, &["api", "user"], crate::github::TIMEOUT,
     )?;
     let signed_in = authenticated_login(&crate::github::json(&user)?)?;
+    // Resolve ID on every explicit Observe request, including after a rename
+    // or delete/recreate of the same repository display name.
+    let repository_endpoint = format!("repos/{repo}");
+    let repository = crate::github::run_gh(
+        &root, &["api", &repository_endpoint], crate::github::TIMEOUT,
+    )?;
+    let repository_id = authenticated_repository_id(&crate::github::json(&repository)?, repo)?;
     let mut pages = Vec::new();
     let mut previous_id = None;
     for page in 1..=GITHUB_MAX_PAGES {
@@ -1005,6 +1058,7 @@ fn fetch_authenticated_github_window(
         if complete { break; }
     }
     let response = combine_github_pages(&pages, since, prior_cursor)?;
+    require_authenticated_feed_repository(&response, repository_id)?;
     Ok((signed_in, response, pages.len()))
 }
 
@@ -1595,7 +1649,7 @@ fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<Ev
              SELECT 1 FROM sa_source_thread_links l
              JOIN sa_event_sources linked ON linked.id=l.source_id
              WHERE l.ticket_id=?1 AND l.subject_key=d.subject_key
-               AND linked.repository=observed.repository
+               AND linked.repository=observed.repository COLLATE NOCASE
                AND linked.orchestration_id=observed.orchestration_id
            )
          ORDER BY d.at DESC,d.source_id DESC,d.delivery_id DESC LIMIT ?3",
@@ -1888,6 +1942,69 @@ mod tests {
 
 
     #[test]
+    fn live_observe_repository_metadata_pins_every_event_to_authenticated_id() {
+        let repository = serde_json::json!({"id":73,"full_name":"Owner/Repo"});
+        assert_eq!(authenticated_repository_id(&repository,"owner/repo").unwrap(),73);
+        for invalid in [
+            serde_json::json!({"id":74,"full_name":"owner/other"}),
+            serde_json::json!({"id":0,"full_name":"owner/repo"}),
+            serde_json::json!({"id":"73","full_name":"owner/repo"}),
+            serde_json::json!({"id":73}),
+        ] {
+            assert!(authenticated_repository_id(&invalid,"owner/repo").is_err());
+        }
+        let valid = serde_json::json!([
+            {"repo":{"id":73,"name":"owner/repo"}},
+            {"repo":{"id":73,"name":"Owner/Repo"}}
+        ]);
+        assert!(require_authenticated_feed_repository(&valid,73).is_ok());
+        assert!(require_authenticated_feed_repository(&serde_json::json!([]),73).is_ok());
+        let mut rebound = valid.clone();
+        rebound[1]["repo"]["id"] = serde_json::json!(74);
+        assert!(require_authenticated_feed_repository(&rebound,73).is_err());
+        rebound[1]["repo"].as_object_mut().unwrap().remove("id");
+        assert!(require_authenticated_feed_repository(&rebound,73).is_err());
+        assert!(require_authenticated_feed_repository(&valid,74).is_err());
+        assert!(require_authenticated_feed_repository(&serde_json::json!({}),73).is_err());
+    }
+
+    #[test]
+    fn authenticated_poll_rejects_repository_id_drift_before_any_receipt_or_cursor() {
+        let (store, path) = fixture();
+        let off = create_source(&store,"orch","owner/repo","trusted-bot","issues.opened").unwrap();
+        let observed = set_mode(&store,&off.id,off.policy_revision,"observe").unwrap();
+        let event = |id: &str, number: u64, repo_id: u64| serde_json::json!({
+            "id":id, "created_at":"2026-11-12T09:00:00Z", "type":"IssuesEvent",
+            "actor":{"login":"trusted-bot"},
+            "repo":{"name":"owner/repo","id":repo_id},
+            "payload":{"action":"opened","issue":{"number":number}}
+        });
+        let bad = serde_json::json!([
+            event("5000003102",2,73),event("5000003101",1,74)
+        ]);
+        assert!(poll_authenticated_events(&store,&observed,0,&bad).is_err());
+        let mut missing = bad.clone();
+        missing[1]["repo"].as_object_mut().unwrap().remove("id");
+        assert!(poll_authenticated_events(&store,&observed,0,&missing).is_err());
+        let mut zero = bad.clone();
+        zero[1]["repo"]["id"] = serde_json::json!(0);
+        assert!(poll_authenticated_events(&store,&observed,0,&zero).is_err());
+        assert_eq!(source(&store,&observed.id).unwrap().last_sequence,0);
+        assert!(list_decisions(&store,&observed.id,10).unwrap().is_empty());
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(source(&reopened,&observed.id).unwrap().last_sequence,0);
+        let valid = serde_json::json!([
+            event("5000003102",2,73),event("5000003101",1,73)
+        ]);
+        assert_eq!(poll_authenticated_events(&reopened,&observed,0,&valid).unwrap().recorded,2);
+        assert_eq!(poll_authenticated_events(&reopened,&observed,0,&valid).unwrap().duplicates,2);
+        assert_eq!(source(&reopened,&observed.id).unwrap().last_sequence,5_000_003_102);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets",[],
+            |row|row.get::<_,i64>(0)).unwrap(),0);
+    }
+
+    #[test]
     fn sparse_github_observe_advances_only_verified_feed_cursor_without_admitting_work() {
         let (store, path) = fixture();
         let off = create_source(
@@ -1935,6 +2052,64 @@ mod tests {
         let reopened = Store::open(&path).unwrap();
         assert_eq!(source(&reopened, &on.id).unwrap().last_sequence, 5_000_002_004);
         assert_eq!(list_decisions(&reopened, &on.id, 10).unwrap().len(), 1);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |r| r.get::<_,i64>(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn authenticated_github_repo_case_aliases_preserve_one_cursor_and_receipt() {
+        let (store, path) = fixture();
+        let off = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.opened",
+        ).unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let delivery = |repository: &str, actor: &str, id: &str| serde_json::json!([{
+            "id": id, "type": "IssuesEvent", "created_at": "2026-11-12T09:00:00Z",
+            "repo": {"name": repository}, "actor": {"login": actor},
+            "payload": {"action": "opened", "issue": {"number": 42}}
+        }]);
+
+        // GitHub repository names and actor logins are case-insensitive. Its
+        // response must not be rejected just because the display casing moved.
+        let first = poll_authenticated_events(
+            &store, &on, 0, &delivery("Owner/Repo", "TRUSTED-BOT", "5000004002"),
+        ).unwrap();
+        assert_eq!(first.recorded, 1);
+        assert_eq!(first.last_sequence, 5_000_004_002);
+        let replay = poll_authenticated_events(
+            &store, &on, 0, &delivery("OWNER/REPO", "trusted-bot", "5000004002"),
+        ).unwrap();
+        assert_eq!(replay.recorded, 0);
+        assert_eq!(replay.duplicates, 1);
+        assert_eq!(replay.last_sequence, first.last_sequence);
+        assert_eq!(list_decisions(&store, &on.id, 10).unwrap().len(), 1);
+
+        // Similar prefixes and malformed/missing repository identities
+        // remain forbidden, without persisting a receipt or cursor change.
+        for bad_repo in ["Owner/Repo-Evil", "Owner/Repo/other", ""] {
+            assert!(poll_authenticated_events(
+                &store, &on, 0, &delivery(bad_repo, "trusted-bot", "5000004003"),
+            ).is_err());
+        }
+        let missing = serde_json::json!([{
+            "id": "5000004003", "type": "IssuesEvent",
+            "created_at": "2026-11-12T09:00:00Z",
+            "actor": {"login": "trusted-bot"},
+            "payload": {"action": "opened", "issue": {"number": 42}}
+        }]);
+        assert!(poll_authenticated_events(&store, &on, 0, &missing).is_err());
+        assert_eq!(source(&store, &on.id).unwrap().last_sequence, first.last_sequence);
+        assert_eq!(list_decisions(&store, &on.id, 10).unwrap().len(), 1);
+
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let durable = poll_authenticated_events(
+            &reopened, &on, 0, &delivery("oWnEr/rEpO", "Trusted-Bot", "5000004002"),
+        ).unwrap();
+        assert_eq!(durable.duplicates, 1);
+        assert_eq!(durable.recorded, 0);
+        assert_eq!(durable.last_sequence, first.last_sequence);
         assert_eq!(reopened.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets", [], |r| r.get::<_,i64>(0),
         ).unwrap(), 0);
@@ -1993,6 +2168,40 @@ mod tests {
             "payload":{"action":"opened","issue":{"number":42}},
         });
         assert!(authenticated_event(&selected, &other_actor).unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_mixed_case_repository_source_can_observe_verified_events_without_new_authority() {
+        let (store, path) = fixture();
+        let initial = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        store.db.execute(
+            "UPDATE sa_event_sources SET repository='Test/Fixture' WHERE id=?1",
+            [&initial.id],
+        ).unwrap();
+        let legacy = source(&store, &initial.id).unwrap();
+        let observed = set_mode(&store, &legacy.id, legacy.policy_revision, "observe").unwrap();
+        let raw = serde_json::json!({
+            "id":"5000001001", "type":"IssuesEvent", "created_at":"2026-11-12T08:59:00Z",
+            "actor":{"login":"trusted-bot"}, "repo":{"name":"test/fixture"},
+            "payload":{"action":"opened","issue":{"number":42}},
+        });
+        let (event, _) = authenticated_event(&observed, &raw).unwrap().unwrap();
+        assert_eq!(event.repository, "test/fixture");
+        let decision = observe_authenticated(&store, &event, "local-operator").unwrap();
+        assert_eq!(decision.decision, "observed_permitted");
+        assert_eq!(source(&store, &observed.id).unwrap().last_sequence, 5000001001);
+        assert!(authenticated_event(&observed, &serde_json::json!({
+            "id":"5000001002", "type":"IssuesEvent", "created_at":"2026-11-12T08:59:00Z",
+            "actor":{"login":"trusted-bot"}, "repo":{"name":"test/fixture-foreign"},
+            "payload":{"action":"opened","issue":{"number":42}},
+        })).is_err());
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |r| r.get::<_,i64>(0)).unwrap(), 0);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert!(observe_authenticated(&reopened, &event, "local-operator").unwrap().duplicate);
+        assert_eq!(source(&reopened, &observed.id).unwrap().last_sequence, 5000001001);
     }
 
     #[test]
@@ -3008,6 +3217,49 @@ mod tests {
         assert!(link_thread(&store,&src.id,"two","pull:52").is_err());
         let count:i64=store.db.query_row("SELECT COUNT(*) FROM sa_source_thread_links",[],|row|row.get(0)).unwrap();
         assert_eq!(count,1);
+    }
+
+    #[test]
+    fn legacy_repository_case_aliases_share_ticket_links_without_cross_ticket_leaks() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "one", "orch");
+        insert_manual_ticket(&store, "two", "orch");
+        let issue = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let review = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request_review.submitted").unwrap();
+        let pull = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request.opened").unwrap();
+        // Older databases may contain mixed-case repository identities even
+        // though newly created sources require canonical lower-case names.
+        for id in [&review.id, &pull.id] {
+            store.db.execute(
+                "UPDATE sa_event_sources SET repository='Test/Fixture' WHERE id=?1",
+                [id],
+            ).unwrap();
+        }
+        assert_eq!(create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request.opened").unwrap().id, pull.id,
+            "A legacy case alias must retain its source ID, revision and cursor");
+        let observed = set_mode(&store, &issue.id, issue.policy_revision, "observe").unwrap();
+        observe(&store, &event("alias-event", &observed, 1)).unwrap();
+        link_thread(&store, &issue.id, "one", "issue:42").unwrap();
+        assert!(link_thread(&store, &review.id, "two", "issue:42").is_err(),
+            "Case-only source aliases cannot give a thread to another Ticket");
+        assert!(link_issue_to_pull(&store, &pull.id, "two", "issue:42", "pull:99").is_err());
+        let associated = link_issue_to_pull(&store, &pull.id, "one", "issue:42", "pull:99").unwrap();
+        assert_eq!(associated.subject_key, "pull:99");
+        link_thread(&store, &review.id, "one", "issue:42").unwrap();
+        unlink_thread(&store, &issue.id, "one", "issue:42").unwrap();
+        // A legacy alias exposes authenticated receipt metadata only to its
+        // explicitly linked Ticket, not an unrelated Demand.
+        assert_eq!(linked_decisions(&store, "one", 50).unwrap()[0].delivery_id, "alias-event");
+        assert!(linked_decisions(&store, "two", 50).unwrap().is_empty());
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(linked_decisions(&reopened, "one", 50).unwrap().len(), 1);
+        assert!(link_thread(&reopened, &issue.id, "two", "issue:42").is_err());
+        assert!(linked_decisions(&reopened, "two", 50).unwrap().is_empty());
     }
 
     #[test]

@@ -266,13 +266,20 @@ proof of task completion, and not a substitute for verified Council/effects.
 
 ## Portable Teams and native objective search
 
-Portable Team export now emits schema v4, including each role's configured
-non-secret reasoning effort alongside provider, model, mode, and Skills.
-Imports continue to accept legacy schema v1-v3 documents, but a v4 import
-requires one complete effective profile for every role and rejects mismatched
-reasoning effort before any Team write or backup. Imported Teams remain Off.
-The canonical Team remains the atomic versioned native Team snapshot; a
-parallel mutable roster is not created.
+Portable Team export now emits schema v5. Each role retains its
+non-secret configured reasoning effort, provider, model, mode and Skills.
+The exported versioned strategy also includes priority, bounded attempt
+timeout/retries, requested parallelism, and optional token/cost and nested
+delegation preferences. Legacy schema v1-v4 remains readable; v5 requires
+one complete effective role profile and a validated strategy. Import rejects
+ambiguous/missing bots, unsupported priorities, malformed budgets, or Council
+requirements without eligible independent reviewers before any Team write or
+backup. A successfully imported Team always starts disabled/Off, including
+when its portable strategy requests unsupported parallel, spending or
+delegation capabilities. Export never carries issued grants, live Tickets,
+worker results, secrets, credentials or source subscriptions. The canonical
+Team remains an atomic, immutable versioned native snapshot rather than a
+parallel mutable roster.
 
 The **All Demands / Runs** view supports explicit literal objective search.
 Native Team and Ticket-state filters, objective matching, and newest-first

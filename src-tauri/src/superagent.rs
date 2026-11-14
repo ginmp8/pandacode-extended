@@ -6874,14 +6874,14 @@ mod tests {
             "alias-project","codex","default","plan",
         ).unwrap();
         assert!(active_manual_conflict(
-            &store,&[ordinary.id.clone()],"worker","project",
+            &store,std::slice::from_ref(&ordinary.id),"worker","project",
         ).unwrap());
         assert!(manual_candidate_occupied(
             &store,"unrelated-worker","alias-project","alias-project",
         ).unwrap());
         assert!(guard_run_admission(&store,&ordinary.id,&[]).is_err());
         assert!(guard_run_admission(
-            &store,&native,&[ordinary.id.clone()],
+            &store,&native,std::slice::from_ref(&ordinary.id),
         ).is_err());
         stop(&store,&ticket.id).unwrap();
         assert!(!manual_candidate_occupied(

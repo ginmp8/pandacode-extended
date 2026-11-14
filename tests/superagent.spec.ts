@@ -1337,7 +1337,11 @@ test('duplicate Team uses native atomic roster creation without copying source a
   await expect(workspace.locator('.sa-list .sa-item')).toHaveCount(2);
   await expect(workspace.locator('.sa-list')).toContainText('Review Fixture copy');
   await expect(workspace.getByRole('status').filter({hasText:'Disabled Team duplicated.'})).toBeVisible();
+  await workspace.getByRole('button',{name:'Demands / Runs',exact:true}).click();
+  await expect(workspace.getByRole('region',{name:'Selected orchestration'}))
+    .toContainText('Review Fixture copy');
   await expect(workspace.getByRole('button',{name:'Enable manual'})).toBeDisabled();
+  await workspace.getByRole('button',{name:'Teams',exact:true}).click();
   await workspace.getByRole('button',{name:'Load native members'}).click();
   await expect(workspace.getByRole('region',{name:'Configured Team roles'})).toContainText('Ledger');
   await expect(workspace.locator('.sa-list .sa-item').filter({hasText:'Review Fixture copy'}))

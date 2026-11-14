@@ -106,3 +106,13 @@ mixed-case source are compared against its exact GitHub repository identity
 and recorded under the canonical lowercase repository key, without losing
 existing receipts or creating a Ticket. This remains Observe-only context,
 never a GitHub grant or inferred demand.
+
+## Per-window repository identity consistency
+
+A bounded authenticated Events poll checks the repository name and, when the
+GitHub Events feed supplies `repo.id`, requires the same positive numeric ID
+on every event in that window. An invalid, missing-in-part or conflicting ID
+rejects the whole batch before any decision receipt or cursor is committed.
+This prevents mixing two repository histories under the same display name.
+It does **not** pin repository identity across separate polls, create a
+subscription, authorize Auto, or treat user-supplied events as authenticated.

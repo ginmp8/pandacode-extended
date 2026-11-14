@@ -751,11 +751,26 @@ fn combine_github_pages(pages: &[serde_json::Value], since: i64, cursor: i64)
 fn github_feed_watermark(events: &[serde_json::Value], repository: &str) -> Result<Option<i64>> {
     let mut newest = None;
     let mut previous = None;
+    // A finite repository feed must not mix the histories of distinct GitHub
+    // repository IDs that happen to share an owner/name. Existing older
+    // fixtures without IDs remain valid only when all events omit the ID.
+    let mut feed_repository_id: Option<Option<u64>> = None;
     for item in events {
         if !item.pointer("/repo/name").and_then(|v| v.as_str())
             .is_some_and(|name| name.eq_ignore_ascii_case(repository))
         {
             return Err("GitHub Events feed contains a foreign or missing repository; cursor unchanged.".into());
+        }
+        let current_repository_id = item.pointer("/repo/id")
+            .map(|value| value.as_u64().filter(|id| *id > 0)
+                .ok_or("GitHub Events feed has an invalid repository ID."))
+            .transpose()?;
+        if let Some(expected) = feed_repository_id {
+            if expected != current_repository_id {
+                return Err("GitHub Events feed changes repository identity; cursor unchanged.".into());
+            }
+        } else {
+            feed_repository_id = Some(current_repository_id);
         }
         let id = item.get("id").and_then(|v| v.as_str())
             .ok_or("GitHub Events feed has no numeric identity.")?;
@@ -1690,6 +1705,42 @@ mod tests {
         assert!(list_decisions(&store,&on.id,10).unwrap().is_empty());
     }
 
+
+    #[test]
+    fn authenticated_poll_rejects_repository_id_drift_before_any_receipt_or_cursor() {
+        let (store, path) = fixture();
+        let off = create_source(&store,"orch","owner/repo","trusted-bot","issues.opened").unwrap();
+        let observed = set_mode(&store,&off.id,off.policy_revision,"observe").unwrap();
+        let event = |id: &str, number: u64, repo_id: u64| serde_json::json!({
+            "id":id, "created_at":"2026-11-12T09:00:00Z", "type":"IssuesEvent",
+            "actor":{"login":"trusted-bot"},
+            "repo":{"name":"owner/repo","id":repo_id},
+            "payload":{"action":"opened","issue":{"number":number}}
+        });
+        let bad = serde_json::json!([
+            event("5000003102",2,73),event("5000003101",1,74)
+        ]);
+        assert!(poll_authenticated_events(&store,&observed,0,&bad).is_err());
+        let mut missing = bad.clone();
+        missing[1]["repo"].as_object_mut().unwrap().remove("id");
+        assert!(poll_authenticated_events(&store,&observed,0,&missing).is_err());
+        let mut zero = bad.clone();
+        zero[1]["repo"]["id"] = serde_json::json!(0);
+        assert!(poll_authenticated_events(&store,&observed,0,&zero).is_err());
+        assert_eq!(source(&store,&observed.id).unwrap().last_sequence,0);
+        assert!(list_decisions(&store,&observed.id,10).unwrap().is_empty());
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(source(&reopened,&observed.id).unwrap().last_sequence,0);
+        let valid = serde_json::json!([
+            event("5000003102",2,73),event("5000003101",1,73)
+        ]);
+        assert_eq!(poll_authenticated_events(&reopened,&observed,0,&valid).unwrap().recorded,2);
+        assert_eq!(poll_authenticated_events(&reopened,&observed,0,&valid).unwrap().duplicates,2);
+        assert_eq!(source(&reopened,&observed.id).unwrap().last_sequence,5_000_003_102);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets",[],
+            |row|row.get::<_,i64>(0)).unwrap(),0);
+    }
 
     #[test]
     fn sparse_github_observe_advances_only_verified_feed_cursor_without_admitting_work() {

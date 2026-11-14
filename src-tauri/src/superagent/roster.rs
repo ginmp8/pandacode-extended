@@ -28,7 +28,7 @@ pub struct RosterInput {
     #[serde(default)]
     pub council_required: Option<bool>,
 }
-#[derive(Debug,Clone,Serialize)]
+#[derive(Debug,Clone,Serialize,Deserialize)]
 #[serde(rename_all="camelCase")]
 pub struct TeamRoster {
     pub orchestration_id:String,

@@ -162,3 +162,28 @@ read-only intake path, **not** a fully autonomous code-writing/review/release
 pipeline or a guarantee that every GitHub event will be delivered. Follow
 the original #148 task authorization, effects and provider safety gates for
 any future writable Auto capabilities.
+
+## Atomic authenticated Auto admission
+
+GitHub Auto is a separate, explicitly consented source of native work. It
+cannot claim the identity of a direct local-user instruction. A staged event
+must have an exact durable authenticated receipt, active source policy and
+matching source/consent revisions before a Worker can start.
+
+For an authenticated Auto Worker, the Ticket actor and mandate actor are both
+`github-auto`. Native admission atomically persists the Ticket, immutable Team
+snapshot, scoped read-only mandate, Worker assignment and the receipt-to-Ticket
+link in one SQLite transaction. If any source, consent or Ticket revision
+changes, no partial Ticket/lease/session may be admitted. The legacy Ticket
+`source` column is retained as its compatibility projection (`manual`
+CHECK); **the authoritative Auto provenance** is the distinct actor and the
+one-to-one record in `sa_auto_intakes`. It is never inferred from a text
+prompt or sender name.
+
+Provider/tool admission rechecks source consent and the exact linked receipt,
+including after revocation, restart, callback replay and attempted cross-source
+request-key reuse. A Ticket claiming `github-auto` with a missing link has
+**no authority** and cannot fall back to manual credentials or grants. An
+ordinary manual Ticket stays independent of GitHub Auto source activation.
+An in-flight provider whose consent is revoked is blocked or interrupted,
+never promoted to a successful completion by a stale callback.

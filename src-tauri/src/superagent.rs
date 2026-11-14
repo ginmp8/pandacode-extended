@@ -2674,10 +2674,44 @@ fn admit_role(
 
 // A detached operator can stage a blocked Ticket but cannot reserve a provider
 // session. This preserves the existing manual admission API and its tests.
+/// Authenticated Auto provenance is frozen with the same SQLite transaction
+/// that admits the Ticket, mandate and provider session. Without a matching
+/// source receipt, an orphaned Auto session has zero native authority.
+#[derive(Clone, Copy)]
+pub(crate) struct AuthenticatedAutoAdmission<'a> {
+    pub source_id: &'a str,
+    pub delivery_id: &'a str,
+    pub source_revision: i64,
+    pub consent_revision: i64,
+}
+
+pub(crate) fn admit_auto(
+    store: &mut Store, config_id: &str, objective: &str,
+    request_key: &str, origin: AuthenticatedAutoAdmission<'_>,
+) -> Result<(Ticket, bool)> {
+    admit_role_with_provenance(
+        store, config_id, objective, request_key, false, false, false, Some(origin),
+    )
+}
+
 fn admit_role_with_staging(
     store: &mut Store, config_id: &str, objective: &str,
     request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
 ) -> Result<(Ticket, bool)> {
+    admit_role_with_provenance(
+        store, config_id, objective, request_key, busy, coordinate, headless_staging, None,
+    )
+}
+
+fn admit_role_with_provenance(
+    store: &mut Store, config_id: &str, objective: &str,
+    request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
+    auto: Option<AuthenticatedAutoAdmission<'_>>,
+) -> Result<(Ticket, bool)> {
+    if auto.is_some() && (coordinate || headless_staging) {
+        return Err("Authenticated Auto may only admit a direct native Worker.".into());
+    }
+    let actor = if auto.is_some() { "github-auto" } else { "local-user" };
     let objective = objective.trim();
     if objective.is_empty() || objective.len() > MAX_OBJECTIVE_BYTES || objective.chars().any(|c| c == '\0') {
         return Err("A nonempty, bounded objective is required.".into());
@@ -2692,8 +2726,8 @@ fn admit_role_with_staging(
         params![config_id,request_key], |row| row.get::<_, String>(0),
     ).optional().map_err(|e| e.to_string())? {
         let ticket = get_ticket(store, &existing)?;
-        if ticket.objective != objective {
-            return Err("The manual-request key is already bound to another objective.".into());
+        if ticket.objective != objective || ticket.actor != actor {
+            return Err("The request key is bound to a different objective or source identity.".into());
         }
         // A key identifies the original native dispatch intent as well as its
         // objective. Replaying a direct worker request as a coordinator request
@@ -2704,17 +2738,34 @@ fn admit_role_with_staging(
             [&ticket.id], |row| row.get(0),
         ).optional().map_err(|e| e.to_string())?
             .ok_or("Manual request admission audit missing.")?;
-        let originally_coordinated = match admission.as_str() {
-            "manual readonly coordinator reserved" => true,
-            "manual readonly worker reserved" | "blocked: worker occupied"
-            | "blocked: explicit headless staging" => false,
-            _ => return Err("Manual request admission mode is unknown.".into()),
+        let originally_coordinated = match (admission.as_str(),auto.is_some()) {
+            ("manual readonly coordinator reserved",false) => true,
+            ("manual readonly worker reserved",false)
+            | ("blocked: worker occupied",false)
+            | ("blocked: explicit headless staging",false)
+            | ("auto readonly worker reserved",true)
+            | ("auto blocked: worker occupied",true) => false,
+            _ => return Err("Request source or admission mode changed during replay.".into()),
         };
         if headless_staging && admission != "blocked: explicit headless staging" {
             return Err("Request key already belongs to a different manual dispatch mode.".into());
         }
         if originally_coordinated != coordinate {
             return Err("Manual request key cannot change between direct and coordinated dispatch.".into());
+        }
+        if let Some(origin) = auto {
+            let linked:bool=store.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sa_auto_intakes
+                 WHERE source_id=?1 AND delivery_id=?2 AND ticket_id=?3
+                   AND source_policy_revision=?4 AND consent_revision=?5
+                   AND state IN ('admitted','blocked','dispatched'))",
+                params![origin.source_id,origin.delivery_id,ticket.id,
+                    origin.source_revision,origin.consent_revision],
+                |row|row.get(0),
+            ).map_err(|e|e.to_string())?;
+            if !linked {
+                return Err("Auto request replay conflicts with its original authenticated receipt.".into());
+            }
         }
         return Ok((ticket, false));
     }
@@ -2796,15 +2847,20 @@ fn admit_role_with_staging(
     let now = storage::now();
     tx.execute(
         "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,project_id,worker_bot_id,policy_revision,state,active_assignment_id,created_at,updated_at)
-         VALUES(?1,?2,?3,?4,'local-user','manual',?5,?6,?7,?8,?9,?10,?10)",
-        params![ticket_id,config.id,request_key,objective,config.project_id,current_worker.id,config.policy_revision,
+         VALUES(?1,?2,?3,?4,?5,'manual',?6,?7,?8,?9,?10,?11,?11)",
+        // The legacy source column remains constrained to manual. Authenticated
+        // Auto authority comes from the actor plus a mandatory, receipt-bound
+        // sa_auto_intakes link inserted atomically in this transaction.
+        params![ticket_id,config.id,request_key,objective,actor,
+            config.project_id,current_worker.id,config.policy_revision,
             if blocked { "blocked" } else { "running" }, assignment_id,now],
     ).map_err(|e| e.to_string())?;
     insert_ticket_team_snapshot(&tx,&ticket_id,&team_snapshot,"native")?;
     tx.execute(
         "INSERT INTO sa_mandates(ticket_id,actor,authorization_id,policy_revision,project_id,expires_at,created_at)
-         VALUES(?1,'local-user',?2,?3,?4,?5,?6)",
-        params![ticket_id,storage::id(),config.policy_revision,config.project_id,now + 4 * 60 * 60 * 1000,now],
+         VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![ticket_id,actor,storage::id(),config.policy_revision,
+            config.project_id,now + 4 * 60 * 60 * 1000,now],
     ).map_err(|e| e.to_string())?;
     if let (Some(assignment_id),Some(session_id)) = (&assignment_id,&session_id) {
         tx.execute(
@@ -2818,12 +2874,41 @@ fn admit_role_with_staging(
             )?;
         }
     }
+    if let Some(origin) = auto {
+        // This UPDATE is a mandatory part of admission, not a later best
+        // effort step. A crash cannot leave an Auto provider session running
+        // with a missing source link that would be mistaken for a manual task.
+        let linked = tx.execute(
+            "UPDATE sa_auto_intakes SET ticket_id=?3,state=?4,updated_at=?5
+             WHERE source_id=?1 AND delivery_id=?2 AND ticket_id IS NULL
+               AND state='claimed' AND source_policy_revision=?6
+               AND consent_revision=?7
+               AND EXISTS (
+                 SELECT 1 FROM sa_auto_source_policies consent
+                 JOIN sa_event_sources source ON source.id=consent.source_id
+                 WHERE consent.source_id=?1 AND consent.mode='active'
+                   AND consent.policy_revision=?7
+                   AND consent.source_policy_revision=?6
+                   AND source.mode='observe' AND source.policy_revision=?6
+                   AND source.orchestration_id=?8
+               )",
+            params![origin.source_id,origin.delivery_id,ticket_id,
+                if blocked { "blocked" } else { "admitted" },now,
+                origin.source_revision,origin.consent_revision,config.id],
+        ).map_err(|e| e.to_string())?;
+        if linked != 1 {
+            return Err("GitHub Auto receipt or consent changed during atomic Ticket admission.".into());
+        }
+    }
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,'admitted',?2,?3)",
-        params![ticket_id, if headless_staging { "blocked: explicit headless staging" }
-             else if blocked { "blocked: worker occupied" }
-             else if coordinate { "manual readonly coordinator reserved" }
-             else { "manual readonly worker reserved" },now],
+        params![ticket_id, if auto.is_some() {
+                if blocked { "auto blocked: worker occupied" }
+                else { "auto readonly worker reserved" }
+            } else if headless_staging { "blocked: explicit headless staging" }
+            else if blocked { "blocked: worker occupied" }
+            else if coordinate { "manual readonly coordinator reserved" }
+            else { "manual readonly worker reserved" },now],
     ).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     Ok((get_ticket(store, &ticket_id)?, !blocked))
@@ -2864,7 +2949,8 @@ fn coordinator_plan_current(
             if !proven { return Ok(false); }
         }
         Some("manual readonly worker reserved" | "blocked: worker occupied"
-            | "blocked: explicit headless staging") => {}
+            | "blocked: explicit headless staging" | "auto readonly worker reserved"
+            | "auto blocked: worker occupied") => {}
         _ => return Ok(false),
     }
     let invalid: bool = store.db.query_row(
@@ -2919,7 +3005,8 @@ fn assignment_thread_current(store: &Store, session_id: &str, ticket_id: &str) -
                     AND EXISTS (SELECT 1 FROM sa_audit initial
                       WHERE initial.ticket_id=assignment.ticket_id
                         AND initial.kind='admitted'
-                        AND initial.detail='blocked: worker occupied')
+                        AND initial.detail IN ('blocked: worker occupied',
+                             'auto blocked: worker occupied'))
                     AND EXISTS (SELECT 1 FROM sa_audit retry
                       WHERE retry.ticket_id=assignment.ticket_id
                         AND retry.kind='manual_retry'))
@@ -2953,7 +3040,9 @@ fn assignment_role_authorized(
     ).optional().map_err(|e| e.to_string())?;
     Ok(match admission.as_deref() {
         Some("manual readonly coordinator reserved") if attempt == 1 => coordinator,
-        Some("manual readonly coordinator reserved" | "manual readonly worker reserved" | "blocked: worker occupied")
+        Some("manual readonly coordinator reserved" | "manual readonly worker reserved"
+            | "blocked: worker occupied" | "auto readonly worker reserved"
+            | "auto blocked: worker occupied")
             if attempt > 0 => worker,
         _ => false,
     })
@@ -3177,7 +3266,8 @@ pub(crate) fn guard_gateway_inbound(
                   AND EXISTS (SELECT 1 FROM sa_audit initial
                     WHERE initial.ticket_id=assignment.ticket_id
                       AND initial.kind='admitted'
-                      AND initial.detail='blocked: worker occupied')
+                      AND initial.detail IN ('blocked: worker occupied',
+                             'auto blocked: worker occupied'))
                   AND EXISTS (SELECT 1 FROM sa_audit retry
                     WHERE retry.ticket_id=assignment.ticket_id
                       AND retry.kind='manual_retry'))
@@ -4768,6 +4858,97 @@ pub async fn superagent_revoke_worker_write_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authenticated_auto_admission_atomically_binds_source_and_denies_revoked_receipts() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_event_sources
+             (id,orchestration_id,repository,actor_filter,event_kind,mode,
+              policy_revision,created_at,updated_at)
+             VALUES('source-auto',?1,'owner/repo','trusted-bot','issues.opened',
+                    'observe',1,?2,?2)",
+            params![team.id,now],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_auto_source_policies
+             (source_id,mode,policy_revision,source_policy_revision,
+              max_events_per_hour,max_events_per_day,activation_at,updated_at)
+             VALUES('source-auto','active',1,1,4,20,?1,?1)",
+            [now],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_event_decisions
+             (source_id,delivery_id,repository,actor,event_kind,
+              subject_key,sequence,decision,policy_revision,at)
+             VALUES('source-auto','delivery-42','owner/repo','trusted-bot',
+                    'issues.opened','issue:42',42,'observed_permitted',1,?1)",
+            [now],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_auto_intakes
+             (source_id,delivery_id,state,consent_revision,source_policy_revision,
+              event_kind,subject_key,created_at,updated_at)
+             VALUES('source-auto','delivery-42','claimed',1,1,
+                    'issues.opened','issue:42',?1,?1)",
+            [now],
+        ).unwrap();
+        let origin=AuthenticatedAutoAdmission {
+            source_id:"source-auto", delivery_id:"delivery-42",
+            source_revision:1,consent_revision:1,
+        };
+        let denied=admit_auto(
+            &mut store,&team.id,"Authenticated external objective",
+            "auto_source-auto_delivery-42",
+            AuthenticatedAutoAdmission {source_revision:2,..origin},
+        ).unwrap_err();
+        assert!(denied.contains("receipt or consent"));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|row|row.get::<_,i64>(0),
+        ).unwrap(),0,"A stale source cannot leave an orphaned provider grant.");
+        let state:String=store.db.query_row(
+            "SELECT state FROM sa_auto_intakes WHERE source_id='source-auto'",
+            [],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(state,"claimed");
+
+        let (ticket,launched)=admit_auto(
+            &mut store,&team.id,"Authenticated external objective",
+            "auto_source-auto_delivery-42",origin,
+        ).unwrap();
+        assert!(launched);
+        assert_eq!(ticket.actor,"github-auto");
+        assert!(events::auto_intake::ticket_authorized(&store,&ticket.id).unwrap());
+        let mandate=mandate(&store,&ticket.id).unwrap();
+        assert_eq!(mandate.actor,"github-auto");
+        let exact_link:bool=store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_auto_intakes
+             WHERE source_id='source-auto' AND delivery_id='delivery-42'
+               AND ticket_id=?1 AND state='admitted')",
+            [&ticket.id],|row|row.get(0),
+        ).unwrap();
+        assert!(exact_link,"Source receipt and Ticket must commit atomically.");
+        let repeated=admit_auto(
+            &mut store,&team.id,"Authenticated external objective",
+            "auto_source-auto_delivery-42",origin,
+        ).unwrap();
+        assert!(!repeated.1,"The exact delivery can never dispatch twice.");
+        assert_eq!(repeated.0.id,ticket.id);
+        let session=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store,&session).unwrap().is_some());
+
+        store.db.execute(
+            "UPDATE sa_auto_source_policies SET mode='off',policy_revision=2
+             WHERE source_id='source-auto'", [],
+        ).unwrap();
+        assert!(!events::auto_intake::ticket_authorized(&store,&ticket.id).unwrap());
+        assert!(read_only_policy(&store,&session).is_err(),
+            "Revoking source consent must invalidate an already running worker.");
+        assert!(on_run_finished(&store,&session,true,"Stale completion").unwrap());
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+    }
 
     #[test]
     fn changed_provider_session_is_denied_before_tools_and_callback_acceptance() {

@@ -2,7 +2,7 @@
 type Bot = { id:string; name:string; paused:boolean; projectId:string };
 type Config = { id:string; name:string; coordinatorBotId:string; workerBotId:string;
   workerBotIds:string[]; reviewerBotIds:string[]; teamVersion:number;
-  projectId:string; enabled:boolean; policyRevision:number };
+  projectId:string; enabled:boolean; policyRevision:number; councilRequired:boolean };
 type Ticket = { id:string; orchestrationId:string; objective:string;
   state:string; revision:number; evidence:null };
 type TeamSnapshot = {
@@ -54,12 +54,24 @@ export async function invokeSuperagent<T>(
     return {coordinator,workers,reviewers,workerBotIds:[...workerBotIds] as string[],
       reviewerBotIds:[...reviewerBotIds] as string[]};
   };
+  // Native policy is off or required. Create without the field means Off;
+  // update without it preserves the current Team policy, like the native command.
+  const councilRequirement=(input:any,fallback:boolean):boolean=>{
+    if(input?.councilRequired===undefined)return fallback;
+    if(typeof input.councilRequired!=='boolean')throw Error('Invalid Team input.');
+    return input.councilRequired;
+  };
+  const validCouncilReviewers=(reviewerBotIds:string[],councilRequired:boolean):void=>{
+    if(councilRequired&&(reviewerBotIds.length<2||reviewerBotIds.length>8))
+      throw Error('Council-required Teams need between two and eight selected native reviewers.');
+  };
   const makeTeamSnapshot=(config:Config):TeamSnapshot=>({
     snapshotVersion:1,provenance:'native',orchestrationId:config.id,teamVersion:config.teamVersion,
     name:config.name,projectId:config.projectId,coordinatorBotId:config.coordinatorBotId,
     workerBotIds:[...config.workerBotIds],reviewerBotIds:[...config.reviewerBotIds],
     policy:{policyRevision:config.policyRevision,autonomy:'off',maxConcurrentTasks:1,
-      maxAttemptsPerAssignment:2,councilEnabled:false,councilRequired:false},
+      maxAttemptsPerAssignment:2,councilEnabled:config.councilRequired,
+      councilRequired:config.councilRequired},
     roles:[
       {role:'coordinator',ordinal:0,botId:config.coordinatorBotId,effectiveConfig:null,effectiveConfigSha256:null},
       ...config.workerBotIds.map((botId,ordinal)=>({role:'worker',ordinal,botId,
@@ -106,22 +118,26 @@ export async function invokeSuperagent<T>(
       throw Error('Source linking requires a native trusted event source.');
     case 'superagent_create':{
       const input=args.input,roles=resolveRoles(input),b=roles.workers[0];
+      const councilRequired=councilRequirement(input,false);
+      validCouncilReviewers(roles.reviewerBotIds,councilRequired);
       if(!input.name?.trim()||configName(input.name))throw Error('Invalid or duplicate orchestration.');
       const c:Config={id:crypto.randomUUID(),name:input.name,coordinatorBotId:roles.coordinator.id,
         workerBotId:b.id,workerBotIds:roles.workerBotIds,reviewerBotIds:roles.reviewerBotIds,
-        teamVersion:1,projectId:b.projectId,enabled:false,policyRevision:1};
+        teamVersion:1,projectId:b.projectId,enabled:false,policyRevision:1,councilRequired};
       configs.set(c.id,c);value=c;break;
     }
     case 'superagent_update':{
       const c=get(args.orchestrationId),input=args.input;
       if(c.enabled||c.policyRevision!==args.expectedRevision||(tickets.get(c.id)?.length||0)>0)
         throw Error('Preset cannot change after use or while enabled.');
+      const councilRequired=councilRequirement(input,c.councilRequired);
       const roles=resolveRoles(input),b=roles.workers[0];
+      validCouncilReviewers(roles.reviewerBotIds,councilRequired);
       if(!input.name?.trim()||configName(input.name)?.id!==undefined&&configName(input.name)?.id!==c.id)
         throw Error('Invalid or duplicate preset.');
       c.name=input.name;c.coordinatorBotId=roles.coordinator.id;c.workerBotId=b.id;
       c.workerBotIds=roles.workerBotIds;c.reviewerBotIds=roles.reviewerBotIds;
-      c.projectId=b.projectId;c.teamVersion++;c.policyRevision++;
+      c.projectId=b.projectId;c.teamVersion++;c.policyRevision++;c.councilRequired=councilRequired;
       value=c;break;
     }
     case 'superagent_set_enabled':{
@@ -230,7 +246,7 @@ export async function invokeSuperagent<T>(
           const a=bots.find(b=>b.name===preset.coordinatorBot)!,b=bots.find(b=>b.name===preset.workerBot)!;
           const c:Config={id:crypto.randomUUID(),name,coordinatorBotId:a.id,workerBotId:b.id,
             workerBotIds:[b.id],reviewerBotIds:[],teamVersion:1,
-            projectId:b.projectId,enabled:false,policyRevision:1};configs.set(c.id,c);
+            projectId:b.projectId,enabled:false,policyRevision:1,councilRequired:false};configs.set(c.id,c);
         }
         value={created:pending,unchanged};
       }else value={wouldCreate:pending,unchanged,importedPresetsDisabled:true};

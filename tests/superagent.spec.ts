@@ -492,22 +492,21 @@ test('required Council reports an unavailable native observation instead of advi
   await expect(note).not.toContainText('(advisory)');
 });
 
-test('optional Council stays advisory and reports an unproven binding as Unknown', async ({page}) => {
+test('a snapshot with only councilEnabled true is treated as required, never advisory', async ({page}) => {
   await page.goto('/?bots=sample');
   await mountCouncilTicket(page, {
-    hostId:'sa-council-optional-unbound', councilEnabled:true, councilRequired:false,
+    hostId:'sa-council-enabled-only', councilEnabled:true, councilRequired:false,
     council:{nativeStatus:'unverified',nativeRound:1,nativeStale:true,
       nativePassVerified:false,ticketArtifactBound:false},
   });
-  const host = page.locator('#sa-council-optional-unbound');
+  const host = page.locator('#sa-council-enabled-only');
   await host.getByRole('button',{name:'View evidence'}).click();
   const note = host.getByRole('note',{name:'Native Council observation'});
   await expect(host.getByRole('heading',{name:'Native Council',exact:true})).toBeVisible();
-  await expect(note).toContainText('Policy: Council optional (advisory). Review target binding: Not proven (Unknown).');
+  await expect(note).toContainText('Policy: Council required. Review target binding: Not proven (Unknown).');
   await expect(note).toContainText('Native team status: unverified · Round 1 · stale. Verified native pass: No.');
-  await expect(note).toContainText('Optional Council is advisory for this Ticket and does not gate completion');
-  await expect(note).toContainText('Neither a bound native review target nor a verified native Council pass is proven');
-  await expect(note).toContainText('cannot authorize SuperAgent completion');
+  await expect(note).toContainText('Required Council gates completion for this Ticket.');
+  await expect(note).not.toContainText('(advisory)');
 });
 
 test('SuperAgent examples only fill names and leave all authorization disabled', async ({page}) => {
@@ -595,6 +594,7 @@ test('Team Builder creates and edits ordered worker and reviewer roles', async (
   expect(calls[0].args?.input).toMatchObject({
     name:'Ordered Team',coordinatorBotId:'coordinator',workerBotId:'worker-two',
     workerBotIds:['worker-two','worker-one'],reviewerBotIds:['reviewer-two','reviewer-one'],
+    councilRequired:false,
   });
 
   const selected=host.getByRole('region',{name:'Selected orchestration',exact:true});
@@ -694,7 +694,7 @@ test('Team Builder keeps an edit draft and shows native rejection feedback', asy
     const config={id:'team-native-blocked',name:'Original Team',coordinatorBotId:'coordinator',
       projectId:'project-one',
       workerBotId:'worker-one',workerBotIds:['worker-one','worker-two'],reviewerBotIds:['reviewer'],
-      enabled:false,policyRevision:9};
+      enabled:false,policyRevision:9,councilRequired:false};
     const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
     mountSuperagent(host,async(command,args)=>{
       if(command==='bots_list')return bots as never;
@@ -728,8 +728,321 @@ test('Team Builder keeps an edit draft and shows native rejection feedback', asy
     orchestrationId:'team-native-blocked',expectedRevision:9,input:{
       name:'Edited but rejected',coordinatorBotId:'coordinator',
       workerBotIds:['worker-two','worker-one'],reviewerBotIds:['reviewer'],workerBotId:'worker-two',
+      councilRequired:false,
     },
   }}]);
+});
+
+test('Team Builder sends required Council policy with create and update and shows the saved state', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const previous=document.querySelector<HTMLElement>('#superagent-host')!;
+    const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
+    const bots=[
+      {id:'coordinator',name:'Coordinator',paused:false,projectId:'project-one'},
+      {id:'worker',name:'Worker',paused:false,projectId:'project-one'},
+      {id:'reviewer-one',name:'Reviewer One',paused:false,projectId:'project-one'},
+      {id:'reviewer-two',name:'Reviewer Two',paused:false,projectId:'project-one'},
+    ];
+    let config:Record<string,any>|null=null;
+    const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return bots as never;
+      if(command==='superagent_list')return config
+        ? [{...config,ticketCount:0,runningCount:0,blockedCount:0}] as never : [] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_create'||command==='superagent_update'){
+        calls.push({command,args:{...args}});
+        const input=args?.input as Record<string,any>;
+        config=command==='superagent_create'
+          ? {id:'team-council',...input,teamVersion:1,projectId:'project-one',enabled:false,policyRevision:1}
+          : {...config,...input,teamVersion:Number(config?.teamVersion)+1,
+            policyRevision:Number(config?.policyRevision)+1};
+        return config as never;
+      }
+      throw new Error('Unexpected Council Team command: '+command);
+    });
+    (window as unknown as {saCouncilTeamCalls:typeof calls}).saCouncilTeamCalls=calls;
+  });
+  const create=host.locator('form[data-sa-form="create"]');
+  const createCouncil=create.getByRole('checkbox',{name:'Require native Council review'});
+  await expect(createCouncil).not.toBeChecked();
+  await expect(create.getByRole('combobox',{name:'Coordinator'})
+    .locator('option[value="coordinator"]')).toBeAttached();
+  await create.getByRole('textbox',{name:'Name',exact:true}).fill('Council Team');
+  await create.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
+  await create.getByRole('combobox',{name:'Worker 1',exact:true}).selectOption('worker');
+  await create.getByRole('button',{name:'Add reviewer'}).click();
+  await create.getByRole('combobox',{name:'Reviewer 1'}).selectOption('reviewer-one');
+  await create.getByRole('button',{name:'Add reviewer'}).click();
+  await create.getByRole('combobox',{name:'Reviewer 2'}).selectOption('reviewer-two');
+  await createCouncil.check();
+  await create.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(host.locator('.sa-list .sa-item [data-sa-council-state]')).toHaveText('Council required');
+  let calls=await page.evaluate(()=>(window as unknown as {
+    saCouncilTeamCalls:Array<{command:string;args?:Record<string,any>}>
+  }).saCouncilTeamCalls);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toMatchObject({command:'superagent_create',args:{input:{
+    name:'Council Team',coordinatorBotId:'coordinator',workerBotId:'worker',
+    workerBotIds:['worker'],reviewerBotIds:['reviewer-one','reviewer-two'],
+    councilRequired:true,
+  }}});
+
+  await host.getByRole('button',{name:'Edit Team'}).click();
+  const selected=host.getByRole('region',{name:'Selected orchestration',exact:true});
+  const edit=selected.locator('form[data-sa-form="edit"]');
+  const editCouncil=edit.getByRole('checkbox',{name:'Require native Council review'});
+  await expect(editCouncil).toBeChecked();
+  await edit.getByRole('textbox',{name:'Team name',exact:true}).fill('Council Team renamed');
+  await edit.getByRole('button',{name:'Save Team version',exact:true}).click();
+  await expect(host).toHaveAttribute('aria-busy','false');
+  calls=await page.evaluate(()=>(window as unknown as {
+    saCouncilTeamCalls:Array<{command:string;args?:Record<string,any>}>
+  }).saCouncilTeamCalls);
+  expect(calls).toHaveLength(2);
+  expect(calls[1]).toMatchObject({command:'superagent_update',args:{
+    orchestrationId:'team-council',expectedRevision:1,input:{
+      name:'Council Team renamed',councilRequired:true,
+      reviewerBotIds:['reviewer-one','reviewer-two'],
+    },
+  }});
+  await expect(host.locator('.sa-list .sa-item [data-sa-council-state]')).toHaveText('Council required');
+
+  await editCouncil.uncheck();
+  await edit.getByRole('button',{name:'Save Team version',exact:true}).click();
+  await expect(host).toHaveAttribute('aria-busy','false');
+  calls=await page.evaluate(()=>(window as unknown as {
+    saCouncilTeamCalls:Array<{command:string;args?:Record<string,any>}>
+  }).saCouncilTeamCalls);
+  expect(calls).toHaveLength(3);
+  expect(calls[2]).toMatchObject({command:'superagent_update',args:{
+    orchestrationId:'team-council',expectedRevision:2,input:{
+      name:'Council Team renamed',councilRequired:false,
+      reviewerBotIds:['reviewer-one','reviewer-two'],
+    },
+  }});
+  await expect(host.locator('.sa-list .sa-item [data-sa-council-state]')).toHaveText('Council off');
+});
+
+test('Team Builder field-validates required Council with fewer than two reviewers before create or update', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const previous=document.querySelector<HTMLElement>('#superagent-host')!;
+    const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
+    const bots=[
+      {id:'coordinator',name:'Coordinator',paused:false,projectId:'project-one'},
+      {id:'worker',name:'Worker',paused:false,projectId:'project-one'},
+      {id:'reviewer-one',name:'Reviewer One',paused:false,projectId:'project-one'},
+      {id:'reviewer-two',name:'Reviewer Two',paused:false,projectId:'project-one'},
+    ];
+    const config={id:'team-existing',name:'Existing Team',coordinatorBotId:'coordinator',
+      workerBotId:'worker',workerBotIds:['worker'],reviewerBotIds:['reviewer-one'],
+      enabled:false,policyRevision:3,teamVersion:1,projectId:'project-one',councilRequired:false};
+    const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return bots as never;
+      if(command==='superagent_list')return [{...config,ticketCount:0,runningCount:0,blockedCount:0}] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_create'||command==='superagent_update'){
+        calls.push({command,args:{...args}});
+        throw new Error('Invalid Council requirement must not reach native.');
+      }
+      throw new Error('Unexpected invalid Council command: '+command);
+    });
+    (window as unknown as {saInvalidCouncilCalls:typeof calls}).saInvalidCouncilCalls=calls;
+  });
+  const create=host.locator('form[data-sa-form="create"]');
+  await expect(create.getByRole('combobox',{name:'Coordinator'})
+    .locator('option[value="coordinator"]')).toBeAttached();
+  await create.getByRole('textbox',{name:'Name',exact:true}).fill('Invalid Council Team');
+  await create.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
+  await create.getByRole('combobox',{name:'Worker 1',exact:true}).selectOption('worker');
+  await create.getByRole('button',{name:'Add reviewer'}).click();
+  await create.getByRole('combobox',{name:'Reviewer 1'}).selectOption('reviewer-one');
+  const createCouncil=create.getByRole('checkbox',{name:'Require native Council review'});
+  await createCouncil.check();
+  await create.getByRole('button',{name:'Create disabled preset'}).click();
+  const createError=create.locator('[data-sa-council-error]');
+  await expect(createError).toHaveText('Require native Council review needs between two and eight distinct reviewers.');
+  await expect(createError).toHaveAttribute('role','alert');
+  await expect(createCouncil).toHaveAttribute('aria-invalid','true');
+  await expect(createCouncil).toHaveAttribute('aria-describedby',/sa-create-council-error/);
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {
+    saInvalidCouncilCalls:Array<unknown>;
+  }).saInvalidCouncilCalls.length)).toBe(0);
+  await createCouncil.uncheck();
+  await expect(create.locator('[data-sa-council-error]')).toHaveCount(0);
+  await expect(createCouncil).not.toHaveAttribute('aria-invalid','true');
+
+  // A duplicate reviewer is not a distinct native reviewer and must fail in the
+  // form before any create call can reach native policy.
+  await create.getByRole('button',{name:'Add reviewer'}).click();
+  await create.getByRole('combobox',{name:'Reviewer 2'}).selectOption('reviewer-one');
+  await createCouncil.check();
+  await create.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(create.locator('[data-sa-council-error]'))
+    .toHaveText('Require native Council review needs between two and eight distinct reviewers.');
+  await expect(createCouncil).toHaveAttribute('aria-invalid','true');
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {
+    saInvalidCouncilCalls:Array<unknown>;
+  }).saInvalidCouncilCalls.length)).toBe(0);
+
+  await host.getByRole('button',{name:'Edit Team'}).click();
+  const selected=host.getByRole('region',{name:'Selected orchestration',exact:true});
+  const edit=selected.locator('form[data-sa-form="edit"]');
+  const editCouncil=edit.getByRole('checkbox',{name:'Require native Council review'});
+  await expect(editCouncil).not.toBeChecked();
+  await editCouncil.check();
+  await edit.getByRole('button',{name:'Save Team version',exact:true}).click();
+  const editError=edit.locator('[data-sa-council-error]');
+  await expect(editError).toHaveText('Require native Council review needs between two and eight distinct reviewers.');
+  await expect(editCouncil).toHaveAttribute('aria-invalid','true');
+  await expect(editCouncil).toHaveAttribute('aria-describedby',/sa-edit-council-error/);
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {
+    saInvalidCouncilCalls:Array<unknown>;
+  }).saInvalidCouncilCalls.length)).toBe(0);
+  await expect(edit.getByRole('combobox',{name:'Reviewer 1',exact:true})).toHaveValue('reviewer-one');
+});
+
+test('Team Builder clears the Council error and saves once the second distinct reviewer is added', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const previous=document.querySelector<HTMLElement>('#superagent-host')!;
+    const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
+    const bots=[
+      {id:'coordinator',name:'Coordinator',paused:false,projectId:'project-one'},
+      {id:'worker',name:'Worker',paused:false,projectId:'project-one'},
+      {id:'reviewer-one',name:'Reviewer One',paused:false,projectId:'project-one'},
+      {id:'reviewer-two',name:'Reviewer Two',paused:false,projectId:'project-one'},
+    ];
+    let config:Record<string,any>={id:'team-fix-council',name:'Fix Council',
+      coordinatorBotId:'coordinator',workerBotId:'worker',workerBotIds:['worker'],
+      reviewerBotIds:['reviewer-one'],enabled:false,policyRevision:5,teamVersion:1,
+      projectId:'project-one',councilRequired:false};
+    const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return bots as never;
+      if(command==='superagent_list')return [{...config,ticketCount:0,runningCount:0,blockedCount:0}] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_update'){
+        calls.push({command,args:{...args}});
+        const input=args?.input as Record<string,any>;
+        config={...config,...input,teamVersion:Number(config.teamVersion)+1,
+          policyRevision:Number(config.policyRevision)+1};
+        return config as never;
+      }
+      throw new Error('Unexpected Council fix command: '+command);
+    });
+    (window as unknown as {saCouncilFixCalls:typeof calls}).saCouncilFixCalls=calls;
+  });
+
+  const selected=host.getByRole('region',{name:'Selected orchestration',exact:true});
+  await host.getByRole('button',{name:'Edit Team'}).click();
+  const edit=selected.locator('form[data-sa-form="edit"]');
+  const editCouncil=edit.getByRole('checkbox',{name:'Require native Council review'});
+  await expect(editCouncil).not.toBeChecked();
+  await editCouncil.check();
+  await edit.getByRole('button',{name:'Save Team version',exact:true}).click();
+  const error=edit.locator('[data-sa-council-error]');
+  await expect(error).toHaveText('Require native Council review needs between two and eight distinct reviewers.');
+  await expect(editCouncil).toHaveAttribute('aria-invalid','true');
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {
+    saCouncilFixCalls:Array<unknown>;
+  }).saCouncilFixCalls.length)).toBe(0);
+
+  await edit.getByRole('button',{name:'Add reviewer'}).click();
+  await edit.getByRole('combobox',{name:'Reviewer 2'}).selectOption('reviewer-two');
+  await expect(edit.locator('[data-sa-council-error]')).toHaveCount(0);
+  await expect(editCouncil).not.toHaveAttribute('aria-invalid','true');
+  await edit.getByRole('button',{name:'Save Team version',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {
+    saCouncilFixCalls:Array<unknown>;
+  }).saCouncilFixCalls.length)).toBe(1);
+  await expect(host.locator('.sa-list .sa-item [data-sa-council-state]')).toHaveText('Council required');
+  const calls=await page.evaluate(()=>(window as unknown as {
+    saCouncilFixCalls:Array<{command:string;args?:Record<string,any>}>
+  }).saCouncilFixCalls);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toMatchObject({command:'superagent_update',args:{
+    orchestrationId:'team-fix-council',expectedRevision:5,input:{
+      name:'Fix Council',coordinatorBotId:'coordinator',workerBotId:'worker',
+      workerBotIds:['worker'],reviewerBotIds:['reviewer-one','reviewer-two'],
+      councilRequired:true,
+    },
+  }});
+});
+
+test('Team Builder leaves an unknown saved Council state unchanged and omits it from the update payload', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const previous=document.querySelector<HTMLElement>('#superagent-host')!;
+    const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
+    const bots=[
+      {id:'coordinator',name:'Coordinator',paused:false,projectId:'project-one'},
+      {id:'worker',name:'Worker',paused:false,projectId:'project-one'},
+      {id:'reviewer-one',name:'Reviewer One',paused:false,projectId:'project-one'},
+      {id:'reviewer-two',name:'Reviewer Two',paused:false,projectId:'project-one'},
+    ];
+    // A list record from an older/native shape may omit councilRequired entirely.
+    let config:Record<string,any>={id:'team-unknown-council',name:'Unknown Council',
+      coordinatorBotId:'coordinator',workerBotId:'worker',workerBotIds:['worker'],
+      reviewerBotIds:['reviewer-one','reviewer-two'],enabled:false,policyRevision:7,
+      teamVersion:2,projectId:'project-one'};
+    const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return bots as never;
+      if(command==='superagent_list')return [{...config,ticketCount:0,runningCount:0,blockedCount:0}] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_update'){
+        calls.push({command,args:{...args}});
+        const input=args?.input as Record<string,any>;
+        config={...config,...input,teamVersion:Number(config.teamVersion)+1,
+          policyRevision:Number(config.policyRevision)+1};
+        return config as never;
+      }
+      throw new Error('Unexpected unknown Council command: '+command);
+    });
+    (window as unknown as {saUnknownCouncilCalls:typeof calls}).saUnknownCouncilCalls=calls;
+  });
+
+  const state=host.locator('.sa-list .sa-item [data-sa-council-state]');
+  await expect(state).toHaveText('Council state unavailable');
+  const selected=host.getByRole('region',{name:'Selected orchestration',exact:true});
+  await host.getByRole('button',{name:'Edit Team'}).click();
+  const edit=selected.locator('form[data-sa-form="edit"]');
+  const editCouncil=edit.getByRole('checkbox',{name:'Require native Council review'});
+  await expect(editCouncil).not.toBeChecked();
+  await edit.getByRole('textbox',{name:'Team name',exact:true}).fill('Unknown Council renamed');
+  await edit.getByRole('button',{name:'Save Team version',exact:true}).click();
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {
+    saUnknownCouncilCalls:Array<unknown>;
+  }).saUnknownCouncilCalls.length)).toBe(1);
+  await expect(state).toHaveText('Council state unavailable');
+  await expect(editCouncil).not.toBeChecked();
+
+  const calls=await page.evaluate(()=>(window as unknown as {
+    saUnknownCouncilCalls:Array<{command:string;args?:Record<string,any>}>
+  }).saUnknownCouncilCalls);
+  expect(calls).toHaveLength(1);
+  const input=calls[0].args?.input as Record<string,unknown>;
+  expect(input).toMatchObject({
+    name:'Unknown Council renamed',workerBotId:'worker',
+    reviewerBotIds:['reviewer-one','reviewer-two'],
+  });
+  expect(Object.prototype.hasOwnProperty.call(input,'councilRequired')).toBe(false);
 });
 
 test('Team Builder disables roles from another project', async ({page}) => {
@@ -1131,4 +1444,74 @@ test('SuperAgent Preview lists manual Observe support without sending or recordi
   expect(result.message).toContain('check_run.completed');
   expect(result.message).toContain('No GitHub request was sent');
   expect(result.message).toContain('no event or decision receipt was stored');
+});
+
+test('Preview SuperAgent round-trips required and off Council policies with reviewer-count validation', async ({page}) => {
+  await page.goto('/?bots=sample');
+  const result=await page.evaluate(async()=>{
+    const {invokeSuperagent}=await import('/src/preview-superagent.ts');
+    const listBots=async()=>[
+      {id:'coordinator',name:'Coordinator',paused:false,projectId:'preview-project'},
+      {id:'worker',name:'Worker',paused:false,projectId:'preview-project'},
+      {id:'reviewer-one',name:'Reviewer One',paused:false,projectId:'preview-project'},
+      {id:'reviewer-two',name:'Reviewer Two',paused:false,projectId:'preview-project'},
+    ];
+    const team=(name:string,reviewers:string[],councilRequired?:boolean)=>({
+      name,coordinatorBotId:'coordinator',workerBotId:'worker',workerBotIds:['worker'],
+      reviewerBotIds:reviewers,
+      ...(councilRequired===undefined?{}:{councilRequired}),
+    });
+    const required=await invokeSuperagent<{id:string;policyRevision:number;councilRequired:boolean}>(
+      'superagent_create',{input:team('Preview Council Required',['reviewer-one','reviewer-two'],true)},listBots);
+    const listedRequired=await invokeSuperagent<Array<{id:string;councilRequired:boolean}>>(
+      'superagent_list',{},listBots);
+    const preserved=await invokeSuperagent<{policyRevision:number;councilRequired:boolean}>(
+      'superagent_update',{orchestrationId:required.id,expectedRevision:required.policyRevision,
+        input:team('Preview Council Required',['reviewer-one','reviewer-two'])},listBots);
+    const listedPreserved=await invokeSuperagent<Array<{id:string;councilRequired:boolean}>>(
+      'superagent_list',{},listBots);
+    const off=await invokeSuperagent<{policyRevision:number;councilRequired:boolean}>(
+      'superagent_update',{orchestrationId:required.id,expectedRevision:preserved.policyRevision,
+        input:team('Preview Council Required',['reviewer-one'],false)},listBots);
+    const listedOff=await invokeSuperagent<Array<{id:string;councilRequired:boolean}>>(
+      'superagent_list',{},listBots);
+    let tooFewOnCreate='',tooFewOnUpdate='';
+    try {
+      await invokeSuperagent('superagent_create',
+        {input:team('Preview Council Too Few',['reviewer-one'],true)},listBots);
+    } catch(error) { tooFewOnCreate=error instanceof Error?error.message:String(error); }
+    try {
+      await invokeSuperagent('superagent_update',{orchestrationId:required.id,
+        expectedRevision:off.policyRevision,
+        input:team('Preview Council Required',['reviewer-one'],true)},listBots);
+    } catch(error) { tooFewOnUpdate=error instanceof Error?error.message:String(error); }
+    await invokeSuperagent('superagent_set_enabled',{
+      orchestrationId:required.id,expectedRevision:off.policyRevision,enabled:true},listBots);
+    const offTicket=await invokeSuperagent<{id:string}>('superagent_submit',{
+      orchestrationId:required.id,objective:'Preview off Council admission'},listBots);
+    const offSnapshot=await invokeSuperagent<{teamSnapshot:{policy:Record<string,unknown>}}>(
+      'superagent_snapshot',{ticketId:offTicket.id},listBots);
+    const requiredTeam=await invokeSuperagent<{id:string;policyRevision:number}>(
+      'superagent_create',{input:team('Preview Council Admission',['reviewer-one','reviewer-two'],true)},listBots);
+    await invokeSuperagent('superagent_set_enabled',{
+      orchestrationId:requiredTeam.id,expectedRevision:requiredTeam.policyRevision,enabled:true},listBots);
+    const requiredTicket=await invokeSuperagent<{id:string}>('superagent_submit',{
+      orchestrationId:requiredTeam.id,objective:'Preview required Council admission'},listBots);
+    const requiredSnapshot=await invokeSuperagent<{teamSnapshot:{policy:Record<string,unknown>}}>(
+      'superagent_snapshot',{ticketId:requiredTicket.id},listBots);
+    return {required,listedRequired,preserved,listedPreserved,off,listedOff,
+      tooFewOnCreate,tooFewOnUpdate,
+      offPolicy:offSnapshot.teamSnapshot.policy,
+      requiredPolicy:requiredSnapshot.teamSnapshot.policy};
+  });
+  expect(result.required.councilRequired).toBe(true);
+  expect(result.listedRequired.find(config=>config.id===result.required.id)?.councilRequired).toBe(true);
+  expect(result.preserved.councilRequired).toBe(true);
+  expect(result.listedPreserved.find(config=>config.id===result.required.id)?.councilRequired).toBe(true);
+  expect(result.off.councilRequired).toBe(false);
+  expect(result.listedOff.find(config=>config.id===result.required.id)?.councilRequired).toBe(false);
+  expect(result.tooFewOnCreate).toContain('between two and eight');
+  expect(result.tooFewOnUpdate).toContain('between two and eight');
+  expect(result.offPolicy).toMatchObject({councilRequired:false,councilEnabled:false});
+  expect(result.requiredPolicy).toMatchObject({councilRequired:true,councilEnabled:true});
 });

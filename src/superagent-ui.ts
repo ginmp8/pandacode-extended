@@ -8,6 +8,8 @@ interface Bot { id: string; name: string; paused: boolean; projectId: string }
 interface Config {
   id: string; name: string; coordinatorBotId: string; workerBotId: string;
   workerBotIds?: string[]; reviewerBotIds?: string[]; teamVersion?: number; projectId?: string;
+  // Absent means the native list response did not expose a real boolean.
+  councilRequired?: boolean;
   enabled: boolean; policyRevision: number;
   ticketCount?: number; runningCount?: number; blockedCount?: number; lastActivityAt?: number;
 }
@@ -20,6 +22,10 @@ interface TeamSnapshot {
 }
 interface TeamDraft {
   name: string; coordinatorBotId: string; workerBotIds: string[]; reviewerBotIds: string[];
+  // Absent means the saved native policy did not expose a real boolean. It is
+  // not Off: the edit checkbox shows unchecked, but save must omit the field so
+  // native preserves the current policy instead of rewriting required to Off.
+  councilRequired?: boolean;
 }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
 interface ImportResult { created: string[]; unchanged: string[]; backupPath?: string }
@@ -81,6 +87,8 @@ const OBSERVE_EVENT_KINDS = [
 const OBSERVE_FETCH_KINDS = new Set<string>(OBSERVE_EVENT_KINDS);
 const MAX_TEAM_WORKERS = 16;
 const MAX_TEAM_REVIEWERS = 8;
+const COUNCIL_REVIEWER_ERROR =
+  'Require native Council review needs between two and eight distinct reviewers.';
 
 async function issueCommentEffectKey(
   ticketId: string, repository: string, issueNumber: number, comment: string,
@@ -105,7 +113,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   let ticketDetails: TicketDetails | null = null;
   let draftPresetName = '', draftPresetTemplate = '', draftCoordinatorBotId = '';
   let draftWorkerBotIds = [''], draftReviewerBotIds: string[] = [];
+  let draftCouncilRequired = false, draftCouncilError = '';
   const editTeamDrafts = new Map<string, TeamDraft>();
+  const editCouncilErrors = new Map<string, string>();
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
   const safe = (value: unknown) => escape(String(value ?? ''));
@@ -117,11 +127,23 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     ? new Date(timestamp).toLocaleString() : 'Unavailable';
   const readTeamDraft = (form: HTMLFormElement): TeamDraft => {
     const data = new FormData(form);
+    const checked = data.get('councilRequired') !== null;
+    const editId = form.dataset.saForm === 'edit' ? form.dataset.orchestrationId : undefined;
+    // Only a real saved boolean may be sent when the box is unchecked; an
+    // unknown saved state stays unknown unless the user checks the box (true)
+    // or checks and unchecks a previously real value (false).
+    const savedCouncil = editId
+      ? editTeamDrafts.get(editId)?.councilRequired ??
+        presets.find(item => item.id === editId)?.councilRequired
+      : undefined;
+    const councilRequired = checked ? true
+      : editId === undefined || typeof savedCouncil === 'boolean' ? false : undefined;
     return {
       name: String(data.get('name') ?? '').trim(),
       coordinatorBotId: String(data.get('coordinatorBotId') ?? ''),
       workerBotIds: data.getAll('workerBotIds').map(String),
       reviewerBotIds: data.getAll('reviewerBotIds').map(String),
+      councilRequired,
     };
   };
   const rememberTeamDraft = (form: HTMLFormElement, draft: TeamDraft): void => {
@@ -130,10 +152,25 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       draftCoordinatorBotId = draft.coordinatorBotId;
       draftWorkerBotIds = draft.workerBotIds.length ? draft.workerBotIds : [''];
       draftReviewerBotIds = draft.reviewerBotIds;
+      draftCouncilRequired = draft.councilRequired === true;
     } else if (form.dataset.saForm === 'edit' && form.dataset.orchestrationId) {
       editTeamDrafts.set(form.dataset.orchestrationId, draft);
     }
   };
+  // The checkbox is a native Team policy field: off, or a completion-gating
+  // requirement with two to eight distinct reviewers. The same check runs in
+  // validateTeamDraft as a backstop, but the form validates it before saving so
+  // the failure is tied to the field instead of becoming a global error.
+  const councilDraftError = (draft: TeamDraft): string => {
+    if (!draft.councilRequired) return '';
+    const reviewers = draft.reviewerBotIds;
+    return reviewers.length < 2 || reviewers.length > MAX_TEAM_REVIEWERS ||
+      reviewers.some(id => !id) || new Set(reviewers).size !== reviewers.length
+      ? COUNCIL_REVIEWER_ERROR : '';
+  };
+  const councilStatusLabel = (required: boolean | undefined): string =>
+    required === true ? 'Council required'
+      : required === false ? 'Council off' : 'Council state unavailable';
   const validateTeamDraft = (draft: TeamDraft, expectedProjectId?: string): TeamDraft => {
     if (!draft.name || !draft.coordinatorBotId || !draft.workerBotIds.length ||
         draft.workerBotIds.some(id => !id) || draft.reviewerBotIds.some(id => !id)) {
@@ -142,6 +179,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     if (draft.workerBotIds.length > MAX_TEAM_WORKERS || draft.reviewerBotIds.length > MAX_TEAM_REVIEWERS) {
       throw new Error('A Team supports up to 16 workers and 8 reviewers.');
     }
+    const councilError = councilDraftError(draft);
+    if (councilError) throw new Error(councilError);
     const roleIds = [draft.coordinatorBotId, ...draft.workerBotIds, ...draft.reviewerBotIds];
     if (new Set(roleIds).size !== roleIds.length) throw new Error('A bot can have only one role in a Team.');
     const projectId = expectedProjectId || botProjectId(draft.coordinatorBotId);
@@ -195,7 +234,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '</ol><details><summary>Inspect exact saved Team payload</summary><pre>' + safe(payload) +
       '</pre></details></section>';
   }
-  type CouncilPolicyMode = 'required' | 'optional' | 'off' | 'unknown';
+  type CouncilPolicyMode = 'required' | 'off' | 'unknown';
   // Only an exact native snapshot proves the policy captured at admission.
   // Reconstructed legacy snapshots may describe the current Team instead.
   function councilPolicyMode(snapshot: TeamSnapshot | null | undefined): CouncilPolicyMode {
@@ -204,8 +243,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     const policy = snapshot.policy;
     if (!policy || typeof policy !== 'object' || Array.isArray(policy)) return 'unknown';
     const record = policy as Record<string, unknown>;
-    if (record.councilRequired === true) return 'required';
-    if (record.councilRequired === false && record.councilEnabled === true) return 'optional';
+    // Native policy is only off or required. Either recorded flag proves the
+    // completion gate; Off needs both to be explicitly false.
+    if (record.councilRequired === true || record.councilEnabled === true) return 'required';
     if (record.councilRequired === false && record.councilEnabled === false) return 'off';
     return 'unknown';
   }
@@ -213,18 +253,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     const mode = councilPolicyMode(details.teamSnapshot);
     const council = details.council && typeof details.council === 'object' ? details.council : null;
     // An unavailable observation is only worth surfacing when the saved policy
-    // says Council is enabled; an Off/Unknown policy with no evidence adds none.
-    if (!council && mode !== 'required' && mode !== 'optional') return '';
+    // says Council is required; an Off/Unknown policy with no evidence adds none.
+    if (!council && mode !== 'required') return '';
     const policy = mode === 'required' ? 'Council required.'
-      : mode === 'optional' ? 'Council optional (advisory).'
-        : mode === 'off' ? 'Council off in the saved Ticket policy.'
-          : 'Unknown; the saved Team snapshot does not prove whether Council is required.';
+      : mode === 'off' ? 'Council off in the saved Ticket policy.'
+        : 'Unknown; the saved Team snapshot does not prove whether Council is required.';
     if (!council) {
       return '<section class="sa-council-observation" role="note" aria-label="Native Council observation">' +
         '<h5>Native Council</h5><p>Policy: ' + policy + '</p><p>' +
-        (mode === 'required'
-          ? 'The native Council observation is unavailable. Required Council gates completion, and without this observation a bound native review target is Unknown.'
-          : 'The native Council observation is unavailable. Optional Council is advisory for this Ticket and does not gate completion; no bound native review target is proven.') +
+        'The native Council observation is unavailable. Required Council gates completion, and without this observation a bound native review target is Unknown.' +
         '</p></section>';
     }
     const binding = council.ticketArtifactBound === true ? 'Bound to this Ticket artifact.'
@@ -249,17 +286,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
           : verifiedPass
             ? 'Required Council gates completion for this Ticket. A native Council pass is verified, but this artifact is not proven as its review target, so the pass cannot authorize completion.'
             : 'Required Council gates completion for this Ticket. Neither a verified native Council pass nor a bound review target is proven, so this observation cannot authorize completion.')
-      : mode === 'optional'
-        ? (bound && verifiedPass
-          ? 'Optional Council is advisory for this Ticket and does not gate completion. The artifact is bound as the native review target and a native Council pass is verified, but the review cannot authorize SuperAgent completion by itself.'
-          : bound
-            ? 'Optional Council is advisory for this Ticket and does not gate completion. The artifact is bound as the native review target, but the review cannot authorize SuperAgent completion by itself.'
-            : verifiedPass
-              ? 'Optional Council is advisory for this Ticket and does not gate completion. A native Council pass is verified, but this artifact is not proven as its review target, so it cannot authorize SuperAgent completion.'
-              : 'Optional Council is advisory for this Ticket and does not gate completion. Neither a bound native review target nor a verified native Council pass is proven, so it cannot authorize SuperAgent completion.')
-        : mode === 'off'
-          ? 'The saved Ticket policy says Council is off, so this observation does not authorize completion; its relationship to this Ticket is not proven.'
-          : 'The saved Team snapshot does not prove whether Council is required, so whether this observation gates completion is Unknown; it cannot authorize completion by itself.';
+      : mode === 'off'
+        ? 'The saved Ticket policy says Council is off, so this observation does not authorize completion; its relationship to this Ticket is not proven.'
+        : 'The saved Team snapshot does not prove whether Council is required, so whether this observation gates completion is Unknown; it cannot authorize completion by itself.';
     return '<section class="sa-council-observation" role="note" aria-label="Native Council observation">' +
       '<h5>Native Council</h5><p>Policy: ' + policy + ' Review target binding: ' + binding + '</p>' +
       '<p>Native team status: ' + safe(nativeStatus) + ' · Round ' + safe(round) + stale +
@@ -277,7 +306,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
           ? ' · Reviewers: ' + safe(reviewerIds.map(botName).join(', ')) : '');
       return '<li class="sa-item"><div><strong>' + safe(item.name) + '</strong><small>' +
       roles +
-      '</small><small class="sa-counts" aria-label="Task counts">' +
+      '</small><small class="sa-council-state" data-sa-council-state>' +
+      safe(councilStatusLabel(item.councilRequired)) + '</small>' +
+      '<small class="sa-counts" aria-label="Task counts">' +
       (item.ticketCount ?? 0) + ' tasks · ' + (item.runningCount ?? 0) +
       ' running · ' + (item.blockedCount ?? 0) + ' blocked</small>' +
       '<small class="sa-last-activity">Last activity: ' + safe(activityTime(item.lastActivityAt)) +
@@ -316,12 +347,22 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         (rows || '<li>No reviewers selected.</li>') + '</ol><button type="button" data-sa-role-add="' + kind + '"' +
         (ids.length >= max ? ' disabled' : '') + '>Add ' + kind + '</button></div>';
     };
+    const councilField = (id: string, checked: boolean, error: string) =>
+      '<label class="sa-council-choice"><input type="checkbox" name="councilRequired"' +
+      (checked ? ' checked' : '') + (error ? ' aria-invalid="true"' : '') +
+      ' aria-describedby="' + id + '-hint' + (error ? ' ' + id + '-error' : '') +
+      '"> Require native Council review</label>' +
+      '<p class="sa-field-hint" id="' + id + '-hint">Off unless selected. When required, choose two to eight distinct reviewers; a native Council pass then gates completion.</p>' +
+      (error ? '<p class="sa-field-error" id="' + id + '-error" role="alert" data-sa-council-error>' +
+        safe(error) + '</p>' : '');
     const selectedTeamDraft = chosen ? editTeamDrafts.get(chosen.id) ?? {
       name: chosen.name,
       coordinatorBotId: chosen.coordinatorBotId,
       workerBotIds: chosen.workerBotIds?.length ? chosen.workerBotIds : [chosen.workerBotId],
       reviewerBotIds: chosen.reviewerBotIds ?? [],
+      councilRequired: chosen.councilRequired,
     } : null;
+    const editCouncilError = chosen ? editCouncilErrors.get(chosen.id) ?? '' : '';
     const selectedProjectId = chosen
       ? chosen.projectId || botProjectId(selectedTeamDraft?.coordinatorBotId ?? '') : undefined;
     const draftProjectId = botProjectId(draftCoordinatorBotId);
@@ -437,6 +478,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '<option value="">Choose bot</option>' + optionsFor(selectedTeamDraft?.coordinatorBotId ?? '', selectedProjectId) + '</select></label></div>' +
       roleEditor('worker', selectedTeamDraft?.workerBotIds ?? [], selectedProjectId) +
       roleEditor('reviewer', selectedTeamDraft?.reviewerBotIds ?? [], selectedProjectId) +
+      councilField('sa-edit-council', selectedTeamDraft?.councilRequired === true, editCouncilError) +
       '<button class="primary-button" type="submit"' +
       (chosen.enabled || (chosen.ticketCount ?? 0) > 0 ? ' disabled' : '') + '>Save Team version</button></form>' +
       (chosen.ticketCount ? '<p>Team roles lock after its first Ticket.</p>' : '') +
@@ -502,6 +544,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '<option value="">Choose bot</option>' + optionsFor(draftCoordinatorBotId) + '</select></label></div>' +
       roleEditor('worker', draftWorkerBotIds, draftProjectId) +
       roleEditor('reviewer', draftReviewerBotIds, draftProjectId) +
+      councilField('sa-create-council', draftCouncilRequired, draftCouncilError) +
       '<button class="primary-button" type="submit"' +
       (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' +
       active +
@@ -587,6 +630,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   // Templates populate editable names only; no bot, tool or task is selected.
   host.addEventListener('change', event => {
     const target = event.target;
+    if (target instanceof HTMLInputElement && target.name === 'councilRequired') {
+      const form = target.closest<HTMLFormElement>('form[data-sa-form="create"],form[data-sa-form="edit"]');
+      if (!form) return;
+      rememberTeamDraft(form, readTeamDraft(form));
+      if (form.dataset.saForm === 'create') draftCouncilError = '';
+      else if (form.dataset.orchestrationId) editCouncilErrors.delete(form.dataset.orchestrationId);
+      render();
+      return;
+    }
     if (!(target instanceof HTMLSelectElement)) return;
     if (target.hasAttribute('data-sa-template')) {
       draftPresetTemplate = target.value;
@@ -596,8 +648,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     }
     const form = target.closest<HTMLFormElement>('form[data-sa-form="create"],form[data-sa-form="edit"]');
     if (form) {
-      rememberTeamDraft(form, readTeamDraft(form));
-      if (target.name === 'coordinatorBotId') render();
+      const draft = readTeamDraft(form);
+      rememberTeamDraft(form, draft);
+      const id = form.dataset.orchestrationId;
+      let cleared = false;
+      // Clear a field error as soon as its reviewer requirement is satisfied.
+      if (councilDraftError(draft) === '') {
+        if (form.dataset.saForm === 'create' && draftCouncilError) {
+          draftCouncilError = ''; cleared = true;
+        } else if (form.dataset.saForm === 'edit' && id && editCouncilErrors.delete(id)) cleared = true;
+      }
+      if (target.name === 'coordinatorBotId' || cleared) render();
     }
   });
   host.addEventListener('input', event => {
@@ -689,6 +750,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         coordinatorBotId: team.coordinatorBotId,
         workerBotIds: team.workerBotIds?.length ? [...team.workerBotIds] : [team.workerBotId],
         reviewerBotIds: [...(team.reviewerBotIds ?? [])],
+        councilRequired: team.councilRequired,
       });
       if (selected !== team.id) {
         selected = team.id;
@@ -1011,23 +1073,48 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       const existing = current();
       if (!existing || existing.enabled || (existing.ticketCount ?? 0) > 0) return;
       const draft = readTeamDraft(form);
+      const councilError = councilDraftError(draft);
+      if (councilError) {
+        editCouncilErrors.set(existing.id, councilError);
+        rememberTeamDraft(form, draft);
+        render();
+        host.querySelector<HTMLInputElement>(
+          'form[data-sa-form="edit"] input[name="councilRequired"]')?.focus();
+        return;
+      }
+      editCouncilErrors.delete(existing.id);
       void work(async () => {
         const team = validateTeamDraft(draft, existing.projectId || botProjectId(existing.coordinatorBotId));
-        const input = { ...team, workerBotId:team.workerBotIds[0] };
+        const { councilRequired, ...roles } = team;
+        // Absent saved state stays absent: native preserves the current policy.
+        const input = { ...roles, workerBotId:team.workerBotIds[0],
+          ...(councilRequired === undefined ? {} : { councilRequired }) };
         await call('superagent_update',{ orchestrationId:existing.id, expectedRevision:existing.policyRevision, input });
         editTeamDrafts.delete(existing.id);
+        editCouncilErrors.delete(existing.id);
         await reload();
       });
       return;
     }
     if (form.dataset.saForm === 'create') {
       const draft = readTeamDraft(form);
+      const councilError = councilDraftError(draft);
+      if (councilError) {
+        draftCouncilError = councilError;
+        rememberTeamDraft(form, draft);
+        render();
+        host.querySelector<HTMLInputElement>(
+          'form[data-sa-form="create"] input[name="councilRequired"]')?.focus();
+        return;
+      }
+      draftCouncilError = '';
       void work(async () => {
         const team = validateTeamDraft(draft);
-        const input = { ...team, workerBotId:team.workerBotIds[0] };
+        const input = { ...team, workerBotId:team.workerBotIds[0],
+          councilRequired: team.councilRequired === true };
         const created = await call<Config>('superagent_create',{ input });
         draftPresetName = ''; draftPresetTemplate = ''; draftCoordinatorBotId = '';
-        draftWorkerBotIds = ['']; draftReviewerBotIds = [];
+        draftWorkerBotIds = ['']; draftReviewerBotIds = []; draftCouncilRequired = false;
         selected = created.id; await reload();
       });
       return;

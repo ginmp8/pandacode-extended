@@ -485,7 +485,8 @@ pub struct TeamPolicySnapshot {
     pub max_concurrent_tasks: u8,
     pub max_attempts_per_assignment: u8,
     /// Reviewer memberships are descriptive only until a fresh native Council
-    /// adapter is bound to the Ticket.
+    /// adapter is bound to the Ticket. Native snapshots coerce this flag to
+    /// `council_required`; it is not an independent optional-Council mode.
     pub council_enabled: bool,
     /// A SuperAgent Ticket cannot complete without its own matching native
     /// Council verdict. Older snapshots default to Off.

@@ -55,7 +55,15 @@ struct TeamPolicy {
     autonomy: String,
     max_concurrent_tasks: u8,
     max_attempts_per_assignment: u8,
+    /// Native snapshots coerce this legacy flag to `council_required`; it is
+    /// accepted for wire compatibility, not as an independent optional mode.
+    #[serde(default)]
     council_enabled: bool,
+    /// Optional native Council completion gate. Older v2 exports omit it; a
+    /// true `council_enabled` also normalizes to required so imports never
+    /// silently drop the gate.
+    #[serde(default)]
+    council_required: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -110,6 +118,7 @@ struct Resolved {
     worker_ids: Vec<String>,
     reviewer_ids: Vec<String>,
     project_id: String,
+    council_required: bool,
     existing: bool,
 }
 
@@ -126,6 +135,7 @@ fn policy_from_snapshot(snapshot: &super::TeamSnapshot) -> TeamPolicy {
         max_concurrent_tasks: snapshot.policy.max_concurrent_tasks,
         max_attempts_per_assignment: snapshot.policy.max_attempts_per_assignment,
         council_enabled: snapshot.policy.council_enabled,
+        council_required: snapshot.policy.council_required,
     }
 }
 
@@ -146,6 +156,16 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
             if manifest.schema_version != 1 {
                 return Err("Unsupported SuperAgent manifest schema.".into());
             }
+            if manifest
+                .orchestrations
+                .iter()
+                .any(|preset| preset.council.enabled)
+            {
+                return Err(
+                    "Schema-v1 Council-enabled Teams are not supported; re-export them as schema v2."
+                        .into(),
+                );
+            }
             manifest
                 .orchestrations
                 .into_iter()
@@ -158,7 +178,8 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
                         autonomy: preset.autonomy,
                         max_concurrent_tasks: preset.max_concurrent_tasks,
                         max_attempts_per_assignment: preset.max_attempts_per_assignment,
-                        council_enabled: preset.council.enabled,
+                        council_enabled: false,
+                        council_required: false,
                     },
                 })
                 .collect()
@@ -172,12 +193,20 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
             manifest
                 .orchestrations
                 .into_iter()
-                .map(|preset| PortablePreset {
-                    name: preset.name,
-                    coordinator_bot: preset.coordinator_bot,
-                    workers: preset.workers,
-                    reviewers: preset.reviewers,
-                    policy: preset.policy,
+                .map(|preset| {
+                    let mut policy = preset.policy;
+                    // Native Teams coerce Council-enabled to required. Treat
+                    // either wire flag as required so an older export cannot
+                    // silently downgrade a gated Team on reimport.
+                    policy.council_required |= policy.council_enabled;
+                    policy.council_enabled = policy.council_required;
+                    PortablePreset {
+                        name: preset.name,
+                        coordinator_bot: preset.coordinator_bot,
+                        workers: preset.workers,
+                        reviewers: preset.reviewers,
+                        policy,
+                    }
                 })
                 .collect()
         }
@@ -203,9 +232,21 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
         if preset.policy.autonomy != "off"
             || preset.policy.max_concurrent_tasks != 1
             || preset.policy.max_attempts_per_assignment != 2
-            || preset.policy.council_enabled
         {
-            return Err("Unsupported SuperAgent autonomy, Council or execution policy.".into());
+            return Err("Unsupported SuperAgent autonomy or execution policy.".into());
+        }
+        if preset.policy.council_required {
+            let distinct_reviewers: HashSet<_> = preset
+                .reviewers
+                .iter()
+                .map(|name| name.to_ascii_lowercase())
+                .collect();
+            if !(2..=super::MAX_REVIEWERS_PER_TEAM).contains(&distinct_reviewers.len()) {
+                return Err(format!(
+                    "Council-required Team '{}' needs between two and eight distinct reviewers.",
+                    preset.name
+                ));
+            }
         }
     }
     Ok(presets)
@@ -307,6 +348,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
             worker_ids: workers.iter().map(|bot| bot.id.clone()).collect(),
             reviewer_ids: reviewers.iter().map(|bot| bot.id.clone()).collect(),
             project_id,
+            council_required: preset.policy.council_required,
             existing: existing.is_some(),
         });
     }
@@ -378,7 +420,7 @@ fn apply(store: &Store, document: &serde_json::Value, confirmed: bool) -> Result
             &candidate.coordinator_id,
             &candidate.worker_ids,
             &candidate.reviewer_ids,
-            false,
+            candidate.council_required,
             super::TeamSnapshotProvenance::Native,
         )?;
         super::insert_team_version(&tx, &snapshot)
@@ -781,6 +823,7 @@ mod tests {
             json!({
                 "autonomy":"off","maxConcurrentTasks":1,
                 "maxAttemptsPerAssignment":2,"councilEnabled":false,
+                "councilRequired":false,
             })
         );
         assert!(exported["orchestrations"][0].get("enabled").is_none());
@@ -822,6 +865,103 @@ mod tests {
             vec!["fresh-worker", "fresh-worker-two"]
         );
         assert_eq!(restored.reviewer_bot_ids, vec!["fresh-reviewer"]);
+    }
+
+    #[test]
+    fn v2_required_council_round_trips_without_downgrade() {
+        let store = fixture();
+        store
+            .db
+            .execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES('reviewer-two','Reviewer Two','reviewer-project','codex','default','plan',?1,?1)",
+                [storage::now()],
+            )
+            .unwrap();
+        let mut doc = document_v2("Required Council");
+        doc["orchestrations"][0]["reviewers"] = json!(["Reviewer", "Reviewer Two"]);
+        doc["orchestrations"][0]["policy"]["councilRequired"] = json!(true);
+        assert_eq!(
+            apply(&store, &doc, true).unwrap().created,
+            vec!["Required Council"]
+        );
+
+        let id = orchestration_id(&store, "Required Council");
+        let imported = super::super::configuration(&store, &id).unwrap();
+        assert!(imported.council_required);
+        assert_eq!(imported.reviewer_bot_ids, vec!["reviewer", "reviewer-two"]);
+        let snapshot =
+            super::super::load_team_version_snapshot(&store.db, &id, imported.team_version)
+                .unwrap();
+        assert!(snapshot.policy.council_required);
+        assert!(snapshot.policy.council_enabled);
+
+        let exported = export(&store).unwrap();
+        assert_eq!(
+            exported["orchestrations"][0]["policy"]["councilRequired"],
+            json!(true)
+        );
+        assert_eq!(
+            exported["orchestrations"][0]["policy"]["councilEnabled"],
+            json!(true)
+        );
+        assert_eq!(
+            apply(&store, &exported, true).unwrap().unchanged,
+            vec!["Required Council"]
+        );
+
+        let fresh = fixture_with_ids(
+            "fresh-router",
+            "fresh-worker",
+            "fresh-worker-two",
+            "fresh-reviewer",
+        );
+        fresh
+            .db
+            .execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES('fresh-reviewer-two','Reviewer Two','reviewer-project','codex','default','plan',?1,?1)",
+                [storage::now()],
+            )
+            .unwrap();
+        assert_eq!(
+            apply(&fresh, &exported, true).unwrap().created,
+            vec!["Required Council"]
+        );
+        let restored_id = orchestration_id(&fresh, "Required Council");
+        let restored = super::super::configuration(&fresh, &restored_id).unwrap();
+        assert!(restored.council_required);
+        assert_eq!(
+            restored.reviewer_bot_ids,
+            vec!["fresh-reviewer", "fresh-reviewer-two"]
+        );
+        let restored_snapshot = super::super::load_team_version_snapshot(
+            &fresh.db,
+            &restored_id,
+            restored.team_version,
+        )
+        .unwrap();
+        assert!(restored_snapshot.policy.council_required);
+        assert_eq!(
+            restored_snapshot.reviewer_bot_ids,
+            vec!["fresh-reviewer", "fresh-reviewer-two"]
+        );
+
+        let mut too_few = exported;
+        too_few["orchestrations"][0]["name"] = json!("Required Council without seats");
+        too_few["orchestrations"][0]["reviewers"] = json!(["Reviewer"]);
+        let error = preview(&fresh, &too_few).unwrap_err();
+        assert!(
+            error.contains("between two and eight distinct reviewers"),
+            "{error}"
+        );
+        let count: i64 = fresh
+            .db
+            .query_row("SELECT COUNT(*) FROM sa_orchestrations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[test]
@@ -906,11 +1046,11 @@ mod tests {
         assert!(preview(&store, &bad)
             .unwrap_err()
             .contains("Unsupported SuperAgent"));
-        bad = document_v2("Unsupported council");
+        bad = document_v2("Council without seats");
         bad["orchestrations"][0]["policy"]["councilEnabled"] = json!(true);
         assert!(preview(&store, &bad)
             .unwrap_err()
-            .contains("Unsupported SuperAgent"));
+            .contains("between two and eight distinct reviewers"));
 
         let count: i64 = store
             .db

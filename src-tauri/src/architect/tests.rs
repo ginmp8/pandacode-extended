@@ -942,7 +942,6 @@ fn fixture() -> (Store, TeamSnapshot) {
         council_status: None,
         council_accepted: None,
         council_reopened: None,
-        superagent_review: None,
     };
     (store, team)
 }

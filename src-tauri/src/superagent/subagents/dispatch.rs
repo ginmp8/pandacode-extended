@@ -60,8 +60,10 @@ pub(crate) fn lineage_active(store:&Store,child_ticket_id:&str)->Result<bool> {
     let root_ticket=get_ticket(store,&root)?;
     let parent_ticket=get_ticket(store,&parent)?;
     let root_team=configuration(store,&root_ticket.orchestration_id)?;
+    // The Ticket's project identity lives in its immutable native Team snapshot.
+    let root_profile=ticket_team_snapshot(store,&root)?;
     if root_ticket.state!="queued" ||
-        !root_team.enabled || root_team.project_id!=root_ticket.project_id ||
+        !root_team.enabled || root_team.project_id!=root_profile.project_id ||
         root_team.policy_revision!=settings.policy_revision ||
         parent_ticket.state!="running" && parent_ticket.state!="waiting_approval"
             && parent_ticket.state!="waiting_review" {
@@ -319,7 +321,7 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
                      WHERE id=?1 AND state='running'",
                     params![item.id,storage::now()],
                 );
-            }
+            };
         } else {admitted+=1}
     }
     Ok(admitted)

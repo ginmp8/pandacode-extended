@@ -84,6 +84,93 @@ test.describe('shared bot channels', () => {
   });
 
 
+
+  test('shared Channel submits M3 hybrid seats, S2 and frozen user criteria through the existing native request', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const body = (await response.text()).replace(
+        "if (command === 'bots_list' || command.startsWith('bot_'))",
+        "if (command === 'bot_shared_channel_post') (window.__channelCouncilPosts ??= []).push(structuredClone(args));\n  if (command === 'bots_list' || command.startsWith('bot_'))",
+      );
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('radio', { name: 'Bots' }).check();
+    const bots = panel.locator('input[name="councilReviewer"]');
+    await bots.nth(1).check();
+    await panel.getByRole('spinbutton', { name: 'Additional automatic reviewers' }).fill('1');
+    await expect(panel.getByRole('status')).toContainText('2 root seats (1 selected bots + 1 automatic)');
+    await panel.getByRole('combobox', { name: 'Review strategy' }).selectOption('escalated');
+    await panel.getByRole('combobox', { name: 'Criteria source' }).selectOption('user');
+    await panel.getByRole('textbox', { name: 'Criterion ID' }).fill('security');
+    await panel.getByRole('textbox', { name: 'Review lens' }).fill('Permission boundary');
+    await panel.getByRole('checkbox', { name: 'Require independently verified native evidence' }).check();
+    const selectedId = await bots.nth(1).inputValue();
+    await composer.getByRole('textbox', { name: 'Message channel' }).fill('Review this artifact.');
+    await composer.locator('button[type=submit]').click();
+    await expect.poll(() => page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(1);
+    const posted = await page.evaluate(() => (window as any).__channelCouncilPosts[0].council);
+    expect(posted).toMatchObject({
+      target: 9, maxRounds: 10, reviewers: 0,
+      reviewerBotIds: [selectedId], automaticReviewers: 1,
+      strategy: 'escalated', forceEscalation: true,
+      criteriaSource: 'user', criteria: [{ id: 'security', lens: 'Permission boundary',
+        target: 9, required: true, evidenceRequired: true }],
+    });
+    expect(posted.nestedBotReviewers).toBeUndefined();
+  });
+
+  test('shared Channel preserves nested reviewer settings on refresh and serializes a single child seat', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const body = (await response.text()).replace(
+        "if (command === 'bots_list' || command.startsWith('bot_'))",
+        "if (command === 'bot_shared_channel_post') (window.__channelCouncilPosts ??= []).push(structuredClone(args));\n  if (command === 'bots_list' || command.startsWith('bot_'))",
+      );
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    let composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    let panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('radio', { name: 'Bots' }).check();
+    const bots = panel.locator('input[name="councilReviewer"]');
+    await bots.nth(1).check();
+    await bots.nth(2).check();
+    const childId = await bots.nth(2).inputValue();
+    await panel.locator('select[name="councilReviewerRole"]').nth(2).selectOption('nested');
+    await panel.locator('input[name="councilChildReviewers"]').nth(2).fill('3');
+    await panel.getByRole('combobox', { name: 'Review strategy' }).selectOption('two_phase');
+    await page.keyboard.press('Escape');
+    const previous = await composer.elementHandle();
+    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
+    await expect.poll(() => page.evaluate(old => document.querySelector('#shared-channel-composer') !== old, previous)).toBe(true);
+    composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: on' }).click();
+    panel = composer.getByRole('dialog', { name: 'Council' });
+    await expect(panel.locator('select[name="councilReviewerRole"]').nth(2)).toHaveValue('nested');
+    await expect(panel.locator('input[name="councilChildReviewers"]').nth(2)).toHaveValue('3');
+    await expect(panel.getByRole('combobox', { name: 'Review strategy' })).toHaveValue('two_phase');
+    await expect(panel.getByRole('status')).toContainText('2 root seats (2 selected bots + 0 automatic)');
+    await composer.getByRole('textbox', { name: 'Message channel' }).fill('Check isolation.');
+    await composer.locator('button[type=submit]').click();
+    await expect.poll(() => page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(1);
+    const posted = await page.evaluate(() => (window as any).__channelCouncilPosts[0].council);
+    expect(posted.strategy).toBe('two_phase');
+    expect(posted.automaticReviewers).toBeUndefined();
+    expect(posted.reviewerBotIds).toHaveLength(1);
+    expect(posted.nestedBotReviewers).toEqual([{ botId: childId, childReviewers: 3, childTarget: 9, childMaxRounds: 10 }]);
+  });
+
   test('channel Council opens the shared native inspector without navigating or granting a pass', async ({ page }) => {
     test.setTimeout(60_000);
     await page.setViewportSize({ width: 360, height: 640 });

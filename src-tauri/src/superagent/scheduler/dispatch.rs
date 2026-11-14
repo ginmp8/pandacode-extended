@@ -289,7 +289,21 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
                     params![root.id,storage::now(),snapshot.policy.policy_revision,snapshot.project_id],
                     |r|r.get(0),
                 ).map_err(|e|e.to_string())?;
-                if root.state!="queued" || !team.enabled || !root_ok ||
+                // A queued WorkItem cannot inherit a later bot model, provider,
+                // project or Skills change. Recheck the original Team profile
+                // before creating the child Ticket and native Assignment.
+                if superagent::roster::require_current_profile(
+                    &store,&root.id,"worker",&item.worker,
+                ).is_err() {
+                    store.db.execute(
+                        "UPDATE sa_work_items SET state='blocked',
+                         last_reason='Worker profile changed after Demand admission',
+                         updated_at=?2 WHERE id=?1 AND state='pending'
+                         AND child_ticket_id IS NULL",
+                        params![item.id,storage::now()],
+                    ).map_err(|e|e.to_string())?;
+                    None
+                } else if root.state!="queued" || !team.enabled || !root_ok ||
                     !superagent::auto::ticket_authorized(&store,&root.id)? ||
                     team.policy_revision!=snapshot.policy.policy_revision ||
                     team.team_version!=snapshot.team_version ||

@@ -6559,6 +6559,31 @@ mod tests {
         configuration(store,&cfg.id).unwrap()
     }
 
+
+    #[test]
+    fn admitted_worker_profile_rejects_later_model_and_skill_changes() {
+        let mut store=fixture();
+        let config=enabled(&store);
+        let (ticket,launched)=admit(
+            &mut store,&config.id,"Pinned Worker profile","pinned-worker-profile",false,
+        ).unwrap();
+        assert!(launched);
+        assert!(roster::require_current_profile(&store,&ticket.id,"worker","worker").is_ok());
+
+        store.db.execute(
+            "UPDATE bots SET model='different-model' WHERE id='worker'",[],
+        ).unwrap();
+        assert!(roster::require_current_profile(&store,&ticket.id,"worker","worker").is_err(),
+            "new WorkItem and subagent admissions must reject model drift");
+
+        store.db.execute(
+            "UPDATE bots SET model='default',skills='[\"new-task-skill\"]'
+             WHERE id='worker'",[],
+        ).unwrap();
+        assert!(roster::require_current_profile(&store,&ticket.id,"worker","worker").is_err(),
+            "new WorkItem and subagent admissions must reject Skills drift");
+    }
+
     #[test]
     fn settled_ticket_allows_future_role_policy_but_not_primary_rebinding() {
         let mut store = fixture();

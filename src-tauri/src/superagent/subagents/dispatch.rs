@@ -224,7 +224,20 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
                 let busy=super::super::active_manual_conflict(
                     &store,&active,&item.worker,&snapshot.project_id,
                 )?;
-                if policy.revoked || root.state!="queued" ||
+                // A validated spawn request may wait before admission. The
+                // selected Worker must still match its root Team profile.
+                if superagent::roster::require_current_profile(
+                    &store,&root.id,"worker",&item.worker,
+                ).is_err() {
+                    store.db.execute(
+                        "UPDATE sa_subagent_nodes SET state='blocked',
+                         reason='Worker profile changed after Demand admission',
+                         updated_at=?2 WHERE id=?1 AND state='pending'
+                         AND child_ticket_id IS NULL",
+                        params![item.id,storage::now()],
+                    ).map_err(|e|e.to_string())?;
+                    None
+                } else if policy.revoked || root.state!="queued" ||
                     !team.enabled || team.policy_revision!=policy.policy_revision ||
                     snapshot.team_version!=policy.team_version ||
                     parent.state!="waiting_approval" && parent.state!="waiting_review" ||

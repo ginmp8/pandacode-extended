@@ -1030,8 +1030,28 @@ fn load_ticket_team_snapshot(db: &Connection, ticket_id: &str) -> Result<TeamSna
         || snapshot.coordinator_bot_id != version.coordinator_bot_id
         || snapshot.worker_bot_ids != version.worker_bot_ids
         || snapshot.reviewer_bot_ids != version.reviewer_bot_ids
+        // A Ticket's effective role profiles may be refreshed at admission,
+        // but the operator-issued Team policy may never be rewritten here.
+        || snapshot.policy != version.policy
     {
-        return Err("Ticket role bindings disagree with their pinned Team version.".into());
+        return Err("Ticket policy or role bindings disagree with the pinned Team version.".into());
+    }
+    if snapshot.provenance == TeamSnapshotProvenance::Native {
+        for role in &snapshot.roles {
+            let config = role.effective_config.as_ref()
+                .ok_or("Admitted Team role has no frozen effective configuration.")?;
+            let encoded = serde_json::to_vec(config).map_err(|e| e.to_string())?;
+            let digest = sha256_hex(&encoded);
+            if role.effective_config_sha256.as_deref() != Some(digest.as_str()) {
+                return Err("Admitted Team role configuration fails its integrity check.".into());
+            }
+            if role.role == "worker"
+                && config.get("projectId").and_then(serde_json::Value::as_str)
+                    != Some(snapshot.project_id.as_str())
+            {
+                return Err("Admitted Worker project scope differs from its Ticket.".into());
+            }
+        }
     }
     Ok(snapshot)
 }
@@ -6618,6 +6638,60 @@ mod tests {
         assert_eq!(after.activity[0].kind, "stopped");
         assert!(ticket_snapshot(&store, &ticket.id, 0).is_err());
         assert!(ticket_snapshot(&store, &ticket.id, 201).is_err());
+    }
+
+    #[test]
+    fn rehashed_ticket_policy_and_role_drift_cannot_authorize_worker_execution() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &config.id, "Pinned native execution policy",
+            "rehashed-ticket-integrity", false,
+        ).unwrap();
+        assert!(started);
+        let original = ticket_team_snapshot(&store, &ticket.id).unwrap();
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(read_only_policy(&store, &session).unwrap().is_some());
+
+        let mut altered_policy = original.clone();
+        altered_policy.policy.council_required = !original.policy.council_required;
+        let mut altered_role = original.clone();
+        let worker = altered_role.roles.iter_mut()
+            .find(|role| role.role == "worker").unwrap();
+        let config_value = worker.effective_config.as_mut().unwrap();
+        config_value["model"] = serde_json::Value::String("forged-model".into());
+        let mut altered_project = original.clone();
+        let worker = altered_project.roles.iter_mut()
+            .find(|role| role.role == "worker").unwrap();
+        let config_value = worker.effective_config.as_mut().unwrap();
+        config_value["projectId"] = serde_json::Value::String("foreign-project".into());
+        worker.effective_config_sha256 = Some(
+            sha256_hex(&serde_json::to_vec(config_value).unwrap())
+        );
+        for (label, changed) in [
+            ("policy", altered_policy),
+            ("role payload", altered_role),
+            ("worker scope", altered_project),
+        ] {
+            let (json, hash) = encoded_snapshot(&changed).unwrap();
+            store.db.execute(
+                "UPDATE sa_ticket_team_snapshots
+                 SET snapshot_json=?2,snapshot_sha256=?3 WHERE ticket_id=?1",
+                params![&ticket.id, json, hash],
+            ).unwrap();
+            assert!(ticket_team_snapshot(&store, &ticket.id).is_err(),
+                "{label}: valid outer digest must not authorize a different task");
+            assert!(read_only_policy(&store, &session).is_err(),
+                "{label}: provider authority must remain revoked");
+        }
+        let (json, hash) = encoded_snapshot(&original).unwrap();
+        store.db.execute(
+            "UPDATE sa_ticket_team_snapshots
+             SET snapshot_json=?2,snapshot_sha256=?3 WHERE ticket_id=?1",
+            params![&ticket.id, json, hash],
+        ).unwrap();
+        assert!(ticket_team_snapshot(&store, &ticket.id).is_ok());
+        assert!(read_only_policy(&store, &session).unwrap().is_some());
     }
 
     #[test]

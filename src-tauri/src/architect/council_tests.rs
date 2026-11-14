@@ -1830,6 +1830,32 @@ fn config_for_composition(composition: council::CouncilComposition) -> CouncilCo
 
 // Pure snapshot fixtures cover native gate logic; runtime dispatch coverage lives in
 // `architect/tests.rs` and exercises persisted root and child task allocation.
+
+#[test]
+fn composed_lead_rules_keep_nested_bot_quorum_and_native_source_quotas_explicit() {
+    use council::AutomaticReviewerCount as Count;
+    let modes = [
+        ("M4", 0, 0, 2, composition(false, Count::Fixed(0), vec![nested_reviewer("n-a"), nested_reviewer("n-b")])),
+        ("M5", 1, 0, 1, composition(true, Count::Fixed(1), vec![nested_reviewer("n-a")])),
+        ("M6", 0, 1, 1, composition(false, Count::Fixed(0), vec![direct_reviewer("d-a"), nested_reviewer("n-a")])),
+        ("M7", 1, 1, 1, composition(true, Count::Fixed(1), vec![direct_reviewer("d-a"), nested_reviewer("n-a")])),
+    ];
+    for (mode, automatic, direct, nested, composition) in modes {
+        let config = config_for_composition(composition);
+        let team = team_with(config.clone(), vec![]);
+        let rules = council::lead_rules(&team, false);
+        let count = format!("{nested} are task-owned child Councils and {direct} are direct reviewers; {automatic} additional automatic root reviewers");
+        assert!(rules.contains(&count), "{mode}: {rules}");
+        assert!(rules.contains("Each selected nested bot occupies exactly one root seat"), "{mode}");
+        assert!(rules.contains("Never dispatch child leaves as extra root votes"), "{mode}");
+        assert!(rules.contains("native child terminal receipt is missing"), "{mode}");
+        assert_eq!(config.seat_plan().required(), automatic + direct + nested);
+    }
+    let legacy = team_with(on(9.0, 5, 0), vec![]);
+    assert!(!council::lead_rules(&legacy, false).contains("task-owned child Councils"),
+        "legacy M1 is unchanged");
+}
+
 #[test]
 fn synthetic_composition_gate_fixtures_cover_modes_and_strategies() {
     use council::{AutomaticReviewerCount as Count, CouncilCompositionMode as Mode};

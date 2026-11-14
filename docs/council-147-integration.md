@@ -222,3 +222,10 @@ New native `CouncilFinding` records now include optional structured `title` and 
 For historical persisted findings without details, the native digest remains identical to the previous canonical tuple and old JSON rows continue to deserialize. For newly detailed findings the content digest also commits to the title and explanation, preventing post-recording text changes from retaining a prior finding identity. Input validation rejects empty, oversized and control-character text. Both root and child shared-inspector renderers escape detail fields as inert text.
 
 Added Rust negative tests for changed detail identity, forged detail mutation, unsafe titles and historical format compatibility; Playwright verifies that markup-like reviewer text cannot generate script/image DOM nodes. Validation remains exact-SHA pending rather than declared passed.
+
+
+## Concurrent source quotas for nested Councils (PR #149 latest source delta)
+
+PR #149 advanced to `fcf6a0f00d126a7e1e9d5d78547864d6a65a78ec` with separate automatic, direct and native-child source admission. The unified implementation already owns the same semantics through `CouncilComposition`, `CouncilSeatPlan` (`automatic`, `direct_bots`, `nested_bots`), frozen reviewer binding and the existing native 7×3 dispatch test. Copying the source's incompatible `CouncilConfig` fields would introduce duplicate Council engines and break the unified persistence contract.
+
+The root Architect instruction text now explicitly communicates exact M4-M7 nested/direct/automatic quotas, one composite parent vote per child, no root vote for child leaves, OnTrigger preliminary/child separation, and mandatory matching native terminal receipts. New Rust tests assert the M4-M7 plan and preserve M1 guidance. This reconciles the user-visible guidance while retaining the already native-enforced seat plan.

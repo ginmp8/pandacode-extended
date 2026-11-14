@@ -755,9 +755,7 @@ fn unresolved_critical_finding_notice(
     team: &TeamSnapshot,
     ledger: &ArchitectReadSnapshot,
 ) -> Option<String> {
-    if team.config.council.as_ref()?.composition.is_none() {
-        return None;
-    }
+    team.config.council.as_ref()?.composition.as_ref()?;
     let cycle_id = format!("{}:{}", team.session_id, team.council_since);
     let raw_findings = match council_records::<council::CouncilFinding>(
         store, &team.session_id, "council_finding",
@@ -4220,8 +4218,8 @@ fn rules(store: &Store, team: &TeamSnapshot, sid: &str) -> Result<(String, Strin
         let challenge_findings = if team.config.council.as_ref().and_then(|config| config.composition.as_ref())
             .is_some_and(|composition| composition.strategy == council::CouncilStrategy::TwoPhase)
         {
-            if let Some(decision) = s3_challenge_receipt_for_worker(store, &team, worker)? {
-                council_ledger_projection(store, &team).council_findings.into_iter()
+            if let Some(decision) = s3_challenge_receipt_for_worker(store, team, worker)? {
+                council_ledger_projection(store, team).council_findings.into_iter()
                     .filter(|finding| decision.finding_ids.contains(&finding.id))
                     .collect()
             } else {
@@ -5927,10 +5925,16 @@ fn verify_council_finding_state(
     let ledger = council_ledger_projection(&store, &team);
     let outcome = ledger.council_criterion_outcomes.iter().find(|receipt| {
         receipt.validate().is_ok()
-            && receipt.validates_for(
-                &cycle_id, team_session_id, &cycle_id, seat.round, &worker.id, None,
-                worker.attempt, &binding.artifact_revision,
-            )
+            && receipt.validates_for(&council::CouncilReceiptCorrelation {
+                root_cycle_id: &cycle_id,
+                task_id: team_session_id,
+                task_cycle_id: &cycle_id,
+                round: seat.round,
+                seat_id: &worker.id,
+                parent_seat_id: None,
+                attempt: worker.attempt,
+                artifact_revision: &binding.artifact_revision,
+            })
             && receipt.outcome.criterion_id == criterion.id
     }).ok_or("council_finding_unverified: the fresh reviewer has no current native criterion receipt.")?;
     if outcome.outcome.score < criterion.target || outcome.outcome.verified_evidence_refs.is_empty() {
@@ -7055,16 +7059,13 @@ fn dispatch_as_inner(
             } else {
                 None
             };
-            if nested_child_link.is_some() {
-                if batch.assignments.iter().any(|assignment| {
-                    assignment
-                        .get("councilLens")
-                        .and_then(Value::as_str)
-                        .is_none()
+            if nested_child_link.is_some()
+                && batch.assignments.iter().any(|assignment| {
+                    assignment.get("councilLens").and_then(Value::as_str).is_none()
                         || assignment.get("readOnly").and_then(Value::as_bool) != Some(true)
-                }) {
-                    return Err("A nested Council Architect can dispatch only explicit read-only Council reviewers; writer seats are refused natively.".into());
-                }
+                })
+            {
+                return Err("A nested Council Architect can dispatch only explicit read-only Council reviewers; writer seats are refused natively.".into());
             }
             let previous: HashSet<_> = team
                 .workers
@@ -8365,7 +8366,7 @@ fn team_action<'a>(
     {
         team.round += 1;
         let compact =
-            serde_json::to_string(&review_summaries_with_store(&store, &team, false)).map_err(|e| e.to_string())?;
+            serde_json::to_string(&review_summaries_with_store(store, &team, false)).map_err(|e| e.to_string())?;
         team.reviewed_revision = team.dispatch_revision;
         team.reviewed_coordination_revision = team.coordination_revision;
         let prompt = format!(
@@ -8393,7 +8394,7 @@ fn team_action<'a>(
         team.last_wake_at = storage::now();
         team.reviewed_coordination_revision = team.coordination_revision;
         let compact =
-            serde_json::to_string(&review_summaries_with_store(&store, &team, false)).map_err(|e| e.to_string())?;
+            serde_json::to_string(&review_summaries_with_store(store, &team, false)).map_err(|e| e.to_string())?;
         let prompt = format!("A teammate sent a message or reported a blocker for this objective: {}\n\nRead your addressed messages and these progress checkpoints. Reply through send_team_message. Use read_worker for checkpoints omitted by this context budget. Other workers are still active: do not edit their files, repeat completed assignments, or poll. You may end this turn after coordinating; settled work will trigger review.\n\n{compact}", objective_quote(&team));
         return wake_lead(
             store,
@@ -8490,7 +8491,7 @@ fn team_action<'a>(
         team.round += 1;
         team.status = "running".into();
         let compact =
-            serde_json::to_string(&review_summaries_with_store(&store, &team, true)).map_err(|e| e.to_string())?;
+            serde_json::to_string(&review_summaries_with_store(store, &team, true)).map_err(|e| e.to_string())?;
         team.reviewed_revision = team.dispatch_revision;
         team.reviewed_coordination_revision = team.coordination_revision;
         // A finish reopened for Council (`reopen_for_council`) keeps its refusal as the team's error.

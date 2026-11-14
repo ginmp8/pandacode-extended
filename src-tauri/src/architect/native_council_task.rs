@@ -76,9 +76,15 @@ fn record_key(
     Ok(format!("native-council-task:{}:{caller_id}:{assignment_key}", team.council_since))
 }
 
+/// Native-only receipt identity used for idempotent admission replay.
+struct CandidateStamp {
+    request_id: String,
+    admitted_at: i64,
+}
+
 fn candidate(
     store: &Store, caller_id: &str, session_id: &str, project_id: &str,
-    assignment_key: &str, artifact_sha256: &str, request_id: String, admitted_at: i64,
+    assignment_key: &str, artifact_sha256: &str, stamp: CandidateStamp,
 ) -> Result<NativeCouncilTaskRequest> {
     record_key(store, session_id, caller_id, assignment_key)?;
     if artifact_sha256.len() != 64
@@ -114,14 +120,14 @@ fn candidate(
     )).map_err(|error| error.to_string())?;
     Ok(NativeCouncilTaskRequest {
         schema_version: 1,
-        request_id, caller_id: caller_id.to_owned(),
+        request_id: stamp.request_id, caller_id: caller_id.to_owned(),
         session_id: session_id.to_owned(), project_id: project_id.to_owned(),
         assignment_key: assignment_key.to_owned(),
         cycle_id: format!("{}:{}", session_id, team.council_since),
         artifact_sha256: artifact_sha256.to_owned(),
         objective_sha256: digest(team.objective.as_bytes()),
         policy_sha256: digest(&serde_json::to_vec(config).map_err(|error| error.to_string())?),
-        task_scope_sha256: digest(&scope), admitted_at,
+        task_scope_sha256: digest(&scope), admitted_at: stamp.admitted_at,
     })
 }
 
@@ -158,12 +164,15 @@ pub fn admit(
 ) -> Result<NativeCouncilTaskRequest> {
     let proposed_request = candidate(
         store, caller_id, session_id, project_id, assignment_key,
-        artifact_sha256, storage::id(), storage::now(),
+        artifact_sha256, CandidateStamp { request_id: storage::id(), admitted_at: storage::now() },
     )?;
     if let Ok((_, current)) = read_record(store, caller_id, session_id, assignment_key) {
         let same = candidate(
             store, caller_id, session_id, project_id, assignment_key,
-            artifact_sha256, current.request.request_id.clone(), current.request.admitted_at,
+            artifact_sha256, CandidateStamp {
+                request_id: current.request.request_id.clone(),
+                admitted_at: current.request.admitted_at,
+            },
         )?;
         return if same == current.request { Ok(current.request) } else {
             Err("council_task_conflict: admission cannot rebind objective, policy, cycle or artifact.".into())
@@ -200,7 +209,10 @@ pub fn admit(
         } else { error })?;
     let same = candidate(
         store, caller_id, session_id, project_id, assignment_key,
-        artifact_sha256, saved.request.request_id.clone(), saved.request.admitted_at,
+        artifact_sha256, CandidateStamp {
+            request_id: saved.request.request_id.clone(),
+            admitted_at: saved.request.admitted_at,
+        },
     )?;
     if saved.request != same {
         return Err("council_task_conflict: concurrent admission bound a different native request.".into());
@@ -220,7 +232,9 @@ pub fn inspect(
     }
     let current = candidate(
         store, caller_id, session_id, project_id, assignment_key,
-        artifact_sha256, request_id.to_owned(), recorded.request.admitted_at,
+        artifact_sha256, CandidateStamp {
+            request_id: request_id.to_owned(), admitted_at: recorded.request.admitted_at,
+        },
     )?;
     if recorded.request != current {
         return Err("council_task_stale: Council cycle, target, objective or policy changed.".into());

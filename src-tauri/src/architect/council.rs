@@ -388,6 +388,20 @@ pub struct CouncilCriterionOutcomeReceipt {
     pub outcome: CouncilCriterionOutcome,
 }
 
+/// Expected task, cycle, attempt and artifact binding for a native
+/// criterion result. The scope is supplied by the authenticated caller,
+/// never copied from the untrusted receipt being checked.
+pub struct CouncilReceiptCorrelation<'a> {
+    pub root_cycle_id: &'a str,
+    pub task_id: &'a str,
+    pub task_cycle_id: &'a str,
+    pub round: usize,
+    pub seat_id: &'a str,
+    pub parent_seat_id: Option<&'a str>,
+    pub attempt: usize,
+    pub artifact_revision: &'a str,
+}
+
 impl CouncilCriterionOutcomeReceipt {
     pub fn validate(&self) -> std::result::Result<(), CouncilCompositionError> {
         if self.schema_version != 1
@@ -419,26 +433,16 @@ impl CouncilCriterionOutcomeReceipt {
         Ok(())
     }
 
-    pub fn validates_for(
-        &self,
-        root_cycle_id: &str,
-        task_id: &str,
-        task_cycle_id: &str,
-        round: usize,
-        seat_id: &str,
-        parent_seat_id: Option<&str>,
-        attempt: usize,
-        artifact_revision: &str,
-    ) -> bool {
+    pub fn validates_for(&self, scope: &CouncilReceiptCorrelation<'_>) -> bool {
         self.validate().is_ok()
-            && self.root_cycle_id == root_cycle_id
-            && self.task_id == task_id
-            && self.task_cycle_id == task_cycle_id
-            && self.round == round
-            && self.seat_id == seat_id
-            && self.parent_seat_id.as_deref() == parent_seat_id
-            && self.attempt == attempt
-            && self.artifact_revision == artifact_revision
+            && self.root_cycle_id == scope.root_cycle_id
+            && self.task_id == scope.task_id
+            && self.task_cycle_id == scope.task_cycle_id
+            && self.round == scope.round
+            && self.seat_id == scope.seat_id
+            && self.parent_seat_id.as_deref() == scope.parent_seat_id
+            && self.attempt == scope.attempt
+            && self.artifact_revision == scope.artifact_revision
     }
 }
 
@@ -2200,16 +2204,16 @@ fn required_criteria_gate(
                     && receipt.child_cycle_id.as_deref() == Some(receipt.task_cycle_id.as_str())
                     && receipt.parent_seat_id.as_deref() == Some(worker.id.as_str())
             } else {
-                receipt.validates_for(
-                    &root_cycle_id,
-                    &team.session_id,
-                    &root_cycle_id,
-                    seat.round,
-                    &worker.id,
-                    None,
-                    worker.attempt,
-                    &binding.artifact_revision,
-                )
+                receipt.validates_for(&CouncilReceiptCorrelation {
+                    root_cycle_id: &root_cycle_id,
+                    task_id: &team.session_id,
+                    task_cycle_id: &root_cycle_id,
+                    round: seat.round,
+                    seat_id: &worker.id,
+                    parent_seat_id: None,
+                    attempt: worker.attempt,
+                    artifact_revision: &binding.artifact_revision,
+                })
             };
             if !correlated || receipt.validate().is_err() {
                 continue;
@@ -2332,10 +2336,16 @@ pub(super) fn nested_preliminary_trigger(
     }
     let mut own = std::collections::BTreeMap::new();
     for receipt in outcomes.iter().filter(|receipt| receipt.validate().is_ok()) {
-        if receipt.validates_for(
-            &cycle_id, &team.session_id, &cycle_id, seat.round, &worker.id, None,
-            worker.attempt, &binding.artifact_revision,
-        ) {
+        if receipt.validates_for(&CouncilReceiptCorrelation {
+            root_cycle_id: &cycle_id,
+            task_id: &team.session_id,
+            task_cycle_id: &cycle_id,
+            round: seat.round,
+            seat_id: &worker.id,
+            parent_seat_id: None,
+            attempt: worker.attempt,
+            artifact_revision: &binding.artifact_revision,
+        }) {
             own.insert(receipt.outcome.criterion_id.as_str(), &receipt.outcome);
         }
     }
@@ -2550,9 +2560,7 @@ fn status_in(
             && view.complete(round)
             && round == 1
             && two_phase_phase1_passes(team, config, view, outcomes)
-    }) {
-        "dispatch"
-    } else if config.composition.as_ref().is_some_and(|composition| {
+    }) || config.composition.as_ref().is_some_and(|composition| {
         composition.strategy == CouncilStrategy::Escalated
             && view.complete(round)
             && !s2_escalation_signals(team, round, outcomes, findings).is_empty()

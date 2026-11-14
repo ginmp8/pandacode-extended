@@ -592,17 +592,27 @@ fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
     if config.mode() != "m3" { return true; }
     let Some(status) = council::status(team) else { return false };
     if status.state != "passed" || status.stale { return false; }
-    let eligible = team.workers.iter().filter(|worker| {
-        worker.created_at >= team.council_since
-            && worker.council.as_ref().is_some_and(|seat|
-                seat.round == status.round && seat.score.is_some()
-                    && (!worker.abandoned || seat.score.is_some()))
-    }).collect::<Vec<_>>();
-    eligible.len() == config.needed() && eligible.iter().all(|worker| {
-        if !worker.read_only || worker.status != "completed" { return false; }
-        let Some(binding) = worker.reviewer_binding.as_ref() else { return false };
-        binding.validate(team, worker).is_ok()
-            && reviewer_security::validate_recorded_authority(store, &team.session_id, binding).is_ok()
+    // An S3 challenge cannot authenticate a forged or revoked first phase.
+    // Revalidate both phases against durable native grants, not just the
+    // latest scored round. M1/M2 keep their established completion contract.
+    let mut rounds = vec![status.round];
+    if config.strategy == council::CouncilExecutionStrategy::TwoPhase {
+        if status.round != 2 { return false; }
+        rounds.push(1);
+    }
+    rounds.into_iter().all(|round| {
+        let eligible = team.workers.iter().filter(|worker| {
+            worker.created_at >= team.council_since
+                && worker.council.as_ref().is_some_and(|seat|
+                    seat.round == round && seat.score.is_some()
+                        && (!worker.abandoned || seat.score.is_some()))
+        }).collect::<Vec<_>>();
+        eligible.len() == config.needed() && eligible.iter().all(|worker| {
+            if !worker.read_only || worker.status != "completed" { return false; }
+            let Some(binding) = worker.reviewer_binding.as_ref() else { return false };
+            binding.validate(team, worker).is_ok()
+                && reviewer_security::validate_recorded_authority(store, &team.session_id, binding).is_ok()
+        })
     })
 }
 

@@ -169,6 +169,10 @@ CREATE TRIGGER IF NOT EXISTS sa_project_lease_insert
      OR previous_session.project_id=incoming.project_id
      OR previous_session.project_id=incoming_session.project_id
      OR previous_session.id IS NULL OR incoming_session.id IS NULL
+     OR EXISTS(SELECT 1 FROM projects old_checkout,projects new_checkout
+               WHERE old_checkout.id IN (previous.project_id,previous_session.project_id)
+                 AND new_checkout.id IN (incoming.project_id,incoming_session.project_id)
+                 AND old_checkout.path=new_checkout.path)
    )
  )
  BEGIN SELECT RAISE(ABORT,'SuperAgent project already has an active assignment'); END;
@@ -186,6 +190,10 @@ CREATE TRIGGER IF NOT EXISTS sa_project_lease_update
      OR previous_session.project_id=incoming.project_id
      OR previous_session.project_id=incoming_session.project_id
      OR previous_session.id IS NULL OR incoming_session.id IS NULL
+     OR EXISTS(SELECT 1 FROM projects old_checkout,projects new_checkout
+               WHERE old_checkout.id IN (previous.project_id,previous_session.project_id)
+                 AND new_checkout.id IN (incoming.project_id,incoming_session.project_id)
+                 AND old_checkout.path=new_checkout.path)
    )
  )
  BEGIN SELECT RAISE(ABORT,'SuperAgent project already has an active assignment'); END;
@@ -1437,15 +1445,25 @@ fn record(store: &Store, id: &str, kind: &str, detail: &str) -> Result<()> {
 
 /// One native read of checkout/bot contention used both by the real admit
 /// transition and the non-authoritative preview. Admission always repeats it.
+fn checkout_path(store:&Store,project_id:&str)->Result<String> {
+    let path:String=store.db.query_row(
+        "SELECT path FROM projects WHERE id=?1",[project_id],|row|row.get(0),
+    ).map_err(|e|e.to_string())?;
+    if path.trim().is_empty() {return Err("Project checkout path is unavailable.".into());}
+    Ok(path)
+}
+
 /// Native admission must account for ordinary running chats/direct tasks,
 /// not just persisted SuperAgent leases. Unknown live sessions fail closed.
 fn active_manual_conflict(
     store: &Store, active: &[String], candidate_id: &str, project_id: &str,
 ) -> Result<bool> {
+    let requested_path=checkout_path(store,project_id)?;
     for session_id in active {
         let session = store.session(session_id)
             .map_err(|_| "Active provider session is unavailable; checkout admission denied.".to_string())?;
-        if session.project_id == project_id {
+        if session.project_id == project_id
+            || checkout_path(store,&session.project_id)?==requested_path {
             return Ok(true);
         }
         if bots::owner_of(store, session_id)?
@@ -1460,6 +1478,8 @@ fn active_manual_conflict(
 fn manual_candidate_occupied(
     store: &Store, candidate_id: &str, team_project: &str, candidate_project: &str,
 ) -> Result<bool> {
+    checkout_path(store,team_project)?;
+    checkout_path(store,candidate_project)?;
     store.db.query_row(
         "SELECT EXISTS(
            SELECT 1 FROM sa_assignments a
@@ -1467,7 +1487,11 @@ fn manual_candidate_occupied(
            LEFT JOIN sessions active_session ON active_session.id=a.session_id
            WHERE a.state='running'
              AND (a.bot_id=?1 OR previous.project_id IN (?2,?3)
-                  OR active_session.project_id IN (?2,?3) OR active_session.id IS NULL)
+                  OR active_session.project_id IN (?2,?3) OR active_session.id IS NULL
+                   OR EXISTS(SELECT 1 FROM projects old_checkout,projects new_checkout
+                             WHERE old_checkout.id IN (previous.project_id,active_session.project_id)
+                               AND new_checkout.id IN (?2,?3)
+                               AND old_checkout.path=new_checkout.path))
          )",
         params![candidate_id,team_project,candidate_project], |row| row.get(0),
     ).map_err(|e| e.to_string())
@@ -1785,6 +1809,7 @@ fn admitted_session_matches_profile(
     let Some(profile) = roster::ticket_profile(store, ticket_id)? else {
         return Ok(true);
     };
+    if !roster::checkout_paths_current(store,ticket_id)? {return Ok(false);}
     let Some(member) = profile.members.iter()
         .find(|member| member.role == role && member.bot_id == bot_id)
     else {
@@ -1991,6 +2016,7 @@ pub(crate) fn guard_run_admission(
     store: &Store, session_id: &str, running_sessions: &[String],
 ) -> Result<()> {
     let session = store.session(session_id)?;
+    let session_path=checkout_path(store,&session.project_id)?;
     let superagent_run = read_only_policy(store, session_id)?.is_some();
     let leased_by_other: bool = store.db.query_row(
         "SELECT EXISTS(
@@ -1998,7 +2024,11 @@ pub(crate) fn guard_run_admission(
             JOIN sa_tickets t ON t.id=a.ticket_id AND t.active_assignment_id=a.id
             LEFT JOIN sessions assigned ON assigned.id=a.session_id
             WHERE a.state='running' AND t.state='running'
-              AND (t.project_id=?1 OR assigned.project_id=?1 OR assigned.id IS NULL)
+              AND (t.project_id=?1 OR assigned.project_id=?1 OR assigned.id IS NULL
+                    OR EXISTS(SELECT 1 FROM projects old_checkout,projects new_checkout
+                              WHERE old_checkout.id IN (t.project_id,assigned.project_id)
+                                AND new_checkout.id=?1
+                                AND old_checkout.path=new_checkout.path))
               AND a.session_id<>?2
          )",
         params![session.project_id, session_id],
@@ -2012,7 +2042,8 @@ pub(crate) fn guard_run_admission(
             if other_id == session_id { continue; }
             // A disappeared active session is not proof that a lease is free.
             let other = store.session(other_id)?;
-            if other.project_id == session.project_id {
+            if other.project_id == session.project_id
+                || checkout_path(store,&other.project_id)?==session_path {
                 return Err("Project has another active agent; SuperAgent dispatch denied.".into());
             }
         }
@@ -7232,5 +7263,93 @@ mod tests {
         assert!(read_only_policy(&store,&sid).is_err());
         assert!(on_run_finished(&store,&sid,true,"Stale result").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+    }
+
+    #[test]
+    fn exact_checkout_path_aliases_serialize_distinct_project_ids() {
+        let mut store=fixture();
+        let first=enabled(&store);
+        let (ticket,launched)=admit(&mut store,&first.id,
+            "First checkout owner","checkout-alias-first",false).unwrap();
+        assert!(launched);
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('alias-project','Alias','/tmp/disposable-superagent')",[]
+        ).unwrap();
+        for id in ["alias-router","alias-worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'alias-project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let other=create_configuration(&store,NewOrchestration {
+            name:"Second project ID".into(),
+            coordinator_bot_id:"alias-router".into(),worker_bot_id:"alias-worker".into(),
+        }).unwrap();
+        let other=change_enabled(&store,&other.id,other.policy_revision,true).unwrap();
+        assert!(manual_candidate_occupied(&store,"alias-worker","alias-project","alias-project").unwrap());
+        let (blocked,started)=admit(&mut store,&other.id,
+            "Second ID must not share checkout","checkout-alias-second",false).unwrap();
+        assert!(!started);
+        assert_eq!(blocked.state,"blocked");
+        let ordinary=store.create_session("alias-project","codex","default","ask").unwrap();
+        assert!(guard_run_admission(&store,&ordinary.id,&[]).is_err());
+        assert!(active_manual_conflict(&store,&[ordinary.id],"worker","project").unwrap());
+        let worker=bots::get(&store,"alias-worker").unwrap();
+        let sid=bots::thread_session(&store,&worker,CHANNEL,&blocked.id,"Alias").unwrap().0;
+        assert!(store.db.execute(
+            "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
+             VALUES('alias-lease-bypass',?1,'alias-worker',?2,'running',1,?3,?3)",
+            params![blocked.id,sid,storage::now()],
+        ).is_err());
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"running");
+    }
+
+    #[test]
+    fn changed_checkout_path_invalidates_admitted_session_and_late_result() {
+        let mut store=fixture();
+        let config=enabled(&store);
+        let (ticket,launched)=admit(&mut store,&config.id,
+            "Read original checkout","checkout-path-snapshot",false).unwrap();
+        assert!(launched);
+        let sid=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        let profile=roster::ticket_profile(&store,&ticket.id).unwrap().unwrap();
+        assert!(profile.members.iter().all(|m|
+            m.project_path.as_deref()==Some("/tmp/disposable-superagent")));
+        assert!(roster::checkout_paths_current(&store,&ticket.id).unwrap());
+        assert!(read_only_policy(&store,&sid).unwrap().is_some());
+        store.db.execute(
+            "UPDATE projects SET path='/tmp/superagent-reassigned-checkout' WHERE id='project'",[]
+        ).unwrap();
+        assert!(!roster::checkout_paths_current(&store,&ticket.id).unwrap());
+        assert!(read_only_policy(&store,&sid).is_err());
+        assert!(guard_run_admission(&store,&sid,&[]).is_err());
+        assert!(on_run_finished(&store,&sid,true,"Untrusted success").unwrap());
+        let blocked=get_ticket(&store,&ticket.id).unwrap();
+        assert_eq!(blocked.state,"blocked");
+        assert!(accept(&store,&ticket.id,blocked.revision).is_err());
+        assert!(!on_run_finished(&store,&sid,true,"Repeated success").unwrap());
+    }
+
+    #[test]
+    fn v46_upgrade_restores_alias_safe_checkout_lease_triggers() {
+        let store=fixture();
+        let path=store.path.clone();
+        store.db.execute_batch(
+            "DROP TRIGGER sa_project_lease_insert;
+             DROP TRIGGER sa_project_lease_update;
+             PRAGMA user_version=46;",
+        ).unwrap();
+        drop(store);
+        let reopened=Store::open(&path).unwrap();
+        let version:i64=reopened.db.pragma_query_value(None,"user_version",|r|r.get(0)).unwrap();
+        assert_eq!(version,storage::SCHEMA_VERSION);
+        for name in ["sa_project_lease_insert","sa_project_lease_update"] {
+            let sql:String=reopened.db.query_row(
+                "SELECT sql FROM sqlite_master WHERE type='trigger' AND name=?1",
+                [name],|row|row.get(0),
+            ).unwrap();
+            assert!(sql.contains("old_checkout.path=new_checkout.path"),"{name}");
+        }
     }
 }

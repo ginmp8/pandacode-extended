@@ -56,6 +56,8 @@ pub struct AdmittedMemberProfile {
     pub position:usize,
     pub bot_id:String,
     pub project_id:String,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub project_path:Option<String>,
     pub provider:String,
     pub model:String,
     pub mode:String,
@@ -70,14 +72,21 @@ pub struct AdmittedTeamProfile {
     pub members:Vec<AdmittedMemberProfile>,
 }
 
-fn member_profile(bot:&bots::Bot,role:&str,position:usize)->AdmittedMemberProfile {
-    AdmittedMemberProfile {
+fn member_profile(store:&Store,bot:&bots::Bot,role:&str,position:usize)->Result<AdmittedMemberProfile> {
+    let project_path:String=store.db.query_row(
+        "SELECT path FROM projects WHERE id=?1",
+        [&bot.project_id],|row|row.get(0),
+    ).map_err(|e|e.to_string())?;
+    if project_path.trim().is_empty() {
+        return Err("Team member checkout path is unavailable.".into());
+    }
+    Ok(AdmittedMemberProfile {
         role:role.into(),position,bot_id:bot.id.clone(),
-        project_id:bot.project_id.clone(),provider:bot.provider.clone(),
-        model:bot.model.clone(),mode:bot.mode.clone(),
+        project_id:bot.project_id.clone(),project_path:Some(project_path),
+        provider:bot.provider.clone(),model:bot.model.clone(),mode:bot.mode.clone(),
         reasoning_effort:bot.reasoning_effort.clone(),
         assigned_skill_ids:bot.skills.clone(),
-    }
+    })
 }
 
 /// Called inside the same native SQLite transaction that creates the Ticket,
@@ -91,12 +100,12 @@ pub(super) fn capture_ticket_profile(
     }
     let mut profiles=Vec::new();
     let coordinator=bots::get(store,&roster.coordinator_bot_id)?;
-    profiles.push(member_profile(&coordinator,"coordinator",0));
+    profiles.push(member_profile(store,&coordinator,"coordinator",0)?);
     for (position,id) in roster.worker_bot_ids.iter().enumerate() {
-        profiles.push(member_profile(&bots::get(store,id)?,"worker",position));
+        profiles.push(member_profile(store,&bots::get(store,id)?,"worker",position)?);
     }
     for (position,id) in roster.reviewer_bot_ids.iter().enumerate() {
-        profiles.push(member_profile(&bots::get(store,id)?,"reviewer",position));
+        profiles.push(member_profile(store,&bots::get(store,id)?,"reviewer",position)?);
     }
     let json=serde_json::to_string(&profiles).map_err(|e|e.to_string())?;
     if json.len()>64*1024 {
@@ -135,6 +144,22 @@ pub(super) fn ticket_profile(store:&Store,ticket_id:&str)->Result<Option<Admitte
     }).transpose()
 }
 
+/// Check project checkout identity at each native admission and settlement.
+/// Historical read-only snapshots without this field remain compatible.
+pub(super) fn checkout_paths_current(store:&Store,ticket_id:&str)->Result<bool> {
+    use rusqlite::OptionalExtension;
+    let Some(profile)=ticket_profile(store,ticket_id)? else {return Ok(true);};
+    for member in profile.members {
+        let Some(expected)=member.project_path else {continue;};
+        let actual:Option<String>=store.db.query_row(
+            "SELECT path FROM projects WHERE id=?1",
+            [&member.project_id],|row|row.get(0),
+        ).optional().map_err(|e|e.to_string())?;
+        if actual.as_deref()!=Some(expected.as_str()) {return Ok(false);}
+    }
+    Ok(true)
+}
+
 /// New provider sessions for this Ticket may not silently adopt later
 /// model/mode/Skill edits. Existing admitted sessions keep their own pinned
 /// configuration, and legacy Tickets without this v46 evidence remain legacy.
@@ -145,7 +170,8 @@ pub(super) fn require_current_profile(
     let recorded=snapshot.members.iter()
         .find(|m|m.role==role && m.bot_id==bot_id)
         .ok_or("Bot role was not captured in the original Demand.")?;
-    let current=member_profile(&bots::get(store,bot_id)?,role,recorded.position);
+    let mut current=member_profile(store,&bots::get(store,bot_id)?,role,recorded.position)?;
+    if recorded.project_path.is_none() {current.project_path=None;}
     if *recorded!=current {
         return Err("Bot provider, model, mode, project or Skills changed after Demand admission; create a newly authorized Demand.".into());
     }

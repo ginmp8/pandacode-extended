@@ -179,6 +179,15 @@ test.describe('bot collaboration', () => {
 
     await page.evaluate(async () => {
       const { sharedChannelThreadHtml } = await import('/src/bot-shared-channels.ts');
+      const { invoke } = await import('/src/preview.ts');
+      // A Channel report must be bound to the active native Council cycle,
+      // not to a made-up preview revision that bypasses the authorization gate.
+      const task = await invoke<any>('architect_get', { sessionId: 'session-1' });
+      if (!task || !Number.isSafeInteger(task.councilSince) || task.councilSince <= 0) {
+        throw new Error('Expected an active seeded Council task');
+      }
+      const artifactRevision = `cycle:${task.councilSince}`;
+      const cycleId = `${task.sessionId}:${task.councilSince}`;
       const host = document.createElement('div');
       host.id = 'council-report-source';
       host.innerHTML = sharedChannelThreadHtml({
@@ -187,8 +196,8 @@ test.describe('bot collaboration', () => {
         messages: [{
           id: 'nested-delivery', kind: 'assigned', authorBotId: 'executor', text: 'Review this change', status: 'Completed', createdAt: 1,
           council: {
-            cycleId: 'session-1:preview', sessionId: 'session-1', state: 'Passed', round: 1, target: 9.5,
-            lowest: 9.6, artifactRevision: 'preview-revision-1',
+            cycleId, sessionId: task.sessionId, state: 'Passed', round: 1, target: 9.5,
+            lowest: 9.6, artifactRevision,
             reviewers: [{ botId: 'reviewer-alpha', name: 'Review Alpha', lens: 'Security', round: 1, score: 9.8 }],
           },
         }],

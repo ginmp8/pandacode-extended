@@ -243,3 +243,15 @@ children can acquire the same receipt when attributable native approval
 exists; unverifiable children remain gated. The Inspector displays the digest,
 review source and timestamp, not raw responses. The source PR's incompatible
 `sa_work_plans` schema was deliberately not copied into the runnable DAG.
+
+
+#### Explicit native child retry and DAG re-entry
+
+If an operator retries an originally blocked WorkItem child through the
+existing authorized Ticket retry command, the same WorkItem returns to
+`running` or `waiting_review` on the next native reconciliation tick.
+Its previous failure is not a new permission or evidence receipt. Only a
+fresh, attributed acceptance of its actual latest Worker result may mark the
+item verified and release its dependants. Independent ready items continue
+without waiting for this particular recovery; exhausted attempts remain
+blocked and require a newly authorized demand.

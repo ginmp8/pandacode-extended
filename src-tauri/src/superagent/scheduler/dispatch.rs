@@ -107,13 +107,21 @@ pub(crate) fn revoke_descendants(tx:&Connection,root:&str,now:i64)->Result<()> {
 
 fn reconcile(store:&Store)->Result<()> {
     let now=storage::now();
+    // An explicitly retried child resumes its original WorkItem and all
+    // immutable root grants. A blocked WorkItem may not stay permanently
+    // blocked after its original native child gets a new authorized attempt.
+    store.db.execute(
+        "UPDATE sa_work_items SET state='running',last_reason=NULL,updated_at=?1
+         WHERE state='blocked' AND child_ticket_id IN
+           (SELECT id FROM sa_tickets WHERE state='running')",[now],
+    ).map_err(|e|e.to_string())?;
     // Do not accept model-reported completion or a mutable Ticket state.
     // Persist the exact independent human/Council decision first, under the
     // existing native effect/dispatch fence.
     evidence::record_accepted(store,now)?;
     store.db.execute(
         "UPDATE sa_work_items SET state='waiting_review',updated_at=?1
-         WHERE state='running' AND child_ticket_id IN
+         WHERE state IN ('running','blocked') AND child_ticket_id IN
          (SELECT id FROM sa_tickets WHERE state IN ('waiting_approval','waiting_review'))",[now],
     ).map_err(|e|e.to_string())?;
     store.db.execute(

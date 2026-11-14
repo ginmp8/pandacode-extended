@@ -53,7 +53,7 @@ pub(super) fn record_accepted(store:&Store,now:i64)->Result<usize> {
                  ORDER BY audit.id DESC LIMIT 1)
              FROM sa_work_items item
              JOIN sa_tickets child ON child.id=item.child_ticket_id
-             WHERE item.state IN ('running','waiting_review','completed')
+             WHERE item.state IN ('running','waiting_review','blocked','completed')
                AND child.state='completed'
                AND child.evidence IS NOT NULL AND length(child.evidence)>0
                AND NOT EXISTS(SELECT 1 FROM sa_effect_receipts effect
@@ -85,7 +85,7 @@ pub(super) fn record_accepted(store:&Store,now:i64)->Result<usize> {
                  ON ticket.id=item.child_ticket_id
                JOIN sa_assignments native ON native.id=?3
                WHERE item.id=?1 AND item.child_ticket_id=?2
-                 AND item.state IN ('running','waiting_review','completed')
+                 AND item.state IN ('running','waiting_review','blocked','completed')
                  AND ticket.state='completed' AND ticket.revision=?8 AND ticket.evidence=?9
                  AND native.ticket_id=ticket.id AND native.state='finished'
                  AND native.result=ticket.evidence
@@ -109,7 +109,7 @@ pub(super) fn record_accepted(store:&Store,now:i64)->Result<usize> {
         if exact {
             completed+=tx.execute(
                 "UPDATE sa_work_items SET state='completed',last_reason=NULL,updated_at=?2
-                 WHERE id=?1 AND state IN ('running','waiting_review')",
+                 WHERE id=?1 AND state IN ('running','waiting_review','blocked')",
                 params![item,now],
             ).map_err(|e|e.to_string())?;
         }
@@ -170,6 +170,24 @@ mod tests {
             "UPDATE sa_work_item_evidence_receipts SET reviewed_at=200",[],
         ).is_err());
     }
+    #[test]
+    fn locally_retried_blocked_child_can_produce_one_fresh_verified_result() {
+        let store=fixture();
+        store.db.execute(
+            "UPDATE sa_work_items SET state='blocked' WHERE id='item'",[],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,at) VALUES('child','human_accepted',99)",[],
+        ).unwrap();
+        assert_eq!(record_accepted(&store,100).unwrap(),1);
+        assert_eq!(record_accepted(&store,101).unwrap(),0);
+        assert!(receipt(&store,"item").unwrap().is_some());
+        assert_eq!(store.db.query_row(
+            "SELECT state FROM sa_work_items WHERE id='item'",[],
+            |row|row.get::<_,String>(0),
+        ).unwrap(),"completed");
+    }
+
     #[test]
     fn unresolved_github_effect_denies_workitem_proof() {
         let store=fixture();

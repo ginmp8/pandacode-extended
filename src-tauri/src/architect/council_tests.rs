@@ -593,6 +593,10 @@ fn native_user_forced_s2_requires_two_fresh_independent_rounds_before_pass() {
     replay.workers[2].id = "initial-a".into();
     assert_ne!(council::status(&replay).unwrap().state, "passed",
         "reusing a reviewer identity cannot satisfy the fresh native S2 round");
+    let mut reused_session = team.clone();
+    reused_session.workers[2].session_id = team.workers[0].session_id.clone();
+    assert_ne!(council::status(&reused_session).unwrap().state, "passed",
+        "S2 must not count a renamed worker that reuses a previous reviewer session");
     assert!(finish_refusal(&team).is_none());
     // A later artifact change invalidates both phases, not only the last score.
     team.changed_at = SINCE + 5;
@@ -659,6 +663,14 @@ fn native_s2_score_trigger_requires_a_fresh_independent_review_from_the_enabled_
     replay.workers[2].id = "original-a".into();
     assert_ne!(council::status(&replay).unwrap().state, "passed");
     assert!(finish_refusal(&replay).unwrap().contains("S2 automatic escalation"));
+    let mut reused_session = team.clone();
+    reused_session.workers[2].session_id = team.workers[0].session_id.clone();
+    assert_ne!(council::status(&reused_session).unwrap().state, "passed",
+        "an S2 escalation must use a distinct native session, not just a new worker ID");
+    let mut shared_escalation_session = team.clone();
+    shared_escalation_session.workers[3].session_id = team.workers[2].session_id.clone();
+    assert_ne!(council::status(&shared_escalation_session).unwrap().state, "passed",
+        "concurrent escalated seats must not double-count one native session");
     replay.config.council.as_mut().unwrap().max_rounds = 2;
     assert!(finish_refusal(&replay).unwrap().contains("S2 escalation reached the round limit"));
 }
@@ -908,6 +920,14 @@ fn native_s3_uses_fresh_read_only_challengers_and_never_passes_phase_one_alone()
     replay.workers[2].id = "phase-one-a".into();
     assert_ne!(council::status(&replay).unwrap().state, "passed");
     assert!(finish_refusal(&replay).unwrap().contains("S3 two-phase"));
+    let mut reused_session = team.clone();
+    reused_session.workers[2].session_id = team.workers[0].session_id.clone();
+    assert_ne!(council::status(&reused_session).unwrap().state, "passed",
+        "S3 challengers cannot reuse phase-one sessions under new worker IDs");
+    let mut shared_challenge_session = team.clone();
+    shared_challenge_session.workers[3].session_id = team.workers[2].session_id.clone();
+    assert_ne!(council::status(&shared_challenge_session).unwrap().state, "passed",
+        "two challenger workers cannot claim the same native session");
 
     let mut writable = team.clone();
     writable.workers[3].read_only = false;
@@ -3467,7 +3487,7 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
         .filter(|view| view.authenticated_parent_seat.is_some()).count(), 2);
     store.db.execute(
         "UPDATE architect_requests SET content='{}'
-         WHERE parent_session_id=?1 AND kind='council_child_receipt' AND worker_id=?2"
+         WHERE parent_session_id=?1 AND kind='council_child_receipt' AND worker_id=?2",
         rusqlite::params![sid, inspected[0].child_session_id],
     ).unwrap();
     assert!(child_council::inspect(&store, &root).is_err(),

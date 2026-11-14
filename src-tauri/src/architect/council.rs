@@ -1338,9 +1338,10 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
     {
         return false;
     }
-    // Two passing rounds must contain genuinely distinct worker identities. A
-    // duplicated persisted worker cannot masquerade as a fresh independent review.
+    // Two passing rounds must have distinct worker identities AND native sessions.
+    // A renamed persisted worker cannot masquerade as a fresh independent review.
     let mut seen = std::collections::HashSet::new();
+    let mut seen_sessions = std::collections::HashSet::new();
     let mut passing_rounds = 0;
     for round in 1..=view.latest {
         if !view.complete(round)
@@ -1356,7 +1357,9 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
         for (worker, _) in in_round(team, round)
             .filter(|(worker, seat)| counts(worker, seat) && !unsettled(&worker.status) && seat.score.is_some())
         {
-            if !seen.insert(worker.id.as_str()) {
+            if !seen.insert(worker.id.as_str()) || worker.session_id.is_empty()
+                || !seen_sessions.insert(worker.session_id.as_str())
+            {
                 return false;
             }
         }
@@ -1396,9 +1399,16 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
     let prior_ids: std::collections::HashSet<&str> = (1..=trigger_round)
         .flat_map(|round| in_round(team, round).map(|(worker, _)| worker.id.as_str()))
         .collect();
+    let prior_sessions: std::collections::HashSet<&str> = (1..=trigger_round)
+        .flat_map(|round| in_round(team, round).map(|(worker, _)| worker.session_id.as_str()))
+        .collect();
+    let mut fresh_sessions = std::collections::HashSet::new();
     in_round(team, view.latest)
         .filter(|(worker, seat)| counts(worker, seat) && seat.score.is_some())
-        .all(|(worker, _)| !prior_ids.contains(worker.id.as_str()))
+        .all(|(worker, _)| !prior_ids.contains(worker.id.as_str())
+            && !worker.session_id.is_empty()
+            && !prior_sessions.contains(worker.session_id.as_str())
+            && fresh_sessions.insert(worker.session_id.as_str()))
 }
 
 /// Build the S3 challenge handoff from *authenticated native phase-one reports*,
@@ -1523,6 +1533,7 @@ fn two_phase_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view: &Round
         return false;
     }
     let mut reviewer_ids = std::collections::HashSet::new();
+    let mut session_ids = std::collections::HashSet::new();
     let challenged_bots = phase_one_selected_bot_ids(team);
     for round in 1..=2 {
         if lowest(team, round).is_none_or(|score| score < config.target)
@@ -1535,6 +1546,8 @@ fn two_phase_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view: &Round
         for (worker, seat) in in_round(team, round).filter(|(worker, seat)| counts(worker, seat)) {
             if !worker.read_only || worker.status != "completed" || seat.score.is_none()
                 || !reviewer_ids.insert(worker.id.as_str())
+                || worker.session_id.is_empty()
+                || !session_ids.insert(worker.session_id.as_str())
             {
                 return false;
             }

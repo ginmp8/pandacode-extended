@@ -31,7 +31,8 @@ pub(crate) fn parent_active(store:&Store,child_ticket_id:&str)->Result<bool> {
              AND grant.allowed_tools='[]' AND grant.allowed_side_effects=0)",
         params![parent,storage::now()],|r|r.get(0),
     ).map_err(|e|e.to_string())?;
-    Ok(permitted && !crate::feature_controls::get().bots_paused)
+    Ok(permitted && superagent::auto::ticket_authorized(store,&parent)?
+        && !crate::feature_controls::get().bots_paused)
 }
 
 /// Capture active descendant native provider sessions BEFORE Stop clears
@@ -265,6 +266,7 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
                     |r|r.get(0),
                 ).map_err(|e|e.to_string())?;
                 if root.state!="queued" || !team.enabled || !root_ok ||
+                    !superagent::auto::ticket_authorized(&store,&root.id)? ||
                     team.policy_revision!=snapshot.policy.policy_revision ||
                     team.team_version!=snapshot.team_version ||
                     !snapshot.worker_bot_ids.contains(&item.worker) ||

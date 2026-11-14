@@ -4157,6 +4157,9 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     // One native scheduler for desktop and serve. It resumes only already
     // authorized Demand DAGs; no startup GitHub Auto or ambient grants.
     superagent::scheduler::start_native(app.handle().clone());
+    // Authenticated GH source polling is inert until a local user explicitly
+    // issues an expiring exact-repository/event/actor Auto grant.
+    superagent::auto::start_native(app.handle().clone());
     Ok(dir)
 }
 
@@ -4536,6 +4539,9 @@ pub fn run() {
                 superagent::scheduler::superagent_demand_plan,
                 superagent::scheduler::superagent_start_demand,
                 superagent::scheduler::superagent_authorize_work_item_write,
+                superagent::auto::superagent_auto_status,
+                superagent::auto::superagent_auto_authorize,
+                superagent::auto::superagent_auto_revoke,
                 superagent::superagent_effect_receipts,
                 superagent::superagent_preflight,
                 superagent::superagent_submit,

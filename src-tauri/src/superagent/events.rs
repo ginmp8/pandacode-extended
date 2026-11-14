@@ -395,7 +395,7 @@ fn source_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<EventSource> {
         policy_revision: row.get(6)?, last_sequence: row.get(7)?,
     })
 }
-fn source(store: &Store, id: &str) -> Result<EventSource> {
+pub(super) fn source(store: &Store, id: &str) -> Result<EventSource> {
     store.db.query_row(
         "SELECT id,orchestration_id,repository,actor_filter,event_kind,
                 mode,policy_revision,last_sequence FROM sa_event_sources WHERE id=?1",
@@ -893,7 +893,7 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
     Ok(Some((event,at)))
 }
 
-fn poll_authenticated_events_with_identity(
+pub(super) fn poll_authenticated_events_with_identity(
     store: &Store, expected: &EventSource, since: i64,
     raw: &serde_json::Value, signed_in: &str, pages_fetched: usize,
 ) -> Result<AuthenticatedPoll>
@@ -921,11 +921,11 @@ fn poll_authenticated_events_with_identity(
             if at < since {
                 skipped_before_activation += 1;
             } else {
-                parsed.push(event);
+                parsed.push((event,at));
             }
         }
     }
-    parsed.sort_by_key(|event| event.sequence);
+    parsed.sort_by_key(|(event,_)| event.sequence);
     // A multi-page poll is one authoritative observation batch: either every
     // eligible receipt and the cursor survive, or none do. A later conflicting
     // delivery or storage failure must not strand earlier partial decisions.
@@ -938,8 +938,13 @@ fn poll_authenticated_events_with_identity(
     let mut recorded = 0;
     let mut duplicates = 0;
     let mut self_ignored = 0;
-    for event in &parsed {
+    for (event,occurred_at) in &parsed {
         let result = observe_authenticated_in_tx(&tx, &current_policy, event, signed_in)?;
+        // Auto outbox admission is in the SAME verified event receipt/cursor
+        // transaction. A model or Webview can never inject an Auto event.
+        super::auto::enqueue_authenticated(
+            &tx,&current_policy,event,&result,*occurred_at,signed_in,
+        )?;
         if result.duplicate { duplicates += 1; }
         else {
             recorded += 1;
@@ -984,7 +989,7 @@ fn poll_authenticated_events(store: &Store, expected: &EventSource, since: i64,
 /// Shared authenticated GitHub Events read for desktop and explicit local
 /// headless Observe. Nothing is persisted until the policy/revision is
 /// revalidated by the existing transactional decision adapter.
-fn fetch_authenticated_github_window(
+pub(super) fn fetch_authenticated_github_window(
     repo: &str, since: i64, prior_cursor: i64,
 ) -> Result<(String, serde_json::Value, usize)> {
     let root = std::env::temp_dir();

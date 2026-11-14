@@ -226,6 +226,9 @@ fn create_plan(store:&Store,ticket_id:&str,revision:i64,items:&[WorkItemInput])-
         return Err("A different immutable WorkItem plan already owns this Demand.".into());
     }
     let ticket=get_ticket(store,ticket_id)?;
+    if !super::auto::ticket_authorized(store,ticket_id)? {
+        return Err("Original GitHub Auto authorization was revoked or expired.".into());
+    }
     if ticket.revision!=revision || ticket.state!="queued" || ticket.active_assignment_id.is_some() {
         return Err("Demand must have an exact-revision, finished coordinator plan.".into());
     }

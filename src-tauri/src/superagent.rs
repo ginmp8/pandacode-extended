@@ -8,6 +8,7 @@ pub(crate) mod manifest;
 pub(crate) mod scheduler;
 pub(crate) mod roster;
 pub(crate) mod events;
+pub(crate) mod auto;
 pub(crate) mod council_adapter;
 pub mod effects;
 pub(crate) mod write_grants;
@@ -2810,7 +2811,8 @@ pub(crate) fn read_only_policy(
         }),
     ).optional().map_err(|e| e.to_string())?;
     if let Some(scope) = scope {
-        if !scheduler::parent_active(store,&scope.ticket_id)? {
+        if !scheduler::parent_active(store,&scope.ticket_id)? ||
+            !auto::ticket_authorized(store,&scope.ticket_id)? {
             return Err("policy_unsupported: parent Demand mandate was stopped or revoked.".into());
         }
         let snapshot = ticket_team_snapshot(store,&scope.ticket_id)?;

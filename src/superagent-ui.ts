@@ -123,6 +123,14 @@ interface SourceDecision {
   checkConclusion?: string; checkHeadSha?: string; checkCompletedAt?: number;
 }
 
+interface AutoSourceStatus {
+  sourceId:string; enabled:boolean; mode:string;
+  repository:string; actorFilter:string; eventKind:string;
+  maxDailyTasks:number|null; usedLastDay:number;
+  expiresAt:number|null; operatorLogin:string|null;
+  pending:number; blocked:number;
+}
+
 interface SourceIntegrity {
   sourceId: string; repository: string; mode: 'off' | 'observe';
   policyRevision: number; cursorKind: string; lastSequence: number;
@@ -177,6 +185,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
   let sourceIntegrity: SourceIntegrity | null = null;
+  let autoStatus: AutoSourceStatus | null = null, autoDailyLimit = 3;
   let linkedDecisions: SourceDecision[] = [], linkedDecisionsLoaded = false;
   const safe = (value: unknown) => escape(String(value ?? ''));
   const current = () => presets.find(item => item.id === selected);
@@ -499,11 +508,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           : '') +
         '<button type="button" data-sa-close-details>Close evidence</button></section>'
       : '';
-    const sourceRows = sources.map(src =>
-      '<li><div><strong>' + safe(src.repository) + '</strong><small>' +
+    const sourceRows = sources.map(src => {
+      const activeAuto = autoStatus?.sourceId === src.id ? autoStatus : null;
+      return '<li><div><strong>' + safe(src.repository) + '</strong><small>' +
       safe(src.eventKind) + ' · ' + safe(src.actorFilter) + ' · Cursor ' +
       src.lastSequence + ' · Revision ' + src.policyRevision + '</small></div>' +
-      '<span>' + safe(src.mode) + '</span>' +
+      '<span>' + safe(activeAuto?.mode ?? src.mode) + '</span>' +
       '<button type="button" data-sa-source-mode="' + safe(src.id) +
       '" data-sa-next-mode="' + (src.mode === 'off' ? 'observe' : 'off') + '">' +
       (src.mode === 'off' ? 'Enable Observe' : 'Turn Off') + '</button>' +
@@ -518,9 +528,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '<button type="button" data-sa-source-decisions="' + safe(src.id) +
       '">View decisions</button>' +
       '<button type="button" data-sa-source-health="' + safe(src.id) +
-      '">Inspect source health</button></li>').join('');
+      '">Inspect source health</button>' +
+      (src.mode === 'observe' && src.eventKind === 'issues.opened'
+        ? '<button type="button" data-sa-auto-status="' + safe(src.id) +
+          '">Inspect read-only Auto policy</button>' : '') +
+      '</li>';
+    }).join('');
     const sourcePanel = '<section class="sa-event-sources" aria-label="GitHub event sources">' +
-      '<h4>GitHub event sources</h4><p>Off/Observe only. Authenticated GitHub Events polling is bounded; Checks API requires an explicit Check Run ID and a unique matching PR head. Neither is a gap-free subscription or an authorization to launch tasks or external writes.</p>' +
+      '<h4>GitHub event sources</h4><p>Off and authenticated Observe remain available. Read-only Auto for exact issues.opened events requires separate local native confirmation and expires within 24 hours. A source grant never authorizes files, GitHub comments, pushes, merges, or releases.</p>' +
       (!sourcesLoaded ? '<button type="button" data-sa-load-sources>Load sources</button>'
         : '<form data-sa-form="source"><div class="sa-grid">' +
           '<label>Repository (owner/name)<input name="repository" maxlength="200" required></label>' +
@@ -535,6 +550,27 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '</select></label><button type="submit">Add source (Off)</button></form>' +
           '<ul class="sa-tickets sa-source-list">' +
           (sourceRows || '<li class="sa-empty">No event sources configured.</li>') + '</ul>' +
+          (autoStatus && sources.some(src => src.id === autoStatus?.sourceId)
+            ? '<section class="sa-pane" role="region" aria-label="Authenticated GitHub Auto policy">' +
+              '<h5>Read-only GitHub Auto grant</h5><p>' +
+              safe(autoStatus.repository) + ' · ' + safe(autoStatus.eventKind) +
+              ' · Actor ' + safe(autoStatus.actorFilter) +
+              ' · Mode ' + safe(autoStatus.mode) +
+              '</p><p>Intake in rolling day: ' + autoStatus.usedLastDay +
+              ' · Pending: ' + autoStatus.pending + ' · Blocked: ' + autoStatus.blocked +
+              ' · Expires: ' + safe(autoStatus.expiresAt
+                ? activityTime(autoStatus.expiresAt) : 'Not authorized') + '</p>' +
+              (autoStatus.enabled
+                ? '<button type="button" data-sa-auto-revoke="' + safe(autoStatus.sourceId) +
+                  '">Revoke Auto and stop associated native Tickets</button>'
+                : '<form data-sa-form="auto-authorization">' +
+                  '<p>Explicit local-user confirmation authorizes one repository, exact actor, issues.opened, read-only work, and a finite budget. Issue text never grants tools.</p>' +
+                  '<label>Maximum new Demands per rolling 24h' +
+                  '<input name="maxDailyTasks" type="number" min="1" max="20" required value="' +
+                  safe(autoDailyLimit) + '"></label>' +
+                  '<button type="submit" class="primary-button">Review read-only Auto grant</button>' +
+                  '</form>') +
+              '</section>' : '') +
           (sourceIntegrity ? '<section role="region" aria-label="Source integrity">' +
             '<h5>Native source integrity</h5><p>' +
             safe(sourceIntegrity.repository) + ' · ' + safe(sourceIntegrity.mode) +
@@ -938,6 +974,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         linkedDecisions = []; linkedDecisionsLoaded = false; roleRoster = null; workerOrder = []; effectiveTeam = null;
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
         sourceIntegrity = null;
+        autoStatus = null;
       }
       // A failed native read must not leave old ticket approval controls
       // visible underneath a newly selected or reloaded preset.
@@ -962,6 +999,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         // Native policies and cursors are mutable; never keep a prior
         // scan visible as current after a reload or a Team change.
         sourceIntegrity = null;
+        autoStatus = null;
       }
       error = '';
     } catch (cause) { error = cause instanceof Error ? cause.message : String(cause); }
@@ -1376,6 +1414,32 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
+    if (target.dataset.saAutoStatus) {
+      const sourceId = target.dataset.saAutoStatus;
+      if (sources.some(src => src.id === sourceId && src.mode === 'observe' &&
+          src.eventKind === 'issues.opened')) void work(async () => {
+        const found = await call<AutoSourceStatus>('superagent_auto_status',{sourceId});
+        if (sources.some(src => src.id === sourceId) && found.sourceId === sourceId) {
+          autoStatus=found;
+        }
+      });
+      return;
+    }
+    if (target.dataset.saAutoRevoke) {
+      const sourceId = target.dataset.saAutoRevoke;
+      const src = sources.find(src => src.id === sourceId);
+      if (!src || !autoStatus?.enabled || autoStatus.sourceId !== sourceId) return;
+      ask('Revoke this exact read-only GitHub Auto source? All pending admissions will be blocked; existing matching native Tickets are stopped, and ordinary Observe receipts remain intact.',async () => {
+        const outcome=await call<AutoSourceStatus>('superagent_auto_revoke',{
+          sourceId,expectedRevision:src.policyRevision,
+        });
+        autoStatus=outcome;
+        await reload();
+        autoStatus=await call<AutoSourceStatus>('superagent_auto_status',{sourceId});
+        feedback='Auto source revoked natively. Pending intake blocked and live tasks stopped; historical receipts remain.';
+      });
+      return;
+    }
     if (target.dataset.saSourceHealth) {
       const sourceId = target.dataset.saSourceHealth;
       if (sources.some(item => item.id === sourceId)) void work(async () => {
@@ -1551,6 +1615,31 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (!(form instanceof HTMLFormElement) || !host.contains(form)) return;
     event.preventDefault();
     const data = new FormData(form);
+    if (form.dataset.saForm === 'auto-authorization') {
+      const status=autoStatus;
+      const src=sources.find(item => item.id === status?.sourceId);
+      const maxDailyTasks=Number(data.get('maxDailyTasks'));
+      if (!status || !src || src.mode !== 'observe' ||
+          src.eventKind !== 'issues.opened' || status.enabled ||
+          !Number.isInteger(maxDailyTasks) || maxDailyTasks<1 || maxDailyTasks>20) {
+        error='Read-only Auto requires an unchanged Observe issues.opened source and a daily limit from 1 to 20.';
+        render(); return;
+      }
+      autoDailyLimit=maxDailyTasks;
+      void work(async () => {
+        const result=await call<AutoSourceStatus>('superagent_auto_authorize',{
+          sourceId:src.id,expectedRevision:src.policyRevision,maxDailyTasks,
+        });
+        if (result.sourceId!==src.id || !result.enabled || result.maxDailyTasks!==maxDailyTasks) {
+          throw new Error('The native Auto grant does not match the inspected source policy.');
+        }
+        autoStatus=result;
+        await reload();
+        autoStatus=await call<AutoSourceStatus>('superagent_auto_status',{sourceId:src.id});
+        feedback='Local GitHub Auto grant authorized for bounded read-only issue intake. Explicit file-write confirmations remain required.';
+      });
+      return;
+    }
     if (form.dataset.saForm === 'work-write-scope') {
       const ticketId = inspectedTicket;
       const plan = workPlan;

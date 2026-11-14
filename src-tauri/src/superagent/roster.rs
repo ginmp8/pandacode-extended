@@ -72,7 +72,28 @@ pub struct AdmittedTeamProfile {
     pub members:Vec<AdmittedMemberProfile>,
 }
 
+/// Validate stored execution fields using the native Bots editor's rules.
+/// Legacy imports or stale database rows can bypass that editor. Provider
+/// catalog membership does not prove harness installation or tool support.
+fn member_execution_issue(bot:&bots::Bot)->Option<&'static str> {
+    if !bots::known_provider(&bot.provider) {
+        Some("Bot harness is not supported by PandaCode.")
+    } else if !storage::valid_permission_mode(&bot.mode) {
+        Some("Bot permission mode is not supported by PandaCode.")
+    } else if bot.model.len()>200 {
+        Some("Bot model configuration exceeds the native limit.")
+    } else if bot.reasoning_effort.len()>40
+        || bot.reasoning_effort.chars().any(|c| !(c.is_ascii_alphanumeric() || c=='-' || c=='_')) {
+        Some("Bot reasoning effort is invalid.")
+    } else {
+        None
+    }
+}
+
 fn member_profile(store:&Store,bot:&bots::Bot,role:&str,position:usize)->Result<AdmittedMemberProfile> {
+    if let Some(issue)=member_execution_issue(bot) {
+        return Err(issue.into());
+    }
     let project_path:String=store.db.query_row(
         "SELECT path FROM projects WHERE id=?1",
         [&bot.project_id],|row|row.get(0),
@@ -334,6 +355,9 @@ fn effective_team(
         if bot.paused {
             configuration_issues.push("Paused bot: resume it in Bots before admission.".into());
         }
+        if let Some(issue)=member_execution_issue(&bot) {
+            configuration_issues.push(issue.into());
+        }
         // Worker project drift can occur after configuring a reusable Team.
         // Coordinator projects may differ; Workers own the execution scope.
         if role == "worker" && bot.project_id != config.project_id {
@@ -394,6 +418,12 @@ fn effective_team(
                 "Primary Worker project differs from the Team execution project.".into(),
             );
         }
+        if member.role=="coordinator" || (member.role=="worker" && member.position==0) {
+            let bot=bots::get(store,&member.bot_id)?;
+            if let Some(issue)=member_execution_issue(&bot) {
+                manual_admission_blockers.push(issue.into());
+            }
+        }
     }
     Ok(EffectiveTeam {
         orchestration_id:config.id,policy_revision:config.policy_revision,
@@ -439,6 +469,7 @@ fn validate_member_ids(store:&Store,cfg:&Orchestration,input:&RosterInput)->Resu
         }
         let bot=bots::get(store,bot_id)?;
         if bot.paused {return Err("Paused bots cannot join a Team.".into());}
+        if let Some(issue)=member_execution_issue(&bot) {return Err(issue.into());}
         if input.worker_bot_ids.contains(bot_id) && bot.project_id!=cfg.project_id {
             return Err("All configured Workers must belong to the Team project.".into());
         }
@@ -536,6 +567,82 @@ pub async fn superagent_roster_update(window:tauri::WebviewWindow,state:State<'_
 mod tests {
     use super::*;
     use crate::storage;
+
+    #[test]
+    fn invalid_stored_harness_mode_and_reasoning_fail_closed_before_manual_admission() {
+        let path=std::env::temp_dir().join(format!("sa-profile-preflight-{}.sqlite3",storage::id()));
+        let mut store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('p','Team','/tmp/sa-profile-preflight')",[],
+        ).unwrap();
+        for id in ["lead","worker","second"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'p','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let cfg=super::super::create_configuration(&store,NewOrchestration {
+            name:"Capability validation".into(),
+            coordinator_bot_id:"lead".into(),worker_bot_id:"worker".into(),
+        }).unwrap();
+        super::super::change_enabled(&store,&cfg.id,cfg.policy_revision,true).unwrap();
+
+        for (field,invalid,restored,expected) in [
+            ("provider","unsupported-harness","codex","Bot harness"),
+            ("mode","root-access","plan","Bot permission mode"),
+            ("reasoning_effort","spaces invalid","","Bot reasoning effort"),
+        ] {
+            let sql=format!("UPDATE bots SET {field}=?1 WHERE id='worker'");
+            store.db.execute(&sql,[invalid]).unwrap();
+            let view=effective_team(&store,&cfg.id,&HashMap::new()).unwrap();
+            assert!(view.members[1].configuration_issues.iter().any(|s|s.contains(expected)));
+            assert!(view.manual_admission_blockers.iter().any(|s|s.contains(expected)));
+            let request=format!("invalid-profile-{field}");
+            let err=super::super::admit(
+                &mut store,&cfg.id,"Do not start unsupported execution",&request,false,
+            ).unwrap_err();
+            assert!(err.contains(expected),"{field}: {err}");
+            assert_eq!(store.db.query_row(
+                "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0),
+            ).unwrap(),0,"invalid profiles must roll back the Ticket transaction");
+            assert_eq!(store.db.query_row(
+                "SELECT COUNT(*) FROM sa_assignments",[],|r|r.get::<_,i64>(0),
+            ).unwrap(),0,"invalid profiles must not reserve an Assignment");
+            store.db.execute(&sql,[restored]).unwrap();
+        }
+
+        store.db.execute(
+            "UPDATE bots SET provider='unsupported-harness' WHERE id='second'",[],
+        ).unwrap();
+        // Disabled multi-role Teams must not retain unsupported extra workers.
+        let disabled=super::super::change_enabled(
+            &store,&cfg.id,cfg.policy_revision+1,false,
+        ).unwrap();
+        let rejected=set(&store,&cfg.id,disabled.policy_revision,&RosterInput {
+            worker_bot_ids:vec!["worker".into(),"second".into()],
+            reviewer_bot_ids:vec![],
+        }).unwrap_err();
+        assert!(rejected.contains("Bot harness"));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_team_roles",[],|r|r.get::<_,i64>(0),
+        ).unwrap(),0);
+        store.db.execute("UPDATE bots SET provider='codex' WHERE id='second'",[])
+            .unwrap();
+        let enabled=super::super::change_enabled(
+            &store,&cfg.id,disabled.policy_revision,true,
+        ).unwrap();
+        assert!(enabled.enabled);
+        let (ticket,launched)=super::super::admit(
+            &mut store,&cfg.id,"Valid read-only request","valid-profile",false,
+        ).unwrap();
+        assert!(launched);
+        assert!(ticket_profile(&store,&ticket.id).unwrap().is_some());
+        assert_eq!(store.db.query_row(
+            "SELECT state FROM sa_tickets WHERE id=?1",[&ticket.id],
+            |r|r.get::<_,String>(0),
+        ).unwrap(),"running");
+    }
 
     #[test]
     fn admitted_team_snapshot_rejects_corrupt_roles_without_reauthorizing_execution() {

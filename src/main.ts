@@ -7377,17 +7377,21 @@ document.addEventListener('submit', event => {
     const maxRounds = Number(data.get('councilMaxRounds') ?? 10);
     const strategy = String(data.get('councilStrategy') ?? 'parallel');
     const criteriaSource = String(data.get('councilCriteriaSource') ?? 'architect');
-    const criterion = {
-      id: String(data.get('councilCriterionId') ?? '').trim(),
-      lens: String(data.get('councilCriterionLens') ?? '').trim(),
-      target: Number(data.get('councilCriterionTarget') ?? 9),
+    const criteria = [...form.querySelectorAll<HTMLElement>('[data-council-criterion-row]')].map(row => ({
+      id: row.querySelector<HTMLInputElement>('input[name="councilCriterionId"]')?.value.trim() ?? '',
+      lens: row.querySelector<HTMLInputElement>('input[name="councilCriterionLens"]')?.value.trim() ?? '',
+      target: Number(row.querySelector<HTMLInputElement>('input[name="councilCriterionTarget"]')?.value ?? NaN),
       required: true,
-      evidenceRequired: data.get('councilCriterionEvidence') === 'on',
-    };
+      evidenceRequired: row.querySelector<HTMLInputElement>('input[name="councilCriterionEvidence"]')?.checked ?? false,
+    }));
     const criteriaValid = criteriaSource === 'architect' || (
-      /^[a-zA-Z0-9_-]{1,64}$/.test(criterion.id) && criterion.lens.length > 0
-      && criterion.lens.length <= 80 && Number.isFinite(criterion.target)
-      && criterion.target >= 1 && criterion.target <= 10
+      criteria.length >= 1 && criteria.length <= 8
+      && criteria.every(criterion => /^[a-zA-Z0-9_-]{1,64}$/.test(criterion.id)
+        && criterion.lens.length > 0 && criterion.lens.length <= 80
+        && Number.isFinite(criterion.target) && criterion.target >= 1 && criterion.target <= 10)
+      && new Set(criteria.map(c => c.id)).size === criteria.length
+      && new Set(criteria.map(c => c.lens.toLowerCase())).size === criteria.length
+      && (!isSelected || criteria.length <= selectedBotIds.length + automaticReviewers)
     );
     const childAttempts = nestedBotReviewers.reduce((sum, child) => sum + child.childReviewers * child.childMaxRounds, 0);
     const totalSeats = selectedBotIds.length + automaticReviewers;
@@ -7443,7 +7447,7 @@ document.addEventListener('submit', event => {
       ...(nestedBotReviewers.length ? { nestedBotReviewers } : {}),
       ...(automaticReviewers ? { automaticReviewers } : {}),
       ...(strategy !== 'parallel' ? { strategy, forceEscalation: strategy === 'escalated' } : {}),
-      ...(criteriaSource !== 'architect' ? { criteriaSource, criteria: [criterion] } : {}),
+      ...(criteriaSource !== 'architect' ? { criteriaSource, criteria } : {}),
       ...(issueEnabled ? { postAcceptanceIssue: { authorizationId: crypto.randomUUID(), repository: issueRepo } } : {}),
       ...(scopedRequested ? { reviewPermissions: {
         authorizationId: crypto.randomUUID(),

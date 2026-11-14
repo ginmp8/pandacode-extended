@@ -168,12 +168,26 @@ export function sharedChannelActionsHtml(channel: SharedChannelDetail, bots: Bot
 /** Preserve unsent, per-message Council inputs across a channel refresh only. */
 export function restoreSharedChannelCouncilInputs(previous: HTMLFormElement | null, next: HTMLFormElement | null): void {
   if (!previous || !next || previous.dataset.channelId !== next.dataset.channelId) return;
+  // A refresh rebuilds the form: recreate every criterion row before restoring
+  // values, so distinct user-required lenses cannot collapse into the first row.
+  const previousRows = previous.querySelectorAll<HTMLElement>('[data-council-criterion-row]');
+  const newRows = next.querySelector<HTMLElement>('.bc-council-criterion-rows');
+  const template = newRows?.querySelector<HTMLElement>('[data-council-criterion-row]');
+  if (newRows && template) {
+    for (let i = 1; i < Math.min(previousRows.length, 8); i++) {
+      newRows.append(template.cloneNode(true));
+    }
+  }
   const oldInputs = [...previous.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input[name^="council"], select[name^="council"]')];
-  for (const input of next.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input[name^="council"], select[name^="council"]')) {
-    const old = oldInputs.find(item => item.name === input.name
-      && item.dataset.botId === input.dataset.botId
-      && (item instanceof HTMLInputElement && (item.type === 'checkbox' || item.type === 'radio')
-        ? item.value === input.value : true));
+  const nextInputs = [...next.querySelectorAll<HTMLInputElement | HTMLSelectElement>('input[name^="council"], select[name^="council"]')];
+  for (const input of nextInputs) {
+    const match = (item: HTMLInputElement | HTMLSelectElement): boolean =>
+      item.name === input.name && item.dataset.botId === input.dataset.botId
+      && (!(item instanceof HTMLInputElement) || (item.type !== 'checkbox' && item.type !== 'radio')
+        || item.value === input.value);
+    // Multiple criterion rows have identical field names; restore by row order.
+    const index = nextInputs.filter(match).indexOf(input);
+    const old = oldInputs.filter(match)[index];
     if (!old) continue;
     if (input instanceof HTMLInputElement && (input.type === 'checkbox' || input.type === 'radio')) {
       input.checked = (old as HTMLInputElement).checked;
@@ -216,11 +230,18 @@ export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bo
           <label>Review strategy<select name="councilStrategy" aria-label="Review strategy"><option value="parallel">Parallel</option><option value="escalated">Escalated (fresh review)</option><option value="two_phase">Two-phase adversarial</option></select></label>
           <label>Criteria source<select name="councilCriteriaSource" aria-label="Criteria source"><option value="architect">Architect-defined</option><option value="user">User-defined</option><option value="hybrid">Hybrid</option></select></label>
           <div class="bc-council-criterion-fields" hidden>
-            <label>Criterion ID<input name="councilCriterionId" type="text" maxlength="64" autocomplete="off"></label>
-            <label>Review lens<input name="councilCriterionLens" type="text" maxlength="80" autocomplete="off"></label>
-            <label>Minimum criterion score<input name="councilCriterionTarget" type="number" min="1" max="10" step="0.1" value="9"></label>
-            <label><input name="councilCriterionEvidence" type="checkbox"> Require independently verified native evidence</label>
-            <small>Required user criteria cannot be removed or weakened by automatic reviewers.</small>
+            <div class="bc-council-criterion-rows">
+              <fieldset class="bc-council-criterion-row" data-council-criterion-row>
+                <legend>Required criterion</legend>
+                <label>Criterion ID<input name="councilCriterionId" type="text" maxlength="64" autocomplete="off"></label>
+                <label>Review lens<input name="councilCriterionLens" type="text" maxlength="80" autocomplete="off"></label>
+                <label>Minimum criterion score<input name="councilCriterionTarget" type="number" min="1" max="10" step="0.1" value="9"></label>
+                <label><input name="councilCriterionEvidence" type="checkbox"> Require independently verified native evidence</label>
+                <button type="button" class="secondary-button" data-council-criterion-remove disabled>Remove criterion</button>
+              </fieldset>
+            </div>
+            <button type="button" class="secondary-button" data-council-criterion-add>Add criterion</button>
+            <small>Up to eight unique required criteria. Required user criteria cannot be removed or weakened by automatic reviewers.</small>
           </div>
           <p class="bc-council-plan" role="status" aria-live="polite">Council preview: automatic native reviewers.</p>
         </div>
@@ -256,11 +277,16 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
     }
     const source = panel.querySelector<HTMLSelectElement>('select[name="councilCriteriaSource"]')?.value;
     panel.querySelector<HTMLElement>('.bc-council-criterion-fields')!.hidden = source === 'architect';
+    const rows = panel.querySelectorAll<HTMLElement>('[data-council-criterion-row]');
+    for (const remove of panel.querySelectorAll<HTMLButtonElement>('[data-council-criterion-remove]')) {
+      remove.disabled = rows.length <= 1;
+    }
     const extra = selected ? Number(panel.querySelector<HTMLInputElement>('input[name="councilAutomaticReviewers"]')?.value ?? 0) : 0;
     const seats = selected ? selectedBots.length + extra : 0;
-    panel.querySelector<HTMLElement>('.bc-council-plan')!.textContent = selected
+    const criteriaNote = source !== 'architect' ? ` · ${rows.length} required criterion${rows.length === 1 ? '' : 's'} (not yet verified)` : '';
+    panel.querySelector<HTMLElement>('.bc-council-plan')!.textContent = (selected
       ? `Council preview: ${seats} root seats (${selectedBots.length} selected bots + ${extra} automatic). Each child Council counts once.`
-      : 'Council preview: automatic native reviewers.';
+      : 'Council preview: automatic native reviewers.') + criteriaNote;
     for (const choice of panel.querySelectorAll<HTMLButtonElement>('button[data-council-preset]')) {
       const name = choice.dataset.councilPreset === 'target' ? 'councilTarget' : 'councilMaxRounds';
       const input = form.elements.namedItem(name) as HTMLInputElement | null;
@@ -268,6 +294,32 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
     }
   };
   panel.addEventListener('click', event => {
+    const action = (event.target as Element).closest<HTMLButtonElement>('[data-council-criterion-add], [data-council-criterion-remove]');
+    if (action) {
+      const rows = panel.querySelector<HTMLElement>('.bc-council-criterion-rows')!;
+      const first = rows.querySelector<HTMLElement>('[data-council-criterion-row]')!;
+      if (action.hasAttribute('data-council-criterion-add')) {
+        if (rows.children.length >= 8) {
+          panel.querySelector<HTMLElement>('.bc-council-plan')!.textContent = 'Council allows at most eight required criteria.';
+          return;
+        }
+        const next = first.cloneNode(true) as HTMLElement;
+        for (const input of next.querySelectorAll<HTMLInputElement>('input')) {
+          if (input.type === 'checkbox') input.checked = false;
+          else if (input.name === 'councilCriterionTarget') input.value = form.querySelector<HTMLInputElement>('input[name="councilTarget"]')?.value ?? '9';
+          else input.value = '';
+        }
+        rows.append(next);
+        next.querySelector<HTMLInputElement>('input[name="councilCriterionId"]')?.focus({ preventScroll: true });
+      } else if (rows.children.length > 1) {
+        const row = action.closest<HTMLElement>('[data-council-criterion-row]')!;
+        const neighbor = (row.nextElementSibling ?? row.previousElementSibling) as HTMLElement;
+        row.remove();
+        neighbor.querySelector<HTMLInputElement>('input[name="councilCriterionId"]')?.focus({ preventScroll: true });
+      }
+      sync();
+      return;
+    }
     const choice = (event.target as Element).closest<HTMLButtonElement>('button[data-council-preset]');
     if (!choice) return;
     const name = choice.dataset.councilPreset === 'target' ? 'councilTarget' : 'councilMaxRounds';

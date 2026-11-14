@@ -126,6 +126,62 @@ test.describe('shared bot channels', () => {
     expect(posted.nestedBotReviewers).toBeUndefined();
   });
 
+  test('shared Channel preserves and validates multiple user-required criteria across refresh', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const body = (await response.text()).replace(
+        "if (command === 'bots_list' || command.startsWith('bot_'))",
+        "if (command === 'bot_shared_channel_post') (window.__channelCouncilPosts ??= []).push(structuredClone(args));\n  if (command === 'bots_list' || command.startsWith('bot_'))",
+      );
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    let composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    let panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('radio', { name: 'Bots' }).check();
+    await panel.locator('input[name="councilReviewer"]').nth(1).check();
+    await panel.getByRole('spinbutton', { name: 'Additional automatic reviewers' }).fill('1');
+    await panel.getByRole('combobox', { name: 'Criteria source' }).selectOption('hybrid');
+
+    await panel.getByRole('textbox', { name: 'Criterion ID' }).fill('security');
+    await panel.getByRole('textbox', { name: 'Review lens' }).fill('Authorization boundary');
+    await panel.getByRole('checkbox', { name: 'Require independently verified native evidence' }).check();
+    await panel.getByRole('button', { name: 'Add criterion' }).click();
+    await expect(panel.locator('[data-council-criterion-row]')).toHaveCount(2);
+    await panel.getByRole('textbox', { name: 'Criterion ID' }).nth(1).fill('security');
+    await panel.getByRole('textbox', { name: 'Review lens' }).nth(1).fill('Data integrity');
+    await composer.getByRole('textbox', { name: 'Message channel' }).fill('Review both required gates');
+    await composer.locator('button[type=submit]').click();
+    expect(await page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(0);
+
+    await panel.getByRole('textbox', { name: 'Criterion ID' }).nth(1).fill('data_integrity');
+    await page.keyboard.press('Escape');
+    const previous = await composer.elementHandle();
+    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
+    await expect.poll(async () => page.evaluate(old => document.querySelector('#shared-channel-composer') !== old, previous)).toBe(true);
+    composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: on' }).click();
+    panel = composer.getByRole('dialog', { name: 'Council' });
+    await expect(panel.locator('[data-council-criterion-row]')).toHaveCount(2);
+    await expect(panel.getByRole('textbox', { name: 'Criterion ID' }).nth(0)).toHaveValue('security');
+    await expect(panel.getByRole('textbox', { name: 'Criterion ID' }).nth(1)).toHaveValue('data_integrity');
+    await expect(panel.getByRole('checkbox', { name: 'Require independently verified native evidence' }).nth(0)).toBeChecked();
+    await expect(panel.getByRole('checkbox', { name: 'Require independently verified native evidence' }).nth(1)).not.toBeChecked();
+    await expect(panel.getByRole('status')).toContainText('2 required criteria (not yet verified)');
+    await composer.locator('button[type=submit]').click();
+    await expect.poll(() => page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(1);
+    const posted = await page.evaluate(() => (window as any).__channelCouncilPosts[0].council);
+    expect(posted.criteriaSource).toBe('hybrid');
+    expect(posted.criteria).toEqual([
+      { id: 'security', lens: 'Authorization boundary', target: 9, required: true, evidenceRequired: true },
+      { id: 'data_integrity', lens: 'Data integrity', target: 9, required: true, evidenceRequired: false },
+    ]);
+  });
+
   test('shared Channel preserves nested reviewer settings on refresh and serializes a single child seat', async ({ page }) => {
     test.setTimeout(60_000);
     await page.route('**/src/preview.ts*', async route => {

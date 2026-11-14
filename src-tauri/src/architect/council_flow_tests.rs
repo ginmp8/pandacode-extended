@@ -425,7 +425,7 @@ fn a_reviewers_sub_workers_do_not_outdate_its_round() {
     };
     let coordination::Actor::Worker { id, attempt } = actor else { panic!("a worker") };
     let generation = saved(&state, &sid).generation;
-    dispatch_as(&state, &sid, generation, Some((&id, attempt)), "pandacode_dispatch_workers", json!({"assignments":[{"key":"render","profileId":"fast","name":"render","prompt":"Render frames.","files":[],"readOnly":true}]}), &AtomicBool::new(false), &routing::AutoRoutes::default(), None).unwrap();
+    dispatch_as(&state, &sid, generation, Some((&id, attempt)), "pandacode_dispatch_workers", json!({"assignments":[{"key":"render","profileId":"fast","name":"render","prompt":"Render frames.","files":[],"readOnly":true}]}), &AtomicBool::new(false), &routing::AutoRoutes::default(), None, false).unwrap();
     let child = saved(&state, &sid).workers[1].session_id.clone();
     let mut team = saved(&state, &sid);
     team.workers[0].council.as_mut().unwrap().started_at = storage::now() - 100;

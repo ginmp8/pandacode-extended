@@ -910,6 +910,7 @@ fn fixture() -> (Store, TeamSnapshot) {
         .unwrap();
     let team = TeamSnapshot {
         session_id: parent.id,
+        superagent_review: None,
         tool_catalog_version: TOOL_CATALOG_VERSION,
         config: config(),
         status: "running".into(),
@@ -941,6 +942,7 @@ fn fixture() -> (Store, TeamSnapshot) {
         council_status: None,
         council_accepted: None,
         council_reopened: None,
+        
     };
     (store, team)
 }
@@ -3081,7 +3083,7 @@ fn ranked_picks_say_their_tier() {
 fn sub_call(state: &AppState, sid: &str, caller: &str, name: &str, args: Value) -> Result<Value> {
     let team = load(&state.store.lock().unwrap(), sid)?.unwrap();
     let attempt = team.workers.iter().find(|w| w.id == caller).unwrap().attempt;
-    dispatch_as(state, sid, team.generation, Some((caller, attempt)), name, args, &AtomicBool::new(false), &routing::AutoRoutes::default(), None).map(|x| x.0)
+    dispatch_as(state, sid, team.generation, Some((caller, attempt)), name, args, &AtomicBool::new(false), &routing::AutoRoutes::default(), None, false).map(|x| x.0)
 }
 fn team_of(state: &AppState, sid: &str) -> TeamSnapshot {
     load(&state.store.lock().unwrap(), sid).unwrap().unwrap()

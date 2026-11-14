@@ -1,14 +1,42 @@
 /** Deterministic preview-only SuperAgent adapter. No real harness or external writes. */
-type Bot = { id:string; name:string; paused:boolean; projectId:string };
+type Bot = { id:string; name:string; paused:boolean; projectId:string;
+  provider?:string; model?:string; mode?:string; skills?:string[]; reasoningEffort?:string };
 type Config = { id:string; name:string; coordinatorBotId:string; workerBotId:string;
-  projectId:string; enabled:boolean; policyRevision:number };
+  workerBotIds:string[]; reviewerBotIds:string[]; teamVersion:number;
+  projectId:string; enabled:boolean; policyRevision:number; councilRequired?:boolean };
+type StrategyPolicy = {
+  priority:string; attemptTimeoutMs:number; tokenCeiling?:number;
+  estimatedCostCeilingMinor?:number; subagentDelegationEnabled:boolean;
+};
+type Strategy = {settings:StrategyPolicy;maxConcurrentTasks:number;maxAttemptsPerAssignment:number};
+const defaultStrategy = ():Strategy => ({
+  settings:{priority:'balanced',attemptTimeoutMs:1_800_000,
+    subagentDelegationEnabled:false},
+  maxConcurrentTasks:1,maxAttemptsPerAssignment:2,
+});
 type Ticket = { id:string; orchestrationId:string; objective:string;
   state:string; revision:number; evidence:null };
+type TeamSnapshot = {
+  snapshotVersion:number; provenance:string; orchestrationId:string; teamVersion:number;
+  name:string; projectId:string; coordinatorBotId:string; workerBotIds:string[];
+  reviewerBotIds:string[];
+  policy:{policyRevision:number;autonomy:string;maxConcurrentTasks:number;
+    maxAttemptsPerAssignment:number;councilEnabled:boolean;strategy:StrategyPolicy};
+  roles:Array<{role:string;ordinal:number;botId:string;effectiveConfig:null;effectiveConfigSha256:null}>;
+};
 type Activity = { id:number; kind:string; detail:string; at:number };
 type Assignment = { id:string; botId:string; sessionId:string; attempt:number; state:string };
 const activity = new Map<string,Activity[]>(), assignments = new Map<string,Assignment[]>();
-const threadLinks = new Map<string,Array<{sourceId:string;ticketId:string;repository:string;subjectKey:string;createdAt:number}>>();
+const PREVIEW_OBSERVE_EVENT_KINDS = [
+  'issues.opened','issues.edited','issue_comment.created','pull_request.opened',
+  'pull_request_review.submitted','check_run.completed',
+] as const;
+const threadLinks = new Map<string,Array<{sourceId:string;ticketId:string;repository:string;subjectKey:string;
+  actorFilter:string;eventKind:string;mode:'off'|'observe';createdAt:number}>>();
 const configs = new Map<string,Config>(), tickets = new Map<string,Ticket[]>();
+const teamSnapshots = new Map<string,TeamSnapshot>();
+const teamStrategies = new Map<string,Strategy>();
+const strategyFor = (id:string):Strategy => teamStrategies.get(id) ?? defaultStrategy();
 const get = (id:string):Config => { const c=configs.get(id); if(!c)throw Error('Orchestration not found.'); return c; };
 export async function invokeSuperagent<T>(
   command:string,args:Record<string,any>,listBots:()=>Promise<Bot[]>,
@@ -20,6 +48,46 @@ export async function invokeSuperagent<T>(
   const bots=needsBots?await listBots():[];
   const find=(id:string)=>{ const b=bots.find(b=>b.id===id); if(!b)throw Error('Bot no longer exists.'); return b; };
   const configName=(name:string)=>[...configs.values()].find(c=>c.name.toLowerCase()===name.toLowerCase());
+  const resolveRoles=(input:any)=>{
+    if(!input||typeof input!=='object')throw Error('Invalid Team input.');
+    const workerBotIds=Array.isArray(input.workerBotIds)?input.workerBotIds:[input.workerBotId];
+    const reviewerBotIds=Array.isArray(input.reviewerBotIds)?input.reviewerBotIds:[];
+    if(workerBotIds.length<1||workerBotIds.length>16||reviewerBotIds.length>8||
+      workerBotIds.some((id:unknown)=>typeof id!=='string'||!id)||
+      reviewerBotIds.some((id:unknown)=>typeof id!=='string'||!id)||
+      workerBotIds[0]!==input.workerBotId)
+      throw Error('A Team needs one coordinator, 1–16 workers and at most 8 reviewers, with workerBotId matching the first worker.');
+    const coordinator=find(input.coordinatorBotId);
+    const workers=(workerBotIds as string[]).map(find);
+    const reviewers=(reviewerBotIds as string[]).map(find);
+    const ids=[coordinator.id,...workers.map(bot=>bot.id),...reviewers.map(bot=>bot.id)];
+    if(new Set(ids).size!==ids.length)throw Error('A bot can have only one role in a Team.');
+    // Match native Team admission: each existing bot retains its own project;
+    // only executor Workers must share the scoped checkout. Independent
+    // coordinator and read-only reviewer bots may own different projects.
+    if(workers.some(bot=>bot.projectId!==workers[0].projectId))
+      throw Error('Executor Workers must share one project scope.');
+    if(input.councilRequired && reviewerBotIds.length < 2)
+      throw Error('Council-required Teams need two independent reviewers.');
+    return {coordinator,workers,reviewers,workerBotIds:[...workerBotIds] as string[],
+      reviewerBotIds:[...reviewerBotIds] as string[]};
+  };
+  const makeTeamSnapshot=(config:Config):TeamSnapshot=>({
+    snapshotVersion:1,provenance:'native',orchestrationId:config.id,teamVersion:config.teamVersion,
+    name:config.name,projectId:config.projectId,coordinatorBotId:config.coordinatorBotId,
+    workerBotIds:[...config.workerBotIds],reviewerBotIds:[...config.reviewerBotIds],
+    policy:{policyRevision:config.policyRevision,autonomy:'off',
+      maxConcurrentTasks:strategyFor(config.id).maxConcurrentTasks,
+      maxAttemptsPerAssignment:strategyFor(config.id).maxAttemptsPerAssignment,
+      councilEnabled:config.councilRequired===true,strategy:strategyFor(config.id).settings},
+    roles:[
+      {role:'coordinator',ordinal:0,botId:config.coordinatorBotId,effectiveConfig:null,effectiveConfigSha256:null},
+      ...config.workerBotIds.map((botId,ordinal)=>({role:'worker',ordinal,botId,
+        effectiveConfig:null as null,effectiveConfigSha256:null as null})),
+      ...config.reviewerBotIds.map((botId,ordinal)=>({role:'reviewer',ordinal,botId,
+        effectiveConfig:null as null,effectiveConfigSha256:null as null})),
+    ],
+  });
   let value:unknown;
   switch(command){
     case 'superagent_list': value=[...configs.values()].map(config=>({
@@ -29,6 +97,66 @@ export async function invokeSuperagent<T>(
       blockedCount:(tickets.get(config.id)||[]).filter(ticket=>ticket.state==='blocked').length,
       lastActivityAt:Date.now(),
     }));break;
+    case 'superagent_roster':{
+      const c=get(args.orchestrationId);
+      value={orchestrationId:c.id,policyRevision:c.policyRevision,
+        coordinatorBotId:c.coordinatorBotId,workerBotIds:[...c.workerBotIds],
+        reviewerBotIds:[...c.reviewerBotIds],councilRequired:!!c.councilRequired,
+        executionReady:c.workerBotIds.length===1 && c.reviewerBotIds.length===0};
+      break;
+    }
+    case 'superagent_strategy_get':
+    case 'superagent_strategy_update': {
+      const config = get(args.orchestrationId);
+      let saved = strategyFor(config.id);
+      if(command==='superagent_strategy_update'){
+        const request=args.input;
+        if(config.enabled || config.policyRevision!==args.expectedRevision ||
+           (tickets.get(config.id)||[]).some(ticket=>!['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)))
+          throw Error('Settle Tickets and disable this Team before changing strategy.');
+        const validPriority=['balanced','cost','latency','throughput','quality'].includes(request?.priority);
+        if(!validPriority || !Number.isInteger(request.maxConcurrentTasks) ||
+           request.maxConcurrentTasks<1 || request.maxConcurrentTasks>8 ||
+           !Number.isInteger(request.maxAttemptsPerAssignment) ||
+           request.maxAttemptsPerAssignment<1 || request.maxAttemptsPerAssignment>8 ||
+           !Number.isInteger(request.attemptTimeoutMs) ||
+           request.attemptTimeoutMs<60_000 || request.attemptTimeoutMs>1_800_000 ||
+           [request.tokenCeiling,request.estimatedCostCeilingMinor]
+            .some(value=>value!==undefined && (!Number.isSafeInteger(value)||value<=0)))
+          throw Error('Invalid bounded Team strategy.');
+        const next:Strategy={
+          settings:{priority:request.priority,attemptTimeoutMs:request.attemptTimeoutMs,
+            tokenCeiling:request.tokenCeiling,
+            estimatedCostCeilingMinor:request.estimatedCostCeilingMinor,
+            subagentDelegationEnabled:request.subagentDelegationEnabled===true},
+          maxConcurrentTasks:request.maxConcurrentTasks,
+          maxAttemptsPerAssignment:request.maxAttemptsPerAssignment,
+        };
+        if(JSON.stringify(saved)!==JSON.stringify(next)){
+          saved=next;teamStrategies.set(config.id,saved);
+          config.policyRevision++;config.teamVersion++;
+        }
+      }
+      const enableBlockers = [
+        ...(config.workerBotIds.length>1||config.reviewerBotIds.length>0
+          ? ['Multi-member dispatch requires scoped native scheduling.'] : []),
+        ...(saved.maxConcurrentTasks!==1
+          ? ['Parallel worker execution has no admitted isolated scheduler yet.'] : []),
+        ...(saved.settings.tokenCeiling!==undefined
+          ? ['A native provider token meter is not available for a hard token ceiling.'] : []),
+        ...(saved.settings.estimatedCostCeilingMinor!==undefined
+          ? ['A verified price/usage meter is not available for a hard monetary ceiling.'] : []),
+        ...(saved.settings.subagentDelegationEnabled
+          ? ['Nested native child admission and inherited grants are not available.'] : []),
+      ];
+      value={orchestrationId:config.id,policyRevision:config.policyRevision,
+        teamVersion:config.teamVersion,settings:{...saved.settings},
+        maxConcurrentTasks:saved.maxConcurrentTasks,
+        maxAttemptsPerAssignment:saved.maxAttemptsPerAssignment,
+        executableParallelWorkers:1,tokenMeteringAvailable:false,
+        pricedCostMeteringAvailable:false,nestedChildAdmissionAvailable:false,enableBlockers};
+      break;
+    }
     case 'superagent_tickets':value=tickets.get(args.orchestrationId)||[];break;
     case 'superagent_snapshot':
     case 'superagent_mandate':
@@ -44,47 +172,62 @@ export async function invokeSuperagent<T>(
       if(command==='superagent_assignments')value=assignments.get(t.id)||[];
       else if(command==='superagent_activity')value=activity.get(t.id)||[];
       else if(command==='superagent_mandate')value=mandate;
-      else value={ticket:t,mandate,assignments:assignments.get(t.id)||[],activity:activity.get(t.id)||[]};
+      else value={ticket:t,teamSnapshot:teamSnapshots.get(t.id)||null,mandate,
+        assignments:assignments.get(t.id)||[],activity:activity.get(t.id)||[]};
       break;
     }
     case 'superagent_source_thread_links':
       value=threadLinks.get(args.ticketId)||[];break;
+    case 'superagent_source_fetch_thread':
+      value={previewOnly:true,message:`Preview only. Manual Observe supports ${PREVIEW_OBSERVE_EVENT_KINDS.join(', ')}. No GitHub request was sent and no event or decision receipt was stored.`};break;
     // These are preview-only references. Real native code verifies source and
     // Ticket orchestration ownership and rejects conflicting thread reuse.
     case 'superagent_source_link_thread':
       throw Error('Source linking requires a native trusted event source.');
     case 'superagent_create':{
-      const input=args.input;const a=find(input.coordinatorBotId),b=find(input.workerBotId);
-      if(!input.name?.trim()||a.id===b.id||configName(input.name))throw Error('Invalid or duplicate orchestration.');
-      const c:Config={id:crypto.randomUUID(),name:input.name,coordinatorBotId:a.id,
-        workerBotId:b.id,projectId:b.projectId,enabled:false,policyRevision:1};
-      configs.set(c.id,c);value=c;break;
+      const input=args.input,roles=resolveRoles(input),b=roles.workers[0];
+      if(!input.name?.trim()||configName(input.name))throw Error('Invalid or duplicate orchestration.');
+      const c:Config={id:crypto.randomUUID(),name:input.name,coordinatorBotId:roles.coordinator.id,
+        workerBotId:b.id,workerBotIds:roles.workerBotIds,reviewerBotIds:roles.reviewerBotIds,
+        teamVersion:1,projectId:b.projectId,enabled:false,policyRevision:1,
+        councilRequired:input.councilRequired===true};
+      configs.set(c.id,c);teamStrategies.set(c.id,defaultStrategy());value=c;break;
     }
     case 'superagent_update':{
       const c=get(args.orchestrationId),input=args.input;
       if(c.enabled||c.policyRevision!==args.expectedRevision||(tickets.get(c.id)?.length||0)>0)
         throw Error('Preset cannot change after use or while enabled.');
-      const a=find(input.coordinatorBotId),b=find(input.workerBotId);
-      if(!input.name?.trim()||a.id===b.id||configName(input.name)?.id!==undefined&&configName(input.name)?.id!==c.id)
+      const roles=resolveRoles(input),b=roles.workers[0];
+      if(!input.name?.trim()||configName(input.name)?.id!==undefined&&configName(input.name)?.id!==c.id)
         throw Error('Invalid or duplicate preset.');
-      c.name=input.name;c.coordinatorBotId=a.id;c.workerBotId=b.id;c.projectId=b.projectId;c.policyRevision++;
+      c.name=input.name;c.coordinatorBotId=roles.coordinator.id;c.workerBotId=b.id;
+      c.workerBotIds=roles.workerBotIds;c.reviewerBotIds=roles.reviewerBotIds;
+      c.projectId=b.projectId;c.teamVersion++;c.policyRevision++;
       value=c;break;
     }
     case 'superagent_set_enabled':{
       const c=get(args.orchestrationId);if(c.policyRevision!==args.expectedRevision)throw Error('Stale policy.');
+      const strategy=strategyFor(c.id);
+      if(args.enabled && (strategy.maxConcurrentTasks!==1 ||
+          strategy.settings.tokenCeiling!==undefined ||
+          strategy.settings.estimatedCostCeilingMinor!==undefined ||
+          strategy.settings.subagentDelegationEnabled ||
+          c.workerBotIds.length>1 || c.reviewerBotIds.length>0))
+          throw Error('Requested Team policy cannot run with current native capabilities.');
       if(c.enabled!==args.enabled){c.enabled=args.enabled;c.policyRevision++;}
       value=c;break;
     }
     case 'superagent_delete':{
       const c=get(args.orchestrationId);if(c.enabled||c.policyRevision!==args.expectedRevision||
         (tickets.get(c.id)?.length||0)>0)throw Error('Cannot delete used or enabled preset.');
-      configs.delete(c.id);value=null;break;
+      configs.delete(c.id);teamStrategies.delete(c.id);value=null;break;
     }
     case 'superagent_submit':
     case 'superagent_submit_coordinated':{
       const c=get(args.orchestrationId);if(!c.enabled)throw Error('Orchestration disabled.');
       const t:Ticket={id:crypto.randomUUID(),orchestrationId:c.id,objective:args.objective,
         state:'running',revision:0,evidence:null};
+      teamSnapshots.set(t.id,makeTeamSnapshot(c));
       tickets.set(c.id,[...(tickets.get(c.id)||[]),t]);
       assignments.set(t.id,[{id:'preview-assignment-'+t.id,botId:c.workerBotId,
         sessionId:'preview-session-'+t.id,attempt:1,state:'running'}]);
@@ -121,34 +264,168 @@ export async function invokeSuperagent<T>(
       activity.set(t.id,events);
       value=t;break;
     }
+    case 'superagent_dispatch_worker_with_write_grant':{
+      const t=[...tickets.values()].flat().find(t=>t.id===args.ticketId);
+      if(!t)throw Error('Ticket not found.');
+      if(t.revision!==args.expectedRevision)throw Error('Ticket revision changed before preview.');
+      const paths=args.allowedPaths;
+      if(!Array.isArray(paths)||paths.length===0||paths.length>16||paths.some((path:unknown)=>typeof path!=='string'))
+        throw Error('Authorize between 1 and 16 exact file paths.');
+      const unique=new Set<string>();
+      for(const path of paths as string[]){
+        const invalidSegment=path.split('/').some(part=>part===''||part==='.'||part==='..'||
+          part.toLowerCase()==='.git'||[...part].some(character=>{
+            const code=character.codePointAt(0)??0;return code<=0x1f||(code>=0x7f&&code<=0x9f);
+          }));
+        if(new TextEncoder().encode(path).length>4096||path.includes('\\')||path.includes('\0')||
+           path.includes(':')||invalidSegment)throw Error('Invalid exact project-relative file path.');
+        if(unique.has(path))throw Error('A write scope cannot repeat a file path.');
+        unique.add(path);
+      }
+      value={previewOnly:true,ticket:t,allowedPaths:[...(paths as string[])],
+        message:'Preview only. No native authorization or worker dispatch occurred.'};
+      break;
+    }
+    case 'superagent_issue_comment':{
+      value={previewOnly:true,message:'Preview only. No GitHub comment was sent.'};
+      break;
+    }
     case 'superagent_manifest_export':{
-      value={schemaVersion:1,orchestrations:[...configs.values()].map(c=>({
-        name:c.name,coordinatorBot:find(c.coordinatorBotId).name,workerBot:find(c.workerBotId).name,
-        enabled:c.enabled,autonomy:'off',maxConcurrentTasks:1,maxAttemptsPerAssignment:2,
-        council:{enabled:false}
-      }))};break;
+      const profile=(id:string)=>{
+        const b=find(id);
+        return {bot:b.name,provider:b.provider??'codex',
+          model:b.model??'default',mode:b.mode??'plan',skills:b.skills??[],
+          reasoningEffort:b.reasoningEffort??'medium'};
+      };
+      value={schemaVersion:5,orchestrations:[...configs.values()].map(c=>{
+        const policy=strategyFor(c.id);
+        return {
+          name:c.name,coordinatorBot:find(c.coordinatorBotId).name,
+          workerBot:find(c.workerBotId).name,
+          extraWorkerBots:c.workerBotIds.slice(1).map(id=>find(id).name),
+          reviewerBots:c.reviewerBotIds.map(id=>find(id).name),
+          botProfiles:[c.coordinatorBotId,...c.workerBotIds,...c.reviewerBotIds].map(profile),
+          enabled:false,autonomy:'off',
+          maxConcurrentTasks:policy.maxConcurrentTasks,
+          maxAttemptsPerAssignment:policy.maxAttemptsPerAssignment,
+          council:{enabled:c.councilRequired===true},
+          strategy:{...policy.settings},
+        };
+      })};break;
     }
     case 'superagent_manifest_preview':
     case 'superagent_manifest_import':{
-      const doc=args.document;if(doc?.schemaVersion!==1||!Array.isArray(doc.orchestrations))throw Error('Invalid manifest.');
+      const doc=args.document,version=doc?.schemaVersion;
+      if(![1,2,3,4,5].includes(version)||!Array.isArray(doc?.orchestrations)||
+         doc.orchestrations.length>64)throw Error('Unsupported portable Team manifest.');
+      const seen=new Set<string>();
       const pending:string[]=[],unchanged:string[]=[];
+      const prepared:Array<{name:string;coordinator:Bot;workers:Bot[];
+        reviewers:Bot[];councilRequired:boolean;policy:Strategy}>=[];
+      const botProfile=(bot:Bot)=>({
+        bot:bot.name,provider:bot.provider??'codex',
+        model:bot.model??'default',mode:bot.mode??'plan',
+        skills:bot.skills??[],reasoningEffort:bot.reasoningEffort??'medium',
+      });
+      const lookup=(name:unknown):Bot=>{
+        if(typeof name!=='string'||!name.trim()||name.length>120)
+          throw Error('Portable role name is invalid.');
+        const matches=bots.filter(b=>b.name.toLowerCase()===name.toLowerCase());
+        if(matches.length!==1||matches[0].paused)
+          throw Error('Portable role is missing, ambiguous or paused.');
+        return matches[0];
+      };
       for(const preset of doc.orchestrations){
+        if(!preset||typeof preset.name!=='string'||preset.name.trim()!==preset.name||
+           preset.name.length===0||preset.name.length>120||
+           /[\x00-\x1f\x7f]/.test(preset.name)||seen.has(preset.name.toLowerCase()))
+          throw Error('Invalid or repeated portable Team name.');
+        seen.add(preset.name.toLowerCase());
+        const coordinator=lookup(preset.coordinatorBot);
+        const workerNames=version===2?preset.workers:
+          version>=3?[preset.workerBot,...(preset.extraWorkerBots??[])]:
+          [preset.workerBot];
+        const reviewerNames=version===2?(preset.reviewers??[]):
+          version>=3?(preset.reviewerBots??[]):[];
+        if(!Array.isArray(workerNames)||workerNames.length<1||workerNames.length>16||
+           !Array.isArray(reviewerNames)||reviewerNames.length>8)
+          throw Error('Portable Team role bounds are invalid.');
+        const workers=workerNames.map(lookup),reviewers=reviewerNames.map(lookup);
+        const identities=[coordinator,...workers,...reviewers].map(bot=>bot.id);
+        if(new Set(identities).size!==identities.length ||
+           workers.some(bot=>bot.projectId!==workers[0].projectId))
+          throw Error('Portable Team contains duplicate roles or cross-project Workers.');
+        const policySource=version===2?preset.policy:preset;
+        const autonomy=policySource?.autonomy;
+        const councilRequired=version===2?policySource?.councilEnabled===true:
+          preset.council?.enabled===true;
+        const maxConcurrentTasks=policySource?.maxConcurrentTasks;
+        const maxAttemptsPerAssignment=policySource?.maxAttemptsPerAssignment;
+        if(autonomy!=='off'||!Number.isInteger(maxConcurrentTasks)||
+           maxConcurrentTasks<1||maxConcurrentTasks>8||
+           !Number.isInteger(maxAttemptsPerAssignment)||
+           maxAttemptsPerAssignment<1||maxAttemptsPerAssignment>8||
+           (councilRequired && reviewers.length<2))
+          throw Error('Portable Team autonomy, worker budget or Council review policy is unsupported.');
+        let settings=defaultStrategy().settings;
+        if(version===5){
+          const raw=preset.strategy;
+          if(!raw || !['balanced','cost','latency','throughput','quality'].includes(raw.priority)||
+             !Number.isInteger(raw.attemptTimeoutMs)||raw.attemptTimeoutMs<60_000||
+             raw.attemptTimeoutMs>1_800_000||
+             [raw.tokenCeiling,raw.estimatedCostCeilingMinor].some((value:any)=>
+               value!==undefined && (!Number.isSafeInteger(value)||value<=0))||
+             typeof raw.subagentDelegationEnabled!=='boolean')
+            throw Error('Invalid portable v5 bounded strategy.');
+          settings={priority:raw.priority,attemptTimeoutMs:raw.attemptTimeoutMs,
+            tokenCeiling:raw.tokenCeiling,
+            estimatedCostCeilingMinor:raw.estimatedCostCeilingMinor,
+            subagentDelegationEnabled:raw.subagentDelegationEnabled};
+        }else if(preset.strategy!==undefined) {
+          throw Error('Portable strategy requires Team schema v5.');
+        }
+        if(version>=3){
+          const profiles=preset.botProfiles;
+          const expected=[coordinator,...workers,...reviewers].map(botProfile);
+          if(!Array.isArray(profiles)||profiles.length!==expected.length)
+            throw Error('Portable role profile count does not match its Team.');
+          for(let index=0;index<expected.length;index++){
+            const actual=profiles[index],effective=expected[index];
+            if(!actual||String(actual.bot).toLowerCase()!==effective.bot.toLowerCase()||
+               actual.provider!==effective.provider||actual.model!==effective.model||
+               actual.mode!==effective.mode||JSON.stringify(actual.skills)!==JSON.stringify(effective.skills)||
+               (version>=4 && actual.reasoningEffort!==effective.reasoningEffort)||
+               (version===3 && actual.reasoningEffort!==undefined))
+              throw Error('Portable role profile mismatch; inspect native bot settings.');
+          }
+        }
+        const policy:Strategy={settings,maxConcurrentTasks,maxAttemptsPerAssignment};
         const found=configName(preset.name);
-        if(preset.autonomy!=='off'||preset.council?.enabled||preset.maxConcurrentTasks!==1)throw Error('Unsupported policy.');
-        const a=bots.filter(b=>b.name.toLowerCase()===String(preset.coordinatorBot).toLowerCase());
-        const b=bots.filter(b=>b.name.toLowerCase()===String(preset.workerBot).toLowerCase());
-        if(a.length!==1||b.length!==1||a[0].id===b[0].id)throw Error('Invalid portable bot reference.');
-        if(found){if(found.coordinatorBotId!==a[0].id||found.workerBotId!==b[0].id)throw Error('Conflicting preset.');
+        if(found){
+          const original=strategyFor(found.id);
+          if(found.coordinatorBotId!==coordinator.id ||
+             JSON.stringify(found.workerBotIds)!==JSON.stringify(workers.map(bot=>bot.id))||
+             JSON.stringify(found.reviewerBotIds)!==JSON.stringify(reviewers.map(bot=>bot.id))||
+             (found.councilRequired===true)!==councilRequired||
+             JSON.stringify(original)!==JSON.stringify(policy))
+            throw Error('Existing Team conflicts with portable role or strategy snapshot.');
           unchanged.push(preset.name);
         }else pending.push(preset.name);
+        prepared.push({name:preset.name,coordinator,workers,reviewers,councilRequired,policy});
       }
       if(command==='superagent_manifest_import'){
         if(args.confirmed!==true)throw Error('Confirmation required.');
-        for(const name of pending){
-          const preset=doc.orchestrations.find((item:any)=>item.name===name);
-          const a=bots.find(b=>b.name===preset.coordinatorBot)!,b=bots.find(b=>b.name===preset.workerBot)!;
-          const c:Config={id:crypto.randomUUID(),name,coordinatorBotId:a.id,workerBotId:b.id,
-            projectId:b.projectId,enabled:false,policyRevision:1};configs.set(c.id,c);
+        // All references, role bounds and strategy contracts are validated
+        // before any new preview state is committed.
+        for(const candidate of prepared.filter(item=>pending.includes(item.name))){
+          const c:Config={id:crypto.randomUUID(),name:candidate.name,
+            coordinatorBotId:candidate.coordinator.id,workerBotId:candidate.workers[0].id,
+            workerBotIds:candidate.workers.map(bot=>bot.id),
+            reviewerBotIds:candidate.reviewers.map(bot=>bot.id),
+            councilRequired:candidate.councilRequired,
+            teamVersion:1,projectId:candidate.workers[0].projectId,
+            enabled:false,policyRevision:1};
+          configs.set(c.id,c);teamStrategies.set(c.id,candidate.policy);
         }
         value={created:pending,unchanged};
       }else value={wouldCreate:pending,unchanged,importedPresetsDisabled:true};

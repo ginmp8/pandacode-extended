@@ -6768,6 +6768,29 @@ mod tests {
         assert!(!relaunched,"Idempotent WorkItem replay must not dispatch twice");
         assert_eq!(replayed.id,child.id);
         assert!(scheduler::parent_active(&store,&child.id).unwrap());
+        store.db.execute(
+            "UPDATE sa_mandates SET actor='forged-user' WHERE ticket_id=?1",
+            [&root.id],
+        ).unwrap();
+        assert!(!scheduler::parent_active(&store,&child.id).unwrap(),
+            "A child must not inherit a parent mandate assigned to another actor");
+        store.db.execute(
+            "UPDATE sa_mandates SET actor=?2,project_id='foreign-project' WHERE ticket_id=?1",
+            params![&root.id,&root.actor],
+        ).unwrap();
+        assert!(!scheduler::parent_active(&store,&child.id).unwrap(),
+            "A child must not retain authority when the parent project grant drifts");
+        store.db.execute(
+            "UPDATE sa_mandates SET project_id=?2 WHERE ticket_id=?1",
+            params![&root.id,&root.project_id],
+        ).unwrap();
+        assert!(scheduler::parent_active(&store,&child.id).unwrap());
+        store.db.execute(
+            "UPDATE sa_orchestrations SET project_id='foreign-project' WHERE id=?1",
+            [&cfg.id],
+        ).unwrap();
+        assert!(!scheduler::parent_active(&store,&child.id).unwrap(),
+            "A moved parent Team checkout must revoke descendant authority");
     }
 
     #[test]

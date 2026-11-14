@@ -30,8 +30,10 @@ pub(crate) fn parent_active(store:&Store,child_ticket_id:&str)->Result<bool> {
            WHERE root.id=?1 AND root.state='queued' AND root.active_assignment_id IS NULL
              AND plan.state='active' AND root.policy_revision=plan.policy_revision
              AND team.enabled=1 AND team.policy_revision=plan.policy_revision
+             AND team.project_id=root.project_id
              AND grant.revoked=0 AND grant.expires_at>?2
              AND grant.policy_revision=plan.policy_revision
+             AND grant.project_id=root.project_id AND grant.actor=root.actor
              AND grant.allowed_tools='[]' AND grant.allowed_side_effects=0)",
         params![parent,storage::now()],|r|r.get(0),
     ).map_err(|e|e.to_string())?;
@@ -155,8 +157,10 @@ fn reconcile(store:&Store)->Result<()> {
                AND root.revision=plan.ticket_revision
                AND grant.revoked=0 AND grant.expires_at>?1
                AND grant.policy_revision=plan.policy_revision
+               AND grant.project_id=root.project_id AND grant.actor=root.actor
                AND grant.allowed_tools='[]' AND grant.allowed_side_effects=0
                AND team.enabled=1 AND team.policy_revision=plan.policy_revision
+               AND team.project_id=root.project_id
                AND EXISTS(SELECT 1 FROM sa_work_items WHERE ticket_id=plan.ticket_id)
                AND NOT EXISTS(
                  SELECT 1 FROM sa_work_items item
@@ -193,9 +197,19 @@ fn reconcile(store:&Store)->Result<()> {
             "UPDATE sa_tickets SET state='completed',revision=revision+1,updated_at=?2
              WHERE id=?1 AND state='queued'
                AND revision=(SELECT ticket_revision FROM sa_demand_plans WHERE ticket_id=?1)
-               AND EXISTS (SELECT 1 FROM sa_mandates grant
-                            WHERE grant.ticket_id=?1 AND grant.revoked=0
-                              AND grant.expires_at>?2)
+               AND EXISTS (
+                 SELECT 1 FROM sa_mandates grant
+                 JOIN sa_orchestrations team ON team.id=sa_tickets.orchestration_id
+                 JOIN sa_demand_plans plan ON plan.ticket_id=sa_tickets.id
+                 WHERE grant.ticket_id=sa_tickets.id AND grant.revoked=0
+                   AND grant.expires_at>?2
+                   AND grant.policy_revision=plan.policy_revision
+                   AND grant.project_id=sa_tickets.project_id
+                   AND grant.actor=sa_tickets.actor
+                   AND grant.allowed_tools='[]' AND grant.allowed_side_effects=0
+                   AND team.enabled=1 AND team.policy_revision=plan.policy_revision
+                   AND team.project_id=sa_tickets.project_id
+               )
                AND EXISTS(SELECT 1 FROM sa_work_items item WHERE item.ticket_id=?1)
              AND NOT EXISTS(
                  SELECT 1 FROM sa_subagent_nodes descendant
@@ -244,8 +258,10 @@ fn ready(store:&Store)->Result<Vec<ReadyItem>> {
            AND root.active_assignment_id IS NULL
            AND root.policy_revision=plan.policy_revision
            AND team.enabled=1 AND team.policy_revision=plan.policy_revision
+           AND team.project_id=root.project_id
            AND grant.revoked=0 AND grant.expires_at>?1
            AND grant.policy_revision=plan.policy_revision
+           AND grant.project_id=root.project_id AND grant.actor=root.actor
            AND grant.allowed_tools='[]' AND grant.allowed_side_effects=0
            AND (item.requires_write=0 OR EXISTS(
                SELECT 1 FROM sa_work_item_write_scopes scope
@@ -304,9 +320,13 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
                 let root_ok:bool=store.db.query_row(
                     "SELECT EXISTS(SELECT 1 FROM sa_demand_plans plan
                       JOIN sa_mandates grant ON grant.ticket_id=plan.ticket_id
+                      JOIN sa_tickets original ON original.id=plan.ticket_id
                       WHERE plan.ticket_id=?1 AND plan.state='active'
+                      AND original.state='queued' AND original.active_assignment_id IS NULL
+                      AND original.policy_revision=?3 AND original.project_id=?4
                       AND grant.revoked=0 AND grant.expires_at>?2
                       AND grant.policy_revision=?3 AND grant.project_id=?4
+                      AND grant.actor=original.actor
                       AND grant.allowed_tools='[]' AND grant.allowed_side_effects=0)",
                     params![root.id,storage::now(),snapshot.policy.policy_revision,snapshot.project_id],
                     |r|r.get(0),

@@ -1,5 +1,11 @@
 # Extended 0.12.0 — known issues and acceptance gaps
 
+## 2026-11-14 — upstream 0.3.126 inherited limitations and acceptance gaps
+
+The upstream [0.3.126 release notes](../../../releases/0.3.126.md) state that the animated sky briefly pauses on every machine during scrolling/typing, even where the earlier blur was inexpensive; project explorer names cannot contain slash, backslash or colon or equal `.git`; and opening a project file externally hands it to the operating system's default handler. These are **upstream limitations**, not established Extended-specific regressions.
+
+The new project explorer's symlink/path containment, concurrent editor-save conflict handling, ZCode team MCP bridge, animated-sky behavior and retained Extended Settings On/Off paths still require native functional validation. Local Node/TS, Rust, Expo and installed-client tests were not run for this candidate. The 81 shared divergent files retain Extended customization and require complete semantic review; full behavior parity cannot be inferred solely from their presence, successful patch application, or earlier CI. No confirmed security regression is claimed. **Extended 0.12.0 remains DRAFT.**
+
 ## 2026-11-14 — VM screenshot acceptance gaps for source `da1ecb5fc452`
 
 The inherited RFB changes address stale VM frames, buffered/held VNC requests and resize cases. The fork includes new Rust mock-server scenarios; their presence is not evidence that they passed on the Extended candidate. Local Rust tests, live QEMU and macOS Virtualization.framework captures, interaction after typing/clicking, and native Settings On/Off checks were **not executed** here. The 81 existing customized shared paths still require independent semantic acceptance. Prior [Extended `20795fc15cf4`](https://github.com/ginmp8/pandacode-extended/commit/20795fc15cf4cfd41aaf77a06c65be88757e939d) CI was green (22/22), but it predates these three source imports. No known functional regression in these changes has yet been reproduced; do not conflate missing native validation with confirmed loss of functionality.

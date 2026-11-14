@@ -1,5 +1,11 @@
 # Extended 0.12.0 — feature-control continuity
 
+## 2026-11-14 — upstream 0.3.126 continuity of optional controls
+
+The 0.3.126 source [`6c91efdb4d5f`](https://github.com/ginmp8/pandacode/commit/6c91efdb4d5ff317c2e7597fcb717e0814939349) introduces project-file editing and ZCode team MCP host tools. Existing Extended changes in `src/main.ts`, `src-tauri/src/architect.rs`, `src-tauri/src/lib.rs`, `src-tauri/src/providers.rs` and `src-tauri/src/providers/mcp_host.rs` are retained; upstream edits in these files are applied by uniquely matching original patch hunks, not by overwriting Extended logic. The source changes do not authorize removing or changing existing Settings defaults.
+
+Existing optional update, Connect/direct-route, global bot-pause, external MCP, cloud credential-transfer and agent VM/cloud management controls remain in the candidate tree. Off must restrict only its chosen operation; On must permit the underlying upstream path subject to existing authentication/approvals. **No native On/Off, ZCode end-to-end team workflow, editor save/rename safety, or cloud/VM/credential integration tests were run**; source tests and matching patches are not proof of functional equivalence. This release documentation remains **0.12.0 DRAFT**.
+
 ## 2026-11-14 — VM RFB import and existing controls
 
 The three source changes in [upstream `da1ecb5fc452`](https://github.com/ginmp8/pandacode/commit/da1ecb5fc452bc8df313b4485da93d4d573e1e4d) affect only `src-tauri/src/vm/rfb.rs`, its Rust tests and `docs/agent-reference.md`; they do not edit Settings, permission gates, Cloud/VM tool selection, Connect, MCP, bots, credential-transfer controls or defaults. This import therefore retains those pre-existing Extended code paths rather than replacing them with source versions. Existing controls must continue restricting only their configured operations when Off and permitting upstream behavior when On. That functional contract and live VM screenshots have **not been independently exercised** for this candidate; prior CI success on [Extended `20795fc15cf4`](https://github.com/ginmp8/pandacode-extended/commit/20795fc15cf4cfd41aaf77a06c65be88757e939d) does not constitute On/Off acceptance.

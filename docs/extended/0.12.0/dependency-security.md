@@ -1,5 +1,11 @@
 # Extended 0.12.0 — dependency and security tracking
 
+## 2026-11-14 — upstream app 0.3.126 without Extended dependency rollback
+
+Source [`6c91efdb4d5f`](https://github.com/ginmp8/pandacode/commit/6c91efdb4d5ff317c2e7597fcb717e0814939349) declares application **0.3.126**. The candidate synchronizes root `package.json`, both root/version entries in `package-lock.json`, the app package in `src-tauri/Cargo.lock`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`; the last is source-exact. Existing Extended dependency overrides, remediated package versions and lockfile fixes remain. The 0.3.126 upstream manifest delta is a version-only update in these files, not a dependency downgrade.
+
+Static source/destination paths, modes and blobs were checked for the frozen candidate. No new-SHA Node, Rust, Clippy, npm audit or RustSec result exists at documentation authoring. The previous destination [`7206c0592f65`](https://github.com/ginmp8/pandacode-extended/commit/7206c0592f652af3aea01848ea85c44906f0264d) passed [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43597837416) (11/11), but this does not validate the new integration or justify approving **Extended 0.12.0 DRAFT**.
+
 ## 2026-11-14 — source VM frame fix without dependency rollback
 
 [upstream `da1ecb5fc452`](https://github.com/ginmp8/pandacode/commit/da1ecb5fc452bc8df313b4485da93d4d573e1e4d) changes RFB Rust implementation/tests and an agent reference only. Source and Extended application metadata still declare **0.3.125** in npm, the root npm lock metadata, Tauri config, Cargo manifest and the application entry in Cargo.lock. No dependency manifest or lockfile is imported in this checkpoint: Extended's existing remediations, overrides and compatible lockfile remain in place. The baseline [Extended `20795fc15cf4`](https://github.com/ginmp8/pandacode-extended/commit/20795fc15cf4cfd41aaf77a06c65be88757e939d) passed 22/22 CI jobs, including audits, but **no audits or Rust tests for the new candidate SHA have been executed yet**. The documentation version remains **0.12.0 DRAFT**.

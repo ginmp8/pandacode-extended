@@ -1,5 +1,17 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-14 — upstream 0.3.126 candidate gate
+
+- [x] Freeze and verify source [`6c91efdb4d5f`](https://github.com/ginmp8/pandacode/commit/6c91efdb4d5ff317c2e7597fcb717e0814939349) versus destination baseline [`7206c0592f65`](https://github.com/ginmp8/pandacode-extended/commit/7206c0592f652af3aea01848ea85c44906f0264d); all recursive trees complete, not truncated.
+- [x] Include 59 changed upstream paths: 50 source-exact (11 new, including two binary PNG screenshots), nine uniquely matched Extended-aware patch reconciliations, no upstream deletions.
+- [x] Candidate static inventory: 2,062 source, 2,120 Extended files; 1,981 shared identical, 81 customized, 58 Extended-only; no missing source or type/mode divergence.
+- [x] Align app/build version metadata to **0.3.126** while leaving planned Extended distribution documentation at **0.12.0 DRAFT**.
+- [x] Retain upstream original release notes, existing Extended configurable controls, security remediations and exclusive paths.
+- [ ] Run and inspect all CI jobs against the newly published destination commit (prior baseline CI is not sufficient).
+- [ ] Run native project explorer/editor safety and editing tests, ZCode team MCP session bridge and worktrees, animated-sky performance, and platform screenshots.
+- [ ] Validate Extended Settings On/Off, manual versus automatic actions, bots, Connect, remote MCP, cloud/VM and credential flows. Independently review all 81 customized shared paths.
+- [ ] Approve release after applicable cross-platform validation; **do not** tag, publish, create an installer or otherwise treat this candidate as released.
+
 ## 2026-11-14 — inherited VM RFB fix candidate from `da1ecb5fc452`
 
 - [x] Pin [upstream `da1ecb5fc452`](https://github.com/ginmp8/pandacode/commit/da1ecb5fc452bc8df313b4485da93d4d573e1e4d) and [Extended `20795fc15cf4`](https://github.com/ginmp8/pandacode-extended/commit/20795fc15cf4cfd41aaf77a06c65be88757e939d), and compare both complete recursive Git trees without truncation.

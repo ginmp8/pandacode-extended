@@ -111,6 +111,7 @@ import { createAgentInput, type AgentInput } from './agent-input';
 import { mountSlashCommands, type SlashCommand } from './slash-commands';
 import { mountFileMentions, type MentionEntry } from './file-mentions';
 import { createFileTabs } from './file-tabs';
+import { createFileExplorer } from './file-explorer';
 import { bindFileLinkContext, configureFileLinks, isPreviewableFile, refreshFileLinks, type FileLinkContext, type ResolvedFile } from './file-links';
 import { createWorktrees } from './worktrees';
 import { createGithub, githubEnabled } from './github';
@@ -165,8 +166,8 @@ type LiveEarlier = { turn: TranscriptTurn; tools: ToolActivity[] };
 /** Views this platform can show; the inspector's open tabs and selection persist across launches. */
 const INSPECTOR_AVAILABLE = INSPECTOR_VIEWS.filter(view => view !== 'vm' || isMac);
 let inspectorTabs = loadTabs(localStorage, INSPECTOR_AVAILABLE);
-/** Open files is the inspector's per-task editor view: shown only while the task has file tabs, never saved in the strip's order. */
-type PanelView = InspectorView | 'file';
+/** Inspector tabs only. Open files live in the floating editor, not in this strip. */
+type PanelView = InspectorView;
 const INSPECTOR_TITLES: Record<InspectorView, string> = { files: 'Files', search: 'Search', changes: 'Changes', browser: 'Browser', pull: 'Pull request', simulator: 'Simulators', vm: 'Virtual machines', design: 'Design', btw: 'By the way' };
 const INSPECTOR_TIPS: Partial<Record<InspectorView, string>> = { simulator: 'iOS & Android simulators', design: 'Design canvas', btw: 'By the way: a side thread' };
 const INSPECTOR_ICONS: Record<InspectorView, string> = { files: 'file', search: 'search', changes: 'branch', browser: 'globe', pull: 'pull', simulator: 'phone', vm: 'monitor', design: 'sketch', btw: 'chat' };
@@ -562,12 +563,12 @@ $app.innerHTML = `<div class="workspace" data-tauri-drag-region>
     <div class="sidebar-bottom">${button('support', 'Help & support', 'help', 'support-button', 'id="support-button"')}${button('agent-usage', 'Agent usage', 'activity', '', 'id="agent-usage-button"')}<button data-action="settings" title="Settings (${shortcut(',')})" aria-label="Settings">${icon('settings')}</button>${starPanda()}<button data-action="toggle-theme" id="theme-toggle" aria-label="Dark mode" aria-pressed="false"></button></div>
   </aside>
   <main class="main-pane">
-    <header class="workspace-header" data-tauri-drag-region="deep"><div class="header-leading" data-tauri-drag-region>${button('toggle-sidebar', 'Hide sidebar', 'sidebar', 'sidebar-toggle', 'id="sidebar-toggle" aria-controls="workspace-sidebar" aria-expanded="true" aria-keyshortcuts="Meta+B Control+B"')}<span id="view-divider" class="header-divider" aria-hidden="true" hidden></span><div id="breadcrumb" class="breadcrumb" data-tauri-drag-region></div></div><div class="header-actions">${preview ? '<span class="preview-status">Browser preview · sample data</span>' : ''}</div><div id="agents-dock-host"></div><div id="action-dock" class="action-dock" role="toolbar" aria-label="Workspace actions" aria-orientation="vertical" data-tauri-drag-region="false"><div class="action-dock-group" data-group="panels">${button('toggle-inspector', 'Toggle inspector', 'panel', 'active', 'id="inspector-toggle" aria-keyshortcuts="Meta+Shift+B Control+Shift+B"', `Toggle inspector (${shortcut('B', true)})`)}${button('terminal', 'Toggle terminal', 'terminal', '', 'id="terminal-toggle" aria-controls="terminal-drawer" aria-expanded="false" aria-keyshortcuts="Meta+J Control+J"', `Toggle terminal (${shortcut('J')})`)}${button('browser', 'Open browser', 'globe', '', 'id="browser-toggle"')}${button('moodboards', 'Project moodboards', 'images')}<button type="button" id="agents-toggle" class="agents-toggle" aria-label="Agents" aria-haspopup="dialog" aria-expanded="false" aria-controls="agents-flyout" data-dock-notip hidden>${icon('team')}<b class="dock-badge" aria-hidden="true" hidden></b></button></div><div class="action-dock-group" data-group="actions"><button type="button" class="header-run" id="run-project-button" data-action="run-project" aria-label="Run project" title="Run pandacode-run.sh" hidden>${icon('play')}<span>Run</span></button>${button('deploy', 'Deploy', 'upload', '', 'id="deploy-button" aria-haspopup="dialog"')}${button('task-menu', 'Task actions', 'more', '', 'id="task-menu-trigger" aria-haspopup="dialog" aria-expanded="false"')}</div><div class="action-dock-group" data-group="status"><button type="button" id="update-status" class="update-status" hidden>${icon('refresh')}<span>Restart to update</span></button></div></div><div id="agents-flyout" class="agents-flyout" data-tauri-drag-region="false" hidden><div id="subagents-host" class="subagents-host" hidden></div><div id="lineage-host" class="lineage-host"></div></div></header>
+    <header class="workspace-header" data-tauri-drag-region="deep"><div class="header-leading" data-tauri-drag-region>${button('toggle-sidebar', 'Hide sidebar', 'sidebar', 'sidebar-toggle', 'id="sidebar-toggle" aria-controls="workspace-sidebar" aria-expanded="true" aria-keyshortcuts="Meta+B Control+B"')}<span id="view-divider" class="header-divider" aria-hidden="true" hidden></span><div id="breadcrumb" class="breadcrumb" data-tauri-drag-region></div></div><div class="header-actions">${preview ? '<span class="preview-status">Browser preview · sample data</span>' : ''}</div><div id="agents-dock-host"></div><div id="action-dock" class="action-dock" role="toolbar" aria-label="Workspace actions" aria-orientation="vertical" data-tauri-drag-region="false"><div class="action-dock-group" data-group="panels">${button('toggle-inspector', 'Toggle inspector', 'panel', 'active', 'id="inspector-toggle" aria-keyshortcuts="Meta+Shift+B Control+Shift+B"', `Toggle inspector (${shortcut('B', true)})`)}${button('terminal', 'Toggle terminal', 'terminal', '', 'id="terminal-toggle" aria-controls="terminal-drawer" aria-expanded="false" aria-keyshortcuts="Meta+J Control+J"', `Toggle terminal (${shortcut('J')})`)}${button('browser', 'Open browser', 'globe', '', 'id="browser-toggle"')}${button('toggle-files', 'Toggle file explorer', 'folder', '', 'id="files-toggle" aria-controls="inspector" aria-pressed="false"')}${button('toggle-file-editor', 'Toggle editor', 'edit', '', 'id="file-editor-toggle" aria-controls="file-panel" aria-expanded="false" hidden')}${button('moodboards', 'Project moodboards', 'images')}<button type="button" id="agents-toggle" class="agents-toggle" aria-label="Agents" aria-haspopup="dialog" aria-expanded="false" aria-controls="agents-flyout" data-dock-notip hidden>${icon('team')}<b class="dock-badge" aria-hidden="true" hidden></b></button></div><div class="action-dock-group" data-group="actions"><button type="button" class="header-run" id="run-project-button" data-action="run-project" aria-label="Run project" title="Run pandacode-run.sh" hidden>${icon('play')}<span>Run</span></button>${button('deploy', 'Deploy', 'upload', '', 'id="deploy-button" aria-haspopup="dialog"')}${button('task-menu', 'Task actions', 'more', '', 'id="task-menu-trigger" aria-haspopup="dialog" aria-expanded="false"')}</div><div class="action-dock-group" data-group="status"><button type="button" id="update-status" class="update-status" hidden>${icon('refresh')}<span>Restart to update</span></button></div></div><div id="agents-flyout" class="agents-flyout" data-tauri-drag-region="false" hidden><div id="subagents-host" class="subagents-host" hidden></div><div id="lineage-host" class="lineage-host"></div></div></header>
     <div class="work-area"><section id="project-board" class="project-board" aria-label="Project board" hidden></section><section id="github-hub" aria-label="GitHub" hidden></section><section class="conversation-pane"><div id="task-details-heading" class="task-details-heading" hidden></div><aside id="progress-pip" class="progress-pip" aria-label="Visual progress" hidden></aside><div id="transcript" class="transcript" role="log" aria-label="Conversation" aria-live="off"></div><div id="composer-area" class="composer-area"></div><div id="composer-live" class="sr-only" role="status" aria-live="polite"></div></section></div>
     <div id="terminal-drawer" class="terminal-drawer" hidden><div class="drawer-heading"><span>${icon('terminal')}<span id="terminal-project" class="muted"></span></span><div class="terminal-tabs" role="tablist" aria-label="Terminal tabs"></div><div class="terminal-heading-actions"><button class="icon-button" data-terminal-action="new" aria-label="New terminal" title="New terminal">${icon('plus')}</button><button class="icon-button" data-terminal-action="minimize" aria-label="Minimize terminal" title="Minimize terminal">${icon('minimize')}</button><button class="icon-button" data-terminal-action="close" aria-label="Close terminal" title="Close terminal" aria-haspopup="dialog">${icon('close')}</button></div></div><div id="terminal-host"></div></div>
   </main>
   <section id="settings-page" aria-label="Settings" hidden></section>
-  <aside id="inspector" class="inspector" aria-label="Project inspector"><div class="inspector-strip"><nav class="inspector-tabs" role="tablist" aria-label="Panel views"><div class="inspector-tab file-panel-tab" data-view="file" hidden><button class="inspector-tab-button" role="tab" aria-selected="false" tabindex="-1" data-action="tab-open-files" aria-label="Open files" title="Open files">${icon('file')}<span class="inspector-tab-label">Open files</span></button>${button('close-inspector-tab', 'Close open files', 'close', 'inspector-tab-close', 'data-view="file" tabindex="-1"')}</div>${INSPECTOR_AVAILABLE.map(view => `<div class="inspector-tab" data-view="${view}" hidden><button class="inspector-tab-button" role="tab" aria-selected="false" tabindex="-1" data-action="${INSPECTOR_ACTIONS[view]}" aria-label="${INSPECTOR_TITLES[view]}" title="${escape(INSPECTOR_TIPS[view] ?? INSPECTOR_TITLES[view])}">${icon(INSPECTOR_ICONS[view])}<span class="inspector-tab-label">${INSPECTOR_TITLES[view]}</span>${view === 'changes' ? '<span id="changes-count" class="inspector-tab-count"></span>' : ''}</button>${button('close-inspector-tab', `Close ${INSPECTOR_TITLES[view]}`, 'close', 'inspector-tab-close', `data-view="${view}" tabindex="-1"`)}</div>`).join('')}${button('inspector-add-tab', 'Open a view', 'plus', 'inspector-tab-add', 'aria-haspopup="dialog"')}</nav><h2 id="inspector-title" class="sr-only">${INSPECTOR_TITLES[inspectorTabs.selected]}</h2><div class="inspector-strip-actions">${button('refresh-inspector', 'Refresh project', 'refresh', '', 'id="inspector-refresh"')}${button('toggle-inspector', 'Hide inspector', 'panel', 'inspector-hide')}</div></div><div id="inspector-content" class="inspector-content"></div><section id="browser-panel" class="browser-panel" aria-label="Browser" hidden></section><section id="simulator-panel" class="simulator-panel" aria-label="Simulators" hidden></section><section id="vm-panel" class="vm-panel" aria-label="Virtual machines" hidden></section><section id="design-panel" class="design-panel" aria-label="Design" hidden></section><section id="file-panel" class="file-panel" aria-label="Open files" hidden><div id="file-tabs" class="file-tabs" role="tablist" aria-label="Open files" hidden></div><section id="file-view" class="file-view" role="tabpanel" aria-label="Open file" hidden></section></section></aside>
+  <aside id="inspector" class="inspector" aria-label="Project inspector"><div class="inspector-strip"><nav class="inspector-tabs" role="tablist" aria-label="Panel views">${INSPECTOR_AVAILABLE.map(view => `<div class="inspector-tab" data-view="${view}" hidden><button class="inspector-tab-button" role="tab" aria-selected="false" tabindex="-1" data-action="${INSPECTOR_ACTIONS[view]}" aria-label="${INSPECTOR_TITLES[view]}" title="${escape(INSPECTOR_TIPS[view] ?? INSPECTOR_TITLES[view])}">${icon(INSPECTOR_ICONS[view])}<span class="inspector-tab-label">${INSPECTOR_TITLES[view]}</span>${view === 'changes' ? '<span id="changes-count" class="inspector-tab-count"></span>' : ''}</button>${button('close-inspector-tab', `Close ${INSPECTOR_TITLES[view]}`, 'close', 'inspector-tab-close', `data-view="${view}" tabindex="-1"`)}</div>`).join('')}${button('inspector-add-tab', 'Open a view', 'plus', 'inspector-tab-add', 'aria-haspopup="dialog"')}</nav><h2 id="inspector-title" class="sr-only">${INSPECTOR_TITLES[inspectorTabs.selected]}</h2><div class="inspector-strip-actions">${button('refresh-inspector', 'Refresh project', 'refresh', '', 'id="inspector-refresh"')}${button('toggle-inspector', 'Hide inspector', 'panel', 'inspector-hide')}</div></div><div id="inspector-content" class="inspector-content"></div><section id="browser-panel" class="browser-panel" aria-label="Browser" hidden></section><section id="simulator-panel" class="simulator-panel" aria-label="Simulators" hidden></section><section id="vm-panel" class="vm-panel" aria-label="Virtual machines" hidden></section><section id="design-panel" class="design-panel" aria-label="Design" hidden></section><section id="file-panel" class="file-panel" aria-label="Open files" hidden><div id="file-tabs" class="file-tabs" role="tablist" aria-label="Open files" hidden></div><section id="file-view" class="file-view" role="tabpanel" aria-label="Open file" hidden></section></section></aside>
 </div><div id="toast" class="toast" hidden><span class="toast-text" role="status" aria-atomic="false"></span></div><dialog id="dialog"></dialog>`;
 mountDesktopBrand($('.brand-name'));
 // Design-system gallery (src/redesign/gallery.ts): browser preview only, with `?ds`.
@@ -675,8 +676,68 @@ const fileTabs = createFileTabs({
   preview: (path, context) => previewFile(path, context),
   notify: text => notify(text),
   report: error => report(error),
+  selection: async request => {
+    const task = session();
+    if (!task || task.projectId !== request.context.projectId || request.context.sessionId && request.context.sessionId !== task.id) throw new Error('Open this file in its project task before asking the model.');
+    if (task.archived || taskStage(task) === 'completed') throw new Error('Reopen this task before asking the model.');
+    const fence = '`'.repeat([...request.text.matchAll(/`+/g)].reduce((length, match) => Math.max(length, match[0].length + 1), 3));
+    const instruction = request.action === 'fix' ? 'Fix the selected code in this file. Keep the change focused and verify the fix.' : 'Answer the question about this selected code. Do not change files.';
+    const question = request.question || (request.action === 'fix' ? 'Fix any problems in this selection.' : 'Explain what this code does.');
+    const text = `${question}\n\nFile context: ${request.path}\nSelected lines: ${request.startLine}–${request.endLine}\n${instruction}${request.unsaved ? '\nSource: unsaved editor buffer; use the selected text below.' : ''}\n${fence}\n${request.text}\n${fence}`;
+    const entry = await call<QueuedMessage>('queue_add', { sessionId: task.id, text, attachments: [] });
+    setQueue(task.id, [...queueOf(task.id).filter(item => item.id !== entry.id), entry]);
+    renderComposer(); void run(dispatchQueue(task.id)); notify('Selection request added to this task');
+  },
   focusConversation: () => document.querySelector<HTMLElement>('#prompt')?.focus(),
-  emptied: () => { if (state.inspectorTab === 'file') { state.inspectorTab = threadDefault(inspectorTabs); renderInspector(); } },
+  changed: () => {
+    const toggle = $('#file-editor-toggle'); toggle.hidden = !fileTabs.count;
+    toggle.classList.toggle('active', fileTabs.visible); toggle.setAttribute('aria-expanded', String(fileTabs.visible));
+  },
+});
+const fileExplorer = createFileExplorer({
+  call,
+  menu: ({ anchor, ...options }) => run(showChoices(anchor, options)),
+  modal, closeModal,
+  open: async (path, context) => {
+    if (context.projectId !== state.projectId) await selectProject(context.projectId);
+    await openFile(path, 'file', false, context, /\.(html?|svg)$/i.test(path));
+  },
+  changed: (context, path, next) => {
+    fileTabs.remap(context, path, next);
+    if (context.projectId !== state.projectId || (context.sessionId ?? '') !== state.sessionId) return;
+    for (const folder of [...state.openFolders]) if (folder === path || folder.startsWith(path + '/')) {
+      state.openFolders.delete(folder); if (next) state.openFolders.add(next + folder.slice(path.length));
+    }
+    state.folderFiles.clear();
+  },
+  created: (context, parent) => { if (parent && context.projectId === state.projectId && (context.sessionId ?? '') === state.sessionId) state.openFolders.add(parent); },
+  hasChanges: (context, path) => fileTabs.hasChanges(context, path),
+  refresh: async () => { fileTabs.reload(); await refreshExplorerFiles(); },
+  notify, report,
+});
+document.querySelector<HTMLElement>('#inspector-content')!.addEventListener('contextmenu', event => {
+  const anchor = (event.target as Element).closest('.file-row')?.querySelector<HTMLElement>('button[data-path]');
+  if (!anchor) return;
+  event.preventDefault();
+  fileExplorer.menu(anchor, workspaceContext(), anchor.dataset.path!, anchor.hasAttribute('aria-expanded'), { x: event.clientX, y: event.clientY });
+});
+document.querySelector<HTMLElement>('#inspector-content')!.addEventListener('keydown', event => {
+  const anchor = (event.target as Element).closest<HTMLElement>('.file-row>button:first-child[data-path]');
+  if (!anchor || isImeKey(event)) return;
+  const path = anchor.dataset.path!, directory = anchor.hasAttribute('aria-expanded');
+  if (event.key === 'F10' && event.shiftKey || event.key === 'ContextMenu') {
+    event.preventDefault(); fileExplorer.menu(anchor, workspaceContext(), path, directory); return;
+  }
+  if (event.key === 'F2' || event.key === 'Delete') {
+    event.preventDefault(); fileExplorer.edit(workspaceContext(), event.key === 'F2' ? 'rename' : 'delete', path, directory); return;
+  }
+  if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+  event.preventDefault(); event.stopPropagation();
+  const rows = [...document.querySelectorAll<HTMLButtonElement>('#inspector-content .file-row>button:first-child')], index = rows.indexOf(anchor as HTMLButtonElement);
+  if (directory && (event.key === 'ArrowRight' && anchor.getAttribute('aria-expanded') === 'false' || event.key === 'ArrowLeft' && anchor.getAttribute('aria-expanded') === 'true')) { anchor.click(); return; }
+  const parent = path.split('/').slice(0, -1).join('/');
+  const next = event.key === 'Home' ? rows[0] : event.key === 'End' ? rows.at(-1) : event.key === 'ArrowLeft' ? rows.find(row => row.dataset.path === parent) : rows[index + (event.key === 'ArrowUp' ? -1 : 1)];
+  next?.focus();
 });
 const pullView = createPullView({
   call,
@@ -1035,8 +1096,21 @@ const toolImageLoader: ToolImageLoader = (sessionId, path, maxEdge) => isNetwork
 attachToolImages(transcriptScroller, () => state.sessionId ?? '', toolImageLoader);
 const releaseTranscript = (): void => { resumeFollow = false; if (transcriptScroller.scrollTop > 0) stickToBottom = false; };
 // Composer mutations do not imply a resize; the transcript ResizeObserver handles actual size changes before paint.
+// What is skipped is NAMED here rather than inferred: the transcript's own subtree, the composer, and the progress pip with
+// everything inside it. The pip floats over the conversation — #progress-pip is position:absolute in the relatively
+// positioned pane — so no write inside it can move the flow it covers: place() re-sets --pp-top/--pp-bottom/--pp-room from
+// the pane's resize observer, a drag writes translate, and progress-pip.ts writes a frame's width and height and the stage's
+// aspect-ratio while a snapshot animates. A record inside the pip is skipped whatever its type, childList included; a real
+// size change to the transcript is the ResizeObserver's business above.
+// This replaces a getComputedStyle(target).position === 'absolute' | 'fixed' test. That test inferred the skip set from
+// runtime style: every attribute write in the pane paid a style resolution to ask whether its target happened to be out of
+// flow at that moment, so what was skipped could not be read off the source, changed with a class swap on the target, and
+// missed the pip's own descendants because it judged the record's target alone. A named list cannot drift that way.
 const composerArea = $('#composer-area');
-new MutationObserver(records => { if (records.some(record => !transcriptScroller.contains(record.target) && !composerArea.contains(record.target))) followTranscript(); })
+const progressPipHost = $('#progress-pip');
+const rePinsTranscript = (target: Node): boolean =>
+  !transcriptScroller.contains(target) && !composerArea.contains(target) && !progressPipHost.contains(target);
+new MutationObserver(records => { if (records.some(record => rePinsTranscript(record.target))) followTranscript(); })
   .observe($('.conversation-pane'), { childList: true, subtree: true, attributes: true, attributeFilter: ['style', 'class', 'data-state', 'hidden'] });
 transcriptScroller.addEventListener('scroll', () => {
   const top = transcriptScroller.scrollTop;
@@ -1181,7 +1255,7 @@ function restoreThreadPanel(task?: Session): void {
   const sameWorkspace = saved?.workspace === workspaceKey();
   // Without saved state the conversation opens the panel on the selected tab, unless the user closed it or it would cover the chat.
   state.inspector = saved?.open ?? (state.view === 'conversation' && inspectorChosen && !matchMedia('(max-width: 920px)').matches);
-  state.inspectorTab = saved?.tab && (saved.tab === 'file' || inspectorTabs.open.includes(saved.tab)) ? saved.tab : threadDefault(inspectorTabs); state.openFolders = new Set(sameWorkspace ? saved?.folders : []);
+  state.inspectorTab = saved?.tab && inspectorTabs.open.includes(saved.tab) ? saved.tab : threadDefault(inspectorTabs); state.openFolders = new Set(sameWorkspace ? saved?.folders : []);
   state.selectedFile = sameWorkspace ? saved?.file ?? '' : ''; state.selectedKind = sameWorkspace ? saved?.kind ?? '' : ''; state.selectedStaged = saved?.staged ?? false;
   state.browserUrl = sameWorkspace ? saved?.browserUrl ?? '' : ''; selectedFileContext = sameWorkspace && saved?.context ? { ...saved.context } : undefined;
   fileTabs.show(state.sessionId, workspaceKey());
@@ -3437,6 +3511,105 @@ const settleUnfolded = (element: HTMLElement): void => settleIn(element, 4, { re
 /** The reference's steer arrow (↳) and effort gauge; dom.ts has no such glyphs. */
 const STEER_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4v7a3 3 0 0 0 3 3h10m-4-4 4 4-4 4"/></svg>';
 const GAUGE_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4.2 16.5a8.5 8.5 0 1 1 15.6 0"/><path d="m12 13 3.5-4"/></svg>';
+/* The height the text needs is the one thing a keystroke costs a layout read: releasing the box and asking it for its
+ * scrollHeight is the only way to know how many lines the text now wraps to. What the fit memo saves is a second layout,
+ * not that one: the old code wrote the height and then read the box back to decide the overflow switch, so every keystroke
+ * laid the text out twice. It now takes the overflow from the same measurement, and a call whose text is already fitted
+ * (the resizePrompt() that follows a queued message, a redraw between keystrokes) returns without writing and without
+ * laying anything out. A keystroke is not one of those: no focus path calls resizePrompt, and a keystroke's own call always
+ * sees a value the memo has not fitted yet, so typing measures exactly once.
+ * The text is not the fit's only input though: how many lines it wraps to depends on the width it wraps at, and the prompt
+ * is a column of a resizable pane beside a send control that is not one width: 62x36 for Send and Stop
+ * (redesign/conversation.css sizes `.composer-pill>.send-button` 62x36, overriding the 28x28 `--control` square in
+ * styles.css), then content-width for the wider "Checking…" and "Retry connection" secondary buttons, so one draft needs a
+ * taller box in a narrower prompt. The fit is therefore also remembered at a width, and the PROMPT's own ResizeObserver
+ * re-measures it when that width changes — its callbacks run after layout, so the width costs no layout read, and only a
+ * WIDTH counts: the height written below changes the observed box height on every keystroke and must not make the fit stale
+ * (that is the loop guard).
+ * Text and width are not the whole memo key, because a fit can go stale without either changing. `rows` is one input: the
+ * template sets rows="2" and renderComposer() copies the fresh template's rows onto the reused textarea, so a template
+ * that chose a different row count would leave the box at the height fitted for the old one. The box's own height limits
+ * are the other: `min-height` floors a short draft (redesign/conversation.css `.composer-input textarea` sets 60px) and a
+ * `max-height` would cap it, so the limits are keyed too, through a single getComputedStyle(prompt) of just those two
+ * properties. That read sits where the answer can change — in the early-return test, and right after a fit — and costs no
+ * layout: both limits resolve to lengths and keywords the style engine answers from the style it already has, and the
+ * post-fit read runs after scrollHeight forced the layout above it. A font metric is the one input not in the key: the
+ * prompt's font-size is a rem of the root, so the only thing that moves it is the interface scale, whose event re-fits
+ * unconditionally.
+ * The state below sits here rather than beside the listener that also uses it, because renderComposer() — the first caller —
+ * is only a few lines down: a const or let declared below its function's first caller leaves a window where a call (a
+ * redraw, a future top-level one) throws instead of returning. */
+const PROMPT_MAX_HEIGHT = 180;
+/** Everything the fitted height depends on that can change without the text changing: the box's row count and its height
+ *  limits. `rows` is an integer, the limits a serialization of the two computed lengths. */
+type PromptFit = { prompt: HTMLTextAreaElement; value: string; rows: number; limits: string };
+let promptFit: PromptFit | undefined;
+let promptBoxWidth = -1;
+let promptObserved: HTMLTextAreaElement | null = null;
+const promptResize = new ResizeObserver(entries => {
+  const width = entries.at(-1)?.contentRect.width ?? 0;
+  // No box to fit (a view without a composer, the prompt hidden or collapsed): forget the width, so the width it comes back
+  // at re-fits even when that is the width it left at. A sub-pixel change wraps nothing.
+  if (!width) { promptBoxWidth = -1; return; }
+  if (Math.abs(width - promptBoxWidth) < .5) return;
+  promptBoxWidth = width;
+  // An empty prompt is one line at any width, so a width change must not lay it out. The first
+  // character still measures, at the width just recorded.
+  const current = promptObserved;
+  if (current && current.value === '' && promptFit?.prompt === current && promptFit.rows === current.rows && current.style.height) return;
+  resizePrompt(true);
+});
+// Created once, never per render, and watching the prompt itself: its own inline size is exactly the quantity the fit
+// depends on, so the send pill (62 px for Send and Stop) swapping for the wider, content-sized secondary button re-fits the
+// draft even though the composer row's own box never changes. The node survives a redraw of the same thread
+// (renderComposer() puts the old textarea back), so nothing to re-attach there; a thread switch leaves the template's fresh
+// node in place, so resizePrompt() re-attaches below — one identity compare, no layout read.
+function watchPrompt(prompt: HTMLTextAreaElement | null): void {
+  if (prompt === promptObserved) return;
+  if (promptObserved) promptResize.unobserve(promptObserved);
+  promptObserved = prompt;
+  // A different box is measured from scratch, at whatever width it lands at.
+  promptBoxWidth = -1;
+  if (prompt) promptResize.observe(prompt);
+}
+function resizePrompt(remeasure = false): void {
+  const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
+  watchPrompt(prompt);
+  if (!prompt) { promptFit = undefined; return; }
+  const fit = promptFit?.prompt === prompt ? promptFit : undefined;
+  // An empty prompt is one line at any width (docs/agent-reference.md). Every composer render asks, and resolving
+  // min/max height here would restyle the page on each one, so an empty box that is already fitted returns before that
+  // read. `rows` stays in the key: the template copies its row count onto the reused textarea. Interface scale passes
+  // `remeasure` and refits, because the line height changed even though the width did not.
+  if (!remeasure && fit && prompt.value === '' && fit.value === '' && fit.rows === prompt.rows && prompt.style.height) return;
+  // The same text, the same rows and the same height limits in a box that is already fitted, at a width promptResize has
+  // accounted for, needs the height it has: this call writes nothing and lays nothing out. `value` and `rows` are a string
+  // and an integer, so a keystroke short-circuits on the value before the only read here is reached, and a redraw that
+  // changed the row count or the limits re-fits instead of trusting the last fit.
+  if (!remeasure && fit && fit.value === prompt.value && prompt.style.height && fit.rows === prompt.rows && fit.limits === promptHeightLimits(prompt)) return;
+  prompt.style.height = 'auto';
+  const natural = prompt.scrollHeight;
+  // A pane that is not laid out reports no content height: forget the fit and the width it was taken at, so the next layout
+  // — the pane shown again, or the prompt's observer seeing it at a real width — measures instead of trusting it.
+  if (!natural) { promptFit = undefined; promptBoxWidth = -1; return; }
+  const height = Math.min(natural, PROMPT_MAX_HEIGHT);
+  prompt.style.height = `${height}px`;
+  // Scroll only past the cap; a pixel of rounding at rest must not show a scroll bar. At any height the box scrolls
+  // exactly when the text is taller than it, so this is the same test, one measurement cheaper.
+  const overflow = natural > height + 1 ? 'auto' : 'hidden';
+  if (prompt.style.overflowY !== overflow) prompt.style.overflowY = overflow;
+  promptFit = { prompt, value: prompt.value, rows: prompt.rows, limits: promptHeightLimits(prompt) };
+}
+/** The fitted height also depends on the box's own limits, and they can change without the text or the width changing (a
+ *  rule above it in the cascade, a unit change). Read once where the answer is decided or recorded, never per keystroke. */
+function promptHeightLimits(prompt: HTMLTextAreaElement): string {
+  const style = getComputedStyle(prompt);
+  return `${style.minHeight}|${style.maxHeight}`;
+}
+// An interface-size change can leave the prompt's box the same width and still change how the text wraps (the preview scales
+// the root font while the actions keep their px widths), so the observer above stays silent and the fit has to be re-taken
+// from the event.
+window.addEventListener('pandacode-ui-scale-change', () => resizePrompt(true));
 function renderComposer(): void {
   refreshTeamProgress();
   syncProgressPip();
@@ -5563,6 +5736,24 @@ function onAgent(event: AgentEvent): void {
   if (!renderFrame && event.sessionId === state.sessionId && transcriptVisible()) renderFrame = requestAnimationFrame(() => { renderFrame = 0; renderStream(); });
 }
 
+async function refreshExplorerFiles(): Promise<void> {
+  if (!project() || session()?.remoteDevice || state.inspectorTab !== 'files' || !state.inspector || state.inspectorLoading) return;
+  const key = workspaceKey(), context = workspaceContext(), folders = ['', ...state.openFolders];
+  const results = await Promise.allSettled(folders.map(path => call<FileEntry[]>('list_files', { ...context, path })));
+  if (key !== workspaceKey()) return;
+  const same = (current: FileEntry[] | undefined, next: FileEntry[]) => JSON.stringify(current ?? []) === JSON.stringify(next);
+  let changed = false;
+  results.forEach((result, i) => {
+    if (result.status !== 'fulfilled') return;
+    if (!folders[i]) {
+      if (!same(state.files, result.value) || state.filesError) { state.files = result.value; state.filesError = ''; changed = true; }
+    } else if (state.openFolders.has(folders[i]) && !same(state.folderFiles.get(folders[i]), result.value)) {
+      state.folderFiles.set(folders[i], result.value); changed = true;
+    }
+  });
+  if (changed) renderInspector();
+}
+
 /** A thread switch within the workspace whose status loaded this long ago (ms) reuses it rather than reloading the
  *  status, file list and jj state and redrawing the inspector; anything that changes the files refreshes it itself. */
 const INSPECTOR_FRESH_MS = 5000;
@@ -5600,7 +5791,7 @@ async function refreshInspector(): Promise<void> {
   state.files = results[1].status === 'fulfilled' ? results[1].value : [];
   state.jj = results[2].status === 'fulfilled' ? results[2].value : null;
   state.filesError = results[1].status === 'rejected' ? errorText(results[1].reason) || 'The folder could not be read.' : '';
-  renderInspector(); renderHeader(); if (state.inspector && state.inspectorTab === 'file') fileTabs.reload();
+  renderInspector(); renderHeader(); fileTabs.reload();
 }
 /** The simulator panel stays mounted once opened; hiding it stops its frames. */
 function syncSimulatorPanel(): void {
@@ -5779,26 +5970,22 @@ $('.inspector-tabs').addEventListener('focusout', event => {
   if (!nav.contains(event.relatedTarget as Node | null)) rovingTabs(nav);
 });
 function renderInspectorTabs(pullLinked: boolean): void {
-  const tabs = state.inspectorTab === 'file' ? inspectorTabs : openTab(inspectorTabs, state.inspectorTab);
+  const tabs = openTab(inspectorTabs, state.inspectorTab);
   if (!sameTabs(tabs, inspectorTabs)) { inspectorTabs = tabs; saveTabs(localStorage, tabs); }
   const nav = $('.inspector-tabs'), add = nav.querySelector<HTMLElement>('.inspector-tab-add')!;
   const shown = tabs.open.filter(view => view !== 'pull' || pullLinked);
-  const files = nav.querySelector<HTMLElement>(':scope>.file-panel-tab')!;
-  files.hidden = !fileTabs.count;
-  const items = [files, ...nav.querySelectorAll<HTMLElement>(':scope>.inspector-tab:not(.file-panel-tab)')];
+  const items = [...nav.querySelectorAll<HTMLElement>(':scope>.inspector-tab')];
   for (const item of items) {
     const view = item.dataset.view as PanelView, selected = view === state.inspectorTab;
-    if (item !== files) {
-      item.hidden = !shown.includes(view as InspectorView);
-      item.querySelector<HTMLElement>('.inspector-tab-close')!.hidden = shown.length < 2;
-    }
+    item.hidden = !shown.includes(view);
+    item.querySelector<HTMLElement>('.inspector-tab-close')!.hidden = shown.length < 2;
     const tab = item.querySelector<HTMLElement>('.inspector-tab-button')!;
     tab.classList.toggle('selected', selected);
     tab.setAttribute('aria-selected', String(selected));
   }
   rovingTabs(nav);
   // Move nodes only when the order changed, so a focused tab keeps focus.
-  if (items.filter(item => !item.hidden && item !== files).map(item => item.dataset.view).join() !== shown.join()) for (const view of shown) nav.insertBefore(items.find(item => item.dataset.view === view)!, add);
+  if (items.filter(item => !item.hidden).map(item => item.dataset.view).join() !== shown.join()) for (const view of shown) nav.insertBefore(items.find(item => item.dataset.view === view)!, add);
   add.hidden = !closedViews(tabs, INSPECTOR_AVAILABLE.filter(view => view !== 'pull' || pullLinked)).length;
   revealSelectedTab();
 }
@@ -5807,13 +5994,6 @@ function openInspectorView(view: InspectorView): void {
   if (tab) run(action(tab.dataset.action!, tab));
 }
 function closeInspectorTab(view: PanelView): void {
-  if (view === 'file') {
-    fileTabs.forget(state.sessionId);
-    if (state.inspectorTab === 'file') state.inspectorTab = threadDefault(inspectorTabs);
-    renderInspector();
-    document.querySelector<HTMLElement>(`.inspector-tab[data-view="${state.inspectorTab}"] .inspector-tab-button`)?.focus();
-    return;
-  }
   const next = closeTab(inspectorTabs, view);
   if (next === inspectorTabs) return;
   const wasSelected = state.inspectorTab === view;
@@ -5854,7 +6034,7 @@ function showChangesView(target: HTMLElement, key: string): void {
 function fileTree(files: FileEntry[], depth: number): string {
   return files.map(file => {
     const open = file.isDir && state.openFolders.has(file.path), path = escape(file.path);
-    const row = `<div class="file-row" style="--depth:${depth}"><button data-action="${file.isDir ? 'toggle-file-folder' : isPreviewableFile(file.path) && !OPENS_IN_TAB.test(file.path) ? 'preview-file' : 'open-file'}" data-path="${path}"${file.isDir ? ` aria-expanded="${open}"` : ''}>${file.isDir ? icon('chevron', 'file-twisty') : '<span class="file-twisty"></span>'}${fileIcon(file.name, file.isDir)}<span>${escape(file.name)}</span></button>${!file.isDir && /\.(html?|svg)$/i.test(file.path) ? button('view-source', 'View source of ' + file.name, 'file', 'file-attach', `data-path="${path}"`) : ''}${!file.isDir ? button('attach-file', 'Attach ' + file.name, 'plus', 'file-attach', `data-path="${path}"`) : ''}</div>`;
+    const row = `<div class="file-row" data-id="file:${path}" style="--depth:${depth}"><button data-action="${file.isDir ? 'toggle-file-folder' : 'open-file'}" data-path="${path}"${file.isDir ? ` aria-expanded="${open}"` : ''}>${file.isDir ? icon('chevron', 'file-twisty') : '<span class="file-twisty"></span>'}${fileIcon(file.name, file.isDir)}<span>${escape(file.name)}</span></button>${!file.isDir && /\.svg$/i.test(file.path) ? button('view-source', 'View source of ' + file.name, 'file', 'file-attach', `data-path="${path}"`) : ''}${!file.isDir ? button('attach-file', 'Attach ' + file.name, 'plus', 'file-attach', `data-path="${path}"`) : ''}${button('file-menu', 'Actions for ' + file.name, 'more', 'file-attach', `data-path="${path}" data-directory="${file.isDir}" aria-haspopup="menu"`)}</div>`;
     return row + (open ? fileTree(state.folderFiles.get(file.path) ?? [], depth + 1) : '');
   }).join('');
 }
@@ -5900,15 +6080,18 @@ function renderInspector(): void {
   else hidePanel(inspector, animate, () => { if (inspector.hidden) workspace.classList.add('inspector-closed'); }, $('#inspector-toggle'));
   inspectorDrawn = true; inspectorView = state.view;
   $('#inspector-toggle').classList.toggle('active', visible);
+  const filesOpen = visible && state.inspectorTab === 'files';
+  $('#files-toggle').classList.toggle('active', filesOpen);
+  $('#files-toggle').setAttribute('aria-pressed', String(filesOpen));
+  $('#files-toggle').hidden = !project() || Boolean(state.sharedChannelId);
   const pullTask = githubEnabled() && session()?.pullRequest ? session() : undefined;
   if (state.inspectorTab === 'pull' && !pullTask) { const shown = inspectorTabs.open.filter(view => view !== 'pull'); state.inspectorTab = shown.includes('changes') || !shown.length ? 'changes' : shown[0]; }
-  if (state.inspectorTab === 'file' && !fileTabs.count) state.inspectorTab = threadDefault(inspectorTabs);
   renderInspectorTabs(Boolean(pullTask));
   const pullTab = $('.inspector-tabs').querySelector<HTMLButtonElement>('[data-action="tab-pull"]')!;
   if (pullTask) { pullTab.title = `Pull request #${pullTask.pullRequest!.number}`; pullTab.setAttribute('aria-label', `Pull request #${pullTask.pullRequest!.number}`); }
   const changeCount = state.git?.files.length ?? 0;
   $('.inspector-tabs [data-action="tab-changes"]').setAttribute('aria-label', changeCount ? `Changes, ${changeCount} changed ${changeCount === 1 ? 'file' : 'files'}` : 'Changes');
-  $('#inspector-title').textContent = state.inspectorTab === 'file' ? 'Open files' : INSPECTOR_TITLES[state.inspectorTab];
+  $('#inspector-title').textContent = INSPECTOR_TITLES[state.inspectorTab];
   $('#changes-count').textContent = state.git?.files.length ? String(state.git.files.length) : '';
   const changesKey = `${state.projectId}\0${state.sessionId}\0${workspacePath()}`;
   const keepChanges = state.inspectorTab === 'changes' && !state.selectedKind && Boolean(project()) && !session()?.remoteDevice && !(state.jj?.isRepo && !state.jj.colocated) && changesViewKey === changesKey && (state.inspectorLoading || (!state.gitError && Boolean(state.git?.isRepo)));
@@ -5917,10 +6100,7 @@ function renderInspector(): void {
   syncSimulatorPanel();
   syncVmPanel();
   syncDesignPanel();
-  const showFiles = state.inspectorTab === 'file';
-  $('#file-panel').hidden = !showFiles;
-  if (showFiles) { $('#inspector-content').hidden = true; $('#inspector-refresh').hidden = true; }
-  if (showFiles || state.inspectorTab === 'browser' || state.inspectorTab === 'simulator' || state.inspectorTab === 'vm' || state.inspectorTab === 'design') { pullView.dispose(); return; }
+  if (state.inspectorTab === 'browser' || state.inspectorTab === 'simulator' || state.inspectorTab === 'vm' || state.inspectorTab === 'design') { pullView.dispose(); return; }
   const target = $('#inspector-content');
   if (state.inspectorTab === 'pull' && pullTask && visible) { pullView.show(target, pullTask); return; }
   pullView.dispose();
@@ -5958,8 +6138,8 @@ function renderInspector(): void {
   }
   if (state.inspectorTab === 'files') {
     // Morphed once the tree is up, so a folder's chevron survives to turn.
-    const tree = `<div class="file-folder-path"><span>${escape(project()?.name)}</span>${state.openFolders.size ? button('collapse-folders', 'Collapse folders', 'minimize') : ''}</div><div class="file-list">${fileTree(state.files, 0) || '<div class="inspector-empty">This folder is empty.</div>'}</div>`;
-    if (target.querySelector(':scope>.file-list')) morph(target, tree); else target.innerHTML = tree;
+    const tree = `<section class="file-explorer" aria-label="File explorer"><div class="file-folder-path"><span title="${escape(workspacePath())}">${escape(project()?.name)}</span><div class="file-explorer-tools">${button('new-workspace-file', 'New file', 'file')}${button('new-workspace-folder', 'New folder', 'folder')}${button('file-menu', 'File actions', 'more', '', 'data-path="" data-directory="true" aria-haspopup="menu"')}${state.openFolders.size ? button('collapse-folders', 'Collapse folders', 'minimize') : ''}</div></div><div class="file-list">${fileTree(state.files, 0) || '<div class="inspector-empty">This folder is empty.</div>'}</div></section>`;
+    if (target.querySelector(':scope>.file-explorer')) morph(target, tree, 6); else target.innerHTML = tree;
     return;
   }
   if (state.jj?.isRepo && !state.jj.colocated) {
@@ -5996,13 +6176,12 @@ async function previewFile(path: string, context = workspaceContext(), active?: 
 }
 async function openFile(path: string, kind: 'file' | 'diff', staged = false, context = workspaceContext(), source = false): Promise<void> {
   const p = project(); if (!p) return;
-  // Files open as tabs in the inspector's Open files view beside their task's conversation.
   if (kind === 'file') {
     if (context.sessionId && context.sessionId !== state.sessionId) await selectSession(context.sessionId);
     if (context.sessionId && context.sessionId !== state.sessionId) return;
     if (state.view !== 'conversation' && !state.boardPanel) setWorkspaceView('conversation');
     fileTabs.open(path, context, source);
-    ++fileRequest; inspectorSuppressed = false; state.inspector = true; state.inspectorTab = 'file'; state.selectedKind = ''; renderInspector(); return;
+    ++fileRequest; state.selectedKind = ''; renderInspector(); return;
   }
   const request = ++fileRequest, generation = state.generation; const content = await call<string>('git_diff', { ...context, path, staged }); if (request !== fileRequest || p.id !== state.projectId || generation !== state.generation) return;
   selectedFileContext = { ...context };
@@ -6241,8 +6420,8 @@ async function showModel(anchor: HTMLElement, target = session()): Promise<void>
       if (isBtwDraft(selected)) { saveBtwDraft(selected, { provider: providerId, model, reasoningEffort: null }); return; }
       configuringSessions.add(selected.id);
       try {
-        // A plain model leaves a named team; ZCode only supports single-agent tasks.
-        if (teams.get(selected.id)?.config.rosterOnly || (providerId === 'zcode' && teams.has(selected.id))) {
+        // A plain model leaves a named team.
+        if (teams.get(selected.id)?.config.rosterOnly) {
           await call<TeamSnapshot | null>('architect_configure', { sessionId: selected.id, config: null, architect: null, profileId: null });
           onArchitect({ sessionId: selected.id, removed: true });
         }
@@ -7788,7 +7967,7 @@ async function toggleTerminal(): Promise<void> {
 
 async function action(name: string, element: HTMLElement): Promise<void> {
   if (element.dataset.command) closeModal();
-  if (['tab-files', 'tab-changes', 'browser', 'back-inspector'].includes(name) || name === 'toggle-inspector' && !state.filePreviewLoading) ++fileRequest;
+  if (['tab-files', 'toggle-files', 'tab-changes', 'browser', 'back-inspector'].includes(name) || name === 'toggle-inspector' && !state.filePreviewLoading) ++fileRequest;
   if (name.startsWith('queue-')) { await queueAction(name, element); return; }
   if (name.startsWith('limit-')) { await limitAction(name, element); return; }
   switch (name) {
@@ -7912,11 +8091,12 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'copy-path': await navigator.clipboard.writeText(workspacePath()); notify(session()?.worktreePath ? 'Worktree path copied' : 'Project path copied'); break;
     case 'terminal': await toggleTerminal(); break;
     case 'toggle-inspector': state.inspector = inspectorChosen = inspectorSuppressed || !state.inspector; inspectorSuppressed = false; renderInspector(); break;
+    case 'toggle-files': state.inspector = inspectorChosen = inspectorSuppressed || !state.inspector || state.inspectorTab !== 'files'; inspectorSuppressed = false; state.inspectorTab = 'files'; state.selectedKind = ''; renderInspector(); break;
     case 'tab-vm': openVm(); break;
     case 'tab-btw': openBtw(); btwPanel.focus(); break;
     case 'inspector-add-tab': await showInspectorViews(element); break;
     case 'close-inspector-tab': closeInspectorTab(element.dataset.view as PanelView); break;
-    case 'tab-open-files': state.inspectorTab = 'file'; state.selectedKind = ''; renderInspector(); break;
+    case 'toggle-file-editor': fileTabs.toggle(); break;
     case 'tab-design': inspectorSuppressed = false; state.inspector = true; state.inspectorTab = 'design'; state.selectedKind = ''; renderInspector(); break;
     case 'deploy': await showDeploy(element); break;
     case 'tab-simulator': case 'simulator': if (name === 'simulator' && state.inspector && state.inspectorTab === 'simulator' && !inspectorSuppressed) { state.inspectorTab = 'changes'; renderInspector(); } else openSimulator(); break;
@@ -7932,6 +8112,8 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     case 'browser': inspectorSuppressed = false; state.inspector = true; state.inspectorTab = 'browser'; state.selectedKind = ''; renderInspector(); break;
     case 'refresh-inspector': if (state.inspectorTab === 'btw') { await btwPanel.reload(); break; } if (state.inspectorTab === 'pull') { pullView.forget(state.sessionId); renderInspector(); break; } if (state.inspectorTab === 'search') searchPanel.refresh(); refreshFileLinks(workspaceContext()); await refreshInspector(); break;
     case 'locate-project-folder': await locateProjectFolder(); break;
+    case 'file-menu': fileExplorer.menu(element, workspaceContext(), element.dataset.path!, element.dataset.directory === 'true'); break;
+    case 'new-workspace-file': case 'new-workspace-folder': fileExplorer.edit(workspaceContext(), name === 'new-workspace-file' ? 'new-file' : 'new-folder', '', true); break;
     case 'toggle-file-folder': await toggleFolder(element.dataset.path!); break;
     case 'collapse-folders': state.openFolders = new Set(); state.folderFiles = new Map(); renderInspector(); document.querySelector<HTMLElement>('#inspector-content .file-row button')?.focus(); break;
     case 'run-project': if (!element.dataset.sessionId || element.dataset.sessionId === state.sessionId) await projectRunner.run(); break;
@@ -8059,22 +8241,6 @@ document.addEventListener('submit', event => {
     } finally { if (submitter?.isConnected) submitter.disabled = false; }
   })());
 });
-/** The prompt last sized while empty: an empty prompt is one line at any width, so sizing it again changes nothing
- *  and would only lay out the page (every composer render asks). */
-let emptySized: HTMLTextAreaElement | undefined;
-function resizePrompt(): void {
-  const prompt = document.querySelector<HTMLTextAreaElement>('#prompt');
-  if (!prompt) return;
-  if (!prompt.value && emptySized === prompt) return;
-  emptySized = prompt.value ? undefined : prompt;
-  prompt.style.height = 'auto';
-  const natural = prompt.scrollHeight;
-  prompt.style.height = Math.min(natural, 180) + 'px';
-  // Use the same measurement; a pixel of rounding at the cap must not show a scroll bar.
-  const overflow = natural > 181 ? 'auto' : 'hidden';
-  if (prompt.style.overflowY !== overflow) prompt.style.overflowY = overflow;
-}
-window.addEventListener('pandacode-ui-scale-change', () => { emptySized = undefined; resizePrompt(); });
 document.addEventListener('input', event => { const input = event.target as HTMLInputElement; if (input.id === 'command-query') renderCommands(input.value); if (input.id === 'prompt') { resizePrompt(); if (input.dataset.sessionId && !deletedSessions.has(input.dataset.sessionId)) state.drafts.set(input.dataset.sessionId, input.value); } if (input.id === 'shared-channel-prompt' && state.sharedChannelId) state.drafts.set(channelDraftKey(state.sharedChannelId), input.value); if (input.id === 'sidebar-filter') { state.query = input.value; renderNavigation(); } });
 document.addEventListener('scroll', event => {
   if (!state.sharedChannelId) return;

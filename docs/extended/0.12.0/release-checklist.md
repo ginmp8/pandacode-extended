@@ -1,5 +1,16 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-14 — inherited VM RFB fix candidate from `da1ecb5fc452`
+
+- [x] Pin [upstream `da1ecb5fc452`](https://github.com/ginmp8/pandacode/commit/da1ecb5fc452bc8df313b4485da93d4d573e1e4d) and [Extended `20795fc15cf4`](https://github.com/ginmp8/pandacode-extended/commit/20795fc15cf4cfd41aaf77a06c65be88757e939d), and compare both complete recursive Git trees without truncation.
+- [x] Identify exactly three changed upstream paths; prepare byte-exact copies and preserve 81 customized shared plus 58 Extended-only paths.
+- [x] Confirm application metadata **0.3.125** independently of planned Extended **0.12.0 DRAFT** and preserve dependency hardening.
+- [x] Record pre-import [Extended `20795fc15cf4`](https://github.com/ginmp8/pandacode-extended/commit/20795fc15cf4cfd41aaf77a06c65be88757e939d) CI: [push](https://github.com/ginmp8/pandacode-extended/actions/runs/43574216539) and [PR](https://github.com/ginmp8/pandacode-extended/actions/runs/43574221160), 22/22 passed.
+- [ ] Verify CI and build checks of the **new published SHA**; prior CI is not transferable.
+- [ ] Execute Rust RFB mock-server tests and native QEMU/Virtualization.framework VM capture, resize, click and type acceptance.
+- [ ] Validate existing VM management controls and related Extended Settings On/Off paths; independently review all 81 customized shared paths for functional parity.
+- [ ] Obtain separate release approval; no tag, public installer, GitHub Release or deploy is authorized.
+
 ## 2026-11-14 — verified CI for the Cargo.lock reconciliation
 
 - [x] Verify exact-source [source 6c42278ff598](https://github.com/ginmp8/pandacode/commit/6c42278ff5981e50c9dc494986b4380123d4686d) and exact-code [Extended 7d6897e87c3e](https://github.com/ginmp8/pandacode-extended/commit/7d6897e87c3e8a88c1ebb323783cb75a7071f65b); the native application remains **0.3.125**.

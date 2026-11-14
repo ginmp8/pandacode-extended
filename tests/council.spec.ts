@@ -1018,6 +1018,9 @@ test('Auto is explained, the off note is plain, and the button is busy while a s
 });
 
 test('Tab and Shift+Tab stay inside the panel through every control, from any of them (WebKit too)', async ({ page }) => {
+  // Two focus round trips per stop over the whole editor; WebKit in CI is slow enough to hit the suite's 60 s
+  // ceiling mid-walk, so budget extra headroom instead of dropping any edge assertion.
+  test.setTimeout(180_000);
   await open(page, '/?council=composition');
   await button(page).click();
   await expect(toggle(page)).toBeFocused();

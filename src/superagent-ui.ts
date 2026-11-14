@@ -1042,8 +1042,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<dt>Worker</dt><dd>' + safe(botName(chosen.workerBotId)) + '</dd>' +
         '<dt>Configured members</dt><dd>' + safe(roleSummary(chosen)) + '</dd>' +
         '<dt>Review policy</dt><dd>' + (chosen.councilRequired ? 'Native Council required' : 'Council Off') + '</dd>' +
-        '<dt>Current native support</dt><dd>Manual worker dispatch with explicitly authorized scoped writes on supported platforms; authenticated Observe only, no GitHub Auto.</dd></dl>' +
-        '<button type="button" data-sa-open-runs>Assign demand / Open runs</button></section>'
+        '<dt>Current native support</dt><dd>Manual worker dispatch with explicitly authorized scoped writes on supported platforms; authenticated GitHub Auto only with an exact native grant.</dd></dl>' +
+        '<div class="sa-actions"><button type="button" data-sa-enable="' + safe(chosen.id) + '"' +
+        (!chosen.enabled && (chosen.workerBotIds?.length ?? 1) > 1
+          ? ' disabled title="Native manual admission supports one executable Worker"' : '') +
+        '>' + (chosen.enabled ? 'Disable' : 'Enable manual') + '</button>' +
+        '<button type="button" data-sa-open-runs>Assign demand / Open runs</button></div>' +
+        (!chosen.enabled && (chosen.workerBotIds?.length ?? 1) > 1
+          ? '<p role="note">This Team has multiple configured Workers; native manual execution is unavailable until separately scoped multi-worker admission is supported.</p>' : '') +
+        '</section>'
       : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
     const globalReviewPanel = '<section class="sa-pane sa-cross-team-review" ' +
       'role="region" aria-label="Cross-Team native review inbox"><header>' +

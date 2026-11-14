@@ -584,6 +584,28 @@ pub(crate) fn council_evidence_is_current(store: &Store, team: &TeamSnapshot) ->
     council::changed_at(store, team).is_ok_and(|latest| latest <= team.changed_at)
 }
 
+/// M3 is a new composed Council mode: a scored, completed read-only seat must
+/// also have its real native authority record, not merely a plausible worker
+/// snapshot in architect_teams. Legacy M1/M2 completion remains unchanged.
+fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
+    let Some(config) = team.config.council.as_ref() else { return false };
+    if config.mode() != "m3" { return true; }
+    let Some(status) = council::status(team) else { return false };
+    if status.state != "passed" || status.stale { return false; }
+    let eligible = team.workers.iter().filter(|worker| {
+        worker.created_at >= team.council_since
+            && worker.council.as_ref().is_some_and(|seat|
+                seat.round == status.round && seat.score.is_some()
+                    && (!worker.abandoned || seat.score.is_some()))
+    }).collect::<Vec<_>>();
+    eligible.len() == config.needed() && eligible.iter().all(|worker| {
+        if !worker.read_only || worker.status != "completed" { return false; }
+        let Some(binding) = worker.reviewer_binding.as_ref() else { return false };
+        binding.validate(team, worker).is_ok()
+            && reviewer_security::validate_recorded_authority(store, &team.session_id, binding).is_ok()
+    })
+}
+
 /// Do not use a cached "passed" label as an authorization token. Recompute
 /// the native Council gate from frozen workers, scores, required skill receipts
 /// and current stored change evidence before publishing a successful result.
@@ -593,6 +615,7 @@ pub(crate) fn verified_council_pass(store: &Store, team: &TeamSnapshot) -> bool 
     if stored.state != "passed" || stored.stale { return false; }
     let Some(verified) = council::status(team) else { return false };
     verified.state == "passed" && !verified.stale
+        && mixed_native_authority_current(store, team)
         && stored.round == verified.round
         && stored.lowest == verified.lowest
         && stored.target == verified.target
@@ -2630,6 +2653,15 @@ fn dispatch_as(
             refresh_council(&store, &mut team);
             if let Some(refusal) = council::finish_refusal(&team) {
                 return Err(refusal);
+            }
+            // A composed M3 Council cannot finish from forged snapshots that
+            // have no matching native reviewer authority. An explicit user
+            // acceptance remains a separate, attributed exceptional outcome.
+            if team.config.council.as_ref().is_some_and(|c| c.mode() == "m3")
+                && council::status(&team).is_some_and(|s| s.state == "passed")
+                && !mixed_native_authority_current(&store, &team)
+            {
+                return Err("reviewer_session_mismatch: M3 Council seats require persisted native reviewer authority before completion.".into());
             }
             team.status = "completed".into();
             team.summary = Some(finish.summary);

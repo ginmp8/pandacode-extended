@@ -1253,6 +1253,69 @@ fn composed_council_rejects_forged_failed_and_duplicate_native_seats_at_limit() 
 }
 
 #[test]
+fn mixed_root_terminal_gate_requires_recorded_native_reviewer_authority() {
+    let (state, sid) = state_fixture();
+    let store = state.store.lock().unwrap();
+    let mut config = on(9.0, 1, 0);
+    config.reviewer_bot_ids = vec!["selected-reviewer".into()];
+    config.automatic_reviewers = 1;
+    let mut team = team_with(config, Vec::new());
+    team.session_id = sid.clone();
+
+    let mut direct = seat("direct-auth", 1, Some(9.8), SINCE + 1);
+    let mut direct_binding = reviewer_security::ReviewerBinding::native(
+        &team, &direct.id, direct.created_at, &direct.provider, &direct.model,
+        direct.council.as_ref().unwrap(),
+    );
+    direct_binding.reviewer_bot_id = Some("selected-reviewer".into());
+    direct_binding.roster_bot_ids = vec!["selected-reviewer".into()];
+    direct_binding.required_reviewers = Some(2);
+    direct_binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+        name: "Selected reviewer".into(), role: "Security".into(),
+        instructions: String::new(), goals: String::new(), soul: String::new(),
+        reasoning_effort: String::new(), skill_ids: vec![],
+    });
+    direct.reviewer_binding = Some(direct_binding);
+
+    let mut automatic = seat("automatic-auth", 1, Some(9.6), SINCE + 2);
+    automatic.reviewer_binding = Some(reviewer_security::ReviewerBinding::native(
+        &team, &automatic.id, automatic.created_at, &automatic.provider, &automatic.model,
+        automatic.council.as_ref().unwrap(),
+    ));
+    team.workers = vec![direct, automatic];
+    assert_eq!(council::status(&team).unwrap().state, "passed",
+        "the in-memory gate alone is not a persisted authority receipt");
+    assert!(!mixed_native_authority_current(&store, &team),
+        "plausible scored workers cannot approve without native grants");
+
+    reviewer_security::record_native_authority(
+        &store, &sid, team.workers[0].reviewer_binding.as_ref().unwrap(),
+    ).unwrap();
+    assert!(!mixed_native_authority_current(&store, &team),
+        "the legacy automatic read-only fallback cannot substitute for an M3 grant");
+    reviewer_security::record_native_authority(
+        &store, &sid, team.workers[1].reviewer_binding.as_ref().unwrap(),
+    ).unwrap();
+    assert!(mixed_native_authority_current(&store, &team),
+        "both recorded, distinct completed read-only native seats qualify");
+
+    let mut forged = team.clone();
+    forged.workers[0].reviewer_binding.as_mut().unwrap().roster_bot_ids.push("forged".into());
+    assert!(!mixed_native_authority_current(&store, &forged));
+    store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, "native-reviewer-authority:automatic-auth"],
+    ).unwrap();
+    assert!(!mixed_native_authority_current(&store, &team),
+        "revoking even an automatic native authority blocks composed approval");
+
+    let mut legacy = team.clone();
+    legacy.config.council.as_mut().unwrap().automatic_reviewers = 0;
+    assert!(mixed_native_authority_current(&store, &legacy),
+        "M1/M2 continue using their existing native Council contract");
+}
+
+#[test]
 fn mixed_automatic_and_direct_bot_sources_preserve_legacy_defaults_and_capacity() {
     let original = on(9.0, 10, 0);
     assert_eq!(serde_json::to_value(&original).unwrap(),

@@ -156,7 +156,7 @@ pub fn admit(
     store: &Store, caller_id: &str, session_id: &str, project_id: &str,
     assignment_key: &str, artifact_sha256: &str,
 ) -> Result<NativeCouncilTaskRequest> {
-    let candidate = candidate(
+    let proposed_request = candidate(
         store, caller_id, session_id, project_id, assignment_key,
         artifact_sha256, storage::id(), storage::now(),
     )?;
@@ -177,7 +177,7 @@ pub fn admit(
         return Err("council_task_denied: admission must precede the first native reviewer.".into());
     }
     let body = serde_json::to_string(&NativeTaskRecord {
-        request: candidate.clone(), receipt: None,
+        request: proposed_request.clone(), receipt: None,
     }).map_err(|error| error.to_string())?;
     let key = record_key(store, session_id, caller_id, assignment_key)?;
     // A single atomic writer statement prevents multiple artifact requests
@@ -192,7 +192,7 @@ pub fn admit(
                    THEN json_extract(content,'$.request.cycleId')
                    ELSE ?6 END)=?6
          ) ON CONFLICT(parent_session_id,key) DO NOTHING",
-        params![session_id,key,RECORD_KIND,body,caller_id,candidate.cycle_id],
+        params![session_id,key,RECORD_KIND,body,caller_id,proposed_request.cycle_id],
     ).map_err(|error| error.to_string())?;
     let (_, saved) = read_record(store, caller_id, session_id, assignment_key)
         .map_err(|error| if inserted == 0 {

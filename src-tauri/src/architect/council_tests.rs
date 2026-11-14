@@ -3334,4 +3334,25 @@ fn child_council_admits_real_read_only_native_leaves_only_after_root_review_barr
     };
     assert_eq!(serde_json::to_value(before).unwrap(), serde_json::to_value(after).unwrap(),
         "a late callback after root stoppage cannot mutate a child Council");
+    // The only way to bypass the missing composite receipt is an explicitly
+    // attributed user acceptance; it does not synthesize a passed Council.
+    control_state(&state, &sid, "resume").unwrap();
+    council::accept(&state, &sid).unwrap();
+    let resumed = {
+        let store = state.store.lock().unwrap();
+        load(&store, &sid).unwrap().unwrap()
+    };
+    let (answer, _) = dispatch_state(
+        &state, &sid, resumed.generation, "pandacode_finish_team",
+        json!({"summary":"User explicitly accepted an incomplete nested review."}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(answer["completed"], true);
+    let final_team = {
+        let store = state.store.lock().unwrap();
+        load(&store, &sid).unwrap().unwrap()
+    };
+    assert_eq!(final_team.council_accepted, Some(final_team.council_since));
+    assert_eq!(final_team.status, "completed");
+    assert!(!council::inspection(&final_team, false).unwrap().verified_pass);
 }

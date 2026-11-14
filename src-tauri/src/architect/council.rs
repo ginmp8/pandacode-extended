@@ -816,6 +816,10 @@ pub(super) fn accept(state: &AppState, session_id: &str) -> Result<TeamSnapshot>
         return Err("Council is off for this team.".into());
     }
     let refusal = finish_refusal(&team);
+    // A real user's explicit acceptance is a distinct exceptional result, not
+    // a verified composite Council pass. Revoke any in-flight nested leaves
+    // before unlocking the root's finalization path.
+    super::child_council::stop_leaves(&store, &team, &agents)?;
     // Nothing waits for scores once they are accepted.
     let since = team.council_since;
     let out: Vec<String> = team.workers.iter().filter(|w| w.council.is_some() && w.created_at >= since && !w.abandoned && unsettled(&w.status)).map(|w| w.id.clone()).collect();

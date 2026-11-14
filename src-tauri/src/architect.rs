@@ -2670,6 +2670,7 @@ fn dispatch_as(
             }
             if team.config.council.as_ref()
                 .is_some_and(|config| !config.nested_bot_reviewers.is_empty())
+                && team.council_accepted != Some(team.council_since)
             {
                 // A real root finish attempt is the native review barrier:
                 // all writers settled, frozen cycle and a single transaction.

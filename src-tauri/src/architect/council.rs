@@ -1597,6 +1597,20 @@ fn in_round(team: &TeamSnapshot, round: usize) -> impl Iterator<Item = (&Worker,
 fn counts(worker: &Worker, seat: &CouncilSeat) -> bool {
     !worker.abandoned || seat.score.is_some()
 }
+/// A persisted native session cannot count for multiple scored Council seats.
+/// Keep this invariant for legacy and composed rounds, including restored tasks.
+fn independent_scored_sessions(team: &TeamSnapshot, round: usize) -> bool {
+    let mut workers = std::collections::HashSet::new();
+    let mut sessions = std::collections::HashSet::new();
+    in_round(team, round)
+        .filter(|(worker, seat)| counts(worker, seat) && seat.score.is_some())
+        .all(|(worker, _)| {
+            !worker.id.is_empty() && !worker.session_id.is_empty()
+                && workers.insert(worker.id.as_str())
+                && sessions.insert(worker.session_id.as_str())
+        })
+}
+
 fn same_lens(a: &str, b: &str) -> bool {
     a.trim().to_lowercase() == b.trim().to_lowercase()
 }
@@ -1659,7 +1673,9 @@ impl Rounds {
             let seated = in_round(team, round).filter(|(w, seat)| counts(w, seat)).count();
             let count = scored(team, round).count();
             let required = required_reviewers(team, config, round);
-            let complete = !reconfigured(team, round) && count == seated && count >= required && view.missing(team, round).is_empty();
+            let complete = !reconfigured(team, round) && count == seated && count >= required
+                && independent_scored_sessions(team, round)
+                && view.missing(team, round).is_empty();
             view.done.push(complete);
             view.started += usize::from(in_round(team, round).any(|(_, seat)| seat.started_at > 0));
         }
@@ -2380,11 +2396,17 @@ fn two_phase_independent(team: &TeamSnapshot, phase1: usize, phase2: usize) -> b
         && later.len() == earlier.len()
         && !stale(team, phase1)
         && !stale(team, phase2)
+        && independent_scored_sessions(team, phase1)
+        && independent_scored_sessions(team, phase2)
         && later.iter().enumerate().all(|(index, (challenger, _))| {
             later.iter().skip(index + 1).all(|(other, _)| reviewer_identity(challenger) != reviewer_identity(other))
         })
         && later.iter().all(|(challenger, challenge_seat)| {
-            earlier.iter().all(|(author, _)| reviewer_identity(author) != reviewer_identity(challenger))
+            earlier.iter().all(|(author, _)| {
+                author.id != challenger.id
+                    && author.session_id != challenger.session_id
+                    && reviewer_identity(author) != reviewer_identity(challenger)
+            })
                 && earlier.iter().any(|(author, author_seat)| {
                     same_lens(&author_seat.lens, &challenge_seat.lens)
                         && author.reviewer_binding.as_ref().zip(challenger.reviewer_binding.as_ref())

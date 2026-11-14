@@ -2062,6 +2062,27 @@ fn two_phase_fixture(with_challengers: bool) -> (TeamSnapshot, Vec<council::Coun
 }
 
 #[test]
+fn scored_council_round_rejects_duplicate_worker_or_native_session() {
+    let config = on(9.0, 10, 2);
+    let team = team_with(config, vec![
+        seat("identity-first", 1, Some(9.8), SINCE + 1),
+        seat("identity-second", 1, Some(9.7), SINCE + 2),
+    ]);
+    assert!(council::complete(&team, team.config.council.as_ref().unwrap(), 1));
+    assert_eq!(council::status(&team).unwrap().state, "passed");
+
+    let mut duplicated_session = team.clone();
+    duplicated_session.workers[1].session_id = team.workers[0].session_id.clone();
+    assert!(!council::complete(&duplicated_session, duplicated_session.config.council.as_ref().unwrap(), 1));
+    assert_ne!(council::status(&duplicated_session).unwrap().state, "passed");
+
+    let mut duplicated_worker = team.clone();
+    duplicated_worker.workers[1].id = team.workers[0].id.clone();
+    assert!(!council::complete(&duplicated_worker, duplicated_worker.config.council.as_ref().unwrap(), 1));
+    assert_ne!(council::status(&duplicated_worker).unwrap().state, "passed");
+}
+
+#[test]
 fn two_phase_requires_both_correlated_rounds_and_independent_challengers() {
     let (phase1_only, phase1_receipts) = two_phase_fixture(false);
     let phase1_status = council::status_with_criterion_outcomes(&phase1_only, &phase1_receipts).unwrap();
@@ -2079,6 +2100,11 @@ fn two_phase_requires_both_correlated_rounds_and_independent_challengers() {
         }
     }
     assert_eq!(council::status_with_criterion_outcomes(&same_authors, &passed_receipts).unwrap().state, "blocked");
+
+    let mut reused_session = passed.clone();
+    reused_session.workers[2].session_id = passed.workers[0].session_id.clone();
+    assert_ne!(council::status_with_criterion_outcomes(&reused_session, &passed_receipts).unwrap().state, "passed",
+        "a fresh two-phase challenger must not reuse a phase-one native session");
 }
 
 #[test]

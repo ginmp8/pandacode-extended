@@ -144,3 +144,12 @@ blocked before its first round. Native notices are escaped before display.
 Frontend preflight now mirrors the mandatory nested-leaf budget rule instead
 of deferring its error until backend submission. Node tests cover all new
 states and the fixed versus OnTrigger budget boundary.
+
+
+## November 14, 2026: latest #149/#152 source review (incremental)
+
+- Reviewed **PR #149** from `664c530152693f403199496a450ce17df550cf74` to `dba7c7ff1ee3ab3484aebcc53c6a3a374be589dc` (22 new, linear source commits; 12 changed paths). **PR #152** remains at `48a8076ddac65ddd5ae790cce93dc2d8ad73ea0e` with no new source changes.
+- Ported a source-backed security invariant into the authoritative #152-derived Council engine: distinct scored root worker IDs and native session IDs are now required in every completed round, including legacy rounds; two-phase challengers additionally cannot reuse first-phase worker/session identities. Added negative Rust regressions for both conditions.
+- Existing PR #155 native composition, task-isolated child Council, immutable child receipt, Shared Channel composition UI and current terminal-evidence code remain authoritative. The #149 `child_council.rs` and `council-inspector.ts` implementations are **not** copied into parallel, competing runtime/UI pipelines.
+- **Not a full semantic source sync:** the remaining #149-only child lifecycle, shared consumed root/child admission budget, child-only terminal/restart rotation and inspector drill-down differences still require path-by-path behavior comparison and exact-HEAD native/UI tests. Source patches overlap heavily with PR #155's independently evolved architecture; raw cherry-picks would replace working contracts.
+- No source or base ref is mutated here. The original #149/#152 commit SHAs are evidence pointers, not integrated-commit ancestry. Exact-HEAD Rust/Node/Playwright tests and full #147 acceptance remain unverified; keep this PR in draft.

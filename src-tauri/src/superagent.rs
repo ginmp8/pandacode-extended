@@ -313,7 +313,7 @@ CREATE TRIGGER IF NOT EXISTS sa_council_finalization_no_delete
 /// optimistic application check. Every active assignment with the same ticket
 /// project shares an exclusive lease; ordinary bots keep their existing behavior.
 /// These triggers also protect future retry/update callers from bypassing admission.
-pub(crate) pub(crate) const PROJECT_LEASE: &str = r#"
+pub(crate) const PROJECT_LEASE: &str = r#"
 CREATE TRIGGER IF NOT EXISTS sa_project_lease_insert
  BEFORE INSERT ON sa_assignments
  WHEN NEW.state='running' AND EXISTS(

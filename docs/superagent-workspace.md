@@ -242,3 +242,24 @@ entry grants a task, provider or external effect. The editable JSON draft
 is isolated to its original inspected Ticket rather than silently reused
 when switching Demands. Unsupported native plan inspection remains an
 explicit error, not synthesized content.
+
+### Native provider-session identity pinning (S1/S2, PR #150 follow-up)
+
+Active SuperAgent sessions are checked against their immutable, versioned
+`sa_ticket_team_snapshots` profile at the **provider/tool boundary** and again
+before **callback settlement**. In addition to the current native Team/mandate
+revision, actor, Bot and Council guards, the session's saved project, provider,
+model, mode and reasoning effort must exactly match the admitted role's
+SHA-256-verified configuration. An altered session cannot inherit another
+harness or silently upgrade the result to an approvable Ticket.
+
+The stored session profile stays unchanged if an operator edits a reusable Bot,
+but those edits still cause the live Team-profile boundary to fail closed
+until a freshly authorized Demand is created. This conservatively retains
+existing revocation semantics rather than assuming changed Bot defaults are
+safe to adopt. Legacy/unknown snapshots remain non-authoritative.
+
+The native regression suite covers modified session fields, denied provider
+access, denied final callbacks, duplicate callback handling and preservation of
+session fields after later Bot edits. This is not a writable Work grant, not
+proof of task completion, and not a substitute for verified Council/effects.

@@ -2737,6 +2737,47 @@ fn assignment_role_authorized(
     })
 }
 
+/// A native Ticket freezes the actual effective bot configuration at
+/// admission. The provider session must remain at that same project, harness,
+/// model, mode and reasoning effort for its entire admitted attempt. The
+/// independent bot-profile and mandate guards still apply, and this check
+/// never converts a snapshot into a permission grant.
+fn admitted_session_matches_profile(
+    snapshot: &TeamSnapshot, bot_id: &str, role: &str,
+    ordinal: usize, session: &storage::Session,
+) -> bool {
+    if snapshot.provenance != TeamSnapshotProvenance::Native {
+        return false;
+    }
+    let Some(member) = snapshot.roles.iter().find(|member| {
+        member.role == role && member.ordinal == ordinal && member.bot_id == bot_id
+    }) else {
+        return false;
+    };
+    let Some(configuration) = member.effective_config.as_ref() else {
+        return false;
+    };
+    let Some(expected_sha) = member.effective_config_sha256.as_deref() else {
+        return false;
+    };
+    let Ok(bytes) = serde_json::to_vec(configuration) else {
+        return false;
+    };
+    if sha256_hex(&bytes) != expected_sha {
+        return false;
+    }
+    configuration.get("projectId").and_then(serde_json::Value::as_str)
+        == Some(session.project_id.as_str())
+        && configuration.get("provider").and_then(serde_json::Value::as_str)
+            == Some(session.provider.as_str())
+        && configuration.get("model").and_then(serde_json::Value::as_str)
+            == Some(session.model.as_str())
+        && configuration.get("mode").and_then(serde_json::Value::as_str)
+            == Some(session.mode.as_str())
+        && configuration.get("reasoningEffort").and_then(serde_json::Value::as_str)
+            == Some(session.reasoning_effort.as_deref().unwrap_or(""))
+}
+
 /// Only the active, user-admitted read-only assignment is allowed to run.
 /// Leverages the existing provider-level Council isolation (native plan,
 /// tool-host removal, external MCP checks and permission denial), not a prompt.
@@ -2820,6 +2861,17 @@ pub(crate) fn read_only_policy(
         let coordinator_profile_current = snapshot_role_profile_matches(
             &store.db,&snapshot,"coordinator",0,&snapshot.coordinator_bot_id,
         )?;
+        let admitted_session_profile_current = if let Some(ordinal) = worker_ordinal {
+            admitted_session_matches_profile(
+                &snapshot,&scope.bot_id,"worker",ordinal,&assigned_session,
+            )
+        } else if scope.bot_id == snapshot.coordinator_bot_id {
+            admitted_session_matches_profile(
+                &snapshot,&scope.bot_id,"coordinator",0,&assigned_session,
+            )
+        } else {
+            false
+        };
         let active_profile_current = if let Some(ordinal) = worker_ordinal {
             snapshot_role_profile_matches(&store.db,&snapshot,"worker",ordinal,&scope.bot_id)?
         } else if scope.bot_id == snapshot.coordinator_bot_id {
@@ -2828,6 +2880,7 @@ pub(crate) fn read_only_policy(
             false
         };
         if coordinator.paused || active_bot.paused || active_bot.project_id != assigned_session.project_id
+            || !admitted_session_profile_current
             || !coordinator_profile_current || !active_profile_current
             || (is_worker && active_bot.project_id != scope.project_id)
             || (is_worker && !coordinator_plan_current(
@@ -3028,8 +3081,22 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     // callback. A stale success must not become approvable after global pause.
     let within_budget = assignment_within_budget(started_at, storage::now());
     let thread_current = assignment_thread_current(store, session_id, &task_id)?;
+    // Revalidate the exact admitted runtime identity on final callbacks, not
+    // just at the provider admission/tool host boundary.
+    let session_profile_current = store.session(session_id).ok()
+        .is_some_and(|session| {
+            let (role,ordinal) = if coordinator {
+                ("coordinator",Some(0))
+            } else {
+                ("worker",team_snapshot.worker_bot_ids.iter().position(|id| id==&bot_id))
+            };
+            ordinal.is_some_and(|position| admitted_session_matches_profile(
+                &team_snapshot,&bot_id,role,position,&session,
+            ))
+        });
     let authorized = execution_permitted(
-        authorized && role_current && provenance_ok && within_budget && thread_current,
+        authorized && role_current && provenance_ok && within_budget && thread_current
+            && session_profile_current,
         crate::feature_controls::get().bots_paused,
     );
     let next = if !authorized { "blocked" }
@@ -4408,6 +4475,72 @@ pub async fn superagent_revoke_worker_write_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changed_provider_session_is_denied_before_tools_and_callback_acceptance() {
+        for (field,changed) in [
+            ("provider","claude"),
+            ("model","unapproved-model"),
+            ("mode","ask"),
+            ("reasoning_effort","high"),
+            ("project_id","other-project"),
+        ] {
+            let mut store=fixture();
+            let config=enabled(&store);
+            let request_key=format!("pinned-session-{field}");
+            let (ticket,started)=admit(
+                &mut store,&config.id,"Session-pinned task",&request_key,false,
+            ).unwrap();
+            assert!(started);
+            let session_id=assignment_session(&store,&ticket.id).unwrap().unwrap();
+            assert!(read_only_policy(&store,&session_id).unwrap().is_some());
+            if field=="project_id" {
+                store.db.execute(
+                    "INSERT INTO projects(id,name,path)
+                     VALUES('other-project','Other','/tmp/other-superagent')",[],
+                ).unwrap();
+            }
+            let change=format!("UPDATE sessions SET {field}=?2 WHERE id=?1");
+            store.db.execute(&change,params![session_id,changed]).unwrap();
+            assert!(read_only_policy(&store,&session_id).is_err(),
+                "{field} drift must fail closed at native admission");
+            assert!(on_run_finished(
+                &store,&session_id,true,"Untrusted provider completion",
+            ).unwrap());
+            assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+            assert!(mandate(&store,&ticket.id).unwrap().allowed_tools.is_empty());
+            assert!(mandate(&store,&ticket.id).unwrap().allowed_side_effects==false);
+            assert!(!on_run_finished(
+                &store,&session_id,true,"Duplicate stale callback",
+            ).unwrap());
+        }
+    }
+
+    #[test]
+    fn admitted_session_is_not_rewritten_when_the_reusable_bot_changes() {
+        let mut store=fixture();
+        let config=enabled(&store);
+        let (ticket,started)=admit(
+            &mut store,&config.id,"Frozen session","bot-edited-after-admission",false,
+        ).unwrap();
+        assert!(started);
+        let session_id=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        let before=store.session(&session_id).unwrap();
+        store.db.execute(
+            "UPDATE bots SET provider='claude',model='other-model',mode='ask',
+             reasoning_effort='high' WHERE id='worker'",
+            [],
+        ).unwrap();
+        let after=store.session(&session_id).unwrap();
+        assert_eq!(before.provider,after.provider);
+        assert_eq!(before.model,after.model);
+        assert_eq!(before.mode,after.mode);
+        assert_eq!(before.reasoning_effort,after.reasoning_effort);
+        assert!(read_only_policy(&store,&session_id).is_err(),
+            "Bot edits may not silently alter a live Ticket permission boundary");
+        assert!(on_run_finished(&store,&session_id,true,"Stale apparent success").unwrap());
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+    }
 
     #[test]
     fn headless_work_plan_is_version_bound_immutable_and_never_grants_execution() {

@@ -487,7 +487,8 @@ impl ReviewerBinding {
             || self.required_reviewers.is_some_and(|n| !(2..=8).contains(&n))
             || (!self.roster_bot_ids.is_empty() && (self.required_reviewers != Some(
                 team.config.council.as_ref()
-                    .filter(|config| config.automatic_reviewers > 0)
+                    .filter(|config| config.automatic_reviewers > 0
+                        || !config.nested_bot_reviewers.is_empty())
                     .map_or(self.roster_bot_ids.len(), |config| config.needed()))
                 || self.reviewer_bot_id.as_ref().is_none_or(|id| !self.roster_bot_ids.contains(id))))
         {

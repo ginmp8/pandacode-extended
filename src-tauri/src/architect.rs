@@ -690,11 +690,20 @@ fn eligible_hierarchical_s2_root_escalation(store: &Store, team: &TeamSnapshot) 
     {
         return false;
     }
+    // Child receipts are bound to the *original* immutable task policy.
+    // Clearing force_escalation before verifying them changes that policy and
+    // wrongly rejects authentic first-wave child callbacks.
+    if !council_evidence_is_current(store, team) { return false; }
+    let Some(children) = child_council::verified_parent_seats(store, team).ok().flatten()
+        else { return false };
     let mut first = team.clone();
     first.workers.retain(|worker| worker.council.as_ref().is_none_or(|seat| seat.round == 1));
+    // This projection only checks whether the first wave merits admitting fresh
+    // reviewers. It never changes the persisted policy or grants a terminal pass.
     first.config.council.as_mut().unwrap().force_escalation = false;
-    refresh_council(store, &mut first);
-    verified_council_pass(store, &first)
+    council::status_for_authenticated_children(&first, &children)
+        .is_some_and(|status| status.state == "passed" && !status.stale)
+        && mixed_native_authority_current(store, &first)
 }
 
 /// A settled run's save that fails is logged; the watchdog then reaps the worker that still reads

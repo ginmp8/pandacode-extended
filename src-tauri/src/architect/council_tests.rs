@@ -4214,6 +4214,19 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
         "pandacode_finish_team", json!({"summary":"First wave settled"}),
         &std::sync::atomic::AtomicBool::new(false)).unwrap();
     assert_eq!(pending["completed"], false, "forced S2 cannot pass on its first wave");
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        assert!(eligible_hierarchical_s2_root_escalation(&store, &root),
+            "the unchanged frozen policy and authenticated first wave must permit a new root session");
+        let mut forged = root.clone();
+        let first = forged.workers.iter_mut()
+            .find(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 1))
+            .unwrap();
+        first.council.as_mut().unwrap().score = Some(10.0);
+        assert!(!eligible_hierarchical_s2_root_escalation(&store, &forged),
+            "a forged first-wave root score must never permit escalation");
+    }
     let assigned = call(&state, &sid, "pandacode_dispatch_workers", second_request).unwrap();
     assert_eq!(assigned["queued"], true);
     let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();

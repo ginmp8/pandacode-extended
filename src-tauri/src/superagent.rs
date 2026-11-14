@@ -3262,8 +3262,8 @@ pub(crate) fn guard_cloud_attach(store: &Store, session_id: &str) -> Result<()> 
 pub(crate) fn guard_gateway_inbound(
     store: &Store, bot_id: &str, external_id: &str, sender_id: &str, trusted: bool,
 ) -> Result<()> {
-    if !trusted || sender_id != "local-user" {
-        return Err("policy_unsupported: internal SuperAgent delivery requires local authority.".into());
+    if !trusted || !matches!(sender_id, "local-user" | "github-auto") {
+        return Err("policy_unsupported: internal SuperAgent delivery requires an authorized native actor.".into());
     }
     let session_id: Option<String> = store.db.query_row(
         "SELECT thread.session_id
@@ -3273,6 +3273,7 @@ pub(crate) fn guard_gateway_inbound(
          WHERE thread.bot_id=?1 AND thread.channel_id=?2 AND thread.external_id=?3
            AND assignment.bot_id=?1 AND assignment.state='running'
            AND ticket.state='running' AND ticket.active_assignment_id=assignment.id
+           AND ticket.actor=?4
            AND (
              (assignment.attempt=1 AND thread.external_id=ticket.id)
               OR (assignment.attempt=1 AND thread.external_id=ticket.id || ':attempt:1'
@@ -3289,7 +3290,7 @@ pub(crate) fn guard_gateway_inbound(
              OR (assignment.attempt>1 AND
                  thread.external_id=ticket.id || ':worker:' || assignment.attempt)
            )",
-        params![bot_id, CHANNEL, external_id], |row| row.get(0),
+        params![bot_id, CHANNEL, external_id, sender_id], |row| row.get(0),
     ).optional().map_err(|e| e.to_string())?;
     let session_id = session_id.ok_or(
         "policy_unsupported: no active native assignment owns this SuperAgent thread.",
@@ -4945,6 +4946,11 @@ mod tests {
         assert_eq!(origin.receipt_state,"admitted");
         assert_eq!(origin.event_kind.as_deref(),Some("issues.opened"));
         assert!(origin.currently_authorized);
+        assert!(guard_gateway_inbound(&store,"worker",&ticket.id,"github-auto",true).is_ok());
+        assert!(guard_gateway_inbound(&store,"worker",&ticket.id,"local-user",true).is_err(),
+            "An Auto Ticket cannot enter via manual-user sender identity.");
+        assert!(guard_gateway_inbound(&store,"worker",&ticket.id,"github-auto",false).is_err(),
+            "An external sender still needs trusted native ingress.");
         let redacted=inspect_headless_status(&store.path,Some(&ticket.id)).unwrap();
         assert!(redacted.contains("\"authenticated-github-auto\""));
         assert!(redacted.contains("\"issues.opened\""));

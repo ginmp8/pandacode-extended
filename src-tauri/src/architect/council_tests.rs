@@ -200,6 +200,36 @@ fn composed_root_authority_denies_unissued_tampered_and_revoked_seats() {
     reviewer_security::record_native_authority(
         &store, &sid, team.workers[1].reviewer_binding.as_ref().unwrap(),
     ).unwrap();
+    // Persist real reviewer transcripts; an issued grant without a current
+    // native callback is never sufficient to authenticate a composed score.
+    let project = store.session(&sid).unwrap().project_id;
+    for reviewer in &team.workers {
+        store.db.execute(
+            "INSERT INTO sessions(id,project_id,title,provider,model,mode,status,created_at,updated_at,archived)
+             VALUES(?1,?2,'Native reviewer',?3,?4,'plan','completed',1,1,0)",
+            rusqlite::params![reviewer.session_id, project, reviewer.provider, reviewer.model],
+        ).unwrap();
+    }
+    assert!(!composed_native_authority_current(&store, &team, 1),
+        "native grants with no actual reviewer callback cannot approve a root");
+    for reviewer in &team.workers {
+        store.message(&reviewer.session_id, "assistant",
+            &format!("Independent review.\nCouncil score: {}/10",
+                reviewer.council.as_ref().unwrap().score.unwrap())
+        ).unwrap();
+    }
+    assert!(composed_native_authority_current(&store, &team, 1),
+        "both root scores must match their actual persisted native reports");
+    let mut forged_score = team.clone();
+    forged_score.workers[0].council.as_mut().unwrap().score = Some(10.0);
+    assert!(!composed_native_authority_current(&store, &forged_score, 1),
+        "a forged root score cannot borrow its earlier authorization");
+    store.message(&team.workers[1].session_id, "assistant",
+        "A later independent evaluation.\nCouncil score: 7/10").unwrap();
+    assert!(!composed_native_authority_current(&store, &team, 1),
+        "a changed latest native reviewer report invalidates a cached pass");
+    store.message(&team.workers[1].session_id, "assistant",
+        "Revalidated result.\nCouncil score: 9.7/10").unwrap();
     assert!(composed_native_authority_current(&store, &team, 1));
 
     let mut tampered = team.clone();

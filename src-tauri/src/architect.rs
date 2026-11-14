@@ -881,9 +881,21 @@ fn composed_native_authority_current(
         let Some(binding) = worker.reviewer_binding.as_ref() else {
             return false;
         };
-        binding.validate(team, worker).is_ok()
+        // The native grant proves who may review, but cannot authenticate
+        // a score changed in a restored/injected worker snapshot. Direct and
+        // automatic root seats must still match their persisted assistant
+        // callback. Nested composite scores are verified independently from
+        // the child Council's signed terminal/evidence receipt.
+        let callback_score_is_current = binding.composition_mode.as_deref() == Some("nested")
+            || worker.council.as_ref().and_then(|seat| seat.score)
+                == council::latest_score(store, &worker.session_id);
+        callback_score_is_current
+            && binding.validate(team, worker).is_ok()
             && reviewer_security::validate_recorded_authority(
                 store, &team.session_id, binding,
+            ).is_ok()
+            && bot_reviewers::validate_frozen_seat_for_task(
+                store, &team.session_id, binding, false,
             ).is_ok()
     })
 }

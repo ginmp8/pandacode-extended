@@ -249,7 +249,7 @@ fn ensure_scoped_write_target_current(target: &ScopedWriteTarget) -> Result<(), 
 fn resolve_scoped_write_target(root: &Path, value: &str) -> Result<ScopedWriteTarget, String> {
     use std::{
         ffi::CString,
-        os::{fd::AsRawFd, unix::ffi::OsStrExt},
+        os::fd::AsRawFd,
     };
 
     let parts = scoped_write_parts(value)?;
@@ -797,12 +797,19 @@ fn write_scoped_text_at(target: ScopedWriteTarget, text: &str) -> Result<(), Str
     let parent_fd = target.parent.as_raw_fd();
     let temp_name = std::ffi::CString::new(format!(".pandacode-write-{}.tmp", crate::storage::id()))
         .map_err(|e| e.to_string())?;
+    // `openat` takes its optional mode through varargs. Darwin's `mode_t` is
+    // `u16`, so C promotes it to `int`; Linux's `mode_t` is `u32` and remains
+    // unsigned when passed through varargs.
+    #[cfg(target_vendor = "apple")]
+    let create_mode = 0o666 as libc::c_int;
+    #[cfg(not(target_vendor = "apple"))]
+    let create_mode = 0o666 as libc::mode_t;
     let fd = unsafe {
         libc::openat(
             parent_fd,
             temp_name.as_ptr(),
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o666 as libc::mode_t,
+            create_mode,
         )
     };
     if fd < 0 {

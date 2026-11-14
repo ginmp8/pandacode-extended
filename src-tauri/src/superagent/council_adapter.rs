@@ -13,6 +13,7 @@ use std::{
     path::{Path, PathBuf},
     time::{Duration, Instant},
 };
+use tauri::Manager;
 
 #[cfg(unix)]
 use std::os::unix::fs::{symlink, PermissionsExt};
@@ -475,8 +476,10 @@ fn create_snapshot_symlink(
     };
     let _ = source_root;
     #[cfg(unix)]
-    symlink(target,destination)
-        .map_err(|_| "Council workspace symbolic link could not be copied into its review snapshot.".into())
+    {
+        symlink(target,destination)
+            .map_err(|_| "Council workspace symbolic link could not be copied into its review snapshot.".into())
+    }
     #[cfg(windows)]
     {
         if fs::metadata(source).is_ok_and(|metadata| metadata.is_dir()) {
@@ -863,6 +866,53 @@ pub(super) fn required_worker_session(store: &Store, worker_session_id: &str) ->
     }))
 }
 
+/// Fail closed on a start that was interrupted before its native session ID
+/// was durably linked. Startup never replays reviewer dispatch.
+pub(crate) fn recover_starting(app: &tauri::AppHandle) {
+    let state = app.state::<crate::AppState>();
+    let database_path = match state.store.lock() {
+        Ok(store) => store.path.clone(),
+        Err(error) => {
+            eprintln!("SuperAgent Council startup recovery could not access Store: {error}");
+            return;
+        }
+    };
+    let _dispatch_fence = match super::effects::lock_dispatch(&database_path) {
+        Ok(fence) => fence,
+        Err(error) => {
+            eprintln!("SuperAgent Council startup recovery could not acquire dispatch fence: {error}");
+            return;
+        }
+    };
+    let store = match state.store.lock() {
+        Ok(store) => store,
+        Err(error) => {
+            eprintln!("SuperAgent Council startup recovery could not access Store: {error}");
+            return;
+        }
+    };
+    let request_ids: rusqlite::Result<Vec<String>> = (|| {
+        let mut statement = store.db.prepare("SELECT id FROM sa_council_requests WHERE state='starting'")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        let collected = rows.collect();
+        collected
+    })();
+    let request_ids = match request_ids {
+        Ok(ids) => ids,
+        Err(error) => {
+            eprintln!("SuperAgent Council startup recovery could not list pending starts: {error}");
+            return;
+        }
+    };
+    for request_id in request_ids {
+        if let Err(error) = block_request(&store, &request_id,
+            "Native Council start was interrupted before its exact session could be recovered.")
+        {
+            eprintln!("SuperAgent Council startup recovery failed closed: {error}");
+        }
+    }
+}
+
 fn block_request(store: &Store, request_id: &str, detail: &str) -> Result<()> {
     let tx = store.db.unchecked_transaction().map_err(|error| error.to_string())?;
     let now = storage::now();
@@ -893,11 +943,23 @@ fn block_request(store: &Store, request_id: &str, detail: &str) -> Result<()> {
 
 /// Launch only once, only after the successful worker callback atomically bound
 /// this request to the current artifact and Ticket revision.
-pub(super) fn start_after_worker_completion(app: &tauri::AppHandle, worker_session_id: &str) -> Result<bool> {
+pub(crate) fn start_after_worker_completion(app: &tauri::AppHandle, worker_session_id: &str) -> Result<bool> {
     let state = app.state::<crate::AppState>();
     start_after_worker_completion_inner(&state,worker_session_id,|launch| {
         architect::start_superagent_review(app,launch)
     })
+}
+
+/// Native completion callbacks enter through the AppHandle so they can take
+/// the cross-process dispatch fence before acquiring the shared Store.
+pub(crate) fn finalize_after_native_run_from_app(
+    app: &tauri::AppHandle, reviewer_session_id: &str,
+) -> Result<bool> {
+    let state = app.state::<crate::AppState>();
+    let database_path = state.store.lock().map_err(|error| error.to_string())?.path.clone();
+    let fence = super::effects::lock_dispatch(&database_path)?;
+    let store = state.store.lock().map_err(|error| error.to_string())?;
+    finalize_after_native_run_locked(&store, reviewer_session_id, &fence)
 }
 
 fn start_after_worker_completion_inner(
@@ -1067,14 +1129,13 @@ fn start_after_worker_completion_inner(
         return Ok(false);
     }
     drop(store);
-    drop(_dispatch_fence);
     let store = state.store.lock().map_err(|error| error.to_string())?;
     if let Some(team) = architect::load(&store,&native_session_id)? {
         let settled_sessions = team.workers.iter()
             .filter(|worker| matches!(worker.status.as_str(),"completed" | "failed" | "stopped"))
             .map(|worker| worker.session_id.clone()).collect::<Vec<_>>();
         for reviewer_session in settled_sessions {
-            if let Err(error) = finalize_after_native_run(&store,&reviewer_session) {
+            if let Err(error) = finalize_after_native_run_locked(&store,&reviewer_session,&_dispatch_fence) {
                 eprintln!("SuperAgent Council finalization callback failed: {error}");
             }
         }
@@ -1317,6 +1378,16 @@ fn persist_finalization(
 /// Incomplete work is left waiting; failed, stale, limited or stopped rounds
 /// revoke the Ticket and require an explicit retry.
 pub(super) fn finalize_after_native_run(store: &Store, reviewer_session_id: &str) -> Result<bool> {
+    finalize_after_native_run_inner(store, reviewer_session_id)
+}
+
+fn finalize_after_native_run_locked(
+    store: &Store, reviewer_session_id: &str, _fence: &super::effects::DispatchFence,
+) -> Result<bool> {
+    finalize_after_native_run_inner(store, reviewer_session_id)
+}
+
+fn finalize_after_native_run_inner(store: &Store, reviewer_session_id: &str) -> Result<bool> {
     let Some(native_session_id) = architect::parent_of(store,reviewer_session_id)? else { return Ok(false) };
     let Some(team) = architect::load(store,&native_session_id)? else { return Ok(false) };
     let Some(binding) = team.superagent_review.as_ref() else { return Ok(false) };
@@ -1411,6 +1482,33 @@ pub(super) fn finalize_human_accept(
         return Err("Attributed Council acceptance did not match the current native Ticket review.".into());
     }
     super::get_ticket(store,ticket_id)
+}
+
+/// Keep one dispatch fence across the native acceptance callback and the
+/// exact Ticket/request transaction. The callback runs without the Store lock.
+pub(super) fn accept_and_finalize_human(
+    state: &crate::AppState,
+    ticket_id: &str,
+    expected_revision: i64,
+    reason: &str,
+    accept_native: impl FnOnce(&str) -> Result<()>,
+) -> Result<Ticket> {
+    let database_path = state.store.lock().map_err(|error| error.to_string())?.path.clone();
+    let fence = super::effects::lock_dispatch(&database_path)?;
+    let native_session_id = {
+        let store = state.store.lock().map_err(|error| error.to_string())?;
+        prepare_human_accept(&store, ticket_id, expected_revision)?
+    };
+    accept_native(&native_session_id)?;
+    let store = state.store.lock().map_err(|error| error.to_string())?;
+    finalize_human_accept_locked(&store, ticket_id, expected_revision, reason, &fence)
+}
+
+fn finalize_human_accept_locked(
+    store: &Store, ticket_id: &str, expected_revision: i64, reason: &str,
+    _fence: &super::effects::DispatchFence,
+) -> Result<Ticket> {
+    finalize_human_accept(store, ticket_id, expected_revision, reason)
 }
 
 /// Atomically freeze a finished worker's exact ticket artifact against the
@@ -2004,7 +2102,9 @@ mod tests {
         {
             let store=state.store.lock().unwrap();
             assert!(team.workers.iter().all(|worker| {
-                store.workspace_root(&ticket.project_id,Some(&worker.session_id)).is_ok_and(|root| root == snapshot_root)
+                store.session(&worker.session_id).is_ok_and(|session| {
+                    store.workspace_root(&session.project_id,Some(&session.id)).is_ok_and(|root| root == snapshot_root)
+                })
             }));
         }
 

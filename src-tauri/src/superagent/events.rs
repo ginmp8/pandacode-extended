@@ -794,7 +794,7 @@ mod tests {
         calls: &'a mut Vec<Vec<String>>,
         authenticated: bool,
     ) -> impl FnMut(&[String], usize, std::time::Duration)
-        -> Result<crate::workspace::Capture, String> + 'a
+        -> std::result::Result<crate::workspace::Capture, String> + 'a
     {
         move |args, limit, timeout| {
             assert!(limit <= 64 * 1024, "Observe responses stay bounded");
@@ -816,7 +816,7 @@ mod tests {
         source_id: &str,
         subject_key: &str,
         runner: impl FnMut(&[String], usize, std::time::Duration)
-            -> Result<crate::workspace::Capture, String>,
+            -> std::result::Result<crate::workspace::Capture, String>,
     ) -> Result<EventDecision> {
         let permit=prepare_fetch(store,source_id,subject_key)?;
         let fetched=crate::github::observe_event_with(

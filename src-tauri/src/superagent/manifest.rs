@@ -133,7 +133,7 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
         .and_then(serde_json::Value::as_u64)
         .and_then(|version| u32::try_from(version).ok())
         .ok_or("Unsupported SuperAgent manifest schema.")?;
-    let presets = match schema_version {
+    let presets: Vec<PortablePreset> = match schema_version {
         1 => {
             let manifest: ManifestV1 = serde_json::from_value(document.clone())
                 .map_err(|e| format!("Invalid SuperAgent companion manifest: {e}"))?;
@@ -372,6 +372,7 @@ fn apply(store: &Store, document: &serde_json::Value, confirmed: bool) -> Result
             &candidate.coordinator_id,
             &candidate.worker_ids,
             &candidate.reviewer_ids,
+            false,
             super::TeamSnapshotProvenance::Native,
         )?;
         super::insert_team_version(&tx, &snapshot)
@@ -445,12 +446,13 @@ fn export(store: &Store) -> Result<serde_json::Value> {
             .iter()
             .map(|id| bots::get(store, id).map(|bot| bot.name))
             .collect::<Result<Vec<_>>>()?;
+        let policy = policy_from_snapshot(&snapshot);
         presets.push(PresetV2 {
             name: snapshot.name,
             coordinator_bot: coordinator.name,
             workers,
             reviewers,
-            policy: policy_from_snapshot(&snapshot),
+            policy,
         });
     }
     serde_json::to_value(ManifestV2 {
@@ -689,7 +691,7 @@ mod tests {
             vec!["Legacy Team"]
         );
         let imported =
-            super::configuration(&store, &orchestration_id(&store, "Legacy Team")).unwrap();
+            super::super::configuration(&store, &orchestration_id(&store, "Legacy Team")).unwrap();
         assert_eq!(imported.team_version, 1);
         assert_eq!(imported.worker_bot_ids, vec!["worker"]);
         assert!(imported.reviewer_bot_ids.is_empty());
@@ -723,7 +725,7 @@ mod tests {
             vec!["Legacy Team"]
         );
         let restored =
-            super::configuration(&restored, &orchestration_id(&restored, "Legacy Team")).unwrap();
+            super::super::configuration(&restored, &orchestration_id(&restored, "Legacy Team")).unwrap();
         assert_eq!(restored.coordinator_bot_id, "fresh-router");
         assert_eq!(restored.worker_bot_ids, vec!["fresh-worker"]);
         assert!(restored.reviewer_bot_ids.is_empty());
@@ -740,7 +742,7 @@ mod tests {
         let result = apply(&store, &doc, true).unwrap();
         assert_eq!(result.created, vec!["Multi-role Team"]);
         let imported =
-            super::configuration(&store, &orchestration_id(&store, "Multi-role Team")).unwrap();
+            super::super::configuration(&store, &orchestration_id(&store, "Multi-role Team")).unwrap();
         assert_eq!(imported.coordinator_bot_id, "router");
         assert_eq!(imported.worker_bot_ids, vec!["worker", "worker-two"]);
         assert_eq!(imported.reviewer_bot_ids, vec!["reviewer"]);
@@ -795,7 +797,7 @@ mod tests {
             vec!["Multi-role Team"]
         );
         let restored =
-            super::configuration(&fresh, &orchestration_id(&fresh, "Multi-role Team")).unwrap();
+            super::super::configuration(&fresh, &orchestration_id(&fresh, "Multi-role Team")).unwrap();
         assert_eq!(restored.coordinator_bot_id, "fresh-router");
         assert_eq!(
             restored.worker_bot_ids,
@@ -818,7 +820,7 @@ mod tests {
             vec!["No reviewers"]
         );
         assert!(
-            super::configuration(&store, &orchestration_id(&store, "No reviewers"))
+            super::super::configuration(&store, &orchestration_id(&store, "No reviewers"))
                 .unwrap()
                 .reviewer_bot_ids
                 .is_empty()

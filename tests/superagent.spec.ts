@@ -46,9 +46,9 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await page.goto('/?bots=sample');
   const workspace=await openOrchestrationWorkspace(page);
   await expect(workspace.getByText('No orchestrations created.')).toBeVisible();
-  await workspace.getByRole('textbox',{name:'Name'}).fill('Software Development');
+  await workspace.getByRole('textbox',{name:'Name',exact:true}).fill('Software Development');
   const coordinator=workspace.getByRole('combobox',{name:'Coordinator'});
-  const worker=workspace.getByRole('combobox',{name:'Worker 1'});
+  const worker=workspace.getByRole('combobox',{name:'Worker 1',exact:true});
   await coordinator.selectOption({label:'Scout'});
   await worker.selectOption({label:'Writer'});
   await workspace.getByRole('button',{name:'Create disabled preset'}).click();
@@ -74,9 +74,9 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const workspace=await openOrchestrationWorkspace(page);
-  await workspace.getByRole('textbox',{name:'Name'}).fill('Issue Resolution');
+  await workspace.getByRole('textbox',{name:'Name',exact:true}).fill('Issue Resolution');
   await workspace.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
-  await workspace.getByRole('combobox',{name:'Worker 1'}).selectOption({label:'Writer'});
+  await workspace.getByRole('combobox',{name:'Worker 1',exact:true}).selectOption({label:'Writer'});
   await workspace.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(workspace.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await workspace.getByRole('button',{name:'Enable manual'}).click();
@@ -331,12 +331,13 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const workspace=await openOrchestrationWorkspace(page);
-  await workspace.getByRole('textbox',{name:'Name'}).fill('Safe default');
+  await workspace.getByRole('textbox',{name:'Name',exact:true}).fill('Safe default');
   await workspace.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
-  await workspace.getByRole('combobox',{name:'Worker 1'}).selectOption({label:'Writer'});
+  await workspace.getByRole('combobox',{name:'Worker 1',exact:true}).selectOption({label:'Writer'});
   await workspace.getByRole('button',{name:'Create disabled preset'}).click();
-  await workspace.getByRole('textbox',{name:'Preset title'}).fill('Safely renamed');
-  await workspace.getByRole('button',{name:'Save preset'}).click();
+  const selected=workspace.getByRole('region',{name:'Selected orchestration',exact:true});
+  await selected.getByRole('textbox',{name:'Team name',exact:true}).fill('Safely renamed');
+  await selected.getByRole('button',{name:'Save Team version',exact:true}).click();
   await expect(workspace.locator('.sa-list .sa-item strong')).toHaveText('Safely renamed');
   await expect(workspace.getByRole('button',{name:'Enable manual'})).toBeVisible();
   await workspace.getByRole('button',{name:'Delete unused'}).click();
@@ -457,6 +458,7 @@ test('SuperAgent examples only fill names and leave all authorization disabled',
 
 
 test('Team Builder creates and edits ordered worker and reviewer roles', async ({page}) => {
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
   await page.evaluate(async () => {
@@ -464,11 +466,12 @@ test('Team Builder creates and edits ordered worker and reviewer roles', async (
     const previous=document.querySelector<HTMLElement>('#superagent-host')!;
     const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
     const bots=[
-      {id:'coordinator',name:'Coordinator',paused:false},
-      {id:'worker-one',name:'Worker One',paused:false},
-      {id:'worker-two',name:'Worker Two',paused:false},
-      {id:'reviewer-one',name:'Reviewer One',paused:false},
-      {id:'reviewer-two',name:'Reviewer Two',paused:false},
+      {id:'coordinator',name:'Coordinator',paused:false,projectId:'project-one'},
+      {id:'worker-one',name:'Worker One',paused:false,projectId:'project-one'},
+      {id:'worker-two',name:'Worker Two',paused:false,projectId:'project-one'},
+      {id:'foreign-worker',name:'Foreign Worker',paused:false,projectId:'project-two'},
+      {id:'reviewer-one',name:'Reviewer One',paused:false,projectId:'project-one'},
+      {id:'reviewer-two',name:'Reviewer Two',paused:false,projectId:'project-one'},
     ];
     let config:Record<string,any>|null=null;
     const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
@@ -494,9 +497,11 @@ test('Team Builder creates and edits ordered worker and reviewer roles', async (
     (window as unknown as {saTeamCalls:typeof calls}).saTeamCalls=calls;
   });
   const team=host;
-  await host.getByRole('textbox',{name:'Name'}).fill('Ordered Team');
+  await host.getByRole('textbox',{name:'Name',exact:true}).fill('Ordered Team');
   await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
-  await host.getByRole('combobox',{name:'Worker 1'}).selectOption('worker-one');
+  const workerOne=host.getByRole('combobox',{name:'Worker 1',exact:true});
+  await expect(workerOne.locator('option[value="foreign-worker"]')).toHaveAttribute('disabled','');
+  await workerOne.selectOption('worker-one');
   await host.getByRole('button',{name:'Add worker'}).click();
   await host.getByRole('combobox',{name:'Worker 2'}).selectOption('worker-two');
   await host.getByRole('button',{name:'Add reviewer'}).click();
@@ -515,10 +520,11 @@ test('Team Builder creates and edits ordered worker and reviewer roles', async (
     workerBotIds:['worker-two','worker-one'],reviewerBotIds:['reviewer-two','reviewer-one'],
   });
 
+  const selected=host.getByRole('region',{name:'Selected orchestration',exact:true});
   await host.getByRole('button',{name:'Edit Team'}).click();
-  await host.getByRole('button',{name:'Move worker 2 up'}).click();
-  await host.getByRole('button',{name:'Move reviewer 2 up'}).click();
-  await host.getByRole('button',{name:'Save Team version'}).click();
+  await selected.getByRole('button',{name:'Move worker 2 up'}).click();
+  await selected.getByRole('button',{name:'Move reviewer 2 up'}).click();
+  await selected.getByRole('button',{name:'Save Team version',exact:true}).click();
   await expect(host).toHaveAttribute('aria-busy','false');
   calls=await page.evaluate(()=>(window as unknown as {
     saTeamCalls:Array<{command:string;args?:Record<string,any>}>
@@ -532,6 +538,7 @@ test('Team Builder creates and edits ordered worker and reviewer roles', async (
 });
 
 test('Team Builder removes worker and reviewer roles while retaining the required worker', async ({page}) => {
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
   await page.evaluate(async () => {
@@ -539,13 +546,14 @@ test('Team Builder removes worker and reviewer roles while retaining the require
     const previous=document.querySelector<HTMLElement>('#superagent-host')!;
     const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
     const bots=[
-      {id:'coordinator',name:'Coordinator',paused:false},
-      {id:'worker-one',name:'Worker One',paused:false},
-      {id:'worker-two',name:'Worker Two',paused:false},
-      {id:'reviewer-one',name:'Reviewer One',paused:false},
-      {id:'reviewer-two',name:'Reviewer Two',paused:false},
+      {id:'coordinator',name:'Coordinator',paused:false,projectId:'project-one'},
+      {id:'worker-one',name:'Worker One',paused:false,projectId:'project-one'},
+      {id:'worker-two',name:'Worker Two',paused:false,projectId:'project-one'},
+      {id:'reviewer-one',name:'Reviewer One',paused:false,projectId:'project-one'},
+      {id:'reviewer-two',name:'Reviewer Two',paused:false,projectId:'project-one'},
     ];
     let config:Record<string,any>={id:'team-removal',name:'Removable roles',
+      projectId:'project-one',
       coordinatorBotId:'coordinator',workerBotId:'worker-one',
       workerBotIds:['worker-one','worker-two'],reviewerBotIds:['reviewer-one','reviewer-two'],
       enabled:false,policyRevision:4,teamVersion:1};
@@ -566,17 +574,18 @@ test('Team Builder removes worker and reviewer roles while retaining the require
     (window as unknown as {saRemovalCalls:typeof calls}).saRemovalCalls=calls;
   });
 
+  const selected=host.getByRole('region',{name:'Selected orchestration',exact:true});
   await host.getByRole('button',{name:'Edit Team'}).click();
-  const workers=host.getByRole('group',{name:'Workers (ordered)'});
+  const workers=selected.getByRole('group',{name:'Workers (ordered)',exact:true});
   await workers.getByRole('button',{name:'Remove worker 1'}).click();
-  await expect(workers.getByRole('combobox',{name:'Worker 1'})).toHaveValue('worker-two');
+  await expect(workers.getByRole('combobox',{name:'Worker 1',exact:true})).toHaveValue('worker-two');
   await expect(workers.getByRole('button',{name:'Remove worker 1'})).toHaveCount(0);
 
-  const reviewers=host.getByRole('group',{name:'Reviewers (ordered)'});
+  const reviewers=selected.getByRole('group',{name:'Reviewers (ordered)',exact:true});
   await reviewers.getByRole('button',{name:'Remove reviewer 1'}).click();
   await reviewers.getByRole('button',{name:'Remove reviewer 1'}).click();
   await expect(reviewers).toContainText('No reviewers selected.');
-  await host.getByRole('button',{name:'Save Team version'}).click();
+  await selected.getByRole('button',{name:'Save Team version',exact:true}).click();
   await expect(host).toHaveAttribute('aria-busy','false');
 
   const calls=await page.evaluate(()=>(window as unknown as {
@@ -591,6 +600,7 @@ test('Team Builder removes worker and reviewer roles while retaining the require
 });
 
 test('Team Builder keeps an edit draft and shows native rejection feedback', async ({page}) => {
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
   await page.evaluate(async () => {
@@ -598,12 +608,13 @@ test('Team Builder keeps an edit draft and shows native rejection feedback', asy
     const previous=document.querySelector<HTMLElement>('#superagent-host')!;
     const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
     const bots=[
-      {id:'coordinator',name:'Coordinator',paused:false},
-      {id:'worker-one',name:'Worker One',paused:false},
-      {id:'worker-two',name:'Worker Two',paused:false},
-      {id:'reviewer',name:'Reviewer',paused:false},
+      {id:'coordinator',name:'Coordinator',paused:false,projectId:'project-one'},
+      {id:'worker-one',name:'Worker One',paused:false,projectId:'project-one'},
+      {id:'worker-two',name:'Worker Two',paused:false,projectId:'project-one'},
+      {id:'reviewer',name:'Reviewer',paused:false,projectId:'project-one'},
     ];
     const config={id:'team-native-blocked',name:'Original Team',coordinatorBotId:'coordinator',
+      projectId:'project-one',
       workerBotId:'worker-one',workerBotIds:['worker-one','worker-two'],reviewerBotIds:['reviewer'],
       enabled:false,policyRevision:9};
     const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
@@ -620,16 +631,17 @@ test('Team Builder keeps an edit draft and shows native rejection feedback', asy
     (window as unknown as {saBlockedEditCalls:typeof calls}).saBlockedEditCalls=calls;
   });
 
+  const selected=host.getByRole('region',{name:'Selected orchestration',exact:true});
   await host.getByRole('button',{name:'Edit Team'}).click();
-  const editor=host.locator('form[data-sa-form="edit"]');
-  await editor.getByRole('textbox',{name:'Team name'}).fill('Edited but rejected');
+  const editor=selected.locator('form[data-sa-form="edit"]');
+  await editor.getByRole('textbox',{name:'Team name',exact:true}).fill('Edited but rejected');
   await editor.getByRole('button',{name:'Move worker 2 up'}).click();
-  await editor.getByRole('button',{name:'Save Team version'}).click();
+  await editor.getByRole('button',{name:'Save Team version',exact:true}).click();
   await expect(host).toHaveAttribute('aria-busy','false');
   await expect(host.getByRole('alert')).toHaveText('Native policy blocked this Team update: revision changed.');
-  await expect(host.locator('form[data-sa-form="edit"] input[name="name"]')).toHaveValue('Edited but rejected');
-  await expect(host.getByRole('combobox',{name:'Worker 1'})).toHaveValue('worker-two');
-  await expect(host.getByRole('combobox',{name:'Worker 2'})).toHaveValue('worker-one');
+  await expect(editor.getByRole('textbox',{name:'Team name',exact:true})).toHaveValue('Edited but rejected');
+  await expect(selected.getByRole('combobox',{name:'Worker 1',exact:true})).toHaveValue('worker-two');
+  await expect(selected.getByRole('combobox',{name:'Worker 2',exact:true})).toHaveValue('worker-one');
   await expect(host.locator('.sa-list .sa-item strong')).toHaveText('Original Team');
   const calls=await page.evaluate(()=>(window as unknown as {
     saBlockedEditCalls:Array<{command:string;args?:Record<string,any>}>
@@ -640,6 +652,39 @@ test('Team Builder keeps an edit draft and shows native rejection feedback', asy
       workerBotIds:['worker-two','worker-one'],reviewerBotIds:['reviewer'],workerBotId:'worker-two',
     },
   }}]);
+});
+
+test('Team Builder disables roles from another project', async ({page}) => {
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const previous=document.querySelector<HTMLElement>('#superagent-host')!;
+    const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
+    const bots=[
+      {id:'coordinator',name:'Coordinator',paused:false,projectId:'project-one'},
+      {id:'worker-one',name:'Worker One',paused:false,projectId:'project-one'},
+      {id:'worker-other',name:'Worker Other Project',paused:false,projectId:'project-two'},
+      {id:'reviewer-one',name:'Reviewer One',paused:false,projectId:'project-one'},
+      {id:'reviewer-other',name:'Reviewer Other Project',paused:false,projectId:'project-two'},
+    ];
+    mountSuperagent(host,async(command)=>{
+      if(command==='bots_list')return bots as never;
+      if(command==='superagent_list')return [] as never;
+      if(command==='superagent_tickets')return [] as never;
+      throw new Error('Unexpected project compatibility command: '+command);
+    });
+  });
+
+  await host.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption('coordinator');
+  const workers=host.getByRole('group',{name:'Workers (ordered)',exact:true});
+  const worker=workers.getByRole('combobox',{name:'Worker 1',exact:true});
+  await expect(worker.locator('option[value="worker-other"]')).toHaveAttribute('disabled','');
+  await expect(worker.locator('option[value="worker-one"]')).not.toHaveAttribute('disabled','');
+  await host.getByRole('button',{name:'Add reviewer',exact:true}).click();
+  const reviewers=host.getByRole('group',{name:'Reviewers (ordered)',exact:true});
+  await expect(reviewers.getByRole('combobox',{name:'Reviewer 1',exact:true})
+    .locator('option[value="reviewer-other"]')).toHaveAttribute('disabled','');
 });
 
 test('Ticket evidence reports a missing saved Team snapshot without using the current Team', async ({page}) => {

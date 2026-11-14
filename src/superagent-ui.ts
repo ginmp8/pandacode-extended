@@ -4,10 +4,10 @@ import { escape } from './dom';
 // This interface only invokes native policy/authorization decisions. It cannot
 // grant tools, infer work, start tasks on import or bypass Council review.
 type Call = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-interface Bot { id: string; name: string; paused: boolean }
+interface Bot { id: string; name: string; paused: boolean; projectId: string }
 interface Config {
   id: string; name: string; coordinatorBotId: string; workerBotId: string;
-  workerBotIds?: string[]; reviewerBotIds?: string[]; teamVersion?: number;
+  workerBotIds?: string[]; reviewerBotIds?: string[]; teamVersion?: number; projectId?: string;
   enabled: boolean; policyRevision: number;
   ticketCount?: number; runningCount?: number; blockedCount?: number; lastActivityAt?: number;
 }
@@ -111,6 +111,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   const safe = (value: unknown) => escape(String(value ?? ''));
   const current = () => presets.find(item => item.id === selected);
   const botName = (id: string) => bots.find(bot => bot.id === id)?.name ?? 'Missing bot';
+  const botProjectId = (id: string) => bots.find(bot => bot.id === id)?.projectId;
   const activityTime = (timestamp?: number): string => typeof timestamp === 'number' &&
     Number.isFinite(timestamp) && timestamp > 0
     ? new Date(timestamp).toLocaleString() : 'Unavailable';
@@ -133,7 +134,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       editTeamDrafts.set(form.dataset.orchestrationId, draft);
     }
   };
-  const validateTeamDraft = (draft: TeamDraft): TeamDraft => {
+  const validateTeamDraft = (draft: TeamDraft, expectedProjectId?: string): TeamDraft => {
     if (!draft.name || !draft.coordinatorBotId || !draft.workerBotIds.length ||
         draft.workerBotIds.some(id => !id) || draft.reviewerBotIds.some(id => !id)) {
       throw new Error('Choose a Team name, one coordinator, and at least one worker.');
@@ -143,6 +144,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     }
     const roleIds = [draft.coordinatorBotId, ...draft.workerBotIds, ...draft.reviewerBotIds];
     if (new Set(roleIds).size !== roleIds.length) throw new Error('A bot can have only one role in a Team.');
+    const projectId = expectedProjectId || botProjectId(draft.coordinatorBotId);
+    if (!projectId || roleIds.some(id => botProjectId(id) !== projectId)) {
+      throw new Error('Choose the Coordinator, Workers, and Reviewers from the same project.');
+    }
     return draft;
   };
   function renderTeamSnapshot(snapshot: TeamSnapshot | null | undefined): string {
@@ -214,17 +219,21 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '</li>';
       }
     ).join('');
-    const optionsFor = (botId: string) => bots.map(bot => '<option value="' + safe(bot.id) + '"' +
-      (bot.paused ? ' disabled' : '') + (bot.id === botId ? ' selected' : '') + '>' + safe(bot.name) +
-      (bot.paused ? ' (paused)' : '') + '</option>').join('');
-    const roleEditor = (kind: 'worker' | 'reviewer', ids: string[]) => {
+    const chosen = current();
+    const optionsFor = (botId: string, projectId?: string) => bots.map(bot => {
+      const differentProject = !!projectId && bot.projectId !== projectId;
+      return '<option value="' + safe(bot.id) + '"' +
+        (bot.paused || differentProject ? ' disabled' : '') + (bot.id === botId ? ' selected' : '') + '>' +
+        safe(bot.name) + (bot.paused ? ' (paused)' : differentProject ? ' (different project)' : '') + '</option>';
+    }).join('');
+    const roleEditor = (kind: 'worker' | 'reviewer', ids: string[], projectId?: string) => {
       const title = kind === 'worker' ? 'Workers (ordered)' : 'Reviewers (ordered)';
       const max = kind === 'worker' ? MAX_TEAM_WORKERS : MAX_TEAM_REVIEWERS;
       const rows = ids.map((id, index) => {
         const label = kind === 'worker' ? 'Worker ' + (index + 1) : 'Reviewer ' + (index + 1);
         const name = kind === 'worker' ? 'workerBotIds' : 'reviewerBotIds';
         return '<li><label>' + label + '<select name="' + name + '" data-sa-team-role="' + kind + '" required>' +
-          '<option value="">Choose bot</option>' + optionsFor(id) + '</select></label><div class="sa-actions">' +
+          '<option value="">Choose bot</option>' + optionsFor(id, projectId) + '</select></label><div class="sa-actions">' +
           '<button type="button" data-sa-role-action="up" data-sa-role="' + kind + '" data-sa-role-index="' + index + '" aria-label="Move ' +
           label.toLowerCase() + ' up"' + (index === 0 ? ' disabled' : '') + '>Move up</button>' +
           '<button type="button" data-sa-role-action="down" data-sa-role="' + kind + '" data-sa-role-index="' + index + '" aria-label="Move ' +
@@ -237,13 +246,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         (rows || '<li>No reviewers selected.</li>') + '</ol><button type="button" data-sa-role-add="' + kind + '"' +
         (ids.length >= max ? ' disabled' : '') + '>Add ' + kind + '</button></div>';
     };
-    const chosen = current();
     const selectedTeamDraft = chosen ? editTeamDrafts.get(chosen.id) ?? {
       name: chosen.name,
       coordinatorBotId: chosen.coordinatorBotId,
       workerBotIds: chosen.workerBotIds?.length ? chosen.workerBotIds : [chosen.workerBotId],
       reviewerBotIds: chosen.reviewerBotIds ?? [],
     } : null;
+    const selectedProjectId = chosen
+      ? chosen.projectId || botProjectId(selectedTeamDraft?.coordinatorBotId ?? '') : undefined;
+    const draftProjectId = botProjectId(draftCoordinatorBotId);
     const inspected = tickets.find(ticket => ticket.id === inspectedTicket);
     const writeTicket = tickets.find(ticket => ticket.id === writeGrantTicket);
     const canComment = !!inspected && ticketDetails?.ticket.id === inspected.id &&
@@ -360,8 +371,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       (chosen.enabled ? ' disabled' : '') + '>Delete unused</button></div></header>' +
       '<form data-sa-form="edit" data-orchestration-id="' + safe(chosen.id) + '"><label>Team name<input name="name" required maxlength="120" value="' + safe(selectedTeamDraft?.name) + '"></label>' +
       '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" required>' +
-      '<option value="">Choose bot</option>' + optionsFor(selectedTeamDraft?.coordinatorBotId ?? '') + '</select></label></div>' +
-      roleEditor('worker', selectedTeamDraft?.workerBotIds ?? []) + roleEditor('reviewer', selectedTeamDraft?.reviewerBotIds ?? []) +
+      '<option value="">Choose bot</option>' + optionsFor(selectedTeamDraft?.coordinatorBotId ?? '', selectedProjectId) + '</select></label></div>' +
+      roleEditor('worker', selectedTeamDraft?.workerBotIds ?? [], selectedProjectId) +
+      roleEditor('reviewer', selectedTeamDraft?.reviewerBotIds ?? [], selectedProjectId) +
       '<button class="primary-button" type="submit"' +
       (chosen.enabled || (chosen.ticketCount ?? 0) > 0 ? ' disabled' : '') + '>Save Team version</button></form>' +
       (chosen.ticketCount ? '<p>Team roles lock after its first Ticket.</p>' : '') +
@@ -425,7 +437,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       safe(draftPresetName) + '" required></label>' +
       '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" required>' +
       '<option value="">Choose bot</option>' + optionsFor(draftCoordinatorBotId) + '</select></label></div>' +
-      roleEditor('worker', draftWorkerBotIds) + roleEditor('reviewer', draftReviewerBotIds) +
+      roleEditor('worker', draftWorkerBotIds, draftProjectId) +
+      roleEditor('reviewer', draftReviewerBotIds, draftProjectId) +
       '<button class="primary-button" type="submit"' +
       (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' +
       active +
@@ -519,7 +532,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       if (field) field.value = draftPresetName;
     }
     const form = target.closest<HTMLFormElement>('form[data-sa-form="create"],form[data-sa-form="edit"]');
-    if (form) rememberTeamDraft(form, readTeamDraft(form));
+    if (form) {
+      rememberTeamDraft(form, readTeamDraft(form));
+      if (target.name === 'coordinatorBotId') render();
+    }
   });
   host.addEventListener('input', event => {
     const target = event.target;
@@ -933,7 +949,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       if (!existing || existing.enabled || (existing.ticketCount ?? 0) > 0) return;
       const draft = readTeamDraft(form);
       void work(async () => {
-        const team = validateTeamDraft(draft);
+        const team = validateTeamDraft(draft, existing.projectId || botProjectId(existing.coordinatorBotId));
         const input = { ...team, workerBotId:team.workerBotIds[0] };
         await call('superagent_update',{ orchestrationId:existing.id, expectedRevision:existing.policyRevision, input });
         editTeamDrafts.delete(existing.id);

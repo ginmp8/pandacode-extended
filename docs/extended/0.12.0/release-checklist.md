@@ -1,5 +1,12 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-14 — Cargo.lock consistency repair (validation pending)
+
+- [x] Reproduce the exact `Cargo.lock` correction from the failed CI's `cargo metadata` diff and match its Git blob SHA `b9922223a60fc1da5628307009569758f20fb1a3`.
+- [ ] Confirm `cargo --locked` and all Rust/Clippy/ONNX jobs on the **new** destination commit (previous push/PR runs failed).
+- [ ] Validate native Settings On/Off and all external integrations; 81 customized upstream paths remain a separate semantic acceptance gate.
+- [ ] Approve Extended 0.12.0 for distribution only after all required release gates; currently DRAFT.
+
 ## 2026-11-14 — source HEAD import candidate (not approved)
 
 - [x] Freeze [source `6c42278ff598`](https://github.com/ginmp8/pandacode/commit/6c42278ff5981e50c9dc494986b4380123d4686d) and confirm app version **0.3.125**.

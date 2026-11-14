@@ -4838,6 +4838,26 @@ fn resume_nested_child_team(store: &Store, link: &CouncilChildLink) -> Result<()
     save(store, &mut child)
 }
 
+const NESTED_CANCELLED_PREFIX: &str = "Nested Council cancelled: ";
+
+/// The terminal reason a cancelled nested child reports on its root seat. The
+/// child keeps the internal cancellation marker for idempotent recovery, while
+/// the root seat carries only the human cancellation reason.
+fn nested_terminal_reason(child: &TeamSnapshot) -> String {
+    child
+        .error
+        .as_deref()
+        .map_or_else(
+            || "Nested Council failed.".to_string(),
+            |error| {
+                error
+                    .strip_prefix(NESTED_CANCELLED_PREFIX)
+                    .unwrap_or(error)
+                    .to_string()
+            },
+        )
+}
+
 fn cancel_nested_child_team(
     store: &Store,
     agents: &std::collections::HashMap<String, crate::RunningAgent>,
@@ -4859,7 +4879,7 @@ fn cancel_nested_child_team(
         && child
             .error
             .as_deref()
-            .is_some_and(|error| error.starts_with("Nested Council cancelled: "))
+            .is_some_and(|error| error.starts_with(NESTED_CANCELLED_PREFIX))
     {
         return Ok(());
     }
@@ -4867,7 +4887,7 @@ fn cancel_nested_child_team(
     child.status = "failed".into();
     child.pending_turn = None;
     child.error = Some(format!(
-        "Nested Council cancelled: {}",
+        "{NESTED_CANCELLED_PREFIX}{}",
         bounded(reason, 1024)
     ));
     for worker in &mut child.workers {
@@ -5606,13 +5626,13 @@ fn dispatch_tool(child: bool) -> Value {
         item["replaces"] = json!({"type":"string","description":"Replace failed worker or failed check; \"auto\" tries other/stronger models at most twice; retains changes."});
         item["replaceReason"] = json!({"type":"string","description":"Failed check."});
         item["councilLens"] = json!({"type":"string","description":"Review lens; read-only."});
-        item["councilSource"] = json!({"type":"string","enum":["automatic","selected_bot"],"description":"For a mixed Council plan, explicitly reserve this reviewer seat for the automatic or selected-bot source."});
-        item["reviewerBotId"] = json!({"type":"string","description":"Selected bot ID for a selected_bot Council seat. Required in mixed automatic/selected-bot plans."});
+        item["councilSource"] = json!({"type":"string","enum":["automatic","selected_bot"]});
+        item["reviewerBotId"] = json!({"type":"string"});
         "Start assignments as one parallel batch; returns IDs. With profileId \"auto\" or omitted with routing on, Router picks models; select explicit models only when asked. In a mixed Council, set councilSource on every seat and reviewerBotId on each selected_bot seat so both sources receive their required distinct seats. For S2, set forceEscalation only when the user explicitly requests a fresh review round; assignments must be new Council reviewer seats, and only sources enabled by the mode are scheduled. files are repo-relative; [] reserves checkout. Disjoint writers/readOnly can overlap; dependsOn uses returned IDs.".into()
     };
     let mut properties = json!({"assignments":{"type":"array","items":{"type":"object","properties":item,"required":["key","name","prompt","files"]}}});
     if !child {
-        properties["forceEscalation"] = json!({"type":"boolean","description":"User explicitly requests an additional fresh Council round under the configured S2 strategy."});
+        properties["forceEscalation"] = json!({"type":"boolean"});
     }
     tool(
         "dispatch_workers",
@@ -8343,9 +8363,7 @@ fn reconcile_nested_child_seats(
                                 _ => Some(Err("Nested Council completed without a current, passing native Council result and finding summary.".to_string())),
                             }
                         }
-                        "failed" => Some(Err(child
-                            .error
-                            .unwrap_or_else(|| "Nested Council failed.".into()))),
+                        "failed" => Some(Err(nested_terminal_reason(&child))),
                         _ => None,
                     }
                 }

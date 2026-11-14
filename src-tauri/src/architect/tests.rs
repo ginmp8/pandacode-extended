@@ -734,10 +734,8 @@ fn composed_pass_blocks_when_a_configured_cost_cap_has_no_receipt_proof() {
     let cycle_id = format!("{}:{}", team.session_id, team.council_since);
     for reviewer in &team.workers {
         let evidence = vec![format!("verified:{}", reviewer.id)];
-        let finding_identity = format!("{cycle_id}:1:{}:coverage", reviewer.id);
-        let finding_digest = council_sha256(finding_identity.as_bytes());
-        let finding = council::CouncilFinding {
-            id: format!("finding-{}", &finding_digest[..32]),
+        let mut finding = council::CouncilFinding {
+            id: String::new(),
             content_digest: String::new(),
             cycle_id: cycle_id.clone(),
             round_id: format!("{cycle_id}:1"),
@@ -754,10 +752,12 @@ fn composed_pass_blocks_when_a_configured_cost_cap_has_no_receipt_proof() {
             location: None,
             suggested_fix: None,
         };
+        finding.content_digest = finding.calculated_content_digest();
+        finding.id = format!("finding-{}", finding.content_digest);
         persist_council_record(
             &store,
             &team.session_id,
-            &format!("native-council-finding:{}", &finding_digest[..48]),
+            &format!("native-council-finding:{}", &finding.content_digest[..48]),
             "council_finding",
             &finding,
             &reviewer.id,
@@ -6759,11 +6759,9 @@ fn persisted_council_criterion_receipts_drive_the_gate_and_dispositions_project_
         team.workers.push(reviewer);
 
         let cycle_id = binding.council_cycle_id.clone();
-        let identity = format!("{cycle_id}:1:{id}:authorization");
-        let digest = council_sha256(identity.as_bytes());
         let evidence = vec![format!("file:src/{id}.rs#sha256:{}", "a".repeat(64))];
-        let finding = council::CouncilFinding {
-            id: format!("finding-{}", &digest[..32]),
+        let mut finding = council::CouncilFinding {
+            id: String::new(),
             content_digest: String::new(),
             cycle_id: cycle_id.clone(),
             round_id: format!("{cycle_id}:1"),
@@ -6778,7 +6776,9 @@ fn persisted_council_criterion_receipts_drive_the_gate_and_dispositions_project_
             location: None,
             suggested_fix: None,
         };
-        let finding_key = format!("native-council-finding:{}", &digest[..48]);
+        finding.content_digest = finding.calculated_content_digest();
+        finding.id = format!("finding-{}", finding.content_digest);
+        let finding_key = format!("native-council-finding:{}", &finding.content_digest[..48]);
         persist_council_record(
             &store,
             &team.session_id,
@@ -6917,70 +6917,109 @@ fn nested_child_lifecycle_fixture_for_root(
     state: AppState,
     root_id: String,
 ) -> (AppState, String, String, CouncilChildLink) {
+    use council::{AutomaticReviewerCount as Count, CouncilCriteriaSource as Source, CouncilCriterionOrigin as Origin, SelectedReviewerMode};
+
     let store = state.store.lock().unwrap();
     let project_id = store.session(&root_id).unwrap().project_id;
-    let child_session = store.create_session(&project_id, "codex", "default", "ask").unwrap();
-    let child_id = child_session.id.clone();
+    for id in ["reviewer-bot", "other-bot"] {
+        store.db.execute(
+            "INSERT INTO bots(id,name,role,instructions,goals,soul,project_id,provider,model,mode,created_at,updated_at,skills) VALUES(?1,?1,'Reviewer','Review only the assigned task.','','',?2,'codex','gpt-5-nano','full',1,1,'[]')",
+            params![id, project_id],
+        ).unwrap();
+    }
+    let nested = council::NestedCouncilConfig {
+        template: council::NestedCouncilTemplate::ExplicitTask,
+        child_criteria_source: Source::Architect,
+        child_reviewer_count: 2,
+        target: 8.0,
+        max_rounds: 1,
+        escalation: council::NestedEscalation::Always,
+        user_forced: false,
+    };
+    let composition = council::CouncilComposition {
+        schema_version: 1,
+        automatic: council::CouncilAutomaticReviewers { enabled: false, count: Count::Fixed(0) },
+        selected: vec![
+            council::SelectedCouncilReviewer {
+                bot_id: "reviewer-bot".into(), mode: SelectedReviewerMode::Nested,
+                required: true, nested: Some(nested.clone()),
+            },
+            council::SelectedCouncilReviewer {
+                bot_id: "other-bot".into(), mode: SelectedReviewerMode::Direct,
+                required: true, nested: None,
+            },
+        ],
+        criteria_source: Source::Architect,
+        criteria: vec![council::CouncilCriterion {
+            id: "security".into(), lens: "security".into(),
+            description: "Review the nested task through its frozen craft.".into(),
+            required: true, target: 8.0, evidence_required: false, source: Origin::Architect,
+        }],
+        strategy: council::CouncilStrategy::Parallel,
+        limits: council::CouncilCompositionLimits {
+            max_depth: 2, max_root_seats: 8, max_concurrent_leaves: 4,
+            max_leaf_reviews_per_round: 4, timeout_ms: 3_600_000,
+            max_estimated_cost_micros: Some(1),
+        },
+    };
+    composition.validate().unwrap();
 
+    let child_session = store.create_session(&project_id, "codex", "gpt-5-nano", "ask").unwrap();
+    let child_id = child_session.id.clone();
     let mut root = load(&store, &root_id).unwrap().unwrap();
-    root.council_since = 12;
+    root.council_since = storage::now().max(2);
+    root.config.council = Some(council::CouncilConfig {
+        target: 8.0,
+        max_rounds: 1,
+        reviewers: 0,
+        reviewer_bot_ids: vec!["reviewer-bot".into(), "other-bot".into()],
+        composition: Some(composition),
+        ..council::CouncilConfig::default()
+    });
     let seat = council::CouncilSeat {
         round: 1, lens: "security".into(), score: None,
         closed_by_selection: false, started_at: 0
     };
+    let created_at = storage::now();
     let mut parent_worker = worker("nested-review", "waiting", &["src"], &[]);
     parent_worker.session_id = child_id.clone();
+    parent_worker.provider = "codex".into();
+    parent_worker.model = "gpt-5-nano".into();
+    parent_worker.created_at = created_at;
+    parent_worker.updated_at = created_at;
+    parent_worker.read_only = true;
     parent_worker.council = Some(seat.clone());
     let mut binding = reviewer_security::ReviewerBinding::native(
-        &root, &parent_worker.id, storage::now(), "codex", "default", &seat,
+        &root, &parent_worker.id, created_at, "codex", "gpt-5-nano", &seat,
     );
     binding.composition_mode = Some("nested".into());
     binding.reviewer_bot_id = Some("reviewer-bot".into());
+    binding.roster_bot_ids = vec!["reviewer-bot".into(), "other-bot".into()];
+    binding.required_reviewers = Some(2);
+    binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+        name: "Reviewer bot".into(), role: "Reviewer".into(), instructions: String::new(),
+        goals: String::new(), soul: String::new(), reasoning_effort: String::new(),
+        skill_ids: Vec::new(),
+    });
     parent_worker.reviewer_binding = Some(binding.clone());
+    reviewer_security::record_native_authority(&store, &root.session_id, &binding).unwrap();
     root.workers.push(parent_worker.clone());
-
-    let mut child = new_team(child_id.clone(), config());
-    child.status = "running".into();
+    store.db.execute(
+        "INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",
+        params![root_id, parent_worker.id, child_id],
+    ).unwrap();
+    save(&store, &mut root).unwrap();
+    create_nested_child_team(&store, &root, &parent_worker, &nested, &child_id).unwrap();
+    // The production dispatch persists the child link against the next root
+    // dispatch revision, then advances that revision on its own save.
+    root.dispatch_revision = root.dispatch_revision.saturating_add(1);
+    save(&store, &mut root).unwrap();
+    // A nested child gets leaf reviewers from dispatch; the pause/resume/cancel
+    // lifecycle only needs one queued child worker to settle.
+    let mut child = load(&store, &child_id).unwrap().unwrap();
     child.workers = vec![worker("leaf-review", "queued", &["src"], &[])];
     save(&store, &mut child).unwrap();
-    save(&store, &mut root).unwrap();
-
-    let root_cycle_id = format!("{}:{}", root.session_id, root.council_since);
-    let link = CouncilChildLink {
-        schema_version: 1,
-        root_session_id: root.session_id.clone(),
-        root_worker_id: parent_worker.id.clone(),
-        root_council_cycle_id: root_cycle_id.clone(),
-        root_round: 1,
-        root_artifact_revision: binding.artifact_revision.clone(),
-        root_dispatch_revision: root.dispatch_revision,
-        root_changed_at: root.changed_at,
-        child_session_id: child_id.clone(),
-        child_council_cycle_id: format!("{}:{}", child.session_id, child.council_since),
-        delivery_id: None,
-        depth: 1,
-        timeout_at: storage::now() + 60_000,
-        max_concurrent_leaves: 1,
-        max_leaf_reviews_per_round: 2,
-        max_estimated_cost_micros: Some(1),
-        nested: council::NestedCouncilConfig {
-            template: council::NestedCouncilTemplate::ExplicitTask,
-            child_criteria_source: council::CouncilCriteriaSource::Architect,
-            child_reviewer_count: 1,
-            target: 8.0,
-            max_rounds: 1,
-            escalation: council::NestedEscalation::Always,
-            user_forced: false,
-        },
-        binding,
-        created_at: storage::now(),
-    };
-    let content = serde_json::to_string(&link).unwrap();
-    record_request(
-        &store, &root.session_id,
-        &council_child_key(&root_cycle_id, &parent_worker.id),
-        "council_child_link", &content, &parent_worker.id,
-    ).unwrap();
+    let link = load_council_child_link(&store, &child_id).unwrap().unwrap();
     drop(store);
     (state, root_id, child_id, link)
 }

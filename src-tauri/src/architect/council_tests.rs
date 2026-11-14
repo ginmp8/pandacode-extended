@@ -2100,6 +2100,12 @@ fn mixed_composition_quorum_requires_automatic_seats_in_addition_to_selected_bot
             );
             binding.reviewer_bot_id = Some(id.clone());
             binding.roster_bot_ids = roster.clone();
+            binding.composition_mode = Some(match config.composition.as_ref().unwrap().selected.iter()
+                .find(|selected| selected.bot_id == *id).unwrap().mode
+            {
+                council::SelectedReviewerMode::Direct => "direct".into(),
+                council::SelectedReviewerMode::Nested => "nested".into(),
+            });
             // This is the selected roster size written by architect.rs. It must not replace the
             // source-aware total on a mixed composition round.
             binding.required_reviewers = Some(roster.len());
@@ -2108,7 +2114,13 @@ fn mixed_composition_quorum_requires_automatic_seats_in_addition_to_selected_bot
         let quota = config.seat_plan();
         assert!(quota.automatic > 0 && quota.selected_bots() == roster.len());
         assert!(!council::complete(&team, &config, 1), "selected bots alone cannot satisfy M3/M5/M7");
-        assert!(finish_refusal(&team).unwrap().contains(&format!("at least {} needed", quota.required())));
+        let refusal = finish_refusal(&team).unwrap();
+        assert!(
+            refusal.contains("council_source_quorum_blocked")
+                && refusal.contains("automatic reviewer seats")
+                && refusal.contains("has 0"),
+            "{refusal}"
+        );
 
         for index in 0..quota.automatic {
             let mut automatic = seat(&format!("automatic-{index}"), 1, Some(9.7), team.council_since + 20 + index as i64);
@@ -2346,9 +2358,29 @@ fn composed_finish_gate_does_not_pass_on_scores_without_required_criteria_covera
         target: 9.0, evidence_required: true, source: Origin::User,
     }];
     let config = config_for_composition(plan);
+    let roster = config.reviewer_bot_ids.clone();
     let since = storage::now().max(2);
     let mut team = team_with(config, vec![writer("writer", since), seat("review-a", 1, Some(9.9), since + 1), seat("review-b", 1, Some(9.8), since + 2)]);
     team.council_since = since;
+    // Real selected-seat bindings let the source-coverage gate pass so the
+    // missing required criterion is what the finish gate reports.
+    for (index, bot_id) in roster.iter().enumerate() {
+        let worker = &team.workers[index + 1];
+        let seat = worker.council.as_ref().unwrap().clone();
+        let mut binding = reviewer_security::ReviewerBinding::native(
+            &team, &worker.id, worker.created_at, &worker.provider, &worker.model, &seat,
+        );
+        binding.reviewer_bot_id = Some(bot_id.clone());
+        binding.roster_bot_ids = roster.clone();
+        binding.required_reviewers = Some(roster.len());
+        binding.composition_mode = Some("direct".into());
+        binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+            name: bot_id.clone(), role: "QA".into(), instructions: String::new(),
+            goals: String::new(), soul: String::new(), reasoning_effort: String::new(),
+            skill_ids: Vec::new(),
+        });
+        team.workers[index + 1].reviewer_binding = Some(binding);
+    }
     let refusal = finish_refusal(&team).unwrap();
     assert!(refusal.contains("council_criteria_gate_blocked"), "{refusal}");
     assert!(refusal.contains("Required Council criterion \"security\" has no scored reviewer coverage"), "{refusal}");
@@ -2444,9 +2476,13 @@ fn critical_findings_require_verified_or_current_human_disposition() {
     assert!(first.validate().is_ok());
     assert!(second.validate().is_ok());
     let findings = vec![first.clone(), second.clone()];
+    let sorted = |mut ids: Vec<String>| {
+        ids.sort();
+        ids
+    };
     assert_eq!(
         council::unresolved_critical_findings(&findings, &[], "root:cycle-4"),
-        vec![first.id.clone(), second.id.clone()],
+        sorted(vec![first.id.clone(), second.id.clone()]),
     );
 
     let disposition = |finding_id: &str, actor: &str, kind| {
@@ -2474,7 +2510,7 @@ fn critical_findings_require_verified_or_current_human_disposition() {
             &findings, &[forged_waiver, stale_waiver, stale_artifact, model_addressed],
             "root:cycle-4",
         ),
-        vec![first.id.clone(), second.id.clone()],
+        sorted(vec![first.id.clone(), second.id.clone()]),
     );
     let mut wrong_cycle = disposition(&first.id, "user", Kind::WaivedByAuthorizedHuman);
     wrong_cycle.cycle_id = "root:old-cycle".into();
@@ -2484,7 +2520,7 @@ fn critical_findings_require_verified_or_current_human_disposition() {
         council::unresolved_critical_findings(
             &findings, &[wrong_cycle, wrong_artifact], "root:cycle-4",
         ),
-        vec![first.id.clone(), second.id.clone()],
+        sorted(vec![first.id.clone(), second.id.clone()]),
         "a matching ID cannot let a stale cycle or artifact disposition close the finding"
     );
     let valid_waiver = disposition(

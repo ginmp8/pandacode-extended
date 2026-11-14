@@ -685,7 +685,11 @@ pub(crate) fn reviewer_policy(
     admission: Option<&Admission>,
 ) -> Result<Option<reviewer_security::ReviewerToolPolicy>> {
     let Some(admission) = admission else { return Ok(None) };
-    reject_task_owned_child_lead(store, &admission.parent)?;
+    if parent_of(store, &admission.parent)?.is_some() {
+        child_council::authorize_leaf(store, sid, admission)?;
+    } else {
+        reject_task_owned_child_lead(store, &admission.parent)?;
+    }
     if admission.parent == sid { return Ok(None) }
     let team = load(store, &admission.parent)?.ok_or("Reviewer team unavailable.")?;
     let worker = team.workers.iter().find(|worker| worker.session_id == sid)
@@ -730,7 +734,11 @@ pub(crate) fn validate_admission(
         }
         return Ok(());
     };
-    reject_task_owned_child_lead(store, &admission.parent)?;
+    if parent_of(store, &admission.parent)?.is_some() {
+        child_council::authorize_leaf(store, sid, admission)?;
+    } else {
+        reject_task_owned_child_lead(store, &admission.parent)?;
+    }
     let mut team = load(store, &admission.parent)?.ok_or("Team is no longer configured.")?;
     if !active(&team.status) || team.generation != admission.generation {
         return Err("Team was paused or changed before this run started.".into());
@@ -796,7 +804,11 @@ pub(crate) fn prompt(
     let Some(admission) = admission else {
         return Ok(original.into());
     };
-    reject_task_owned_child_lead(store, &admission.parent)?;
+    if parent_of(store, &admission.parent)?.is_some() {
+        child_council::authorize_leaf(store, sid, admission)?;
+    } else {
+        reject_task_owned_child_lead(store, &admission.parent)?;
+    }
     let mut team = load(store, &admission.parent)?.ok_or("Team is unavailable.")?;
     let actor = coordination::Actor::resolve(&team, sid).ok_or("Team actor is unavailable.")?;
     let (rules, reminder) = rules(store, &team, sid)?;
@@ -916,7 +928,8 @@ fn rules(store: &Store, team: &TeamSnapshot, sid: &str) -> Result<(String, Strin
             .iter()
             .find(|w| w.session_id == sid)
             .ok_or("Worker missing.")?;
-        let spawning = if worker.parent_worker.is_some() {
+        let spawning = if worker.parent_worker.is_some()
+            || parent_of(store, &team.session_id)?.is_some() {
             "Do not spawn subagents or other tasks."
         } else {
             "Do not spawn native subagents or other tasks; pandacode_dispatch_workers may start sub-workers inside your scope, only if really needed."
@@ -1598,6 +1611,9 @@ pub(crate) fn control_state(state: &AppState, session_id: &str, action: &str) ->
         let mut team = load(&store, session_id)?.ok_or("Team is unavailable.")?;
         match action {
             "pause" | "stop" => {
+                // The task owns its child leaf processes; stopping only the
+                // direct root workers would leave untracked read-only runs alive.
+                child_council::stop_leaves(&store, &team, &agents)?;
                 team.generation += 1;
                 team.status = "paused".into();
                 team.pending_turn = None;
@@ -1626,6 +1642,9 @@ pub(crate) fn control_state(state: &AppState, session_id: &str, action: &str) ->
                 }
             }
             "resume" => {
+                if child_council::active_leaf_agents(&store, session_id, &agents)? {
+                    return Err(AGENTS_STOPPING.into());
+                }
                 if active(&team.status)
                     || agents.contains_key(session_id)
                     || team
@@ -2649,25 +2668,36 @@ fn dispatch_as(
             if team.workers.iter().any(|w| w.status != "completed" && !w.abandoned) {
                 return Err("Every worker must complete or be explicitly abandoned before finishing. Follow up or cancel failed work with a reason.".into());
             }
-            // Turns that ended since the last save may have recorded changes.
-            refresh_council(&store, &mut team);
-            if let Some(refusal) = council::finish_refusal(&team) {
-                return Err(refusal);
-            }
-            // A composed M3 Council cannot finish from forged snapshots that
-            // have no matching native reviewer authority. An explicit user
-            // acceptance remains a separate, attributed exceptional outcome.
-            if team.config.council.as_ref().is_some_and(|c| c.mode() == "m3")
-                && council::status(&team).is_some_and(|s| s.state == "passed")
-                && !mixed_native_authority_current(&store, &team)
+            if team.config.council.as_ref()
+                .is_some_and(|config| !config.nested_bot_reviewers.is_empty())
             {
-                return Err("reviewer_session_mismatch: M3 Council seats require persisted native reviewer authority before completion.".into());
+                // A real root finish attempt is the native review barrier:
+                // all writers settled, frozen cycle and a single transaction.
+                // Child leaf work is admitted but never counted as root approval.
+                let admitted = child_council::admit_leaves(&store, &team)?;
+                changed = admitted;
+                json!({"completed":false,"status":"child_council_reviewing"})
+            } else {
+                // Turns that ended since the last save may have recorded changes.
+                refresh_council(&store, &mut team);
+                if let Some(refusal) = council::finish_refusal(&team) {
+                    return Err(refusal);
+                }
+                // A composed M3 Council cannot finish from forged snapshots that
+                // have no matching native reviewer authority. An explicit user
+                // acceptance remains a separate, attributed exceptional outcome.
+                if team.config.council.as_ref().is_some_and(|c| c.mode() == "m3")
+                    && council::status(&team).is_some_and(|s| s.state == "passed")
+                    && !mixed_native_authority_current(&store, &team)
+                {
+                    return Err("reviewer_session_mismatch: M3 Council seats require persisted native reviewer authority before completion.".into());
+                }
+                team.status = "completed".into();
+                team.summary = Some(finish.summary);
+                team.error = None;
+                changed = true;
+                json!({"completed":true})
             }
-            team.status = "completed".into();
-            team.summary = Some(finish.summary);
-            team.error = None;
-            changed = true;
-            json!({"completed":true})
         }
         _ => return Err("Unknown architect tool.".into()),
     };
@@ -2933,6 +2963,17 @@ fn next_action_state(
             }
         })
         .collect::<Vec<_>>();
+    // Child sessions cannot enter the common root dispatcher. Only the root-
+    // correlated read-only leaf path below may produce a child run.
+    for root in &teams {
+        if active(&root.status) && reject_task_owned_child_lead(&store, &root.session_id).is_ok() {
+            match child_council::next_leaf_launch(&store, &agents, root) {
+                Ok(Some(leaf)) => return Ok(Some(leaf)),
+                Ok(None) => {}
+                Err(error) => eprintln!("Architect child Council {}: {error}", root.session_id),
+            }
+        }
+    }
     // Each team's checkout, read once per pass and only when a launch needs the cross-team check.
     let roots = std::cell::OnceCell::new();
     for original in &teams {
@@ -2943,6 +2984,16 @@ fn next_action_state(
         // Skip it without denying other independent root teams a scheduler turn.
         if reject_task_owned_child_lead(&store, &original.session_id).is_err() {
             continue;
+        }
+        // Do not settle or pause the root before its native independent leaf
+        // reviews have returned. A corrupt child blocks only this task.
+        match child_council::has_pending_leaves(&store, original) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => {
+                eprintln!("Architect child Council {}: {error}", original.session_id);
+                continue;
+            }
         }
         // One team's bad state or failed save must not stop scheduling for every other team.
         match team_action(&store, &agents, &teams, &roots, original, notify) {
@@ -3438,7 +3489,11 @@ fn fail_over(store: &Store, team: &mut TeamSnapshot, index: usize, reason: &str)
 }
 pub(crate) fn mark_started(store: &Store, sid: &str, admission: Option<&Admission>) -> Result<()> {
     if let Some(admission) = admission {
-        reject_task_owned_child_lead(store, &admission.parent)?;
+        if parent_of(store, &admission.parent)?.is_some() {
+            child_council::authorize_leaf(store, sid, admission)?;
+        } else {
+            reject_task_owned_child_lead(store, &admission.parent)?;
+        }
         if sid == admission.parent {
             let mut team = load(store, sid)?.ok_or("Team unavailable.")?;
             team.last_turn_kind = team.pending_turn.take().and_then(|turn| turn.kind);
@@ -3659,9 +3714,12 @@ fn completed_with_agents(
     if let Some(admission) = admission {
         if let Ok(store) = state.store.lock() {
             // Completion is not an authority grant. Ignore spoofed child callbacks.
-            if reject_task_owned_child_lead(&store, &admission.parent).is_err() {
-                return;
-            }
+            let authorized = if parent_of(&store, &admission.parent).ok().flatten().is_some() {
+                child_council::authorize_leaf(&store, sid, admission)
+            } else {
+                reject_task_owned_child_lead(&store, &admission.parent)
+            };
+            if authorized.is_err() { return; }
             if let Ok(Some(mut team)) = load(&store, &admission.parent) {
                 if team.generation == admission.generation {
                     if let Some(index) = team.workers.iter().position(|w| w.session_id == sid) {
@@ -3777,7 +3835,8 @@ fn completed_with_agents(
                             "stopped" if active(&team.status) => settle_children(&mut team, &id, agents, "Its parent worker stopped."),
                             _ => {}
                         }
-                        if let Some(reason) = failure {
+                        if let Some(reason) = failure.filter(|_|
+                            parent_of(&store, &admission.parent).ok().flatten().is_none()) {
                             if let Err(e) = fail_over(&store, &mut team, index, &reason) {
                                 eprintln!("Worker failover: {e}");
                             }

@@ -1,11 +1,13 @@
 //! Task-isolated reservations for hierarchical Council child Architects.
-//! A reservation is NOT a child verdict, a runnable bot conversation or a
-//! reviewer authority grant. The root gate remains blocked until a verified
-//! native leaf lifecycle and composite receipt are available.
-use super::{council::{CouncilConfig, CouncilNestedReviewer}, TeamConfig, TeamSnapshot};
+//! A reservation alone grants no reviewer authority. A trusted root-only
+//! barrier admits independent native read-only leaf sessions after writers
+//! settle, but these results cannot satisfy the root without a verified
+//! authenticated composite receipt.
+use super::{council::{CouncilConfig, CouncilNestedReviewer, CouncilSeat}, reviewer_security::{self, ReviewerBinding, ReviewerToolPolicy}, Admission, Launch, TeamConfig, TeamSnapshot, Worker};
 use crate::{bots, storage::{self, Store}, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use sha2::{Digest, Sha256};
 
 const RESERVATION_DESCRIPTION: &str = "Task-owned read-only Council reservation; reviewer dispatch is not yet enabled.";
@@ -184,6 +186,10 @@ fn read(store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer) -> Re
     if task_description != RESERVATION_DESCRIPTION {
         return Err("child_council_stale: reserved child task description changed.".into());
     }
+    if stored.status == "running" {
+        validate_admitted(store, root, child, &record, &stored)?;
+        return Ok(Some(record));
+    }
     let pending_native_requests: i64 = store.db.query_row(
         "SELECT EXISTS(SELECT 1 FROM architect_requests WHERE parent_session_id=?1)",
         [&child_session_id], |row| row.get(0),
@@ -211,6 +217,319 @@ fn read(store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer) -> Re
         return Err("child_council_stale: child state or permissions have changed.".into());
     }
     Ok(Some(record))
+}
+
+/** NATIVE LEAF RUNTIME */
+
+/// Resolve task descendants through native ownership, never a bot's editable
+/// roster or self-reported parent. This is deliberately limited to depth two.
+fn leaf_sessions(store: &Store, root: &str) -> Result<Vec<String>> {
+    let mut statement = store.db.prepare(
+        "SELECT leaf.session_id FROM architect_workers AS child
+         JOIN architect_workers AS leaf ON leaf.parent_session_id=child.session_id
+         WHERE child.parent_session_id=?1",
+    ).map_err(|e| e.to_string())?;
+    statement.query_map([root], |row| row.get::<_, String>(0))
+        .map_err(|e| e.to_string())?
+        .collect::<std::result::Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// An incomplete native stop must not let a resumed root overtake still-live
+/// child reviewers. Unlike task status, live agent registry entries cannot be
+/// forged from a model's conversation.
+pub(super) fn active_leaf_agents(
+    store: &Store, root: &str,
+    agents: &std::collections::HashMap<String, crate::RunningAgent>,
+) -> Result<bool> {
+    Ok(leaf_sessions(store, root)?.iter().any(|id| agents.contains_key(id)))
+}
+
+/// Propagate root pause/stop to all leaf processes even if a child snapshot is
+/// corrupt; authorization checks then revoke their late completion callbacks.
+pub(super) fn stop_leaves(
+    store: &Store, root: &TeamSnapshot,
+    agents: &std::collections::HashMap<String, crate::RunningAgent>,
+) -> Result<()> {
+    for id in leaf_sessions(store, &root.session_id)? {
+        if let Some(agent) = agents.get(&id) {
+            let _ = agent.send(crate::RunInput::Stop);
+        }
+    }
+    if let Some(config) = root.config.council.as_ref() {
+        for choice in &config.nested_bot_reviewers {
+            if let Ok(Some(record)) = read(store, root, choice) {
+                if let Ok(Some(mut team)) = super::load(store, &record.child_session_id) {
+                    for worker in &mut team.workers {
+                        if super::stoppable(&worker.status) {
+                            worker.status = "stopped".into();
+                            worker.updated_at = storage::now();
+                        }
+                    }
+                    // A failed persistence still leaves native process stops
+                    // issued. The next admission rechecks the frozen grant.
+                    if let Err(error) = super::save(store, &mut team) {
+                        eprintln!("Stopping child Council {}: {error}", team.session_id);
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// A child may run only these native-issued leaves; the common Architect
+/// dispatcher remains unavailable to every task-owned child coordinator.
+fn validate_admitted(
+    store: &Store, root: &TeamSnapshot, choice: &CouncilNestedReviewer,
+    record: &FrozenChildReservation, team: &TeamSnapshot,
+) -> Result<()> {
+    let invalid = || "child_council_stale: native leaf admission no longer matches its frozen task.";
+    if team.status != "running" || team.generation != root.generation
+        || team.council_since != root.council_since || team.objective != root.objective
+        || team.config != child_config(root.config.council.as_ref().ok_or("Council is off.")?, choice)?
+        || team.workers.len() != choice.child_reviewers
+        || team.pending_turn.is_some() || team.pending_setup.is_some()
+        || team.summary.is_some() || team.council_accepted.is_some()
+    {
+        return Err(invalid().into());
+    }
+    let requests: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1",
+        [&record.child_session_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    let owned: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_workers WHERE parent_session_id=?1",
+        [&record.child_session_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if requests != choice.child_reviewers as i64 || owned != choice.child_reviewers as i64 {
+        return Err(invalid().into());
+    }
+    let coordinator = store.session(&record.child_session_id)?;
+    let mut ids = HashSet::new();
+    let mut sessions = HashSet::new();
+    for leaf in &team.workers {
+        let session = store.session(&leaf.session_id)?;
+        if !ids.insert(&leaf.id) || !sessions.insert(&leaf.session_id)
+            || super::parent_of(store, &leaf.session_id)?.as_deref()
+                != Some(record.child_session_id.as_str())
+            || session.project_id != coordinator.project_id
+            || session.worktree_path != coordinator.worktree_path
+            || session.mode != "plan" || session.archived || session.task_stage == "completed"
+            || leaf.provider != session.provider || leaf.model != session.model
+            || !leaf.read_only || leaf.wrote_at != 0 || !leaf.files.is_empty()
+            || leaf.parent_worker.is_some() || leaf.abandoned
+            || !matches!(leaf.status.as_str(), "queued" | "running" | "completed" | "failed" | "stopped")
+            || leaf.council.as_ref().is_none_or(|seat| seat.round != 1)
+            || super::parent_of(store, &record.child_session_id)?.as_deref()
+                != Some(root.session_id.as_str())
+        {
+            return Err(invalid().into());
+        }
+        let binding = leaf.reviewer_binding.as_ref().ok_or_else(invalid)?;
+        if binding.reviewer_bot_id.is_some()
+            || binding.snapshot.tool_policy != ReviewerToolPolicy::NativeReadOnly
+            || binding.validate(team, leaf).is_err()
+            || reviewer_security::validate_recorded_authority(
+                store, &record.child_session_id, binding,
+            ).is_err()
+        {
+            return Err(invalid().into());
+        }
+        let grandchild: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_workers WHERE parent_session_id=?1",
+            [&leaf.session_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if grandchild != 0 {
+            return Err("child_council_denied: a leaf reviewer cannot create grandchildren.".into());
+        }
+    }
+    Ok(())
+}
+
+/// Trusted root-only transition: allocate fresh read-only reviewer sessions
+/// after the root's actual writing workers settle. No bot conversation, prompt
+/// claim or persisted child reservation can request this operation.
+pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
+    let Some(config) = root.config.council.as_ref() else { return Ok(false) };
+    if config.nested_bot_reviewers.is_empty() { return Ok(false) }
+    if root.council_since <= 0 || root.objective.trim().is_empty()
+        || !super::active(&root.status)
+        || root.workers.iter().any(|w| !w.read_only && super::unsettled(&w.status))
+    {
+        return Err("child_council_denied: root work must be settled before native child review.".into());
+    }
+    crate::bots::shared_channels::validate_delivery_council(store, &root.session_id, config)?;
+    let mut created = false;
+    for choice in &config.nested_bot_reviewers {
+        let record = read(store, root, choice)?
+            .ok_or("child_council_stale: expected native reservation is missing.")?;
+        let mut child = super::load(store, &record.child_session_id)?
+            .ok_or("child_council_stale: reserved child Architect is missing.")?;
+        if child.status == "running" { continue; }
+        if child.status != "blocked" || !child.workers.is_empty() {
+            return Err("child_council_stale: child review is not eligible for admission.".into());
+        }
+        let session = store.session(&record.child_session_id)?;
+        super::validate_worker_role(&session.provider, true)?;
+        child.status = "running".into();
+        child.generation = root.generation;
+        child.objective = root.objective.clone();
+        child.council_since = root.council_since;
+        let lenses: Vec<String> = config.criteria.iter().map(|criterion| criterion.lens.clone()).collect();
+        for index in 0..choice.child_reviewers {
+            let lens = lenses.get(index).cloned().unwrap_or_else(|| format!("Child review {}", index + 1));
+            let assignment = format!(
+                "Review the frozen task artifact independently for the {lens} criterion. \
+                 You are a task-scoped Council leaf, never the coordinating bot. \
+                 Inspect only; do not edit the checkout, access a bot conversation, \
+                 invoke tools with side effects or spawn another agent. \
+                 Report concrete findings and end with Council score: N/10. \
+                 Task objective: {}",
+                root.objective,
+            );
+            let leaf = store.create_session(&session.project_id, &session.provider, &session.model, "plan")?;
+            let now = storage::now();
+            store.db.execute(
+                "UPDATE sessions SET title=?2,task_description=?3,worktree_path=?4,reasoning_effort=?5 WHERE id=?1",
+                params![leaf.id, format!("Child Council reviewer {}", index + 1),
+                    assignment, session.worktree_path, session.reasoning_effort],
+            ).map_err(|e| e.to_string())?;
+            let id = storage::id();
+            store.db.execute(
+                "INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",
+                params![record.child_session_id, id, leaf.id],
+            ).map_err(|e| e.to_string())?;
+            let seat = CouncilSeat {
+                round: 1, lens, score: None, started_at: 0,
+                closed_by_selection: false, reported_severe_finding: false, reported_conflict: false,
+            };
+            let binding = ReviewerBinding::native(&child, &id, now, &session.provider, &session.model, &seat);
+            reviewer_security::record_native_authority(store, &record.child_session_id, &binding)?;
+            child.workers.push(Worker {
+                id, session_id: leaf.id, name: format!("Child reviewer {}", index + 1),
+                profile_id: "native-child-reviewer".into(), provider: session.provider.clone(),
+                model: session.model.clone(), reasoning_effort: session.reasoning_effort.clone(),
+                status: "queued".into(), assignment, summary: String::new(), error: None,
+                depends_on: Vec::new(), files: Vec::new(), read_only: true,
+                attempt: 1, created_at: now, updated_at: now, keys: vec![format!("leaf-{}", index + 1)],
+                abandoned: false, result_revision: 0, checkpoint: None, timed_out: false,
+                failovers: 0, parent_worker: None, resume_prompt: None,
+                tool_catalog_version: super::TOOL_CATALOG_VERSION, nudged: false,
+                reported: false, council: Some(seat), reviewer_binding: Some(binding),
+                score_nudged: false, wrote_at: 0,
+            });
+        }
+        super::save(store, &mut child)?;
+        // Validate the complete native issuance before the parent transaction
+        // commits. A partial or forged set rolls back, never becoming a vote.
+        read(store, root, choice)?
+            .ok_or("child_council_stale: native child admission was not persisted.")?;
+        created = true;
+    }
+    Ok(created)
+}
+
+/// Root orchestration stays parked while leaf processes are queued/running.
+/// Without this guard the ordinary root scheduler could pause the task and
+/// revoke an otherwise valid child callback before review completes.
+pub(super) fn has_pending_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
+    let Some(config) = root.config.council.as_ref() else { return Ok(false) };
+    for choice in &config.nested_bot_reviewers {
+        let Some(record) = read(store, root, choice)? else {
+            return Err("child_council_stale: expected reservation is missing.".into());
+        };
+        let child = super::load(store, &record.child_session_id)?
+            .ok_or("child_council_stale: task-owned child team is missing.")?;
+        if child.status == "running" && child.workers.iter().any(|leaf|
+            super::unsettled(&leaf.status)) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Authorize only a native leaf session, never the child coordinator, through
+/// the existing task launch/callback path. Every callback rechecks recorded
+/// grants, frozen root cycle and current child/worker ownership.
+pub(super) fn authorize_leaf(store: &Store, sid: &str, admission: &Admission) -> Result<()> {
+    let root_sid = super::parent_of(store, &admission.parent)?
+        .ok_or("child_council_denied: no root cycle owns this child.")?;
+    let root = super::load(store, &root_sid)?
+        .ok_or("child_council_stale: root task no longer exists.")?;
+    if !super::active(&root.status) {
+        return Err("child_council_revoked: root task is no longer active.".into());
+    }
+    let config = root.config.council.as_ref().ok_or("Council is off.")?;
+    let mut authorized = false;
+    for choice in &config.nested_bot_reviewers {
+        let Some(record) = read(store, &root, choice)? else {
+            return Err("child_council_stale: child reservation is missing.".into());
+        };
+        if record.child_session_id == admission.parent {
+            authorized = true;
+        }
+    }
+    if !authorized || super::parent_of(store, sid)?.as_deref() != Some(admission.parent.as_str()) {
+        return Err("child_council_denied: only admitted leaf sessions may run.".into());
+    }
+    let child = super::load(store, &admission.parent)?
+        .ok_or("child_council_stale: child team is missing.")?;
+    if child.generation != admission.generation || child.status != "running"
+        || !child.workers.iter().any(|leaf| leaf.session_id == sid
+            && leaf.status == "running" && leaf.read_only && leaf.council.is_some())
+    {
+        return Err("child_council_revoked: native leaf run is no longer scheduled.".into());
+    }
+    Ok(())
+}
+
+/// Dedicated read-only leaf scheduler: no child lead turn, dispatcher, tools,
+/// extra reviewer source or recursive Council is ever launched.
+pub(super) fn next_leaf_launch(
+    store: &Store, agents: &std::collections::HashMap<String, crate::RunningAgent>,
+    root: &TeamSnapshot,
+) -> Result<Option<Launch>> {
+    let Some(config) = root.config.council.as_ref() else { return Ok(None) };
+    if config.nested_bot_reviewers.is_empty() { return Ok(None) }
+    let mut global_running = root.workers.iter().filter(|w|
+        super::active(&w.status) || agents.contains_key(&w.session_id)).count();
+    let mut children = Vec::new();
+    for choice in &config.nested_bot_reviewers {
+        let Some(record) = read(store, root, choice)? else {
+            return Err("child_council_stale: child reservation is missing.".into());
+        };
+        let child = super::load(store, &record.child_session_id)?
+            .ok_or("child_council_stale: child review is missing.")?;
+        global_running += child.workers.iter().filter(|w|
+            super::active(&w.status) || agents.contains_key(&w.session_id)).count();
+        children.push(child);
+    }
+    if global_running >= 8 { return Ok(None); }
+    for mut child in children {
+        if child.status != "running" { continue; }
+        let local_running = child.workers.iter().filter(|w|
+            super::active(&w.status) || agents.contains_key(&w.session_id)).count();
+        if local_running >= child.config.max_parallel { continue; }
+        let Some(leaf) = child.workers.iter_mut().find(|w|
+            w.status == "queued" && !w.abandoned && !agents.contains_key(&w.session_id)) else {
+            continue;
+        };
+        leaf.status = "running".into();
+        leaf.updated_at = storage::now();
+        if let Some(seat) = leaf.council.as_mut() {
+            if seat.started_at == 0 { seat.started_at = leaf.updated_at; }
+        }
+        let launch = Launch {
+            sid: leaf.session_id.clone(),
+            prompt: leaf.resume_prompt.clone().unwrap_or_else(|| leaf.assignment.clone()),
+            images: None,
+            admission: Admission { parent: child.session_id.clone(), generation: child.generation },
+        };
+        super::save(store, &mut child)?;
+        authorize_leaf(store, &launch.sid, &launch.admission)?;
+        return Ok(Some(launch));
+    }
+    Ok(None)
 }
 
 /// Called in the root cycle's native transaction. Failure rolls back every
@@ -282,12 +601,14 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
     council.nested_bot_reviewers.iter().map(|child| {
         let record = read(store, root, child)?
             .ok_or("child_council_stale: expected native child reservation is missing.")?;
+        let active = super::load(store, &record.child_session_id)?
+            .is_some_and(|team| team.status == "running");
         Ok(ChildReservationView {
             bot_id: child.bot_id.clone(),
             child_session_id: record.child_session_id,
             root_cycle_id: record.root_cycle_id,
             required_leaf_reviewers: child.child_reviewers,
-            status: "blocked_until_native_child_review",
+            status: if active { "reviewing" } else { "blocked_until_native_child_review" },
         })
     }).collect()
 }

@@ -3228,3 +3228,110 @@ fn native_task_terminal_requires_real_completed_reviewer_callbacks() {
         &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
     ).is_err());
 }
+
+
+#[test]
+fn child_council_admits_real_read_only_native_leaves_only_after_root_review_barrier() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["security-child", "architecture-child"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.nested_bot_reviewers = ["security-child", "architecture-child"].iter().map(|bot|
+            council::CouncilNestedReviewer {
+                bot_id: (*bot).into(), child_reviewers: 2,
+                child_target: 9.5, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (root, _) = start_state(&state, &sid, "Review the frozen project", None, None).unwrap();
+    {
+        let store = state.store.lock().unwrap();
+        assert!(child_council::inspect(&store, &root).unwrap()
+            .iter().all(|view| view.status == "blocked_until_native_child_review"));
+        assert!(store.db.query_row(
+            "SELECT COUNT(*) FROM architect_workers WHERE parent_session_id IN
+             (SELECT worker_id FROM architect_requests WHERE parent_session_id=?1 AND kind='council_child')",
+            [&sid], |row| row.get::<_, i64>(0),
+        ).unwrap() == 0, "the root objective cannot launch speculative child reviews");
+    }
+    let (answer, _) = dispatch_state(
+        &state, &sid, root.generation, "pandacode_finish_team",
+        json!({"summary":"Ready for independent review."}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(answer["completed"], false, "a reserved leaf is not root approval");
+    let inspected = {
+        let store = state.store.lock().unwrap();
+        child_council::inspect(&store, &load(&store, &sid).unwrap().unwrap()).unwrap()
+    };
+    assert_eq!(inspected.len(), 2);
+    assert!(inspected.iter().all(|view| view.status == "reviewing"));
+    let mut distinct = std::collections::HashSet::new();
+    for view in &inspected {
+        let store = state.store.lock().unwrap();
+        let child = load(&store, &view.child_session_id).unwrap().unwrap();
+        assert_eq!(child.workers.len(), 2);
+        assert_eq!(child.council_since, root.council_since);
+        assert!(child.workers.iter().all(|w| w.read_only && w.files.is_empty()
+            && w.council.as_ref().is_some_and(|seat| seat.round == 1)
+            && w.reviewer_binding.as_ref().is_some_and(|binding|
+                reviewer_security::validate_recorded_authority(&store, &child.session_id, binding).is_ok())));
+        for worker in &child.workers {
+            assert!(distinct.insert(worker.session_id.clone()));
+            assert_eq!(parent_of(&store, &worker.session_id).unwrap().as_deref(),
+                Some(child.session_id.as_str()));
+            assert_eq!(store.session(&worker.session_id).unwrap().mode, "plan");
+            assert!(parent_of(&store, &worker.session_id).unwrap().is_some());
+        }
+        drop(store);
+        assert!(start_state(&state, &view.child_session_id, "Take over", None, None)
+            .unwrap_err().contains("child_council_denied"));
+    }
+    assert_eq!(distinct.len(), 4);
+    let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    assert!(distinct.contains(&launch.sid), "only an admitted child leaf is scheduled");
+    {
+        let store = state.store.lock().unwrap();
+        validate_admission(&store, &launch.sid, Some(&launch.admission)).unwrap();
+        assert!(reviewer_policy(&store, &launch.sid, Some(&launch.admission)).unwrap().is_some());
+        assert!(validate_admission(&store, &launch.admission.parent, Some(&launch.admission)).is_err(),
+            "the child coordinator is never an independently scored reviewer");
+    }
+    {
+        let store = state.store.lock().unwrap();
+        store.message(&launch.sid, "assistant", "Independent findings.\nCouncil score: 9.5/10").unwrap();
+    }
+    completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    let store = state.store.lock().unwrap();
+    let child = load(&store, &launch.admission.parent).unwrap().unwrap();
+    let leaf = child.workers.iter().find(|leaf| leaf.session_id == launch.sid).unwrap();
+    assert_eq!(leaf.status, "completed");
+    assert_eq!(leaf.council.as_ref().unwrap().score, Some(9.5));
+    assert_eq!(council::status(&load(&store, &sid).unwrap().unwrap()).unwrap().state, "blocked",
+        "child scores without a composite receipt can never approve the root");
+    drop(store);
+    control_state(&state, &sid, "pause").unwrap();
+    let before = {
+        let store = state.store.lock().unwrap();
+        load(&store, &launch.admission.parent).unwrap().unwrap()
+    };
+    completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    let after = {
+        let store = state.store.lock().unwrap();
+        load(&store, &launch.admission.parent).unwrap().unwrap()
+    };
+    assert_eq!(serde_json::to_value(before).unwrap(), serde_json::to_value(after).unwrap(),
+        "a late callback after root stoppage cannot mutate a child Council");
+}

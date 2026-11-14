@@ -33,6 +33,10 @@ enum Command {
     ListTickets,
     ListReviewInbox,
     ListRecoveryInbox,
+    ListDemands {
+        state: String, before_updated_at: Option<i64>, before_id: Option<String>,
+        search_query: Option<String>,
+    },
     ListTeamDemands {
         orchestration_id: String, state: String,
         before_updated_at: Option<i64>, before_id: Option<String>,
@@ -284,6 +288,24 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::ListDemands {
+                state, before_updated_at, before_id, search_query,
+            } = &command {
+                // Read-only global queue, no startup recovery or task dispatch.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::list_headless_all_demands_searched(
+                        &dir.join("kingcode.sqlite3"), state, *before_updated_at,
+                        before_id.as_deref(), search_query.as_deref(),
+                    ));
+                match result {
+                    Ok(page) => { println!("{page}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Demand queue inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             if let Command::ListTeamDemands {
                 orchestration_id, state, before_updated_at, before_id, search_query,
             } = &command {
@@ -424,7 +446,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
     match command {
         // Inspection exits before setup_common and must never reach this branch.
         Command::InspectOrchestrations | Command::ListTickets | Command::ListReviewInbox
-        | Command::ListRecoveryInbox | Command::ListTeamDemands { .. }
+        | Command::ListRecoveryInbox | Command::ListDemands { .. }
+        | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
         | Command::InspectDemandPlan { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
@@ -868,6 +891,42 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 command = Command::ListReviewInbox;
                 ops += 1;
             }
+            "--list-demands" => {
+                let state = args.get(index + 1)
+                    .ok_or_else(|| format!("--list-demands needs a native Ticket state or all.\n\n{}", help()))?;
+                if !matches!(state.as_str(), "all" | "queued" | "running" |
+                    "waiting_approval" | "waiting_review" | "blocked" | "completed" |
+                    "failed" | "stopped" | "interrupted" | "inconclusive") {
+                    return Err("Choose an exact native Ticket state or all.".into());
+                }
+                let (before_updated_at, before_id) =
+                    if args.get(index + 2).map(String::as_str) == Some("--before") {
+                        let timestamp = args.get(index + 3)
+                            .ok_or("--before needs a positive millisecond timestamp and Ticket ID.")?
+                            .parse::<i64>().ok().filter(|value| *value > 0)
+                            .ok_or("--before needs a positive millisecond timestamp.")?;
+                        let cursor_id = args.get(index + 4)
+                            .ok_or("--before needs the previous page's last Ticket ID.")?;
+                        validate_ticket_id(cursor_id)?;
+                        index += 3;
+                        (Some(timestamp), Some(cursor_id.clone()))
+                    } else { (None, None) };
+                let search_query = if args.get(index + 2).map(String::as_str) == Some("--search") {
+                    let query = args.get(index + 3)
+                        .ok_or("--search needs a 1 to 128 byte objective fragment.")?;
+                    if query.trim().is_empty() || query.len() > 128
+                        || query.starts_with("--") || query.chars().any(char::is_control) {
+                        return Err("--search needs 1 to 128 non-control UTF-8 bytes.".into());
+                    }
+                    index += 2;
+                    Some(query.clone())
+                } else { None };
+                command = Command::ListDemands {
+                    state: state.clone(), before_updated_at, before_id, search_query,
+                };
+                ops += 1;
+                index += 1;
+            }
             "--list-team-demands" => {
                 let id = args.get(index + 1)
                     .ok_or_else(|| format!("--list-team-demands needs a Team ID and state.\n\n{}", help()))?;
@@ -1247,7 +1306,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1278,6 +1337,8 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          redact objectives, never approve or run a reviewer; exit.
   --list-recovery-inbox  Prioritize up to 200 actual recovery/decision Tickets across Teams;
                          identify stale native runs and uncertain remote effects, read-only; exit.
+  --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>]
+                         Page the global native Demand queue across Teams, read-only and redacted.
   --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>]
                          Page up to 200 native Demands for one Team and exact Ticket state
                          (or all). Next page uses returned nextCursor; no private evidence
@@ -1390,6 +1451,22 @@ mod tests {
             assert!(parsed(invalid).is_err(), "{invalid}");
         }
         assert!(parsed("--list-review-inbox --stop-ticket ticket_1").is_err());
+        assert_eq!(parsed("--list-demands all"),
+            Ok(Command::ListDemands {
+                state:"all".into(),before_updated_at:None,before_id:None,search_query:None,
+            }));
+        assert_eq!(parsed("--list-demands blocked --before 2000 ticket_099 --search needle"),
+            Ok(Command::ListDemands {
+                state:"blocked".into(),before_updated_at:Some(2000),
+                before_id:Some("ticket_099".into()),search_query:Some("needle".into()),
+            }));
+        for invalid in [
+            "--list-demands", "--list-demands ALL", "--list-demands ../unsafe",
+            "--list-demands blocked --search", "--list-demands blocked --search --stop-ticket",
+            "--list-demands blocked --before", "--list-demands blocked --before 0 ticket_099",
+            "--list-demands blocked --before 2000 ../escape",
+            "--list-demands blocked --search needle --stop-ticket ticket_123",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
         assert_eq!(parsed("--list-team-demands team_123 blocked"),
             Ok(Command::ListTeamDemands {
                 orchestration_id:"team_123".into(),state:"blocked".into(),
@@ -1618,6 +1695,7 @@ mod tests {
             "--list-tickets",
             "--list-review-inbox",
             "--list-recovery-inbox",
+            "--list-demands",
             "--inspect-team-readiness",
             "--inspect-team-roster",
             "--inspect-ticket",

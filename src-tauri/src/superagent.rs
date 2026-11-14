@@ -2519,6 +2519,16 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
              WHERE assignment_id=?1 AND state IN ('admitted','bound','starting','dispatched')",
             params![assignment_id,now],
         ).map_err(|e| e.to_string())?;
+        // A pending remote write may have reached GitHub before the timeout.
+        // Preserve its digest and provider evidence; never turn it into replay
+        // permission when the Worker is interrupted.
+        tx.execute(
+            "UPDATE sa_effect_receipts SET state='uncertain',
+             uncertainty_reason=COALESCE(uncertainty_reason,'watchdog_interrupted'),
+             updated_at=?2
+             WHERE ticket_id=?1 AND state='pending'",
+            params![ticket_id,now],
+        ).map_err(|e| e.to_string())?;
         tx.execute(
             "INSERT INTO sa_audit(ticket_id,kind,detail,at)
              VALUES(?1,'watchdog_interrupted',?2,?3)",
@@ -6391,6 +6401,15 @@ mod tests {
         ).unwrap();
         store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
         assert_eq!(watchdog_expired_assignments(&store, storage::now()).unwrap(), vec![session.clone()]);
+        assert_eq!(effects::receipt_history(&store, &ticket.id, 10).unwrap()[0].state,
+            "uncertain", "Watchdog must not leave a possibly sent write pending");
+        assert_eq!(effects::unresolved_count(&store, &ticket.id).unwrap(), 1);
+        let reason:Option<String>=store.db.query_row(
+            "SELECT uncertainty_reason FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND effect_key='github:issue:42'",
+            [&ticket.id], |r|r.get(0),
+        ).unwrap();
+        assert_eq!(reason.as_deref(),Some("watchdog_interrupted"));
         let path = store.path.clone();
         drop(store);
         let reopened = Store::open(&path).unwrap();

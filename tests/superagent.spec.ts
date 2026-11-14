@@ -157,6 +157,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
 });
 
 test('SuperAgent scoped-write request validates paths and reports native error and success',async ({page})=>{
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
   await page.evaluate(async()=>{

@@ -427,8 +427,12 @@ pub struct OrchestrationInput {
     pub council_required: Option<bool>,
 }
 
+/// Validated legacy projection plus ordered worker/reviewer roles and the
+/// optional Council requirement carried by command input.
+type OrchestrationParts = (NewOrchestration, Vec<String>, Vec<String>, Option<bool>);
+
 impl OrchestrationInput {
-    fn into_parts(self) -> Result<(NewOrchestration, Vec<String>, Vec<String>, Option<bool>)> {
+    fn into_parts(self) -> Result<OrchestrationParts> {
         let worker_bot_ids = self.worker_bot_ids
             .unwrap_or_else(|| vec![self.worker_bot_id.clone()]);
         let reviewer_bot_ids = self.reviewer_bot_ids.unwrap_or_default();
@@ -444,16 +448,13 @@ impl OrchestrationInput {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum TeamSnapshotProvenance {
     Native,
     LegacyCurrent,
+    #[default]
     LegacyUnknown,
-}
-
-impl Default for TeamSnapshotProvenance {
-    fn default() -> Self { Self::LegacyUnknown }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -610,6 +611,10 @@ fn effective_role_snapshot(
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Each argument is a distinct audited snapshot field; sibling modules and manifest import construct it positionally"
+)]
 fn make_team_snapshot(
     db: &Connection,
     orchestration_id: &str,
@@ -1056,11 +1061,15 @@ fn configuration(store: &Store, id: &str) -> Result<Orchestration> {
     hydrate_orchestration(store,config)
 }
 
+// Test-only legacy wrapper; the command boundary uses the role and policy
+// aware constructor below.
+#[cfg(test)]
 fn create_configuration(store: &Store, input: NewOrchestration) -> Result<Orchestration> {
     let worker_bot_ids = vec![input.worker_bot_id.clone()];
     create_configuration_roles(store,input,worker_bot_ids,vec![])
 }
 
+#[cfg(test)]
 fn create_configuration_roles(
     store: &Store,
     input: NewOrchestration,
@@ -1431,6 +1440,10 @@ pub(crate) fn headless_stop_ticket(database_path: &std::path::Path, ticket_id: &
     headless_ticket_status(&ticket)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Local CLI issue-comment boundary is bound by the existing headless command line; callers live outside this module"
+)]
 pub(crate) fn headless_issue_comment(
     database_path: &std::path::Path,
     ticket_id: &str,
@@ -1454,6 +1467,10 @@ pub(crate) fn headless_issue_comment(
     )
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Same local CLI shape as headless_issue_comment plus an injected dispatch seam; callers live outside this module"
+)]
 pub(crate) fn headless_issue_comment_with_dispatch(
     database_path: &std::path::Path,
     ticket_id: &str,
@@ -2596,11 +2613,15 @@ fn change_enabled(
 /// A Team edit appends a version only while disabled and before its first
 /// Ticket. Existing Ticket snapshots and grants remain bound to their admitted
 /// roles and effective profiles.
+// Test-only legacy wrapper; the command boundary uses the role and policy aware
+// update below.
+#[cfg(test)]
 fn update_configuration(store: &Store, id: &str, expected_revision: i64, input: &NewOrchestration) -> Result<Orchestration> {
     update_configuration_roles(store,id,expected_revision,input,
         vec![input.worker_bot_id.clone()],vec![])
 }
 
+#[cfg(test)]
 fn update_configuration_roles(
     store: &Store, id: &str, expected_revision: i64, input: &NewOrchestration,
     worker_bot_ids: Vec<String>, reviewer_bot_ids: Vec<String>,
@@ -3320,6 +3341,10 @@ async fn confirm_issue_comment(
 }
 
 #[tauri::command]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Tauri binds command arguments by name from the existing frontend invocation; grouping them would change the IPC contract"
+)]
 pub async fn superagent_issue_comment(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
@@ -4178,7 +4203,7 @@ mod tests {
         assert_eq!(snapshot.reviewer_bot_ids,vec!["reviewer"]);
         assert_eq!(snapshot.policy.autonomy,"off");
         assert_eq!(snapshot.policy.max_concurrent_tasks,1);
-        assert_eq!(snapshot.policy.council_enabled,false);
+        assert!(!snapshot.policy.council_enabled);
         assert_eq!(snapshot.roles.iter().map(|role|role.role.as_str()).collect::<Vec<_>>(),
             vec!["coordinator","worker","worker","reviewer"]);
         assert!(snapshot.roles.iter().all(|role|role.effective_config.is_some()));

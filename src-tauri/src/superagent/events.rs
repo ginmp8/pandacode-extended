@@ -81,7 +81,6 @@ pub struct EventSource {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[cfg_attr(not(test), expect(dead_code, reason = "Authenticated event intake is not implemented yet"))]
 pub struct EventEnvelope {
     pub source_id: String,
     pub delivery_id: String,

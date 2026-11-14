@@ -140,6 +140,9 @@ pub(crate) fn lock_dispatch_before_wait(
     let lock_path = database_path.with_extension("superagent-effect-dispatch.lock");
     let file = OpenOptions::new()
         .create(true)
+        // The fence is advisory-lock metadata, never content: keep any
+        // existing file instead of truncating another process's lock inode.
+        .truncate(false)
         .read(true)
         .write(true)
         .open(lock_path)
@@ -970,19 +973,35 @@ fn post_issue_comment_with(
     }
 }
 
+struct ReceiptEvidence {
+    state: String,
+    uncertainty_reason: Option<String>,
+    readback_state: Option<String>,
+    remote_comment_id: Option<String>,
+    remote_comment_url: Option<String>,
+    remote_comment_author: Option<String>,
+}
+
 fn status(store: &Store, intent: &IssueCommentIntent, reconciliation: &str) -> Result<EffectStatus> {
-    let evidence: Option<(String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> = store.db
+    let evidence = store.db
         .query_row(
             "SELECT state,uncertainty_reason,readback_state,remote_comment_id,
                     remote_comment_url,remote_author_login
              FROM sa_effect_receipts
              WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3",
             params![intent.ticket_id,intent.effect_key,intent.payload_sha256],
-            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,row.get(5)?)),
+            |row| Ok(ReceiptEvidence {
+                state: row.get(0)?,
+                uncertainty_reason: row.get(1)?,
+                readback_state: row.get(2)?,
+                remote_comment_id: row.get(3)?,
+                remote_comment_url: row.get(4)?,
+                remote_comment_author: row.get(5)?,
+            }),
         )
         .optional()
         .map_err(|e| e.to_string())?;
-    let Some((state,uncertainty_reason,readback_state,remote_comment_id,remote_comment_url,remote_comment_author)) = evidence else {
+    let Some(evidence) = evidence else {
         return Err("The exact external-effect receipt disappeared during reconciliation.".into());
     };
     Ok(EffectStatus {
@@ -992,13 +1011,13 @@ fn status(store: &Store, intent: &IssueCommentIntent, reconciliation: &str) -> R
         issue_number: intent.issue_number,
         effect_key: intent.effect_key.clone(),
         payload_sha256: intent.payload_sha256.clone(),
-        state,
+        state: evidence.state,
         reconciliation: reconciliation.into(),
-        uncertainty_reason,
-        readback_state,
-        remote_comment_id,
-        remote_comment_url,
-        remote_comment_author,
+        uncertainty_reason: evidence.uncertainty_reason,
+        readback_state: evidence.readback_state,
+        remote_comment_id: evidence.remote_comment_id,
+        remote_comment_url: evidence.remote_comment_url,
+        remote_comment_author: evidence.remote_comment_author,
     })
 }
 
@@ -1089,7 +1108,7 @@ mod tests {
     }
 
     fn is_issue_comment_write(args: &[&str]) -> bool {
-        args.get(0) == Some(&"issue") && args.get(1) == Some(&"comment")
+        args.first() == Some(&"issue") && args.get(1) == Some(&"comment")
     }
 
     fn exact_readback(intent: &IssueCommentIntent) -> crate::workspace::Capture {
@@ -1156,7 +1175,21 @@ mod tests {
             error,
             "The Ticket, revision, mandate, or active worker no longer permits this effect."
         );
-        assert!(!has_exact_grant(&store, &intent).unwrap());
+        let grant_count: i64 = store
+            .db
+            .query_row(
+                "SELECT COUNT(*) FROM sa_effect_grants WHERE ticket_id=?1 AND effect_key=?2",
+                params![&id, &intent.effect_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(grant_count, 0, "revocation must not leave an exact grant");
+        let lookup_error = has_exact_grant(&store, &intent)
+            .expect_err("a revoked mandate must not present an exact grant");
+        assert_eq!(
+            lookup_error,
+            "The Ticket, revision, mandate, or active worker no longer permits this effect."
+        );
     }
 
     #[test]
@@ -1571,6 +1604,7 @@ mod tests {
         let excluded = ready
             && OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .read(true)
                 .write(true)
                 .open(lock_path)

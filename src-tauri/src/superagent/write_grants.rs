@@ -143,6 +143,10 @@ pub(crate) fn validate_paths_in_root(root: &std::path::Path, paths: &[String]) -
 
 /// The grant is inserted in the same transaction as worker Assignment
 /// admission. Its revision is the post-admission revision the provider sees.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "The ten independent grant fields are part of the existing cross-module admission call contract."
+)]
 pub(crate) fn insert_for_assignment(
     tx: &Transaction<'_>,
     ticket_id: &str,
@@ -521,6 +525,7 @@ mod tests {
         root_c: PathBuf,
         outside_a: PathBuf,
         config_a: String,
+        #[cfg(windows)]
         config_b: String,
     }
 
@@ -559,6 +564,7 @@ mod tests {
                 ).unwrap();
             }
             let config_a = Self::enabled_config(&store,"project-a","router-a","worker-a","Write fixture A");
+            #[cfg(windows)]
             let config_b = Self::enabled_config(&store,"project-b","router-b","worker-b","Write fixture B");
             Self {
                 store: Some(Arc::new(Mutex::new(store))),
@@ -568,6 +574,7 @@ mod tests {
                 root_c,
                 outside_a,
                 config_a,
+                #[cfg(windows)]
                 config_b,
             }
         }
@@ -588,6 +595,7 @@ mod tests {
             self.store.as_ref().expect("fixture store").lock().unwrap()
         }
 
+        #[cfg(windows)]
         fn queued_ticket(&self, config_id: &str, request_key: &str) -> super::Ticket {
             let ticket_id = {
                 let mut store = self.store();
@@ -926,7 +934,7 @@ mod tests {
             let mut store = fixture.store();
             store.db.execute("UPDATE bots SET provider='claude' WHERE id='worker-b'",[]).unwrap();
             let error = super::prepare_coordinated_worker_with_write_grant(
-                &mut *store,&queued.id,false,queued.revision,&allowed_paths(),
+                &mut store,&queued.id,false,queued.revision,&allowed_paths(),
             ).unwrap_err();
             assert!(error.contains("policy_unsupported"),"{error}");
         }

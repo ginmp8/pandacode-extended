@@ -30,6 +30,12 @@ struct PresetV1 {
     name: String,
     coordinator_bot: String,
     worker_bot: String,
+    /// Accepted from schema-v1 exports for wire compatibility. Imports always
+    /// create presets disabled, so this flag never grants authority.
+    #[expect(
+        dead_code,
+        reason = "v1 manifests carry enabled; serde must accept it, while imports intentionally ignore it"
+    )]
     enabled: bool,
     autonomy: String,
     max_concurrent_tasks: u8,
@@ -561,19 +567,31 @@ mod tests {
     ) -> Store {
         let path = std::env::temp_dir().join(format!("pandacode-sa-manifest-{}.db", storage::id()));
         let store = Store::open(&path).unwrap();
+        // One row per project: the two worker bots intentionally share a project
+        // scope, so insert projects separately instead of once per bot.
+        for (project, name) in [
+            ("router-project", "Router project"),
+            ("worker-project", "Worker project"),
+            ("reviewer-project", "Reviewer project"),
+        ] {
+            store
+                .db
+                .execute(
+                    "INSERT INTO projects(id,name,path) VALUES(?1,?2,?3)",
+                    params![
+                        project,
+                        name,
+                        format!("/tmp/pandacode-manifest-{project}")
+                    ],
+                )
+                .unwrap();
+        }
         for (id, name, project) in [
             (router_id, "Router", "router-project"),
             (worker_id, "Builder", "worker-project"),
             (worker_two_id, "Builder Two", "worker-project"),
             (reviewer_id, "Reviewer", "reviewer-project"),
         ] {
-            store
-                .db
-                .execute(
-                    "INSERT INTO projects(id,name,path) VALUES(?1,?2,?3)",
-                    params![project, name, format!("/tmp/pandacode-manifest-{project}")],
-                )
-                .unwrap();
             store
                 .db
                 .execute(

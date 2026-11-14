@@ -913,16 +913,25 @@ test('the tray button is settings only: no score badge, a cue dot when asking or
   await open(page, '/?council');
   await expect(button(page).locator('b')).toHaveCount(0);
   await expect(button(page)).toHaveAccessibleName('Council: Round 2 of 10 · reviewing');
-  const dot = () => button(page).locator('.council-glyph').evaluate(node => getComputedStyle(node, '::after').content !== 'none');
-  await expect.poll(dot).toBe(false);
+  // Test native-derived UI state and a rendered 6px cue, without relying on
+  // engine-specific serialization of the ::after empty-string content value.
+  const cue = () => button(page).locator('.council-glyph');
+  const expectCue = async (value: '' | 'asking' | 'settled') => {
+    await expect(cue()).toHaveAttribute('data-cue', value);
+    await expect.poll(() => cue().evaluate(node => {
+      const after = getComputedStyle(node, '::after');
+      return after.width === '6px' && after.height === '6px' && after.content !== 'none';
+    })).toBe(value !== '');
+  };
+  await expectCue('');
   await open(page, '/?council=asking');
   await expect(button(page)).toHaveAccessibleName('Council needs you');
-  await expect.poll(dot).toBe(true);
+  await expectCue('asking');
   await open(page, '/?council=passed');
-  await expect.poll(dot).toBe(true);
+  await expectCue('settled');
   await open(page, '/?council=accepted');
   await expect(button(page)).toHaveAccessibleName(/^Council: Accepted/);
-  await expect.poll(dot).toBe(false);
+  await expectCue('');
 });
 
 test('in the thread, reviewers are ordinary worker rows with their verdict as status', async ({ page }) => {

@@ -1860,6 +1860,10 @@ pub(super) fn status_for_authenticated_children(
         }
         match binding.reviewer_bot_id.as_deref() {
             Some(bot) if config.reviewer_bot_ids.iter().any(|id| id == bot)
+                // A child-enabled direct seat must retain the entire frozen bot
+                // roster and top-level quorum, not merely claim a selected ID.
+                && binding.roster_bot_ids == config.reviewer_bot_ids
+                && binding.required_reviewers == Some(config.needed())
                 && bot_ids.insert(bot) => direct += 1,
             Some(_) => return None,
             None => automatic += 1,

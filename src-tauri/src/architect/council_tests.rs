@@ -4030,3 +4030,131 @@ fn nested_m5_parallel_terminal_requires_real_root_and_child_callbacks() {
 fn nested_m5_escalated_clean_first_wave_passes_without_synthetic_reviewers() {
     assert_nested_m5_root_and_child_callbacks(council::CouncilExecutionStrategy::Escalated);
 }
+
+
+/// Exercise direct-bot and automatic-root seats alongside a real child Council.
+/// Native reviewer callbacks and task-owned child receipts must both settle
+/// before the existing root gate can approve M6 or M7.
+fn assert_nested_mixed_root_callbacks(include_automatic: bool) {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["quality-direct", "security-child"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.reviewer_bot_ids = vec!["quality-direct".into()];
+        config.automatic_reviewers = usize::from(include_automatic);
+        config.nested_bot_reviewers = vec![council::CouncilNestedReviewer {
+            bot_id: "security-child".into(),
+            child_reviewers: 2, child_target: 9.5, child_max_rounds: 2,
+        }];
+        assert_eq!(config.mode(), if include_automatic { "m7" } else { "m6" });
+        config.validate().unwrap();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+
+    let (started, _) = start_state(
+        &state, &sid, "Review independently through all enabled Council sources",
+        None, None,
+    ).unwrap();
+    let mut direct = reviewer_assignment("direct-root", "Quality");
+    direct["councilReviewerSource"] = json!("direct_bot");
+    let mut assignments = vec![direct];
+    if include_automatic {
+        let mut automatic = reviewer_assignment("automatic-root", "Compatibility");
+        automatic["councilReviewerSource"] = json!("automatic");
+        assignments.push(automatic);
+    }
+    call(&state, &sid, "pandacode_dispatch_workers",
+        json!({"assignments": assignments})).unwrap();
+    for _ in 0..if include_automatic { 2 } else { 1 } {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        let (run, _) = claim(&state, launch);
+        assert!(run.config.reviewer_boundary);
+        finish(&state, &run, "Native root reviewer findings.\nCouncil score: 9.7/10", true);
+    }
+
+    let (pending, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Wait for authenticated child callbacks"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false,
+        "root-only reports must not approve a composed Council");
+    for _ in 0..2 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                "Independent native child report.\nCouncil score: 9.5/10").unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    }
+    {
+        let store = state.store.lock().unwrap();
+        let pending = load(&store, &sid).unwrap().unwrap();
+        assert!(!verified_council_pass(&store, &pending),
+            "child leaf callbacks are not yet authenticated composite receipts");
+    }
+    let (finished, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"All enabled native Council sources settled"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(finished["completed"], true);
+    let store = state.store.lock().unwrap();
+    let saved = load(&store, &sid).unwrap().unwrap();
+    assert_eq!(saved.council_status.as_ref().unwrap().state, "passed");
+    assert_eq!(saved.council_status.as_ref().unwrap().lowest, Some(9.5));
+    assert!(verified_council_pass(&store, &saved));
+    let inspected = council_inspection_state(&store, &sid).unwrap().unwrap();
+    assert_eq!(inspected.usage.unique_attempts, if include_automatic { 2 } else { 1 });
+    assert_eq!(inspected.composed_usage.unwrap().unique_attempts,
+        if include_automatic { 4 } else { 3 },
+        "one child composite is never double-counted as a root review");
+
+    let children = child_council::verified_parent_seats(&store, &saved)
+        .unwrap().unwrap();
+    assert_eq!(children.len(), 1);
+    let mut forged = saved.clone();
+    let direct = forged.workers.iter_mut()
+        .find(|worker| worker.reviewer_binding.as_ref()
+            .and_then(|binding| binding.reviewer_bot_id.as_deref())
+            == Some("quality-direct"))
+        .expect("one direct bot reviewer");
+    direct.reviewer_binding.as_mut().unwrap().roster_bot_ids.clear();
+    assert!(council::status_for_authenticated_children(&forged, &children).is_none(),
+        "a claimed direct bot without its frozen native roster cannot approve M6/M7");
+    assert!(!verified_council_pass(&store, &forged));
+    let original = saved.workers.iter()
+        .find(|worker| worker.reviewer_binding.as_ref()
+            .and_then(|binding| binding.reviewer_bot_id.as_deref())
+            == Some("quality-direct"))
+        .unwrap();
+    store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, format!("native-reviewer-authority:{}", original.id)],
+    ).unwrap();
+    assert!(!verified_council_pass(&store, &saved),
+        "a revoked real direct-bot grant invalidates the composed terminal verdict");
+}
+
+#[test]
+fn nested_m6_direct_bot_and_child_require_independent_native_callbacks() {
+    assert_nested_mixed_root_callbacks(false);
+}
+
+#[test]
+fn nested_m7_direct_bot_automatic_and_child_require_independent_native_callbacks() {
+    assert_nested_mixed_root_callbacks(true);
+}

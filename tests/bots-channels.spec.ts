@@ -83,6 +83,154 @@ test.describe('shared bot channels', () => {
     await expect(restoredPanel.locator('input[name="councilReviewer"]').first()).toBeChecked();
   });
 
+
+
+  test('shared Channel submits M3 hybrid seats, S2 and frozen user criteria through the existing native request', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const body = (await response.text()).replace(
+        "if (command === 'bots_list' || command.startsWith('bot_'))",
+        "if (command === 'bot_shared_channel_post') (window.__channelCouncilPosts ??= []).push(structuredClone(args));\n  if (command === 'bots_list' || command.startsWith('bot_'))",
+      );
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('radio', { name: 'Bots' }).check();
+    const bots = panel.locator('input[name="councilReviewer"]');
+    await bots.nth(1).check();
+    await panel.getByRole('spinbutton', { name: 'Additional automatic reviewers' }).fill('1');
+    await expect(panel.getByRole('status')).toContainText('2 root seats (1 selected bots + 1 automatic)');
+    await panel.getByRole('combobox', { name: 'Review strategy' }).selectOption('escalated');
+    await panel.getByRole('combobox', { name: 'Criteria source' }).selectOption('user');
+    await panel.getByRole('textbox', { name: 'Criterion ID' }).fill('security');
+    await panel.getByRole('textbox', { name: 'Review lens' }).fill('Permission boundary');
+    await panel.getByRole('checkbox', { name: 'Require independently verified native evidence' }).check();
+    const selectedId = await bots.nth(1).inputValue();
+    await composer.getByRole('textbox', { name: 'Message channel' }).fill('Review this artifact.');
+    await composer.locator('button[type=submit]').click();
+    await expect.poll(() => page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(1);
+    const posted = await page.evaluate(() => (window as any).__channelCouncilPosts[0].council);
+    expect(posted).toMatchObject({
+      target: 9, maxRounds: 10, reviewers: 0,
+      reviewerBotIds: [selectedId], automaticReviewers: 1,
+      strategy: 'escalated', forceEscalation: true,
+      criteriaSource: 'user', criteria: [{ id: 'security', lens: 'Permission boundary',
+        target: 9, required: true, evidenceRequired: true }],
+    });
+    expect(posted.nestedBotReviewers).toBeUndefined();
+  });
+
+  test('shared Channel preserves nested reviewer settings on refresh and serializes a single child seat', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const body = (await response.text()).replace(
+        "if (command === 'bots_list' || command.startsWith('bot_'))",
+        "if (command === 'bot_shared_channel_post') (window.__channelCouncilPosts ??= []).push(structuredClone(args));\n  if (command === 'bots_list' || command.startsWith('bot_'))",
+      );
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    let composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    let panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('radio', { name: 'Bots' }).check();
+    const bots = panel.locator('input[name="councilReviewer"]');
+    await bots.nth(1).check();
+    await bots.nth(2).check();
+    const childId = await bots.nth(2).inputValue();
+    await panel.locator('select[name="councilReviewerRole"]').nth(2).selectOption('nested');
+    await panel.locator('input[name="councilChildReviewers"]').nth(2).fill('3');
+    await panel.getByRole('combobox', { name: 'Review strategy' }).selectOption('two_phase');
+    await page.keyboard.press('Escape');
+    const previous = await composer.elementHandle();
+    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
+    await expect.poll(() => page.evaluate(old => document.querySelector('#shared-channel-composer') !== old, previous)).toBe(true);
+    composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: on' }).click();
+    panel = composer.getByRole('dialog', { name: 'Council' });
+    await expect(panel.locator('select[name="councilReviewerRole"]').nth(2)).toHaveValue('nested');
+    await expect(panel.locator('input[name="councilChildReviewers"]').nth(2)).toHaveValue('3');
+    await expect(panel.getByRole('combobox', { name: 'Review strategy' })).toHaveValue('two_phase');
+    await expect(panel.getByRole('status')).toContainText('2 root seats (2 selected bots + 0 automatic)');
+    await composer.getByRole('textbox', { name: 'Message channel' }).fill('Check isolation.');
+    await composer.locator('button[type=submit]').click();
+    await expect.poll(() => page.evaluate(() => (window as any).__channelCouncilPosts?.length ?? 0)).toBe(1);
+    const posted = await page.evaluate(() => (window as any).__channelCouncilPosts[0].council);
+    expect(posted.strategy).toBe('two_phase');
+    expect(posted.automaticReviewers).toBeUndefined();
+    expect(posted.reviewerBotIds).toHaveLength(1);
+    expect(posted.nestedBotReviewers).toEqual([{ botId: childId, childReviewers: 3, childTarget: 9, childMaxRounds: 10 }]);
+  });
+
+  test('channel Council opens the shared native inspector without navigating or granting a pass', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.setViewportSize({ width: 360, height: 640 });
+    const inspection = {
+      cycleStartedAt: 1000, teamRevision: 9,
+      status: { state: 'passed', round: 1, lowest: 9.7, target: 9, stale: false },
+      verifiedPass: false, criteria: [],
+      attempts: [{
+        workerId: 'a', round: 1, lens: '<script>alert(1)</script>',
+        reviewerSource: 'direct_bot', name: 'Review', status: 'completed',
+        score: 9.7, abandoned: false, provider: 'codex', model: 'native',
+        attempt: 1, createdAt: 1000, startedAt: 1001, lastUpdatedAt: 1020,
+        tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown',
+      }],
+    };
+    await page.route('**/src/preview.ts*', async route => {
+      const response = await route.fetch();
+      const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/,
+        'if (command === "architect_council_inspect" && args.sessionId === "channel-cycle-task") return ' +
+        JSON.stringify(inspection) + '; switch (command) {');
+      await route.fulfill({ response, body });
+    });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    await page.evaluate(async () => {
+      const { sharedChannelThreadHtml } = await import('/src/bot-shared-channels.ts');
+      const wrapper = document.createElement('div');
+      wrapper.innerHTML = sharedChannelThreadHtml({
+        id: 'channel-one', name: 'launch', memberIds: [], leadBotId: null,
+        archived: false, updatedAt: 1, activeBotIds: [],
+        messages: [{
+          id: 'delivery-one', kind: 'assigned', authorBotId: null,
+          text: '', status: 'Completed', createdAt: 1,
+          council: {
+            cycleId: 'cycle-one', sessionId: 'channel-cycle-task', state: 'Passed',
+            round: 1, target: 9, lowest: 9.7, artifactRevision: 'artifact',
+            reviewers: [],
+          },
+        }],
+      }, []);
+      const assignment = wrapper.querySelector('.bc-assigned');
+      const history = document.querySelector('.bc-history');
+      if (!assignment || !history) throw new Error('Channel fixture is missing');
+      history.append(assignment);
+    });
+    await expect(page.getByRole('button', { name: 'View Council report' })).toBeVisible();
+    await page.getByRole('button', { name: 'Inspect Council evidence' }).click();
+    const dialog = page.getByRole('dialog', { name: 'Council inspection' });
+    await expect(dialog).toBeVisible();
+    const details = dialog.locator('.council-inspection');
+    await expect(details).toHaveAttribute('open', '');
+    await expect(dialog.getByText('Native pass not verified', { exact: false })).toBeVisible();
+    await expect(dialog.getByText('Tokens unknown', { exact: false })).toBeVisible();
+    await expect(dialog.getByText('<script>alert(1)</script>', { exact: false })).toBeVisible();
+    await expect(dialog.locator('script')).toHaveCount(0);
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(page.getByRole('textbox', { name: 'Message channel' })).toBeVisible();
+  });
+
   test('renders isolated reviewer skill provenance with keyboard-readable details', async ({ page }) => {
     await page.goto('/?bots=sample');
     const html = await page.evaluate(async () => {

@@ -53,14 +53,57 @@ export function createPreviewArchitect(host: PreviewHost) {
   /** Like the native command: a sane range, or a refusal. */
   function validCouncil(council: CouncilConfig): CouncilConfig {
     if (!council || typeof council.target !== 'number' || !(council.target > 0 && council.target <= 10)) throw new Error('A council target is between 0 and 10.');
+    // Preview round-trips native strategy configuration without simulating a
+    // completed review. In particular, S3 is never proof of real challengers.
+    const strategy = council.strategy ?? 'parallel';
+    if (strategy !== 'parallel' && strategy !== 'escalated' && strategy !== 'two_phase')
+      throw new Error('Unknown Council review strategy.');
+    if (strategy === 'two_phase' && council.maxRounds < 2)
+      throw new Error('S3 two-phase Council requires at least two review rounds.');
+    if (council.forceEscalation && strategy !== 'escalated')
+      throw new Error('Forced escalation requires the escalated Council strategy.');
+    if (council.forceEscalation && council.maxRounds < 2)
+      throw new Error('Forced Council escalation requires at least two review rounds.');
     const ids = council.reviewerBotIds ?? [];
+    const nested = council.nestedBotReviewers ?? [];
+    if (!Array.isArray(nested)) throw new Error('Nested Council reviewers must be a list.');
+    const reviewers = integer(council.reviewers, 0, 8, 'Council reviewers');
+    const extras = integer(council.automaticReviewers ?? 0, 0, 8, 'Additional automatic reviewers');
+    const selectedCount = ids.length + nested.length;
+    if (extras && (!selectedCount || reviewers !== 0 || selectedCount + extras > 8))
+      throw new Error('Mixed Council needs selected bots, reviewers=0 and at most eight root seats.');
     const permissions = council.reviewPermissions;
     if (permissions && (!ids.length || !/^[a-zA-Z0-9-]{1,128}$/.test(permissions.authorizationId)
         || permissions.grants.length !== 1 || permissions.grants[0].tool !== 'pandacode_open_file'
         || permissions.grants[0].action !== 'call' || permissions.grants[0].resourceArgument !== 'path'
         || !/^[^/:\\]+(?:\u002f[^/:\\]+)*$/.test(permissions.grants[0].resource)
         || permissions.grants[0].resource.split('/').some(part => part === '..' || !part))) throw new Error('Scoped reviewer access requires an exact relative file and native authorization.');
-    if (!Array.isArray(ids) || (ids.length > 0 && (ids.length < 2 || ids.length > 8 || new Set(ids).size !== ids.length || ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(id))))) throw new Error('Select 2 to 8 distinct reviewer bots.');
+    const minimum = extras > 0 || nested.length > 0 ? 1 : 2;
+    if (!Array.isArray(ids) || (ids.length > 0 && (ids.length < minimum || ids.length > 8 || new Set(ids).size !== ids.length || ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(id)))))
+      throw new Error(`Select ${minimum} to 8 distinct reviewer bots.`);
+    if (nested.length) {
+      if (reviewers !== 0) throw new Error('Nested Council bot seats require reviewers=0.');
+      if (selectedCount + extras < 2 || selectedCount + extras > 8)
+        throw new Error('Nested Council requires 2 to 8 total top-level seats.');
+      const unique = new Set(ids);
+      for (const child of nested) {
+        if (!child || typeof child.botId !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(child.botId) || unique.has(child.botId))
+          throw new Error('Nested Council bot IDs must be valid, unique and distinct from direct reviewers.');
+        unique.add(child.botId);
+        integer(child.childReviewers, 2, 8, 'Child Council reviewers');
+        if (typeof child.childTarget !== 'number' || !Number.isFinite(child.childTarget) || child.childTarget < 1 || child.childTarget > 10)
+          throw new Error('Child Council target must be between 1 and 10.');
+        integer(child.childMaxRounds, 1, 100, 'Child Council rounds');
+      }
+    }
+    // Preview must reject configurations the native task admission rejects;
+    // neither check is evidence that a child Council actually executed.
+    const childAttempts = nested.reduce((sum, child) => sum + child.childReviewers * child.childMaxRounds, 0);
+    if (childAttempts > 256) throw new Error('Nested Council exceeds 256 child reviewer attempts per task.');
+    if (nested.length || extras > 0) {
+      const planned = (selectedCount + extras + childAttempts) * integer(council.maxRounds, 1, 100, 'Council rounds');
+      if (planned > 1024) throw new Error('Composed Council exceeds 1024 planned reviewer attempts across root and child rounds.');
+    }
     // Match native Council: optional skill roles are task-scoped and must survive reloads.
     const optionalSkills = council.optionalSkillIds ?? [];
     if (!Array.isArray(optionalSkills) || optionalSkills.length > 32
@@ -75,7 +118,39 @@ export function createPreviewArchitect(host: PreviewHost) {
         || new Set(checks).size !== checks.length) {
       throw new Error('Native check requirements must name unique mandatory selected-bot skills.');
     }
-    return { target: council.target, maxRounds: integer(council.maxRounds, 1, 100, 'Council rounds'), reviewers: integer(council.reviewers, 0, 8, 'Council reviewers'), ...(ids.length ? { reviewerBotIds: [...ids] } : {}), ...(optionalSkills.length ? { optionalSkillIds: [...optionalSkills] } : {}), ...(checks.length ? { requiredCheckSkillIds: [...checks] } : {}), ...(permissions ? { reviewPermissions: permissions } : {}) };
+    // Match native task-scoped criteria. Preview never invents evidence or approval.
+    const criteriaSource = council.criteriaSource ?? 'architect';
+    const rawCriteria = council.criteria ?? [];
+    if (!['architect', 'user', 'hybrid'].includes(criteriaSource) || !Array.isArray(rawCriteria)
+      || rawCriteria.length > 8 || (criteriaSource === 'architect' && rawCriteria.length))
+      throw new Error('Invalid Council criteria source or count.');
+    const criterionIds = new Set<string>(), lenses = new Set<string>();
+    const criteria = rawCriteria.map(item => {
+      if (!item || typeof item.id !== 'string' || typeof item.lens !== 'string'
+        || !/^[a-zA-Z0-9_-]{1,80}$/.test(item.id) || !item.lens.trim() || item.lens.length > 80
+        || [...item.lens].some(ch => ch.charCodeAt(0) < 32 || ch.charCodeAt(0) === 127)
+        || !Number.isFinite(item.target) || item.target < 1 || item.target > 10
+        || criterionIds.has(item.id) || lenses.has(item.lens.trim().toLowerCase()))
+        throw new Error('Council requires unique criterion IDs, lenses and targets from 1 to 10.');
+      criterionIds.add(item.id); lenses.add(item.lens.trim().toLowerCase());
+      return { id: item.id, lens: item.lens, target: item.target,
+        required: item.required !== false, evidenceRequired: item.evidenceRequired === true };
+    });
+    const required = criteria.filter(item => item.required).length;
+    if (criteriaSource !== 'architect' && (!required || required > (selectedCount ? selectedCount + extras : Math.max(2, reviewers))))
+      throw new Error('Required Council criteria exceed native reviewer seats.');
+    if (nested.some(child => child.childReviewers < required))
+      throw new Error('Each child Council must cover every required user criterion.');
+    return { target: council.target, maxRounds: integer(council.maxRounds, 1, 100, 'Council rounds'), reviewers,
+      ...(ids.length ? { reviewerBotIds: [...ids] } : {}),
+      ...(nested.length ? { nestedBotReviewers: nested.map(child => ({ ...child })) } : {}),
+      ...(extras ? { automaticReviewers: extras } : {}),
+      ...(strategy !== 'parallel' ? { strategy } : {}),
+      ...(council.forceEscalation ? { forceEscalation: true } : {}),
+      ...(criteriaSource !== 'architect' ? { criteriaSource, criteria } : {}),
+      ...(optionalSkills.length ? { optionalSkillIds: [...optionalSkills] } : {}),
+      ...(checks.length ? { requiredCheckSkillIds: [...checks] } : {}),
+      ...(permissions ? { reviewPermissions: permissions } : {}) };
   }
   function validate(config: TeamConfig): TeamConfig {
     // Auto teams carry an optional roster (the lead picks models); configured teams name at least one profile.

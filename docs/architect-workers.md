@@ -49,6 +49,22 @@ See [model routing](model-routing.md).
 
 ## Council
 
+Issue #147 adds a source-composition contract: the native read-only Council inspector
+reports derived modes M1 (automatic), M2 (direct bots), and M3 (direct bots plus
+additional automatic reviewers). The same serialized contract now recognizes
+task-owned nested-bot plans for M4–M7, with distinct bot IDs, two to eight leaf
+reviewers and a bounded target/round budget per child. Native validation also
+rejects a combined reservation above **256 possible child leaf-review attempts
+per root task**, calculated as the sum of each child's reviewer count times its
+maximum rounds. This is a static pre-dispatch ceiling, not a measured token,
+monetary cost or completed-review count. The existing Council modal applies
+the same ceiling before submitting a task. **Nested plans remain
+fail-closed** with `child_council_unavailable` at native configuration and dispatch
+until isolated child Architect sessions, correlated receipts and policy inheritance
+exist. A persisted invalid plan cannot pass from ordinary root reviewer scores;
+the native Council reports `blocked`. This is a compatibility/safety foundation,
+**not** implementation or acceptance of M4–M7 or the 21 execution scenarios.
+
 With Council on, the lead convenes independent read-only reviewers who each score the work out of
 10. It fixes what they find and convenes a fresh round until every reviewer reaches the target, the
 lowest score rather than the average. `finish_team` enforces this; the rules only explain it. Set it
@@ -138,6 +154,34 @@ no Council keeps the team's, and removing the team removes it. Council is per ta
   after a round below the target, wakes the lead once with that refusal; a refusal lifted from a paused team's error leaves the pause
   note. The lead's review carries `council`: `round`, `target`, `lowest`, `complete`, `passed`, `roundsLeft`,
   `scores` (the latest round), `firstScores` (each lens's first score this cycle) and `next`.
+
+### Read-only native Council inspection
+
+`architect_council_inspect` returns the existing task's Council status,
+reviewer attempts and configured criteria. The native implementation in
+`src-tauri/src/architect/council.rs` does not expose a second scoring engine.
+Worker-owned sessions cannot inspect the parent's Council. The native caller
+validates issued reviewer authority, selected-bot frozen inputs and the
+persisted current-evidence gate before setting `verifiedPass`.
+
+The optional `verifiedCompletion` projection describes a **completed**
+native Council cycle only when the gate is independently verified as passing,
+the round is not stale, and the team itself has finished. It includes the
+native task/cycle identity, team revision, round and minimum score. A displayed
+high score, queued/running team, unverified gate, stale round or a human
+`accepted` exception cannot create this projection. It is **not** an
+artifact-bound task review request/receipt or authority to notify or approve
+an external consumer. Those contracts remain separate work in issue #147.
+
+The direct-chat and opt-in Shared Channel UI use the same read-only inspector.
+The Channel dialog preserves the previous **View Council report** navigation.
+The inspector escapes untrusted review strings. Measured native queue wait and
+settled observation span are distinguished from provider tokens/billing:
+unknown provider usage or cost remains unknown. The added fields are optional;
+older saved Council configuration and review history require no migration.
+The gate and task session remain authoritative after UI rollback. Relevant
+regressions are in `src-tauri/src/architect/council_tests.rs`,
+`tests/council.spec.ts` and `tests/bots-channels.spec.ts`.
 
 ## Saved setups and profiles
 
@@ -446,3 +490,26 @@ team and cleared atomically when applied. `config` and the parent `Session` alwa
 describe the effective setup. No schema migration is needed for this optional field.
 An architect can explicitly resolve cancelled work with a reason; unresolved
 failures prevent successful completion.
+
+### Reviewer-reported structured findings (issue #147, partial native projection)
+
+The Council inspector can derive bounded, versioned, stable finding IDs from the latest persisted native reviewer assistant message whose score matches the admitted seat. A reviewer may include a single `Council findings JSON:` line with a compact JSON array of at most 16 objects containing `severity`, `category`, `title` and `explanation`, followed by its normal final `Council score: N/10` line. The native projection adds cycle, reviewer, round and message attribution; a newer user/coordination turn invalidates the old reported-finding projection. Malformed, unbounded or unrecognized fields are ignored, not executed.
+
+**Safety boundary:** these are explicitly **reviewer-reported, unverified claims**, not independently established defects, verified file locations, artifact SHA digests, proof of skill checks, authorized fixes or approval tokens. No claimed evidence reference is promoted to native evidence; required evidence continues to fail closed, and only the existing Council score and terminal approval gate can determine pass. The scope-bound native inspection helper rejects stale cycle/revision reads, but its trusted caller still must independently verify task ownership. Durable structured finding dispositions and independently verified finding evidence remain unimplemented. The channel-scoped native C-2 request and terminal receipt foundation exists, but the general non-channel task adapter and authenticated child composite receipts remain incomplete; do not consume reported findings as final #148 task approval.
+
+
+### Native S2 task-scoped UI and escalation contract (#147)
+
+The existing Council modal now offers **Parallel (original)** and **Escalated — require two fresh rounds**. Selecting Escalated before enabling Council is task-local (it does not create persistent reviewer bot defaults or modify unrelated threads). The native strategy requires two genuinely distinct reviewer worker identities, preserves the exact first-round review lenses and enabled reviewer sources, and never treats an alternate lens, duplicated worker ID, stale score, or absent native evidence as completion. The shared native inspector discloses configured strategy, user escalation, and criteria source as **configuration, not execution proof**. The Two-phase strategy is now selectable in the existing modal; the native two-round gate remains partial and fails closed where independent challengers or child Councils are unavailable.
+
+### Native S3 selected-bot cross-challenge (#147, partial)
+
+Two-phase Council can reuse the **selected bot roster** in a new second-round native worker session without adding an unauthorized automatic reviewer source. Each second-phase direct bot receives a bounded, authenticated handoff of *other reviewers' phase-one reports only*; its own earlier report is excluded after all phase-one reports have passed native provenance and score checks. The final native S3 gate requires fresh worker IDs, a complete read-only second round, and a distinct second-phase challenger for every selected-bot phase-one author. This is cross-review, not a bot reviewing its own earlier findings; reported findings remain unverified claims.
+
+This enables source-constrained direct-bot review paths without inventing new bot identities or scores. It does **not** implement nested child Council execution, authenticated child composite receipts, artifact content hashing, provider-independent model diversity, or all 21 functional mode/strategy transitions. Missing eligible peer challengers remain blocked.
+
+### Experimental native S2 escalation contract (#147)
+
+A task's optional `strategy: escalated` with `forceEscalation: true` requires **two fresh, separately admitted native Council rounds** to pass on the same current artifact. Each round retains the existing source selection (automatic, configured direct bots, or their supported mixture), score, required-criterion, and verified skill-evidence gates. The native gate does not add reviewer sources, silently reuse a scored seat, or treat an exhausted round budget as approval. Configure at least two rounds. Existing configurations default to `parallel` without serialization changes.
+
+Native S2 now includes automatic low-score, required-criterion, missing mandatory skill-check evidence, scored reviewer-reported critical/high finding triggers, and scored reviewer-reported `category: "conflict"` triggers. A conflict claim must come from the same persisted native reviewer assistant message as the admitted score; it conservatively requires a fresh independent native review even when the original scores met the target, without being treated as verified evidence. Critical/high findings remain unverified reviewer claims, but conservatively prevent a passing round until an observed artifact correction and fresh independent review. A fresh round must use different native reviewer identities and only sources enabled by the task. Task-isolated native child leaf reviews and authenticated composite parent seats now run for nested Parallel Council. Under Escalated S2, M4–M7 may admit only their configured first-wave root sources and pass only when every real child/root reviewer is clean and no escalation trigger was seen. Forced escalation, previously failing/conflicting root or child attempts, new S2 waves, and hierarchical S3 stay fail-closed until independent re-admission is implemented. The complete S2 budget scheduler and 21-mode/strategy integration proof remain **incomplete**; no live-provider evidence is claimed.

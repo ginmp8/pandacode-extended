@@ -447,3 +447,82 @@ test('a trailing slash on either scope still overlaps and explains the wait', ()
   assert.equal(workerQueueReason(worker('B', 'queued', ['SRC']), [running], 0), 'Waiting for A to finish editing shared files');
   assert.equal(workerQueueReason(worker('B', 'queued', ['lib//']), [running], 0), undefined);
 });
+
+
+test('architect preview preserves task-scoped nested Council roles without manufacturing child results', t => {
+  const { api, host } = fixture(t);
+  api.configure('parent', config());
+  const standard = { target: 9, maxRounds: 3, reviewers: 0 };
+  const child = (botId, childReviewers = 2) => ({ botId, childReviewers, childTarget: 9, childMaxRounds: 3 });
+  for (const council of [
+    { ...standard, nestedBotReviewers: [child('a'), child('b')] },
+    { ...standard, nestedBotReviewers: [child('a')], automaticReviewers: 1 },
+    { ...standard, nestedBotReviewers: [child('a')], reviewerBotIds: ['b'] },
+    { ...standard, nestedBotReviewers: [child('a')], reviewerBotIds: ['b'], automaticReviewers: 1 },
+  ]) {
+    const configured = api.setCouncil('parent', council);
+    assert.deepEqual(configured.config.council.nestedBotReviewers, council.nestedBotReviewers);
+    assert.equal(configured.councilStatus.state, 'waiting',
+      'the browser preview must never claim that simulated child reviewers executed');
+    assert.deepEqual(createPreviewArchitect(host).get('parent').config.council.nestedBotReviewers, council.nestedBotReviewers);
+  }
+  assert.throws(() => api.setCouncil('parent', { ...standard, nestedBotReviewers: [child('a')] }), /top-level seats/);
+  assert.throws(() => api.setCouncil('parent', { ...standard, nestedBotReviewers: [child('a'), child('a')] }), /unique/);
+  assert.throws(() => api.setCouncil('parent', { ...standard, nestedBotReviewers: [child('a')], reviewerBotIds: ['a'] }), /distinct/);
+  assert.throws(() => api.setCouncil('parent', { ...standard, nestedBotReviewers: [child('a', 1), child('b')] }), /between 2 and 8/);
+  assert.throws(() => api.setCouncil('parent', { ...standard, reviewers: 2, nestedBotReviewers: [child('a'), child('b')] }), /reviewers=0/);
+  assert.throws(() => api.setCouncil('parent', { ...standard, nestedBotReviewers: [child('a'), child('b'), child('c')],
+    criteriaSource: 'user', criteria: [
+      { id: 'one', lens: 'One', required: true, target: 9 },
+      { id: 'two', lens: 'Two', required: true, target: 9 },
+      { id: 'three', lens: 'Three', required: true, target: 9 },
+    ] }), /Each child Council/);
+  const original = api.setCouncil('parent', standard);
+  assert.equal(original.config.council.nestedBotReviewers, undefined);
+});
+
+test('preview checks native composed review budgets without weakening legacy Councils', t => {
+  const { api } = fixture(t);
+  api.configure('parent', config());
+  const base = { target: 9, maxRounds: 10, reviewers: 0 };
+  const child = (botId, childMaxRounds, childReviewers = 2) => ({ botId, childReviewers, childTarget: 9, childMaxRounds });
+  assert.throws(() => api.setCouncil('parent', {
+    ...base, nestedBotReviewers: [child('a', 30), child('b', 30)],
+  }), /1024 planned reviewer attempts/);
+  assert.equal(api.setCouncil('parent', {
+    ...base, nestedBotReviewers: [child('a', 20), child('b', 20)],
+  }).councilStatus.state, 'waiting');
+  assert.throws(() => api.setCouncil('parent', {
+    ...base, maxRounds: 3, nestedBotReviewers: [child('a', 17, 8), child('b', 17, 8)],
+  }), /256 child reviewer attempts/);
+  assert.equal(api.setCouncil('parent', {
+    ...base, maxRounds: 3, nestedBotReviewers: [child('a', 16, 8), child('b', 16, 8)],
+  }).councilStatus.state, 'waiting');
+  assert.equal(api.setCouncil('parent', { ...base, maxRounds: 100, reviewers: 8 }).councilStatus.state, 'waiting');
+});
+
+test('architect preview round-trips only admitted native Council strategies without weakening the old default', t => {
+  const { api, host } = fixture(t);
+  api.configure('parent', config());
+  const standard = { target: 9, maxRounds: 3, reviewers: 0 };
+  const legacy = api.setCouncil('parent', standard);
+  assert.equal(legacy.config.council.strategy, undefined);
+  assert.equal(legacy.config.council.forceEscalation, undefined);
+  const escalated = api.setCouncil('parent', { ...standard, strategy: 'escalated', forceEscalation: true });
+  assert.equal(escalated.config.council.strategy, 'escalated');
+  assert.equal(escalated.config.council.forceEscalation, true);
+  const restored = createPreviewArchitect(host).get('parent');
+  assert.equal(restored.config.council.strategy, 'escalated');
+  assert.equal(restored.config.council.forceEscalation, true);
+  const twoPhase = api.setCouncil('parent', { ...standard, strategy: 'two_phase' });
+  assert.equal(twoPhase.config.council.strategy, 'two_phase');
+  assert.equal(twoPhase.config.council.forceEscalation, undefined);
+  assert.equal(createPreviewArchitect(host).get('parent').config.council.strategy, 'two_phase');
+  assert.throws(() => api.setCouncil('parent', { ...standard, strategy: 'two_phase', maxRounds: 1 }), /at least two/);
+  assert.throws(() => api.setCouncil('parent', { ...standard, strategy: 'untrusted' }), /Unknown Council review strategy/);
+  assert.throws(() => api.setCouncil('parent', { ...standard, forceEscalation: true }), /requires the escalated/);
+  assert.throws(() => api.setCouncil('parent', { ...standard, maxRounds: 1, strategy: 'escalated', forceEscalation: true }), /at least two/);
+  const parallel = api.setCouncil('parent', { ...standard, strategy: 'parallel', forceEscalation: false });
+  assert.equal(parallel.config.council.strategy, undefined);
+  assert.equal(parallel.config.council.forceEscalation, undefined);
+});

@@ -270,6 +270,24 @@ pub(crate) fn validate_issued_authority(store: &Store, parent: &str, binding: &R
     }
 }
 
+/// New composed Councils require a recorded native grant even for read-only
+/// automatic reviewers. The legacy automatic-reviewer fallback in
+/// validate_issued_authority is deliberately not used for this stricter gate.
+pub(crate) fn validate_recorded_authority(
+    store: &Store, parent: &str, binding: &ReviewerBinding,
+) -> Result<()> {
+    let recorded: i64 = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2 AND kind='reviewer_authority' AND worker_id=?3)",
+        params![parent, authority_key(&binding.seat_id), binding.seat_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if recorded != 1 {
+        return Err("capability_not_authorized: a composed reviewer has no recorded native authority.".into());
+    }
+    validate_issued_authority(store, parent, binding)
+}
+
 /// Called by the future S2/S4 trusted user-action adapter; never from a model
 /// prompt. Both the user's requested grants and bot-configured grants must match.
 #[allow(dead_code)]
@@ -467,7 +485,10 @@ impl ReviewerBinding {
             || self.reviewer_bot_id.is_some() != self.snapshot.bot_context.is_some()
             || self.reviewer_bot_id.as_deref().is_some_and(|id| !super::valid_id(id))
             || self.required_reviewers.is_some_and(|n| !(2..=8).contains(&n))
-            || (!self.roster_bot_ids.is_empty() && (self.required_reviewers != Some(self.roster_bot_ids.len())
+            || (!self.roster_bot_ids.is_empty() && (self.required_reviewers != Some(
+                team.config.council.as_ref()
+                    .filter(|config| config.automatic_reviewers > 0)
+                    .map_or(self.roster_bot_ids.len(), |config| config.needed()))
                 || self.reviewer_bot_id.as_ref().is_none_or(|id| !self.roster_bot_ids.contains(id))))
         {
             return Err("reviewer_session_mismatch: immutable reviewer binding differs from scheduled worker.".into());

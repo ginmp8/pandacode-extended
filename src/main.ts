@@ -7176,6 +7176,22 @@ async function action(name: string, element: HTMLElement): Promise<void> {
       }
       break;
     }
+    case 'channel-council-inspect': {
+      const taskId = element.dataset.sessionId;
+      if (!taskId || !state.sharedChannelId) break;
+      // Read the same task-owned native Council projection without switching channels.
+      const { createCouncilInspector } = await import('./council-inspector');
+      const dialog = modal('Council inspection',
+        '<div class="bc-council-inspector-host" role="region" aria-label="Native Council evidence"></div>',
+        'bc-council-inspector-dialog');
+      const inspector = createCouncilInspector(() =>
+        call<import('./architect-types').CouncilInspection | null>('architect_council_inspect', { sessionId: taskId }));
+      dialog.querySelector('.bc-council-inspector-host')?.append(inspector);
+      const summary = inspector.querySelector<HTMLElement>('summary');
+      summary?.focus();
+      summary?.click();
+      break;
+    }
     case 'channel-council-report': {
       const taskId = element.dataset.sessionId;
       if (!taskId) break;
@@ -7336,21 +7352,80 @@ document.addEventListener('submit', event => {
     if (!text) return;
     const councilEnabled = data.get('councilEnabled') === 'on';
     const councilMode = data.get('councilMode');
-    const reviewerBotIds = [...form.querySelectorAll<HTMLInputElement>('input[name=councilReviewer]:checked')].map(input => input.value);
+    const isSelected = councilMode === 'selected';
+    const channel = state.sharedChannelDetail;
+    const selectedBotIds = isSelected
+      ? [...form.querySelectorAll<HTMLInputElement>('input[name=councilReviewer]:checked')].map(input => input.value)
+      : [];
+    const directBotIds: string[] = [], nestedBotReviewers: { botId: string; childReviewers: number; childTarget: number; childMaxRounds: number }[] = [];
+    const roles = [...form.querySelectorAll<HTMLSelectElement>('select[name=councilReviewerRole]')];
+    const childValue = (name: string, botId: string): number => Number(
+      [...form.querySelectorAll<HTMLInputElement>('input[name=' + name + ']')].find(input => input.dataset.botId === botId)?.value ?? NaN
+    );
+    let rolesValid = true;
+    for (const id of selectedBotIds) {
+      const role = roles.find(select => select.dataset.botId === id)?.value;
+      if (role === 'direct') directBotIds.push(id);
+      else if (role === 'nested') nestedBotReviewers.push({
+        botId: id, childReviewers: childValue('councilChildReviewers', id),
+        childTarget: childValue('councilChildTarget', id), childMaxRounds: childValue('councilChildMaxRounds', id),
+      });
+      else rolesValid = false;
+    }
+    const automaticReviewers = isSelected ? Number(data.get('councilAutomaticReviewers')) : 0;
     const target = Number(data.get('councilTarget') ?? 9);
     const maxRounds = Number(data.get('councilMaxRounds') ?? 10);
-    if (councilEnabled && (!Number.isFinite(target) || target < 1 || target > 10
+    const strategy = String(data.get('councilStrategy') ?? 'parallel');
+    const criteriaSource = String(data.get('councilCriteriaSource') ?? 'architect');
+    const criterion = {
+      id: String(data.get('councilCriterionId') ?? '').trim(),
+      lens: String(data.get('councilCriterionLens') ?? '').trim(),
+      target: Number(data.get('councilCriterionTarget') ?? 9),
+      required: true,
+      evidenceRequired: data.get('councilCriterionEvidence') === 'on',
+    };
+    const criteriaValid = criteriaSource === 'architect' || (
+      /^[a-zA-Z0-9_-]{1,64}$/.test(criterion.id) && criterion.lens.length > 0
+      && criterion.lens.length <= 80 && Number.isFinite(criterion.target)
+      && criterion.target >= 1 && criterion.target <= 10
+    );
+    const childAttempts = nestedBotReviewers.reduce((sum, child) => sum + child.childReviewers * child.childMaxRounds, 0);
+    const totalSeats = selectedBotIds.length + automaticReviewers;
+    const validSelection = !isSelected || (
+      rolesValid && selectedBotIds.length >= (automaticReviewers > 0 ? 1 : 2)
+      && selectedBotIds.length <= 8 && totalSeats >= 2 && totalSeats <= 8
+      && new Set(selectedBotIds).size === selectedBotIds.length
+      && selectedBotIds.every(id => channel?.memberIds.includes(id))
+      && Number.isInteger(automaticReviewers) && automaticReviewers >= 0 && automaticReviewers <= 7
+      && nestedBotReviewers.every(child =>
+        Number.isInteger(child.childReviewers) && child.childReviewers >= 2 && child.childReviewers <= 8
+        && Number.isFinite(child.childTarget) && child.childTarget >= 1 && child.childTarget <= 10
+        && Number.isInteger(child.childMaxRounds) && child.childMaxRounds >= 1 && child.childMaxRounds <= 100)
+      && Number.isSafeInteger(childAttempts) && childAttempts <= 256
+      && Number.isSafeInteger((totalSeats + childAttempts) * maxRounds)
+      && (totalSeats + childAttempts) * maxRounds <= 1024
+    );
+    if (councilEnabled && (
+      !['auto', 'selected'].includes(String(councilMode))
+      || !Number.isFinite(target) || target < 1 || target > 10
       || !Number.isInteger(maxRounds) || maxRounds < 1 || maxRounds > 100
-      || (councilMode === 'selected' && (reviewerBotIds.length < 2 || reviewerBotIds.length > 8)))) {
-      notify('Set a Council target from 1–10, 1–100 rounds and 2–8 selected reviewers, if selected.');
+      || !['parallel', 'escalated', 'two_phase'].includes(strategy)
+      || !['architect', 'user', 'hybrid'].includes(criteriaSource)
+      || !criteriaValid || !validSelection
+    )) {
+      notify('Check Council seats (2–8), child limits, strategy and required criteria before sending.');
       return;
     }
-    const scopedFile = data.get('councilScopedFile') === 'on' && councilMode === 'selected';
+    const scopedRequested = data.get('councilScopedFile') === 'on' && isSelected;
+    if (councilEnabled && scopedRequested && !directBotIds.length) {
+      notify('Scoped reviewer grants require at least one direct bot, not only child Councils.');
+      return;
+    }
     const filePath = String(data.get('councilFilePath') ?? '').trim();
     const validFilePath = filePath.length > 0 && filePath.length <= 240 && !filePath.startsWith('/')
       && !filePath.startsWith('\\') && !filePath.includes(':')
       && filePath.split(/[\\/]/).every(part => Boolean(part) && part !== '..');
-    if (councilEnabled && scopedFile && !validFilePath) {
+    if (councilEnabled && scopedRequested && !validFilePath) {
       notify('Choose one valid relative file path for the scoped reviewer action.');
       return;
     }
@@ -7363,19 +7438,23 @@ document.addEventListener('submit', event => {
       return;
     }
     const council = councilEnabled ? {
-      target, maxRounds, reviewers: 0, ...(councilMode === 'selected' ? { reviewerBotIds } : {}),
+      target, maxRounds, reviewers: 0,
+      ...(directBotIds.length ? { reviewerBotIds: directBotIds } : {}),
+      ...(nestedBotReviewers.length ? { nestedBotReviewers } : {}),
+      ...(automaticReviewers ? { automaticReviewers } : {}),
+      ...(strategy !== 'parallel' ? { strategy, forceEscalation: strategy === 'escalated' } : {}),
+      ...(criteriaSource !== 'architect' ? { criteriaSource, criteria: [criterion] } : {}),
       ...(issueEnabled ? { postAcceptanceIssue: { authorizationId: crypto.randomUUID(), repository: issueRepo } } : {}),
-      ...(scopedFile ? { reviewPermissions: {
+      ...(scopedRequested ? { reviewPermissions: {
         authorizationId: crypto.randomUUID(),
         grants: [{ tool: 'pandacode_open_file', action: 'call', resourceArgument: 'path', resource: filePath }],
       } } : {}),
     } : undefined;
-    const channel = state.sharedChannelDetail;
     const recipients = (channel?.memberIds ?? []).filter(id => {
       const name = sidebarBots.find(bot => bot.id === id)?.name;
       return Boolean(name && new RegExp(`(?:^|\\s)@${name.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&')}(?=$|\\s|[^\\p{L}\\p{N}_])`, 'iu').test(text));
     }).slice(0, 2);
-    if (councilEnabled && reviewerBotIds.some(id => recipients.includes(id)) && councilMode === 'selected') {
+    if (councilEnabled && selectedBotIds.some(id => recipients.includes(id)) && isSelected) {
       notify('A message executor cannot also be one of its Council reviewers.');
       return;
     }

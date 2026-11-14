@@ -129,3 +129,29 @@
 .bots-group-channels .channel-row .bc-face-count { width: 21px; height: 21px; font-size: 8px; }
 .bots-group-channels .bots-group-label { margin-top: 13px; }
 .bc-earlier { flex: none; align-self: center; }
+
+/* Channel delivery evidence uses the same native inspector as direct chat. */
+.bc-council-inspector-host{width:min(640px,calc(100dvw - 44px));min-width:0;max-height:calc(100dvh - 160px);overflow:auto;overflow-wrap:anywhere}
+.bc-council-inspector-host .council-inspection{display:block;max-width:100%;font-size:var(--ds-text-ui)}
+.bc-council-inspector-host .council-inspection summary{cursor:pointer;font-weight:var(--weight-medium)}
+.bc-council-inspector-host .council-inspection-body{min-width:0;overflow-wrap:anywhere;line-height:1.5}
+.bc-council-inspector-host .council-inspection-body li{margin:8px 0}
+.bc-council-inspector-host .council-inspection-body small{display:block;color:var(--muted)}
+.bc-council-inspector-host .council-inspection :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+
+/* Per-message hybrid/child Council settings reuse the existing Channel modal. */
+.bc-council-reviewer-options .bc-council-automatic{flex-basis:100%;display:flex;justify-content:space-between;align-items:center;gap:12px;cursor:default}
+.bc-council-reviewer-options .bc-council-reviewer{display:grid;flex:1 1 100%;gap:6px;padding:8px;border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner)}
+.bc-council-reviewer-options .bc-council-reviewer>label{justify-content:flex-start;cursor:default}
+.bc-council-reviewer-options .bc-council-child-settings{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px}
+.bc-council-reviewer-options .bc-council-child-settings label{display:grid;gap:4px;min-width:0;font-size:var(--ds-text-meta)}
+.bc-council-panel .bc-council-advanced{display:grid;gap:9px;padding-top:10px;border-top:1px solid var(--ds-border)}
+.bc-council-panel .bc-council-advanced>label,.bc-council-panel .bc-council-criterion-fields>label{display:grid;gap:5px}
+.bc-council-panel .bc-council-criterion-fields{display:grid;gap:7px}
+.bc-council-panel .bc-council-criterion-fields small{color:var(--muted)}
+.bc-council-panel :is(.bc-council-advanced,.bc-council-reviewer-options) :is(input:not([type=checkbox]),select){box-sizing:border-box;max-width:100%;width:100%;min-width:0;min-height:32px;padding:5px;border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner);background:var(--ds-fill);color:var(--text);font:inherit}
+.bc-council-panel .bc-council-automatic input{width:64px!important}
+.bc-council-plan{margin:0;color:var(--muted);font-size:var(--ds-text-meta);line-height:1.4}
+.bc-council-panel :is(.bc-council-role,.bc-council-child-settings,.bc-council-criterion-fields)[hidden]{display:none!important}
+.bc-council-panel :is(select,input):focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media(max-width:420px){.bc-council-reviewer-options .bc-council-child-settings{grid-template-columns:1fr}}

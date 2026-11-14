@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 43;
+pub const SCHEMA_VERSION: i64 = 45;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -689,6 +689,22 @@ impl Store {
                 migration.execute_batch(crate::superagent::effects::SCHEMA)
                     .map_err(|e| e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=43;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 44 {
+                // Immutable, per-delivery native Council request identities. A request
+                // is not a verdict, approval token or permission grant.
+                migration.execute_batch(crate::architect::council_requests::SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=44;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 45 {
+                // Additive terminal receipts use the existing native Council gate.
+                // Historical request rows remain readable and unapproved.
+                migration.execute_batch(crate::architect::council_requests::RECEIPT_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=45;")
                     .map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;

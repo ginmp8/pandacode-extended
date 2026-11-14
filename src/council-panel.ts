@@ -3,6 +3,8 @@ import { reducedMotion, springKeyframes, trackSegment } from './motion';
 import { hidePopover, showPopover } from './popover-motion';
 import { teamActive, type CouncilConfig, type TeamSnapshot } from './architect-types';
 import type { ProviderId } from './types';
+import { createCouncilCriteriaEditor } from './council-criteria-editor';
+import { createCouncilInspector } from './council-inspector';
 import { COUNCIL_REVIEWERS, COUNCIL_ROUNDS, COUNCIL_TARGETS, councilDefaults, councilForNewThreads, setCouncilForNewThreads, councilAsking, councilNotice, councilProgress, councilStateText, firstAndFinal, finishedBelow, formatScore, outOfTen, provisional, saveCouncilDefaults, seatScore, type CouncilProgress, type CouncilRound, type CouncilSeatWorker } from './council';
 
 /* Council in the composer: the tray's settings button and panel, and one compact strip inside the prompt box (its state,
@@ -31,7 +33,8 @@ export type CouncilHost = {
 
 type Field = 'target' | 'maxRounds' | 'reviewers';
 type ReviewerBot = { id: string; name: string; role: string; provider: ProviderId; model: string; paused: boolean; skills?: string[]; available?: boolean; reason?: string | null };
-type ReviewerSelection = { selected: boolean; ids: string[]; idsEdited?: boolean; optionalSkills?: string[]; checkSkills?: string[]; scoped?: boolean; fileScope?: string; authorizationId?: string };
+type ChildSettings = { childReviewers: number; childTarget: number; childMaxRounds: number };
+type ReviewerSelection = { selected: boolean; ids: string[]; nested: Record<string, ChildSettings>; idsEdited?: boolean; automaticReviewers?: number; optionalSkills?: string[]; checkSkills?: string[]; scoped?: boolean; fileScope?: string; authorizationId?: string };
 const FIELDS: readonly { key: Field; label: string; options: readonly number[]; name(value: number): string }[] = [
   { key: 'target', label: 'Target score', options: COUNCIL_TARGETS, name: formatScore },
   { key: 'maxRounds', label: 'Max rounds', options: COUNCIL_ROUNDS, name: String },
@@ -39,6 +42,8 @@ const FIELDS: readonly { key: Field; label: string; options: readonly number[]; 
 ];
 /** Wide enough that "10.0" keeps clear of its segment's edge. */
 const PANEL_WIDTH = 300;
+const MAX_CHILD_LEAF_ATTEMPTS = 256; // Native Council pre-dispatch cap, shared by every nested bot in this task.
+const MAX_COMPOSED_REVIEW_ATTEMPTS = 1024; // Native worst-case cap across root and child rounds.
 const BUTTON = '.composer-council-button';
 /** A balance: reviewers weighing the work. Its own glyph, apart from the sidebar's Agent usage. */
 const COUNCIL_ICON = '<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.65" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v16M8 20h8M5 7h14M5 7l-3 6.5a3 3 0 0 0 6 0zM19 7l-3 6.5a3 3 0 0 0 6 0z"/></svg>';
@@ -82,20 +87,26 @@ export function createCouncil(host: CouncilHost) {
   const reviewerBots = new Map<string, ReviewerBot[]>();
   const reviewerLoads = new Map<string, string>();
   const reviewerDraft = new Map<string, ReviewerSelection>();
+  // Strategy is task-scoped; a pre-enable selection must not become a global default.
+  const strategyDraft = new Map<string, 'parallel' | 'escalated' | 'two_phase'>();
   const selection = (sessionId: string): ReviewerSelection => {
     let draft = reviewerDraft.get(sessionId);
     const persisted = shownConfig(sessionId);
     // The panel may open before the saved team appears; never keep a provisional
     // empty reviewer roster after native restoration, or override manual ID edits.
-    if (draft?.selected && !draft.idsEdited && draft.ids.length === 0 && persisted?.reviewerBotIds?.length) {
-      draft = { ...draft, ids: [...persisted.reviewerBotIds],
+    if (draft?.selected && !draft.idsEdited && draft.ids.length === 0 && (persisted?.reviewerBotIds?.length || persisted?.nestedBotReviewers?.length)) {
+      draft = { ...draft, ids: [...(persisted.reviewerBotIds ?? []), ...(persisted.nestedBotReviewers ?? []).map(child => child.botId)],
+        nested: Object.fromEntries((persisted.nestedBotReviewers ?? []).map(child => [child.botId, { childReviewers: child.childReviewers, childTarget: child.childTarget, childMaxRounds: child.childMaxRounds }])),
+        automaticReviewers: persisted.automaticReviewers ?? draft.automaticReviewers ?? 0,
         optionalSkills: [...(persisted.optionalSkillIds ?? [])],
         checkSkills: [...(persisted.requiredCheckSkillIds ?? [])] };
       reviewerDraft.set(sessionId, draft);
     }
     return draft ?? {
-      selected: Boolean(persisted?.reviewerBotIds?.length),
-      ids: [...(persisted?.reviewerBotIds ?? [])],
+      selected: Boolean(persisted?.reviewerBotIds?.length || persisted?.nestedBotReviewers?.length),
+      ids: [...(persisted?.reviewerBotIds ?? []), ...(persisted?.nestedBotReviewers ?? []).map(child => child.botId)],
+      nested: Object.fromEntries((persisted?.nestedBotReviewers ?? []).map(child => [child.botId, { childReviewers: child.childReviewers, childTarget: child.childTarget, childMaxRounds: child.childMaxRounds }])),
+      automaticReviewers: persisted?.automaticReviewers ?? 0,
       optionalSkills: [...(persisted?.optionalSkillIds ?? [])],
       checkSkills: [...(persisted?.requiredCheckSkillIds ?? [])],
       scoped: Boolean(persisted?.reviewPermissions),
@@ -107,9 +118,29 @@ export function createCouncil(host: CouncilHost) {
     && !path.startsWith('/') && !path.startsWith('\\') && !path.includes(':')
     && path.split(/[\\/]/).every(part => Boolean(part) && part !== '..');
   function selectionConfig(sessionId: string): CouncilConfig {
-    const draft = selection(sessionId), council = shownConfig(sessionId) ?? councilDefaults();
-    if (!draft.selected) return { ...council, reviewerBotIds: undefined, optionalSkillIds: undefined, requiredCheckSkillIds: undefined, reviewPermissions: undefined };
-    if (draft.ids.length < 2 || draft.ids.length > 8 || new Set(draft.ids).size !== draft.ids.length) throw new Error('Select 2 to 8 distinct reviewer bots.');
+    const draft = selection(sessionId), pendingStrategy = strategyDraft.get(sessionId);
+    const council = { ...(shownConfig(sessionId) ?? councilDefaults()), ...(pendingStrategy ? {
+      strategy: pendingStrategy, forceEscalation: pendingStrategy === 'escalated',
+    } : {}) };
+    if (!draft.selected) return { ...council, automaticReviewers: undefined, reviewerBotIds: undefined, nestedBotReviewers: undefined, optionalSkillIds: undefined, requiredCheckSkillIds: undefined, reviewPermissions: undefined };
+    const extras = draft.automaticReviewers ?? 0;
+    const directBotIds = draft.ids.filter(id => !draft.nested[id]);
+    const nestedBotReviewers = draft.ids.filter(id => draft.nested[id]).map(id => ({ botId: id, ...draft.nested[id] }));
+    const childAttempts = nestedBotReviewers.reduce((count, child) => count + child.childReviewers * child.childMaxRounds, 0);
+    if (!Number.isSafeInteger(childAttempts) || childAttempts > MAX_CHILD_LEAF_ATTEMPTS) {
+      throw new Error(`Nested Council exceeds ${MAX_CHILD_LEAF_ATTEMPTS} child reviewer attempts per task. Reduce child reviewers or rounds.`);
+    }
+    const minimum = extras > 0 ? 1 : 2;
+    if (!Number.isInteger(extras) || extras < 0 || extras > 7 || draft.ids.length < minimum || draft.ids.length > 8
+      || draft.ids.length + extras > 8 || new Set(draft.ids).size !== draft.ids.length) {
+      throw new Error(extras > 0 ? 'Choose at least one selected bot and at most eight combined Council seats.' : 'Select 2 to 8 distinct reviewer bots.');
+    }
+    if (nestedBotReviewers.length || extras > 0) {
+      const plannedAttempts = (draft.ids.length + extras + childAttempts) * council.maxRounds;
+      if (!Number.isSafeInteger(plannedAttempts) || plannedAttempts > MAX_COMPOSED_REVIEW_ATTEMPTS) {
+        throw new Error(`Composed Council exceeds ${MAX_COMPOSED_REVIEW_ATTEMPTS} planned reviewer attempts across root and child rounds.`);
+      }
+    }
     const available = reviewerBots.get(sessionId) ?? [];
     const executor = host.executorBotId?.(sessionId);
     for (const id of draft.ids) {
@@ -123,10 +154,17 @@ export function createCouncil(host: CouncilHost) {
     if (draft.scoped && (!reviewPermissions?.authorizationId || !scopedFile(reviewPermissions.grants[0].resource))) {
       throw new Error('Choose a relative file path to authorize one exact native host action.');
     }
-    const allAssigned = new Set(available.filter(bot => draft.ids.includes(bot.id)).flatMap(bot => bot.skills ?? []));
+    if (!directBotIds.length && (draft.scoped || draft.checkSkills?.length)) {
+      throw new Error('Scoped reviewer grants and required skills need at least one direct bot reviewer.');
+    }
+    const allAssigned = new Set(available.filter(bot => directBotIds.includes(bot.id)).flatMap(bot => bot.skills ?? []));
     const optionalSkillIds = (draft.optionalSkills ?? []).filter(id => allAssigned.has(id));
     const requiredCheckSkillIds = (draft.checkSkills ?? []).filter(id => allAssigned.has(id) && !optionalSkillIds.includes(id));
-    return { ...council, reviewerBotIds: [...draft.ids], optionalSkillIds: optionalSkillIds.length ? optionalSkillIds : undefined, requiredCheckSkillIds: requiredCheckSkillIds.length ? requiredCheckSkillIds : undefined, reviewPermissions };
+    return { ...council, reviewers: extras > 0 || nestedBotReviewers.length ? 0 : council.reviewers,
+      automaticReviewers: extras || undefined, reviewerBotIds: directBotIds.length ? directBotIds : undefined,
+      nestedBotReviewers: nestedBotReviewers.length ? nestedBotReviewers : undefined,
+      optionalSkillIds: optionalSkillIds.length ? optionalSkillIds : undefined,
+      requiredCheckSkillIds: requiredCheckSkillIds.length ? requiredCheckSkillIds : undefined, reviewPermissions };
   }
   function selectedError(sessionId: string, error: string): void {
     failures.set(sessionId, error);
@@ -210,16 +248,26 @@ export function createCouncil(host: CouncilHost) {
     if (!panel.dataset.compact) {
       const draft = selection(sessionId), bots = reviewerBots.get(sessionId) ?? [], executor = host.executorBotId?.(sessionId);
       const list = panel.querySelector<HTMLElement>('.council-bots')!;
-      const assignedSkills = [...new Set(bots.filter(bot => draft.ids.includes(bot.id)).flatMap(bot => bot.skills ?? []))].sort();
+      const assignedSkills = [...new Set(bots.filter(bot => draft.ids.includes(bot.id) && !draft.nested[bot.id]).flatMap(bot => bot.skills ?? []))].sort();
+      const extraSeats = draft.automaticReviewers ?? 0;
+      const minBots = extraSeats > 0 ? 1 : 2;
+      const totalSeats = draft.ids.length + extraSeats;
+      const extraOptions = Array.from({ length: Math.max(0, 8 - draft.ids.length) + 1 }, (_, n) =>
+        `<option value="${n}"${n === extraSeats ? ' selected' : ''}>${n}</option>`).join('');
       const missing = draft.ids.filter(id => !bots.some(bot => bot.id === id)).map(id => `<label class="council-bot-choice is-unavailable"><input type="checkbox" data-reviewer-bot="${escape(id)}" checked><span class="council-bot-info"><strong>${escape(id)}</strong><small>Selected reviewer · remove to choose another bot</small></span><span class="council-bot-state">${reviewerLoads.has(sessionId) ? 'Unavailable' : 'Missing bot'}</span></label>`).join('');
-      const markup = draft.selected ? `<p class="council-bot-heading">Task reviewers · 2–8 distinct bots</p>${reviewerLoads.has(sessionId) ? `<p role="status">${escape(reviewerLoads.get(sessionId)!)}</p>` : ''}${bots.length ? bots.map(bot => {
+      const markup = draft.selected ? `<p class="council-bot-heading">Task reviewers · ${minBots}–8 distinct bots</p><label class="council-mixed">Additional automatic Architect reviewers<select data-council-automatic aria-label="Additional automatic Architect reviewers">${extraOptions}</select></label><p class="council-bot-hint">Root Council: ${totalSeats} of 2–8 combined seats; every source is required.</p>${reviewerLoads.has(sessionId) ? `<p role="status">${escape(reviewerLoads.get(sessionId)!)}</p>` : ''}${bots.length ? bots.map(bot => {
         const unavailable = bot.paused || bot.available === false || bot.id === executor || host.harnessAvailable?.(bot.provider) === false;
         // An unavailable reviewer cannot be added, but an existing selection must remain removable.
         const checked = draft.ids.includes(bot.id), disabled = unavailable && !checked;
         const reason = bot.id === executor ? 'Executor' : bot.paused ? 'Paused' : bot.available === false ? (bot.reason || 'Unavailable') : host.harnessAvailable?.(bot.provider) === false ? 'Harness unavailable' : 'Available';
-        return `<label class="council-bot-choice${unavailable ? ' is-unavailable' : ''}"><input type="checkbox" data-reviewer-bot="${escape(bot.id)}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}><span class="council-bot-info"><strong>${escape(bot.name)}</strong><small>${escape(bot.role || 'Reviewer')} · ${escape(bot.provider)} / ${escape(bot.model)}</small></span><span class="council-bot-state">${escape(reason)}</span></label>`;
-      }).join('') : !reviewerLoads.has(sessionId) ? '<p role="status">No configured bots available.</p>' : ''}${missing}<p class="council-bot-hint">${draft.ids.length} of 2–8 reviewers selected${draft.ids.length < 2 ? ' · select at least two to apply' : ''}</p>${draft.ids.length >= 2 && new Set(draft.ids.map(id => bots.find(bot => bot.id === id)).filter((bot): bot is ReviewerBot => Boolean(bot)).map(bot => `${bot.provider}:${bot.model}`)).size < draft.ids.filter(id => bots.some(bot => bot.id === id)).length ? '<p class="council-bot-hint">These bots share a provider/model; model diversity is reduced.</p>' : ''}<div class="council-review-permissions" role="group" aria-label="Optional reviewer skills"><small>Optional skills (unavailable items are reported; required skills always block)</small>${assignedSkills.length ? assignedSkills.map(id => `<label><input type="checkbox" data-council-optional-skill="${escape(id)}" ${draft.optionalSkills?.includes(id) ? 'checked' : ''}><span>${escape(id)}</span></label>`).join('') : '<small>No assigned skills in selected bots.</small>'}</div><div class="council-review-permissions" role="group" aria-label="Required native skill checks"><small>Require a native pinned-input integrity check before Council can pass. This is not a project test.</small>${assignedSkills.length ? assignedSkills.map(id => `<label><input type="checkbox" data-council-required-check="${escape(id)}" ${draft.checkSkills?.includes(id) ? 'checked' : ''}><span>${escape(id)}</span></label>`).join('') : '<small>No assigned skills.</small>'}</div><div class="council-review-permissions"><label><input type="checkbox" data-council-scoped ${draft.scoped ? 'checked' : ''}> Allow one exact native host action (file inspector)</label>${draft.scoped ? `<label>Relative file path<input type="text" data-council-path maxlength="240" autocomplete="off" placeholder="src/example.ts" value="${escape(draft.fileScope ?? '')}" aria-label="Allowed reviewer file path"></label>` : ''}<small>Read-only by default; this per-task action never grants shell or checkout writes.</small></div>` : '';
+        const child = draft.nested[bot.id];
+        const role = checked ? `<div class="council-child-settings"><label>Review role for ${escape(bot.name)}<select data-council-bot-role data-council-bot-id="${escape(bot.id)}" aria-label="Review role for ${escape(bot.name)}"><option value="direct">Direct reviewer</option><option value="nested"${child ? ' selected' : ''}>Own Council (task-isolated)</option></select></label>${child ? `<label>Child reviewers for ${escape(bot.name)}<input data-council-child-reviewers data-council-bot-id="${escape(bot.id)}" aria-label="Child reviewers for ${escape(bot.name)}" type="number" min="2" max="8" step="1" value="${child.childReviewers}"></label><label>Child target for ${escape(bot.name)}<input data-council-child-target data-council-bot-id="${escape(bot.id)}" aria-label="Child target for ${escape(bot.name)}" type="number" min="1" max="10" step="0.5" value="${child.childTarget}"></label><label>Child max rounds for ${escape(bot.name)}<input data-council-child-rounds data-council-bot-id="${escape(bot.id)}" aria-label="Child max rounds for ${escape(bot.name)}" type="number" min="1" max="100" step="1" value="${child.childMaxRounds}"></label><small>Child Council dispatch remains blocked until native leaf reviewers are implemented.</small>` : ''}</div>` : '';
+        return `<label class="council-bot-choice${unavailable ? ' is-unavailable' : ''}"><input type="checkbox" data-reviewer-bot="${escape(bot.id)}" ${checked ? 'checked' : ''} ${disabled ? 'disabled' : ''}><span class="council-bot-info"><strong>${escape(bot.name)}</strong><small>${escape(bot.role || 'Reviewer')} · ${escape(bot.provider)} / ${escape(bot.model)}</small></span><span class="council-bot-state">${escape(reason)}</span></label>${role}`;
+      }).join('') : !reviewerLoads.has(sessionId) ? '<p role="status">No configured bots available.</p>' : ''}${missing}<p class="council-bot-hint">${draft.ids.length} of ${minBots}–8 reviewers selected${draft.ids.length < minBots ? ` · select at least ${minBots} to apply` : ''}</p>${draft.ids.length >= 2 && new Set(draft.ids.map(id => bots.find(bot => bot.id === id)).filter((bot): bot is ReviewerBot => Boolean(bot)).map(bot => `${bot.provider}:${bot.model}`)).size < draft.ids.filter(id => bots.some(bot => bot.id === id)).length ? '<p class="council-bot-hint">These bots share a provider/model; model diversity is reduced.</p>' : ''}<div class="council-review-permissions" role="group" aria-label="Optional reviewer skills"><small>Optional skills (unavailable items are reported; required skills always block)</small>${assignedSkills.length ? assignedSkills.map(id => `<label><input type="checkbox" data-council-optional-skill="${escape(id)}" ${draft.optionalSkills?.includes(id) ? 'checked' : ''}><span>${escape(id)}</span></label>`).join('') : '<small>No assigned skills in selected bots.</small>'}</div><div class="council-review-permissions" role="group" aria-label="Required native skill checks"><small>Require a native pinned-input integrity check before Council can pass. This is not a project test.</small>${assignedSkills.length ? assignedSkills.map(id => `<label><input type="checkbox" data-council-required-check="${escape(id)}" ${draft.checkSkills?.includes(id) ? 'checked' : ''}><span>${escape(id)}</span></label>`).join('') : '<small>No assigned skills.</small>'}</div><div class="council-review-permissions"><label><input type="checkbox" data-council-scoped ${draft.scoped ? 'checked' : ''}> Allow one exact native host action (file inspector)</label>${draft.scoped ? `<label>Relative file path<input type="text" data-council-path maxlength="240" autocomplete="off" placeholder="src/example.ts" value="${escape(draft.fileScope ?? '')}" aria-label="Allowed reviewer file path"></label>` : ''}<small>Read-only by default; this per-task action never grants shell or checkout writes.</small></div>` : '';
       const focusedBot = (document.activeElement as HTMLElement | null)?.closest<HTMLInputElement>('[data-reviewer-bot]')?.dataset.reviewerBot;
+      const activeField = document.activeElement as HTMLElement | null;
+      const focusedChild = activeField?.dataset.councilBotId;
+      const focusedChildKind = ['data-council-bot-role', 'data-council-child-reviewers', 'data-council-child-target', 'data-council-child-rounds'].find(attribute => activeField?.hasAttribute(attribute));
       if (list.innerHTML !== markup) {
         // A checked input's property is not always reconciled by a DOM attribute morph.
         // Recreate only the bot rows; preserve keyboard focus and scroll position.
@@ -230,6 +278,9 @@ export function createCouncil(host: CouncilHost) {
       if (focusedBot && !list.contains(document.activeElement)) {
         const next = list.querySelector<HTMLInputElement>(`[data-reviewer-bot="${CSS.escape(focusedBot)}"]:not(:disabled)`) ?? list.querySelector<HTMLInputElement>('input:not(:disabled)');
         next?.focus({ preventScroll: true });
+      }
+      if (focusedChild && focusedChildKind && !list.contains(document.activeElement)) {
+        list.querySelector<HTMLElement>(`[${focusedChildKind}][data-council-bot-id="${CSS.escape(focusedChild)}"]`)?.focus({ preventScroll: true });
       }
       list.hidden = !draft.selected;
     }
@@ -284,6 +335,8 @@ export function createCouncil(host: CouncilHost) {
     const lowestNote = shown && typeof lowest === 'number' ? ` · lowest ${open ? 'so far' : 'now'} ${formatScore(lowest)}` : '';
     const lowestLine = panel.querySelector<HTMLElement>('.council-lowest')!;
     if (lowestLine.textContent !== lowestNote) lowestLine.textContent = lowestNote;
+    const strategySelect = panel.querySelector<HTMLSelectElement>('[data-council-strategy]');
+    if (strategySelect) strategySelect.value = strategyDraft.get(sessionId) ?? values.strategy ?? 'parallel';
     panel.querySelector<HTMLInputElement>('.council-new-threads')!.checked = councilForNewThreads();
     // The switch is busy while an automatic team starts for it.
     const sw = panel.querySelector<HTMLInputElement>('.council-switch')!, starting = pending.has(sessionId) && !host.team(sessionId);
@@ -376,6 +429,7 @@ export function createCouncil(host: CouncilHost) {
         // Keep the UI synchronized with the native snapshot after success or refusal.
         // A rejected optimistic selected roster must not remain as though it were persisted.
         reviewerDraft.delete(sessionId);
+        strategyDraft.delete(sessionId);
         if (reason) {
           failures.set(sessionId, reason);
           // Closed since: say it now, and show it when the panel opens again for this thread.
@@ -412,8 +466,27 @@ export function createCouncil(host: CouncilHost) {
     if (anchor.closest('.council-strip')) panel.dataset.compact = focusField ?? 'target';
     panel.setAttribute('role', 'dialog');
     panel.setAttribute('aria-labelledby', 'council-title');
-    panel.innerHTML = `<div class="council-panel-head"><label id="council-title" for="council-switch">Council</label><input id="council-switch" class="ds-toggle council-switch" type="checkbox" role="switch" tabindex="0" aria-describedby="council-about"></div><p id="council-about">${ABOUT}</p><p class="council-idle" role="status" hidden>No changes to review yet</p>${FIELDS.map(({ key, label, options, name }) => `<div class="council-field" data-field-row="${key}"><span id="council-${key}">${label}${key === 'target' ? '<small class="council-lowest"></small>' : ''}</span><div class="ds-seg" role="group" aria-labelledby="council-${key}" data-field="${key}">${options.map(value => `<button type="button" data-value="${value}" aria-pressed="false"${key === 'reviewers' && !value ? ` aria-label="${AUTO}" data-tip="${AUTO}"` : ''}>${name(value)}</button>`).join('')}${key === 'reviewers' ? '<button type="button" data-reviewers-source="selected" aria-label="Selected bots" data-tip="Review with existing configured bots" aria-pressed="false">Bots</button>' : ''}</div></div>`).join('')}<div class="council-bots" role="group" aria-label="Selected reviewer bots" hidden></div><p class="council-error" role="alert" hidden></p><div class="council-foot"><label class="council-new"><input type="checkbox" class="council-new-threads" tabindex="0"><span>Start new threads with Council on</span></label></div>`;
+    panel.innerHTML = `<div class="council-panel-head"><label id="council-title" for="council-switch">Council</label><input id="council-switch" class="ds-toggle council-switch" type="checkbox" role="switch" tabindex="0" aria-describedby="council-about"></div><p id="council-about">${ABOUT}</p><p class="council-idle" role="status" hidden>No changes to review yet</p>${FIELDS.map(({ key, label, options, name }) => `<div class="council-field" data-field-row="${key}"><span id="council-${key}">${label}${key === 'target' ? '<small class="council-lowest"></small>' : ''}</span><div class="ds-seg" role="group" aria-labelledby="council-${key}" data-field="${key}">${options.map(value => `<button type="button" data-value="${value}" aria-pressed="false"${key === 'reviewers' && !value ? ` aria-label="${AUTO}" data-tip="${AUTO}"` : ''}>${name(value)}</button>`).join('')}${key === 'reviewers' ? '<button type="button" data-reviewers-source="selected" aria-label="Selected bots" data-tip="Review with existing configured bots" aria-pressed="false">Bots</button>' : ''}</div></div>`).join('')}${!panel.dataset.compact ? '<div class="council-strategy-field"><label>Review strategy<select data-council-strategy aria-label="Review strategy"><option value="parallel">Parallel (original)</option><option value="escalated">Escalated — require two fresh rounds</option><option value="two_phase">Two-phase — independent challenge round</option></select></label><small>Two-phase uses fresh native read-only reviewers; nested Councils still require child execution support.</small></div>' : ''}<div class="council-bots" role="group" aria-label="Selected reviewer bots" hidden></div><p class="council-error" role="alert" hidden></p><div class="council-foot"><label class="council-new"><input type="checkbox" class="council-new-threads" tabindex="0"><span>Start new threads with Council on</span></label></div>`;
     document.body.append(panel);
+    if (!panel.dataset.compact) {
+      const editor = createCouncilCriteriaEditor(
+        shownConfig(sessionId) ?? councilDefaults(),
+        () => shownConfig(sessionId),
+        config => { void apply(sessionId, config, !anchor.closest('.council-strip')); },
+        reason => selectedError(sessionId, reason),
+      );
+      panel.querySelector<HTMLElement>('.council-foot')!.before(editor);
+      if (shownConfig(sessionId)) {
+        const inspection = createCouncilInspector(() => host.call('architect_council_inspect', { sessionId }));
+        panel!.querySelector<HTMLElement>('.council-foot')!.before(inspection);
+        inspection.addEventListener('toggle', () => requestAnimationFrame(() => placeNow?.()));
+      }
+      // Opening or changing the disclosure alters the popover's natural height.
+      // Reposition after the staged editor has updated its visibility.
+      const positionEditor = () => requestAnimationFrame(() => placeNow?.());
+      editor.addEventListener('click', positionEditor);
+      editor.addEventListener('change', positionEditor);
+    }
     // Compact (from the strip): only the row it opened on, titled by what it does (a heading, no longer the switch's label).
     if (panel.dataset.compact) {
       for (const row of panel.querySelectorAll<HTMLElement>('[data-field-row]')) row.hidden = row.dataset.fieldRow !== panel.dataset.compact;
@@ -457,6 +530,67 @@ export function createCouncil(host: CouncilHost) {
     const onChange = (event: Event) => {
       const input = event.target as HTMLInputElement;
       if (input.classList.contains('council-new-threads')) { setCouncilForNewThreads(input.checked); return; }
+      if (input.hasAttribute('data-council-strategy')) {
+        const strategy = input.value === 'escalated' ? 'escalated' : input.value === 'two_phase' ? 'two_phase' : 'parallel';
+        const current = shownConfig(sessionId);
+        if (strategy !== 'parallel' && (current ?? councilDefaults()).maxRounds < 2) {
+          selectedError(sessionId, 'Escalated and two-phase Council require at least two review rounds.');
+          return;
+        }
+        failures.delete(sessionId);
+        if (current) void apply(sessionId, { ...current, strategy, forceEscalation: strategy === 'escalated' }, remember);
+        else {
+          strategyDraft.set(sessionId, strategy);
+          paint(sessionId);
+        }
+        return;
+      }
+      if (input.hasAttribute('data-council-bot-role') || input.hasAttribute('data-council-child-reviewers')
+        || input.hasAttribute('data-council-child-target') || input.hasAttribute('data-council-child-rounds')) {
+        const draft = selection(sessionId), id = input.dataset.councilBotId!;
+        if (!draft.ids.includes(id)) { selectedError(sessionId, 'Select this bot before assigning its Council role.'); return; }
+        const nested = { ...draft.nested };
+        if (input.hasAttribute('data-council-bot-role')) {
+          if (input.value === 'nested') nested[id] = nested[id] ?? {
+            childReviewers: 2, childTarget: (shownConfig(sessionId) ?? councilDefaults()).target,
+            childMaxRounds: (shownConfig(sessionId) ?? councilDefaults()).maxRounds,
+          };
+          else delete nested[id];
+        } else {
+          const current = nested[id];
+          if (!current) { selectedError(sessionId, 'This bot is not configured as a child Council.'); return; }
+          const value = Number(input.value);
+          const field = input.hasAttribute('data-council-child-reviewers') ? 'childReviewers'
+            : input.hasAttribute('data-council-child-target') ? 'childTarget' : 'childMaxRounds';
+          const bounded = Number.isFinite(value) && value >= (field === 'childReviewers' ? 2 : 1)
+            && value <= (field === 'childReviewers' ? 8 : field === 'childTarget' ? 10 : 100)
+            && (field === 'childTarget' || Number.isInteger(value));
+          if (!bounded || !input.value) { selectedError(sessionId, 'Child Council counts and targets must be within their native limits.'); return; }
+          nested[id] = { ...current, [field]: value };
+        }
+        reviewerDraft.set(sessionId, { ...draft, nested });
+        failures.delete(sessionId);
+        if (shownConfig(sessionId) && draft.ids.length + (draft.automaticReviewers ?? 0) >= 2) {
+          try { void apply(sessionId, selectionConfig(sessionId), remember); }
+          catch (cause) { selectedError(sessionId, String(cause)); }
+        } else paint(sessionId);
+        return;
+      }
+      if (input.hasAttribute('data-council-automatic')) {
+        const draft = selection(sessionId), automaticReviewers = Number(input.value);
+        if (!Number.isInteger(automaticReviewers) || automaticReviewers < 0 || automaticReviewers > 7
+          || draft.ids.length + automaticReviewers > 8) {
+          selectedError(sessionId, 'Council allows at most eight combined reviewer seats.');
+          return;
+        }
+        reviewerDraft.set(sessionId, { ...draft, automaticReviewers });
+        failures.delete(sessionId);
+        if (shownConfig(sessionId) && draft.ids.length >= (automaticReviewers > 0 ? 1 : 2)) {
+          try { void apply(sessionId, selectionConfig(sessionId), remember); }
+          catch (cause) { selectedError(sessionId, String(cause)); }
+        } else paint(sessionId);
+        return;
+      }
       if (input.hasAttribute('data-council-scoped') || input.hasAttribute('data-council-path')) {
         const draft = selection(sessionId);
         reviewerDraft.set(sessionId, {
@@ -494,10 +628,10 @@ export function createCouncil(host: CouncilHost) {
       }
       if (input.hasAttribute('data-reviewer-bot')) {
         const id = input.dataset.reviewerBot!, draft = selection(sessionId), ids = input.checked ? [...draft.ids, id] : draft.ids.filter(item => item !== id);
-        if (ids.length > 8) { input.checked = false; selectedError(sessionId, 'Council allows at most 8 reviewer bots.'); return; }
+        if (ids.length + (draft.automaticReviewers ?? 0) > 8) { input.checked = false; selectedError(sessionId, 'Council allows at most 8 combined reviewer seats.'); return; }
         reviewerDraft.set(sessionId, { ...draft, selected: true, ids, idsEdited: true });
         failures.delete(sessionId);
-        if (shownConfig(sessionId) && ids.length >= 2) {
+        if (shownConfig(sessionId) && ids.length >= ((draft.automaticReviewers ?? 0) > 0 ? 1 : 2)) {
           try { void apply(sessionId, selectionConfig(sessionId), remember); } catch (cause) { selectedError(sessionId, String(cause)); }
         } else paint(sessionId);
         return;
@@ -522,7 +656,7 @@ export function createCouncil(host: CouncilHost) {
         reviewerDraft.set(sessionId, { ...draft, selected: true, ids: [...draft.ids] });
         failures.delete(sessionId);
         // Configure once the user has actually chosen a valid roster; no partial request.
-        if (current && draft.ids.length >= 2) {
+        if (current && draft.ids.length >= ((draft.automaticReviewers ?? 0) > 0 ? 1 : 2)) {
           try { void apply(sessionId, selectionConfig(sessionId), remember); }
           catch (cause) { selectedError(sessionId, String(cause)); }
         } else paint(sessionId);
@@ -531,10 +665,10 @@ export function createCouncil(host: CouncilHost) {
       const value = Number(option.dataset.value);
       if (key === 'reviewers') {
         const draft = selection(sessionId);
-        reviewerDraft.set(sessionId, { ...draft, selected: false, ids: [...draft.ids] });
+        reviewerDraft.set(sessionId, { ...draft, selected: false, ids: [...draft.ids], automaticReviewers: 0 });
       }
       // While Council is off, a reviewer-count click only sets what starts next.
-      if (current) apply(sessionId, { ...current, [key]: value, ...(key === 'reviewers' ? { reviewerBotIds: undefined, optionalSkillIds: undefined, requiredCheckSkillIds: undefined, reviewPermissions: undefined } : {}) }, remember);
+      if (current) apply(sessionId, { ...current, [key]: value, ...(key === 'reviewers' ? { reviewerBotIds: undefined, nestedBotReviewers: undefined, automaticReviewers: undefined, optionalSkillIds: undefined, requiredCheckSkillIds: undefined, reviewPermissions: undefined } : {}) }, remember);
       else { saveCouncilDefaults({ ...councilDefaults(), [key]: value }); paint(sessionId); }
     };
     const onKey = (event: KeyboardEvent) => {
@@ -552,7 +686,7 @@ export function createCouncil(host: CouncilHost) {
       // Tab and Shift+Tab always move inside the panel, in document order (the switch, each row's stop, the footer
       // checkbox), wrapping like a dialog: WebKit would otherwise skip plain checkboxes and leave the panel.
       if (event.key !== 'Tab' || !panel?.contains(document.activeElement)) return;
-      const controls = [...panel.querySelectorAll<HTMLElement>('input:not(:disabled), button:not(:disabled)')].filter(control => control.tabIndex !== -1 && control.offsetParent !== null);
+      const controls = [...panel.querySelectorAll<HTMLElement>('input:not(:disabled), select:not(:disabled), button:not(:disabled), details > summary')].filter(control => control.tabIndex !== -1 && control.offsetParent !== null);
       if (!controls.length) return;
       event.preventDefault();
       const at = controls.indexOf(document.activeElement as HTMLElement), dir = event.shiftKey ? -1 : 1;

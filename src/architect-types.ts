@@ -10,15 +10,115 @@ export interface WorkerProfile {
 /** What a council must reach: every reviewer at `target`, within `maxRounds` completed rounds (1-100), with `reviewers` seats (0 = the lead decides). */
 export interface CouncilReviewGrant { tool: string; action: string; resourceArgument: string; resource: string; actionArgument?: string | null }
 export interface CouncilPermissionSelection { authorizationId: string; grants: CouncilReviewGrant[] }
-export interface CouncilConfig { target: number; maxRounds: number; reviewers: number; /** Task-scoped persistent reviewer identities; absent means automatic native workers. */ reviewerBotIds?: string[]; optionalSkillIds?: string[]; requiredCheckSkillIds?: string[]; reviewPermissions?: CouncilPermissionSelection | null; postAcceptanceIssue?: { authorizationId: string; repository: string } | null }
+export type CouncilCriteriaSource = 'architect' | 'user' | 'hybrid';
+export type CouncilExecutionStrategy = 'parallel' | 'escalated' | 'two_phase';
+/** Frozen child plan only; native admission rejects it until task-owned child sessions exist. */
+export interface CouncilNestedReviewer {
+  botId: string; childReviewers: number; childTarget: number; childMaxRounds: number;
+}
+export interface CouncilCriterion { id: string; lens: string; required: boolean; target: number; evidenceRequired?: boolean }
+export interface CouncilConfig {
+  target: number;
+  maxRounds: number;
+  reviewers: number;
+  /** Task-scoped persistent reviewer identities; absent means automatic native workers. */
+  reviewerBotIds?: string[];
+  /** Independent coordinating bots (one child native Council per root seat). Not executable yet. */
+  nestedBotReviewers?: CouncilNestedReviewer[];
+  /** Extra automatic root seats, opt-in only when direct bot seats are selected. */
+  automaticReviewers?: number;
+  /** Native task strategy; default parallel keeps M1/M2 behavior unchanged. */
+  strategy?: CouncilExecutionStrategy;
+  /** An explicit S2 escalation trigger requires a second fresh native review round. */
+  forceEscalation?: boolean;
+  /** Missing source/criteria preserves the original Council semantics. */
+  criteriaSource?: CouncilCriteriaSource;
+  criteria?: CouncilCriterion[];
+  optionalSkillIds?: string[];
+  requiredCheckSkillIds?: string[];
+  reviewPermissions?: CouncilPermissionSelection | null;
+  postAcceptanceIssue?: { authorizationId: string; repository: string } | null;
+}
 /** A worker's seat on the council: the round it reviews, what it looks at, and its score once given. */
 export interface CouncilSeat { round: number; lens: string; score?: number | null; /** First launch; a round begins with its earliest seat. */ startedAt?: number }
 /** `dispatch`: the latest round is open but no seat is live, so it waits on the lead; `asking`: the team rests for the user. */
-export type CouncilState = 'waiting' | 'reviewing' | 'dispatch' | 'fixing' | 'passed' | 'limit' | 'asking' | 'accepted';
+export type CouncilState = 'waiting' | 'reviewing' | 'dispatch' | 'fixing' | 'passed' | 'limit' | 'asking' | 'accepted' | 'blocked';
 /** Native's own reading of the council, which also sees edits the webview cannot (the lead's own). `stale`: the latest round passed, then the work changed. */
 /** `accepted`: the user accepted this cycle's result (Council stays on). `notice`: a plain sentence for the user whenever `team.error`
  *  holds a Council refusal written for the lead (asking or paused), which is then never shown; null otherwise. */
 export interface CouncilStatus { state: CouncilState; round: number; lowest: number | null; target: number; stale: boolean; notice?: string | null }
+
+/** Informational terminal projection: not a transferable authorization or artifact digest receipt. */
+export interface CouncilVerifiedCompletion {
+  sessionId: string; cycleId: string; teamRevision: number; round: number; lowest: number;
+}
+/** Read-only native Council projection, never an approval token. */
+export interface CouncilInspectionAttempt {
+  workerId: string; round: number; lens: string;
+  reviewerSource: 'automatic' | 'direct_bot';
+  name: string; status: string; score: number | null; abandoned: boolean;
+  provider: string; model: string; attempt: number;
+  createdAt: number; startedAt: number; lastUpdatedAt: number;
+  /** Native event timestamps in ms. Never infer provider-billed duration from these values. */
+  queueWaitMs?: number | null; observedSpanMs?: number | null;
+  tokenCount: number | null; costAmount: number | null;
+  costCurrency: string | null; usageProvenance: 'unknown';
+}
+/** Native-attributed reviewer report claim, not independently verified evidence or a pass. */
+export interface CouncilReportedFinding {
+  schemaVersion: number; id: string; cycleId: string; round: number;
+  workerId: string; reportMessageId: number; lens: string;
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
+  category: string; title: string; explanation: string;
+  artifactRevision: string | null;
+  verifiedEvidenceRefs: string[]; evidenceVerified: boolean; locationVerified: boolean;
+}
+/** Observed native queue and settled spans, cumulative across unique attempt IDs (not wall-clock or billing). */
+export interface CouncilUsageTotals {
+  uniqueAttempts: number; queueMeasuredAttempts: number; spanMeasuredAttempts: number;
+  cumulativeQueueWaitMs: number | null; cumulativeObservedSpanMs: number | null;
+  tokenCount: number | null; costAmount: number | null; costCurrency: string | null;
+  usageProvenance: 'unknown';
+}
+/** Root-only native usage; groups have disjoint attempt IDs and exclude child reservations. */
+export interface CouncilUsageGroup {
+  round: number; reviewerSource: 'automatic' | 'direct_bot'; usage: CouncilUsageTotals;
+}
+/** Native evidence derived from fresh independently admitted child leaves, not a root approval. */
+export interface CouncilVerifiedChildReceipt {
+  rootCycleId: string; childSessionId: string; botId: string;
+  objectiveSha256: string; policySha256: string; childConfigSha256: string;
+  lowestScore: number; leafWorkerIds: string[];
+}
+/** Read-only task-owned native reservation, never authorization to approve the root. */
+export interface CouncilChildReservation {
+  botId: string; childSessionId: string; rootCycleId: string;
+  requiredLeafReviewers: number; status: string;
+  /** Native child-leaf lifecycle measurements; no reservation or fabricated billing. */
+  observedLeafUsage?: CouncilUsageTotals | null;
+  /** Actual native child leaves, scoped to this task; never additional root votes. */
+  leafAttempts?: CouncilInspectionAttempt[];
+  /** Absent for unadmitted, incomplete, failed, or legacy child reviews. */
+  verifiedChildReceipt?: CouncilVerifiedChildReceipt | null;
+}
+export interface CouncilInspection {
+  mode: 'm1' | 'm2' | 'm3' | 'm4' | 'm5' | 'm6' | 'm7';
+  /** Configured native policy, not proof that escalation or challenge work ran. */
+  strategy?: CouncilExecutionStrategy; forceEscalation?: boolean; criteriaSource?: CouncilCriteriaSource;
+  cycleStartedAt: number; teamRevision: number; status: CouncilStatus;
+  verifiedPass: boolean; verifiedCompletion?: CouncilVerifiedCompletion | null;
+  criteria: CouncilCriterion[];
+  attempts: CouncilInspectionAttempt[];
+  /** Optional for older native builds / existing preview fixtures. */
+  usage?: CouncilUsageTotals;
+  /** Root and child native attempts, excluding reservations and composite seats; provider billing remains unknown. */
+  composedUsage?: CouncilUsageTotals | null;
+  /** Absent in older builds; all groups together count each root worker ID at most once. */
+  usageByRoundSource?: CouncilUsageGroup[];
+  reportedFindings?: CouncilReportedFinding[];
+  /** Absent on legacy builds; pending children cannot be presented as a passing quorum. */
+  reservedChildren?: CouncilChildReservation[];
+}
 export interface TeamConfig {
   /** The task's own model leads and picks each worker's model (from `workers`, a roster of
    * installed models, or as the prompt asks). Configured teams name fixed worker profiles. */

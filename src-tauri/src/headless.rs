@@ -57,6 +57,7 @@ enum Command {
     AcceptTicket { ticket_id: String, expected_revision: i64 },
     RejectTicket { ticket_id: String, expected_revision: i64, reason: String },
     StopTicket { ticket_id: String },
+    QuarantineTerminalOrphan { ticket_id: String, expected_revision: i64 },
     DisableOrchestration { orchestration_id: String, expected_revision: i64 },
     RenameOrchestration { orchestration_id: String, expected_revision: i64, name: String },
     IssueComment {
@@ -385,7 +386,8 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
             }
             let native_action = matches!(&command,
                 Command::AcceptTicket { .. } | Command::RejectTicket { .. }
-                | Command::StopTicket { .. } | Command::DisableOrchestration { .. }
+                | Command::StopTicket { .. } | Command::QuarantineTerminalOrphan { .. }
+                | Command::DisableOrchestration { .. }
                 | Command::RenameOrchestration { .. } | Command::IssueComment { .. });
             if native_action {
                 let result = app.path().app_data_dir()
@@ -399,6 +401,10 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                                 crate::superagent::headless_reject_ticket(&database, ticket_id, *expected_revision, reason),
                             Command::StopTicket { ticket_id } =>
                                 crate::superagent::headless_stop_ticket(&database, ticket_id),
+                            Command::QuarantineTerminalOrphan { ticket_id, expected_revision } =>
+                                crate::superagent::headless_quarantine_terminal_orphan(
+                                    &database, ticket_id, *expected_revision,
+                                ),
                             Command::DisableOrchestration { orchestration_id, expected_revision } =>
                                 crate::superagent::headless_disable_orchestration(
                                     &database, orchestration_id, *expected_revision,
@@ -457,7 +463,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::ObserveSource { .. } | Command::ObserveCheckRun { .. }
         | Command::QueueDemand { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
-        | Command::StopTicket { .. } | Command::DisableOrchestration { .. }
+        | Command::StopTicket { .. } | Command::QuarantineTerminalOrphan { .. }
+        | Command::DisableOrchestration { .. }
         | Command::RenameOrchestration { .. } | Command::IssueComment { .. } => {
             eprintln!("SuperAgent inspection must use the read-only startup path.");
             std::process::exit(2)
@@ -1156,6 +1163,19 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 3;
             }
+            "--quarantine-terminal-orphan" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or("--quarantine-terminal-orphan needs Ticket ID and revision.")?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--quarantine-terminal-orphan needs a Ticket revision.")?;
+                command = Command::QuarantineTerminalOrphan {
+                    ticket_id: ticket_id.clone(),
+                    expected_revision: parse_ticket_revision(revision)?,
+                };
+                ops += 1;
+                index += 2;
+            }
             "--stop-ticket" => {
                 let ticket_id = args.get(index + 1)
                     .ok_or_else(|| format!("--stop-ticket needs a ticket ID.\n\n{}", help()))?;
@@ -1306,7 +1326,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1378,6 +1398,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --reject-ticket <id> <revision> <reason>
                          Reject current worker evidence with a required reason; quote it if it has spaces.
   --stop-ticket <id>    Revoke a Ticket mandate and stop the Ticket; exit.
+  --quarantine-terminal-orphan <id> <revision>
+                         Quarantine a running assignment on a terminal Ticket;
+                         revoke its mandate, preserve uncertain effects and never replay.
   --disable-orchestration <id> <revision>
                          Turn a Team Off and atomically revoke its mandates;
                          live provider calls may finish but native authority stays revoked.
@@ -1404,6 +1427,24 @@ mod tests {
     /// The command half of a parse, for tests that don't care about the import path.
     fn parsed(flags: &str) -> Result<Command, String> {
         parse(&argv(flags)).map(|(command, _)| command)
+    }
+
+    #[test]
+    fn terminal_orphan_quarantine_requires_exact_revision_and_exclusive_cli_action() {
+        assert_eq!(parsed("--quarantine-terminal-orphan ticket_123 7"),
+            Ok(Command::QuarantineTerminalOrphan {
+                ticket_id: "ticket_123".into(), expected_revision: 7,
+            }));
+        for invalid in [
+            "--quarantine-terminal-orphan",
+            "--quarantine-terminal-orphan ticket_123",
+            "--quarantine-terminal-orphan ticket_123 0",
+            "--quarantine-terminal-orphan ticket_123 nope",
+            "--quarantine-terminal-orphan ../unsafe 7",
+            "--quarantine-terminal-orphan ticket_123 7 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
     }
 
     #[test]

@@ -485,6 +485,15 @@ snapshots rather than one long transaction; concurrently changing Tickets
 may move between pages. Avoid sensitive CLI search phrases in shell history
 and process arguments.
 
+### Terminal orphan assignment quarantine
+
+Use `pandacode serve --quarantine-terminal-orphan <ticket-id> <revision>` only
+when a terminal Ticket retains a running native assignment. The operation
+holds the native dispatch fence and atomically revokes its Mandate, interrupts
+the orphan, marks pending remote effects uncertain and records an audit entry.
+It does not stop an external provider or replay an effect. Stale revisions and
+repeated quarantine requests are denied. Verify provider state separately.
+
 ### Read-only Team Demand status inspection
 
 Use `pandacode serve --list-team-demands <team-id> <state>` to inspect up to

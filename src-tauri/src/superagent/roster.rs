@@ -195,13 +195,29 @@ pub(crate) fn read(store:&Store,id:&str)->Result<TeamRoster> {
     let rows=stmt.query_map([id],|row|Ok((
         row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,String>(2)?,
     ))).map_err(|e|e.to_string())?;
+    // Invalid imported/legacy metadata must never silently reorder, omit or
+    // over-allocate trusted member roles during native preflight.
+    let mut next_worker_position=1_i64;
+    let mut next_reviewer_position=0_i64;
     for row in rows {
         let (role,position,bot_id)=row.map_err(|e|e.to_string())?;
         match role.as_str() {
-            "worker" if position>0=>workers.push(bot_id),
-            "reviewer"=>reviewers.push(bot_id),
+            "worker" if position==next_worker_position && workers.len()<MAX_WORKERS=>{
+                workers.push(bot_id);
+                next_worker_position+=1;
+            }
+            "reviewer" if position==next_reviewer_position && reviewers.len()<MAX_REVIEWERS=>{
+                reviewers.push(bot_id);
+                next_reviewer_position+=1;
+            }
             _=>return Err("Malformed Team role metadata; no authority granted.".into()),
         }
+    }
+    if workers.iter().chain(reviewers.iter())
+           .any(|id|id==&config.coordinator_bot_id)
+        || workers.iter().skip(1).chain(reviewers.iter())
+           .any(|id|id==&config.worker_bot_id) {
+        return Err("Malformed Team role identity; no authority granted.".into());
     }
     let ready=workers.len()==1 && reviewers.is_empty();
     Ok(TeamRoster {
@@ -238,6 +254,7 @@ pub struct EffectiveMember {
     pub provider:String,
     pub model:String,
     pub mode:String,
+    pub reasoning_effort:String,
     pub project_id:String,
     pub paused:bool,
     pub skills:Vec<EffectiveSkill>,
@@ -302,6 +319,7 @@ fn effective_team(
         members.push(EffectiveMember {
             role:role.into(),position,bot_id:bot.id,name:bot.name,
             provider:bot.provider,model:bot.model,mode:bot.mode,
+            reasoning_effort:bot.reasoning_effort,
             project_id:bot.project_id,paused:bot.paused,skills,configuration_issues,
         });
         Ok(())
@@ -469,7 +487,7 @@ mod tests {
             ).unwrap();
         }
         store.db.execute(
-            "UPDATE bots SET skills='[\"known\",\"missing\"]' WHERE id='worker'",[],
+            "UPDATE bots SET skills='[\"known\",\"missing\"]',reasoning_effort='high' WHERE id='worker'",[],
         ).unwrap();
         store.db.execute("UPDATE bots SET paused=1 WHERE id='reviewer'",[]).unwrap();
         let cfg=super::super::create_configuration(&store,super::super::NewOrchestration {
@@ -496,6 +514,7 @@ mod tests {
         assert_eq!(view.members.iter().map(|m|m.role.as_str()).collect::<Vec<_>>(),
             vec!["coordinator","worker","worker","reviewer"]);
         assert_eq!(view.members[1].model,"gpt-default");
+        assert_eq!(view.members[1].reasoning_effort,"high");
         assert_eq!(view.members[1].skills[0].library_status,"installed");
         assert_eq!(view.members[1].skills[0].safety_status,"review_required");
         assert_eq!(view.members[1].skills[0].harness_eligibility,"not_verified");
@@ -709,4 +728,60 @@ mod tests {
         }).unwrap();
         assert!(read(&store,&legacy.id).unwrap().execution_ready);
     }
+    #[test]
+    fn malformed_persisted_roster_positions_and_primary_aliases_fail_closed() {
+        let path=std::env::temp_dir().join(format!("sa-roster-integrity-{}.sqlite3",storage::id()));
+        let store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('p','Team','/tmp/sa-roster-integrity')",[]
+        ).unwrap();
+        for id in ["lead","primary","additional","reviewer"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'p','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let cfg=super::super::create_configuration(&store,NewOrchestration {
+            name:"Validated roles".into(),coordinator_bot_id:"lead".into(),
+            worker_bot_id:"primary".into(),
+        }).unwrap();
+        let valid=RosterInput {
+            worker_bot_ids:vec!["primary".into(),"additional".into()],
+            reviewer_bot_ids:vec!["reviewer".into()],
+        };
+        set(&store,&cfg.id,cfg.policy_revision,&valid).unwrap();
+        assert_eq!(read(&store,&cfg.id).unwrap().worker_bot_ids,valid.worker_bot_ids);
+
+        store.db.execute(
+            "UPDATE sa_team_roles SET position=4 WHERE orchestration_id=?1 AND role='worker'",
+            [&cfg.id],
+        ).unwrap();
+        assert!(read(&store,&cfg.id).unwrap_err().contains("Malformed Team role metadata"));
+        store.db.execute(
+            "UPDATE sa_team_roles SET position=1 WHERE orchestration_id=?1 AND role='worker'",
+            [&cfg.id],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_team_roles SET position=3 WHERE orchestration_id=?1 AND role='reviewer'",
+            [&cfg.id],
+        ).unwrap();
+        assert!(read(&store,&cfg.id).unwrap_err().contains("Malformed Team role metadata"));
+        store.db.execute(
+            "UPDATE sa_team_roles SET position=0,bot_id='primary'
+             WHERE orchestration_id=?1 AND role='reviewer'",
+            [&cfg.id],
+        ).unwrap();
+        assert!(read(&store,&cfg.id).unwrap_err().contains("Malformed Team role identity"));
+        store.db.execute(
+            "UPDATE sa_team_roles SET bot_id='reviewer'
+             WHERE orchestration_id=?1 AND role='reviewer'",
+            [&cfg.id],
+        ).unwrap();
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert_eq!(read(&reopened,&cfg.id).unwrap().reviewer_bot_ids,valid.reviewer_bot_ids);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|row|row.get::<_,i64>(0)).unwrap(),0);
+    }
+
 }

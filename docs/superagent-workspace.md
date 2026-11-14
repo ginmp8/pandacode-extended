@@ -7,6 +7,11 @@ each independent Demand is a durable Ticket bound to exactly one Team.
 ## Native-backed surfaces
 
 - **Teams:** saved policy revisions, coordinator/worker bot identity and native task counters.
+  The read-only effective policy inspector shows each member's configured provider,
+  model, mode and reasoning effort alongside Skill Library status; these are
+  configuration observations, not provider eligibility, grants or proof of execution.
+  Native roster reads reject non-contiguous Worker/Reviewer positions and role
+  aliases to the Coordinator or primary Worker rather than silently remapping authority.
   The directory shows native correlated member counts (one Coordinator,
   configured Workers and Reviewers) without inflating Ticket totals when a
   Team has multiple roles. Search and Off/Manual status filters operate only

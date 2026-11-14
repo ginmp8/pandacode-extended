@@ -7266,42 +7266,27 @@ mod tests {
     }
 
     #[test]
-    fn exact_checkout_path_aliases_serialize_distinct_project_ids() {
+    fn duplicate_checkout_path_is_rejected_by_storage_and_active_lease_is_preserved() {
         let mut store=fixture();
         let first=enabled(&store);
         let (ticket,launched)=admit(&mut store,&first.id,
-            "First checkout owner","checkout-alias-first",false).unwrap();
+            "First checkout owner","checkout-unique-first",false).unwrap();
         assert!(launched);
-        store.db.execute(
+
+        // projects.path is UNIQUE. Two project IDs cannot have an identical
+        // stored path, so the previous alias fixture was impossible to create.
+        // Physical/symlink aliases with different strings need separate guards.
+        assert!(store.db.execute(
             "INSERT INTO projects(id,name,path) VALUES('alias-project','Alias','/tmp/disposable-superagent')",[]
-        ).unwrap();
-        for id in ["alias-router","alias-worker"] {
-            store.db.execute(
-                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
-                 VALUES(?1,?1,'alias-project','codex','default','plan',?2,?2)",
-                params![id,storage::now()],
-            ).unwrap();
-        }
-        let other=create_configuration(&store,NewOrchestration {
-            name:"Second project ID".into(),
-            coordinator_bot_id:"alias-router".into(),worker_bot_id:"alias-worker".into(),
-        }).unwrap();
-        let other=change_enabled(&store,&other.id,other.policy_revision,true).unwrap();
-        assert!(manual_candidate_occupied(&store,"alias-worker","alias-project","alias-project").unwrap());
-        let (blocked,started)=admit(&mut store,&other.id,
-            "Second ID must not share checkout","checkout-alias-second",false).unwrap();
-        assert!(!started);
-        assert_eq!(blocked.state,"blocked");
-        let ordinary=store.create_session("alias-project","codex","default","ask").unwrap();
+        ).is_err());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM projects WHERE id='alias-project'",[],
+            |row|row.get::<_,i64>(0)).unwrap(),0);
+
+        // A regular session cannot bypass the original Ticket's checkout lease.
+        let ordinary=store.create_session("project","codex","default","ask").unwrap();
         assert!(guard_run_admission(&store,&ordinary.id,&[]).is_err());
         assert!(active_manual_conflict(&store,&[ordinary.id],"worker","project").unwrap());
-        let worker=bots::get(&store,"alias-worker").unwrap();
-        let sid=bots::thread_session(&store,&worker,CHANNEL,&blocked.id,"Alias").unwrap().0;
-        assert!(store.db.execute(
-            "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
-             VALUES('alias-lease-bypass',?1,'alias-worker',?2,'running',1,?3,?3)",
-            params![blocked.id,sid,storage::now()],
-        ).is_err());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"running");
     }
 

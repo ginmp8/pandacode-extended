@@ -1231,9 +1231,9 @@ test('Team effective policy view is native-backed and never grants or launches t
         orchestrationId:'team',policyRevision:3,enabled:false,executionReady:false,
         grantsIssued:false,members:[
           {role:'coordinator',position:0,botId:'lead',name:'Lead',provider:'codex',
-            model:'gpt-main',mode:'plan',projectId:'p',paused:false,skills:[],configurationIssues:[]},
+            model:'gpt-main',mode:'plan',reasoningEffort:'medium',projectId:'p',paused:false,skills:[],configurationIssues:[]},
           {role:'worker',position:0,botId:'worker',name:'Worker',provider:'claude',
-            model:'sonnet',mode:'plan',projectId:'p',paused:false,skills:[
+            model:'sonnet',mode:'plan',reasoningEffort:'high',projectId:'p',paused:false,skills:[
               {id:'quality',libraryStatus:'installed',safetyStatus:'clean',
                 harnessEligibility:'not_verified',invocationEvidence:'not_verified'},
               {id:'removed',libraryStatus:'missing',safetyStatus:'unknown',
@@ -1253,6 +1253,7 @@ test('Team effective policy view is native-backed and never grants or launches t
   const view=roles.getByRole('region',{name:'Native effective Team policy'});
   await expect(view).toContainText('Harness claude');
   await expect(view).toContainText('Model sonnet');
+  await expect(view).toContainText('Reasoning effort high');
   await expect(view).toContainText('Skill quality · Library installed · Safety clean');
   await expect(view).toContainText('Skill removed · Library missing');
   await expect(view.getByText('Assigned Skill removed is missing: install or unassign it in Skills Manager.')).toBeVisible();

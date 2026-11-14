@@ -867,9 +867,14 @@ export function createCouncil(host: CouncilHost) {
     const onChange = (event: Event) => {
       const input = event.target as HTMLInputElement;
       if (input.classList.contains('council-new-threads')) { setCouncilForNewThreads(input.checked); return; }
-      if ((event.target as HTMLElement).closest('.council-composition-slot') && updateCompositionField(sessionId, event.target as HTMLElement)) {
+      const compositionControl = event.target as HTMLElement;
+      if (compositionControl.closest('.council-composition-slot') && updateCompositionField(sessionId, compositionControl)) {
         const slot = panel?.querySelector<HTMLElement>('.council-composition-slot');
-        if (slot) replaceCompositionSlot(slot, sessionId);
+        // Text edits already update the draft on `input`. Replacing the slot on their later `change`
+        // removes the Apply button as the click that blurred the field is still being dispatched.
+        const rebuild = compositionControl.matches('[data-composition-enabled], [data-composition-automatic], [data-composition-bots-enabled], [data-composition-bot], [data-composition-reviewer-mode], [data-composition-criteria-source]');
+        if (slot && rebuild) replaceCompositionSlot(slot, sessionId);
+        else compositionStatus(sessionId);
         return;
       }
       if (input.hasAttribute('data-council-scoped') || input.hasAttribute('data-council-path')) {

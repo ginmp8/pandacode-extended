@@ -339,7 +339,7 @@ export function sharedChannelComposerHtml(channel: SharedChannelDetail, bots: Bo
             <section class="council-plan-preview" data-bc-plan-preview aria-label="Schema v1 plan preview" hidden>
               <h4>Schema v1 plan preview</h4>
               <p class="council-composition-help">Draft only. This is the configuration being sent; it does not show review results or verified evidence.</p>
-              <pre data-bc-plan-preview-text></pre>
+              <pre data-bc-plan-preview-text style="box-sizing:border-box;min-width:0;max-width:100%;white-space:pre-wrap;overflow-wrap:anywhere"></pre>
             </section>
           </div>
         </section>

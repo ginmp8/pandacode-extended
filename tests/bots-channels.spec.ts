@@ -121,7 +121,11 @@ test.describe('shared bot channels', () => {
     const enabled = panel.getByRole('switch', { name: 'Council' });
     await expect(enabled).toBeFocused();
     await expect(panel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' })).toBeVisible();
-    await expect(panel.getByRole('radio')).toHaveCount(0);
+    const automaticReviewers = panel.getByRole('radio', { name: 'Automatic native reviewers' });
+    const selectedChannelBots = panel.getByRole('radio', { name: 'Selected channel bots' });
+    await expect(panel.getByRole('radio')).toHaveCount(2);
+    await expect(automaticReviewers).toBeChecked();
+    await expect(selectedChannelBots).not.toBeChecked();
     await page.keyboard.press('Tab');
     await expect(panel.getByRole('button', { name: '7.0', exact: true })).toBeFocused();
     await enabled.focus();
@@ -592,6 +596,7 @@ test.describe('shared bot channels', () => {
   });
 
   test('channel Council report shows the same current-cycle hierarchy and resolved evidence as Workers', async ({ page }) => {
+    test.setTimeout(60_000);
     await page.addInitScript(() => localStorage.setItem('pandacode.teamClassic', 'false'));
     await page.goto('/?bots=sample&council=ledger');
     await expect(page.getByRole('textbox', { name: 'Message your coding agent' })).toBeVisible();
@@ -649,7 +654,9 @@ test.describe('shared bot channels', () => {
     const reportHierarchy = reportLedger.locator('.council-inspector-hierarchy');
     const reportHierarchyText = await reportHierarchy.evaluate(node => node.textContent?.replace(/\s+/g, ' ').trim() ?? '');
     expect(reportHierarchyText).toBe(directHierarchyText);
+    await reportLedger.locator('details').filter({ hasText: 'Findings and dispositions' }).locator(':scope > summary').click();
     const rootFinding = reportLedger.locator('.council-ledger-finding').filter({ hasText: 'A current root-cycle issue.' });
+    await expect(rootFinding).toBeVisible();
     await rootFinding.getByText('Evidence and accepted exceptions', { exact: true }).click();
     const evidenceButton = rootFinding.getByRole('button', { name: 'src/main.ts', exact: true }).first();
     await expect(evidenceButton).toHaveClass(/workspace-file-link/);
@@ -668,6 +675,70 @@ test.describe('shared bot channels', () => {
     const reviewerEvidence = reviewer.locator('.council-inspector-evidence');
     await reviewerEvidence.locator(':scope > summary').click();
     await expect(reviewerEvidence).toContainText('src/main.ts');
+  });
+
+  test('channel Council report shows the legacy unavailable state for a snapshot without projections', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.addInitScript(() => localStorage.setItem('pandacode.teamClassic', 'false'));
+    await page.route('**/src/preview-bots.ts*', async route => {
+      const response = await route.fetch();
+      const source = await response.text();
+      const assignedPush = /(channel\.messages\.push\(\{\s*id:\s*crypto\.randomUUID\(\),\s*kind:\s*['"]assigned['"],\s*authorBotId:\s*botId,[\s\S]*?createdAt:\s*now)\s*\}\);/;
+      const body = source.replace(assignedPush, '$1, ...(window.__sharedChannelCouncilDelivery ? { council: window.__sharedChannelCouncilDelivery } : {}) });');
+      if (body === source) throw new Error('Could not install the shared-channel Council report preview fixture.');
+      const headers = response.headers();
+      delete headers['content-length'];
+      delete headers['content-encoding'];
+      delete headers['transfer-encoding'];
+      await route.fulfill({ status: response.status(), headers, body });
+    });
+
+    await page.goto('/?bots=sample&council=fixing');
+    await expect(page.getByRole('toolbar', { name: 'Workspace actions' })).toBeVisible();
+    const botBar = page.locator('.sidebar-bots-bar');
+    if (await botBar.getAttribute('aria-pressed') !== 'true') await botBar.click();
+    await expect(sidebar(page)).toBeVisible();
+
+    const snapshot = await page.evaluate(async () => {
+      const { call } = await import('/src/bridge.ts');
+      return call<any>('architect_get', { sessionId: 'session-1' });
+    });
+    expect(snapshot.sessionId).toBe('session-1');
+    expect(snapshot.config.council).toBeTruthy();
+    expect(snapshot.config.council.composition).toBeUndefined();
+    expect(snapshot.councilSince).toEqual(expect.any(Number));
+    const projectionFields = ['councilFindings', 'councilFindingDispositions', 'councilChildReceipts', 'councilReviewReceipts', 'councilUsage'];
+    expect(projectionFields.filter(field => Object.prototype.hasOwnProperty.call(snapshot, field))).toEqual([]);
+    const delivery = {
+      cycleId: `${snapshot.sessionId}:${snapshot.councilSince}`, sessionId: snapshot.sessionId,
+      state: 'In progress', round: 1, target: snapshot.config.council.target,
+      lowest: null, artifactRevision: `revision-${snapshot.revision}`, reviewers: [],
+    };
+    await page.evaluate(value => { (window as any).__sharedChannelCouncilDelivery = value; }, delivery);
+
+    await page.getByRole('button', { name: '#launch', exact: true }).click();
+    await expect(page.locator('.conversation-pane.channel-thread .bc-channel')).toBeVisible();
+    const composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    const councilPanel = composer.getByRole('dialog', { name: 'Council' });
+    await councilPanel.getByRole('switch', { name: 'Council' }).check();
+    await page.keyboard.press('Escape');
+    await composer.getByRole('textbox', { name: 'Message channel' }).fill('Open the legacy Council report');
+    await composer.getByRole('button', { name: 'Send message' }).click();
+
+    const reportButton = page.getByRole('button', { name: 'View Council report' });
+    await expect(reportButton).toBeVisible({ timeout: 15_000 });
+    await expect(reportButton).toHaveAttribute('data-session-id', snapshot.sessionId);
+    await reportButton.click();
+    const dialog = page.getByRole('dialog', { name: 'Council report' });
+    await expect(dialog).toBeVisible({ timeout: 15_000 });
+    const report = dialog.locator('.bc-council-report');
+    await expect(report).toHaveAttribute('data-session-id', snapshot.sessionId);
+    const ledger = report.locator('.council-ledger');
+    const unavailable = ledger.locator('.council-ledger-unavailable');
+    await expect(unavailable).toBeVisible();
+    await expect(unavailable).toHaveText('This legacy Council configuration does not produce composition findings, receipts or usage.');
+    await expect(page.locator('.conversation-pane.channel-thread .bc-channel')).toBeVisible();
   });
 
   test('renders isolated reviewer skill provenance with keyboard-readable details', async ({ page }) => {

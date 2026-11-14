@@ -95,6 +95,7 @@ test('schema v1 derives all seven modes and keeps each bot branch draft when mod
 
 test('criterion IDs keep sequential keystrokes in the applied composition', async ({ page }) => {
   await open(page, '/?council=composition');
+  await settle(page);
   await button(page).click();
   const editor = panel(page).locator('.council-composition-editor');
   await editor.locator('[data-composition-criteria-source]').selectOption('user');
@@ -102,10 +103,40 @@ test('criterion IDs keep sequential keystrokes in the applied composition', asyn
   const idField = editor.locator('[data-composition-criterion="id"]').first();
   await expect(idField).toBeVisible();
   const initialId = await idField.inputValue();
-  await idField.focus();
-  await page.keyboard.press('End');
-  await idField.pressSequentially('-typed');
+  await idField.evaluate(node => {
+    const input = node as HTMLInputElement;
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+  });
+  await page.keyboard.type('-typed');
   const finalId = initialId + '-typed';
+  await expect(idField).toHaveValue(finalId);
+  await idField.evaluate(node => node.blur());
+  await expect(idField).toHaveValue(finalId);
+  const apply = editor.getByRole('button', { name: 'Apply composition' });
+  await expect(apply).toBeEnabled();
+  await apply.click();
+  await expect.poll(async () => (await calls(page)).length).toBeGreaterThan(0);
+  const applied = (await calls(page)).at(-1);
+  expect(applied.composition.criteria).toEqual(expect.arrayContaining([expect.objectContaining({ id: finalId })]));
+});
+
+test('applying a composition while a criterion field is focused preserves the click', async ({ page }) => {
+  await open(page, '/?council=composition');
+  await settle(page);
+  await button(page).click();
+  const editor = panel(page).locator('.council-composition-editor');
+  await editor.locator('[data-composition-criteria-source]').selectOption('user');
+  await editor.getByRole('button', { name: 'Add user criterion' }).click();
+  const idField = editor.locator('[data-composition-criterion="id"]').first();
+  const initialId = await idField.inputValue();
+  await idField.focus();
+  await idField.evaluate(node => {
+    const input = node as HTMLInputElement;
+    input.setSelectionRange(input.value.length, input.value.length);
+  });
+  await page.keyboard.type('-clicked');
+  const finalId = initialId + '-clicked';
   await expect(idField).toHaveValue(finalId);
   await editor.getByRole('button', { name: 'Apply composition' }).click();
   await expect.poll(async () => (await calls(page)).length).toBeGreaterThan(0);
@@ -147,6 +178,7 @@ test('an empty reviewer composition is unavailable and keyboard edits keep focus
   await expect(strategy).toHaveValue('escalated');
 
   const source = editor.locator('[data-composition-criteria-source]');
+  await source.focus();
   await source.selectOption('hybrid');
   await expect(source).toBeFocused();
   const add = editor.getByRole('button', { name: 'Add user criterion' });

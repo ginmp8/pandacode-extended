@@ -13,8 +13,8 @@ test.describe('bot collaboration', () => {
         id: 'lab-security', name: 'lab-security', memberIds: ['executor', 'reviewer'],
         archived: false, messages: [], activeBotIds: [],
       } as any, [
-        { id: 'executor', name: 'Executor' },
-        { id: 'reviewer', name: 'Reviewer' },
+        { id: 'executor', name: 'Executor', avatar: 'panda:0', color: '' },
+        { id: 'reviewer', name: 'Reviewer', avatar: 'panda:1', color: '' },
       ] as any);
       const form = document.querySelector<HTMLFormElement>('#shared-channel-composer')!;
       form.style.cssText = 'max-width:830px;margin:24px auto';
@@ -96,8 +96,8 @@ test.describe('bot collaboration', () => {
         id: 'long-names', name: 'long-names', memberIds: ['security', 'architecture'],
         archived: false, messages: [], activeBotIds: [],
       } as any, [
-        { id: 'security', name: names[0] },
-        { id: 'architecture', name: names[1] },
+        { id: 'security', name: names[0], avatar: 'panda:0', color: '' },
+        { id: 'architecture', name: names[1], avatar: 'panda:1', color: '' },
       ] as any);
       const form = document.querySelector<HTMLFormElement>('#shared-channel-composer')!;
       form.style.cssText = 'max-width:830px;margin:24px auto';
@@ -156,8 +156,8 @@ test.describe('bot collaboration', () => {
           },
         }],
       } as any, [
-        { id: 'executor', name: 'Executor' },
-        { id: 'reviewer-alpha', name: 'Review Alpha' },
+        { id: 'executor', name: 'Executor', avatar: 'panda:0', color: '' },
+        { id: 'reviewer-alpha', name: 'Review Alpha', avatar: 'panda:1', color: '' },
       ] as any);
       document.querySelector('.conversation-pane')?.append(host);
     });
@@ -167,16 +167,16 @@ test.describe('bot collaboration', () => {
     await report.scrollIntoViewIfNeeded();
     await report.click();
 
-    const workers = page.getByRole('dialog', { name: 'Workers' });
-    await expect(workers).toBeVisible();
-    const hierarchy = workers.locator('.council-slot .council-inspector-hierarchy');
+    const reportDialog = page.getByRole('dialog', { name: 'Council report' });
+    await expect(reportDialog).toBeVisible();
+    const hierarchy = reportDialog.locator('.council-inspector-hierarchy');
     await expect(hierarchy).toBeVisible();
     const rootSeat = hierarchy.locator('[data-level="bot"]').filter({ hasText: 'Security' });
     await expect(rootSeat).toHaveCount(1);
-    await rootSeat.locator('summary').click();
+    await rootSeat.locator(':scope > summary').click();
     const child = rootSeat.locator('[data-level="child-council"][data-child-cycle="nested-review-task:1"]');
     await expect(child).toBeVisible();
-    await expect(child.locator('summary')).toContainText('Child Council · passed · minimum score 9.6');
+    await expect(child.locator(':scope > summary')).toContainText('Child Council · passed · minimum score 9.6');
     await expect(child).toContainText('A finding from the correlated child Council.');
     await expect(child).toContainText('src/main.ts');
   });
@@ -294,7 +294,9 @@ test.describe('bot collaboration', () => {
     await expect(fixture.locator('input[name="councilEnabled"]')).toBeChecked();
     await expect(fixture.locator('input[name="councilTarget"]')).toHaveValue('9');
     await expect(fixture.locator('input[name="councilMaxRounds"]')).toHaveValue('10');
-    await expect(fixture.locator('input[name="councilReviewer"]')).toHaveCount(2);
+    const legacyReviewers = fixture.locator('[data-bc-legacy-reviewer]');
+    await expect(legacyReviewers).toHaveCount(2);
+    await expect(fixture.locator('[data-bc-composition-enabled]')).not.toBeChecked();
     await fixture.locator('input[name="councilMode"][value="selected"]').check();
     await expect(fixture.locator('input[name="councilScopedFile"]')).toHaveCount(1);
     await expect(fixture.locator('input[name="councilFilePath"]')).toHaveCount(1);
@@ -303,7 +305,7 @@ test.describe('bot collaboration', () => {
 
     await fixture.locator('input[name="councilTarget"]').fill('8.5');
     await fixture.locator('input[name="councilMaxRounds"]').fill('4');
-    await fixture.locator('input[name="councilReviewer"][value="reviewer"]').check();
+    await fixture.locator('[data-bc-legacy-reviewer][value="reviewer"]').check();
     await fixture.locator('input[name="councilScopedFile"]').check();
     await fixture.locator('input[name="councilFilePath"]').fill('src/entry.ts');
     await fixture.locator('input[name="councilGithubIssue"]').check();
@@ -316,7 +318,10 @@ test.describe('bot collaboration', () => {
         const holder = document.createElement('div');
         holder.innerHTML = sharedChannelComposerHtml({
           id, name: id, memberIds: ['executor', 'reviewer'], archived: false,
-        } as any, [{ id: 'executor', name: 'Executor' }, { id: 'reviewer', name: 'Reviewer' }] as any);
+        } as any, [
+          { id: 'executor', name: 'Executor', avatar: 'panda:0', color: '' },
+          { id: 'reviewer', name: 'Reviewer', avatar: 'panda:1', color: '' },
+        ] as any);
         return holder.querySelector<HTMLFormElement>('form')!;
       };
       const refreshed = render('quality');
@@ -330,7 +335,7 @@ test.describe('bot collaboration', () => {
     await expect(fixture.locator('input[name="councilMode"][value="selected"]')).toBeChecked();
     await expect(fixture.locator('input[name="councilTarget"]')).toHaveValue('8.5');
     await expect(fixture.locator('input[name="councilMaxRounds"]')).toHaveValue('4');
-    await expect(fixture.locator('input[name="councilReviewer"][value="reviewer"]')).toBeChecked();
+    await expect(fixture.locator('[data-bc-legacy-reviewer][value="reviewer"]')).toBeChecked();
     await expect(fixture.locator('input[name="councilScopedFile"]')).toBeChecked();
     await expect(fixture.locator('input[name="councilFilePath"]')).toHaveValue('src/entry.ts');
     await expect(fixture.locator('input[name="councilGithubIssue"]')).toBeChecked();
@@ -341,7 +346,10 @@ test.describe('bot collaboration', () => {
       const holder = document.createElement('div');
       holder.innerHTML = sharedChannelComposerHtml({
         id: 'other', name: 'other', memberIds: ['executor','reviewer'], archived: false,
-      } as any, [{ id: 'executor', name: 'Executor' }, { id: 'reviewer', name: 'Reviewer' }] as any);
+      } as any, [
+        { id: 'executor', name: 'Executor', avatar: 'panda:0', color: '' },
+        { id: 'reviewer', name: 'Reviewer', avatar: 'panda:1', color: '' },
+      ] as any);
       const next = holder.querySelector<HTMLFormElement>('form')!;
       restoreSharedChannelCouncilInputs(old, next);
       old.replaceWith(next);

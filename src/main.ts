@@ -7200,9 +7200,17 @@ async function action(name: string, element: HTMLElement): Promise<void> {
       const taskId = element.dataset.sessionId;
       if (!taskId) break;
       if (!state.sessions.some(task => task.id === taskId)) await reloadSessions();
-      if (!state.sessions.some(task => task.id === taskId)) { notify('This Council delivery report is unavailable.'); break; }
+      const task = state.sessions.find(item => item.id === taskId);
+      const readSnapshot = () => task?.remoteDevice
+        ? call<import('./architect-types').TeamSnapshot | null>('remote_team', { sessionId: taskId })
+        : call<import('./architect-types').TeamSnapshot | null>('architect_get', { sessionId: taskId });
+      let snapshot = await readSnapshot().catch(() => null);
+      if (!snapshot && !task) snapshot = await call<import('./architect-types').TeamSnapshot | null>('remote_team', { sessionId: taskId }).catch(() => null);
+      if (!snapshot || snapshot.sessionId !== taskId) { notify('This Council delivery report is unavailable.'); break; }
       const { openSharedChannelCouncilReport } = await import('./bot-shared-channels');
-      await openSharedChannelCouncilReport(taskId, sharedChannelUi());
+      const ui = sharedChannelUi();
+      ui.loadCouncilSnapshot = async () => snapshot;
+      await openSharedChannelCouncilReport(taskId, ui);
       break;
     }
     case 'bot-settings': if (element.dataset.bot) await showBotSettings(element.dataset.bot, element.dataset.tab as import('./bots').Section | undefined); break;

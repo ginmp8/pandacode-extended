@@ -5342,6 +5342,27 @@ fn council_finding_tool_enabled(
         .is_some_and(|composition| !composition.criteria.is_empty()))
 }
 
+/// One immutable criterion outcome may authorize multiple independently
+/// evidenced findings from the same reviewer attempt. A later finding cannot
+/// rewrite the score, reviewer, policy, artifact or original evidence set.
+fn immutable_council_criterion_outcome(
+    candidate: &council::CouncilCriterionOutcomeReceipt,
+    existing: Option<&council::CouncilCriterionOutcomeReceipt>,
+) -> Result<council::CouncilCriterionOutcomeReceipt> {
+    candidate.validate().map_err(|error| error.to_string())?;
+    let Some(existing) = existing else {
+        return Ok(candidate.clone());
+    };
+    existing.validate().map_err(|error| error.to_string())?;
+    let mut comparable = candidate.clone();
+    comparable.outcome.verified_evidence_refs =
+        existing.outcome.verified_evidence_refs.clone();
+    if &comparable != existing {
+        return Err("council_criterion_conflict: a reviewer cannot rewrite the immutable criterion score, artifact, or authority with another finding.".into());
+    }
+    Ok(existing.clone())
+}
+
 fn record_council_finding_state(
     state: &AppState,
     team_session_id: &str,
@@ -5492,24 +5513,6 @@ fn record_council_finding_state(
     finding.id = format!("finding-{}", finding.content_digest);
     finding.validate().map_err(|error| error.to_string())?;
     let finding_key = format!("native-council-finding:{}", finding.content_digest);
-    persist_council_record(
-        &store,
-        root_id,
-        &finding_key,
-        "council_finding",
-        &finding,
-        &worker.id,
-    )?;
-    if link.is_some() {
-        persist_council_record(
-            &store,
-            team_session_id,
-            &finding_key,
-            "council_finding",
-            &finding,
-            &worker.id,
-        )?;
-    }
 
     let outcome = council::CouncilCriterionOutcome {
         criterion_id: criterion.id.clone(),
@@ -5539,26 +5542,41 @@ fn record_council_finding_state(
         "native-council-criterion:{}:{}:{}:{}",
         cycle_id, seat.round, worker.id, criterion.id
     );
+    let prior: Option<String> = store.db.query_row(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_criterion_outcome'",
+        params![root_id, &outcome_key],
+        |row| row.get(0),
+    ).optional().map_err(|error| error.to_string())?;
+    let prior = prior.map(|raw| {
+        serde_json::from_str::<council::CouncilCriterionOutcomeReceipt>(&raw)
+            .map_err(|_| "council_criterion_conflict: invalid previously recorded criterion receipt.".to_string())
+    }).transpose()?;
+    let frozen_receipt = immutable_council_criterion_outcome(&receipt, prior.as_ref())?;
+
+    // Findings can be distinct even when they share one scored criterion.
+    // All root/child finding and outcome records and refreshed snapshots
+    // either commit together or leave no persisted partial finding.
+    let transaction = store.db.unchecked_transaction().map_err(|error| error.to_string())?;
     persist_council_record(
-        &store,
-        root_id,
-        &outcome_key,
-        "council_criterion_outcome",
-        &receipt,
-        &worker.id,
+        &store, root_id, &finding_key, "council_finding", &finding, &worker.id,
     )?;
     if link.is_some() {
-        let mut child_receipt = receipt.clone();
+        persist_council_record(
+            &store, team_session_id, &finding_key, "council_finding", &finding, &worker.id,
+        )?;
+    }
+    persist_council_record(
+        &store, root_id, &outcome_key, "council_criterion_outcome", &frozen_receipt, &worker.id,
+    )?;
+    if link.is_some() {
+        let mut child_receipt = frozen_receipt.clone();
         child_receipt.root_cycle_id = child_receipt.task_cycle_id.clone();
         child_receipt.child_cycle_id = None;
         child_receipt.parent_seat_id = None;
         persist_council_record(
-            &store,
-            team_session_id,
-            &outcome_key,
-            "council_criterion_outcome",
-            &child_receipt,
-            &worker.id,
+            &store, team_session_id, &outcome_key,
+            "council_criterion_outcome", &child_receipt, &worker.id,
         )?;
         save(&store, &mut team)?;
     }
@@ -5568,6 +5586,7 @@ fn record_council_finding_state(
     } else {
         save(&store, &mut root)?;
     }
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(json!({"findingId":finding.id,"criterionId":criterion.id,"recorded":true}))
 }
 

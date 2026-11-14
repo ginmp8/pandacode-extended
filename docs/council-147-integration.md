@@ -236,3 +236,12 @@ The root Architect instruction text now explicitly communicates exact M4-M7 nest
 The native Council strategy/status regression now iterates all seven A/D/N combinations with Parallel, Escalated and TwoPhase. For each pair, a complete executable synthetic source-aware fixture reaches the native passing gate, while independently exercised negative paths block approval: an unscored or failed required reviewer, a below-target reviewer, absent mandatory criterion receipts, stale root-cycle evidence and replayed reviewer session identity. TwoPhase additionally rejects a first-phase-only result.
 
 This matrix validates the core native status/score/receipt logic, not live provider execution or the independent persisted terminal callback CAS. The existing 7 × 3 persisted runtime-dispatch fixture remains separate. Exact-HEAD test execution stays subject to CI, which must not be conflated with test source coverage.
+
+
+## Atomic and repeatable native finding recording (C-1 / AC-33/36)
+
+The native `pandacode_council_record_finding` handler now validates the one immutable scored criterion outcome before writing any finding. A reviewer may submit multiple separate evidence-backed findings under that criterion while retaining its original score, artifact, reviewer attempt, policy correlation and initial verified criterion evidence. Later findings get their own content-derived IDs and individually verified file-hash references; they never rewrite the criterion outcome.
+
+If a later call tries to change the scored criterion, artifact revision or binding, it is rejected with `council_criterion_conflict` before writing any new finding. The root/child finding records, both criterion projections and refreshed snapshots now share one SQLite transaction: any failure rolls back the entire call, including an otherwise-valid new finding. Exact identical retries remain idempotent.
+
+A Rust regression proves unchanged score/identity across distinct evidence-backed findings and denial of score/artifact mutation. End-to-end native filesystem-hash and SQLite fault-injection checks are still required before accepting AC-33/36 as passed.

@@ -7169,6 +7169,43 @@ fn composed_admission_test_config() -> council::CouncilConfig {
     }
 }
 
+
+#[test]
+fn repeated_finding_under_one_native_criterion_keeps_its_first_scored_receipt_immutable() {
+    let original = council::CouncilCriterionOutcomeReceipt {
+        schema_version: 1,
+        root_cycle_id: "root:100".into(),
+        task_id: "root".into(),
+        task_cycle_id: "root:100".into(),
+        child_cycle_id: None,
+        round: 1,
+        seat_id: "reviewer".into(),
+        parent_seat_id: None,
+        attempt: 1,
+        artifact_revision: "frozen-revision".into(),
+        outcome: council::CouncilCriterionOutcome {
+            criterion_id: "authorization".into(),
+            score: 8.5,
+            verified_evidence_refs: vec!["verified:first-issue".into()],
+        },
+    };
+    assert_eq!(immutable_council_criterion_outcome(&original, None).unwrap(), original);
+    let mut second_finding = original.clone();
+    second_finding.outcome.verified_evidence_refs =
+        vec!["verified:second-distinct-issue".into()];
+    assert_eq!(immutable_council_criterion_outcome(&second_finding, Some(&original)).unwrap(), original,
+        "another real issue may keep its own immutable finding ID without altering the criterion score");
+
+    let mut changed_score = second_finding.clone();
+    changed_score.outcome.score = 10.0;
+    assert!(immutable_council_criterion_outcome(&changed_score, Some(&original))
+        .unwrap_err().contains("council_criterion_conflict"));
+    let mut changed_artifact = second_finding;
+    changed_artifact.artifact_revision = "new-revision".into();
+    assert!(immutable_council_criterion_outcome(&changed_artifact, Some(&original))
+        .unwrap_err().contains("council_criterion_conflict"));
+}
+
 #[test]
 fn native_child_leaf_projection_reports_only_completed_finite_scores() {
     let mut leaf = worker("nested-leaf", "completed", &[], &[]);

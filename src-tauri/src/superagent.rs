@@ -14,6 +14,7 @@ pub(crate) mod headless_dispatch;
 pub(crate) mod work_items;
 pub(crate) mod strategy;
 pub(crate) mod children;
+pub(crate) mod coordinated_auto;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1535,6 +1536,9 @@ pub struct TaskSnapshot {
     /// authority. A missing or revoked receipt must remain inspectable.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub auto_origin: Option<events::auto_intake::AutoTicketOrigin>,
+    /// Original one-time local consent and its native handoff outcome.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub coordinated_auto: Option<coordinated_auto::ContinuationReceipt>,
 }
 
 fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSnapshot> {
@@ -1579,6 +1583,7 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
         unresolved_external_effects,
         council: council_adapter::inspect(store, &ticket)?,
         auto_origin: events::auto_intake::ticket_origin(store,ticket_id)?,
+        coordinated_auto: coordinated_auto::inspect(store,ticket_id)?,
         team_snapshot: admitted_team,
         ticket,
         mandate: native_mandate,
@@ -1718,6 +1723,11 @@ pub(crate) fn inspect_headless_status(
                 "eventKind": origin.event_kind,
                 "receiptState": origin.receipt_state,
                 "currentlyAuthorized": origin.currently_authorized
+            })),
+            "coordinatedAuto": snapshot.coordinated_auto.as_ref().map(|receipt| serde_json::json!({
+                "state": receipt.state,
+                "oneShot": receipt.one_shot,
+                "automaticReplayPermitted": receipt.automatic_replay_permitted
             })),
             "mandate": {
                 "revoked": snapshot.mandate.revoked,
@@ -4568,6 +4578,7 @@ fn prepare_coordinated_worker_inner(
 pub async fn superagent_submit_coordinated(window: tauri::WebviewWindow, 
     app: tauri::AppHandle, state: State<'_, AppState>,
     orchestration_id: String, objective: String, request_key: String,
+    auto_dispatch_worker: Option<bool>,
 ) -> Result<Ticket> {
     require_main_window(&window)?;
     if crate::feature_controls::get().bots_paused {
@@ -4580,6 +4591,16 @@ pub async fn superagent_submit_coordinated(window: tauri::WebviewWindow,
         let cfg = configuration(&store, &orchestration_id)?;
         let busy = active_manual_conflict(&store,&active,&cfg.coordinator_bot_id,&cfg.project_id)?;
         let (ticket,launch) = admit_role(&mut store,&orchestration_id,&objective,&request_key,busy,true)?;
+        if auto_dispatch_worker.unwrap_or(false) {
+            if launch {
+                if let Err(error)=coordinated_auto::authorize(&store,&ticket) {
+                    let _=fail_launch(&store,&ticket.id,&error);
+                    return Err(format!("Native coordinated continuation was not authorized: {error}"));
+                }
+            } else if coordinated_auto::inspect(&store,&ticket.id)?.is_none() {
+                return Err("A duplicate request key cannot upgrade a manual Ticket to automatic Worker dispatch.".into());
+            }
+        }
         (ticket,launch,cfg.coordinator_bot_id)
     };
     if !launch { return Ok(ticket); }
@@ -4881,6 +4902,63 @@ pub async fn superagent_revoke_worker_write_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn explicitly_armed_coordinator_can_claim_one_worker_handoff_only_once() {
+        let mut store=fixture();
+        let config=enabled(&store);
+        let (ticket,launched)=admit_role(
+            &mut store,&config.id,"Read-only coordinated objective",
+            "coordinator-once",false,true,
+        ).unwrap();
+        assert!(launched);
+        assert!(coordinated_auto::inspect(&store,&ticket.id).unwrap().is_none(),
+            "Unconsented coordinator tasks must not silently start Workers.");
+        let session=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        assert!(coordinated_auto::claim(&store,&session).unwrap().is_none());
+        coordinated_auto::authorize(&store,&ticket).unwrap();
+        coordinated_auto::authorize(&store,&ticket).unwrap();
+        assert_eq!(coordinated_auto::inspect(&store,&ticket.id)
+            .unwrap().unwrap().state,"armed");
+        assert!(coordinated_auto::claim(&store,&session).unwrap().is_none(),
+            "No model result has completed the coordinator yet.");
+        assert!(on_run_finished(&store,&session,true,"Scoped coordinator plan").unwrap());
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"queued");
+        assert_eq!(coordinated_auto::claim(&store,&session).unwrap(),
+            Some(ticket.id.clone()));
+        assert!(coordinated_auto::claim(&store,&session).unwrap().is_none(),
+            "The same coordinator result cannot claim another Worker.");
+        let (worker,thread,bot_id,plan)=prepare_coordinated_worker(
+            &mut store,&ticket.id,false,
+        ).unwrap();
+        assert_eq!(worker.state,"running");
+        assert_eq!(bot_id,"worker");
+        assert!(thread.contains(":worker:2"));
+        assert_eq!(plan,"Scoped coordinator plan");
+        coordinated_auto::settle(&store,&ticket.id,"dispatched").unwrap();
+        assert_eq!(coordinated_auto::inspect(&store,&ticket.id)
+            .unwrap().unwrap().state,"dispatched");
+        assert!(coordinated_auto::claim(&store,&session).unwrap().is_none());
+        // Restart recovery may not replay a completed one-shot handoff.
+        store.db.execute_batch(coordinated_auto::RECOVER).unwrap();
+        assert_eq!(coordinated_auto::inspect(&store,&ticket.id)
+            .unwrap().unwrap().state,"dispatched");
+    }
+
+    #[test]
+    fn unconsented_or_failed_coordinator_cannot_claim_worker_handoff() {
+        let mut store=fixture();
+        let config=enabled(&store);
+        let (ticket,launched)=admit_role(
+            &mut store,&config.id,"No automatic continuation",
+            "coordinator-without-consent",false,true,
+        ).unwrap();
+        assert!(launched);
+        let session=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store,&session,true,"Coordination finished").unwrap());
+        assert!(coordinated_auto::claim(&store,&session).unwrap().is_none());
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"queued");
+    }
 
     #[test]
     fn authenticated_auto_admission_atomically_binds_source_and_denies_revoked_receipts() {

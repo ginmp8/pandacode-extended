@@ -106,6 +106,10 @@ interface TicketDetails {
   attemptInsights?: AssignmentInsight[];
   activity: Activity[]; teamSnapshot?: TeamSnapshot | null; council?: CouncilObservation | null;
   autoOrigin?: AutoTicketOrigin | null;
+  coordinatedAuto?: {
+    state:string; oneShot:boolean; automaticReplayPermitted:boolean;
+    workerBotId:string; createdAt:number; updatedAt:number;
+  } | null;
   finalizationGate?: 'not_pending' | 'native_recheck_required' | 'council_required' | 'effects_unresolved';
   unresolvedExternalEffects?: number;
 }
@@ -208,6 +212,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let commentRepository = '', commentIssueNumber = '', commentDraft = '';
   let issueCommentError = '', issueCommentStatus: IssueCommentStatus | null = null;
   let demandObjective = '', demandMode: 'coordinated' | 'direct' = 'coordinated';
+  let autoWorkerDraft = false;
   let demandPreflight: ManualPreflight | null = null;
   let preflightObjective = '', preflightMode: 'coordinated' | 'direct' = 'coordinated';
   // Persist the user's editable preset draft across asynchronous list refreshes.
@@ -383,6 +388,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<dl><dt>Ticket ID</dt><dd><code>' + safe(inspected.id) + '</code></dd>' +
         '<dt>State / revision</dt><dd>' + safe(inspected.state) + ' / ' + inspected.revision + '</dd>' +
         '<dt>Actor</dt><dd>' + safe(ticketDetails.mandate.actor) + '</dd>' +
+        '<dt>One-shot Worker continuation</dt><dd>' +
+        (ticketDetails.coordinatedAuto
+          ? 'Explicit local authorization · ' + safe(ticketDetails.coordinatedAuto.state) +
+            ' · ' + (ticketDetails.coordinatedAuto.automaticReplayPermitted
+              ? 'Replay available' : 'No automatic replay')
+          : 'Not authorized for automatic handoff') + '</dd>' +
         '<dt>Native origin</dt><dd>' +
         (ticketDetails.autoOrigin
           ? 'Authenticated GitHub Auto · ' +
@@ -790,6 +801,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       (demandMode === 'coordinated' ? ' selected' : '') + '>Coordinator, then worker</option>' +
       '<option value="direct"' + (demandMode === 'direct' ? ' selected' : '') +
       '>Worker directly</option></select></label>' +
+      '<label><input type="checkbox" name="autoDispatchWorker"' +
+      (autoWorkerDraft ? ' checked' : '') +
+      (demandMode !== 'coordinated' ? ' disabled' : '') +
+      '> After the Coordinator produces a valid plan, start the one selected read-only Worker automatically (one shot; no automatic retry or write permission)</label>' +
       '<button type="button" data-sa-preflight>Review native preflight</button>' +
       '<button class="primary-button" type="submit"' + (chosen.enabled ? '' : ' disabled') +
       '>Dispatch manually</button></form>' + nativePreflight +
@@ -1172,6 +1187,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   // Templates populate editable names only; no bot, tool or task is selected.
   host.addEventListener('change', event => {
     const target = event.target;
+    if (target instanceof HTMLInputElement && target.name === 'autoDispatchWorker' &&
+        target.closest('form[data-sa-form="run"]')) {
+      autoWorkerDraft = target.checked;
+      return;
+    }
     if (target instanceof Element && guidedBuilder.handleChange(target)) {
       render();
       return;
@@ -1236,6 +1256,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target instanceof HTMLSelectElement && target.name === 'mode' &&
         target.closest<HTMLFormElement>('form[data-sa-form="run"]')) {
       demandMode = target.value === 'direct' ? 'direct' : 'coordinated';
+      const autoWorker = host.querySelector<HTMLInputElement>('form[data-sa-form="run"] input[name="autoDispatchWorker"]');
+      if (autoWorker) autoWorker.disabled = demandMode !== 'coordinated';
       demandPreflight = null;
       host.querySelector('[aria-label="Native demand preflight"]')?.remove();
       return;
@@ -2241,8 +2263,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (!selectedConfig?.enabled || !objective) return;
       const key = taskKey;
       void work(async () => {
-        await call(command,{ orchestrationId:selectedConfig.id, objective, requestKey:key });
+        await call(command,{
+          orchestrationId:selectedConfig.id, objective, requestKey:key,
+          ...(command === 'superagent_submit_coordinated'
+            ? {autoDispatchWorker:data.has('autoDispatchWorker')} : {}),
+        });
         taskKey = crypto.randomUUID(); demandObjective = ''; demandPreflight = null;
+        autoWorkerDraft = false;
         await reload();
       });
     }

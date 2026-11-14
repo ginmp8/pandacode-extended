@@ -370,3 +370,30 @@ parent/child tool authority or autonomous child scheduling. Native child
 admission must be implemented and verified before Team strategy can advertise
 that ability. Historical provider subagent events are evidence, not a source
 of writable credentials or permission escalation.
+
+## Explicit one-shot Coordinator → Worker continuation
+
+A new coordinated manual demand can optionally select **Start the one
+selected read-only Worker automatically** at submission. This is a trusted
+local-user choice made before the Coordinator runs, not an instruction from
+a model, imported preset, GitHub source, or arbitrary channel message.
+Existing manual dispatch remains the default when the option is unchecked.
+
+The authorization is bound to the original Ticket, exact native Coordinator
+assignment/session, immutable Team policy revision and selected primary Worker.
+Only an original successful Coordinator completion with current evidence
+advances a queued Ticket. The next Worker uses the same native read-only
+admission guards and must stay in its original project, under the original
+mandate, original provider profile and Council policy. No additional Workers,
+tool grants, write permissions, provider fallback or external side effects are
+implicitly enabled.
+
+A native SQLite receipt records \`armed\`, \`claimed\`, \`dispatched\`,
+\`blocked\`, \`uncertain\` or \`cancelled\`; only one claim is possible.
+If the Worker is occupied or the policy is no longer valid, the automatic
+handoff is blocked and the original Ticket remains inspectable. After an
+ambiguous gateway handoff, the receipt becomes uncertain and **must not be
+automatically replayed**. Process restart cancels outstanding armed/claimed
+authorization without starting a new provider. The normal Ticket Inspector
+and headless read-only snapshot show the one-shot state. Final human/Council
+approval is still required after the Worker finishes.

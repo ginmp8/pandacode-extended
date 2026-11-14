@@ -465,10 +465,28 @@ pub(crate) async fn run_finished(app: &tauri::AppHandle, session_id: &str, succe
         // Internal task results are retained by the native ticket gate, never sent
         // as an external channel reply or an ambient bot notification.
         if settled {
-            if let Ok(store) = state.store.lock() {
-                if let Err(error) = crate::superagent::on_run_finished(&store, session_id, successful, &text) {
-                    eprintln!("SuperAgent settlement failed: {error}");
+            let finished = state.store.lock().ok().and_then(|store|
+                match crate::superagent::on_run_finished(&store, session_id, successful, &text) {
+                    Ok(settled) => Some(settled),
+                    Err(error) => {
+                        eprintln!("SuperAgent settlement failed: {error}");
+                        None
+                    }
                 }
+            ).unwrap_or(false);
+            if finished && successful {
+                // Native admission and an immutable one-shot local grant, not
+                // provider output, decide whether the coordinator may schedule
+                // exactly one read-only Worker. No retry after an ambiguous send.
+                let handle=app.clone();
+                let coordinator_session=session_id.to_owned();
+                tauri::async_runtime::spawn(async move {
+                    if let Err(error)=crate::superagent::coordinated_auto::after_coordinator(
+                        handle,coordinator_session,
+                    ).await {
+                        eprintln!("SuperAgent one-shot worker handoff requires inspection: {error}");
+                    }
+                });
             }
         }
     } else if thread.channel_id == "schedule" {

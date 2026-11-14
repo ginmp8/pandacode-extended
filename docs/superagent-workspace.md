@@ -214,3 +214,17 @@ new Teams remain disabled and Off. Unsupported Auto/write modes are marked
 unavailable, not silently enabled. The quick-create path remains for existing
 users. Final UX-01..24 acceptance requires native/browser evidence and real
 PandaCode screenshots.
+
+
+### Native immutable Team resource strategies
+
+Each Team has versioned priorities (`balanced`, `cost`, `latency`,
+`throughput`, `quality`) and bounded attempts/timeouts, pinned into new
+Tickets. The **Resource strategy and native capability** pane shows actual
+eligibility and why a hard token, cost, parallel-write or delegated-child policy
+cannot be enabled without corresponding native enforcement. The existing
+scheduler can select multiple configured Workers but serializes overlapping
+physical checkouts; a priority preference never grants parallel writes.
+Older saved Teams and Tickets retain safe default settings. Team edits require
+an exact policy revision, a disabled Team and settled historical assignments;
+previous Ticket snapshots and Council/effect receipts are never rewritten.

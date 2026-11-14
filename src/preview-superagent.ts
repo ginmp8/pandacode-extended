@@ -3,6 +3,16 @@ type Bot = { id:string; name:string; paused:boolean; projectId:string };
 type Config = { id:string; name:string; coordinatorBotId:string; workerBotId:string;
   workerBotIds:string[]; reviewerBotIds:string[]; teamVersion:number;
   projectId:string; enabled:boolean; policyRevision:number; councilRequired?:boolean };
+type StrategyPolicy = {
+  priority:string; attemptTimeoutMs:number; tokenCeiling?:number;
+  estimatedCostCeilingMinor?:number; subagentDelegationEnabled:boolean;
+};
+type Strategy = {settings:StrategyPolicy;maxConcurrentTasks:number;maxAttemptsPerAssignment:number};
+const defaultStrategy = ():Strategy => ({
+  settings:{priority:'balanced',attemptTimeoutMs:1_800_000,
+    subagentDelegationEnabled:false},
+  maxConcurrentTasks:1,maxAttemptsPerAssignment:2,
+});
 type Ticket = { id:string; orchestrationId:string; objective:string;
   state:string; revision:number; evidence:null };
 type TeamSnapshot = {
@@ -10,7 +20,7 @@ type TeamSnapshot = {
   name:string; projectId:string; coordinatorBotId:string; workerBotIds:string[];
   reviewerBotIds:string[];
   policy:{policyRevision:number;autonomy:string;maxConcurrentTasks:number;
-    maxAttemptsPerAssignment:number;councilEnabled:boolean};
+    maxAttemptsPerAssignment:number;councilEnabled:boolean;strategy:StrategyPolicy};
   roles:Array<{role:string;ordinal:number;botId:string;effectiveConfig:null;effectiveConfigSha256:null}>;
 };
 type Activity = { id:number; kind:string; detail:string; at:number };
@@ -24,6 +34,8 @@ const threadLinks = new Map<string,Array<{sourceId:string;ticketId:string;reposi
   actorFilter:string;eventKind:string;mode:'off'|'observe';createdAt:number}>>();
 const configs = new Map<string,Config>(), tickets = new Map<string,Ticket[]>();
 const teamSnapshots = new Map<string,TeamSnapshot>();
+const teamStrategies = new Map<string,Strategy>();
+const strategyFor = (id:string):Strategy => teamStrategies.get(id) ?? defaultStrategy();
 const get = (id:string):Config => { const c=configs.get(id); if(!c)throw Error('Orchestration not found.'); return c; };
 export async function invokeSuperagent<T>(
   command:string,args:Record<string,any>,listBots:()=>Promise<Bot[]>,
@@ -63,8 +75,10 @@ export async function invokeSuperagent<T>(
     snapshotVersion:1,provenance:'native',orchestrationId:config.id,teamVersion:config.teamVersion,
     name:config.name,projectId:config.projectId,coordinatorBotId:config.coordinatorBotId,
     workerBotIds:[...config.workerBotIds],reviewerBotIds:[...config.reviewerBotIds],
-    policy:{policyRevision:config.policyRevision,autonomy:'off',maxConcurrentTasks:1,
-      maxAttemptsPerAssignment:2,councilEnabled:config.councilRequired===true},
+    policy:{policyRevision:config.policyRevision,autonomy:'off',
+      maxConcurrentTasks:strategyFor(config.id).maxConcurrentTasks,
+      maxAttemptsPerAssignment:strategyFor(config.id).maxAttemptsPerAssignment,
+      councilEnabled:config.councilRequired===true,strategy:strategyFor(config.id).settings},
     roles:[
       {role:'coordinator',ordinal:0,botId:config.coordinatorBotId,effectiveConfig:null,effectiveConfigSha256:null},
       ...config.workerBotIds.map((botId,ordinal)=>({role:'worker',ordinal,botId,
@@ -88,6 +102,56 @@ export async function invokeSuperagent<T>(
         coordinatorBotId:c.coordinatorBotId,workerBotIds:[...c.workerBotIds],
         reviewerBotIds:[...c.reviewerBotIds],councilRequired:!!c.councilRequired,
         executionReady:c.workerBotIds.length===1 && c.reviewerBotIds.length===0};
+      break;
+    }
+    case 'superagent_strategy_get':
+    case 'superagent_strategy_update': {
+      const config = get(args.orchestrationId);
+      let saved = strategyFor(config.id);
+      if(command==='superagent_strategy_update'){
+        const request=args.input;
+        if(config.enabled || config.policyRevision!==args.expectedRevision ||
+           (tickets.get(config.id)||[]).some(ticket=>!['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)))
+          throw Error('Settle Tickets and disable this Team before changing strategy.');
+        const validPriority=['balanced','cost','latency','throughput','quality'].includes(request?.priority);
+        if(!validPriority || !Number.isInteger(request.maxConcurrentTasks) ||
+           request.maxConcurrentTasks<1 || request.maxConcurrentTasks>8 ||
+           !Number.isInteger(request.maxAttemptsPerAssignment) ||
+           request.maxAttemptsPerAssignment<1 || request.maxAttemptsPerAssignment>8 ||
+           !Number.isInteger(request.attemptTimeoutMs) ||
+           request.attemptTimeoutMs<60_000 || request.attemptTimeoutMs>1_800_000 ||
+           [request.tokenCeiling,request.estimatedCostCeilingMinor]
+            .some(value=>value!==undefined && (!Number.isSafeInteger(value)||value<=0)))
+          throw Error('Invalid bounded Team strategy.');
+        const next:Strategy={
+          settings:{priority:request.priority,attemptTimeoutMs:request.attemptTimeoutMs,
+            tokenCeiling:request.tokenCeiling,
+            estimatedCostCeilingMinor:request.estimatedCostCeilingMinor,
+            subagentDelegationEnabled:request.subagentDelegationEnabled===true},
+          maxConcurrentTasks:request.maxConcurrentTasks,
+          maxAttemptsPerAssignment:request.maxAttemptsPerAssignment,
+        };
+        if(JSON.stringify(saved)!==JSON.stringify(next)){
+          saved=next;teamStrategies.set(config.id,saved);
+          config.policyRevision++;config.teamVersion++;
+        }
+      }
+      const enableBlockers = [
+        ...(saved.maxConcurrentTasks!==1
+          ? ['Parallel writes over one leased checkout are not supported; the current native scheduler serializes conflicting workers.'] : []),
+        ...(saved.settings.tokenCeiling!==undefined
+          ? ['A native provider token meter is not available for a hard token ceiling.'] : []),
+        ...(saved.settings.estimatedCostCeilingMinor!==undefined
+          ? ['A verified price/usage meter is not available for a hard monetary ceiling.'] : []),
+        ...(saved.settings.subagentDelegationEnabled
+          ? ['The Team strategy alone cannot authorize descendant execution; a separate exact native delegation policy is required.'] : []),
+      ];
+      value={orchestrationId:config.id,policyRevision:config.policyRevision,
+        teamVersion:config.teamVersion,settings:{...saved.settings},
+        maxConcurrentTasks:saved.maxConcurrentTasks,
+        maxAttemptsPerAssignment:saved.maxAttemptsPerAssignment,
+        executableParallelWorkers:1,tokenMeteringAvailable:false,
+        pricedCostMeteringAvailable:false,nestedChildAdmissionAvailable:true,enableBlockers};
       break;
     }
     case 'superagent_tickets':value=tickets.get(args.orchestrationId)||[];break;
@@ -124,7 +188,7 @@ export async function invokeSuperagent<T>(
         workerBotId:b.id,workerBotIds:roles.workerBotIds,reviewerBotIds:roles.reviewerBotIds,
         teamVersion:1,projectId:b.projectId,enabled:false,policyRevision:1,
         councilRequired:!!input.councilRequired};
-      configs.set(c.id,c);value=c;break;
+      configs.set(c.id,c);teamStrategies.set(c.id,defaultStrategy());value=c;break;
     }
     case 'superagent_update':{
       const c=get(args.orchestrationId),input=args.input;
@@ -140,13 +204,19 @@ export async function invokeSuperagent<T>(
     }
     case 'superagent_set_enabled':{
       const c=get(args.orchestrationId);if(c.policyRevision!==args.expectedRevision)throw Error('Stale policy.');
+      const strategy=strategyFor(c.id);
+      if(args.enabled && (strategy.maxConcurrentTasks!==1 ||
+          strategy.settings.tokenCeiling!==undefined ||
+          strategy.settings.estimatedCostCeilingMinor!==undefined ||
+          strategy.settings.subagentDelegationEnabled))
+          throw Error('Requested Team policy cannot run with current native capabilities.');
       if(c.enabled!==args.enabled){c.enabled=args.enabled;c.policyRevision++;}
       value=c;break;
     }
     case 'superagent_delete':{
       const c=get(args.orchestrationId);if(c.enabled||c.policyRevision!==args.expectedRevision||
         (tickets.get(c.id)?.length||0)>0)throw Error('Cannot delete used or enabled preset.');
-      configs.delete(c.id);value=null;break;
+      configs.delete(c.id);teamStrategies.delete(c.id);value=null;break;
     }
     case 'superagent_submit':
     case 'superagent_submit_coordinated':{

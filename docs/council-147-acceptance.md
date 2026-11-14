@@ -1,5 +1,27 @@
 # Council #147: architecture and acceptance evidence
 
+> **Historical baseline — not a PR #155 completion report.**
+>
+> The AC status table below is pinned only to the **older PR #152**
+> implementation at `5edec40ce913dc950dd50f0799e3aa1d63dc17a2`
+> and its historical Actions run. It must not be reused as proof that
+> [PR #155](https://github.com/ginmp8/pandacode-extended/pull/155)
+> currently passes any acceptance criterion. The new unified branch has
+> additional commits (including `296ee246a54b9340f82d3beb059101083dfb2815`)
+> and **no completed native, Playwright, provider or exact-HEAD
+> AC-01–40 validation receipt at the time of this integration edit**.
+> Therefore every AC at the unified PR head remains
+> **not_run / not independently verified** until fresh tests produce
+> version-bound evidence. Code presence is not a passing test.
+>
+> Current implementation extensions include strict persisted reviewer
+> grants, callback/terminal receipt uniqueness, preflight nested budgets,
+> a non-Channel native task admission/inspection/terminal/evidence API,
+> SQLite restart negative tests, and explicit blocked/failed/stale UI
+> statuses. The full 21-pair **terminal** matrix, harness permission tests,
+> 3-source criteria matrix, concurrent Channel callback/restart scenarios,
+> and accessible browser inspector matrix still require independent evidence.
+
 ## Evidence snapshot
 
 This ledger applies the requirements in [issue #147](https://github.com/ginmp8/pandacode-extended/issues/147), read at its 2026-11-12 update, to [PR #152](https://github.com/ginmp8/pandacode-extended/pull/152), head 5edec40ce913dc950dd50f0799e3aa1d63dc17a2 (base extended/development). The PR is open. This is a candidate evidence snapshot, not issue closure, merge approval, or release evidence.

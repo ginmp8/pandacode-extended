@@ -474,3 +474,44 @@ team and cleared atomically when applied. `config` and the parent `Session` alwa
 describe the effective setup. No schema migration is needed for this optional field.
 An architect can explicitly resolve cancelled work with a reason; unresolved
 failures prevent successful completion.
+
+
+## Native-only Council task review client (issue #147)
+
+The integration's native task-scoped API is exposed from
+`architect::native_council_task` for trusted in-process callers. It does
+**not** create a new Council, send a bot message, publish a callback, grant
+provider tools, or accept an approval from model text.
+
+Use the following order:
+
+1. Create and start an ordinary root Architect task with Council enabled.
+   The task must own its session and project, be non-Channel, and have no
+   reviewer already dispatched.
+2. Compute the exact target artifact SHA-256 in the caller, select a stable
+   native caller ID and assignment key, and call
+   `admit(store, caller_id, session_id, project_id, assignment_key, artifact_sha256)`.
+   It records one idempotent request for the current Council cycle. A second
+   assignment/target cannot bind to that root cycle.
+3. Dispatch and run the **existing** Council using its normal native task
+   APIs. Inspect progress with `inspect(..., request_id)`, passing the same
+   complete caller/task/project/assignment/artifact tuple each time.
+4. Only after the root task is completed and its native pass is independently
+   verified, call `record_terminal(..., request_id)`. A compare-and-swap
+   persists one terminal receipt. Repeated calls are idempotent only while
+   the exact native verdict and frozen scope remain current.
+5. Call `read_terminal(..., request_id)` and `read_evidence(..., request_id)`
+   to retrieve the receipt or verified evidence. Both reauthorize against
+   the live root state; no request ID acts as a bearer capability.
+
+The caller-provided artifact digest pins *target identity*, not independently
+verified file bytes. Trust only a digest produced by an authorized native
+caller that also controls the task artifact. Reviewer tool permissions remain
+subject to the Council's existing native policy; no external LLM/tool is
+allowed to call these Rust-only APIs. Replays, changed objectives, different
+projects/callers, altered policy, past cycles, early reviews, false passes
+and duplicate native assignments are rejected.
+
+This is implementation guidance, **not** proof of end-to-end delivery.
+The new negative Rust and SQLite restart regressions are committed but
+not yet executed at the current integration SHA.

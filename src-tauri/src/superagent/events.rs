@@ -59,7 +59,6 @@ CREATE INDEX IF NOT EXISTS sa_thread_links_ticket
 
 const MAX_LINKS_PER_TICKET: i64 = 16;
 const MAX_SOURCES: i64 = 64;
-#[cfg(test)]
 const MAX_RECEIPTS: i64 = 10_000;
 const EVENT_KINDS: &[&str] = &[
     "issues.opened", "issues.edited", "issue_comment.created",
@@ -82,7 +81,6 @@ pub struct EventSource {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-#[cfg_attr(not(test), expect(dead_code, reason = "Authenticated event intake is not implemented yet"))]
 pub struct EventEnvelope {
     pub source_id: String,
     pub delivery_id: String,
@@ -131,7 +129,20 @@ pub struct SourceThreadLink {
     pub ticket_id: String,
     pub repository: String,
     pub subject_key: String,
+    pub actor_filter: String,
+    pub event_kind: String,
+    pub mode: String,
     pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+struct FetchPermit {
+    source_id: String,
+    orchestration_id: String,
+    repository: String,
+    event_kind: String,
+    subject_key: String,
+    policy_revision: i64,
 }
 
 /// Links may refer only to an exact issue or PR number, not URLs, arbitrary
@@ -146,7 +157,8 @@ fn valid_thread_key(value: &str) -> bool {
 fn list_thread_links(store: &Store, ticket_id: &str) -> Result<Vec<SourceThreadLink>> {
     super::get_ticket(store, ticket_id)?;
     let mut statement = store.db.prepare(
-        "SELECT l.source_id,l.ticket_id,s.repository,l.subject_key,l.created_at
+        "SELECT l.source_id,l.ticket_id,s.repository,l.subject_key,s.actor_filter,
+                s.event_kind,s.mode,l.created_at
          FROM sa_source_thread_links l
          JOIN sa_event_sources s ON s.id=l.source_id
          WHERE l.ticket_id=?1 ORDER BY l.created_at,l.source_id,l.subject_key
@@ -155,7 +167,8 @@ fn list_thread_links(store: &Store, ticket_id: &str) -> Result<Vec<SourceThreadL
     let rows = statement.query_map([ticket_id], |row| Ok(SourceThreadLink {
         source_id: row.get(0)?, ticket_id: row.get(1)?,
         repository: row.get(2)?, subject_key: row.get(3)?,
-        created_at: row.get(4)?,
+        actor_filter: row.get(4)?, event_kind: row.get(5)?,
+        mode: row.get(6)?, created_at: row.get(7)?,
     })).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
@@ -299,7 +312,6 @@ fn set_mode(store: &Store, id: &str, expected_revision: i64, mode: &str) -> Resu
     source(store,id)
 }
 
-#[cfg(test)]
 fn valid_event(event: &EventEnvelope) -> bool {
     token_ok(&event.delivery_id, 128) && repo_ok(&event.repository)
         && token_ok(&event.actor, 80) && EVENT_KINDS.contains(&event.event_kind.as_str())
@@ -312,7 +324,6 @@ fn valid_event(event: &EventEnvelope) -> bool {
 /// Ticket, launch a provider, publish a reply or claim GitHub authenticity.
 /// A delivery ID is immutable: replay with changed fields is rejected even
 /// after mode changes, restart, or later cursor advancement.
-#[cfg(test)]
 fn observe(store: &Store, event: &EventEnvelope) -> Result<EventDecision> {
     if !valid_event(event) {
         return Err("Invalid, unsupported or unbounded source event envelope.".into());
@@ -343,7 +354,16 @@ fn observe(store: &Store, event: &EventEnvelope) -> Result<EventDecision> {
     ).map_err(|e| e.to_string())?;
     if receipts >= MAX_RECEIPTS { return Err("Source decision receipt limit reached; no event admitted.".into()); }
 
-    let decision = if event.sequence <= src.last_sequence { "ignored_stale" }
+    // GitHub database IDs are monotonic per event class. Compare each exact
+    // thread independently: a higher ID fetched from another linked thread
+    // must not stale this one. Gaps are expected and accepted; late IDs are
+    // persisted as ignored_stale without moving that thread's order backward.
+    let thread_cursor: i64 = tx.query_row(
+        "SELECT COALESCE(MAX(sequence),0) FROM sa_event_decisions
+         WHERE source_id=?1 AND subject_key=?2",
+        params![&event.source_id,&event.subject_key], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    let decision = if event.sequence <= thread_cursor { "ignored_stale" }
         else if src.mode == "off" { "ignored_off" }
         else if src.repository != event.repository || src.actor_filter != event.actor
             || src.event_kind != event.event_kind { "ignored_filter" }
@@ -368,6 +388,87 @@ fn observe(store: &Store, event: &EventEnvelope) -> Result<EventDecision> {
     Ok(EventDecision { source_id:event.source_id.clone(),
         delivery_id:event.delivery_id.clone(),decision:decision.into(),
         policy_revision:src.policy_revision,sequence:event.sequence,at,duplicate:false })
+}
+
+/// Authorization snapshot for a user-triggered one-shot fetch. This performs
+/// only local reads so Off, unlinked targets, unsupported event classes, and
+/// mismatched thread kinds never invoke `gh`.
+fn prepare_fetch(store: &Store, source_id: &str, subject_key: &str) -> Result<FetchPermit> {
+    if !valid_thread_key(subject_key) {
+        return Err("A fetch requires an exact issue:NUMBER or pull:NUMBER thread key.".into());
+    }
+    let src = source(store, source_id)?;
+    if src.mode != "observe" {
+        return Err("This source is Off; no GitHub request was made.".into());
+    }
+    if !crate::github::supports_observe_event(&src.event_kind) {
+        return Err("This event class is not supported by manual Observe intake.".into());
+    }
+    let subject_kind = subject_key.split_once(':').map(|(kind, _)| kind).unwrap_or_default();
+    if (matches!(src.event_kind.as_str(), "issues.opened" | "issues.edited")
+        && subject_kind != "issue")
+        || (matches!(src.event_kind.as_str(), "pull_request.opened" | "pull_request_review.submitted" | "check_run.completed")
+            && subject_kind != "pull")
+    {
+        return Err("The linked thread kind does not match the configured event class.".into());
+    }
+    let linked_orchestration: Option<String> = store.db.query_row(
+        "SELECT t.orchestration_id FROM sa_source_thread_links l
+         JOIN sa_tickets t ON t.id=l.ticket_id
+         WHERE l.source_id=?1 AND l.subject_key=?2",
+        params![source_id,subject_key], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if linked_orchestration.as_deref() != Some(src.orchestration_id.as_str()) {
+        return Err("The exact thread is not linked to this source.".into());
+    }
+    Ok(FetchPermit {
+        source_id: src.id,
+        orchestration_id: src.orchestration_id,
+        repository: src.repository,
+        event_kind: src.event_kind,
+        subject_key: subject_key.to_string(),
+        policy_revision: src.policy_revision,
+    })
+}
+
+/// Recheck revocation and the exact source-thread link after the network call,
+/// then record only bounded event metadata. This path has no task/Ticket calls.
+fn record_fetched_event(
+    store: &Store,
+    permit: &FetchPermit,
+    fetched: crate::github::ObserveEvent,
+) -> Result<EventDecision> {
+    let src = source(store, &permit.source_id)?;
+    if src.mode != "observe"
+        || src.policy_revision != permit.policy_revision
+        || src.orchestration_id != permit.orchestration_id
+        || src.repository != permit.repository
+        || src.event_kind != permit.event_kind
+    {
+        return Err("The source changed or was turned Off during the fetch; no event was recorded.".into());
+    }
+    if fetched.subject_key != permit.subject_key {
+        return Err("GitHub returned a different thread than the configured link.".into());
+    }
+    let linked_orchestration: Option<String> = store.db.query_row(
+        "SELECT t.orchestration_id FROM sa_source_thread_links l
+         JOIN sa_tickets t ON t.id=l.ticket_id
+         WHERE l.source_id=?1 AND l.subject_key=?2",
+        params![&permit.source_id,&permit.subject_key], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if linked_orchestration.as_deref() != Some(permit.orchestration_id.as_str()) {
+        return Err("The exact source-thread link changed during the fetch; no event was recorded.".into());
+    }
+    let event = EventEnvelope {
+        source_id: permit.source_id.clone(),
+        delivery_id: fetched.delivery_id,
+        repository: fetched.repository,
+        actor: fetched.actor,
+        event_kind: fetched.event_kind,
+        subject_key: fetched.subject_key,
+        sequence: fetched.sequence,
+    };
+    observe(store, &event)
 }
 
 /// A source-scoped, restart-durable decision timeline. Neither the read nor
@@ -442,7 +543,35 @@ pub async fn superagent_source_observe(
 }
 
 fn superagent_source_delivery_unavailable() -> Result<EventDecision> {
-    Err("GitHub event delivery is unavailable: no authenticated delivery adapter is configured.".into())
+    Err("Caller-supplied GitHub event envelopes are rejected. Use the explicit linked-thread Observe fetch.".into())
+}
+
+/// Fetch one exact already-linked thread after an explicit UI click. The CLI
+/// runs outside the store lock; source revision and link are rechecked before
+/// any receipt is persisted so Off/revocation wins races.
+#[tauri::command]
+pub async fn superagent_source_fetch_thread(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    source_id: String,
+    subject_key: String,
+) -> Result<EventDecision> {
+    require_main_window(&window)?;
+    let (permit, root) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let permit = prepare_fetch(&store, &source_id, &subject_key)?;
+        let config = super::configuration(&store, &permit.orchestration_id)?;
+        let root = store.workspace_root(&config.project_id, None)?;
+        (permit, root)
+    };
+    let repository = permit.repository.clone();
+    let event_kind = permit.event_kind.clone();
+    let exact_subject = permit.subject_key.clone();
+    let fetched = crate::blocking(move || {
+        crate::github::observe_event(&root, &repository, &exact_subject, &event_kind)
+    }).await?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    record_fetched_event(&store, &permit, fetched)
 }
 
 
@@ -601,6 +730,276 @@ mod tests {
                     'worker',1,'queued',?3,?3)",
             params![id,orchestration_id,storage::now()],
         ).unwrap();
+    }
+
+    fn linked_observe_source(store: &Store) -> EventSource {
+        linked_observe_source_for(store,"observe-ticket","issues.opened","trusted-bot","issue:42")
+    }
+
+    fn linked_observe_source_for(
+        store: &Store,
+        ticket_id: &str,
+        event_kind: &str,
+        actor_filter: &str,
+        subject_key: &str,
+    ) -> EventSource {
+        insert_manual_ticket(store,ticket_id,"orch");
+        let source=create_source(store,"orch","test/fixture",actor_filter,event_kind).unwrap();
+        let source=set_mode(store,&source.id,source.policy_revision,"observe").unwrap();
+        link_thread(store,&source.id,ticket_id,subject_key).unwrap();
+        source
+    }
+
+    fn issue_payload(repository: &str, actor: &str, database_id: i64, number: i64) -> String {
+        serde_json::json!({
+            "data": { "repository": { "nameWithOwner": repository,
+                "issueOrPullRequest": { "__typename": "Issue", "fullDatabaseId": database_id,
+                    "number": number, "author": { "login": actor } }
+            } }
+        }).to_string()
+    }
+
+    fn issue_edit_payload(repository: &str, actor: &str, edit_id: &str, number: i64) -> String {
+        serde_json::json!({
+            "data": { "repository": { "nameWithOwner": repository,
+                "issueOrPullRequest": { "__typename": "Issue", "number": number,
+                    "createdAt": "2025-02-03T04:00:00Z",
+                    "userContentEdits": { "nodes": [{ "id": edit_id,
+                        "editedAt": "2025-02-03T04:05:06.789Z",
+                        "editor": { "login": actor }
+                    }] }
+                }
+            } }
+        }).to_string()
+    }
+
+    fn check_run_payload(repository: &str, app_slug: &str, database_id: i64, number: i64) -> String {
+        serde_json::json!({
+            "data": { "repository": { "nameWithOwner": repository,
+                "issueOrPullRequest": { "__typename": "PullRequest", "number": number,
+                    "commits": { "nodes": [{ "commit": { "checkSuites": { "nodes": [{
+                        "checkRuns": { "nodes": [{ "fullDatabaseId": database_id,
+                            "status": "COMPLETED", "completedAt": "2025-02-03T04:05:06Z",
+                            "checkSuite": { "app": { "slug": app_slug } }
+                        }] }
+                    }] } } }] }
+                }
+            } }
+        }).to_string()
+    }
+
+    fn fake_cli<'a>(
+        payload: &'a str,
+        calls: &'a mut Vec<Vec<String>>,
+        authenticated: bool,
+    ) -> impl FnMut(&[String], usize, std::time::Duration)
+        -> std::result::Result<crate::workspace::Capture, String> + 'a
+    {
+        move |args, limit, timeout| {
+            assert!(limit <= 64 * 1024, "Observe responses stay bounded");
+            assert!(timeout <= std::time::Duration::from_secs(30));
+            calls.push(args.to_vec());
+            if args.first().map(String::as_str) == Some("auth") {
+                return if authenticated {
+                    Ok(crate::workspace::Capture { bytes: b"Logged in".to_vec(), truncated: false })
+                } else {
+                    Err("GitHub CLI is not authenticated.".into())
+                };
+            }
+            Ok(crate::workspace::Capture { bytes: payload.as_bytes().to_vec(), truncated: false })
+        }
+    }
+
+    fn manual_fetch_with_cli(
+        store: &Store,
+        source_id: &str,
+        subject_key: &str,
+        runner: impl FnMut(&[String], usize, std::time::Duration)
+            -> std::result::Result<crate::workspace::Capture, String>,
+    ) -> Result<EventDecision> {
+        let permit=prepare_fetch(store,source_id,subject_key)?;
+        let fetched=crate::github::observe_event_with(
+            &permit.repository,&permit.subject_key,&permit.event_kind,runner,
+        )?;
+        record_fetched_event(store,&permit,fetched)
+    }
+
+    #[test]
+    fn manual_observe_fetch_uses_authenticated_bounded_metadata_and_never_launches() {
+        let (store,_)=fixture();
+        let source=linked_observe_source(&store);
+        let before:i64=store.db.query_row("SELECT COUNT(*) FROM sa_tickets",[],|row|row.get(0)).unwrap();
+        let payload=issue_payload("test/fixture","trusted-bot",4200,42);
+        let mut calls=Vec::new();
+        let decision=manual_fetch_with_cli(&store,&source.id,"issue:42",
+            fake_cli(&payload,&mut calls,true)).unwrap();
+        assert_eq!(decision.decision,"observed_permitted");
+        assert_eq!(calls.len(),2);
+        assert_eq!(calls[0],vec!["auth","status","--hostname=github.com"]);
+        assert!(calls[1].iter().any(|arg|arg=="graphql"));
+        let query=calls[1].join(" ");
+        assert!(query.contains("owner=test") && query.contains("name=fixture") && query.contains("number=42"));
+        assert!(!query.contains("title") && !query.contains("body"),"no issue or comment text is requested");
+        let record=list_decisions(&store,&source.id,10).unwrap();
+        assert_eq!(record.len(),1);
+        assert_eq!(record[0].actor,"trusted-bot");
+        assert_eq!(record[0].delivery_id,"gh-issues-opened-4200");
+        let after:i64=store.db.query_row("SELECT COUNT(*) FROM sa_tickets",[],|row|row.get(0)).unwrap();
+        assert_eq!(after,before,"Observe records metadata only and never creates or launches a Ticket");
+    }
+
+    #[test]
+    fn new_manual_observe_classes_record_deduplicated_decisions_without_tickets_or_effects() {
+        let (store,_)=fixture();
+        let issue_source=linked_observe_source_for(
+            &store,"edited-ticket","issues.edited","trusted-editor","issue:42");
+        let check_source=linked_observe_source_for(
+            &store,"check-ticket","check_run.completed","trusted-checker","pull:42");
+        let denied_source=linked_observe_source_for(
+            &store,"denied-check-ticket","check_run.completed","other-checker","pull:43");
+        let ticket_count_before:i64=store.db.query_row("SELECT COUNT(*) FROM sa_tickets",[],|row|row.get(0)).unwrap();
+        let effects_before:i64=store.db.query_row("SELECT COUNT(*) FROM sa_effect_receipts",[],|row|row.get(0)).unwrap();
+
+        let edit_id="VXNlckNvbnRlbnRFZGl0OjEyMw==";
+        let edit_payload=issue_edit_payload("test/fixture","trusted-editor",edit_id,42);
+        let mut edit_calls=Vec::new();
+        let edited=manual_fetch_with_cli(&store,&issue_source.id,"issue:42",
+            fake_cli(&edit_payload,&mut edit_calls,true)).unwrap();
+        assert_eq!(edited.decision,"observed_permitted");
+        assert_eq!(edit_calls.len(),2);
+        let edit_query=edit_calls[1].join(" ");
+        assert!(edit_query.contains("userContentEdits") && edit_query.contains("editedAt"));
+        assert!(!edit_query.contains("title") && !edit_query.contains("body") && !edit_query.contains("diff"));
+        let edit_receipts=list_decisions(&store,&issue_source.id,10).unwrap();
+        assert_eq!(edit_receipts.len(),1);
+        assert_eq!(edit_receipts[0].event_kind,"issues.edited");
+        assert_eq!(edit_receipts[0].actor,"trusted-editor");
+        let mut edit_replay_calls=Vec::new();
+        let edit_replay=manual_fetch_with_cli(&store,&issue_source.id,"issue:42",
+            fake_cli(&edit_payload,&mut edit_replay_calls,true)).unwrap();
+        assert!(edit_replay.duplicate);
+        assert_eq!(list_decisions(&store,&issue_source.id,10).unwrap().len(),1);
+
+        let check_payload=check_run_payload("test/fixture","trusted-checker",9876,42);
+        let mut check_calls=Vec::new();
+        let completed=manual_fetch_with_cli(&store,&check_source.id,"pull:42",
+            fake_cli(&check_payload,&mut check_calls,true)).unwrap();
+        assert_eq!(completed.decision,"observed_permitted");
+        assert_eq!(check_calls.len(),2);
+        let check_query=check_calls[1].join(" ");
+        assert!(check_query.contains("checkSuites") && check_query.contains("checkRuns"));
+        assert!(!check_query.contains("title") && !check_query.contains("body") && !check_query.contains("conclusion"));
+        let check_receipts=list_decisions(&store,&check_source.id,10).unwrap();
+        assert_eq!(check_receipts.len(),1);
+        assert_eq!(check_receipts[0].event_kind,"check_run.completed");
+        assert_eq!(check_receipts[0].actor,"trusted-checker");
+        let mut check_replay_calls=Vec::new();
+        let check_replay=manual_fetch_with_cli(&store,&check_source.id,"pull:42",
+            fake_cli(&check_payload,&mut check_replay_calls,true)).unwrap();
+        assert!(check_replay.duplicate);
+        assert_eq!(list_decisions(&store,&check_source.id,10).unwrap().len(),1);
+
+        let wrong_actor_payload=check_run_payload("test/fixture","trusted-checker",9877,43);
+        let mut denied_calls=Vec::new();
+        let filtered=manual_fetch_with_cli(&store,&denied_source.id,"pull:43",
+            fake_cli(&wrong_actor_payload,&mut denied_calls,true)).unwrap();
+        assert_eq!(filtered.decision,"ignored_filter");
+        let denied_receipts=list_decisions(&store,&denied_source.id,10).unwrap();
+        assert_eq!(denied_receipts.len(),1);
+        assert_eq!(denied_receipts[0].actor,"trusted-checker");
+
+        let ticket_count_after:i64=store.db.query_row("SELECT COUNT(*) FROM sa_tickets",[],|row|row.get(0)).unwrap();
+        let effects_after:i64=store.db.query_row("SELECT COUNT(*) FROM sa_effect_receipts",[],|row|row.get(0)).unwrap();
+        assert_eq!(ticket_count_after,ticket_count_before,"Observe must not create or launch Tickets");
+        assert_eq!(effects_after,effects_before,"Observe must not dispatch or record external effects");
+    }
+
+    #[test]
+    fn off_unlinked_or_revoked_sources_never_call_or_commit_github_metadata() {
+        let (store,_)=fixture();
+        insert_manual_ticket(&store,"off-ticket","orch");
+        let off=create_source(&store,"orch","test/fixture","trusted-bot","issues.opened").unwrap();
+        link_thread(&store,&off.id,"off-ticket","issue:42").unwrap();
+        let payload=issue_payload("test/fixture","trusted-bot",4200,42);
+        let mut calls=Vec::new();
+        let result=manual_fetch_with_cli(&store,&off.id,"issue:42",fake_cli(&payload,&mut calls,true));
+        assert!(result.is_err());
+        assert!(calls.is_empty(),"Off must not invoke even the local gh auth check");
+
+        let source=set_mode(&store,&off.id,off.policy_revision,"observe").unwrap();
+        let permit=prepare_fetch(&store,&source.id,"issue:42").unwrap();
+        let turned_off=set_mode(&store,&source.id,source.policy_revision,"off").unwrap();
+        let fetched=crate::github::ObserveEvent { repository:"test/fixture".into(),
+            actor:"trusted-bot".into(),event_kind:"issues.opened".into(),subject_key:"issue:42".into(),
+            delivery_id:"gh-issues-opened-4200".into(),sequence:4200 };
+        assert!(record_fetched_event(&store,&permit,fetched).is_err(),"Off/revocation during the request wins");
+        assert_eq!(super::source(&store,&turned_off.id).unwrap().last_sequence,0);
+        assert!(list_decisions(&store,&turned_off.id,10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn github_actor_repository_and_event_allowlists_are_enforced() {
+        let (store,_)=fixture();
+        let source=linked_observe_source(&store);
+        let wrong_actor=issue_payload("test/fixture","outsider",4200,42);
+        let mut calls=Vec::new();
+        let decision=manual_fetch_with_cli(&store,&source.id,"issue:42",
+            fake_cli(&wrong_actor,&mut calls,true)).unwrap();
+        assert_eq!(decision.decision,"ignored_filter");
+        assert_eq!(calls.len(),2);
+
+        let wrong_repository=issue_payload("other/fixture","trusted-bot",4201,42);
+        let mut calls=Vec::new();
+        assert!(manual_fetch_with_cli(&store,&source.id,"issue:42",
+            fake_cli(&wrong_repository,&mut calls,true)).is_err());
+        assert_eq!(calls.len(),2);
+        assert_eq!(list_decisions(&store,&source.id,10).unwrap().len(),1,
+            "a mismatched repository is rejected without recording fetched metadata");
+        assert_eq!(super::source(&store,&source.id).unwrap().last_sequence,4200);
+        let mut disallowed=event("wrong-event-kind",&source,4202);
+        disallowed.event_kind="check_run.completed".into();
+        assert_eq!(observe(&store,&disallowed).unwrap().decision,"ignored_filter");
+        let wrong_thread=issue_payload("test/fixture","trusted-bot",4203,43);
+        let mut calls=Vec::new();
+        assert!(manual_fetch_with_cli(&store,&source.id,"issue:42",
+            fake_cli(&wrong_thread,&mut calls,true)).is_err());
+        assert_eq!(calls.len(),2,"the exact repository/thread request is bounded to one API read");
+        assert_eq!(super::source(&store,&source.id).unwrap().last_sequence,4202);
+    }
+
+    #[test]
+    fn github_auth_failure_is_closed_and_replays_gaps_and_reordering_are_safe() {
+        let (store,_)=fixture();
+        let source=linked_observe_source(&store);
+        let payload=issue_payload("test/fixture","trusted-bot",4200,42);
+        let mut calls=Vec::new();
+        assert!(manual_fetch_with_cli(&store,&source.id,"issue:42",
+            fake_cli(&payload,&mut calls,false)).is_err());
+        assert_eq!(calls,vec![vec!["auth","status","--hostname=github.com"]]);
+        assert_eq!(super::source(&store,&source.id).unwrap().last_sequence,0);
+
+        let mut calls=Vec::new();
+        let first=manual_fetch_with_cli(&store,&source.id,"issue:42",
+            fake_cli(&payload,&mut calls,true)).unwrap();
+        assert_eq!(first.decision,"observed_permitted");
+        let mut calls=Vec::new();
+        let replay=manual_fetch_with_cli(&store,&source.id,"issue:42",
+            fake_cli(&payload,&mut calls,true)).unwrap();
+        assert!(replay.duplicate);
+        assert_eq!(replay.decision,"observed_permitted");
+
+        let later=issue_payload("test/fixture","trusted-bot",4208,42);
+        let mut calls=Vec::new();
+        assert_eq!(manual_fetch_with_cli(&store,&source.id,"issue:42",
+            fake_cli(&later,&mut calls,true)).unwrap().decision,"observed_permitted");
+        let reordered=issue_payload("test/fixture","trusted-bot",4204,42);
+        let mut calls=Vec::new();
+        assert_eq!(manual_fetch_with_cli(&store,&source.id,"issue:42",
+            fake_cli(&reordered,&mut calls,true)).unwrap().decision,"ignored_stale");
+        assert_eq!(super::source(&store,&source.id).unwrap().last_sequence,4208);
+        assert_eq!(list_decisions(&store,&source.id,10).unwrap().len(),3);
+        let tickets:i64=store.db.query_row("SELECT COUNT(*) FROM sa_tickets",[],|row|row.get(0)).unwrap();
+        assert_eq!(tickets,1,"fetches never create a Ticket");
     }
 
     #[test]

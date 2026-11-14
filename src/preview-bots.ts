@@ -113,6 +113,22 @@ async function lastMessage(host: PreviewBotsHost, sessionId: string): Promise<Bo
   return { role: latest.role as 'user' | 'assistant', text: [...line].length > 160 ? [...line].slice(0, 160).join('') + '…' : line, at: latest.createdAt ?? latest.created_at ?? Date.now() };
 }
 
+function createBot(host: PreviewBotsHost, input: BotInput, projectId?: string): Bot {
+  const normalized = validate(input);
+  const id = crypto.randomUUID(), now = Date.now();
+  const bot: Bot = { ...normalized, soul: normalized.soul ?? '', skills: [], mcp: [], id,
+    projectId: projectId ?? host.addProject(normalized.name).id, paused: false, memoryVersion: 0,
+    notifyChannelId: null, notifyThread: null,
+    nextHeartbeatAt: normalized.heartbeatMinutes ? now + normalized.heartbeatMinutes * MINUTE : null,
+    createdAt: now, updatedAt: now };
+  const entry: Store = { bot, memories: [], schedules: [], channels: [], pairings: [], threads: [], rules: [],
+    activity: [], freshContextEachMessage: false, includeSharedChannelHistory: true };
+  log(entry, 'created', `Created ${bot.name}`);
+  bots.set(id, entry);
+  host.emit('bots-changed', null);
+  return structuredClone(bot);
+}
+
 const params = typeof location === 'undefined' ? new URLSearchParams() : new URLSearchParams(location.search);
 let sampled = false;
 let sampleChannelSeeded = false;
@@ -125,8 +141,12 @@ export const previewBotBusy = (sessionId: string): boolean => sampleBusy.has(ses
 async function seedSamples(host: PreviewBotsHost): Promise<void> {
   if (sampled || params.get('bots') !== 'sample') return;
   sampled = true;
-  const base = { instructions: 'Sample bot.', goals: '', provider: 'claude', model: 'sonnet', mode: 'ask', heartbeatMinutes: 0 };
-  const make = (name: string, role: string, avatar: string, profile: Partial<BotInput> = {}) => invokeBots<Bot>('bot_create', { input: { ...base, name, role, avatar, ...profile } }, host);
+  const base: Pick<BotInput, 'instructions' | 'goals' | 'provider' | 'model' | 'mode' | 'heartbeatMinutes'> = {
+    instructions: 'Sample bot.', goals: '', provider: 'claude', model: 'sonnet', mode: 'ask', heartbeatMinutes: 0,
+  };
+  const sampleProjectId = host.addProject('Sample bots').id;
+  const make = (name: string, role: string, avatar: string, profile: Partial<BotInput> = {}) =>
+    createBot(host, { ...base, name, role, avatar, ...profile }, sampleProjectId);
   const [waiting, working, limited, paused] = await Promise.all([make('Scout', 'Research', 'panda:5'), make('Writer', 'Drafts posts', 'panda:4'), make('Ledger', 'Finance', 'panda:7', { color: '#14b8a6', reasoningEffort: 'high', backupModels: [{ provider: 'codex', model: 'gpt-5' }], fallbackMode: 'auto', notify: false, whileWorking: 'steer', showPlan: true }), make('Dozy', 'Night shift', 'panda:8')]);
   if (!sampleChannelSeeded) {
     sampleChannelSeeded = true;
@@ -239,15 +259,7 @@ export async function invokeBots<T>(command: string, args: Record<string, any>, 
       failoverAsks.delete(sessionId); result = null; changed(); break;
     }
     case 'bot_detail': result = detail(store(args.botId)); break;
-    case 'bot_create': {
-      const input = validate(args.input);
-      const id = crypto.randomUUID(), now = Date.now();
-      const project = host.addProject(input.name);
-      const bot: Bot = { ...input, soul: input.soul ?? '', skills: [], mcp: [], id, projectId: project.id, paused: false, memoryVersion: 0, notifyChannelId: null, notifyThread: null, nextHeartbeatAt: input.heartbeatMinutes ? now + input.heartbeatMinutes * MINUTE : null, createdAt: now, updatedAt: now };
-      const entry: Store = { bot, memories: [], schedules: [], channels: [], pairings: [], threads: [], rules: [], activity: [], freshContextEachMessage: false, includeSharedChannelHistory: true };
-      log(entry, 'created', `Created ${bot.name}`);
-      bots.set(id, entry); result = structuredClone(bot); changed(); break;
-    }
+    case 'bot_create': result = createBot(host, args.input); break;
     case 'bot_update': {
       const entry = store(args.botId); const input = validate(args.input);
       entry.bot = { ...entry.bot, ...input, memoryVersion: entry.bot.memoryVersion + 1, updatedAt: Date.now() };

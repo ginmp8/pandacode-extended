@@ -8,8 +8,11 @@ pub(crate) mod manifest;
 pub(crate) mod events;
 pub(crate) mod council_adapter;
 pub mod effects;
-use rusqlite::{params, OptionalExtension};
+pub(crate) mod write_grants;
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use std::collections::HashSet;
 use tauri::{Manager, State};
 
 /// A desktop window is not itself a task mandate. It is nevertheless the
@@ -33,6 +36,9 @@ pub(crate) const CHANNEL: &str = "superagent";
 /// headroom for native task metadata, read-only instructions and coordinator
 /// evidence; never persist an objective that is silently truncated at dispatch.
 const MAX_OBJECTIVE_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_WORKERS_PER_TEAM: usize = 16;
+pub(crate) const MAX_REVIEWERS_PER_TEAM: usize = 8;
+const TEAM_SNAPSHOT_VERSION: u32 = 3;
 
 /// A native ceiling for each provider attempt, independent of the longer
 /// ticket mandate lifetime. A late provider result must never become newly
@@ -149,6 +155,144 @@ CREATE TABLE IF NOT EXISTS sa_audit (
 CREATE INDEX IF NOT EXISTS sa_audit_ticket ON sa_audit(ticket_id,id);
 "#;
 
+/// Versioned Team membership and immutable per-Ticket role snapshots. The
+/// legacy coordinator/worker columns remain as projections for old callers.
+pub(crate) const TEAM_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS sa_team_versions (
+  orchestration_id TEXT NOT NULL REFERENCES sa_orchestrations(id) ON DELETE CASCADE,
+  version INTEGER NOT NULL CHECK(version > 0),
+  name TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  snapshot_json TEXT NOT NULL CHECK(json_valid(snapshot_json)),
+  snapshot_sha256 TEXT NOT NULL CHECK(length(snapshot_sha256)=64),
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY(orchestration_id,version)
+);
+CREATE TABLE IF NOT EXISTS sa_team_version_members (
+  orchestration_id TEXT NOT NULL,
+  team_version INTEGER NOT NULL,
+  role TEXT NOT NULL CHECK(role IN ('coordinator','worker','reviewer')),
+  ordinal INTEGER NOT NULL CHECK(ordinal>=0 AND
+    ((role='coordinator' AND ordinal=0) OR
+     (role='worker' AND ordinal<16) OR
+     (role='reviewer' AND ordinal<8))),
+  bot_id TEXT NOT NULL,
+  PRIMARY KEY(orchestration_id,team_version,role,ordinal),
+  UNIQUE(orchestration_id,team_version,bot_id),
+  FOREIGN KEY(orchestration_id,team_version)
+    REFERENCES sa_team_versions(orchestration_id,version) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS sa_ticket_team_snapshots (
+  ticket_id TEXT PRIMARY KEY REFERENCES sa_tickets(id) ON DELETE RESTRICT,
+  orchestration_id TEXT NOT NULL,
+  team_version INTEGER NOT NULL CHECK(team_version>=0),
+  policy_revision INTEGER NOT NULL,
+  snapshot_json TEXT NOT NULL CHECK(json_valid(snapshot_json)),
+  snapshot_sha256 TEXT NOT NULL CHECK(length(snapshot_sha256)=64),
+  source_kind TEXT NOT NULL CHECK(source_kind IN ('native','legacy-backfill')),
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sa_ticket_team_version
+  ON sa_ticket_team_snapshots(orchestration_id,team_version,ticket_id);
+CREATE TRIGGER IF NOT EXISTS sa_team_versions_immutable
+ BEFORE UPDATE ON sa_team_versions
+ BEGIN SELECT RAISE(ABORT,'SuperAgent Team versions are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS sa_team_version_members_immutable
+ BEFORE UPDATE ON sa_team_version_members
+ BEGIN SELECT RAISE(ABORT,'SuperAgent Team memberships are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS sa_ticket_team_snapshots_immutable
+ BEFORE UPDATE ON sa_ticket_team_snapshots
+ BEGIN SELECT RAISE(ABORT,'SuperAgent Ticket Team snapshots are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS sa_ticket_team_snapshots_no_delete
+ BEFORE DELETE ON sa_ticket_team_snapshots
+ BEGIN SELECT RAISE(ABORT,'SuperAgent Ticket Team snapshots are durable'); END;
+"#;
+
+/// Immutable Council request identity for one admitted worker assignment. The
+/// worker artifact and workspace snapshot are filled only after the worker finishes.
+pub(crate) const COUNCIL_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS sa_council_requests (
+  id TEXT PRIMARY KEY,
+  ticket_id TEXT NOT NULL REFERENCES sa_tickets(id) ON DELETE RESTRICT,
+  assignment_id TEXT NOT NULL UNIQUE REFERENCES sa_assignments(id) ON DELETE RESTRICT,
+  worker_session_id TEXT NOT NULL,
+  admitted_ticket_revision INTEGER NOT NULL,
+  ticket_revision INTEGER NOT NULL,
+  policy_revision INTEGER NOT NULL,
+  cycle_id TEXT NOT NULL UNIQUE,
+  cycle_started_at INTEGER NOT NULL,
+  generation INTEGER NOT NULL CHECK(generation > 0),
+  reviewer_policy_json TEXT NOT NULL CHECK(json_valid(reviewer_policy_json)),
+  reviewer_policy_sha256 TEXT NOT NULL CHECK(length(reviewer_policy_sha256)=64),
+  council_config_json TEXT NOT NULL CHECK(json_valid(council_config_json)),
+  council_config_sha256 TEXT NOT NULL CHECK(length(council_config_sha256)=64),
+  artifact_sha256 TEXT,
+  workspace_sha256 TEXT CHECK(workspace_sha256 IS NULL OR length(workspace_sha256)=64),
+  workspace_snapshot_id TEXT,
+  workspace_snapshot_sha256 TEXT CHECK(workspace_snapshot_sha256 IS NULL OR length(workspace_snapshot_sha256)=64),
+  bound_at INTEGER,
+  native_session_id TEXT UNIQUE,
+  state TEXT NOT NULL CHECK(state IN ('admitted','bound','starting','dispatched','passed','human_accepted','blocked')),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sa_council_request_ticket
+  ON sa_council_requests(ticket_id,created_at DESC);
+CREATE TABLE IF NOT EXISTS sa_council_finalizations (
+  id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL UNIQUE REFERENCES sa_council_requests(id) ON DELETE RESTRICT,
+  ticket_id TEXT NOT NULL REFERENCES sa_tickets(id) ON DELETE RESTRICT,
+  assignment_id TEXT NOT NULL REFERENCES sa_assignments(id) ON DELETE RESTRICT,
+  worker_session_id TEXT NOT NULL,
+  ticket_revision INTEGER NOT NULL,
+  policy_revision INTEGER NOT NULL,
+  cycle_id TEXT NOT NULL UNIQUE,
+  cycle_started_at INTEGER NOT NULL,
+  generation INTEGER NOT NULL CHECK(generation > 0),
+  native_session_id TEXT NOT NULL,
+  artifact_sha256 TEXT NOT NULL CHECK(length(artifact_sha256)=64),
+  workspace_sha256 TEXT CHECK(workspace_sha256 IS NULL OR length(workspace_sha256)=64),
+  workspace_snapshot_id TEXT,
+  workspace_snapshot_sha256 TEXT CHECK(workspace_snapshot_sha256 IS NULL OR length(workspace_snapshot_sha256)=64),
+  verdict TEXT NOT NULL CHECK(verdict IN ('passed','human_accepted')),
+  actor TEXT NOT NULL,
+  reason TEXT,
+  created_at INTEGER NOT NULL,
+  UNIQUE(ticket_id,assignment_id,worker_session_id,ticket_revision,policy_revision,
+    cycle_id,cycle_started_at,generation,native_session_id,artifact_sha256)
+);
+CREATE INDEX IF NOT EXISTS sa_council_finalization_ticket
+  ON sa_council_finalizations(ticket_id,created_at DESC);
+CREATE TRIGGER IF NOT EXISTS sa_council_request_identity_immutable
+ BEFORE UPDATE ON sa_council_requests
+ WHEN NEW.ticket_id IS NOT OLD.ticket_id
+   OR NEW.assignment_id IS NOT OLD.assignment_id
+   OR NEW.worker_session_id IS NOT OLD.worker_session_id
+   OR NEW.admitted_ticket_revision IS NOT OLD.admitted_ticket_revision
+   OR NEW.policy_revision IS NOT OLD.policy_revision
+   OR NEW.cycle_id IS NOT OLD.cycle_id
+   OR NEW.cycle_started_at IS NOT OLD.cycle_started_at
+   OR NEW.generation IS NOT OLD.generation
+   OR NEW.reviewer_policy_json IS NOT OLD.reviewer_policy_json
+   OR NEW.reviewer_policy_sha256 IS NOT OLD.reviewer_policy_sha256
+   OR NEW.council_config_json IS NOT OLD.council_config_json
+   OR NEW.council_config_sha256 IS NOT OLD.council_config_sha256
+   OR (OLD.state<>'admitted' AND NEW.ticket_revision IS NOT OLD.ticket_revision)
+   OR (OLD.artifact_sha256 IS NOT NULL AND NEW.artifact_sha256 IS NOT OLD.artifact_sha256)
+   OR (OLD.workspace_sha256 IS NOT NULL AND NEW.workspace_sha256 IS NOT OLD.workspace_sha256)
+   OR (OLD.workspace_snapshot_id IS NOT NULL AND NEW.workspace_snapshot_id IS NOT OLD.workspace_snapshot_id)
+   OR (OLD.workspace_snapshot_sha256 IS NOT NULL AND NEW.workspace_snapshot_sha256 IS NOT OLD.workspace_snapshot_sha256)
+   OR (OLD.bound_at IS NOT NULL AND NEW.bound_at IS NOT OLD.bound_at)
+   OR (OLD.native_session_id IS NOT NULL AND NEW.native_session_id IS NOT OLD.native_session_id)
+ BEGIN SELECT RAISE(ABORT,'SuperAgent Council request identity is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS sa_council_finalization_immutable
+ BEFORE UPDATE ON sa_council_finalizations
+ BEGIN SELECT RAISE(ABORT,'SuperAgent Council finalizations are immutable'); END;
+CREATE TRIGGER IF NOT EXISTS sa_council_finalization_no_delete
+ BEFORE DELETE ON sa_council_finalizations
+ BEGIN SELECT RAISE(ABORT,'SuperAgent Council finalizations are durable'); END;
+"#;
+
 /// Cross-bot resource admission is a database invariant, not only an
 /// optimistic application check. Every active assignment with the same ticket
 /// project shares an exclusive lease; ordinary bots keep their existing behavior.
@@ -227,6 +371,33 @@ UPDATE sa_tickets SET state='interrupted',revision=revision+1,active_assignment_
 UPDATE sa_mandates SET revoked=1 WHERE revoked=0 AND ticket_id IN (
  SELECT id FROM sa_tickets WHERE state='interrupted'
 );
+-- A `starting` request may have committed its frozen snapshot before the
+-- native team/session ID was linked. Keep that one narrow transition pending
+-- until the app-level Council reconciler can either bind its exact saved seats
+-- or block it without replaying a reviewer dispatch.
+INSERT INTO sa_audit(ticket_id,kind,detail,at)
+ SELECT id,'council_interrupted','Required native review interrupted by restart; explicit recovery is required',
+ CAST(strftime('%s','now') AS INTEGER)*1000
+ FROM sa_tickets t WHERE state='waiting_review' AND NOT EXISTS (
+  SELECT 1 FROM sa_council_requests r WHERE r.ticket_id=t.id AND r.state='starting'
+ );
+UPDATE sa_mandates SET revoked=1 WHERE revoked=0 AND ticket_id IN (
+ SELECT t.id FROM sa_tickets t WHERE t.state='waiting_review' AND NOT EXISTS (
+  SELECT 1 FROM sa_council_requests r WHERE r.ticket_id=t.id AND r.state='starting'
+ )
+);
+UPDATE sa_council_requests SET state='blocked',updated_at=CAST(strftime('%s','now') AS INTEGER)*1000
+ WHERE (state IN ('admitted','bound','dispatched') AND ticket_id IN (
+   SELECT id FROM sa_tickets WHERE state IN ('waiting_review','interrupted','blocked','failed','stopped','inconclusive')
+  ))
+  OR (state='starting' AND ticket_id IN (
+   SELECT id FROM sa_tickets WHERE state IN ('interrupted','blocked','failed','stopped','inconclusive')
+  ));
+UPDATE sa_tickets SET state='blocked',active_assignment_id=NULL,revision=revision+1,
+ updated_at=CAST(strftime('%s','now') AS INTEGER)*1000
+ WHERE state='waiting_review' AND NOT EXISTS (
+  SELECT 1 FROM sa_council_requests r WHERE r.ticket_id=sa_tickets.id AND r.state='starting'
+ );
 ";
 
 #[derive(Debug, Clone, Deserialize)]
@@ -235,6 +406,104 @@ pub struct NewOrchestration {
     pub name: String,
     pub coordinator_bot_id: String,
     pub worker_bot_id: String,
+}
+
+/// Stable command-boundary input that accepts both the legacy one-worker
+/// shape and the versioned ordered role lists. The internal legacy type stays
+/// unchanged for native callers that still construct it directly.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct OrchestrationInput {
+    pub name: String,
+    pub coordinator_bot_id: String,
+    pub worker_bot_id: String,
+    #[serde(default)]
+    pub worker_bot_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub reviewer_bot_ids: Option<Vec<String>>,
+    /// Optional native Council completion gate. Missing on create means Off;
+    /// missing on update preserves the current Team policy.
+    #[serde(default)]
+    pub council_required: Option<bool>,
+}
+
+/// Validated legacy projection plus ordered worker/reviewer roles and the
+/// optional Council requirement carried by command input.
+type OrchestrationParts = (NewOrchestration, Vec<String>, Vec<String>, Option<bool>);
+
+impl OrchestrationInput {
+    fn into_parts(self) -> Result<OrchestrationParts> {
+        let worker_bot_ids = self.worker_bot_ids
+            .unwrap_or_else(|| vec![self.worker_bot_id.clone()]);
+        let reviewer_bot_ids = self.reviewer_bot_ids.unwrap_or_default();
+        if worker_bot_ids.first().map(String::as_str) != Some(self.worker_bot_id.as_str()) {
+            return Err("The legacy workerBotId must match the first ordered workerBotIds entry.".into());
+        }
+        valid_team_roles(&self.coordinator_bot_id, &worker_bot_ids, &reviewer_bot_ids)?;
+        Ok((NewOrchestration {
+            name: self.name,
+            coordinator_bot_id: self.coordinator_bot_id,
+            worker_bot_id: self.worker_bot_id,
+        }, worker_bot_ids, reviewer_bot_ids, self.council_required))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum TeamSnapshotProvenance {
+    Native,
+    LegacyCurrent,
+    #[default]
+    LegacyUnknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TeamSnapshot {
+    pub snapshot_version: u32,
+    /// Native snapshots are fully recorded. Legacy-current is the mutable row
+    /// observed during upgrade; legacy-unknown records only evidence that old
+    /// Tickets actually saved and is never an authority to dispatch.
+    #[serde(default)]
+    pub provenance: TeamSnapshotProvenance,
+    pub orchestration_id: String,
+    pub team_version: i64,
+    pub name: String,
+    pub project_id: String,
+    pub coordinator_bot_id: String,
+    pub worker_bot_ids: Vec<String>,
+    pub reviewer_bot_ids: Vec<String>,
+    pub policy: TeamPolicySnapshot,
+    pub roles: Vec<TeamRoleSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TeamPolicySnapshot {
+    pub policy_revision: i64,
+    pub autonomy: String,
+    pub max_concurrent_tasks: u8,
+    pub max_attempts_per_assignment: u8,
+    /// Reviewer memberships are descriptive only until a fresh native Council
+    /// adapter is bound to the Ticket.
+    pub council_enabled: bool,
+    /// A SuperAgent Ticket cannot complete without its own matching native
+    /// Council verdict. Older snapshots default to Off.
+    #[serde(default)]
+    pub council_required: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct TeamRoleSnapshot {
+    pub role: String,
+    pub ordinal: usize,
+    pub bot_id: String,
+    /// Effective, non-secret bot profile at this Team edit or Ticket admission.
+    /// Missing legacy bot rows remain represented by identity only and fail
+    /// closed when a new run is requested.
+    pub effective_config: Option<serde_json::Value>,
+    pub effective_config_sha256: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -247,6 +516,10 @@ pub struct Orchestration {
     pub project_id: String,
     pub enabled: bool,
     pub policy_revision: i64,
+    pub team_version: i64,
+    pub worker_bot_ids: Vec<String>,
+    pub reviewer_bot_ids: Vec<String>,
+    pub council_required: bool,
 }
 
 fn orchestration_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Orchestration> {
@@ -254,7 +527,459 @@ fn orchestration_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Orchestration>
         id: row.get(0)?, name: row.get(1)?, coordinator_bot_id: row.get(2)?,
         worker_bot_id: row.get(3)?, project_id: row.get(4)?,
         enabled: row.get::<_, i64>(5)? != 0, policy_revision: row.get(6)?,
+        team_version: 0, worker_bot_ids: Vec::new(), reviewer_bot_ids: Vec::new(),
+        council_required: false,
     })
+}
+
+fn valid_team_roles(coordinator: &str, workers: &[String], reviewers: &[String]) -> Result<()> {
+    if coordinator.trim().is_empty() || workers.is_empty()
+        || workers.len() > MAX_WORKERS_PER_TEAM
+        || reviewers.len() > MAX_REVIEWERS_PER_TEAM
+        || workers.iter().any(|id| id.trim().is_empty())
+        || reviewers.iter().any(|id| id.trim().is_empty())
+    {
+        return Err(format!(
+            "A Team needs one coordinator, 1–{MAX_WORKERS_PER_TEAM} workers and at most {MAX_REVIEWERS_PER_TEAM} reviewers."
+        ));
+    }
+    let mut seen = HashSet::new();
+    for id in std::iter::once(coordinator)
+        .chain(workers.iter().map(String::as_str))
+        .chain(reviewers.iter().map(String::as_str))
+    {
+        if !seen.insert(id) {
+            return Err("A bot can have only one role in a Team.".into());
+        }
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn effective_role_snapshot(
+    db: &Connection, role: &str, ordinal: usize, bot_id: &str,
+) -> Result<TeamRoleSnapshot> {
+    type Raw = (
+        String,String,String,String,String,String,String,String,String,String,
+        String,String,String,i64,String,String,i64,
+    );
+    let raw: Option<Raw> = db.query_row(
+        "SELECT name,project_id,provider,model,mode,role,instructions,goals,soul,
+                reasoning_effort,backup_models,fallback_mode,while_working,show_plan,
+                skills,mcp,memory_version
+         FROM bots WHERE id=?1",
+        [bot_id],
+        |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,
+            r.get(6)?,r.get(7)?,r.get(8)?,r.get(9)?,r.get(10)?,r.get(11)?,
+            r.get(12)?,r.get(13)?,r.get(14)?,r.get(15)?,r.get(16)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let effective_config = raw.map(|(
+        name,project_id,provider,model,mode,bot_role,instructions,goals,soul,
+        reasoning_effort,backup_models,fallback_mode,while_working,show_plan,
+        skills,mcp,memory_version,
+    )| -> Result<serde_json::Value> {
+        Ok(serde_json::json!({
+            "name": name,
+            "projectId": project_id,
+            "provider": provider,
+            "model": model,
+            "mode": mode,
+            "role": bot_role,
+            "instructions": instructions,
+            "goals": goals,
+            "soul": soul,
+            "reasoningEffort": reasoning_effort,
+            "backupModels": serde_json::from_str::<serde_json::Value>(&backup_models)
+                .map_err(|e| e.to_string())?,
+            "fallbackMode": fallback_mode,
+            "whileWorking": while_working,
+            "showPlan": show_plan != 0,
+            "skills": serde_json::from_str::<Vec<String>>(&skills).map_err(|e| e.to_string())?,
+            "mcp": serde_json::from_str::<Vec<String>>(&mcp).map_err(|e| e.to_string())?,
+            "memoryVersion": memory_version,
+        }))
+    }).transpose()?;
+    let effective_config_sha256 = effective_config.as_ref().map(|profile| {
+        serde_json::to_vec(profile).map(|bytes| sha256_hex(&bytes)).map_err(|e| e.to_string())
+    }).transpose()?;
+    Ok(TeamRoleSnapshot {
+        role: role.into(), ordinal, bot_id: bot_id.into(),
+        effective_config, effective_config_sha256,
+    })
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Each argument is a distinct audited snapshot field; sibling modules and manifest import construct it positionally"
+)]
+fn make_team_snapshot(
+    db: &Connection,
+    orchestration_id: &str,
+    team_version: i64,
+    name: &str,
+    project_id: &str,
+    policy_revision: i64,
+    coordinator_bot_id: &str,
+    worker_bot_ids: &[String],
+    reviewer_bot_ids: &[String],
+    council_required: bool,
+    provenance: TeamSnapshotProvenance,
+) -> Result<TeamSnapshot> {
+    valid_team_roles(coordinator_bot_id, worker_bot_ids, reviewer_bot_ids)?;
+    let mut roles = Vec::with_capacity(1 + worker_bot_ids.len() + reviewer_bot_ids.len());
+    roles.push(effective_role_snapshot(db, "coordinator", 0, coordinator_bot_id)?);
+    for (ordinal, bot_id) in worker_bot_ids.iter().enumerate() {
+        roles.push(effective_role_snapshot(db, "worker", ordinal, bot_id)?);
+    }
+    for (ordinal, bot_id) in reviewer_bot_ids.iter().enumerate() {
+        roles.push(effective_role_snapshot(db, "reviewer", ordinal, bot_id)?);
+    }
+    Ok(TeamSnapshot {
+        snapshot_version: TEAM_SNAPSHOT_VERSION,
+        provenance,
+        orchestration_id: orchestration_id.into(),
+        team_version,
+        name: name.into(),
+        project_id: project_id.into(),
+        coordinator_bot_id: coordinator_bot_id.into(),
+        worker_bot_ids: worker_bot_ids.to_vec(),
+        reviewer_bot_ids: reviewer_bot_ids.to_vec(),
+        policy: TeamPolicySnapshot {
+            policy_revision,
+            autonomy: "off".into(),
+            max_concurrent_tasks: 1,
+            max_attempts_per_assignment: 2,
+            council_enabled: council_required,
+            council_required,
+        },
+        roles,
+    })
+}
+
+/// Pre-v48 Tickets only recorded their selected worker, project, and policy
+/// revision. Keep that evidence, while making every unrecorded role/profile
+/// explicit and unusable as new dispatch authority.
+fn legacy_unknown_team_snapshot(
+    orchestration_id: &str,
+    team_version: i64,
+    worker_bot_id: &str,
+    project_id: &str,
+    policy_revision: i64,
+) -> Result<TeamSnapshot> {
+    let mut coordinator_bot_id = format!("legacy-unknown-coordinator:{orchestration_id}:{team_version}");
+    while coordinator_bot_id == worker_bot_id {
+        coordinator_bot_id.push('_');
+    }
+    let worker_bot_ids = vec![worker_bot_id.to_string()];
+    let reviewer_bot_ids = Vec::new();
+    valid_team_roles(&coordinator_bot_id, &worker_bot_ids, &reviewer_bot_ids)?;
+    let roles = vec![
+        TeamRoleSnapshot {
+            role: "coordinator".into(), ordinal: 0, bot_id: coordinator_bot_id.clone(),
+            effective_config: None, effective_config_sha256: None,
+        },
+        TeamRoleSnapshot {
+            role: "worker".into(), ordinal: 0, bot_id: worker_bot_id.into(),
+            effective_config: None, effective_config_sha256: None,
+        },
+    ];
+    Ok(TeamSnapshot {
+        snapshot_version: TEAM_SNAPSHOT_VERSION,
+        provenance: TeamSnapshotProvenance::LegacyUnknown,
+        orchestration_id: orchestration_id.into(),
+        team_version,
+        name: "Legacy Team (historical configuration unknown)".into(),
+        project_id: project_id.into(),
+        coordinator_bot_id,
+        worker_bot_ids,
+        reviewer_bot_ids,
+        policy: TeamPolicySnapshot {
+            policy_revision,
+            autonomy: "off".into(),
+            max_concurrent_tasks: 1,
+            max_attempts_per_assignment: 0,
+            council_enabled: false,
+            council_required: false,
+        },
+        roles,
+    })
+}
+
+fn encoded_snapshot(snapshot: &TeamSnapshot) -> Result<(String,String)> {
+    let bytes = serde_json::to_vec(snapshot).map_err(|e| e.to_string())?;
+    Ok((String::from_utf8(bytes.clone()).map_err(|e| e.to_string())?, sha256_hex(&bytes)))
+}
+
+fn insert_team_version(db: &Connection, snapshot: &TeamSnapshot) -> Result<()> {
+    let (snapshot_json, snapshot_sha256) = encoded_snapshot(snapshot)?;
+    db.execute(
+        "INSERT INTO sa_team_versions(orchestration_id,version,name,project_id,
+            snapshot_json,snapshot_sha256,created_at) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![snapshot.orchestration_id,snapshot.team_version,snapshot.name,
+            snapshot.project_id,snapshot_json,snapshot_sha256,storage::now()],
+    ).map_err(|e| e.to_string())?;
+    let mut insert_member = db.prepare(
+        "INSERT INTO sa_team_version_members(orchestration_id,team_version,role,ordinal,bot_id)
+         VALUES(?1,?2,?3,?4,?5)",
+    ).map_err(|e| e.to_string())?;
+    insert_member.execute(params![snapshot.orchestration_id,snapshot.team_version,"coordinator",0,
+        snapshot.coordinator_bot_id]).map_err(|e| e.to_string())?;
+    for (ordinal, bot_id) in snapshot.worker_bot_ids.iter().enumerate() {
+        let ordinal = i64::try_from(ordinal)
+            .map_err(|_| "Team version worker ordinal exceeds SQLite's integer range.")?;
+        insert_member.execute(params![snapshot.orchestration_id,snapshot.team_version,"worker",ordinal,bot_id])
+            .map_err(|e| e.to_string())?;
+    }
+    for (ordinal, bot_id) in snapshot.reviewer_bot_ids.iter().enumerate() {
+        let ordinal = i64::try_from(ordinal)
+            .map_err(|_| "Team version reviewer ordinal exceeds SQLite's integer range.")?;
+        insert_member.execute(params![snapshot.orchestration_id,snapshot.team_version,"reviewer",ordinal,bot_id])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn insert_ticket_team_snapshot(
+    db: &Connection, ticket_id: &str, snapshot: &TeamSnapshot, source_kind: &str,
+) -> Result<()> {
+    let (snapshot_json, snapshot_sha256) = encoded_snapshot(snapshot)?;
+    db.execute(
+        "INSERT INTO sa_ticket_team_snapshots(ticket_id,orchestration_id,team_version,
+            policy_revision,snapshot_json,snapshot_sha256,source_kind,created_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+        params![ticket_id,snapshot.orchestration_id,snapshot.team_version,
+            snapshot.policy.policy_revision,snapshot_json,snapshot_sha256,source_kind,storage::now()],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Forward-migration backfill for legacy one-coordinator/one-worker rows.
+/// Each old Ticket gets a version built from its saved worker/project binding;
+/// the current mutable orchestration row is stored afterward as a separate
+/// future-facing version. Schema migration runs this inside one transaction.
+pub(crate) fn migrate_team_versions(db: &Connection) -> Result<()> {
+    let configurations = {
+        let mut stmt = db.prepare(
+            "SELECT id,name,coordinator_bot_id,worker_bot_id,project_id,policy_revision
+             FROM sa_orchestrations ORDER BY created_at,id",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |r| Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+            r.get::<_,String>(2)?,r.get::<_,String>(3)?,r.get::<_,String>(4)?,r.get::<_,i64>(5)?)))
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+        rows
+    };
+    for (id,name,coordinator,worker,project,policy_revision) in configurations {
+        let has_versions: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_team_versions WHERE orchestration_id=?1)",
+            [&id], |r| r.get(0),
+        ).map_err(|e| e.to_string())?;
+        if has_versions {
+            let missing_snapshot: bool = db.query_row(
+                "SELECT EXISTS(
+                    SELECT 1 FROM sa_tickets t
+                    LEFT JOIN sa_ticket_team_snapshots s ON s.ticket_id=t.id
+                    WHERE t.orchestration_id=?1 AND s.ticket_id IS NULL
+                 )",
+                [&id], |r| r.get(0),
+            ).map_err(|e| e.to_string())?;
+            if missing_snapshot {
+                return Err("Existing Team versions have an incomplete Ticket snapshot backfill.".into());
+            }
+            continue;
+        }
+        let orphan_snapshot: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_ticket_team_snapshots WHERE orchestration_id=?1)",
+            [&id], |r| r.get(0),
+        ).map_err(|e| e.to_string())?;
+        if orphan_snapshot {
+            return Err("Ticket snapshots exist without their immutable Team versions.".into());
+        }
+        let tickets = {
+            let mut stmt = db.prepare(
+                "SELECT id,worker_bot_id,project_id,policy_revision
+                 FROM sa_tickets WHERE orchestration_id=?1 ORDER BY created_at,id",
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([&id], |r| Ok((
+                r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+                r.get::<_,String>(2)?,r.get::<_,i64>(3)?,
+            )))
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+            rows
+        };
+        let mut team_version = 1_i64;
+        for (ticket_id,worker_id,project_id,ticket_policy_revision) in tickets {
+            let snapshot = legacy_unknown_team_snapshot(
+                &id,team_version,&worker_id,&project_id,ticket_policy_revision,
+            )?;
+            insert_team_version(db,&snapshot)?;
+            insert_ticket_team_snapshot(db,&ticket_id,&snapshot,"legacy-backfill")?;
+            team_version = team_version.checked_add(1)
+                .ok_or("Legacy Team version counter overflowed.")?;
+        }
+
+        // Keep configuration() and future admissions pinned to the mutable
+        // orchestration row as it exists now, never to a historical Ticket.
+        let current = make_team_snapshot(
+            db,&id,team_version,&name,&project,policy_revision,&coordinator,&[worker],&[],
+            false,
+            TeamSnapshotProvenance::LegacyCurrent,
+        )?;
+        insert_team_version(db,&current)?;
+    }
+
+    let unbackfilled_ticket: bool = db.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sa_tickets t
+            LEFT JOIN sa_ticket_team_snapshots s ON s.ticket_id=t.id
+            WHERE s.ticket_id IS NULL
+         )",
+        [], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    if unbackfilled_ticket {
+        return Err("A legacy Ticket has no orchestration for its Team snapshot.".into());
+    }
+    let ticket_ids = {
+        let mut stmt = db.prepare("SELECT ticket_id FROM sa_ticket_team_snapshots ORDER BY ticket_id")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |r| r.get::<_,String>(0))
+            .map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+        rows
+    };
+    for ticket_id in ticket_ids {
+        load_ticket_team_snapshot(db,&ticket_id)?;
+    }
+    Ok(())
+}
+
+fn load_team_version_snapshot(db: &Connection, orchestration_id: &str, version: i64) -> Result<TeamSnapshot> {
+    let (json, expected_hash): (String,String) = db.query_row(
+        "SELECT snapshot_json,snapshot_sha256 FROM sa_team_versions
+         WHERE orchestration_id=?1 AND version=?2",
+        params![orchestration_id,version], |r| Ok((r.get(0)?,r.get(1)?)),
+    ).map_err(|_| "Team version snapshot is missing.")?;
+    if sha256_hex(json.as_bytes()) != expected_hash {
+        return Err("Team version snapshot failed its integrity check.".into());
+    }
+    let snapshot: TeamSnapshot = serde_json::from_str(&json)
+        .map_err(|_| "Team version snapshot is malformed.")?;
+    if snapshot.orchestration_id != orchestration_id || snapshot.team_version != version {
+        return Err("Team version snapshot identity does not match its database key.".into());
+    }
+    valid_team_roles(&snapshot.coordinator_bot_id,&snapshot.worker_bot_ids,&snapshot.reviewer_bot_ids)
+        .map_err(|_| "Team version snapshot has invalid role bounds or duplicate bot identities.")?;
+    let members = {
+        let mut stmt = db.prepare(
+            "SELECT role,ordinal,bot_id FROM sa_team_version_members
+             WHERE orchestration_id=?1 AND team_version=?2
+             ORDER BY CASE role WHEN 'coordinator' THEN 0 WHEN 'worker' THEN 1 ELSE 2 END,ordinal",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(params![orchestration_id,version], |r| Ok((
+            r.get::<_,String>(0)?,r.get::<_,i64>(1)?,r.get::<_,String>(2)?,
+        ))).map_err(|e| e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+        rows.into_iter().map(|(role,ordinal,bot_id)| {
+            let ordinal = usize::try_from(ordinal)
+                .map_err(|_| "Team version membership ordinal is outside the supported range.")?;
+            Ok((role,ordinal,bot_id))
+        }).collect::<Result<Vec<_>>>()?
+    };
+    let expected = snapshot.roles.iter().map(|role| (
+        role.role.clone(),role.ordinal,role.bot_id.clone(),
+    )).collect::<Vec<_>>();
+    if members != expected {
+        return Err("Team version memberships disagree with their immutable snapshot.".into());
+    }
+    Ok(snapshot)
+}
+
+fn load_ticket_team_snapshot(db: &Connection, ticket_id: &str) -> Result<TeamSnapshot> {
+    let (orchestration_id,team_version,policy_revision,json,expected_hash,source_kind):
+        (String,i64,i64,String,String,String) = db.query_row(
+        "SELECT orchestration_id,team_version,policy_revision,snapshot_json,snapshot_sha256,source_kind
+         FROM sa_ticket_team_snapshots WHERE ticket_id=?1",
+        [ticket_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
+    ).map_err(|_| "Ticket Team snapshot is missing.")?;
+    if sha256_hex(json.as_bytes()) != expected_hash {
+        return Err("Ticket Team snapshot failed its integrity check.".into());
+    }
+    let snapshot: TeamSnapshot = serde_json::from_str(&json)
+        .map_err(|_| "Ticket Team snapshot is malformed.")?;
+    if snapshot.orchestration_id != orchestration_id
+        || snapshot.team_version != team_version
+        || snapshot.policy.policy_revision != policy_revision
+    {
+        return Err("Ticket Team snapshot identity or policy does not match its database key.".into());
+    }
+    let (ticket_orchestration_id,ticket_project_id,ticket_worker_bot_id,ticket_policy_revision):
+        (String,String,String,i64) = db.query_row(
+        "SELECT orchestration_id,project_id,worker_bot_id,policy_revision
+         FROM sa_tickets WHERE id=?1",
+        [ticket_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+    ).map_err(|_| "Ticket Team snapshot has no owning Ticket.")?;
+    if ticket_orchestration_id != orchestration_id
+        || snapshot.project_id != ticket_project_id
+        || snapshot.worker_bot_ids.first().map(String::as_str) != Some(ticket_worker_bot_id.as_str())
+        || ticket_policy_revision != policy_revision
+    {
+        return Err("Ticket Team snapshot bindings disagree with its owning Ticket row.".into());
+    }
+    let mut expected_role_bindings = Vec::with_capacity(
+        1 + snapshot.worker_bot_ids.len() + snapshot.reviewer_bot_ids.len(),
+    );
+    expected_role_bindings.push(("coordinator".to_string(),0,snapshot.coordinator_bot_id.clone()));
+    expected_role_bindings.extend(snapshot.worker_bot_ids.iter().enumerate().map(|(ordinal,bot_id)| {
+        ("worker".to_string(),ordinal,bot_id.clone())
+    }));
+    expected_role_bindings.extend(snapshot.reviewer_bot_ids.iter().enumerate().map(|(ordinal,bot_id)| {
+        ("reviewer".to_string(),ordinal,bot_id.clone())
+    }));
+    let role_bindings = snapshot.roles.iter().map(|role| (
+        role.role.clone(),role.ordinal,role.bot_id.clone(),
+    )).collect::<Vec<_>>();
+    if role_bindings != expected_role_bindings {
+        return Err("Ticket Team role bindings disagree with its saved role lists.".into());
+    }
+    let version = load_team_version_snapshot(db,&orchestration_id,team_version)?;
+    if source_kind == "legacy-backfill" {
+        if snapshot.provenance != TeamSnapshotProvenance::LegacyUnknown || snapshot != version {
+            return Err("Legacy Ticket snapshot disagrees with its immutable Team version.".into());
+        }
+    } else if source_kind != "native" || snapshot.provenance != TeamSnapshotProvenance::Native {
+        return Err("Ticket Team snapshot provenance does not match its source.".into());
+    } else if snapshot.name != version.name || snapshot.project_id != version.project_id
+        || snapshot.coordinator_bot_id != version.coordinator_bot_id
+        || snapshot.worker_bot_ids != version.worker_bot_ids
+        || snapshot.reviewer_bot_ids != version.reviewer_bot_ids
+    {
+        return Err("Ticket role bindings disagree with their pinned Team version.".into());
+    }
+    Ok(snapshot)
+}
+
+pub(crate) fn ticket_team_snapshot(store: &Store, ticket_id: &str) -> Result<TeamSnapshot> {
+    load_ticket_team_snapshot(&store.db,ticket_id)
+}
+
+fn snapshot_role_profile_matches(
+    db: &Connection, snapshot: &TeamSnapshot, role: &str, ordinal: usize, bot_id: &str,
+) -> Result<bool> {
+    if snapshot.provenance == TeamSnapshotProvenance::LegacyUnknown {
+        return Ok(false);
+    }
+    let Some(pinned) = snapshot.roles.iter().find(|candidate| {
+        candidate.role == role && candidate.ordinal == ordinal && candidate.bot_id == bot_id
+    }) else {
+        return Ok(false);
+    };
+    let current = effective_role_snapshot(db,role,ordinal,bot_id)?;
+    Ok(pinned.effective_config_sha256.is_some()
+        && pinned.effective_config_sha256 == current.effective_config_sha256)
 }
 
 
@@ -284,49 +1009,121 @@ fn orchestration_overview(store: &Store) -> Result<Vec<OrchestrationOverview>> {
          GROUP BY o.id ORDER BY o.created_at,o.id",
     ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], |row| {
-        Ok(OrchestrationOverview {
-            config: orchestration_row(row)?,
-            ticket_count: row.get(7)?,
-            running_count: row.get(8)?,
-            blocked_count: row.get(9)?,
-            last_activity_at: row.get(10)?,
-        })
+        Ok((orchestration_row(row)?,row.get::<_,i64>(7)?,row.get::<_,i64>(8)?,
+            row.get::<_,i64>(9)?,row.get::<_,i64>(10)?))
     }).map_err(|e| e.to_string())?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+    let rows = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+    rows.into_iter().map(|(config,ticket_count,running_count,blocked_count,last_activity_at)| {
+        Ok(OrchestrationOverview {
+            config: hydrate_orchestration(store,config)?,
+            ticket_count,running_count,blocked_count,last_activity_at,
+        })
+    }).collect()
+}
+
+fn hydrate_orchestration(store: &Store, mut config: Orchestration) -> Result<Orchestration> {
+    let latest: Option<i64> = store.db.query_row(
+        "SELECT MAX(version) FROM sa_team_versions WHERE orchestration_id=?1",
+        [&config.id], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    if let Some(version) = latest {
+        let snapshot = load_team_version_snapshot(&store.db,&config.id,version)?;
+        if config.name != snapshot.name
+            || config.coordinator_bot_id != snapshot.coordinator_bot_id
+            || config.worker_bot_id != snapshot.worker_bot_ids.first().cloned().unwrap_or_default()
+            || config.project_id != snapshot.project_id
+        {
+            return Err("Legacy orchestration projection disagrees with its current Team version.".into());
+        }
+        config.team_version = version;
+        config.coordinator_bot_id = snapshot.coordinator_bot_id;
+        config.worker_bot_id = snapshot.worker_bot_ids.first().cloned()
+            .ok_or("Current Team version has no worker.")?;
+        config.worker_bot_ids = snapshot.worker_bot_ids;
+        config.reviewer_bot_ids = snapshot.reviewer_bot_ids;
+        config.council_required = snapshot.policy.council_required;
+        config.project_id = snapshot.project_id;
+    } else {
+        // A Team can be inserted by an older host during an upgrade window.
+        // Its legacy projection is safe to expose, but admission requires a
+        // real version row and will fail until migration/reconciliation runs.
+        config.worker_bot_ids = vec![config.worker_bot_id.clone()];
+    }
+    Ok(config)
 }
 
 fn configuration(store: &Store, id: &str) -> Result<Orchestration> {
-    store.db.query_row(
+    let config = store.db.query_row(
         "SELECT id,name,coordinator_bot_id,worker_bot_id,project_id,enabled,policy_revision FROM sa_orchestrations WHERE id=?1",
         [id], orchestration_row,
     ).optional().map_err(|e| e.to_string())?
-        .ok_or_else(|| "Orchestration not found.".into())
+        .ok_or_else(|| "Orchestration not found.".to_string())?;
+    hydrate_orchestration(store,config)
 }
 
+// Test-only legacy wrapper; the command boundary uses the role and policy
+// aware constructor below.
+#[cfg(test)]
 fn create_configuration(store: &Store, input: NewOrchestration) -> Result<Orchestration> {
+    let worker_bot_ids = vec![input.worker_bot_id.clone()];
+    create_configuration_roles(store,input,worker_bot_ids,vec![])
+}
+
+#[cfg(test)]
+fn create_configuration_roles(
+    store: &Store,
+    input: NewOrchestration,
+    worker_bot_ids: Vec<String>,
+    reviewer_bot_ids: Vec<String>,
+) -> Result<Orchestration> {
+    create_configuration_roles_with_policy(store,input,worker_bot_ids,reviewer_bot_ids,false)
+}
+
+fn create_configuration_roles_with_policy(
+    store: &Store,
+    input: NewOrchestration,
+    worker_bot_ids: Vec<String>,
+    reviewer_bot_ids: Vec<String>,
+    council_required: bool,
+) -> Result<Orchestration> {
     let name = input.name.trim();
     if name.is_empty() || name.len() > 120 || name.chars().any(char::is_control) {
         return Err("Choose an orchestration name of at most 120 characters.".into());
     }
-    if input.coordinator_bot_id == input.worker_bot_id {
-        return Err("Coordinator and worker must be different existing bots.".into());
+    valid_team_roles(&input.coordinator_bot_id,&worker_bot_ids,&reviewer_bot_ids)?;
+    if council_required && !(2..=MAX_REVIEWERS_PER_TEAM).contains(&reviewer_bot_ids.len()) {
+        return Err("Council-required Teams need between two and eight selected native reviewers.".into());
+    }
+    if worker_bot_ids.first().map(String::as_str) != Some(input.worker_bot_id.as_str()) {
+        return Err("The legacy workerBotId must match the first ordered workerBotIds entry.".into());
     }
     let coordinator = bots::get(store, &input.coordinator_bot_id)?;
-    let worker = bots::get(store, &input.worker_bot_id)?;
+    let workers = worker_bot_ids.iter().map(|id| bots::get(store,id)).collect::<Result<Vec<_>>>()?;
+    let reviewers = reviewer_bot_ids.iter().map(|id| bots::get(store,id)).collect::<Result<Vec<_>>>()?;
     // Every native bot owns its own project/workspace. A coordinator is a separate
-    // existing bot, not a second profile inside the worker\'s checkout. The
-    // worker project is the initial execution scope; never require bot projects
-    // to coincide or silently switch one bot\'s global project.
-    if coordinator.paused || worker.paused {
-        return Err("Choose active coordinator and worker bots.".into());
+    // existing bot, not a second profile inside the worker's checkout. Ordered
+    // workers share one execution project; Council reviewers are independent
+    // read-only seats in the native Architect team.
+    if coordinator.paused || workers.iter().any(|bot| bot.paused)
+        || reviewers.iter().any(|bot| bot.paused)
+        || workers.iter().any(|bot| bot.project_id != workers[0].project_id)
+    {
+        return Err("Choose active bots and workers from one project scope.".into());
     }
     let id = storage::id();
     let now = storage::now();
-    store.db.execute(
+    let project_id = &workers[0].project_id;
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    tx.execute(
         "INSERT INTO sa_orchestrations(id,name,coordinator_bot_id,worker_bot_id,project_id,created_at,updated_at)
          VALUES(?1,?2,?3,?4,?5,?6,?6)",
-        params![id,name,coordinator.id,worker.id,worker.project_id,now],
+        params![id,name,coordinator.id,worker_bot_ids[0],project_id,now],
     ).map_err(|e| e.to_string())?;
+    let snapshot = make_team_snapshot(&tx,&id,1,name,project_id,1,
+        &coordinator.id,&worker_bot_ids,&reviewer_bot_ids,council_required,
+        TeamSnapshotProvenance::Native)?;
+    insert_team_version(&tx,&snapshot)?;
+    tx.commit().map_err(|e| e.to_string())?;
     configuration(store, &id)
 }
 
@@ -485,6 +1282,9 @@ fn history(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<AuditEntry>
 #[serde(rename_all = "camelCase")]
 pub struct TaskSnapshot {
     pub ticket: Ticket,
+    /// Exact immutable roles admitted for this Ticket, including legacy
+    /// provenance and a digest-validated reference to its Team version.
+    pub team_snapshot: TeamSnapshot,
     pub mandate: MandateSummary,
     pub assignments: Vec<Assignment>,
     pub activity: Vec<AuditEntry>,
@@ -501,6 +1301,7 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
     let ticket = get_ticket(store, ticket_id)?;
     let result = TaskSnapshot {
         council: council_adapter::inspect(store, &ticket)?,
+        team_snapshot: ticket_team_snapshot(store,ticket_id)?,
         ticket,
         mandate: mandate(store, ticket_id)?,
         assignments: assignments(store, ticket_id, limit)?,
@@ -639,11 +1440,90 @@ pub(crate) fn headless_stop_ticket(database_path: &std::path::Path, ticket_id: &
     headless_ticket_status(&ticket)
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Local CLI issue-comment boundary is bound by the existing headless command line; callers live outside this module"
+)]
+pub(crate) fn headless_issue_comment(
+    database_path: &std::path::Path,
+    ticket_id: &str,
+    expected_revision: i64,
+    repository: &str,
+    issue_number: i64,
+    effect_key: &str,
+    comment: &str,
+    confirmation_hash: Option<&str>,
+) -> Result<String> {
+    headless_issue_comment_with_dispatch(
+        database_path,
+        ticket_id,
+        expected_revision,
+        repository,
+        issue_number,
+        effect_key,
+        comment,
+        confirmation_hash,
+        effects::post_issue_comment,
+    )
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Same local CLI shape as headless_issue_comment plus an injected dispatch seam; callers live outside this module"
+)]
+pub(crate) fn headless_issue_comment_with_dispatch(
+    database_path: &std::path::Path,
+    ticket_id: &str,
+    expected_revision: i64,
+    repository: &str,
+    issue_number: i64,
+    effect_key: &str,
+    comment: &str,
+    confirmation_hash: Option<&str>,
+    dispatch: impl FnOnce(
+        &std::path::Path,
+        &effects::IssueCommentIntent,
+    ) -> Result<effects::EffectStatus>,
+) -> Result<String> {
+    let intent = effects::prepare_issue_comment(
+        ticket_id,
+        expected_revision,
+        repository,
+        issue_number,
+        effect_key,
+        comment,
+    )?;
+    let store = effects::open_effect_store(database_path)?;
+    let already_authorized = effects::has_exact_grant(&store, &intent)?;
+    if confirmation_hash.is_some_and(|hash| hash != intent.payload_sha256) {
+        return Err("The issue-comment confirmation hash does not match this exact payload.".into());
+    }
+    if !already_authorized {
+        if confirmation_hash != Some(intent.payload_sha256.as_str()) {
+            return Err(format!(
+                "Explicit local confirmation is required for Ticket {} at revision {}, repository {}, issue #{}, effect key {}, payload SHA-256 {}. Review these exact arguments and rerun with --confirm-issue-comment {}.",
+                intent.ticket_id,
+                intent.expected_revision,
+                intent.repository,
+                intent.issue_number,
+                intent.effect_key,
+                intent.payload_sha256,
+                intent.payload_sha256,
+            ));
+        }
+        effects::authorize(&store, &intent)?;
+    }
+    drop(store);
+    let status = dispatch(database_path, &intent)?;
+    serde_json::to_string_pretty(&status).map_err(|e| e.to_string())
+}
+
 /// Revoke and interrupt assignments that exceeded the same native attempt
 /// budget used by tool admission. This is called only by the owning serve
 /// process; callers must stop the returned sessions after the transaction.
 /// No attempt is replayed and unresolved effect receipts stay unresolved.
 pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Vec<String>> {
+    let _dispatch_fence = effects::lock_dispatch(&store.path)?;
     let expired = {
         let mut stmt = store.db.prepare(
             "SELECT a.id,a.ticket_id,a.session_id,t.revision
@@ -677,6 +1557,11 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
         tx.execute(
             "UPDATE sa_assignments SET state='interrupted',updated_at=?2
              WHERE id=?1 AND state='running'",
+            params![assignment_id,now],
+        ).map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE sa_council_requests SET state='blocked',updated_at=?2
+             WHERE assignment_id=?1 AND state IN ('admitted','bound','starting','dispatched')",
             params![assignment_id,now],
         ).map_err(|e| e.to_string())?;
         tx.execute(
@@ -753,7 +1638,9 @@ fn admit_role(
     }
     let coordinator = bots::get(store, &config.coordinator_bot_id)?;
     let worker = bots::get(store, &config.worker_bot_id)?;
-    if coordinator.paused || worker.paused || worker.project_id != config.project_id {
+    if config.team_version <= 0 || coordinator.paused || worker.paused
+        || worker.project_id != config.project_id
+    {
         return Err("A selected bot is paused, missing or outside the worker project scope.".into());
     }
     let candidate = if coordinate { &coordinator } else { &worker };
@@ -782,17 +1669,51 @@ fn admit_role(
     // Store methods share this connection, so use unchecked_transaction here
     // instead of borrowing it mutably while provisioning the bot thread.
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let current: (String,String,String,String,i64,i64) = tx.query_row(
+        "SELECT name,coordinator_bot_id,worker_bot_id,project_id,policy_revision,enabled
+         FROM sa_orchestrations WHERE id=?1",
+        [&config.id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?)),
+    ).map_err(|e| e.to_string())?;
+    let latest_version: Option<i64> = tx.query_row(
+        "SELECT MAX(version) FROM sa_team_versions WHERE orchestration_id=?1",
+        [&config.id], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    if current.0 != config.name || current.1 != config.coordinator_bot_id
+        || current.2 != config.worker_bot_id || current.3 != config.project_id
+        || current.4 != config.policy_revision || current.5 == 0
+        || latest_version != Some(config.team_version)
+    {
+        return Err("Team changed during Ticket admission; reload and submit again.".into());
+    }
+    let team_snapshot = make_team_snapshot(
+        &tx,&config.id,config.team_version,&config.name,&config.project_id,
+        config.policy_revision,&config.coordinator_bot_id,&config.worker_bot_ids,&config.reviewer_bot_ids,
+        config.council_required,
+        TeamSnapshotProvenance::Native,
+    )?;
+    if team_snapshot.policy.council_required != config.council_required {
+        return Err("Team Council policy changed during Ticket admission; reload and submit again.".into());
+    }
+    let current_coordinator = bots::get(store,&config.coordinator_bot_id)?;
+    let current_worker = bots::get(store,&config.worker_bot_id)?;
+    if current_coordinator.paused || current_worker.paused
+        || current_worker.project_id != config.project_id
+    {
+        return Err("A selected bot changed or became unavailable during Ticket admission.".into());
+    }
+    let current_candidate = if coordinate { &current_coordinator } else { &current_worker };
     let session_id = if blocked { None } else {
-        Some(bots::thread_session(store, candidate, CHANNEL, &ticket_id,
+        Some(bots::thread_session(store, current_candidate, CHANNEL, &ticket_id,
             if coordinate { "SuperAgent · Coordinator" } else { "SuperAgent · Manual task" })?.0)
     };
     let now = storage::now();
     tx.execute(
         "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,project_id,worker_bot_id,policy_revision,state,active_assignment_id,created_at,updated_at)
          VALUES(?1,?2,?3,?4,'local-user','manual',?5,?6,?7,?8,?9,?10,?10)",
-        params![ticket_id,config.id,request_key,objective,config.project_id,worker.id,config.policy_revision,
+        params![ticket_id,config.id,request_key,objective,config.project_id,current_worker.id,config.policy_revision,
             if blocked { "blocked" } else { "running" }, assignment_id,now],
     ).map_err(|e| e.to_string())?;
+    insert_ticket_team_snapshot(&tx,&ticket_id,&team_snapshot,"native")?;
     tx.execute(
         "INSERT INTO sa_mandates(ticket_id,actor,authorization_id,policy_revision,project_id,expires_at,created_at)
          VALUES(?1,'local-user',?2,?3,?4,?5,?6)",
@@ -802,8 +1723,13 @@ fn admit_role(
         tx.execute(
             "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
              VALUES(?1,?2,?3,?4,'running',1,?5,?5)",
-            params![assignment_id,ticket_id,candidate.id,session_id,now],
+            params![assignment_id,ticket_id,current_candidate.id,session_id,now],
         ).map_err(|e| e.to_string())?;
+        if !coordinate {
+            council_adapter::admit_required(
+                store,&tx,&ticket_id,assignment_id,session_id,0,&team_snapshot,
+            )?;
+        }
     }
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,'admitted',?2,?3)",
@@ -923,16 +1849,23 @@ fn assignment_thread_current(store: &Store, session_id: &str, ticket_id: &str) -
 /// coordinator plan or a direct worker. Later attempts can only be workers.
 fn assignment_role_authorized(
     store: &Store, ticket_id: &str, bot_id: &str, attempt: i64,
-    coordinator_id: &str, worker_id: &str,
 ) -> Result<bool> {
+    let snapshot = ticket_team_snapshot(store,ticket_id)?;
+    let coordinator = bot_id == snapshot.coordinator_bot_id;
+    let worker = snapshot.worker_bot_ids.iter().any(|id| id == bot_id);
+    // A malformed migrated snapshot that reuses one identity across roles is
+    // ambiguous and cannot authorize either side of the assignment boundary.
+    if coordinator && worker {
+        return Ok(false);
+    }
     let admission: Option<String> = store.db.query_row(
         "SELECT detail FROM sa_audit WHERE ticket_id=?1 AND kind='admitted' ORDER BY id LIMIT 1",
         [ticket_id], |row| row.get(0),
     ).optional().map_err(|e| e.to_string())?;
     Ok(match admission.as_deref() {
-        Some("manual readonly coordinator reserved") if attempt == 1 => bot_id == coordinator_id,
+        Some("manual readonly coordinator reserved") if attempt == 1 => coordinator,
         Some("manual readonly coordinator reserved" | "manual readonly worker reserved" | "blocked: worker occupied")
-            if attempt > 0 => bot_id == worker_id,
+            if attempt > 0 => worker,
         _ => false,
     })
 }
@@ -949,11 +1882,8 @@ pub(crate) fn read_only_policy(
         expiry: i64,
         revoked: bool,
         mandate_version: i64,
-        config_version: i64,
         enabled: bool,
         bot_id: String,
-        coordinator_id: String,
-        worker_id: String,
         project_id: String,
         ticket_id: String,
         started_at: i64,
@@ -965,8 +1895,8 @@ pub(crate) fn read_only_policy(
         attempt: i64,
     }
     let scope: Option<AssignmentPolicyScope> = store.db.query_row(
-        "SELECT t.state,a.state,m.expires_at,m.revoked,m.policy_revision,o.policy_revision,o.enabled,
-                a.bot_id,o.coordinator_bot_id,t.worker_bot_id,t.project_id,t.id,a.created_at,
+        "SELECT t.state,a.state,m.expires_at,m.revoked,m.policy_revision,o.enabled,
+                a.bot_id,t.project_id,t.id,a.created_at,
                 m.allowed_side_effects,m.allowed_tools,m.project_id,m.actor,t.actor,a.attempt
          FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id
@@ -977,19 +1907,18 @@ pub(crate) fn read_only_policy(
         |r| Ok(AssignmentPolicyScope {
             ticket_state: r.get(0)?, assignment_state: r.get(1)?,
             expiry: r.get(2)?, revoked: r.get::<_, i64>(3)? != 0,
-            mandate_version: r.get(4)?, config_version: r.get(5)?,
-            enabled: r.get::<_, i64>(6)? != 0, bot_id: r.get(7)?,
-            coordinator_id: r.get(8)?, worker_id: r.get(9)?, project_id: r.get(10)?,
-            ticket_id: r.get(11)?, started_at: r.get(12)?,
-            side_effects: r.get::<_, i64>(13)? != 0, tools_json: r.get(14)?,
-            mandate_project: r.get(15)?, mandate_actor: r.get(16)?, ticket_actor: r.get(17)?,
-            attempt: r.get(18)?,
+            mandate_version: r.get(4)?, enabled: r.get::<_, i64>(5)? != 0,
+            bot_id: r.get(6)?, project_id: r.get(7)?, ticket_id: r.get(8)?,
+            started_at: r.get(9)?, side_effects: r.get::<_, i64>(10)? != 0,
+            tools_json: r.get(11)?, mandate_project: r.get(12)?,
+            mandate_actor: r.get(13)?, ticket_actor: r.get(14)?, attempt: r.get(15)?,
         }),
     ).optional().map_err(|e| e.to_string())?;
     if let Some(scope) = scope {
+        let snapshot = ticket_team_snapshot(store,&scope.ticket_id)?;
         if scope.ticket_state != "running" || scope.assignment_state != "running" || scope.revoked
             || scope.expiry <= storage::now()
-            || scope.mandate_version != scope.config_version
+            || scope.mandate_version != snapshot.policy.policy_revision
             || !assignment_within_budget(scope.started_at, storage::now())
             // The current task channel has only native read-only enforcement.
             // A persisted write/tool grant must not be silently treated as a
@@ -1012,17 +1941,29 @@ pub(crate) fn read_only_policy(
         // A valid native thread must also have the role originally authorized
         // by the Ticket. Remapping both the assignment and the thread to a
         // third existing bot cannot grant that bot access to this project.
-        if !assignment_role_authorized(store, &scope.ticket_id, &scope.bot_id,
-            scope.attempt, &scope.coordinator_id, &scope.worker_id)? {
+        if !assignment_role_authorized(store, &scope.ticket_id, &scope.bot_id,scope.attempt)? {
             return Err("policy_unsupported: assignment bot does not match the original task role.".into());
         }
         let active_bot = bots::get(store, &scope.bot_id)?;
-        let coordinator = bots::get(store, &scope.coordinator_id)?;
+        let coordinator = bots::get(store, &snapshot.coordinator_bot_id)?;
         let assigned_session = store.session(session_id)?;
+        let worker_ordinal = snapshot.worker_bot_ids.iter().position(|id| id == &scope.bot_id);
+        let is_worker = worker_ordinal.is_some();
+        let coordinator_profile_current = snapshot_role_profile_matches(
+            &store.db,&snapshot,"coordinator",0,&snapshot.coordinator_bot_id,
+        )?;
+        let active_profile_current = if let Some(ordinal) = worker_ordinal {
+            snapshot_role_profile_matches(&store.db,&snapshot,"worker",ordinal,&scope.bot_id)?
+        } else if scope.bot_id == snapshot.coordinator_bot_id {
+            coordinator_profile_current
+        } else {
+            false
+        };
         if coordinator.paused || active_bot.paused || active_bot.project_id != assigned_session.project_id
-            || (scope.bot_id == scope.worker_id && active_bot.project_id != scope.project_id)
-            || (scope.bot_id == scope.worker_id && !coordinator_plan_current(
-                store, &scope.ticket_id, &scope.coordinator_id, &coordinator.project_id,
+            || !coordinator_profile_current || !active_profile_current
+            || (is_worker && active_bot.project_id != scope.project_id)
+            || (is_worker && !coordinator_plan_current(
+                store, &scope.ticket_id, &snapshot.coordinator_bot_id, &coordinator.project_id,
             )?)
         {
             return Err("policy_unsupported: assigned bot is paused or moved outside its mandate.".into());
@@ -1133,6 +2074,7 @@ pub(crate) fn guard_run_admission(
 }
 
 fn fail_launch(store: &Store, ticket_id: &str, reason: &str) -> Result<()> {
+    let _dispatch_fence = effects::lock_dispatch(&store.path)?;
     // A failed gateway launch must release the worker lease, change the ticket
     // and retain its audit receipt atomically. An audit/storage failure cannot
     // leave a partially failed assignment or silently permit a second worker.
@@ -1158,6 +2100,11 @@ fn fail_launch(store: &Store, ticket_id: &str, reason: &str) -> Result<()> {
         return Err("SuperAgent ticket changed before launch failure settlement.".into());
     }
     tx.execute(
+        "UPDATE sa_council_requests SET state='blocked',updated_at=?2
+         WHERE ticket_id=?1 AND state='admitted'",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,'launch_failed',?2,?3)",
         params![ticket_id, &detail, now],
@@ -1168,47 +2115,32 @@ fn fail_launch(store: &Store, ticket_id: &str, reason: &str) -> Result<()> {
 /// A provider turn is evidence for a task, not its approval. The only successful
 /// transition here is running -> waiting_approval; native human acceptance is separate.
 pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool, text: &str) -> Result<bool> {
+    let _dispatch_fence = effects::lock_dispatch(&store.path)?;
     // A callback may arrive twice, after Stop, or after process restart.
     // Result, Ticket revision and audit must settle in one transaction; an
     // injected storage failure cannot strand an assignment in a terminal state.
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-    let assignment: Option<(String, String, String, bool, i64, i64)> = tx.query_row(
-        "SELECT a.ticket_id,a.id,a.bot_id,a.bot_id=o.coordinator_bot_id,a.created_at,a.attempt
+    let assignment: Option<(String, String, String, i64, i64)> = tx.query_row(
+        "SELECT a.ticket_id,a.id,a.bot_id,a.created_at,a.attempt
          FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id AND t.active_assignment_id=a.id
-         JOIN sa_orchestrations o ON o.id=t.orchestration_id
          WHERE a.session_id=?1 AND a.state='running' AND t.state='running'",
-        [session_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        [session_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     ).optional().map_err(|e| e.to_string())?;
-    let Some((task_id, assignment_id, bot_id, coordinator, started_at, attempt)) = assignment else { return Ok(false) };
-    let cfg = configuration(store, &get_ticket(store, &task_id)?.orchestration_id)?;
-    let role_current = assignment_role_authorized(
-        store, &task_id, &bot_id, attempt, &cfg.coordinator_bot_id, &cfg.worker_bot_id,
-    )?;
-    let authorized: bool = tx.query_row(
-        "SELECT m.revoked=0 AND m.expires_at>?2 AND m.policy_revision=o.policy_revision AND o.enabled=1
-         AND m.allowed_side_effects=0 AND m.allowed_tools='[]'
-         AND m.project_id=t.project_id AND m.actor=t.actor
-         AND EXISTS (
-           SELECT 1 FROM bots coordinator
-           WHERE coordinator.id=o.coordinator_bot_id AND coordinator.paused=0
-         )
-         AND EXISTS (
-           SELECT 1 FROM sa_assignments active
-           JOIN bots current_bot ON current_bot.id=active.bot_id
-           JOIN sessions active_session ON active_session.id=active.session_id
-           WHERE active.id=t.active_assignment_id AND current_bot.paused=0
-             AND current_bot.project_id=active_session.project_id
-             AND (active.bot_id=o.coordinator_bot_id OR
-               (active.bot_id=t.worker_bot_id AND current_bot.project_id=t.project_id))
-         )
-         FROM sa_mandates m JOIN sa_tickets t ON t.id=m.ticket_id
-         JOIN sa_orchestrations o ON o.id=t.orchestration_id WHERE t.id=?1",
-        params![task_id,storage::now()], |r| r.get(0),
+    let Some((task_id, assignment_id, bot_id, started_at, attempt)) = assignment else { return Ok(false) };
+    let team_snapshot = ticket_team_snapshot(store,&task_id)?;
+    let prior_ticket_revision: i64 = tx.query_row(
+        "SELECT revision FROM sa_tickets WHERE id=?1",[&task_id],|row| row.get(0),
     ).map_err(|e| e.to_string())?;
+    let coordinator = bot_id == team_snapshot.coordinator_bot_id;
+    let role_current = assignment_role_authorized(store,&task_id,&bot_id,attempt)?;
+    // Reuse the same Ticket-snapshot validation as the provider/tool boundary.
+    // A Team edit can advance the mutable config revision without rewriting
+    // the admitted Ticket's mandate or active write grant.
+    let authorized = read_only_policy(store,session_id).ok().flatten().is_some();
     let provenance_ok = if coordinator { true } else {
-        bots::get(store, &cfg.coordinator_bot_id)
-            .and_then(|bot| coordinator_plan_current(store, &task_id, &bot.id, &bot.project_id))
+        bots::get(store, &team_snapshot.coordinator_bot_id)
+            .and_then(|bot| coordinator_plan_current(store, &task_id, &team_snapshot.coordinator_bot_id, &bot.project_id))
             .unwrap_or(false)
     };
     let trimmed = text.trim().chars().take(4096).collect::<String>();
@@ -1224,6 +2156,7 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         else if !successful { "failed" }
         else if trimmed.is_empty() { "inconclusive" }
         else if coordinator { "queued" }
+        else if team_snapshot.policy.council_required { "waiting_review" }
         else { "waiting_approval" };
     let now = storage::now();
     let moved = tx.execute(
@@ -1245,8 +2178,40 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     // Atomically pin the native Council cycle and exact finished artifact,
     // when this worker session already has a Council team. This is advisory:
     // an unrelated or previously completed Council round never approves it.
-    if next == "waiting_approval" {
+    if next == "waiting_review" {
+        if let Err(error) = council_adapter::bind_required_finished(store,&task_id,&assignment_id,session_id) {
+            let detail = error.chars().take(500).collect::<String>();
+            tx.execute(
+                "UPDATE sa_council_requests SET state='blocked',updated_at=?2
+                 WHERE ticket_id=?1 AND assignment_id=?3 AND state='admitted'",
+                params![task_id,now,assignment_id],
+            ).map_err(|e| e.to_string())?;
+            tx.execute(
+                "UPDATE sa_tickets SET state='blocked',revision=revision+1,updated_at=?2
+                 WHERE id=?1 AND state='waiting_review' AND revision=?3",
+                params![task_id,now,prior_ticket_revision.saturating_add(1)],
+            ).map_err(|e| e.to_string())?;
+            tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[&task_id])
+                .map_err(|e| e.to_string())?;
+            tx.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES(?1,'council_binding_failed',?2,?3)",
+                params![task_id,detail,now],
+            ).map_err(|e| e.to_string())?;
+        }
+    } else if next == "waiting_approval" {
         council_adapter::bind_finished(store, &task_id, &assignment_id, session_id)?;
+    }
+    if team_snapshot.policy.council_required && !matches!(next,"queued" | "waiting_review") {
+        let invalidated = tx.execute(
+            "UPDATE sa_council_requests SET state='blocked',updated_at=?2
+             WHERE ticket_id=?1 AND assignment_id=?3 AND state='admitted'",
+            params![task_id,now,assignment_id],
+        ).map_err(|e| e.to_string())?;
+        if invalidated == 1 {
+            tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[&task_id])
+                .map_err(|e| e.to_string())?;
+        }
     }
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
@@ -1272,6 +2237,7 @@ fn accept_with_pause(
     if bots_paused {
         return Err("Bots are globally paused; SuperAgent acceptance is denied.".into());
     }
+    let _dispatch_fence = effects::lock_dispatch(&store.path)?;
     // Acceptance and its attributed audit entry are one durable decision.
     // No terminal state may be visible without matching acceptance evidence.
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
@@ -1281,8 +2247,11 @@ fn accept_with_pause(
     {
         return Err("Task has no current verified worker result to accept.".into());
     }
-    let coordinator = configuration(store, &ticket.orchestration_id)?;
-    let coordinator = bots::get(store, &coordinator.coordinator_bot_id)?;
+    let team_snapshot = ticket_team_snapshot(store,ticket_id)?;
+    if team_snapshot.policy.council_required {
+        return Err("Council-required Tickets need the attributed native Council acceptance flow.".into());
+    }
+    let coordinator = bots::get(store, &team_snapshot.coordinator_bot_id)?;
     if !coordinator_plan_current(store, ticket_id, &coordinator.id, &coordinator.project_id)? {
         return Err("Coordinator plan is stale or its original session is unavailable.".into());
     }
@@ -1322,16 +2291,17 @@ fn accept_with_pause(
             WHERE m.ticket_id=sa_tickets.id AND m.revoked=0 AND m.expires_at>?3
               AND m.allowed_side_effects=0 AND m.allowed_tools='[]'
               AND m.project_id=sa_tickets.project_id AND m.actor=sa_tickets.actor
-              AND m.policy_revision=o.policy_revision AND o.enabled=1
+              AND m.policy_revision=?4 AND o.enabled=1
               AND EXISTS (
                 SELECT 1 FROM bots worker JOIN bots coordinator
-                  ON coordinator.id=o.coordinator_bot_id
+                  ON coordinator.id=?5
                 WHERE worker.id=sa_tickets.worker_bot_id
                   AND worker.paused=0 AND coordinator.paused=0
                   AND worker.project_id=sa_tickets.project_id
               )
          )",
-        params![ticket_id,expected_revision,now],
+        params![ticket_id,expected_revision,now,team_snapshot.policy.policy_revision,
+            team_snapshot.coordinator_bot_id],
     ).map_err(|e| e.to_string())?;
     if changed != 1 {
         return Err("Mandate expired, was revoked or revised; acceptance denied.".into());
@@ -1353,6 +2323,7 @@ fn reject(store: &Store, ticket_id: &str, expected_revision: i64, reason: &str) 
     if reason.is_empty() || reason.len() > 500 || reason.chars().any(char::is_control) {
         return Err("Provide a nonempty rejection reason of at most 500 bytes.".into());
     }
+    let _dispatch_fence = effects::lock_dispatch(&store.path)?;
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let now = storage::now();
     let changed = tx.execute(
@@ -1373,12 +2344,30 @@ fn reject(store: &Store, ticket_id: &str, expected_revision: i64, reason: &str) 
 }
 
 fn stop(store: &Store, ticket_id: &str) -> Result<(Ticket,Option<String>)> {
+    stop_with_lock_observer(store, ticket_id, || {})
+}
+
+fn stop_with_lock_observer(
+    store: &Store,
+    ticket_id: &str,
+    before_wait: impl FnOnce(),
+) -> Result<(Ticket,Option<String>)> {
+    let _dispatch_fence = effects::lock_dispatch_before_wait(&store.path, before_wait)?;
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let ticket = get_ticket(store,ticket_id)?;
     if matches!(ticket.state.as_str(),"completed"|"failed"|"stopped"|"interrupted"|"inconclusive") {
         return Err("Task is already terminal.".into());
     }
-    let session = assignment_session(store,ticket_id)?;
+    let session = match assignment_session(store,ticket_id)? {
+        Some(session) => Some(session),
+        None => tx.query_row(
+            "SELECT native_session_id FROM sa_council_requests
+             WHERE ticket_id=?1 AND state IN ('starting','dispatched')
+               AND native_session_id IS NOT NULL
+             ORDER BY created_at DESC LIMIT 1",
+            [ticket_id],|row| row.get(0),
+        ).optional().map_err(|e| e.to_string())?,
+    };
     let now = storage::now();
     let revoked = tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[ticket_id])
         .map_err(|e| e.to_string())?;
@@ -1395,6 +2384,11 @@ fn stop(store: &Store, ticket_id: &str) -> Result<(Ticket,Option<String>)> {
         params![ticket.active_assignment_id,now],
     ).map_err(|e| e.to_string())?;
     tx.execute(
+        "UPDATE sa_council_requests SET state='blocked',updated_at=?2
+         WHERE ticket_id=?1 AND state IN ('admitted','bound','starting','dispatched')",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,'stopped','local-user revoked mandate',?2)",
         params![ticket_id,now],
@@ -1405,14 +2399,25 @@ fn stop(store: &Store, ticket_id: &str) -> Result<(Ticket,Option<String>)> {
 
 /// A native bot reset/delete invalidates in-flight SuperAgent ownership, but
 /// its Ticket/Mandate/Assignment evidence remains independent of bot history.
-/// Called inside the bot reset's existing transaction; never makes a new runner.
-pub(crate) fn invalidate_bot(store: &Store, bot_id: &str, removed: bool) -> Result<()> {
+/// Called inside the bot reset/delete transaction while its shared dispatch
+/// fence is held; never makes a new runner.
+pub(crate) fn invalidate_bot(
+    store: &Store,
+    bot_id: &str,
+    removed: bool,
+    _dispatch_fence: &effects::DispatchFence,
+) -> Result<()> {
     // Resetting either selected bot invalidates every nonterminal mandate:
     // coordinator sessions are just as ephemeral as worker sessions, and a
     // previously finished plan must not authorize a worker after reset.
     let sql =
-        "SELECT t.id,t.state FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
-         WHERE (t.worker_bot_id=?1 OR o.coordinator_bot_id=?1)
+        "SELECT t.id,t.state FROM sa_tickets t
+         JOIN sa_ticket_team_snapshots snapshot ON snapshot.ticket_id=t.id
+         WHERE EXISTS (
+           SELECT 1 FROM sa_team_version_members member
+           WHERE member.orchestration_id=snapshot.orchestration_id
+             AND member.team_version=snapshot.team_version
+             AND member.bot_id=?1 AND member.role IN ('coordinator','worker'))
          AND t.state IN ('queued','running','waiting_approval','waiting_review','blocked')";
     let affected = {
         let mut stmt = store.db.prepare(sql).map_err(|e| e.to_string())?;
@@ -1437,6 +2442,11 @@ pub(crate) fn invalidate_bot(store: &Store, bot_id: &str, removed: bool) -> Resu
              WHERE ticket_id=?1 AND state='running'",
             params![ticket_id,now],
         ).map_err(|e| e.to_string())?;
+        store.db.execute(
+            "UPDATE sa_council_requests SET state='blocked',updated_at=?2
+             WHERE ticket_id=?1 AND state IN ('admitted','bound','starting','dispatched')",
+            params![ticket_id,now],
+        ).map_err(|e| e.to_string())?;
         record(store,&ticket_id, if removed { "bot_removed" } else { "bot_reset" },
             "Native bot session unavailable; mandate revoked without replay")?;
     }
@@ -1454,10 +2464,11 @@ pub(crate) fn invalidate_bot(store: &Store, bot_id: &str, removed: bool) -> Resu
 
 
 #[tauri::command]
-pub async fn superagent_create(window: tauri::WebviewWindow, state: State<'_,AppState>, input: NewOrchestration) -> Result<Orchestration> {
+pub async fn superagent_create(window: tauri::WebviewWindow, state: State<'_,AppState>, input: OrchestrationInput) -> Result<Orchestration> {
     require_main_window(&window)?;
     let store=state.store.lock().map_err(|e|e.to_string())?;
-    create_configuration(&store,input)
+    let (legacy,workers,reviewers,council_required) = input.into_parts()?;
+    create_configuration_roles_with_policy(&store,legacy,workers,reviewers,council_required.unwrap_or(false))
 }
 
 #[tauri::command]
@@ -1518,12 +2529,13 @@ fn change_enabled(
     }
     if enabled {
         let coordinator=bots::get(store,&current.coordinator_bot_id)?;
-        let worker=bots::get(store,&current.worker_bot_id)?;
-        if coordinator.paused || worker.paused
-            || worker.project_id != current.project_id
+        let workers=current.worker_bot_ids.iter().map(|id| bots::get(store,id))
+            .collect::<Result<Vec<_>>>()?;
+        if coordinator.paused || workers.iter().any(|worker| worker.paused
+            || worker.project_id != current.project_id)
             || crate::feature_controls::get().bots_paused
         {
-            return Err("Selected bots are paused or their worker scope has changed.".into());
+            return Err("Selected bots are paused or a worker scope has changed.".into());
         }
     }
     if current.enabled == enabled {
@@ -1546,6 +2558,7 @@ fn change_enabled(
         ).map_err(|e| e.to_string())?;
         if !unsettled { return Ok(current); }
     }
+    let _dispatch_fence = effects::lock_dispatch(&store.path)?;
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let now = storage::now();
     let updated = tx.execute(
@@ -1586,45 +2599,102 @@ fn change_enabled(
              WHERE orchestration_id=?1 AND state IN {PENDING}"
         );
         tx.execute(&settle, params![orchestration_id,now]).map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE sa_council_requests SET state='blocked',updated_at=?2
+             WHERE state IN ('admitted','bound','starting','dispatched')
+               AND ticket_id IN (SELECT id FROM sa_tickets WHERE orchestration_id=?1)",
+            params![orchestration_id,now],
+        ).map_err(|e| e.to_string())?;
     }
     tx.commit().map_err(|e| e.to_string())?;
     configuration(store,orchestration_id)
 }
 
-/// Only disabled, unused configurations can change their bot identities.
-/// Existing tickets preserve immutable mandate/assignment history.
+/// A Team edit appends a version only while disabled and before its first
+/// Ticket. Existing Ticket snapshots and grants remain bound to their admitted
+/// roles and effective profiles.
+// Test-only legacy wrapper; the command boundary uses the role and policy aware
+// update below.
+#[cfg(test)]
 fn update_configuration(store: &Store, id: &str, expected_revision: i64, input: &NewOrchestration) -> Result<Orchestration> {
+    update_configuration_roles(store,id,expected_revision,input,
+        vec![input.worker_bot_id.clone()],vec![])
+}
+
+#[cfg(test)]
+fn update_configuration_roles(
+    store: &Store, id: &str, expected_revision: i64, input: &NewOrchestration,
+    worker_bot_ids: Vec<String>, reviewer_bot_ids: Vec<String>,
+) -> Result<Orchestration> {
     let current = configuration(store, id)?;
-    if current.policy_revision != expected_revision || current.enabled {
-        return Err("Disable the orchestration and reload its policy revision before editing.".into());
+    update_configuration_roles_with_policy(
+        store,id,expected_revision,input,worker_bot_ids,reviewer_bot_ids,current.council_required,
+    )
+}
+
+fn update_configuration_roles_with_policy(
+    store: &Store, id: &str, expected_revision: i64, input: &NewOrchestration,
+    worker_bot_ids: Vec<String>, reviewer_bot_ids: Vec<String>, council_required: bool,
+) -> Result<Orchestration> {
+    let current = configuration(store, id)?;
+    if current.policy_revision != expected_revision {
+        return Err("Orchestration policy revision changed; reload before editing.".into());
     }
-    let used: bool = store.db.query_row(
+    if current.enabled {
+        return Err("Disable the orchestration before editing its Team.".into());
+    }
+    let has_tickets: bool = store.db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
-        [id], |r| r.get(0),
+        [id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
-    if used { return Err("A preset with ticket history cannot be reconfigured; create a new preset.".into()); }
+    if has_tickets {
+        return Err("Orchestrations with Tickets cannot be edited.".into());
+    }
     let name = input.name.trim();
-    if name.is_empty() || name.len()>120 || name.chars().any(char::is_control)
-        || input.coordinator_bot_id == input.worker_bot_id
-    {
-        return Err("Choose a valid name and two distinct existing bots.".into());
+    if name.is_empty() || name.len()>120 || name.chars().any(char::is_control) {
+        return Err("Choose a valid orchestration name of at most 120 characters.".into());
+    }
+    valid_team_roles(&input.coordinator_bot_id,&worker_bot_ids,&reviewer_bot_ids)?;
+    if council_required && !(2..=MAX_REVIEWERS_PER_TEAM).contains(&reviewer_bot_ids.len()) {
+        return Err("Council-required Teams need between two and eight selected native reviewers.".into());
+    }
+    if worker_bot_ids.first().map(String::as_str) != Some(input.worker_bot_id.as_str()) {
+        return Err("The legacy workerBotId must match the first ordered workerBotIds entry.".into());
     }
     let coordinator = bots::get(store, &input.coordinator_bot_id)?;
-    let worker = bots::get(store, &input.worker_bot_id)?;
-    if coordinator.paused || worker.paused {
-        return Err("Paused bots cannot be selected for a new orchestration policy.".into());
+    let workers = worker_bot_ids.iter().map(|bot_id| bots::get(store,bot_id)).collect::<Result<Vec<_>>>()?;
+    let reviewers = reviewer_bot_ids.iter().map(|bot_id| bots::get(store,bot_id)).collect::<Result<Vec<_>>>()?;
+    let project_id = workers.first().ok_or("A Team needs at least one worker.")?.project_id.clone();
+    if coordinator.paused || workers.iter().any(|bot| bot.paused || bot.project_id != project_id)
+        || reviewers.iter().any(|bot| bot.paused)
+    {
+        return Err("Paused bots or workers outside one project scope cannot be selected.".into());
     }
     if current.name==name && current.coordinator_bot_id==coordinator.id
-        && current.worker_bot_id==worker.id && current.project_id==worker.project_id
+        && current.worker_bot_ids==worker_bot_ids && current.reviewer_bot_ids==reviewer_bot_ids
+        && current.council_required==council_required
+        && current.project_id==project_id
     { return Ok(current); }
-    let changed = store.db.execute(
+    // A Team edit is a future-only version. Existing Tickets keep their exact
+    // role/profile snapshot and grants; their policy revision is checked against
+    // that immutable snapshot, while the new revision protects later edits.
+    let next_revision = current.policy_revision.saturating_add(1);
+    let next_version = current.team_version.saturating_add(1);
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let changed = tx.execute(
         "UPDATE sa_orchestrations SET name=?2,coordinator_bot_id=?3,worker_bot_id=?4,
-            project_id=?5,policy_revision=policy_revision+1,updated_at=?6
-         WHERE id=?1 AND policy_revision=?7 AND enabled=0
+            project_id=?5,policy_revision=?6,updated_at=?7
+         WHERE id=?1 AND policy_revision=?8 AND enabled=0
            AND NOT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
-        params![id,name,coordinator.id,worker.id,worker.project_id,storage::now(),expected_revision],
+        params![id,name,coordinator.id,worker_bot_ids[0],project_id,next_revision,
+            storage::now(),expected_revision],
     ).map_err(|e| e.to_string())?;
-    if changed!=1 { return Err("Orchestration changed before its policy edit.".into()); }
+    if changed!=1 { return Err("Orchestration changed or is no longer eligible for Team editing.".into()); }
+    let snapshot = make_team_snapshot(&tx,id,next_version,name,&project_id,next_revision,
+        &coordinator.id,&worker_bot_ids,&reviewer_bot_ids,council_required,
+        TeamSnapshotProvenance::Native)?;
+    insert_team_version(&tx,&snapshot)?;
+    tx.commit().map_err(|e| e.to_string())?;
     configuration(store,id)
 }
 
@@ -1646,11 +2716,13 @@ fn delete_configuration(store: &Store, id: &str, expected_revision: i64) -> Resu
 #[tauri::command]
 pub async fn superagent_update(window: tauri::WebviewWindow, 
     state: State<'_,AppState>, orchestration_id: String,
-    expected_revision: i64, input: NewOrchestration,
+    expected_revision: i64, input: OrchestrationInput,
 ) -> Result<Orchestration> {
     require_main_window(&window)?;
     let store=state.store.lock().map_err(|e| e.to_string())?;
-    update_configuration(&store,&orchestration_id,expected_revision,&input)
+    let (legacy,workers,reviewers,council_required) = input.into_parts()?;
+    let required = council_required.unwrap_or(configuration(&store,&orchestration_id)?.council_required);
+    update_configuration_roles_with_policy(&store,&orchestration_id,expected_revision,&legacy,workers,reviewers,required)
 }
 
 #[tauri::command]
@@ -1784,10 +2856,15 @@ fn retry_blocked(
     if !config.enabled || crate::feature_controls::get().bots_paused {
         return Err("SuperAgent remains disabled or globally paused.".into());
     }
-    let coordinator=bots::get(store,&config.coordinator_bot_id)?;
-    let worker=bots::get(store,&config.worker_bot_id)?;
-    if coordinator.paused || worker.paused || worker.id != ticket_worker(store,ticket_id)?
-        || worker.project_id != config.project_id
+    let snapshot = ticket_team_snapshot(store,ticket_id)?;
+    let coordinator=bots::get(store,&snapshot.coordinator_bot_id)?;
+    let worker=bots::get(store,&ticket_worker(store,ticket_id)?)?;
+    let worker_ordinal=snapshot.worker_bot_ids.iter().position(|id| id == &worker.id);
+    if coordinator.paused || worker.paused
+        || worker_ordinal.is_none()
+        || worker.project_id != snapshot.project_id
+        || !snapshot_role_profile_matches(&store.db,&snapshot,"coordinator",0,&coordinator.id)?
+        || !snapshot_role_profile_matches(&store.db,&snapshot,"worker",worker_ordinal.unwrap_or(usize::MAX),&worker.id)?
     {
         return Err("Original worker or coordinator is unavailable or out of scope.".into());
     }
@@ -1796,7 +2873,7 @@ fn retry_blocked(
                 AND project_id=?4 AND allowed_side_effects=0 AND allowed_tools='[]'
                 AND actor=(SELECT actor FROM sa_tickets WHERE id=?1)
          FROM sa_mandates WHERE ticket_id=?1",
-        params![ticket_id,storage::now(),config.policy_revision,config.project_id],
+        params![ticket_id,storage::now(),snapshot.policy.policy_revision,snapshot.project_id],
         |r| r.get(0),
     ).optional().map_err(|e| e.to_string())?.unwrap_or(false);
     if !mandate_ok {
@@ -1810,7 +2887,7 @@ fn retry_blocked(
          FROM sa_assignments WHERE ticket_id=?1",
         params![ticket_id,worker.id], |r| Ok((r.get(0)?,r.get(1)?)),
     ).map_err(|e| e.to_string())?;
-    if worker_attempts >= 2 {
+    if worker_attempts >= i64::from(snapshot.policy.max_attempts_per_assignment) {
         return Err("Manual worker retry limit reached; create a new authorized ticket.".into());
     }
     let occupied: bool = store.db.query_row(
@@ -1820,7 +2897,7 @@ fn retry_blocked(
            WHERE a.state='running' AND
                  (a.bot_id=?1 OR previous.project_id=?2)
          )",
-        params![worker.id,config.project_id], |r| r.get(0),
+        params![worker.id,snapshot.project_id], |r| r.get(0),
     ).map_err(|e| e.to_string())?;
     if busy || occupied {
         return Err("Worker is occupied; the original blocked ticket remains queued for manual retry.".into());
@@ -1828,6 +2905,7 @@ fn retry_blocked(
     let attempt=attempts+1;
     let thread=format!("{ticket_id}:attempt:{attempt}");
     let assignment_id=storage::id();
+    let _dispatch_fence=effects::lock_dispatch(&store.path)?;
     let tx=store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let session_id=bots::thread_session(store,&worker,CHANNEL,&thread,"SuperAgent · Manual retry")?.0;
     let now=storage::now();
@@ -1843,6 +2921,9 @@ fn retry_blocked(
         params![ticket_id,assignment_id,now,ticket.revision],
     ).map_err(|e| e.to_string())?;
     if changed != 1 { return Err("Ticket changed before native retry admission.".into()); }
+    council_adapter::admit_required(
+        store,&tx,ticket_id,&assignment_id,&session_id,ticket.revision.saturating_add(1),&snapshot,
+    )?;
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,'manual_retry','user-requested bounded read-only worker attempt',?2)",
@@ -1863,7 +2944,36 @@ fn ticket_worker(store: &Store, ticket_id: &str) -> Result<String> {
 fn prepare_coordinated_worker(
     store: &mut Store, ticket_id: &str, busy: bool,
 ) -> Result<(Ticket, String, String, String)> {
+    prepare_coordinated_worker_inner(store,ticket_id,busy,None,None)
+}
+
+fn prepare_coordinated_worker_with_write_grant(
+    store: &mut Store,
+    ticket_id: &str,
+    busy: bool,
+    expected_revision: i64,
+    allowed_paths: &[String],
+) -> Result<(Ticket, String, String, String)> {
+    if !crate::workspace::scoped_writes_supported() {
+        return Err("policy_unsupported: this platform cannot securely pin checkout ancestors during atomic replacement; scoped worker writes are disabled.".into());
+    }
+    write_grants::validate_paths(allowed_paths)?;
+    prepare_coordinated_worker_inner(
+        store,ticket_id,busy,Some(expected_revision),Some(allowed_paths),
+    )
+}
+
+fn prepare_coordinated_worker_inner(
+    store: &mut Store,
+    ticket_id: &str,
+    busy: bool,
+    expected_revision: Option<i64>,
+    allowed_paths: Option<&[String]>,
+) -> Result<(Ticket, String, String, String)> {
     let ticket = get_ticket(store, ticket_id)?;
+    if expected_revision.is_some_and(|revision| revision != ticket.revision) {
+        return Err("Ticket revision changed before worker authorization.".into());
+    }
     if ticket.state != "queued" || ticket.active_assignment_id.is_some() {
         return Err("Coordinator has not produced a current, dispatchable plan.".into());
     }
@@ -1871,12 +2981,20 @@ fn prepare_coordinated_worker(
     if !config.enabled || crate::feature_controls::get().bots_paused {
         return Err("Orchestration or bots are paused; coordinated dispatch denied.".into());
     }
-    let coordinator = bots::get(store, &config.coordinator_bot_id)?;
-    let worker = bots::get(store, &config.worker_bot_id)?;
-    if coordinator.paused || worker.paused || worker.project_id != config.project_id
-        || worker.id != ticket_worker(store, ticket_id)?
+    let snapshot = ticket_team_snapshot(store,ticket_id)?;
+    let coordinator = bots::get(store, &snapshot.coordinator_bot_id)?;
+    let worker = bots::get(store, &ticket_worker(store,ticket_id)?)?;
+    if coordinator.paused || worker.paused || worker.project_id != snapshot.project_id
+        || !snapshot.worker_bot_ids.iter().any(|id| id == &worker.id)
+        || !snapshot_role_profile_matches(&store.db,&snapshot,"coordinator",0,&coordinator.id)?
+        || !snapshot_role_profile_matches(&store.db,&snapshot,"worker",
+            snapshot.worker_bot_ids.iter().position(|id| id == &worker.id).unwrap_or(usize::MAX),
+            &worker.id)?
     {
         return Err("A selected bot is unavailable or outside the immutable project scope.".into());
+    }
+    if allowed_paths.is_some() && worker.provider != "codex" {
+        return Err("policy_unsupported: scoped SuperAgent writes currently require Codex's native isolated ToolHost.".into());
     }
     // Coordinator advice is tied to the original native session workspace.
     // A later bot project change or deleted source session cannot make that
@@ -1900,7 +3018,7 @@ fn prepare_coordinated_worker(
                 AND project_id=?4 AND allowed_side_effects=0 AND allowed_tools='[]'
                 AND actor=(SELECT actor FROM sa_tickets WHERE id=?1)
          FROM sa_mandates WHERE ticket_id=?1",
-        params![ticket_id,storage::now(),config.policy_revision,config.project_id],
+        params![ticket_id,storage::now(),snapshot.policy.policy_revision,snapshot.project_id],
         |r| r.get(0),
     ).optional().map_err(|e| e.to_string())?.unwrap_or(false);
     if !mandate_ok {
@@ -1913,7 +3031,7 @@ fn prepare_coordinated_worker(
            WHERE a.state='running' AND
                  (a.bot_id=?1 OR previous.project_id=?2)
          )",
-        params![worker.id,config.project_id], |r| r.get(0),
+        params![worker.id,snapshot.project_id], |r| r.get(0),
     ).map_err(|e| e.to_string())?;
     if busy || occupied {
         return Err("Worker is occupied; coordinated ticket stays queued.".into());
@@ -1927,6 +3045,14 @@ fn prepare_coordinated_worker(
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let session_id = bots::thread_session(store, &worker, CHANNEL, &thread,
         "SuperAgent · Coordinated worker")?.0;
+    let project_root = if let Some(paths) = allowed_paths {
+        let session = store.session(&session_id)?;
+        let root = store.workspace_root(&session.project_id,Some(&session_id))?;
+        write_grants::validate_paths_in_root(&root,paths)?;
+        Some(root.to_string_lossy().into_owned())
+    } else {
+        None
+    };
     let now = storage::now();
     tx.execute(
         "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
@@ -1939,6 +3065,22 @@ fn prepare_coordinated_worker(
         params![ticket_id,assignment_id,now,ticket.revision],
     ).map_err(|e| e.to_string())?;
     if moved != 1 { return Err("Coordinator plan was invalidated before worker admission.".into()); }
+    council_adapter::admit_required(
+        store,&tx,ticket_id,&assignment_id,&session_id,ticket.revision.saturating_add(1),&snapshot,
+    )?;
+    if let Some(paths) = allowed_paths {
+        write_grants::insert_for_assignment(
+            &tx,ticket_id,&assignment_id,&session_id,&snapshot.project_id,
+            project_root.as_deref().ok_or("Worker write grant is missing its project root.")?,
+            ticket.revision.saturating_add(1),snapshot.policy.policy_revision,paths,now,
+        )?;
+        let detail = serde_json::json!({"tool":write_grants::TOOL_NAME,"paths":paths}).to_string();
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'worker_write_grant_issued',?2,?3)",
+            params![ticket_id,detail,now],
+        ).map_err(|e| e.to_string())?;
+    }
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,'worker_admitted','manual dispatch after coordinator evidence',?2)",
@@ -2016,6 +3158,87 @@ pub async fn superagent_dispatch_worker(window: tauri::WebviewWindow,
     get_ticket(&store,&ticket.id)
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkerWriteDispatch {
+    pub ticket: Ticket,
+    pub grant: write_grants::WriteGrantSummary,
+}
+
+async fn confirm_worker_write_scope(
+    window: &tauri::WebviewWindow,
+    ticket_id: &str,
+    allowed_paths: &[String],
+) -> bool {
+    use tauri_plugin_dialog::{DialogExt,MessageDialogButtons};
+    let paths = allowed_paths.iter().map(|path| format!("  • {path}")).collect::<Vec<_>>().join("\n");
+    let message = format!(
+        "Authorize the active SuperAgent worker for Ticket {ticket_id} to write UTF-8 text only to these exact project files?\n\n{paths}\n\nThe worker's provider-native shell and file tools remain read-only. This grant ends when the assignment stops or the Ticket changes."
+    );
+    let dialog = window.dialog().message(message)
+        .title("Authorize SuperAgent file writes")
+        .buttons(MessageDialogButtons::OkCancelCustom("Authorize these files".into(), "Cancel".into()));
+    #[cfg(desktop)]
+    let dialog = dialog.parent(window);
+    let (sender,receiver) = tokio::sync::oneshot::channel();
+    dialog.show(move |confirmed| { let _ = sender.send(confirmed); });
+    receiver.await.unwrap_or(false)
+}
+
+/// Explicit local-user operation: dispatch the selected worker with a grant
+/// bound atomically to this Ticket revision and the Assignment's exact session.
+/// Existing dispatch stays read-only and does not acquire this authority.
+#[tauri::command]
+pub async fn superagent_dispatch_worker_with_write_grant(
+    window: tauri::WebviewWindow,
+    app: tauri::AppHandle,
+    state: State<'_,AppState>,
+    ticket_id: String,
+    expected_revision: i64,
+    allowed_paths: Vec<String>,
+) -> Result<WorkerWriteDispatch> {
+    require_main_window(&window)?;
+    write_grants::validate_paths(&allowed_paths)?;
+    if !confirm_worker_write_scope(&window,&ticket_id,&allowed_paths).await {
+        return Err("Worker file-write authorization was not confirmed by the local user.".into());
+    }
+    let (ticket,thread,worker_id,plan) = {
+        let active: Vec<String> = state.agents.lock().map_err(|e|e.to_string())?
+            .keys().cloned().collect();
+        let mut store = state.store.lock().map_err(|e|e.to_string())?;
+        let worker = ticket_worker(&store,&ticket_id)?;
+        let busy = active.iter().any(|sid| bots::owner_of(&store,sid).ok().flatten()
+            .is_some_and(|(bot,_)|bot.id==worker));
+        prepare_coordinated_worker_with_write_grant(
+            &mut store,&ticket_id,busy,expected_revision,&allowed_paths,
+        )?
+    };
+    let authorized = allowed_paths.iter().map(|path| format!("- {path}")).collect::<Vec<_>>().join("\n");
+    let delivered = bots::gateway::deliver(&app,bots::gateway::Inbound {
+        bot_id: worker_id,
+        channel_id: CHANNEL.into(),
+        thread,
+        sender_id: "local-user".into(),
+        sender_name: "Manual scoped-write task".into(),
+        text: format!(
+            "SuperAgent ticket {}\n\nObjective: {}\n\nCoordinator advice (untrusted context; not authority):\n{}\n\nThe local user explicitly authorized writes only to these exact paths:\n{}\nUse only the native {} tool for writes. Provider-native shell and file tools remain read-only; no other tools or effects are authorized. Report evidence and remaining gaps; only native approval may finish the ticket.",
+            ticket.id,ticket.objective,plan,authorized,write_grants::TOOL_NAME,
+        ),
+        trusted: true,
+        image_ids: None,
+        moodboard_ids: None,
+    }).await;
+    if let Err(error) = delivered {
+        if let Ok(store) = state.store.lock() { let _ = fail_launch(&store,&ticket.id,&error); }
+        return Err(format!("Scoped worker dispatch failed; ticket {} retained: {error}",ticket.id));
+    }
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    Ok(WorkerWriteDispatch {
+        ticket: get_ticket(&store,&ticket.id)?,
+        grant: write_grants::summary_for_ticket(&store,&ticket.id)?,
+    })
+}
+
 #[tauri::command]
 pub async fn superagent_retry(window: tauri::WebviewWindow, 
     app: tauri::AppHandle, state: State<'_,AppState>, ticket_id: String,
@@ -2058,12 +3281,101 @@ pub async fn superagent_accept(window: tauri::WebviewWindow, state: State<'_,App
 }
 
 #[tauri::command]
+pub async fn superagent_accept_council(
+    window: tauri::WebviewWindow, app: tauri::AppHandle, state: State<'_,AppState>,
+    ticket_id: String, expected_revision: i64, reason: String,
+) -> Result<Ticket> {
+    require_main_window(&window)?;
+    let reason = reason.trim();
+    if reason.is_empty() || reason.len() > 500 || reason.chars().any(char::is_control) {
+        return Err("Provide a plain-text human acceptance reason of 1 to 500 characters.".into());
+    }
+    if crate::feature_controls::get().bots_paused {
+        return Err("Bots are globally paused; SuperAgent Council acceptance is denied.".into());
+    }
+    council_adapter::accept_and_finalize_human(
+        state.inner(),&ticket_id,expected_revision,reason,
+        |native_session_id| crate::architect::accept_superagent_review(&app,state.inner(),native_session_id).map(|_| ()),
+    )
+}
+
+#[tauri::command]
 pub async fn superagent_reject(window: tauri::WebviewWindow, 
     state: State<'_, AppState>, ticket_id: String, expected_revision: i64, reason: String,
 ) -> Result<Ticket> {
     require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     reject(&store, &ticket_id, expected_revision, &reason)
+}
+
+async fn confirm_issue_comment(
+    window: &tauri::WebviewWindow,
+    intent: &effects::IssueCommentIntent,
+) -> bool {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let message = format!(
+        "Authorize one GitHub issue comment for SuperAgent Ticket {} at revision {}?\n\nRepository: {}\nIssue: #{}\nEffect key: {}\nPayload SHA-256: {}\n\nExact comment body (including PandaCode's idempotency marker):\n{}\n\nPandaCode will reserve this exact effect before calling GitHub. It will not replay a pending or uncertain receipt.",
+        intent.ticket_id,
+        intent.expected_revision,
+        intent.repository,
+        intent.issue_number,
+        intent.effect_key,
+        intent.payload_sha256,
+        intent.comment_body,
+    );
+    let dialog = window
+        .dialog()
+        .message(message)
+        .title("Authorize GitHub issue comment")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Authorize this comment".into(),
+            "Cancel".into(),
+        ));
+    #[cfg(desktop)]
+    let dialog = dialog.parent(window);
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    dialog.show(move |confirmed| {
+        let _ = sender.send(confirmed);
+    });
+    receiver.await.unwrap_or(false)
+}
+
+#[tauri::command]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Tauri binds command arguments by name from the existing frontend invocation; grouping them would change the IPC contract"
+)]
+pub async fn superagent_issue_comment(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    ticket_id: String,
+    expected_revision: i64,
+    repository: String,
+    issue_number: i64,
+    effect_key: String,
+    comment: String,
+) -> Result<effects::EffectStatus> {
+    require_main_window(&window)?;
+    let intent = effects::prepare_issue_comment(
+        &ticket_id,
+        expected_revision,
+        &repository,
+        issue_number,
+        &effect_key,
+        &comment,
+    )?;
+    let database_path = state.store.lock().map_err(|e| e.to_string())?.path.clone();
+    let existing = effects::open_effect_store(&database_path)?;
+    let already_authorized = effects::has_exact_grant(&existing, &intent)?;
+    drop(existing);
+    if !already_authorized {
+        if !confirm_issue_comment(&window, &intent).await {
+            return Err("GitHub issue-comment authorization was not confirmed by the local user.".into());
+        }
+        let store = effects::open_effect_store(&database_path)?;
+        effects::authorize(&store, &intent)?;
+    }
+    effects::post_issue_comment(&database_path, &intent)
 }
 
 #[tauri::command]
@@ -2077,6 +3389,19 @@ pub async fn superagent_stop(window: tauri::WebviewWindow, app: tauri::AppHandle
         let _=crate::stop_session(app.clone(),app.state::<AppState>(),session).await;
     }
     Ok(ticket)
+}
+
+#[tauri::command]
+pub async fn superagent_revoke_worker_write_grant(
+    window: tauri::WebviewWindow,
+    state: State<'_,AppState>,
+    ticket_id: String,
+    grant_id: String,
+    expected_revision: i64,
+) -> Result<write_grants::WriteGrantSummary> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    write_grants::revoke(&store,&ticket_id,&grant_id,expected_revision)
 }
 
 #[cfg(test)]
@@ -2263,6 +3588,12 @@ mod tests {
         ).unwrap();
         assert!(launched);
         let before = ticket_snapshot(&store, &ticket.id, 50).unwrap();
+        let team_payload = serde_json::to_value(&before.team_snapshot).unwrap();
+        assert_eq!(before.team_snapshot, ticket_team_snapshot(&store,&ticket.id).unwrap());
+        assert_eq!(team_payload["provenance"], "native");
+        assert_eq!(team_payload["teamVersion"], config.team_version);
+        assert_eq!(team_payload["policy"]["policyRevision"], config.policy_revision);
+        assert_eq!(team_payload["workerBotIds"], serde_json::json!(["worker"]));
         assert_eq!(before.ticket.state, "running");
         assert!(!before.mandate.revoked);
         assert!(!before.mandate.allowed_side_effects);
@@ -2278,6 +3609,87 @@ mod tests {
         assert_eq!(after.activity[0].kind, "stopped");
         assert!(ticket_snapshot(&store, &ticket.id, 0).is_err());
         assert!(ticket_snapshot(&store, &ticket.id, 201).is_err());
+    }
+
+    #[test]
+    fn ticket_team_snapshot_rejects_owner_row_binding_drift() {
+        for binding in ["orchestration_id","project_id","worker_bot_id","policy_revision"] {
+            let mut store=fixture();
+            let config=enabled(&store);
+            let other=create_configuration(&store,NewOrchestration {
+                name:"Other owner".into(),coordinator_bot_id:"router".into(),
+                worker_bot_id:"worker".into(),
+            }).unwrap();
+            let (ticket,launched)=admit(
+                &mut store,&config.id,"Snapshot owner binding","snapshot-owner-binding",true,
+            ).unwrap();
+            assert!(!launched);
+            let valid=ticket_team_snapshot(&store,&ticket.id).unwrap();
+            assert_eq!(valid.provenance,TeamSnapshotProvenance::Native);
+            let snapshot_before: (String,String)=store.db.query_row(
+                "SELECT snapshot_json,snapshot_sha256 FROM sa_ticket_team_snapshots WHERE ticket_id=?1",
+                [&ticket.id],|r|Ok((r.get(0)?,r.get(1)?)),
+            ).unwrap();
+
+            match binding {
+                "orchestration_id" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET orchestration_id=?1 WHERE id=?2",
+                        params![other.id,ticket.id],
+                    ).unwrap();
+                }
+                "project_id" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET project_id='drifted-project' WHERE id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "worker_bot_id" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET worker_bot_id='drifted-worker' WHERE id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                "policy_revision" => {
+                    store.db.execute(
+                        "UPDATE sa_tickets SET policy_revision=policy_revision+1 WHERE id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            assert!(ticket_team_snapshot(&store,&ticket.id).is_err(),
+                "owner binding drift in {binding} must be rejected");
+            let snapshot_after: (String,String)=store.db.query_row(
+                "SELECT snapshot_json,snapshot_sha256 FROM sa_ticket_team_snapshots WHERE ticket_id=?1",
+                [&ticket.id],|r|Ok((r.get(0)?,r.get(1)?)),
+            ).unwrap();
+            assert_eq!(snapshot_after,snapshot_before,"the immutable snapshot must be unchanged");
+        }
+    }
+
+    #[test]
+    fn legacy_unknown_ticket_team_snapshot_remains_loadable_for_its_owner() {
+        let store=fixture();
+        let config=enabled(&store);
+        let ticket_id="legacy-snapshot-owner";
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,
+                project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+             VALUES(?1,?2,?3,?4,?5,'manual',?6,?7,?8,'blocked',?9,?9)",
+            params![ticket_id,config.id,"legacy-snapshot-owner","Historical work","test",
+                config.project_id,config.worker_bot_id,config.policy_revision,now],
+        ).unwrap();
+        let snapshot=legacy_unknown_team_snapshot(
+            &config.id,config.team_version+1,&config.worker_bot_id,&config.project_id,
+            config.policy_revision,
+        ).unwrap();
+        insert_team_version(&store.db,&snapshot).unwrap();
+        insert_ticket_team_snapshot(&store.db,ticket_id,&snapshot,"legacy-backfill").unwrap();
+
+        assert_eq!(ticket_team_snapshot(&store,ticket_id).unwrap(),snapshot);
     }
 
 
@@ -2642,6 +4054,14 @@ mod tests {
         store
     }
 
+    fn add_worker(store: &Store, id: &str) {
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+            params![id,storage::now()],
+        ).unwrap();
+    }
+
     fn enabled(store: &Store) -> Orchestration {
         let cfg=create_configuration(store,NewOrchestration {
             name:"Safe manual".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
@@ -2651,6 +4071,146 @@ mod tests {
             "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",[&cfg.id],
         ).unwrap();
         configuration(store,&cfg.id).unwrap()
+    }
+
+    #[test]
+    fn team_role_bounds_order_and_cross_role_duplicates_are_validated() {
+        let valid = |workers: Vec<String>, reviewers: Vec<String>| OrchestrationInput {
+            name:"Roles".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:workers.first().cloned().unwrap_or_default(),
+            worker_bot_ids:Some(workers),reviewer_bot_ids:Some(reviewers),
+            council_required:None,
+        };
+        assert!(valid(vec![],vec![]).into_parts().is_err());
+        assert!(valid((0..=MAX_WORKERS_PER_TEAM).map(|i|format!("worker-{i}" )).collect(),vec![])
+            .into_parts().is_err());
+        assert!(valid(vec!["worker".into()],(0..=MAX_REVIEWERS_PER_TEAM)
+            .map(|i|format!("reviewer-{i}" )).collect()).into_parts().is_err());
+        assert!(valid(vec!["worker".into(),"worker".into()],vec![]).into_parts().is_err());
+        assert!(valid(vec!["worker".into()],vec!["worker".into()]).into_parts().is_err());
+        assert!(valid(vec!["worker".into()],vec!["router".into()]).into_parts().is_err());
+        let (_,workers,reviewers,required)=valid(
+            vec!["worker".into(),"worker-2".into()],vec!["reviewer".into()],
+        ).into_parts().unwrap();
+        assert_eq!(workers,vec!["worker","worker-2"]);
+        assert_eq!(reviewers,vec!["reviewer"]);
+        assert_eq!(required,None);
+    }
+
+    #[test]
+    fn council_required_team_policy_is_explicit_and_defaults_off() {
+        let store=fixture();
+        let off=create_configuration(&store,NewOrchestration {
+            name:"Council default off".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        assert!(!off.council_required);
+
+        for id in ["reviewer-a","reviewer-b"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let required=create_configuration_roles_with_policy(
+            &store,
+            NewOrchestration {
+                name:"Council required".into(),coordinator_bot_id:"router".into(),
+                worker_bot_id:"worker".into(),
+            },
+            vec!["worker".into()],
+            vec!["reviewer-a".into(),"reviewer-b".into()],
+            true,
+        ).unwrap();
+        assert!(required.council_required);
+        assert_eq!(required.reviewer_bot_ids,vec!["reviewer-a","reviewer-b"]);
+        assert!(create_configuration_roles_with_policy(
+            &store,
+            NewOrchestration {
+                name:"Council needs two seats".into(),coordinator_bot_id:"router".into(),
+                worker_bot_id:"worker".into(),
+            },
+            vec!["worker".into()],vec!["reviewer-a".into()],true,
+        ).is_err());
+    }
+
+    #[test]
+    fn legacy_create_configuration_supplies_its_single_worker() {
+        let store=fixture();
+        let created=create_configuration(&store,NewOrchestration {
+            name:"Legacy Team".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
+        }).unwrap();
+        assert_eq!(created.team_version,1);
+        assert_eq!(created.worker_bot_ids,vec!["worker"]);
+        assert!(created.reviewer_bot_ids.is_empty());
+    }
+
+    #[test]
+    fn enabled_orchestration_rejects_team_edit_without_mutation() {
+        let store=fixture();
+        let config=enabled(&store);
+        add_worker(&store,"worker-2");
+        let before=configuration(&store,&config.id).unwrap();
+        let input=NewOrchestration {
+            name:"Changed Team".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker-2".into(),
+        };
+        assert!(update_configuration(&store,&config.id,before.policy_revision,&input).is_err());
+        assert!(update_configuration(&store,&config.id,before.policy_revision-1,&input).is_err());
+        let after=configuration(&store,&config.id).unwrap();
+        assert_eq!(after.name,before.name);
+        assert_eq!(after.coordinator_bot_id,before.coordinator_bot_id);
+        assert_eq!(after.project_id,before.project_id);
+        assert_eq!(after.policy_revision,before.policy_revision);
+        assert_eq!(after.team_version,before.team_version);
+        assert_eq!(after.worker_bot_id,before.worker_bot_id);
+        assert_eq!(after.worker_bot_ids,before.worker_bot_ids);
+        assert_eq!(after.reviewer_bot_ids,before.reviewer_bot_ids);
+    }
+
+    #[test]
+    fn ordered_roles_are_snapshotted_and_reviewer_or_coordinator_cannot_run_as_worker() {
+        let mut store=fixture();
+        for id in ["worker-2","reviewer"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let input=OrchestrationInput {
+            name:"Ordered Team".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+            worker_bot_ids:Some(vec!["worker".into(),"worker-2".into()]),
+            reviewer_bot_ids:Some(vec!["reviewer".into()]),
+            council_required:None,
+        };
+        let (legacy,workers,reviewers,required)=input.into_parts().unwrap();
+        assert_eq!(required,None);
+        let created=create_configuration_roles(&store,legacy,workers,reviewers).unwrap();
+        assert_eq!(created.team_version,1);
+        assert_eq!(created.worker_bot_ids,vec!["worker","worker-2"]);
+        assert_eq!(created.reviewer_bot_ids,vec!["reviewer"]);
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&created.id],
+        ).unwrap();
+        let (ticket,launched)=admit(&mut store,&created.id,"Use ordered team","ordered-team",false).unwrap();
+        assert!(launched);
+        let snapshot=ticket_team_snapshot(&store,&ticket.id).unwrap();
+        assert_eq!(snapshot.team_version,1);
+        assert_eq!(snapshot.worker_bot_ids,vec!["worker","worker-2"]);
+        assert_eq!(snapshot.reviewer_bot_ids,vec!["reviewer"]);
+        assert_eq!(snapshot.policy.autonomy,"off");
+        assert_eq!(snapshot.policy.max_concurrent_tasks,1);
+        assert!(!snapshot.policy.council_enabled);
+        assert_eq!(snapshot.roles.iter().map(|role|role.role.as_str()).collect::<Vec<_>>(),
+            vec!["coordinator","worker","worker","reviewer"]);
+        assert!(snapshot.roles.iter().all(|role|role.effective_config.is_some()));
+        assert!(assignment_role_authorized(&store,&ticket.id,"worker",1).unwrap());
+        assert!(assignment_role_authorized(&store,&ticket.id,"worker-2",1).unwrap());
+        assert!(!assignment_role_authorized(&store,&ticket.id,"router",1).unwrap());
+        assert!(!assignment_role_authorized(&store,&ticket.id,"reviewer",1).unwrap());
     }
 
     #[test]
@@ -2664,6 +4224,7 @@ mod tests {
         };
         let updated=update_configuration(&store,&config.id,1,&input).unwrap();
         assert_eq!(updated.policy_revision,2);
+        assert_eq!(updated.team_version,2);
         assert!(!updated.enabled);
         assert!(update_configuration(&store,&config.id,1,&input).is_err());
         assert_eq!(update_configuration(&store,&config.id,2,&input).unwrap().policy_revision,2);
@@ -2672,15 +4233,29 @@ mod tests {
     }
 
     #[test]
-    fn durable_ticket_blocks_reconfiguration_and_deletion_after_disable() {
+    fn orchestration_with_ticket_history_rejects_team_edits_and_blocks_deletion() {
         let mut store=fixture();
         let config=enabled(&store);
         let (ticket,_)=admit(&mut store,&config.id,"Immutable history","policy-guard",false).unwrap();
+        let original=ticket_team_snapshot(&store,&ticket.id).unwrap();
         let disabled=change_enabled(&store,&config.id,config.policy_revision,false).unwrap();
-        let input=NewOrchestration{
-            name:"Changed".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
+        add_worker(&store,"worker-2");
+        let input=NewOrchestration {
+            name:"Future Team".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker-2".into(),
         };
         assert!(update_configuration(&store,&config.id,disabled.policy_revision,&input).is_err());
+        let after=configuration(&store,&config.id).unwrap();
+        assert_eq!(after.name,disabled.name);
+        assert_eq!(after.coordinator_bot_id,disabled.coordinator_bot_id);
+        assert_eq!(after.project_id,disabled.project_id);
+        assert!(!after.enabled);
+        assert_eq!(after.team_version,disabled.team_version);
+        assert_eq!(after.policy_revision,disabled.policy_revision);
+        assert_eq!(after.worker_bot_id,disabled.worker_bot_id);
+        assert_eq!(after.worker_bot_ids,disabled.worker_bot_ids);
+        assert_eq!(after.reviewer_bot_ids,disabled.reviewer_bot_ids);
+        assert_eq!(ticket_team_snapshot(&store,&ticket.id).unwrap(),original);
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().objective,"Immutable history");
         assert!(delete_configuration(&store,&config.id,disabled.policy_revision).is_err());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().objective,"Immutable history");
     }
@@ -3760,6 +5335,31 @@ mod tests {
         assert_ne!(assignment_session(&store,&second.id).unwrap(),Some(sid));
     }
 
+    #[cfg(not(windows))]
+    #[test]
+    fn unsupported_scoped_write_platform_keeps_worker_queued_without_a_grant() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (coordinated, launched) = admit_role(
+            &mut store,&config.id,"Authorize a bounded file change","unsupported-write-platform",false,true,
+        ).unwrap();
+        assert!(launched);
+        let coordinator_session = assignment_session(&store,&coordinated.id).unwrap().unwrap();
+        assert!(on_run_finished(&store,&coordinator_session,true,"Write only the named source file").unwrap());
+        let queued = get_ticket(&store,&coordinated.id).unwrap();
+
+        let error = prepare_coordinated_worker_with_write_grant(
+            &mut store,&queued.id,false,queued.revision,&["src/allowed.txt".into()],
+        ).unwrap_err();
+
+        assert!(error.contains("policy_unsupported"),"{error}");
+        assert_eq!(get_ticket(&store,&queued.id).unwrap().state,"queued");
+        let grant_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_worker_write_grants WHERE ticket_id=?1",[&queued.id],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(grant_count,0);
+    }
+
     #[test]
     fn startup_interruption_is_audited_once_and_old_callbacks_remain_denied() {
         let mut store = fixture();
@@ -4222,14 +5822,24 @@ mod tests {
     }
 
     #[test]
-    fn policy_revision_change_rejects_stale_worker_and_approval() {
+    fn active_ticket_remains_bound_to_its_team_when_edit_is_rejected() {
         let mut store=fixture();
         let cfg=enabled(&store);
         let (ticket,_)=admit(&mut store,&cfg.id,"Review","revision-1",false).unwrap();
         let sid=assignment_session(&store,&ticket.id).unwrap().unwrap();
-        store.db.execute("UPDATE sa_orchestrations SET policy_revision=policy_revision+1 WHERE id=?1",[&cfg.id]).unwrap();
-        assert!(read_only_policy(&store,&sid).is_err());
+        let input=NewOrchestration{
+            name:"Future policy".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
+        };
+        assert!(update_configuration(&store,&cfg.id,cfg.policy_revision,&input).is_err());
+        let after=configuration(&store,&cfg.id).unwrap();
+        assert_eq!(after.policy_revision,cfg.policy_revision);
+        assert_eq!(after.team_version,cfg.team_version);
+        assert_eq!(after.coordinator_bot_id,cfg.coordinator_bot_id);
+        assert_eq!(after.project_id,cfg.project_id);
+        assert_eq!(after.worker_bot_ids,cfg.worker_bot_ids);
+        assert_eq!(after.reviewer_bot_ids,cfg.reviewer_bot_ids);
+        assert!(read_only_policy(&store,&sid).unwrap().is_some());
         assert!(on_run_finished(&store,&sid,true,"Stale result").unwrap());
-        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"waiting_approval");
     }
 }

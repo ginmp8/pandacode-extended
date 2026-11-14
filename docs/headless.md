@@ -268,5 +268,18 @@ Accept and reject use the current Ticket revision; reject also requires a
 nonempty reason. Stop revokes the Ticket mandate in the shared database. A
 provider call already held in memory by a running serve process is not forcibly
 terminated; its late completion is denied by the native state and mandate
-checks. These commands do not create, retry, or resume tasks, and authenticated
-event intake remains unavailable.
+checks. GitHub issue-comment dispatch uses a shared cross-process fence: Stop
+waits for a comment write that already started, and a later invocation cannot
+start another write after Stop or a bot reset/delete returns. These commands do
+not create, retry, or resume tasks, and authenticated event intake remains
+unavailable.
+
+### Explicit GitHub issue comments
+
+`--issue-comment` requires a local confirmation for the exact Ticket revision,
+repository, issue, effect key and comment body. It reserves a durable receipt
+before calling GitHub. The command never replays a pending or uncertain write;
+after restart or revocation it may only read back an existing exact receipt.
+The JSON result includes the bounded uncertainty reason and readback state, plus
+the verified remote comment ID, URL and author when GitHub returns them. The
+receipt does not duplicate the comment body.

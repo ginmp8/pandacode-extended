@@ -104,6 +104,881 @@ fn resolve_scoped_path(root: &Path, value: &str) -> Result<PathBuf, PathError> {
     Ok(candidate)
 }
 
+/// Parse a normalized project-relative path for a narrowly-authorized write.
+fn scoped_write_parts(value: &str) -> Result<Vec<&str>, String> {
+    if value.is_empty() || value.len() > 4096
+        || value.chars().any(|c| matches!(c, '\\' | '\0' | ':'))
+    {
+        return Err("Invalid scoped write path".into());
+    }
+    let parts = value.split('/').collect::<Vec<_>>();
+    if parts.is_empty() || parts.iter().any(|part| {
+        part.is_empty() || *part == "." || *part == ".." || part.eq_ignore_ascii_case(".git")
+            || part.chars().any(char::is_control)
+    }) {
+        return Err("Scoped write path must name a file inside the checkout".into());
+    }
+    Ok(parts)
+}
+
+/// True only where the production replacement primitive can keep checkout
+/// ancestors pinned against rename/reparse-point substitution for the full
+/// atomic replacement. Unix path resolution stays available for validating a
+/// proposed grant, but its `renameat` path cannot hold ancestor renames off.
+pub(crate) const fn scoped_writes_supported() -> bool {
+    cfg!(windows)
+}
+
+#[cfg(unix)]
+struct ScopedWriteTarget {
+    root: File,
+    root_path: PathBuf,
+    parent_parts: Vec<std::ffi::CString>,
+    parent: File,
+    name: std::ffi::CString,
+    #[cfg(test)]
+    existing_mode: Option<libc::mode_t>,
+}
+
+#[cfg(unix)]
+fn open_scoped_child_directory(parent: &File, name: &std::ffi::CString) -> Result<File, String> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    let child = unsafe {
+        libc::openat(
+            parent.as_raw_fd(),
+            name.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if child < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok(unsafe { File::from_raw_fd(child) })
+}
+
+#[cfg(unix)]
+fn open_scoped_root(root: &Path) -> Result<File, String> {
+    use std::{
+        ffi::CString,
+        os::{fd::FromRawFd, unix::ffi::OsStrExt},
+    };
+
+    let root_handle = CString::new("/").map_err(|error| error.to_string())?;
+    let fd = unsafe {
+        libc::open(
+            root_handle.as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let mut directory = unsafe { File::from_raw_fd(fd) };
+    for component in root.components() {
+        match component {
+            Component::RootDir => {}
+            Component::Normal(name) => {
+                let name = CString::new(name.as_bytes()).map_err(|error| error.to_string())?;
+                directory = open_scoped_child_directory(&directory, &name)?;
+            }
+            _ => return Err("Scoped writes require the canonical project root".into()),
+        }
+    }
+    Ok(directory)
+}
+
+#[cfg(unix)]
+fn scoped_directory_identity(file: &File) -> Result<(libc::dev_t, libc::ino_t), String> {
+    use std::os::fd::AsRawFd;
+
+    let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe { libc::fstat(file.as_raw_fd(), &mut metadata) } != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    Ok((metadata.st_dev, metadata.st_ino))
+}
+
+#[cfg(unix)]
+fn ensure_scoped_write_target_current(target: &ScopedWriteTarget) -> Result<(), String> {
+    use std::os::fd::AsRawFd;
+
+    let current_root = open_scoped_root(&target.root_path)?;
+    if scoped_directory_identity(&current_root)? != scoped_directory_identity(&target.root)? {
+        return Err("Scoped write project root moved before replacement".into());
+    }
+
+    let mut current_parent = target.root.try_clone().map_err(|error| error.to_string())?;
+    for component in &target.parent_parts {
+        current_parent = open_scoped_child_directory(&current_parent, component)?;
+    }
+    if scoped_directory_identity(&current_parent)? != scoped_directory_identity(&target.parent)? {
+        return Err("Scoped write parent moved before replacement".into());
+    }
+    let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+    if unsafe {
+        libc::fstatat(
+            target.parent.as_raw_fd(),
+            target.name.as_ptr(),
+            &mut metadata,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    } != 0
+    {
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::NotFound {
+            return Err(error.to_string());
+        }
+    } else {
+        let kind = metadata.st_mode & libc::S_IFMT;
+        if kind == libc::S_IFLNK {
+            return Err("Scoped writes cannot follow symlinks".into());
+        }
+        if kind != libc::S_IFREG {
+            return Err("Scoped write path is not a regular file".into());
+        }
+    }
+    Ok(())
+}
+
+/// Open each root and target directory component relative to an already-open
+/// directory, rejecting symlinks at the moment each component is resolved.
+/// The returned parent handle, rather than a reconstructed pathname, is used
+/// for the eventual atomic replacement.
+#[cfg(unix)]
+fn resolve_scoped_write_target(root: &Path, value: &str) -> Result<ScopedWriteTarget, String> {
+    use std::{
+        ffi::CString,
+        os::fd::AsRawFd,
+    };
+
+    let parts = scoped_write_parts(value)?;
+    let requested_root = root;
+    let canonical_root = fs::canonicalize(requested_root).map_err(|e| e.to_string())?;
+    if canonical_root.as_path() != requested_root {
+        return Err("Scoped writes require the canonical project root".into());
+    }
+
+    let root_handle = open_scoped_root(&canonical_root)?;
+    let mut directory = root_handle.try_clone().map_err(|error| error.to_string())?;
+    let parent_parts = parts[..parts.len() - 1]
+        .iter()
+        .map(|part| CString::new(*part).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    for name in &parent_parts {
+        directory = open_scoped_child_directory(&directory, name)?;
+    }
+
+    let name = CString::new(*parts.last().ok_or("Invalid scoped write path")?)
+        .map_err(|e| e.to_string())?;
+    let mut metadata = unsafe { std::mem::zeroed::<libc::stat>() };
+    let status = unsafe {
+        libc::fstatat(
+            directory.as_raw_fd(),
+            name.as_ptr(),
+            &mut metadata,
+            libc::AT_SYMLINK_NOFOLLOW,
+        )
+    };
+    let _existing_mode = if status == 0 {
+        let kind = metadata.st_mode & libc::S_IFMT;
+        if kind == libc::S_IFLNK {
+            return Err("Scoped writes cannot follow symlinks".into());
+        }
+        if kind != libc::S_IFREG {
+            return Err("Scoped write path is not a regular file".into());
+        }
+        Some(metadata.st_mode & 0o777)
+    } else {
+        let error = std::io::Error::last_os_error();
+        if error.kind() == std::io::ErrorKind::NotFound {
+            None
+        } else {
+            return Err(error.to_string());
+        }
+    };
+
+    Ok(ScopedWriteTarget {
+        root: root_handle,
+        root_path: canonical_root,
+        parent_parts,
+        parent: directory,
+        name,
+        #[cfg(test)]
+        existing_mode: _existing_mode,
+    })
+}
+
+#[cfg(windows)]
+struct ScopedWriteTarget {
+    directories: Vec<File>,
+    name: Vec<u16>,
+    existing: Option<File>,
+}
+
+#[cfg(windows)]
+fn windows_file_attributes(file: &File) -> Result<u32, String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{
+            GetFileInformationByHandleEx, FILE_ATTRIBUTE_TAG_INFO, FileAttributeTagInfo,
+        },
+    };
+
+    let mut info = FILE_ATTRIBUTE_TAG_INFO::default();
+    unsafe {
+        GetFileInformationByHandleEx(
+            HANDLE(file.as_raw_handle()),
+            FileAttributeTagInfo,
+            (&mut info as *mut FILE_ATTRIBUTE_TAG_INFO).cast(),
+            std::mem::size_of::<FILE_ATTRIBUTE_TAG_INFO>() as u32,
+        )
+    }
+    .map_err(|error| error.to_string())?;
+    Ok(info.FileAttributes)
+}
+
+#[cfg(windows)]
+fn nt_status_message(status: i32) -> String {
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn RtlNtStatusToDosError(status: i32) -> u32;
+    }
+    let error = unsafe { RtlNtStatusToDosError(status) };
+    std::io::Error::from_raw_os_error(error as i32).to_string()
+}
+
+#[cfg(windows)]
+struct WindowsSecurityDescriptor(*mut std::ffi::c_void);
+
+#[cfg(windows)]
+impl Drop for WindowsSecurityDescriptor {
+    fn drop(&mut self) {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn LocalFree(memory: *mut std::ffi::c_void) -> *mut std::ffi::c_void;
+        }
+        if !self.0.is_null() {
+            unsafe { LocalFree(self.0) };
+        }
+    }
+}
+
+#[cfg(windows)]
+struct WindowsFileDacl {
+    _descriptor: WindowsSecurityDescriptor,
+    dacl: *mut std::ffi::c_void,
+    protected: bool,
+}
+
+#[cfg(windows)]
+fn windows_file_dacl(file: &File) -> Result<WindowsFileDacl, String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+
+    const SE_FILE_OBJECT: u32 = 1;
+    const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
+    const SE_DACL_PROTECTED: u16 = 0x1000;
+
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn GetSecurityInfo(
+            handle: HANDLE,
+            object_type: u32,
+            security_info: u32,
+            owner: *mut *mut std::ffi::c_void,
+            group: *mut *mut std::ffi::c_void,
+            dacl: *mut *mut std::ffi::c_void,
+            sacl: *mut *mut std::ffi::c_void,
+            security_descriptor: *mut *mut std::ffi::c_void,
+        ) -> u32;
+        fn GetSecurityDescriptorControl(
+            security_descriptor: *mut std::ffi::c_void,
+            control: *mut u16,
+            revision: *mut u32,
+        ) -> i32;
+    }
+
+    let mut descriptor = std::ptr::null_mut();
+    let mut dacl = std::ptr::null_mut();
+    let status = unsafe {
+        GetSecurityInfo(
+            HANDLE(file.as_raw_handle()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut dacl,
+            std::ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::from_raw_os_error(status as i32).to_string());
+    }
+    if descriptor.is_null() {
+        return Err("Windows returned no security descriptor for the scoped target".into());
+    }
+    let descriptor = WindowsSecurityDescriptor(descriptor);
+    let mut control = 0u16;
+    let mut revision = 0u32;
+    if unsafe { GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision) } == 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+
+    Ok(WindowsFileDacl {
+        _descriptor: descriptor,
+        dacl,
+        protected: control & SE_DACL_PROTECTED != 0,
+    })
+}
+
+#[cfg(windows)]
+fn preserve_windows_file_dacl(source: &File, destination: &File) -> Result<(), String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+
+    const SE_FILE_OBJECT: u32 = 1;
+    const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
+    const UNPROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x2000_0000;
+    const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
+
+    #[link(name = "advapi32")]
+    unsafe extern "system" {
+        fn SetSecurityInfo(
+            handle: HANDLE,
+            object_type: u32,
+            security_info: u32,
+            owner: *mut std::ffi::c_void,
+            group: *mut std::ffi::c_void,
+            dacl: *mut std::ffi::c_void,
+            sacl: *mut std::ffi::c_void,
+        ) -> u32;
+    }
+
+    let source_dacl = windows_file_dacl(source)?;
+    let inheritance = if source_dacl.protected {
+        PROTECTED_DACL_SECURITY_INFORMATION
+    } else {
+        UNPROTECTED_DACL_SECURITY_INFORMATION
+    };
+    let status = unsafe {
+        SetSecurityInfo(
+            HANDLE(destination.as_raw_handle()),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | inheritance,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            source_dacl.dacl,
+            std::ptr::null_mut(),
+        )
+    };
+    if status != 0 {
+        return Err(std::io::Error::from_raw_os_error(status as i32).to_string());
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn nt_open_relative(
+    parent: windows::Win32::Foundation::HANDLE,
+    name: &std::ffi::OsStr,
+    desired_access: u32,
+    share_access: u32,
+    disposition: u32,
+    options: u32,
+    attributes: u32,
+) -> Result<File, i32> {
+    use std::{
+        ffi::c_void,
+        os::windows::{ffi::OsStrExt, io::FromRawHandle},
+    };
+    use windows::{
+        core::PWSTR,
+        Win32::Foundation::{HANDLE, UNICODE_STRING},
+    };
+
+    #[repr(C)]
+    struct ObjectAttributes {
+        length: u32,
+        root_directory: HANDLE,
+        object_name: *mut UNICODE_STRING,
+        attributes: u32,
+        security_descriptor: *mut c_void,
+        security_quality_of_service: *mut c_void,
+    }
+    #[repr(C)]
+    struct IoStatusBlock {
+        status: i32,
+        information: usize,
+    }
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn NtCreateFile(
+            file_handle: *mut HANDLE,
+            desired_access: u32,
+            object_attributes: *mut ObjectAttributes,
+            io_status_block: *mut IoStatusBlock,
+            allocation_size: *const i64,
+            file_attributes: u32,
+            share_access: u32,
+            create_disposition: u32,
+            create_options: u32,
+            ea_buffer: *mut c_void,
+            ea_length: u32,
+        ) -> windows::Win32::Foundation::NTSTATUS;
+    }
+
+    let mut wide = name.encode_wide().collect::<Vec<_>>();
+    let byte_length = wide.len().checked_mul(2).filter(|n| *n <= u16::MAX as usize)
+        .ok_or(0xC000000Du32 as i32)?;
+    if byte_length == 0 {
+        return Err(0xC000000Du32 as i32);
+    }
+    let mut object_name = UNICODE_STRING {
+        Length: byte_length as u16,
+        MaximumLength: byte_length as u16,
+        Buffer: PWSTR(wide.as_mut_ptr()),
+    };
+    let mut object_attributes = ObjectAttributes {
+        length: std::mem::size_of::<ObjectAttributes>() as u32,
+        root_directory: parent,
+        object_name: &mut object_name,
+        attributes: 0x40, // OBJ_CASE_INSENSITIVE; every name passed here is one component.
+        security_descriptor: std::ptr::null_mut(),
+        security_quality_of_service: std::ptr::null_mut(),
+    };
+    let mut io_status = IoStatusBlock { status: 0, information: 0 };
+    let mut handle = HANDLE::default();
+    let status = unsafe {
+        NtCreateFile(
+            &mut handle,
+            desired_access,
+            &mut object_attributes,
+            &mut io_status,
+            std::ptr::null(),
+            attributes,
+            share_access,
+            disposition,
+            options,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if status.0 < 0 {
+        return Err(status.0);
+    }
+    if handle.0.is_null() || handle.0 as isize == -1 {
+        return Err(0xC0000001u32 as i32);
+    }
+    Ok(unsafe { File::from_raw_handle(handle.0) })
+}
+
+#[cfg(windows)]
+fn windows_directory_child(
+    parent: &File,
+    name: &std::ffi::OsStr,
+    allow_add_file: bool,
+) -> Result<File, String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT},
+    };
+
+    // NtCreateFile's documented relative-name form keeps each lookup anchored
+    // to its parent handle. FILE_OPEN_REPARSE_POINT opens a reparse point
+    // itself; the handle is rejected below before it can become a RootDirectory.
+    let child = nt_open_relative(
+        HANDLE(parent.as_raw_handle()),
+        name,
+        0x0010_00A1 | if allow_add_file { 0x2 } else { 0 }, // traversal rights; destination parent also gets FILE_ADD_FILE
+        0x3,         // read/write sharing, deliberately no FILE_SHARE_DELETE
+        1,           // FILE_OPEN
+        0x0020_0020, // FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT
+        0,
+    )
+    .map_err(|status| format!("Could not open scoped parent directory: {}", nt_status_message(status)))?;
+    let attributes = windows_file_attributes(&child)?;
+    if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+        return Err("Scoped writes cannot follow reparse points".into());
+    }
+    if attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0 {
+        return Err("Scoped write parent is not a directory".into());
+    }
+    Ok(child)
+}
+
+#[cfg(windows)]
+fn resolve_scoped_write_target(root: &Path, value: &str) -> Result<ScopedWriteTarget, String> {
+    use std::{
+        ffi::OsStr,
+        os::windows::{ffi::OsStrExt, io::{AsRawHandle, FromRawHandle}},
+        path::{Component, Prefix},
+    };
+    use windows::{
+        core::PCWSTR,
+        Win32::{
+            Foundation::HANDLE,
+            Storage::FileSystem::{
+                CreateFileW, GetDriveTypeW, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+                FILE_FLAGS_AND_ATTRIBUTES, FILE_SHARE_MODE, OPEN_EXISTING,
+            },
+        },
+    };
+
+    let parts = scoped_write_parts(value)?;
+    let canonical_root = fs::canonicalize(root).map_err(|error| error.to_string())?;
+    if canonical_root.as_path() != root {
+        return Err("Scoped writes require the canonical project root".into());
+    }
+    let mut components = canonical_root.components();
+    let prefix = match components.next() {
+        Some(Component::Prefix(prefix)) => prefix,
+        _ => return Err("Windows scoped writes require a local drive project root".into()),
+    };
+    let drive = match prefix.kind() {
+        Prefix::Disk(drive) | Prefix::VerbatimDisk(drive) => drive,
+        _ => return Err("Windows scoped writes require a local drive project root".into()),
+    };
+    if !matches!(components.next(), Some(Component::RootDir)) {
+        return Err("Windows scoped writes require a rooted project path".into());
+    }
+    let project_names = components
+        .map(|component| match component {
+            Component::Normal(name) => Ok(name.to_os_string()),
+            _ => Err("Windows project root has an unsupported path component".to_string()),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let parent_parts = &parts[..parts.len() - 1];
+
+    let volume_root = prefix.as_os_str().to_os_string();
+    let mut volume_root = volume_root;
+    volume_root.push("\\");
+    let volume_root_wide = volume_root.encode_wide().chain(Some(0)).collect::<Vec<_>>();
+    let drive_root = format!("{}:\\", char::from(drive))
+        .encode_utf16()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let drive_type = unsafe { GetDriveTypeW(PCWSTR(drive_root.as_ptr())) };
+    if !matches!(drive_type, 2 | 3 | 6) {
+        return Err("Windows scoped writes require a local fixed, removable, or RAM drive".into());
+    }
+
+    let root_handle = unsafe {
+        CreateFileW(
+            PCWSTR(volume_root_wide.as_ptr()),
+            0x80 | 0x20 | if project_names.is_empty() && parent_parts.is_empty() { 0x2 } else { 0 }, // FILE_READ_ATTRIBUTES | FILE_TRAVERSE; FILE_ADD_FILE only for a drive-root target
+            FILE_SHARE_MODE(0x3), // read/write sharing, deliberately no delete sharing
+            None,
+            OPEN_EXISTING,
+            FILE_FLAGS_AND_ATTRIBUTES(0x0200_0000 | 0x0020_0000), // BACKUP_SEMANTICS | OPEN_REPARSE_POINT
+            None,
+        )
+    }
+    .map_err(|error| error.to_string())?;
+    let root_directory = unsafe { File::from_raw_handle(root_handle.0) };
+    let root_attributes = windows_file_attributes(&root_directory)?;
+    if root_attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0
+        || root_attributes & FILE_ATTRIBUTE_DIRECTORY.0 == 0
+    {
+        return Err("Windows volume root is not a plain directory".into());
+    }
+    let mut directories = vec![root_directory];
+
+    for (index, name) in project_names.iter().enumerate() {
+        let add_file = parent_parts.is_empty() && index + 1 == project_names.len();
+        let child = windows_directory_child(directories.last().unwrap(), name, add_file)?;
+        directories.push(child);
+    }
+    for (index, part) in parent_parts.iter().enumerate() {
+        let add_file = index + 1 == parent_parts.len();
+        let child = windows_directory_child(directories.last().unwrap(), OsStr::new(part), add_file)?;
+        directories.push(child);
+    }
+
+    let name = OsStr::new(parts.last().ok_or("Invalid scoped write path")?)
+        .encode_wide().collect::<Vec<_>>();
+    let existing = nt_open_relative(
+        HANDLE(directories.last().unwrap().as_raw_handle()),
+        OsStr::new(parts.last().unwrap()),
+        0x0012_0082, // SYNCHRONIZE | READ_CONTROL | FILE_READ_ATTRIBUTES | FILE_WRITE_DATA
+        0x7, // share read/write/delete for the leaf while checking it
+        1,   // FILE_OPEN
+        0x0020_0060, // OPEN_REPARSE_POINT | SYNCHRONOUS_IO_NONALERT | NON_DIRECTORY_FILE
+        0,
+    );
+    let existing = match existing {
+        Ok(file) => {
+            let attributes = windows_file_attributes(&file)?;
+            if attributes & FILE_ATTRIBUTE_REPARSE_POINT.0 != 0 {
+                return Err("Scoped writes cannot follow reparse points".into());
+            }
+            if attributes & FILE_ATTRIBUTE_DIRECTORY.0 != 0 {
+                return Err("Scoped write path is not a regular file".into());
+            }
+            Some(file)
+        }
+        Err(status) if matches!(status as u32, 0xC0000034 | 0xC000000F) => None,
+        Err(status) => return Err(nt_status_message(status)),
+    };
+
+    Ok(ScopedWriteTarget { directories, name, existing })
+}
+
+/// On platforms without a handle-relative no-follow replacement primitive,
+/// retain path validation for grant creation but never perform a write.
+#[cfg(not(any(unix, windows)))]
+pub(crate) fn validate_scoped_write_path(root: &Path, value: &str) -> Result<(), String> {
+    let parts = scoped_write_parts(value)?;
+    let root = fs::canonicalize(root).map_err(|e| e.to_string())?;
+    let mut target = root.clone();
+    for (index, part) in parts.iter().enumerate() {
+        target.push(part);
+        match fs::symlink_metadata(&target) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err("Scoped writes cannot follow symlinks".into());
+                }
+                let last = index + 1 == parts.len();
+                if (!last && !metadata.is_dir()) || (last && !metadata.is_file()) {
+                    return Err("Scoped write path is not a regular file".into());
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if index + 1 != parts.len() {
+                    return Err("Scoped write parent directory does not exist".into());
+                }
+            }
+            Err(error) => return Err(error.to_string()),
+        }
+    }
+    let parent = target.parent().ok_or("Invalid scoped write path")?;
+    let parent = fs::canonicalize(parent).map_err(|e| e.to_string())?;
+    if !parent.starts_with(&root) {
+        return Err("Scoped write path escapes the checkout".into());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn validate_scoped_write_path(root: &Path, value: &str) -> Result<(), String> {
+    let target = resolve_scoped_write_target(root, value)?;
+    ensure_scoped_write_target_current(&target)
+}
+
+#[cfg(windows)]
+pub(crate) fn validate_scoped_write_path(root: &Path, value: &str) -> Result<(), String> {
+    resolve_scoped_write_target(root, value).map(|_| ())
+}
+
+#[cfg(all(unix, test))]
+fn write_scoped_text_at(target: ScopedWriteTarget, text: &str) -> Result<(), String> {
+    use std::os::fd::{AsRawFd, FromRawFd};
+
+    ensure_scoped_write_target_current(&target)?;
+
+    struct TempEntry<'a> {
+        parent: &'a File,
+        name: std::ffi::CString,
+        installed: bool,
+    }
+    impl Drop for TempEntry<'_> {
+        fn drop(&mut self) {
+            if !self.installed {
+                unsafe {
+                    libc::unlinkat(self.parent.as_raw_fd(), self.name.as_ptr(), 0);
+                }
+            }
+        }
+    }
+
+    let parent_fd = target.parent.as_raw_fd();
+    let temp_name = std::ffi::CString::new(format!(".pandacode-write-{}.tmp", crate::storage::id()))
+        .map_err(|e| e.to_string())?;
+    // `openat` takes its optional mode through varargs. Darwin's `mode_t` is
+    // `u16`, so C promotes it to `int`; Linux's `mode_t` is `u32` and remains
+    // unsigned when passed through varargs.
+    #[cfg(target_vendor = "apple")]
+    let create_mode = 0o666 as libc::c_int;
+    #[cfg(not(target_vendor = "apple"))]
+    let create_mode = 0o666 as libc::mode_t;
+    let fd = unsafe {
+        libc::openat(
+            parent_fd,
+            temp_name.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+            create_mode,
+        )
+    };
+    if fd < 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    let mut temp = TempEntry { parent: &target.parent, name: temp_name, installed: false };
+    let mut file = unsafe { File::from_raw_fd(fd) };
+    if let Some(mode) = target.existing_mode {
+        if mode & 0o222 == 0 {
+            return Err("Scoped write target is not writable".into());
+        }
+        if unsafe { libc::fchmod(file.as_raw_fd(), mode) } != 0 {
+            return Err(std::io::Error::last_os_error().to_string());
+        }
+    }
+    file.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    drop(file);
+
+    ensure_scoped_write_target_current(&target)?;
+    let result = unsafe {
+        libc::renameat(
+            parent_fd,
+            temp.name.as_ptr(),
+            parent_fd,
+            target.name.as_ptr(),
+        )
+    };
+    if result != 0 {
+        return Err(std::io::Error::last_os_error().to_string());
+    }
+    temp.installed = true;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn write_scoped_text_at(target: ScopedWriteTarget, text: &str) -> Result<(), String> {
+    use std::{
+        ffi::OsStr,
+        os::windows::io::AsRawHandle,
+    };
+    use windows::Win32::{
+        Foundation::HANDLE,
+        Storage::FileSystem::{FILE_RENAME_INFO, FILE_RENAME_INFO_0},
+    };
+
+    let parent = target.directories.last().ok_or("Invalid scoped write path")?;
+    let temp_name = format!(".pandacode-write-{}.tmp", crate::storage::id());
+    let mut file = nt_open_relative(
+        HANDLE(parent.as_raw_handle()),
+        OsStr::new(&temp_name),
+        0x0015_0082, // DELETE | WRITE_DAC | SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_WRITE_DATA
+        0x3, // share read/write, deliberately no delete sharing while the temp is installed
+        2, // FILE_CREATE; collisions fail closed
+        0x0020_0060, // OPEN_REPARSE_POINT | SYNCHRONOUS_IO_NONALERT | NON_DIRECTORY_FILE
+        0x80, // FILE_ATTRIBUTE_NORMAL
+    )
+    .map_err(|status| format!("Could not create scoped temporary file: {}", nt_status_message(status)))?;
+
+    struct TempEntry {
+        handle: HANDLE,
+        installed: bool,
+    }
+    impl Drop for TempEntry {
+        fn drop(&mut self) {
+            if !self.installed {
+                use windows::Win32::{
+                    Storage::FileSystem::{
+                        SetFileInformationByHandle, FILE_DISPOSITION_INFO, FileDispositionInfo,
+                    },
+                };
+                let disposition = FILE_DISPOSITION_INFO { DeleteFile: true };
+                unsafe {
+                    let _ = SetFileInformationByHandle(
+                        self.handle,
+                        FileDispositionInfo,
+                        (&disposition as *const FILE_DISPOSITION_INFO).cast(),
+                        std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+                    );
+                }
+            }
+        }
+    }
+
+    let mut temp = TempEntry { handle: HANDLE(file.as_raw_handle()), installed: false };
+    if let Some(existing) = target.existing.as_ref() {
+        preserve_windows_file_dacl(existing, &file)
+            .map_err(|error| format!("Could not preserve scoped target permissions: {error}"))?;
+    }
+    file.write_all(text.as_bytes()).map_err(|error| error.to_string())?;
+    file.sync_all().map_err(|error| error.to_string())?;
+
+    let name_bytes = target.name.len().checked_mul(std::mem::size_of::<u16>())
+        .filter(|bytes| *bytes <= u32::MAX as usize)
+        .ok_or("Scoped write path is too long")?;
+    let header_bytes = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let buffer_bytes = header_bytes.checked_add(name_bytes)
+        .filter(|bytes| *bytes <= u32::MAX as usize)
+        .ok_or("Scoped write path is too long")?;
+    let mut rename_buffer = vec![0usize; buffer_bytes.div_ceil(std::mem::size_of::<usize>())];
+    let rename_info = rename_buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    unsafe {
+        std::ptr::addr_of_mut!((*rename_info).Anonymous)
+            .write(FILE_RENAME_INFO_0 { ReplaceIfExists: true });
+        (*rename_info).RootDirectory = HANDLE(parent.as_raw_handle());
+        (*rename_info).FileNameLength = name_bytes as u32;
+        std::ptr::copy_nonoverlapping(
+            target.name.as_ptr(),
+            std::ptr::addr_of_mut!((*rename_info).FileName).cast::<u16>(),
+            target.name.len(),
+        );
+    }
+    #[repr(C)]
+    struct IoStatusBlock {
+        status: i32,
+        information: usize,
+    }
+    #[link(name = "ntdll")]
+    unsafe extern "system" {
+        fn NtSetInformationFile(
+            file_handle: HANDLE,
+            io_status_block: *mut IoStatusBlock,
+            file_information: *mut std::ffi::c_void,
+            length: u32,
+            file_information_class: u32,
+        ) -> windows::Win32::Foundation::NTSTATUS;
+    }
+    let mut io_status = IoStatusBlock { status: 0, information: 0 };
+    let status = unsafe {
+        NtSetInformationFile(
+            HANDLE(file.as_raw_handle()),
+            &mut io_status,
+            rename_info.cast(),
+            buffer_bytes as u32,
+            10, // FileRenameInformation; relative name is anchored at RootDirectory.
+        )
+    };
+    if status.0 < 0 {
+        return Err(format!("Could not atomically replace scoped target: {}", nt_status_message(status.0)));
+    }
+    temp.installed = true;
+    Ok(())
+}
+
+/// Write bounded UTF-8 text to one validated file path beneath a checkout.
+/// This is intended for a caller that has already checked a task-scoped grant;
+/// handle-relative path confinement is repeated here so callers cannot bypass it.
+pub(crate) fn write_scoped_text_file(root: &Path, path: &str, text: &str) -> Result<(), String> {
+    const WRITE_LIMIT: usize = 1024 * 1024;
+    if text.len() > WRITE_LIMIT || text.contains('\0') {
+        return Err("Scoped file write exceeds the 1 MiB text limit".into());
+    }
+    #[cfg(unix)]
+    {
+        let _ = (root, path, text);
+        Err("Scoped file writes are disabled on Unix because renameat cannot atomically confirm that target ancestors remain beneath the project root".into())
+    }
+    #[cfg(windows)]
+    {
+        let target = resolve_scoped_write_target(root, path)?;
+        write_scoped_text_at(target, text)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        validate_scoped_write_path(root, path)?;
+        Err("Scoped file writes are unavailable on this platform because handle-relative no-follow replacement is unsupported".into())
+    }
+}
+
 pub(crate) struct Capture {
     pub(crate) bytes: Vec<u8>,
     pub(crate) truncated: bool,
@@ -1531,6 +2406,317 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.base);
         }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scoped_write_atomically_replaces_and_creates_files() {
+        let f = Fixture::new(false);
+        fs::create_dir_all(f.root.join("src")).unwrap();
+        fs::write(f.root.join("src/allowed.txt"), "before").unwrap();
+
+        validate_scoped_write_path(&f.root, "src/allowed.txt").unwrap();
+        write_scoped_text_file(&f.root, "src/allowed.txt", "after").unwrap();
+        write_scoped_text_file(&f.root, "src/new.txt", "created").unwrap();
+
+        assert_eq!(fs::read_to_string(f.root.join("src/allowed.txt")).unwrap(), "after");
+        assert_eq!(fs::read_to_string(f.root.join("src/new.txt")).unwrap(), "created");
+    }
+
+    #[cfg(windows)]
+    fn set_test_file_dacl(file: &File, sddl: &str) -> Result<(), std::io::Error> {
+        use std::{ffi::c_void, os::windows::io::AsRawHandle};
+        use windows::Win32::Foundation::HANDLE;
+
+        const SDDL_REVISION_1: u32 = 1;
+        const SE_FILE_OBJECT: u32 = 1;
+        const DACL_SECURITY_INFORMATION: u32 = 0x0000_0004;
+        const PROTECTED_DACL_SECURITY_INFORMATION: u32 = 0x8000_0000;
+
+        #[link(name = "advapi32")]
+        unsafe extern "system" {
+            fn ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                string_security_descriptor: *const u16,
+                revision: u32,
+                security_descriptor: *mut *mut c_void,
+                size: *mut u32,
+            ) -> i32;
+            fn GetSecurityDescriptorDacl(
+                security_descriptor: *mut c_void,
+                dacl_present: *mut i32,
+                dacl: *mut *mut c_void,
+                dacl_defaulted: *mut i32,
+            ) -> i32;
+            fn SetSecurityInfo(
+                handle: HANDLE,
+                object_type: u32,
+                security_info: u32,
+                owner: *mut c_void,
+                group: *mut c_void,
+                dacl: *mut c_void,
+                sacl: *mut c_void,
+            ) -> u32;
+        }
+
+        let sddl = sddl.encode_utf16().chain(Some(0)).collect::<Vec<_>>();
+        let mut raw_descriptor = std::ptr::null_mut();
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut raw_descriptor,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let descriptor = WindowsSecurityDescriptor(raw_descriptor);
+        let mut dacl_present = 0i32;
+        let mut dacl = std::ptr::null_mut();
+        let mut dacl_defaulted = 0i32;
+        if unsafe {
+            GetSecurityDescriptorDacl(
+                descriptor.0,
+                &mut dacl_present,
+                &mut dacl,
+                &mut dacl_defaulted,
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        let status = unsafe {
+            SetSecurityInfo(
+                HANDLE(file.as_raw_handle()),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                dacl,
+                std::ptr::null_mut(),
+            )
+        };
+        if status != 0 {
+            return Err(std::io::Error::from_raw_os_error(status as i32));
+        }
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn test_dacl_bytes(dacl: *mut std::ffi::c_void) -> Option<Vec<u8>> {
+        if dacl.is_null() {
+            return None;
+        }
+        let size =
+            unsafe { std::ptr::read_unaligned((dacl.cast::<u8>()).add(2).cast::<u16>()) } as usize;
+        assert!(
+            size >= 8,
+            "Windows ACL header must fit in its declared size"
+        );
+        Some(unsafe { std::slice::from_raw_parts(dacl.cast::<u8>(), size) }.to_vec())
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scoped_write_replacement_preserves_target_specific_dacl() {
+        use std::{fs::OpenOptions, os::windows::fs::OpenOptionsExt};
+
+        let f = Fixture::new(false);
+        let target_path = f.root.join("allowed.txt");
+        fs::write(&target_path, "before").unwrap();
+        let mut options = OpenOptions::new();
+        let target_handle = options
+            .access_mode(0x0006_0003) // FILE_READ_DATA | FILE_WRITE_DATA | READ_CONTROL | WRITE_DAC
+            .share_mode(0x7) // share read/write/delete while exercising replacement
+            .open(&target_path);
+        let target_handle = match target_handle {
+            Ok(file) => file,
+            Err(error) if error.raw_os_error() == Some(5) => {
+                eprintln!("Windows target-DACL regression skipped: this process lacks the ACL access needed to set the test DACL");
+                return;
+            }
+            Err(error) => panic!("Could not open target with ACL access: {error}"),
+        };
+        if let Err(error) = set_test_file_dacl(&target_handle, "D:P(A;;FA;;;OW)") {
+            if error.raw_os_error() == Some(5) {
+                eprintln!("Windows target-DACL regression skipped: this process lacks the ACL access needed to set the test DACL");
+                return;
+            }
+            panic!("Could not set target-specific DACL: {error}");
+        }
+        let expected_security = windows_file_dacl(&target_handle).unwrap();
+        assert!(
+            expected_security.protected,
+            "test ACL must not inherit the parent DACL"
+        );
+        let expected_dacl = test_dacl_bytes(expected_security.dacl);
+        drop(expected_security);
+        drop(target_handle);
+
+        write_scoped_text_file(&f.root, "allowed.txt", "after").unwrap();
+
+        let replacement = File::open(&target_path).unwrap();
+        let actual_security = windows_file_dacl(&replacement).unwrap();
+        assert_eq!(test_dacl_bytes(actual_security.dacl), expected_dacl);
+        assert!(
+            actual_security.protected,
+            "replacement must preserve the target DACL protection flag"
+        );
+        assert_eq!(fs::read_to_string(target_path).unwrap(), "after");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_write_rejects_target_parent_moved_outside_after_resolution() {
+        let f = Fixture::new(false);
+        let parent = f.root.join("src");
+        let moved_parent = f.base.join("moved-src");
+        let outside = f.base.join("outside");
+        fs::create_dir_all(&parent).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(parent.join("allowed.txt"), "before").unwrap();
+        fs::write(outside.join("allowed.txt"), "outside before").unwrap();
+
+        let target = resolve_scoped_write_target(&f.root, "src/allowed.txt").unwrap();
+        fs::rename(&parent, &moved_parent).unwrap();
+        std::os::unix::fs::symlink(&outside, &parent).unwrap();
+        assert!(write_scoped_text_at(target, "authorized").is_err());
+
+        assert_eq!(fs::read_to_string(moved_parent.join("allowed.txt")).unwrap(), "before");
+        assert_eq!(fs::read_to_string(outside.join("allowed.txt")).unwrap(), "outside before");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_write_rejects_project_root_moved_outside_after_resolution() {
+        let f = Fixture::new(false);
+        fs::create_dir_all(f.root.join("src")).unwrap();
+        fs::write(f.root.join("src/allowed.txt"), "before").unwrap();
+        let moved_root = f.base.join("moved-project");
+
+        let target = resolve_scoped_write_target(&f.root, "src/allowed.txt").unwrap();
+        fs::rename(&f.root, &moved_root).unwrap();
+        assert!(write_scoped_text_at(target, "authorized").is_err());
+
+        assert_eq!(fs::read_to_string(moved_root.join("src/allowed.txt")).unwrap(), "before");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_write_entry_point_is_disabled_on_unix() {
+        let f = Fixture::new(false);
+        fs::write(f.root.join("allowed.txt"), "before").unwrap();
+
+        let error = write_scoped_text_file(&f.root, "allowed.txt", "must not land").unwrap_err();
+
+        assert!(error.contains("disabled on Unix"), "{error}");
+        assert_eq!(fs::read_to_string(f.root.join("allowed.txt")).unwrap(), "before");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scoped_write_replacement_does_not_modify_a_hard_link_alias() {
+        let f = Fixture::new(false);
+        let outside = f.base.join("outside.txt");
+        let allowed = f.root.join("allowed.txt");
+        fs::write(&outside, "external before").unwrap();
+        fs::hard_link(&outside, &allowed).unwrap();
+
+        write_scoped_text_file(&f.root, "allowed.txt", "authorized").unwrap();
+
+        assert_eq!(fs::read_to_string(&allowed).unwrap(), "authorized");
+        assert_eq!(fs::read_to_string(&outside).unwrap(), "external before");
+    }
+
+    #[cfg(windows)]
+    fn create_test_symlink(target: &Path, link: &Path, directory: bool) -> std::io::Result<()> {
+        use std::os::windows::ffi::OsStrExt;
+
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn CreateSymbolicLinkW(link_name: *const u16, target_name: *const u16, flags: u32) -> u8;
+        }
+
+        let link_name = link.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+        let target_name = target.as_os_str().encode_wide().chain(Some(0)).collect::<Vec<_>>();
+        let flags = (if directory { 0x1 } else { 0 }) | 0x2; // ALLOW_UNPRIVILEGED_CREATE
+        if unsafe { CreateSymbolicLinkW(link_name.as_ptr(), target_name.as_ptr(), flags) } == 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scoped_write_rejects_file_and_ancestor_symlinks() {
+        let f = Fixture::new(false);
+        let outside_dir = f.base.join("outside-dir");
+        fs::create_dir_all(&outside_dir).unwrap();
+        fs::write(outside_dir.join("allowed.txt"), "outside before").unwrap();
+        fs::write(f.base.join("outside.txt"), "outside file before").unwrap();
+
+        if let Err(error) = create_test_symlink(&outside_dir, &f.root.join("src"), true) {
+            if error.raw_os_error() == Some(1314) {
+                eprintln!("Windows symlink assertions not run: this process lacks symlink-creation privilege");
+                return;
+            }
+            panic!("Could not create test ancestor symlink: {error}");
+        }
+        assert!(validate_scoped_write_path(&f.root, "src/allowed.txt").is_err());
+        assert!(write_scoped_text_file(&f.root, "src/allowed.txt", "must not land").is_err());
+
+        if let Err(error) = create_test_symlink(&f.base.join("outside.txt"), &f.root.join("allowed.txt"), false) {
+            if error.raw_os_error() == Some(1314) {
+                eprintln!("Windows symlink assertions not run: this process lacks symlink-creation privilege");
+                return;
+            }
+            panic!("Could not create test leaf symlink: {error}");
+        }
+        assert!(validate_scoped_write_path(&f.root, "allowed.txt").is_err());
+        assert!(write_scoped_text_file(&f.root, "allowed.txt", "must not land").is_err());
+
+        assert_eq!(fs::read_to_string(outside_dir.join("allowed.txt")).unwrap(), "outside before");
+        assert_eq!(fs::read_to_string(f.base.join("outside.txt")).unwrap(), "outside file before");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scoped_write_validation_rejects_final_and_ancestor_symlinks() {
+        use std::os::unix::fs::symlink;
+
+        let f = Fixture::new(false);
+        let outside_dir = f.base.join("outside-dir");
+        fs::create_dir_all(&outside_dir).unwrap();
+        fs::write(outside_dir.join("allowed.txt"), "outside before").unwrap();
+        fs::write(f.base.join("outside.txt"), "outside file before").unwrap();
+
+        symlink(&outside_dir, f.root.join("src")).unwrap();
+        assert!(validate_scoped_write_path(&f.root, "src/allowed.txt").is_err());
+
+        symlink(f.base.join("outside.txt"), f.root.join("allowed.txt")).unwrap();
+        assert!(validate_scoped_write_path(&f.root, "allowed.txt").is_err());
+        assert_eq!(fs::read_to_string(outside_dir.join("allowed.txt")).unwrap(), "outside before");
+        assert_eq!(fs::read_to_string(f.base.join("outside.txt")).unwrap(), "outside file before");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn scoped_write_parent_cannot_be_swapped_while_handles_are_open() {
+        let f = Fixture::new(false);
+        let parent = f.root.join("src");
+        let moved_parent = f.base.join("moved-src");
+        fs::create_dir_all(&parent).unwrap();
+        fs::write(parent.join("allowed.txt"), "before").unwrap();
+        fs::write(f.base.join("outside.txt"), "outside before").unwrap();
+
+        let target = resolve_scoped_write_target(&f.root, "src/allowed.txt").unwrap();
+        assert!(fs::rename(&parent, &moved_parent).is_err(), "an open scoped parent must not be renamed");
+        write_scoped_text_at(target, "authorized").unwrap();
+
+        assert_eq!(fs::read_to_string(parent.join("allowed.txt")).unwrap(), "authorized");
+        assert_eq!(fs::read_to_string(f.base.join("outside.txt")).unwrap(), "outside before");
     }
 
     #[test]

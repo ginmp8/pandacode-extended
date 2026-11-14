@@ -2445,14 +2445,24 @@ async fn launch_operation_admitted(
                 config.reviewer_policy.as_ref(),
                 Some(architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly)
             ) {
-                // Read-only reviewers still need the two task-scoped, native skill
-                // retrieval/verification tools. Never expose Architect or bot tools.
-                let host = team.as_ref().and_then(|admission| {
-                    architect::reviewer_skill_host(
-                        app.clone(), session_id.clone(), stopped.clone(), admission,
-                    )
-                });
-                (host, false, None)
+                match superagent::write_grants::host(
+                    app.clone(),session_id.clone(),stopped.clone(),
+                ) {
+                    Err(error) => (None,false,Some(error)),
+                    // A granted SuperAgent worker receives this one app-owned
+                    // tool only; built-in provider tools remain read-only.
+                    Ok(Some(host)) => (Some(host),false,None),
+                    Ok(None) => {
+                        // Ordinary Council reviewers still receive only their
+                        // task-scoped, read-only skill evidence tools.
+                        let host = team.as_ref().and_then(|admission| {
+                            architect::reviewer_skill_host(
+                                app.clone(), session_id.clone(), stopped.clone(), admission,
+                            )
+                        });
+                        (host,false,None)
+                    }
+                }
             } else {
                 (None, false, None)
             };
@@ -2723,6 +2733,33 @@ async fn launch_operation_admitted(
             architect::completed(&app, &session_id, team.as_ref(), successful, was_stopped, provider_error.as_deref(), registry);
         }
         drop(registry);
+        // Persist a just-finished native Council reviewer result before its
+        // SuperAgent callback inspects the native score and skill receipts.
+        if let Err(error) = superagent::council_adapter::finalize_after_native_run_from_app(&app,&session_id) {
+            eprintln!("SuperAgent Council finalization failed: {error}");
+        }
+        // Successful bot workers have no failover path. Settle their Ticket
+        // synchronously so the exact artifact is frozen before actual native
+        // reviewers are dispatched; the later gateway callback is idempotent.
+        if successful && !was_stopped {
+            let required = store.lock().ok().and_then(|db| {
+                superagent::council_adapter::required_worker_session(&db,&session_id).ok()
+            }).unwrap_or(false);
+            if required {
+                let reply = store.lock().ok().and_then(|db| db.db.query_row(
+                    "SELECT content FROM messages WHERE session_id=?1 AND role='assistant' ORDER BY id DESC LIMIT 1",
+                    [&session_id],|row| row.get::<_,String>(0),
+                ).ok()).unwrap_or_default();
+                let settled = store.lock().ok().and_then(|db| {
+                    superagent::on_run_finished(&db,&session_id,true,&reply).ok()
+                }).unwrap_or(false);
+                if settled {
+                    if let Err(error) = superagent::council_adapter::start_after_worker_completion(&app,&session_id) {
+                        eprintln!("SuperAgent Council dispatch failed: {error}");
+                    }
+                }
+            }
+        }
         // A turn's approval requests expire even if Council is still reviewing
         // or the user stopped the run. This must precede deferred final callbacks.
         bots::gateway::turn_ended(&session_id);
@@ -4088,6 +4125,9 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     app.manage(architect::Runtime::default());
     architect::watchdog::watch(app.handle().clone());
     bots::start(app.handle());
+    // Fail closed on starts interrupted before their exact native session was
+    // linked. Startup recovery never replays reviewer dispatch.
+    superagent::council_adapter::recover_starting(app.handle());
     skills::begin_startup_sync(app.handle().clone());
     // Machine threads that settled while PandaCode was closed wake their idle tasks.
     remote::orchestrate::reconcile(app.handle());
@@ -4442,6 +4482,7 @@ pub fn run() {
                 superagent::events::superagent_source_decisions,
                 superagent::events::superagent_source_set_mode,
                 superagent::events::superagent_source_observe,
+                superagent::events::superagent_source_fetch_thread,
                 superagent::events::superagent_source_link_thread,
                 superagent::events::superagent_source_thread_links,
                 superagent::superagent_list,
@@ -4457,9 +4498,12 @@ pub fn run() {
                 superagent::superagent_submit,
                 superagent::superagent_submit_coordinated,
                 superagent::superagent_dispatch_worker,
+                superagent::superagent_dispatch_worker_with_write_grant,
+                superagent::superagent_revoke_worker_write_grant,
                 superagent::superagent_retry,
                 superagent::superagent_accept,
                 superagent::superagent_reject,
+                superagent::superagent_issue_comment,
                 superagent::manifest::superagent_manifest_export,
                 superagent::manifest::superagent_manifest_preview,
                 superagent::manifest::superagent_manifest_import,
@@ -4535,6 +4579,7 @@ pub fn run() {
                 architect::architect_set_council,
                 architect::architect_council_reviewer_options,
                 architect::architect_council_accept,
+                superagent::superagent_accept_council,
                 architect::architect_start,
                 architect::architect_control,
                 architect::architect_worker_messages,

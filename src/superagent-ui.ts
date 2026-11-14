@@ -380,7 +380,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             ' · Native state: ' + safe(item.childTicketState ?? 'not started') +
             (item.lastReason ? ' · ' + safe(item.lastReason) : '') + '</small>' +
             '<small class="sa-item-progress" aria-label="WorkItem progress">' +
-              safe(workItemProgressHint(item, workPlan.items)) + '</small>' +
+              safe(workItemProgressHint(item, workPlan?.items ?? [])) + '</small>' +
             (item.requiresWrite && !item.writeAuthorized && item.state === 'pending'
               ? ' <button type="button" data-sa-authorize-work="' + safe(item.key) +
                 '">Authorize exact file paths</button>' : '') +

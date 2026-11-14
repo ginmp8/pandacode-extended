@@ -101,5 +101,8 @@ operator-linked issue/PR thread. A case-only alias cannot associate the same
 Team/repository/thread with a different Ticket, and cross-source authenticated
 receipts are visible only through an explicit link to that Ticket. Existing
 source IDs, cursors and audit records are not rewritten; ambiguous case-only
-legacy duplicates still fail closed. This remains Observe-only context, never
-a GitHub grant or inferred demand.
+legacy duplicates still fail closed. Authenticated events for a legacy
+mixed-case source are compared against its exact GitHub repository identity
+and recorded under the canonical lowercase repository key, without losing
+existing receipts or creating a Ticket. This remains Observe-only context,
+never a GitHub grant or inferred demand.

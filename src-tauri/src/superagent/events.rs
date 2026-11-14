@@ -603,7 +603,7 @@ fn observe_authenticated_in_tx(
 
     let decision = if event.sequence <= src.last_sequence { "ignored_stale" }
         else if src.mode == "off" { "ignored_off" }
-        else if src.repository != event.repository
+        else if !src.repository.eq_ignore_ascii_case(&event.repository)
             || !src.actor_filter.eq_ignore_ascii_case(&event.actor)
             || src.event_kind != event.event_kind
             // The signed-in operator cannot infer work from their own events,
@@ -864,7 +864,7 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
     let event = EventEnvelope {
         source_id:source.id.clone(),
         delivery_id:raw_id.to_string(),
-        repository:source.repository.clone(),
+        repository:source.repository.to_ascii_lowercase(),
         actor:actor.to_string(),
         event_kind:kind.into(),
         subject_key,
@@ -1855,6 +1855,40 @@ mod tests {
             "payload":{"action":"opened","issue":{"number":42}},
         });
         assert!(authenticated_event(&selected, &other_actor).unwrap().is_none());
+    }
+
+    #[test]
+    fn legacy_mixed_case_repository_source_can_observe_verified_events_without_new_authority() {
+        let (store, path) = fixture();
+        let initial = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        store.db.execute(
+            "UPDATE sa_event_sources SET repository='Test/Fixture' WHERE id=?1",
+            [&initial.id],
+        ).unwrap();
+        let legacy = source(&store, &initial.id).unwrap();
+        let observed = set_mode(&store, &legacy.id, legacy.policy_revision, "observe").unwrap();
+        let raw = serde_json::json!({
+            "id":"5000001001", "type":"IssuesEvent", "created_at":"2026-11-12T08:59:00Z",
+            "actor":{"login":"trusted-bot"}, "repo":{"name":"test/fixture"},
+            "payload":{"action":"opened","issue":{"number":42}},
+        });
+        let (event, _) = authenticated_event(&observed, &raw).unwrap().unwrap();
+        assert_eq!(event.repository, "test/fixture");
+        let decision = observe_authenticated(&store, &event, "local-operator").unwrap();
+        assert_eq!(decision.decision, "observed_permitted");
+        assert_eq!(source(&store, &observed.id).unwrap().last_sequence, 5000001001);
+        assert!(authenticated_event(&observed, &serde_json::json!({
+            "id":"5000001002", "type":"IssuesEvent", "created_at":"2026-11-12T08:59:00Z",
+            "actor":{"login":"trusted-bot"}, "repo":{"name":"test/fixture-foreign"},
+            "payload":{"action":"opened","issue":{"number":42}},
+        })).is_err());
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |r| r.get::<_,i64>(0)).unwrap(), 0);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert!(observe_authenticated(&reopened, &event, "local-operator").unwrap().duplicate);
+        assert_eq!(source(&reopened, &observed.id).unwrap().last_sequence, 5000001001);
     }
 
     #[test]

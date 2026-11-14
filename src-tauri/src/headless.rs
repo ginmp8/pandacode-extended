@@ -734,6 +734,7 @@ fn start_services(app: tauri::AppHandle) {
     });
     // The one-shot CLI never dispatches a provider. Only the live serve runtime
     // consumes explicit, durable headless retry requests through native guards.
+    crate::superagent::events::auto_intake::start_monitor(app.clone());
     let retries = app.clone();
     tauri::async_runtime::spawn(async move {
         loop {

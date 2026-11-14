@@ -4247,6 +4247,7 @@ pub fn run() {
                 }
             });
             let dir = setup_common(app)?;
+            superagent::events::auto_intake::start_monitor(app.handle().clone());
             app.manage(voice::Voice::new(dir.clone()));
             agents_dock::setup(app.handle(), &dir).map_err(std::io::Error::other)?;
             overlay::setup(app.handle(), &dir).map_err(std::io::Error::other)?;
@@ -4490,6 +4491,8 @@ pub fn run() {
                 superagent::events::superagent_source_list,
                 superagent::events::superagent_source_decisions,
                 superagent::events::superagent_source_integrity,
+                superagent::events::auto_intake::superagent_auto_policy_get,
+                superagent::events::auto_intake::superagent_auto_policy_update,
                 superagent::events::superagent_source_set_mode,
                 superagent::events::superagent_source_observe,
                 superagent::events::superagent_source_poll_authenticated,

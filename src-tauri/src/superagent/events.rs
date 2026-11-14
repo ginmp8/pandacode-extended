@@ -1,7 +1,8 @@
 //! S4 native Off/Observe decisions and explicit local thread-to-task links.
 //! Authenticated operator-invoked GitHub Events polling and exact Checks API lookups are Observe-only.
-//! No webhook/subscription, inferred worker admission or Auto effects exist.
+//! GitHub Auto uses a separately consented, bounded native intake sidecar; unauthenticated IPC cannot admit work.
 //! Public IPC intake still refuses caller-supplied unverified envelopes.
+pub(crate) mod auto_intake;
 use super::require_main_window;
 use crate::{storage::{self, Store}, AppState, Result};
 use rusqlite::{params, OptionalExtension};
@@ -556,13 +557,17 @@ fn set_mode(store: &Store, id: &str, expected_revision: i64, mode: &str) -> Resu
         return Err("Event source policy revision changed; reload before editing.".into());
     }
     if current.mode == mode { return Ok(current); }
+    let _fence=super::effects::lock_dispatch(&store.path)?;
+    let tx=store.db.unchecked_transaction().map_err(|error|error.to_string())?;
     let now = storage::now();
-    let updated = store.db.execute(
+    let updated = tx.execute(
         "UPDATE sa_event_sources SET mode=?2,policy_revision=policy_revision+1,updated_at=?3
          WHERE id=?1 AND policy_revision=?4",
         params![id,mode,now,expected_revision],
     ).map_err(|e| e.to_string())?;
     if updated != 1 { return Err("Concurrent source policy change; update rejected.".into()); }
+    auto_intake::revoke_source(&tx,id)?;
+    tx.commit().map_err(|error|error.to_string())?;
     source(store,id)
 }
 
@@ -967,11 +972,11 @@ fn poll_authenticated_events_with_identity(
             if at < since {
                 skipped_before_activation += 1;
             } else {
-                parsed.push(event);
+                parsed.push((event,at));
             }
         }
     }
-    parsed.sort_by_key(|event| event.sequence);
+    parsed.sort_by_key(|(event,_)| event.sequence);
     // A multi-page poll is one authoritative observation batch: either every
     // eligible receipt and the cursor survive, or none do. A later conflicting
     // delivery or storage failure must not strand earlier partial decisions.
@@ -984,8 +989,9 @@ fn poll_authenticated_events_with_identity(
     let mut recorded = 0;
     let mut duplicates = 0;
     let mut self_ignored = 0;
-    for event in &parsed {
+    for (event,event_at) in &parsed {
         let result = observe_authenticated_in_tx(&tx, &current_policy, event, signed_in)?;
+        auto_intake::stage(&tx,&current_policy,event,&result,*event_at)?;
         if result.duplicate { duplicates += 1; }
         else {
             recorded += 1;

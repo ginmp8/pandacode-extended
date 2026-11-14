@@ -3045,6 +3045,11 @@ pub(crate) fn read_only_policy(
         }),
     ).optional().map_err(|e| e.to_string())?;
     if let Some(scope) = scope {
+        // An authenticated GitHub source may revoke its own native Auto
+        // mandate at any time; an older receipt never restores permissions.
+        if !events::auto_intake::ticket_authorized(store,&scope.ticket_id)? {
+            return Err("policy_unsupported: GitHub Auto source consent was revoked or changed.".into());
+        }
         let snapshot = ticket_team_snapshot(store,&scope.ticket_id)?;
         if scope.ticket_state != "running" || scope.assignment_state != "running" || scope.revoked
             || scope.expiry <= storage::now()

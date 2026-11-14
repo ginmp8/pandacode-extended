@@ -109,6 +109,12 @@ interface IssueCommentStatus {
 }
 interface PreviewIssueComment { previewOnly: true; message: string }
 type IssueCommentResult = IssueCommentStatus | PreviewIssueComment;
+interface AutoPolicyView {
+  sourceId:string;mode:'off'|'staging'|'active';policyRevision:number;
+  sourcePolicyRevision:number;maxEventsPerHour:number;maxEventsPerDay:number;
+  activationAt:number;staged:number;dispatched:number;uncertain:number;
+  autoWritesAllowed:false;pollingGapFree:false;
+}
 interface EventSource {
   id: string; orchestrationId: string; repository: string; actorFilter: string;
   eventKind: string; mode: 'off' | 'observe'; policyRevision: number; lastSequence: number;
@@ -201,6 +207,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let workerOrder: string[] = [];
   let effectiveTeam: EffectiveTeam | null = null;
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
+  let autoSourceId = '', autoPolicy: AutoPolicyView | null = null;
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
   let sourceIntegrity: SourceIntegrity | null = null;
   let linkedDecisions: SourceDecision[] = [], linkedDecisionsLoaded = false;
@@ -544,10 +551,37 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             '">Observe authenticated Check Run</button>'
           : '<button type="button" data-sa-source-poll="' + safe(src.id) +
             '">Poll authenticated GitHub</button>') : '') +
+      (['issues.opened','pull_request.opened'].includes(src.eventKind)
+        ? '<button type="button" data-sa-auto-load="' + safe(src.id) +
+          '">Configure GitHub Auto</button>' : '') +
       '<button type="button" data-sa-source-decisions="' + safe(src.id) +
       '">View decisions</button>' +
       '<button type="button" data-sa-source-health="' + safe(src.id) +
       '">Inspect source health</button></li>').join('');
+    const autoSource=sources.find(source=>source.id===autoSourceId);
+    const autoPanel=autoSource && autoPolicy?.sourceId===autoSource.id
+      ? '<section role="region" aria-label="GitHub Auto source consent">' +
+        '<h5>Native GitHub Auto · ' + safe(autoSource.repository) + '</h5>' +
+        '<p>Mode ' + safe(autoPolicy.mode) + ' · Consent revision ' +
+        autoPolicy.policyRevision + ' · Source revision ' +
+        autoPolicy.sourcePolicyRevision + '</p>' +
+        '<p>Staged ' + autoPolicy.staged + ' · Dispatched ' +
+        autoPolicy.dispatched + ' · Uncertain/quarantined ' + autoPolicy.uncertain + '</p>' +
+        '<p>Native read-only Worker admission only. Event text never grants tools, GitHub writes or final acceptance. ' +
+        'Bounded authenticated polling is not gap-free.</p>' +
+        '<form data-sa-form="auto-policy">' +
+        '<label>Native Auto mode<select name="autoMode">' +
+        (['off','staging','active'] as const).map(mode=>
+          '<option value="' + mode + '"' + (autoPolicy?.mode===mode ? ' selected' : '') +
+          '>' + mode + '</option>').join('') + '</select></label>' +
+        '<label>Maximum events per hour (1–20)<input name="maxEventsPerHour" type="number" min="1" max="20" required value="' +
+        autoPolicy.maxEventsPerHour + '"></label>' +
+        '<label>Maximum events per day (1–100)<input name="maxEventsPerDay" type="number" min="1" max="100" required value="' +
+        autoPolicy.maxEventsPerDay + '"></label>' +
+        '<p>Staging records bounded receipts without launching a Worker. Active requires a separately enabled, single-Worker Team. ' +
+        'Turning Off revokes source-linked running attempts; uncertain external effects require inspection.</p>' +
+        '<button type="submit" class="primary-button">Save native Auto consent</button>' +
+        '</form></section>' : '';
     const sourcePanel = '<section class="sa-event-sources" aria-label="GitHub event sources">' +
       '<h4>GitHub event sources</h4><p>Off/Observe only. Authenticated GitHub Events polling is bounded; Checks API requires an explicit Check Run ID and a unique matching PR head. Neither is a gap-free subscription or an authorization to launch tasks or external writes.</p>' +
       (!sourcesLoaded ? '<button type="button" data-sa-load-sources>Load sources</button>'
@@ -564,6 +598,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '</select></label><button type="submit">Add source (Off)</button></form>' +
           '<ul class="sa-tickets sa-source-list">' +
           (sourceRows || '<li class="sa-empty">No event sources configured.</li>') + '</ul>' +
+          autoPanel +
           (sourceIntegrity ? '<section role="region" aria-label="Source integrity">' +
             '<h5>Native source integrity</h5><p>' +
             safe(sourceIntegrity.repository) + ' · ' + safe(sourceIntegrity.mode) +
@@ -1022,6 +1057,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         inspectedTicket = ''; threadLinks = [];
         linkedDecisions = []; linkedDecisionsLoaded = false; roleRoster = null; workerOrder = []; effectiveTeam = null;
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
+        autoSourceId='';autoPolicy=null;
         sourceIntegrity = null;
       }
       // A failed native read must not leave old ticket approval controls
@@ -1397,6 +1433,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
       inspectedAssignmentId = ''; roleRoster = null; workerOrder = []; effectiveTeam = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
+        autoSourceId='';autoPolicy=null;
       sourceIntegrity = null;
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{
@@ -1469,6 +1506,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       inspectedTicket = ''; ticketDetails = null; threadLinks = [];
       inspectedAssignmentId = ''; roleRoster = null; effectiveTeam = null; teamStrategy = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
+        autoSourceId='';autoPolicy=null;
       sourceIntegrity = null;
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 });
@@ -1542,6 +1580,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (selected) void work(async () => {
         sources = await call<EventSource[]>('superagent_source_list',{orchestrationId:selected});
         sourcesLoaded = true;
+      });
+      return;
+    }
+    if (target.dataset.saAutoLoad) {
+      const src=sources.find(entry=>entry.id===target.dataset.saAutoLoad);
+      if (!src || !['issues.opened','pull_request.opened'].includes(src.eventKind)) return;
+      void work(async()=>{
+        const policy=await call<AutoPolicyView>('superagent_auto_policy_get',{
+          sourceId:src.id,
+        });
+        if (src.id!==policy.sourceId || selected!==src.orchestrationId) {
+          throw new Error('Auto policy does not belong to this selected Team source.');
+        }
+        autoSourceId=src.id;autoPolicy=policy;
       });
       return;
     }
@@ -1909,6 +1961,43 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         allDemands = loaded;
         allDemandsHasMore = loaded.length === 200;
         allDemandsLoaded = true;
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'auto-policy') {
+      const src=sources.find(source=>source.id===autoSourceId);
+      const policy=autoPolicy;
+      if (!src || !policy || src.id!==policy.sourceId || selected!==src.orchestrationId) return;
+      const mode=String(data.get('autoMode')??'');
+      const maxEventsPerHour=Number(data.get('maxEventsPerHour'));
+      const maxEventsPerDay=Number(data.get('maxEventsPerDay'));
+      if (!['off','staging','active'].includes(mode) ||
+          !Number.isInteger(maxEventsPerHour) || maxEventsPerHour<1 || maxEventsPerHour>20 ||
+          !Number.isInteger(maxEventsPerDay) || maxEventsPerDay<maxEventsPerHour ||
+          maxEventsPerDay>100) {
+        error='Choose a supported Auto mode and bounded hourly/daily limits.';
+        render();return;
+      }
+      const userConsent=mode==='active'
+        ? 'Activate authenticated GitHub Auto for this exact source? Events may trigger an independently admitted read-only Worker within the current Team and quotas. No tool writes or task approval are granted.'
+        : mode==='off'
+          ? 'Disable GitHub Auto for this source? Existing source-linked mandates are revoked and uncertain dispatches require inspection.'
+          : 'Enable staging for this source? Verified GitHub events will be recorded without launching a Worker.';
+      ask(userConsent,async()=>{
+        const updated=await call<AutoPolicyView>('superagent_auto_policy_update',{
+          sourceId:src.id,expectedRevision:policy.policyRevision,
+          input:{mode,maxEventsPerHour,maxEventsPerDay},
+        });
+        if (updated.sourceId!==src.id || updated.mode!==mode) {
+          throw new Error('Native Auto consent did not match the requested policy.');
+        }
+        await reload();
+        if (selected===src.orchestrationId) {
+          autoSourceId=src.id;autoPolicy=updated;
+        }
+        feedback='GitHub Auto ' + updated.mode +
+          ' saved as native consent revision ' + updated.policyRevision +
+          '. No external write permission or final approval was granted.';
       });
       return;
     }

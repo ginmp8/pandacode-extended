@@ -2,7 +2,7 @@
 type Bot = { id:string; name:string; paused:boolean; projectId:string };
 type Config = { id:string; name:string; coordinatorBotId:string; workerBotId:string;
   workerBotIds:string[]; reviewerBotIds:string[]; teamVersion:number;
-  projectId:string; enabled:boolean; policyRevision:number };
+  projectId:string; enabled:boolean; policyRevision:number; councilRequired?:boolean };
 type Ticket = { id:string; orchestrationId:string; objective:string;
   state:string; revision:number; evidence:null };
 type TeamSnapshot = {
@@ -54,6 +54,8 @@ export async function invokeSuperagent<T>(
     // coordinator and read-only reviewer bots may own different projects.
     if(workers.some(bot=>bot.projectId!==workers[0].projectId))
       throw Error('Executor Workers must share one project scope.');
+    if(input.councilRequired && reviewerBotIds.length < 2)
+      throw Error('Council-required Teams need two independent reviewers.');
     return {coordinator,workers,reviewers,workerBotIds:[...workerBotIds] as string[],
       reviewerBotIds:[...reviewerBotIds] as string[]};
   };
@@ -62,7 +64,7 @@ export async function invokeSuperagent<T>(
     name:config.name,projectId:config.projectId,coordinatorBotId:config.coordinatorBotId,
     workerBotIds:[...config.workerBotIds],reviewerBotIds:[...config.reviewerBotIds],
     policy:{policyRevision:config.policyRevision,autonomy:'off',maxConcurrentTasks:1,
-      maxAttemptsPerAssignment:2,councilEnabled:false},
+      maxAttemptsPerAssignment:2,councilEnabled:config.councilRequired===true},
     roles:[
       {role:'coordinator',ordinal:0,botId:config.coordinatorBotId,effectiveConfig:null,effectiveConfigSha256:null},
       ...config.workerBotIds.map((botId,ordinal)=>({role:'worker',ordinal,botId,
@@ -112,7 +114,8 @@ export async function invokeSuperagent<T>(
       if(!input.name?.trim()||configName(input.name))throw Error('Invalid or duplicate orchestration.');
       const c:Config={id:crypto.randomUUID(),name:input.name,coordinatorBotId:roles.coordinator.id,
         workerBotId:b.id,workerBotIds:roles.workerBotIds,reviewerBotIds:roles.reviewerBotIds,
-        teamVersion:1,projectId:b.projectId,enabled:false,policyRevision:1};
+        teamVersion:1,projectId:b.projectId,enabled:false,policyRevision:1,
+        councilRequired:input.councilRequired===true};
       configs.set(c.id,c);value=c;break;
     }
     case 'superagent_update':{

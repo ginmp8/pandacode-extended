@@ -195,3 +195,22 @@ a different identity or tool capability. Historical Tickets with explicitly
 unknown legacy profile provenance remain visible but cannot use that unknown
 profile to authorize a fresh session. A stored configuration snapshot is never
 itself a tool grant, a Council verdict, or evidence of Skill execution.
+
+### Guided native Team creation (S2 UX, partial)
+
+**Guided Team setup (five steps)** is available alongside the existing quick
+Create form. It preserves local draft state through asynchronous native list
+refreshes, allowing operators to configure the scenario, ordered existing
+Coordinator/Workers/Reviewers, actual assigned bot Models/Skill IDs, optional
+mandatory native Council, and a final native-policy preflight before Save.
+All user-entered values are HTML-escaped, and the native `superagent_create`
+command rechecks role distinctness, current paused state, project boundaries,
+Council reviewer count, versioned Team snapshots and atomic persistence.
+
+The wizard does **not** invent bot or Skill identities, install packages, infer
+a harness capability from Skill assignment, issue a provider grant or execute
+a model. The Team is always persisted Off; its separate native Manual enable
+remains explicit. GitHub Auto, multi-Worker execution and nested subagent
+admission are labelled unsupported until the corresponding native runtime
+capabilities exist. The five-step UI is a configuration aid, not proof of
+S2/S3/S4/S5 autonomous execution completion.

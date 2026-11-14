@@ -1,5 +1,17 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-14 — CI verified for the 0.3.126 source-pinned code SHA
+
+- [x] Freeze and recheck upstream commit `6c91efdb4d5ff317c2e7597fcb717e0814939349` and Extended code commit `8dca72763c5a3a798d9d9b84bd7a0641df7f8682`.
+- [x] Check complete Git trees with zero missing source paths and zero file type/mode mismatches.
+- [x] Verify [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43607984368) and [PR CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43607990721) completed successfully (11/11 jobs each, 22/22 total).
+- [x] Verify the CI TypeScript/website job explicitly ran and passed `npm run test:release`.
+- [ ] Execute native On/Off and external Connect/MCP/bots/cloud/VM/credential integrations.
+- [ ] Independently establish behavior parity for all 81 customized shared files.
+- [ ] Complete candidate acceptance and release review; Extended 0.12.0 remains DRAFT.
+
+The upstream [source commit](https://github.com/ginmp8/pandacode/commit/6c91efdb4d5ff317c2e7597fcb717e0814939349) (tree `23478e308beefa66091d1d2fbceebabc913e4de3`) declares application version `0.3.126`; the corresponding [Extended code commit](https://github.com/ginmp8/pandacode-extended/commit/8dca72763c5a3a798d9d9b84bd7a0641df7f8682) is the verified integration checkpoint. At that exact Extended SHA, [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43607984368) and [pull-request CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43607990721) both completed successfully (**11/11 jobs each; 22/22 total**). Successful checks include Rust tests/Clippy, TypeScript and unit tests, `npm run test:release`, website build, Expo/mobile, dependency audits, RustSec and ONNX parity. The full source/destination Git trees were independently retrieved without truncation: **2,062 upstream paths, 2,120 Extended paths, 1,981 identical shared paths, 81 customized shared paths, 58 Extended-only paths, zero missing upstream paths and zero type/mode mismatches**. This is a source-coverage and CI receipt, **not** evidence of end-to-end equivalence of the 81 customizations or native Settings On/Off, Connect, MCP, bots, cloud, VM and credential flows. The planned Extended **0.12.0 remains DRAFT**; no release or distribution was authorized.
+
 ## 2026-11-14 — upstream 0.3.126 source identity CI correction
 
 - [x] Diagnose the exact-SHA [push CI](https://github.com/ginmp8/pandacode-extended/actions/runs/43603320753) failure: two release-identity assertions incorrectly expect **0.3.125** while all application manifests declare source **0.3.126**.

@@ -2775,6 +2775,25 @@ async fn launch_operation_admitted(
         if !was_stopped {
             bots::run_finished(&app, &session_id, successful);
         }
+        // The native scheduler reacts to durable Ticket/Council state. It
+        // never treats a bot turn as approval and cannot issue new grants.
+        // CI or a paused/unavailable provider does not block other ready work.
+        let demand_app=app.clone();
+        tauri::async_runtime::spawn(async move {
+            let planned={
+                let state=demand_app.state::<AppState>();
+                match state.store.lock() {
+                    Ok(store)=>superagent::scheduler::capture_coordinator_plans(&store),
+                    Err(error)=>Err(error.to_string()),
+                }
+            };
+            if let Err(error)=planned {
+                eprintln!("SuperAgent structured plan capture failed: {error}");
+            }
+            if let Err(error)=superagent::scheduler::advance(&demand_app).await {
+                eprintln!("SuperAgent dependency scheduler failed: {error}");
+            }
+        });
         // Start the next turn's agent now, so a follow-up skips the CLI's own startup.
         if let (true, Some((mut next, (tools, approvals)))) = (successful && !was_stopped, warm_next) {
             // A turn that ended without any reply (seen after background commands) may have
@@ -4510,6 +4529,9 @@ pub fn run() {
                 superagent::superagent_activity,
                 superagent::superagent_snapshot,
                 superagent::superagent_graph,
+                superagent::scheduler::superagent_plan_demand,
+                superagent::scheduler::superagent_demand_plan,
+                superagent::scheduler::superagent_start_demand,
                 superagent::superagent_effect_receipts,
                 superagent::superagent_preflight,
                 superagent::superagent_submit,

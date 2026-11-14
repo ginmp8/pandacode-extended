@@ -5,6 +5,7 @@
 use crate::{bots, storage::{self, Store}, AppState, Result};
 
 pub(crate) mod manifest;
+pub(crate) mod scheduler;
 pub(crate) mod roster;
 pub(crate) mod events;
 pub(crate) mod council_adapter;
@@ -2415,6 +2416,19 @@ fn admit_role_with_staging(
     store: &mut Store, config_id: &str, objective: &str,
     request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
 ) -> Result<(Ticket, bool)> {
+    admit_role_with_selected(
+        store,config_id,objective,request_key,busy,coordinate,headless_staging,None,
+    )
+}
+
+/// The trusted native demand scheduler may select any Worker in the immutable
+/// admitted Team. This does not make the legacy single-Worker manual API
+/// permissive, and grants no tool or GitHub write authority.
+fn admit_role_with_selected(
+    store: &mut Store, config_id: &str, objective: &str,
+    request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
+    selected_worker: Option<&str>,
+) -> Result<(Ticket, bool)> {
     let objective = objective.trim();
     if objective.is_empty() || objective.len() > MAX_OBJECTIVE_BYTES || objective.chars().any(|c| c == '\0') {
         return Err("A nonempty, bounded objective is required.".into());
@@ -2431,6 +2445,14 @@ fn admit_role_with_staging(
         let ticket = get_ticket(store, &existing)?;
         if ticket.objective != objective {
             return Err("The manual-request key is already bound to another objective.".into());
+        }
+        if selected_worker.is_some_and(|id| {
+            store.db.query_row(
+                "SELECT worker_bot_id FROM sa_tickets WHERE id=?1",
+                [&ticket.id],|row|row.get::<_,String>(0),
+            ).ok().as_deref() != Some(id)
+        }) {
+            return Err("The work-item request key belongs to a different Worker.".into());
         }
         // A key identifies the original native dispatch intent as well as its
         // objective. Replaying a direct worker request as a coordinator request
@@ -2459,13 +2481,17 @@ fn admit_role_with_staging(
     if !execution_permitted(config.enabled, crate::feature_controls::get().bots_paused) {
         return Err("Orchestration is disabled or bots are globally paused.".into());
     }
-    // A previously-enabled or externally corrupted multi-role roster cannot
-    // silently fall back to the primary Worker, regardless of UI preflight.
-    if roster::has_additional_members(store, config_id)? {
+    // Legacy manual commands remain single-worker. Only an explicitly
+    // demand-scoped native call can select a configured additional Worker.
+    if roster::has_additional_members(store, config_id)? && selected_worker.is_none() {
         return Err("Multi-member Team requires native scoped role admission; manual dispatch denied.".into());
     }
+    let chosen_worker=selected_worker.unwrap_or(config.worker_bot_id.as_str());
+    if !config.worker_bot_ids.iter().any(|id|id==chosen_worker) {
+        return Err("Selected WorkItem Worker is not a member of this Team.".into());
+    }
     let coordinator = bots::get(store, &config.coordinator_bot_id)?;
-    let worker = bots::get(store, &config.worker_bot_id)?;
+    let worker = bots::get(store, chosen_worker)?;
     if config.team_version <= 0 || coordinator.paused || worker.paused
         || worker.project_id != config.project_id
     {
@@ -2513,7 +2539,7 @@ fn admit_role_with_staging(
         return Err("Team Council policy changed during Ticket admission; reload and submit again.".into());
     }
     let current_coordinator = bots::get(store,&config.coordinator_bot_id)?;
-    let current_worker = bots::get(store,&config.worker_bot_id)?;
+    let current_worker = bots::get(store,chosen_worker)?;
     if current_coordinator.paused || current_worker.paused
         || current_worker.project_id != config.project_id
     {
@@ -2736,6 +2762,9 @@ pub(crate) fn read_only_policy(
         }),
     ).optional().map_err(|e| e.to_string())?;
     if let Some(scope) = scope {
+        if !scheduler::parent_active(store,&scope.ticket_id)? {
+            return Err("policy_unsupported: parent Demand mandate was stopped or revoked.".into());
+        }
         let snapshot = ticket_team_snapshot(store,&scope.ticket_id)?;
         if scope.ticket_state != "running" || scope.assignment_state != "running" || scope.revoked
             || scope.expiry <= storage::now()
@@ -3239,6 +3268,9 @@ fn stop_with_lock_observer(
          WHERE ticket_id=?1 AND state IN ('admitted','bound','starting','dispatched')",
         params![ticket_id,now],
     ).map_err(|e| e.to_string())?;
+    // Cancel and revoke child Tickets atomically with the parent. Native
+    // provider admission also verifies this parent authority on every turn.
+    scheduler::revoke_descendants(&tx,ticket_id,now)?;
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,'stopped','local-user revoked mandate',?2)",
@@ -3384,9 +3416,9 @@ fn change_enabled(
         return Err("Orchestration policy revision changed; reload before editing.".into());
     }
     if enabled {
-        if roster::has_additional_members(store,orchestration_id)? {
-            return Err("Configured multi-member Teams cannot run without native scoped admission.".into());
-        }
+        // Multi-member Teams can now be enabled for the explicit read-only
+        // Demand scheduler. The ordinary manual admission remains denied for
+        // a multi-member Team without a selected, frozen role.
         let coordinator=bots::get(store,&current.coordinator_bot_id)?;
         let workers=current.worker_bot_ids.iter().map(|id| bots::get(store,id))
             .collect::<Result<Vec<_>>>()?;
@@ -4231,10 +4263,18 @@ pub async fn superagent_retry(window: tauri::WebviewWindow,
 
 
 #[tauri::command]
-pub async fn superagent_accept(window: tauri::WebviewWindow, state: State<'_,AppState>, ticket_id: String, expected_revision: i64) -> Result<Ticket> {
+pub async fn superagent_accept(window: tauri::WebviewWindow, app:tauri::AppHandle, state: State<'_,AppState>, ticket_id: String, expected_revision: i64) -> Result<Ticket> {
     require_main_window(&window)?;
-    let store = state.store.lock().map_err(|e| e.to_string())?;
-    accept(&store, &ticket_id, expected_revision)
+    let accepted={
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        accept(&store, &ticket_id, expected_revision)?
+    };
+    // A verified child can unblock dependent read-only WorkItems without
+    // asking the user for another "continue" message.
+    if let Err(error)=scheduler::advance(&app).await {
+        eprintln!("SuperAgent Demand scheduler after acceptance: {error}");
+    }
+    Ok(accepted)
 }
 
 #[tauri::command]
@@ -4255,8 +4295,14 @@ pub async fn superagent_accept_council(
         council_adapter::prepare_human_accept(&store,&ticket_id,expected_revision)?
     };
     crate::architect::accept_superagent_review(&app,state.inner(),&native_session_id)?;
-    let store = state.store.lock().map_err(|error| error.to_string())?;
-    council_adapter::finalize_human_accept(&store,&ticket_id,expected_revision,reason)
+    let accepted={
+        let store = state.store.lock().map_err(|error| error.to_string())?;
+        council_adapter::finalize_human_accept(&store,&ticket_id,expected_revision,reason)?
+    };
+    if let Err(error)=scheduler::advance(&app).await {
+        eprintln!("SuperAgent Demand scheduler after Council acceptance: {error}");
+    }
+    Ok(accepted)
 }
 
 #[tauri::command]
@@ -4337,11 +4383,17 @@ pub async fn superagent_issue_comment(
 #[tauri::command]
 pub async fn superagent_stop(window: tauri::WebviewWindow, app: tauri::AppHandle, state: State<'_,AppState>, ticket_id: String) -> Result<Ticket> {
     require_main_window(&window)?;
-    let (ticket,session)={
+    let (ticket,sessions)={
         let store=state.store.lock().map_err(|e|e.to_string())?;
-        stop(&store,&ticket_id)?
+        let mut sessions=scheduler::sessions_for_root(&store,&ticket_id)?;
+        let (ticket,session)=stop(&store,&ticket_id)?;
+        if let Some(session)=session {sessions.push(session);}
+        sessions.sort();
+        sessions.dedup();
+        (ticket,sessions)
     };
-    if let Some(session)=session {
+    for session in sessions {
+        // Revocation is durable before best-effort process cancellation.
         let _=crate::stop_session(app.clone(),app.state::<AppState>(),session).await;
     }
     Ok(ticket)

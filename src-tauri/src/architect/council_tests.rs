@@ -1129,13 +1129,22 @@ fn seven_native_source_combinations_have_distinct_modes_without_unsafe_child_dis
                     None, None,
                 );
                 match (mode, strategy) {
-                    ("m5", council::CouncilExecutionStrategy::Parallel) =>
+                    ("m5", council::CouncilExecutionStrategy::Parallel | council::CouncilExecutionStrategy::Escalated) =>
                         assert_eq!(source.unwrap(), council::CouncilReviewerSource::Automatic),
-                    ("m6", council::CouncilExecutionStrategy::Parallel) =>
+                    ("m6", council::CouncilExecutionStrategy::Parallel | council::CouncilExecutionStrategy::Escalated) =>
                         assert_eq!(source.unwrap(), council::CouncilReviewerSource::DirectBot),
-                    ("m7", council::CouncilExecutionStrategy::Parallel) =>
+                    ("m7", council::CouncilExecutionStrategy::Parallel | council::CouncilExecutionStrategy::Escalated) =>
                         assert!(source.unwrap_err().contains("councilReviewerSource")),
                     _ => assert!(source.unwrap_err().contains("child_council_unavailable")),
+                }
+                if strategy == council::CouncilExecutionStrategy::Escalated {
+                    let second_wave = council::reviewer_source_for(
+                        &team,
+                        &CouncilSeat { round: 2, lens: "Security".into(), score: None, started_at: 0, closed_by_selection: false, reported_severe_finding: false, reported_conflict: false },
+                        None, None,
+                    );
+                    assert!(second_wave.unwrap_err().contains("child_council_unavailable"),
+                        "{mode}/S2 must not dispatch an unimplemented fresh hierarchy");
                 }
             } else {
                 assert_ne!(inspected.status.state, "passed");

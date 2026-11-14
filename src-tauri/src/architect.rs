@@ -610,7 +610,15 @@ fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
         }
         (rounds, config.needed())
     } else {
-        if config.strategy != council::CouncilExecutionStrategy::Parallel { return false; }
+        // Reuse the real root reviewer grants for a clean hierarchical S2 wave.
+        // The composite terminal gate separately rejects forced or triggered
+        // escalation, which still requires independently admitted new reviews.
+        if config.strategy != council::CouncilExecutionStrategy::Parallel
+            && !(config.strategy == council::CouncilExecutionStrategy::Escalated
+                && !config.force_escalation)
+        {
+            return false;
+        }
         (vec![1], config.reviewer_bot_ids.len() + config.automatic_reviewers)
     };
     rounds.into_iter().all(|round| {

@@ -228,6 +228,54 @@ impl ReviewerToolPolicy {
         });
         Ok(Some(ToolHost { tools, handler, approval_tools: HashSet::new() }))
     }
+
+    /// Native child Architect: coordinate only its own read-only reviewer seats.
+    /// The caller must first validate the persisted child/root ownership link.
+    /// Never forward arbitrary host tools or accept a spoofed schema with a
+    /// privileged name. The normal Architect dispatcher independently requires
+    /// native read-only Council seats for every child assignment.
+    pub(crate) fn restrict_child_coordinator_host(&self, host: Option<ToolHost>) -> Result<Option<ToolHost>> {
+        self.validate()?;
+        if !matches!(self, Self::NativeReadOnly) {
+            return Err("policy_unsupported: only native child Councils may receive coordinator tools.".into());
+        }
+        let host = host.ok_or("policy_unsupported: child Council has no native Architect tool host.")?;
+        let names = [
+            "pandacode_dispatch_workers",
+            "pandacode_list_workers",
+            "pandacode_read_worker",
+            "pandacode_cancel_worker",
+            "pandacode_finish_team",
+        ];
+        let expected = super::catalog();
+        let mut seen = HashSet::new();
+        let tools = host.tools.into_iter().filter(|spec| {
+            let name = spec["name"].as_str().unwrap_or_default();
+            names.contains(&name)
+                && expected.iter().any(|known| known == spec)
+                && seen.insert(name.to_owned())
+        }).collect::<Vec<_>>();
+        if !tools.iter().any(|spec| spec["name"] == "pandacode_dispatch_workers")
+            || !tools.iter().any(|spec| spec["name"] == "pandacode_finish_team")
+        {
+            return Err("policy_unsupported: isolated child Council is missing its native review or completion tools.".into());
+        }
+        let allowed = tools.iter().filter_map(|spec| spec["name"].as_str())
+            .map(str::to_owned).collect::<HashSet<_>>();
+        let original = host.handler;
+        let handler = Arc::new(move |name: String, args: Value| {
+            let permitted = allowed.contains(&name);
+            let original = original.clone();
+            let future: crate::providers::ToolFuture = Box::pin(async move {
+                if !permitted {
+                    return Err("capability_not_authorized: child Council coordinator may only dispatch, read and settle native read-only reviewers.".into());
+                }
+                (original)(name, args).await
+            });
+            future
+        });
+        Ok(Some(ToolHost { tools, handler, approval_tools: HashSet::new() }))
+    }
 }
 
 /// User's task-scoped choice. The native adapter must independently resolve the
@@ -645,6 +693,41 @@ mod tests {
             json!({"criterionId":"coverage","score":9.5,"evidenceFiles":[]}),
         ).await.is_ok());
         assert_eq!(invoked.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn task_owned_child_architect_gets_only_native_read_only_review_management() {
+        let configured = super::super::catalog();
+        let names = ["pandacode_dispatch_workers", "pandacode_list_workers",
+            "pandacode_read_worker", "pandacode_cancel_worker", "pandacode_finish_team"];
+        let mut supplied = configured.clone();
+        // An external module cannot substitute its own schema under a known name.
+        supplied.push(json!({
+            "type":"function","name":"pandacode_dispatch_workers",
+            "inputSchema":{"type":"object","properties":{"shell":{"type":"string"}}},
+        }));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let host = ToolHost {
+            tools: supplied,
+            approval_tools: HashSet::new(),
+            handler: Arc::new(move |_, _| {
+                seen.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(json!({"handled":true})) })
+            }),
+        };
+        let filtered = ReviewerToolPolicy::NativeReadOnly
+            .restrict_child_coordinator_host(Some(host)).unwrap().unwrap();
+        assert_eq!(filtered.tools.len(), names.len());
+        assert!(filtered.tools.iter().all(|spec| names.contains(&spec["name"].as_str().unwrap_or_default())));
+        assert!(filtered.approval_tools.is_empty());
+        assert!((filtered.handler)("pandacode_route_models".into(), json!({})).await.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!((filtered.handler)("pandacode_dispatch_workers".into(), json!({"assignments":[]})).await.is_ok());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(ReviewerToolPolicy::NativeReadOnly
+            .restrict_child_coordinator_host(None).is_err(),
+            "a child cannot fall back to an unrestricted tool host");
     }
 
     #[tokio::test]

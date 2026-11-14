@@ -2546,6 +2546,9 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
                 assert!(child.config.council.is_some(), "{mode_name} × {strategy:?} child has its own Council");
                 let child_link = validate_council_child_link(&state.store.lock().unwrap(), &child.session_id)
                     .unwrap().unwrap_or_else(|| panic!("{mode_name} × {strategy:?} child is missing its native ownership link"));
+                assert!(native_child_coordinator_admitted(
+                    &state.store.lock().unwrap(), &child.session_id,
+                ).unwrap(), "{mode_name} × {strategy:?} child must have an active trusted native coordinator host");
                 assert!(nested_council_callback_current(
                     &state.store.lock().unwrap(), &child.session_id
                 ), "{mode_name} × {strategy:?} legitimate child must retain callback authority");
@@ -7545,6 +7548,14 @@ fn duplicate_task_owned_council_child_links_fail_closed() {
     ).unwrap();
     let error = load_council_child_link(&store, &child_id).unwrap_err();
     assert!(error.contains("duplicate native Council child ownership"), "{error}");
+}
+
+#[test]
+fn native_child_coordinator_is_never_authorized_for_an_unlinked_root_session() {
+    let (state, root_id) = state_fixture();
+    let store = state.store.lock().unwrap();
+    assert!(!native_child_coordinator_admitted(&store, &root_id).unwrap(),
+        "an ordinary root Architect cannot claim a child-only host token");
 }
 
 #[test]

@@ -3824,6 +3824,21 @@ pub(crate) fn check_manual(store: &Store, sid: &str) -> Result<()> {
 }
 /// Require native reviewer tool restrictions on every Council turn, including
 /// resumes from old persisted automatic Council sessions.
+/// Authoritative native child status; called before constructing any
+/// coordinator host. The validated link must remain owned by an active root
+/// and its original, non-abandoned selected Council seat.
+pub(crate) fn native_child_coordinator_admitted(store: &Store, child_session_id: &str) -> Result<bool> {
+    let Some(link) = validate_council_child_link(store, child_session_id)? else {
+        return Ok(false);
+    };
+    let root = load(store, &link.root_session_id)?
+        .ok_or("reviewer_session_mismatch: root Council task disappeared.")?;
+    Ok(active(&root.status) && root.workers.iter().any(|worker| {
+        worker.id == link.root_worker_id && !worker.abandoned
+            && matches!(worker.status.as_str(), "waiting" | "running" | "parked")
+    }))
+}
+
 pub(crate) fn reviewer_policy(
     store: &Store,
     sid: &str,

@@ -136,6 +136,14 @@ pub fn takes_system_instructions(provider: &str) -> bool {
     matches!(provider, "claude" | "glm" | "mimo" | "pi" | "omp")
 }
 
+/// Issued only by PandaCode after constructing and filtering an exact
+/// native, task-scoped reviewer host; never derived from a model or prompt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NativeReviewerHostKind {
+    Evidence,
+    ChildCoordinator,
+}
+
 #[derive(Clone, Debug)]
 pub struct RunConfig {
     pub session_id: String,
@@ -147,6 +155,7 @@ pub struct RunConfig {
     pub reviewer_boundary: bool,
     /// Native user authorization for this one Council seat; none for ordinary tasks.
     pub reviewer_policy: Option<crate::architect::reviewer_security::ReviewerToolPolicy>,
+    pub native_reviewer_host: Option<NativeReviewerHostKind>,
     pub cwd: PathBuf,
     pub resume_id: Option<String>,
     pub prompt: String,
@@ -168,7 +177,7 @@ pub struct RunConfig {
 fn enforce_reviewer_policy(config: &RunConfig, has_host: bool) -> Result<(), String> {
     use crate::architect::reviewer_security::{ReviewerPhase, ReviewerToolPolicy};
     if !config.reviewer_boundary {
-        return if config.reviewer_policy.is_none() { Ok(()) }
+        return if config.reviewer_policy.is_none() && config.native_reviewer_host.is_none() { Ok(()) }
         else { Err("read_only_policy_violation: non-reviewer received reviewer authority.".into()) };
     }
     let policy = config.reviewer_policy.as_ref()
@@ -181,10 +190,10 @@ fn enforce_reviewer_policy(config: &RunConfig, has_host: bool) -> Result<(), Str
         return Err("read_only_unsupported: unknown reviewer harness.".into());
     }
     // ZCode cannot receive scoped native host tools yet (no MCP bridge).
-    if config.provider == "zcode" && matches!(
+    if config.provider == "zcode" && (config.native_reviewer_host.is_some() || matches!(
         config.reviewer_policy.as_ref(),
         Some(ReviewerToolPolicy::Scoped(_))
-    ) {
+    )) {
         return Err("policy_unsupported: ZCode does not expose scoped native host tools.".into());
     }
     if config.mode != "plan" || config.skill.is_some()
@@ -193,11 +202,13 @@ fn enforce_reviewer_policy(config: &RunConfig, has_host: bool) -> Result<(), Str
         return Err("read_only_policy_violation: reviewer cannot inherit writable checkout, goals, skills or mutable Codex settings.".into());
     }
     match policy {
-        ReviewerToolPolicy::NativeReadOnly if has_host => {
-            Err("read_only_policy_violation: default review must not expose host tools.".into())
+        ReviewerToolPolicy::NativeReadOnly if has_host != config.native_reviewer_host.is_some() => {
+            Err("read_only_policy_violation: read-only reviewers need an exact, native-issued tool host or none; arbitrary host tools are forbidden.".into())
         }
-        ReviewerToolPolicy::Scoped(scope) if scope.phase != ReviewerPhase::Review || !has_host => {
-            Err("policy_unsupported: granted native tools must be present in the review phase.".into())
+        ReviewerToolPolicy::Scoped(scope) if scope.phase != ReviewerPhase::Review
+            || !has_host || config.native_reviewer_host.is_some() =>
+        {
+            Err("policy_unsupported: scoped reviewer tools require explicit user grants, not a native-only host token.".into())
         }
         _ => Ok(()),
     }
@@ -4379,6 +4390,19 @@ mod tests {
             assert!(enforce_reviewer_policy(&cfg, true).unwrap_err().contains("read_only_policy_violation"), "{provider}");
         }
         cfg.provider = "codex".into();
+        cfg.native_reviewer_host = Some(NativeReviewerHostKind::Evidence);
+        assert!(enforce_reviewer_policy(&cfg, true).is_ok(),
+            "an exact schema-filtered native evidence host may report criteria without writable tools");
+        assert!(enforce_reviewer_policy(&cfg, false).is_err(),
+            "a native host marker without the authorized host must fail closed");
+        cfg.native_reviewer_host = Some(NativeReviewerHostKind::ChildCoordinator);
+        assert!(enforce_reviewer_policy(&cfg, true).is_ok(),
+            "a frozen child Architect may dispatch its read-only child reviewers");
+        cfg.provider = "zcode".into();
+        assert!(enforce_reviewer_policy(&cfg, true).is_err(),
+            "a harness without a native tool bridge cannot be delegated authority");
+        cfg.provider = "codex".into();
+        cfg.native_reviewer_host = None;
         cfg.mode = "full".into();
         assert!(enforce_reviewer_policy(&cfg, false).is_err());
         cfg.mode = "plan".into();
@@ -4390,6 +4414,10 @@ mod tests {
         cfg.reviewer_policy = Some(ReviewerToolPolicy::from_user_grants(
             ReviewerPhase::Review, "user-grant-1", std::slice::from_ref(&grant), std::slice::from_ref(&grant),
         ).unwrap());
+        cfg.native_reviewer_host = Some(NativeReviewerHostKind::Evidence);
+        assert!(enforce_reviewer_policy(&cfg, true).is_err(),
+            "a native marker cannot authorize tools for a scoped reviewer");
+        cfg.native_reviewer_host = None;
         assert!(enforce_reviewer_policy(&cfg, false).unwrap_err().contains("policy_unsupported"));
         assert!(enforce_reviewer_policy(&cfg, true).is_ok());
         cfg.provider = "claude".into();
@@ -4666,6 +4694,7 @@ mod tests {
             mode: "ask".into(),
             reviewer_boundary: false,
             reviewer_policy: None,
+            native_reviewer_host: None,
             cwd: PathBuf::from("/tmp"),
             resume_id: None,
             prompt: "Explain this project".into(),
@@ -6468,6 +6497,7 @@ read -r a; echo '{{"jsonrpc":"2.0","id":3,"result":{{"stopReason":"end_turn"}}}}
                 mode: "ask".into(),
                 reviewer_boundary: false,
             reviewer_policy: None,
+            native_reviewer_host: None,
                 cwd: root.clone(),
                 resume_id: resume.clone(),
                 prompt: prompt.into(),

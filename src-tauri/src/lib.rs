@@ -1906,6 +1906,7 @@ fn prepare_task_run_in_project(
         mode: if reviewer_boundary { "plan".into() } else { session.mode },
         reviewer_boundary,
         reviewer_policy,
+        native_reviewer_host: None,
         cwd,
         resume_id: session.resume_id,
         prompt,
@@ -1965,6 +1966,7 @@ fn prepare_cloud_attach(
         mode: session.mode,
         reviewer_boundary: false,
         reviewer_policy: None,
+        native_reviewer_host: None,
         cwd,
         resume_id: session.resume_id,
         prompt: String::new(),
@@ -2484,8 +2486,44 @@ async fn launch_operation_admitted(
             config.reviewer_policy.as_ref(),
             Some(architect::reviewer_security::ReviewerToolPolicy::Scoped(_))
         );
-        let (host, team_tools_missing, reviewer_host_error) =
-            if !config.reviewer_boundary || scoped_reviewer {
+        let native_read_only = matches!(
+            config.reviewer_policy.as_ref(),
+            Some(architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly)
+        );
+        let native_child_coordinator = native_read_only
+            && team.as_ref().is_some_and(|admission| admission.parent == session_id)
+            && store.lock().ok().and_then(|db|
+                architect::native_child_coordinator_admitted(&db, &session_id).ok()
+            ).unwrap_or(false);
+        let native_leaf_reviewer = native_read_only
+            && team.as_ref().is_some_and(|admission| admission.parent != session_id);
+        let (host, team_tools_missing, reviewer_host_error, native_host_kind) =
+            if native_child_coordinator || native_leaf_reviewer {
+                // Build only the Architect's app-owned task host. In particular,
+                // do NOT append the general bot, shell, deployment or MCP catalogs.
+                let host = team.as_ref().and_then(|admission| {
+                    architect::host(app.clone(), session_id.clone(), stopped.clone(), admission)
+                });
+                let missing = host.is_none();
+                let filtered = config.reviewer_policy.as_ref()
+                    .ok_or_else(|| "policy_unsupported: native reviewer policy is missing.".to_string())
+                    .and_then(|policy| if native_child_coordinator {
+                        policy.restrict_child_coordinator_host(host)
+                    } else {
+                        policy.restrict_host(host)
+                    });
+                match filtered {
+                    Ok(filtered) => {
+                        let kind = filtered.as_ref().map(|_| if native_child_coordinator {
+                            providers::NativeReviewerHostKind::ChildCoordinator
+                        } else {
+                            providers::NativeReviewerHostKind::Evidence
+                        });
+                        (filtered, missing, None, kind)
+                    }
+                    Err(error) => (None, missing, Some(error), None),
+                }
+            } else if !config.reviewer_boundary || scoped_reviewer {
                 let host = if let Some(admission) = team.as_ref() {
                     architect::host(app.clone(), session_id.clone(), stopped.clone(), admission)
                         .map(|host| {
@@ -2517,11 +2555,11 @@ async fn launch_operation_admitted(
                         .ok_or_else(|| "policy_unsupported: reviewer policy is missing.".to_string())
                         .and_then(|policy| policy.restrict_host(host));
                     match result {
-                        Ok(filtered) => (filtered, missing, None),
-                        Err(error) => (None, missing, Some(error)),
+                        Ok(filtered) => (filtered, missing, None, None),
+                        Err(error) => (None, missing, Some(error), None),
                     }
                 } else {
-                    (host, missing, None)
+                    (host, missing, None, None)
                 }
             } else if matches!(
                 config.reviewer_policy.as_ref(),
@@ -2534,10 +2572,22 @@ async fn launch_operation_admitted(
                         app.clone(), session_id.clone(), stopped.clone(), admission,
                     )
                 });
-                (host, false, None)
+                let filtered = config.reviewer_policy.as_ref()
+                    .ok_or_else(|| "policy_unsupported: native reviewer policy is missing.".to_string())
+                    .and_then(|policy| policy.restrict_host(host));
+                match filtered {
+                    Ok(filtered) => {
+                        let kind = filtered.as_ref().map(|_| providers::NativeReviewerHostKind::Evidence);
+                        (filtered, false, None, kind)
+                    }
+                    Err(error) => (None, false, Some(error), None),
+                }
             } else {
-                (None, false, None)
+                (None, false, None, None)
             };
+        // Only a trusted, schema-filtered native reviewer host may carry the
+        // provider-level host token. It is never derived from a prompt or bot.
+        config.native_reviewer_host = native_host_kind;
         // What the next turn's warm agent needs: this launch and the tools it listed.
         // Team workers rarely get a follow-up, and their warm agents would push out the
         // architect's, whose review turn starts as soon as they settle.

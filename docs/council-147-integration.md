@@ -270,3 +270,14 @@ Root and child criterion receipts and snapshots share a SQLite transaction. A se
 `NativeReadOnly` previously removed all host tools, including read-only Council evidence actions. Its policy now reconstructs a **strict schema-exact whitelist** from the app-owned native criterion/finding/finding-verification tools plus native Skill evidence tools; it wraps the handler with the same allowlist to deny calls to hidden tools. The `Scoped` user-authorized policy keeps its exact user grants and adds only the same schema-exact native reporting actions. This does not grant workspace mutation, shell, network or arbitrary MCP tools.
 
 New native security tests prove the read-only host strips writer tools and schema-spoofed substitutes; native criterion tests cover clean score, exact retry, score rewrite rejection, evidence-required rejection and no invented finding. These tests were authored but not independently executed at the time of this integration.
+
+
+## Native reviewer host wiring and isolated child coordination
+
+Fixed a runtime mismatch discovered during the #147 end-to-end wiring review. Previously `NativeReadOnly` host tools were rejected in `providers::enforce_reviewer_policy`, while the run launcher never sent the built-in Council criterion/finding host to NativeReadOnly reviewers. As a consequence, typed criterion reporting and task-owned child Architect dispatch were unreachable even though the native handlers were implemented.
+
+The run launcher now checks that a native child coordinator has a valid task-owned root/child link and an active, non-abandoned original root seat. The reviewer receives only the app-owned Architect task host, never ambient global bot, VM, shell, deployment or third-party MCP tools. An ordinary read-only reviewer is filtered to exact built-in criterion/finding/verification and Skill evidence tool schemas. A genuine child coordinator is filtered to exact native `dispatch_workers`, `list_workers`, `read_worker`, `cancel_worker` and `finish_team` schemas. Each filtered host wraps the original dispatcher with a second name allowlist and carries no approval tools.
+
+`providers::RunConfig.native_reviewer_host` is a private-to-native-run, explicit enum marker set by the trusted launcher only after filter validation; unknown/forged host tools are rejected before reaching the provider. A missing host for the token, a token on a non-reviewer, a token on a scoped user-grant reviewer, or an unsupported host bridge such as ZCode fails closed. Existing non-reviewer and selected-bot Scoped host grants continue through their separate paths.
+
+Added Rust contract tests for native evidence and isolated child tool allowlists, unsupported/marker mismatches, and legitimate 7 × 3 child ownership. These are static/test-source additions; exact-HEAD provider smoke and native test results remain unverified.

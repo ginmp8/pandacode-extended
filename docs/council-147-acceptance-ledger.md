@@ -17,7 +17,7 @@
 | AC-01 | Original M1 and selected M2 remain available | `src-tauri/src/architect/council.rs`; `src-tauri/src/architect/council_tests.rs` | Code + tests present; exact-HEAD runtime unverified |
 | AC-02 | Three reviewer sources and seven valid combinations | `src-tauri/src/architect/council.rs`; `src-tauri/src/architect/council_tests.rs` | Code + tests present; exact-HEAD runtime unverified |
 | AC-03 | M3 automatic plus direct selected bots | `src-tauri/src/architect/bot_reviewers.rs`; `src-tauri/src/architect/tests.rs` | Native dispatch tests present; provider smoke missing |
-| AC-04 | M4 task-owned child Architects and native leaf reviewers | `src-tauri/src/architect.rs`; `src-tauri/src/architect/tests.rs` | Native dispatch tests present; provider smoke missing |
+| AC-04 | M4 task-owned child Architects and native leaf reviewers | `src-tauri/src/architect.rs`; `src-tauri/src/architect/tests.rs` | Native child host wired and restricted; provider smoke and exact-HEAD Rust suite missing |
 | AC-05 | M5 independent automatic and nested child quotas | `src-tauri/src/architect/council.rs`; `src-tauri/src/architect/tests.rs` | Source-aware dispatch present; terminal runtime unverified |
 | AC-06 | M6 direct and nested bots with no phantom root votes | `src-tauri/src/architect/council.rs`; `src-tauri/src/architect/tests.rs` | Native dispatch tests present; terminal runtime unverified |
 | AC-07 | M7 all three reviewer sources | `src-tauri/src/architect/council.rs`; `src-tauri/src/architect/tests.rs` | Native dispatch tests present; provider smoke missing |
@@ -33,8 +33,8 @@
 | AC-17 | Artifact revision staleness/re-review | `src-tauri/src/architect.rs`; `src-tauri/src/architect/council_tests.rs` | Native revision checks present; end-to-end invalidation pending |
 | AC-18 | Native root terminal gate and typed child receipts | `src-tauri/src/architect.rs`; `src-tauri/src/architect/native_council_task.rs` | Native verified proof required; positive terminal smoke pending |
 | AC-19 | One terminal delivery callback, idempotent recovery | `src-tauri/src/bots/shared_channels.rs`; `src-tauri/src/bots/tests.rs` | CAS/duplicate callback tests present; live race pending |
-| AC-20 | Supported harnesses preserve read-only authority | `src-tauri/src/architect/reviewer_security.rs`; `src-tauri/src/architect/bot_reviewers.rs` | Exact-schema native evidence-only host policy and security regression added; per-harness smoke pending |
-| AC-21 | Task-scoped skill pins/provenance/native check evidence | `src-tauri/src/architect/reviewer_security.rs`; `src-tauri/src/bots/tests.rs` | Native checks and negative tests present; live Skills smoke pending |
+| AC-20 | Supported harnesses preserve read-only authority | `src-tauri/src/architect/reviewer_security.rs`; `src-tauri/src/architect/bot_reviewers.rs` | Native evidence/child coordinator host markers and schema-filtered provider gate added; unsupported harnesses fail closed; per-harness smoke pending |
+| AC-21 | Task-scoped skill pins/provenance/native check evidence | `src-tauri/src/architect/reviewer_security.rs`; `src-tauri/src/bots/tests.rs` | Built-in skill evidence host passed only after trusted native filter; live Skills smoke pending |
 | AC-22 | Independent tasks for concurrent same-bot deliveries | `src-tauri/src/bots/shared_channels.rs`; `src-tauri/src/bots/tests.rs` | Two-concurrent-message test present; runtime race pending |
 | AC-23 | Durable nested child restart and resume | `src-tauri/src/architect.rs`; `src-tauri/src/architect/tests.rs` | Recovery and idempotency tests present; crash-injection pending |
 | AC-24 | Failure, cancellation and timeout fail closed | `src-tauri/src/architect.rs`; `src-tauri/src/architect/tests.rs` | Lifecycle tests present; provider-failure smoke pending |

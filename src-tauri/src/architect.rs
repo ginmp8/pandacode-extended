@@ -3,6 +3,7 @@ mod bot_reviewers;
 mod briefing;
 pub(crate) mod coordination;
 mod council;
+pub mod native_council_task;
 pub(crate) mod internal_turns;
 pub(crate) mod profiles;
 pub(crate) mod reviewer_security;

@@ -93,3 +93,25 @@ The existing native 7-mode x 3-strategy dispatch test now additionally
 requires persisted native authority records for every allocated root reviewer
 and child leaf. This expands real dispatch regression coverage; it does **not**
 yet execute or prove 21 end-to-end terminal accept/reject scenarios.
+
+
+## Standalone non-Channel native task client (AC-35 / AC-36)
+
+A new architect/native_council_task.rs native API now offers task-scoped
+admit/inspect/record_terminal/read_terminal/read_evidence without depending
+on SuperAgent issue #148 or creating a second Council. A new request
+pins caller identity, project, assignment, root cycle, objective, policy,
+local session scope, and caller-supplied target digest before reviewer dispatch.
+Requests are idempotent and cannot be rebound silently. Terminal results
+are gated on completed current native Council approval, native correlated
+evidence, reviewers starting after the task was admitted, and one-winner
+content compare-and-swap storage. Evidence reads recheck the same authority
+and current evidence.
+
+The artifact digest is a correlation key provided by a trusted native caller,
+**not** cryptographic proof of the bytes the model reviewed. This API is
+native-only; it intentionally provides no model-callable permission or
+outbound callback. A negative native test covers idempotency, mismatched
+caller/project/request/digest, absent approval, unauthorized evidence reads,
+and stale objective/policy. A terminal happy-path test and external native
+consumer wiring remain unverified.

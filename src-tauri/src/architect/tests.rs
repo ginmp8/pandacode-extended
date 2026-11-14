@@ -2068,6 +2068,60 @@ fn assignment(key: &str, profile: &str, file: &str) -> Value {
 }
 
 #[test]
+fn native_task_council_admission_is_idempotent_and_rejects_foreign_or_stale_requests() {
+    let (state, sid) = state_fixture();
+    let store = state.store.lock().unwrap();
+    let project = store.session(&sid).unwrap().project_id;
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    team.status = "running".into();
+    team.objective = "Review the immutable native task target.".into();
+    team.council_since = storage::now().max(1);
+    team.config.council = Some(council::CouncilConfig::default());
+    save(&store, &mut team).unwrap();
+    let artifact = "a".repeat(64);
+    let request = native_council_task::admit(
+        &store, "native-client", &sid, &project, "assignment-one", &artifact,
+    ).unwrap();
+    assert_eq!(request, native_council_task::admit(
+        &store, "native-client", &sid, &project, "assignment-one", &artifact,
+    ).unwrap(), "replay of the same native request keeps its original ID");
+    assert!(native_council_task::admit(
+        &store, "foreign-client", &sid, "wrong-project", "assignment-one", &artifact,
+    ).is_err());
+    assert!(native_council_task::inspect(
+        &store, "native-client", &sid, &project, "assignment-one", &artifact,
+        "another-request-id",
+    ).is_err());
+    assert!(native_council_task::inspect(
+        &store, "native-client", &sid, &project, "assignment-one", &"b".repeat(64),
+        &request.request_id,
+    ).is_err());
+    let inspection = native_council_task::inspect(
+        &store, "native-client", &sid, &project, "assignment-one", &artifact,
+        &request.request_id,
+    ).unwrap();
+    assert!(!inspection.verified_pass);
+    assert!(native_council_task::record_terminal(
+        &store, "native-client", &sid, &project, "assignment-one",
+        &artifact, &request.request_id,
+    ).is_err(), "an unreviewed task may not mint a Council pass");
+    assert!(native_council_task::read_evidence(
+        &store, "native-client", &sid, &project, "assignment-one",
+        &artifact, &request.request_id,
+    ).is_err(), "there is no terminal evidence without an approved receipt");
+    let mut changed = load(&store, &sid).unwrap().unwrap();
+    changed.objective.push_str(" Changed after admission.");
+    save(&store, &mut changed).unwrap();
+    assert!(native_council_task::inspect(
+        &store, "native-client", &sid, &project, "assignment-one",
+        &artifact, &request.request_id,
+    ).unwrap_err().contains("council_task_stale"));
+    assert!(native_council_task::admit(
+        &store, "native-client", &sid, &project, "assignment-one", &artifact,
+    ).is_err(), "a frozen key cannot be rebound to the new objective");
+}
+
+#[test]
 fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs() {
     use council::{
         AutomaticReviewerCount as Count, CouncilCriterionOrigin as Origin,

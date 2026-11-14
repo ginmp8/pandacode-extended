@@ -133,3 +133,14 @@ A disposable SQLite test covers replaying an identical request after process
 restart, refusing a terminal receipt without a real Council pass, retaining
 old admission history, admitting a fresh objective with the same assignment
 name under a new cycle, and rejecting the old request ID on that new cycle.
+
+
+## Frontend alignment for blocked native Council verdicts
+
+TypeScript CouncilState now includes blocked, failed, stopped, inconclusive and
+stale, and the view renders each explicitly without ever suggesting passage.
+The composer/tray can show an alert even when an invalid composition is
+blocked before its first round. Native notices are escaped before display.
+Frontend preflight now mirrors the mandatory nested-leaf budget rule instead
+of deferring its error until backend submission. Node tests cover all new
+states and the fixed versus OnTrigger budget boundary.

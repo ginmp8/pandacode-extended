@@ -79,6 +79,16 @@ export function councilCompositionValidationIssues(composition: CouncilCompositi
       if (!Number.isInteger(nested.maxRounds) || nested.maxRounds < 1 || nested.maxRounds > 100) add(field('nested.maxRounds'), `Child max rounds for "${reviewer.botId}" must be 1–100.`);
     } else if (reviewer.nested) add(field('mode'), `Direct reviewer "${reviewer.botId}" cannot include child Council settings.`);
   }
+  // Match native preflight: mandatory Always-nested child rounds must fit
+  // the shared root budget, including fresh two-phase challengers.
+  const mandatoryLeaves = composition.selected.reduce((sum, reviewer) =>
+    reviewer.mode === 'nested' && reviewer.nested?.escalation === 'always'
+      ? sum + reviewer.nested.childReviewerCount : sum, 0);
+  const mandatoryReviews = mandatoryLeaves * (composition.strategy === 'two_phase' ? 2 : 1);
+  if (Number.isFinite(mandatoryReviews) && mandatoryReviews > limits.maxLeafReviewsPerRound) {
+    add('limits.maxLeafReviewsPerRound',
+      `At least ${mandatoryReviews} leaf reviews per round are required by the mandatory nested Councils.`);
+  }
   if (composition.selected.length > 8) add('reviewers', 'Select no more than 8 root reviewers.');
   if (composition.automatic.enabled && composition.automatic.count !== 'auto'
     && (!Number.isInteger(composition.automatic.count) || composition.automatic.count < 1 || composition.automatic.count > 8)) add('automatic.count', 'Automatic reviewer count must be 1–8 or Auto.');
@@ -265,6 +275,11 @@ export function councilStateText({ council, status, rounds: cycle }: CouncilProg
     // The card's footer (round history, target) carries the scores.
     case 'fixing': return changedAfterPass ? `Changed after passing at ${lowest}: fixing` : `Round ${status.round}${rounds} · fixing`;
     case 'passed': return `Passed at ${lowest}${lowered ? ` (target lowered to ${target})` : ''}`;
+    case 'blocked': return status.round > 0 ? `Blocked · round ${status.round}${rounds}` : 'Council blocked · review required';
+    case 'failed': return `Review failed · round ${status.round}${rounds}`;
+    case 'stopped': return `Review stopped · round ${status.round}${rounds}`;
+    case 'inconclusive': return `Review inconclusive · round ${status.round}${rounds}`;
+    case 'stale': return 'Review stale · a fresh verified round is required';
     // Accepted while the latest round has no score: the last complete round's lowest, else just "Accepted".
     case 'accepted': { const last = status.lowest ?? [...cycle].reverse().find(round => round.lowest !== null)?.lowest; return last === undefined || last === null ? 'Accepted' : `Accepted at ${formatScore(last)}`; }
     case 'limit': return `${changedAfterPass ? `Stopped at round limit: changed after passing at ${lowest}` : 'Stopped at round limit'} (${status.round}${rounds})`;

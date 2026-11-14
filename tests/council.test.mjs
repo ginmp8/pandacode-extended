@@ -56,6 +56,15 @@ test('composition validation accepts all strategy and source-mode combinations a
   ] };
   assert.deepEqual(validateCouncilComposition(selectedOnly, 9), []);
   assert.match(validateCouncilComposition({ ...selectedOnly, selected: selectedOnly.selected.slice(0, 1) }, 9).join(' '), /At least 2 root reviewers/);
+  const mandatory = { ...composition, automatic: { enabled: false, count: 0 },
+    selected: [nested('native-a'), nested('native-b')], strategy: 'two_phase',
+    limits: { ...composition.limits, maxLeafReviewsPerRound: 7 } };
+  assert.match(validateCouncilComposition(mandatory, 9).join(' '), /At least 8 leaf reviews/);
+  assert.deepEqual(validateCouncilComposition({ ...mandatory, limits: { ...mandatory.limits, maxLeafReviewsPerRound: 8 } }, 9), []);
+  const optional = { ...mandatory, selected: mandatory.selected.map(reviewer => ({
+    ...reviewer, nested: { ...reviewer.nested, escalation: 'on_trigger' },
+  })) };
+  assert.deepEqual(validateCouncilComposition({ ...optional, limits: { ...optional.limits, maxLeafReviewsPerRound: 1 } }, 9), []);
 });
 
 let nextId = 0;
@@ -141,6 +150,12 @@ test('state text reads as the design says', () => {
   assert.equal(text({ state: 'fixing', round: 3, lowest: 8.3, stale: true }), 'Round 3 of 10 · fixing', 'a stale round below target is the normal fixing loop');
   assert.equal(text({ state: 'fixing', lowest: 9.5, stale: true }), 'Changed after passing at 9.5: fixing');
   assert.equal(text({ state: 'passed', lowest: 9.5 }), 'Passed at 9.5');
+  assert.equal(text({ state: 'blocked', round: 0, lowest: null }), 'Council blocked · review required');
+  assert.equal(text({ state: 'blocked', round: 2, lowest: 9.5 }), 'Blocked · round 2 of 10');
+  assert.equal(text({ state: 'failed', round: 2 }), 'Review failed · round 2 of 10');
+  assert.equal(text({ state: 'inconclusive', round: 2 }), 'Review inconclusive · round 2 of 10');
+  assert.equal(text({ state: 'stale', round: 2 }), 'Review stale · a fresh verified round is required');
+  assert.doesNotMatch(text({ state: 'blocked', round: 2, lowest: 9.5 }), /Passed/);
   assert.equal(text({ state: 'limit', lowest: 8.7, round: 3 }), 'Stopped at round limit (3 of 10)', 'used of the limit');
   const edited = text({ state: 'limit', lowest: 9.5, round: 3, stale: true });
   assert.equal(edited, 'Stopped at round limit: changed after passing at 9.5 (3 of 10)');

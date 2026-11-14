@@ -279,6 +279,10 @@ function face(native: TeamSnapshot | null): { label: string; on: boolean; cue: '
   const team = native && shownTeam(native), progress = team && councilProgress(team);
   if (!progress) return { label: 'Council: off', on: false, cue: '' };
   if (councilAsking(progress.status)) return { label: 'Council needs you', on: true, cue: 'asking' };
+  if (progress.state === 'blocked' || progress.state === 'failed'
+    || progress.state === 'inconclusive' || progress.state === 'stale') {
+    return { label: `Council: ${councilStateText(progress, team!, lowered(team!))}`, on: true, cue: 'asking' };
+  }
   const ended = (settled(progress.state) && progress.state !== 'accepted') || finishedBelow(progress, team!);
   return { label: progress.rounds.length ? `Council: ${councilStateText(progress, team!, lowered(team!))}` : `Council: on, target ${formatScore(progress.status.target)}`, on: true, cue: ended ? 'settled' : '' };
 }
@@ -1187,7 +1191,9 @@ function stripHtml(native: TeamSnapshot): string {
   const team = shownTeam(native), progress = councilProgress(team);
   if (!progress) return '';
   const asks = councilAsking(progress.status), finished = finishedBelow(progress, team), ended = settled(progress.state) || finished;
-  if ((!progress.rounds.length && !asks) || (ended && dismissed.has(cycleKey(team)))) return '';
+  const attention = progress.state === 'blocked' || progress.state === 'failed'
+    || progress.state === 'inconclusive' || progress.state === 'stale';
+  if ((!progress.rounds.length && !asks && !attention) || (ended && dismissed.has(cycleKey(team)))) return '';
   const id = team.sessionId, open = expanded.has(id), { text, score } = stateLine(progress, team), { busy = false, error = '' } = actions.get(id) ?? {};
   const off = busy ? ' aria-disabled="true" aria-busy="true"' : '';
   const panelButton = (field: 'target' | 'maxRounds', label: string, cls = 'ds-btn') => `<button type="button" class="${cls}" data-action="council" data-council-focus="${field}" aria-haspopup="dialog" aria-expanded="${expandedOpener === `${id}:${field}`}"${off}>${label}</button>`;
@@ -1199,10 +1205,13 @@ function stripHtml(native: TeamSnapshot): string {
   const next = asks ? `<span class="council-strip-actions" role="group" aria-label="Council needs you"><button type="button" class="ds-btn-primary" data-action="council-keep-fixing"${off}>Keep fixing</button>${canLower ? panelButton('target', 'Lower target') : ''}<button type="button" class="ds-btn" data-action="council-accept"${off}>Accept and finish</button></span>`
     : progress.state === 'limit' && canRaise ? `<span class="council-strip-actions">${panelButton('maxRounds', 'Raise max rounds')}</span>`
     : finished ? '<span class="council-strip-hint">Send a message to continue, or lower the target.</span>'
+    : attention ? '<span class="council-strip-hint">Review the Council notice before continuing.</span>'
     : halted ? '<span class="council-strip-hint">Send a message to continue.</span>' : '';
   const close = ended ? '<button type="button" class="icon-button council-strip-dismiss" data-action="council-dismiss" aria-label="Dismiss Council result" data-tip="Dismiss">' + icon('close') + '</button>' : '';
-  const tone = asks || progress.state === 'limit' || finished ? 'full' : progress.state === 'passed' ? 'success' : '';
-  return `<section class="council-strip" data-session-id="${escape(id)}" data-state="${progress.state}" aria-label="Council"><div class="council-strip-head"><button type="button" class="council-strip-toggle" data-action="council-strip-toggle" aria-expanded="${open}" aria-controls="council-rows-${escape(id)}"><span class="council-glyph" aria-hidden="true">${COUNCIL_ICON}</span><span class="council-strip-state"${tone ? ` data-state-tone="${tone}"` : ''}>${escape(text)}</span><span class="council-strip-score">${score}</span>${icon('chevron')}</button>${next || close ? `<span class="council-strip-end">${next}${close}</span>` : ''}</div>${error ? `<p class="council-strip-error" role="alert">${escape(error)}</p>` : ''}<div class="council-rows" id="council-rows-${escape(id)}"${open ? '' : ' hidden'}>${open ? rowsHtml(progress, team) : ''}</div></section>`;
+  const tone = asks || attention || progress.state === 'limit' || finished ? 'full' : progress.state === 'passed' ? 'success' : '';
+  const nativeNotice = attention && progress.status.notice
+    ? `<p class="council-strip-error" role="alert">${escape(progress.status.notice)}</p>` : '';
+  return `<section class="council-strip" data-session-id="${escape(id)}" data-state="${progress.state}" aria-label="Council"><div class="council-strip-head"><button type="button" class="council-strip-toggle" data-action="council-strip-toggle" aria-expanded="${open}" aria-controls="council-rows-${escape(id)}"><span class="council-glyph" aria-hidden="true">${COUNCIL_ICON}</span><span class="council-strip-state"${tone ? ` data-state-tone="${tone}"` : ''}>${escape(text)}</span><span class="council-strip-score">${score}</span>${icon('chevron')}</button>${next || close ? `<span class="council-strip-end">${next}${close}</span>` : ''}</div>${nativeNotice}${error ? `<p class="council-strip-error" role="alert">${escape(error)}</p>` : ''}<div class="council-rows" id="council-rows-${escape(id)}"${open ? '' : ' hidden'}>${open ? rowsHtml(progress, team) : ''}</div></section>`;
 }
 const STRIP_EXIT_MS = 120;
 /** Draws the strip in place (morph keeps focus), with its motion: it enters and leaves with a short fade and a few pixels of

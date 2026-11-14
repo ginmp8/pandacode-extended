@@ -81,3 +81,16 @@ contain multiple case-only aliases for the same Team, repository and event
 kind, source creation fails with an explicit ambiguity until an operator
 reconciles the configuration. This never enables a source, admits a Ticket,
 or authorizes a GitHub effect.
+
+## GitHub repository display-case stability
+
+Configured source repositories remain exact canonical lowercase `owner/repo`
+identities. Authenticated GitHub Events API responses can display the same
+repository with different capitalization; the native feed validator and typed
+event parser compare that identity case-insensitively without permitting
+similar prefixes, extra path segments, foreign repositories or missing IDs.
+The stored decision retains the configured canonical repository identity,
+and replay of the same delivery with a case-only actor variation is
+idempotent. Existing receipts and cursors are preserved across restarts.
+No wider repository filter, new subscription, Auto execution or write
+authorization is introduced.

@@ -2459,6 +2459,14 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
             })), "{mode_name} × {strategy:?} root bindings remain correlated and read-only");
             assert!(root_seats.iter().all(|worker| state.store.lock().unwrap().session(&worker.session_id).is_ok()),
                 "{mode_name} × {strategy:?} must allocate real root reviewer sessions");
+            let frozen_required = root.config.council.as_ref().unwrap().needed();
+            for worker in root_seats.iter().filter(|worker| worker.reviewer_binding.as_ref()
+                .is_some_and(|binding| binding.reviewer_bot_id.is_some())) {
+                let binding = worker.reviewer_binding.as_ref().unwrap();
+                assert_eq!(binding.required_reviewers, Some(frozen_required),
+                    "{mode_name} × {strategy:?} selected bindings freeze the composed total");
+                binding.validate(&root, worker).unwrap();
+            }
             for worker in root_seats.iter().filter(|w| w.reviewer_binding.as_ref()
                 .and_then(|b| b.composition_mode.as_deref()) != Some("nested")) {
                 let host = native_reviewer_test_host(state.clone(), worker.session_id.clone(),

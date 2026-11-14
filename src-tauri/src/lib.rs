@@ -291,6 +291,34 @@ mod pending_request_tests {
     }
 }
 
+fn native_reviewer_admission(
+    superagent_reviewer_boundary: bool,
+    admission: Option<&architect::Admission>,
+) -> Result<Option<&architect::Admission>> {
+    if superagent_reviewer_boundary {
+        return Ok(None);
+    }
+    admission
+        .map(Some)
+        .ok_or_else(|| "policy_unsupported: native reviewer admission is missing.".into())
+}
+
+#[cfg(test)]
+mod reviewer_host_initialization_tests {
+    use super::*;
+
+    #[test]
+    fn superagent_read_only_needs_no_architect_admission() {
+        assert!(native_reviewer_admission(true, None).unwrap().is_none());
+    }
+
+    #[test]
+    fn native_read_only_policy_without_team_admission_is_unsupported() {
+        let error = native_reviewer_admission(false, None).unwrap_err();
+        assert_eq!(error, "policy_unsupported: native reviewer admission is missing.");
+    }
+}
+
 #[cfg(test)]
 mod concurrent_task_tests;
 
@@ -1678,6 +1706,8 @@ struct PreparedRun {
     assistant: Arc<Mutex<String>>,
     last_event: Arc<std::sync::atomic::AtomicI64>,
     team: Option<architect::Admission>,
+    /// The policy came from the SuperAgent assignment, not from an Architect Council seat.
+    superagent_reviewer_boundary: bool,
 }
 
 #[cfg(test)]
@@ -1893,9 +1923,16 @@ fn prepare_task_run_in_project(
         error
     };
     let prompt = architect::prompt(&store, &session_id, &prompt, admission.team.as_ref()).map_err(restore)?;
+    let superagent_reviewer_boundary;
     let reviewer_policy = match superagent::read_only_policy(&store, &session_id).map_err(restore)? {
-        Some(policy) => Some(policy),
-        None => architect::reviewer_policy(&store, &session_id, admission.team.as_ref()).map_err(restore)?,
+        Some(policy) => {
+            superagent_reviewer_boundary = true;
+            Some(policy)
+        }
+        None => {
+            superagent_reviewer_boundary = false;
+            architect::reviewer_policy(&store, &session_id, admission.team.as_ref()).map_err(restore)?
+        }
     };
     let reviewer_boundary = reviewer_policy.is_some();
     let config = RunConfig {
@@ -1938,6 +1975,7 @@ fn prepare_task_run_in_project(
         assistant,
         last_event,
         team: admission.team,
+        superagent_reviewer_boundary,
     })
 }
 
@@ -1988,6 +2026,7 @@ fn prepare_cloud_attach(
         assistant: agent.assistant.clone(),
         last_event: agent.last_event.clone(),
         team: None,
+        superagent_reviewer_boundary: false,
     };
     agents.insert(session_id, agent);
     Ok(prepared)
@@ -2231,6 +2270,7 @@ async fn launch_operation_admitted(
         assistant,
         last_event,
         team,
+        superagent_reviewer_boundary,
     } = prepare_task_run_in_project(
         &state,
         session_id.clone(),
@@ -2526,14 +2566,17 @@ async fn launch_operation_admitted(
             } else if matches!(
                 config.reviewer_policy.as_ref(),
                 Some(architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly)
-            ) && team.is_some() {
-                let result = team.as_ref()
-                    .ok_or_else(|| "policy_unsupported: native reviewer admission is missing.".to_string())
-                    .and_then(|admission| architect::reviewer_host(
-                        app.clone(), session_id.clone(), stopped.clone(), admission,
-                    ));
+            ) {
+                let result = native_reviewer_admission(superagent_reviewer_boundary, team.as_ref())
+                    .and_then(|admission| match admission {
+                        Some(admission) => architect::reviewer_host(
+                            app.clone(), session_id.clone(), stopped.clone(), admission,
+                        ).map(Some),
+                        // SuperAgent read-only sessions have no Architect admission.
+                        None => Ok(None),
+                    });
                 match result {
-                    Ok(host) => (Some(host), false, None),
+                    Ok(host) => (host, false, None),
                     Err(error) => (None, false, Some(error)),
                 }
             } else {

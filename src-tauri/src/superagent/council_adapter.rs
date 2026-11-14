@@ -1132,6 +1132,22 @@ mod tests {
         for mode in ["M3", "M5", "M7"] {
             let (mut store, path) = fixture_with_path();
             let (ticket, session) = completed_composed_task(&mut store, mode);
+            let team = architect::load(&store, &session).unwrap().unwrap();
+            let config = team.config.council.as_ref().unwrap();
+            let frozen_required = config.reviewers + config.reviewer_bot_ids.len();
+            let round_seats = team.workers.iter().filter(|worker| {
+                worker.council.as_ref().is_some_and(|seat| seat.round == 1)
+            }).collect::<Vec<_>>();
+            assert!(round_seats.iter().all(|worker| worker.reviewer_binding.as_ref()
+                .is_some_and(|binding| binding.required_reviewers == Some(frozen_required))),
+                "{mode}: every binding must retain the frozen composed quota");
+            if mode == "M7" {
+                assert_eq!(frozen_required, 3);
+                for worker in round_seats.iter().filter(|worker| worker.reviewer_binding.as_ref()
+                    .is_some_and(|binding| binding.reviewer_bot_id.is_some())) {
+                    worker.reviewer_binding.as_ref().unwrap().validate(&team, worker).unwrap();
+                }
+            }
             let client = test_task_client(&store, &ticket.id, None);
             let first = request_task_review(&store, &client).unwrap().unwrap();
             assert!(first.native_pass_verified, "{mode}: {first:?}");

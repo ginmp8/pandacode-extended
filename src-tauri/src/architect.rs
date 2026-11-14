@@ -686,6 +686,18 @@ fn native_council_finish_refusal(store: &Store, team: &TeamSnapshot) -> Option<S
     if let Some(notice) = unresolved_critical_finding_notice(store, team, &ledger) {
         return Some(notice);
     }
+    // A nested coordinator exists to run its child Council. It writes nothing itself, so the
+    // round-0 check in `composed_verdict_in` must not let it complete an empty review.
+    if let Some(config) = team.config.council.as_ref().filter(|config| config.composition.is_some()) {
+        if team.council_status.as_ref().map_or(0, |status| status.round) == 0
+            && matches!(load_council_child_link(store, &team.session_id), Ok(Some(_)))
+        {
+            return Some(format!(
+                "No Council round yet. Dispatch at least {} reviewers in one batch with councilLens.",
+                config.needed()
+            ));
+        }
+    }
     if let Some(config) = team.config.council.as_ref().and_then(|config| config.composition.as_ref()) {
         let signals = council::s2_escalation_signals(
             team,
@@ -6990,11 +7002,9 @@ fn dispatch_as_inner(
                         if let Some(bot) = &selected_bot {
                             binding.reviewer_bot_id = Some(bot.id.clone());
                             binding.roster_bot_ids = bot.roster_bot_ids.clone();
-                            // A single selected bot keeps the composed total quorum.
-                            // Preserve the historical selected-roster pin for 2–8 bots.
-                            if bot.roster_bot_ids.len() >= 2
-                                || team.config.council.as_ref().is_none_or(|c| c.composition.is_none())
-                            {
+                            // Composed plans pin the full source-aware quota from `native`;
+                            // legacy M2 keeps its historical selected-roster quota.
+                            if team.config.council.as_ref().is_none_or(|c| c.composition.is_none()) {
                                 binding.required_reviewers = Some(bot.roster_bot_ids.len());
                             }
                             binding.composition_mode =

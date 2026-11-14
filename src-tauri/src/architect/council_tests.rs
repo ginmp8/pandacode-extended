@@ -4036,6 +4036,14 @@ fn nested_m5_escalated_clean_first_wave_passes_without_synthetic_reviewers() {
 /// Native reviewer callbacks and task-owned child receipts must both settle
 /// before the existing root gate can approve M6 or M7.
 fn assert_nested_mixed_root_callbacks(include_automatic: bool) {
+    // The fixture exercises real native issuance, callback and terminal gates,
+    // but deliberately does not start a provider CLI. Do not require one in CI.
+    crate::providers::with_test_executable_override("codex", || {
+        run_nested_mixed_root_callbacks(include_automatic);
+    });
+}
+
+fn run_nested_mixed_root_callbacks(include_automatic: bool) {
     let (state, sid) = state_fixture();
     {
         let store = state.store.lock().unwrap();

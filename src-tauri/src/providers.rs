@@ -643,7 +643,39 @@ impl ModelInfo {
     }
 }
 
+// Some native Council integration tests complete authenticated callbacks without
+// launching an external CLI. Keep their availability fixture scoped to the
+// calling test thread; production discovery and other tests are unchanged.
+#[cfg(test)]
+thread_local! {
+    static TEST_EXECUTABLE_OVERRIDE: std::cell::RefCell<Option<(String, PathBuf)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn with_test_executable_override<T>(provider: &str, test: impl FnOnce() -> T) -> T {
+    struct Restore(Option<(String, PathBuf)>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            TEST_EXECUTABLE_OVERRIDE.with(|slot| *slot.borrow_mut() = self.0.take());
+        }
+    }
+    let previous = TEST_EXECUTABLE_OVERRIDE.with(|slot| {
+        slot.replace(Some((provider.to_owned(), PathBuf::from("__council_test_only_cli__"))))
+    });
+    let _restore = Restore(previous);
+    test()
+}
+
 pub(crate) fn executable(name: &str) -> Option<PathBuf> {
+    #[cfg(test)]
+    if let Some(path) = TEST_EXECUTABLE_OVERRIDE.with(|slot| {
+        slot.borrow().as_ref()
+            .filter(|(provider, _)| provider == name)
+            .map(|(_, path)| path.clone())
+    }) {
+        return Some(path);
+    }
     if let Some(path) = crate::provider_settings::executable_override(name) {
         return Some(path);
     }

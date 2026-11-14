@@ -402,6 +402,47 @@ pub async fn superagent_start_demand(
 }
 
 
+/// Persist scope and evidence atomically. A failed audit insertion must not
+/// leave a runnable write permission behind; admission is pinned to the
+/// exact still-pending WorkItem and frozen Demand revision.
+fn commit_work_item_write_scope(
+    store:&Store,ticket_id:&str,item_id:&str,item_key:&str,
+    paths_json:&str,expected_revision:i64,
+)->Result<()> {
+    let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
+    let existing:Option<String>=tx.query_row(
+        "SELECT allowed_paths FROM sa_work_item_write_scopes WHERE item_id=?1",
+        [item_id],|row|row.get(0),
+    ).optional().map_err(|e|e.to_string())?;
+    if let Some(previous)=existing {
+        if previous!=paths_json {
+            return Err("A different immutable file scope already belongs to this WorkItem.".into());
+        }
+    } else {
+        let inserted=tx.execute(
+            "INSERT INTO sa_work_item_write_scopes(
+                item_id,allowed_paths,root_ticket_revision,authorized_at)
+             SELECT item.id,?3,?4,?5
+             FROM sa_work_items item
+             JOIN sa_demand_plans plan ON plan.ticket_id=item.ticket_id
+             WHERE item.ticket_id=?1 AND item.id=?2
+               AND item.state='pending' AND item.child_ticket_id IS NULL
+               AND item.requires_write=1 AND plan.state='active'
+               AND plan.ticket_revision=?4",
+            params![ticket_id,item_id,paths_json,expected_revision,storage::now()],
+        ).map_err(|e|e.to_string())?;
+        if inserted!=1 {
+            return Err("WorkItem became ineligible before write scope admission.".into());
+        }
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'work_item_write_scope_confirmed',?2,?3)",
+            params![ticket_id,format!("WorkItem {item_key}"),storage::now()],
+        ).map_err(|e|e.to_string())?;
+    }
+    tx.commit().map_err(|e|e.to_string())
+}
+
 /// A write-required WorkItem remains pending until the local user confirms
 /// exactly which paths it may modify. A Coordinator JSON proposal is NEVER a
 /// file-write grant. Only the native Codex ToolHost can execute this scope.
@@ -428,6 +469,32 @@ pub async fn superagent_authorize_work_item_write(
             return Err("WorkItem is not waiting for a new file-write authorization.".into());
         }
         let snapshot=ticket_team_snapshot(store,&ticket_id)?;
+        let current=configuration(store,&root.orchestration_id)?;
+        if crate::feature_controls::get().bots_paused || !current.enabled ||
+            current.team_version!=snapshot.team_version ||
+            current.policy_revision!=snapshot.policy.policy_revision {
+            return Err("Team changed or bots paused before scoped write authorization.".into());
+        }
+        let root_mandate:bool=store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_mandates mandate
+               JOIN sa_tickets ticket ON ticket.id=mandate.ticket_id
+               WHERE ticket.id=?1 AND ticket.state='queued'
+                 AND ticket.active_assignment_id IS NULL
+                 AND ticket.actor='local-user' AND ticket.source='manual'
+                 AND mandate.actor=ticket.actor AND mandate.revoked=0
+                 AND mandate.expires_at>?2 AND mandate.policy_revision=?3
+                 AND mandate.project_id=?4 AND mandate.allowed_tools='[]'
+                 AND mandate.allowed_side_effects=0)",
+            params![ticket_id,storage::now(),snapshot.policy.policy_revision,
+                snapshot.project_id],
+            |row|row.get(0),
+        ).map_err(|e|e.to_string())?;
+        if !root_mandate || !super::auto::ticket_authorized(store,&ticket_id)? {
+            return Err("Original Demand mandate or GitHub Auto grant is revoked or expired.".into());
+        }
+        super::roster::require_current_profile(
+            store,&ticket_id,"worker",&item.worker_bot_id,
+        )?;
         let worker=bots::get(store,&item.worker_bot_id)?;
         if worker.provider!="codex" || worker.paused ||
             worker.project_id!=snapshot.project_id {
@@ -467,26 +534,9 @@ pub async fn superagent_authorize_work_item_write(
         let item=original.items.iter().find(|item|item.key==item_key)
             .ok_or("WorkItem not found.")?;
         let paths_json=serde_json::to_string(&allowed_paths).map_err(|error|error.to_string())?;
-        let existing:Option<String>=store.db.query_row(
-            "SELECT allowed_paths FROM sa_work_item_write_scopes WHERE item_id=?1",
-            [&item.id],|row|row.get(0),
-        ).optional().map_err(|error|error.to_string())?;
-        if let Some(previous)=existing {
-            if previous!=paths_json {
-                return Err("A different immutable file scope already belongs to this WorkItem.".into());
-            }
-        } else {
-            store.db.execute(
-                "INSERT INTO sa_work_item_write_scopes(item_id,allowed_paths,root_ticket_revision,authorized_at)
-                 VALUES(?1,?2,?3,?4)",
-                params![item.id,paths_json,expected_revision,storage::now()],
-            ).map_err(|error|error.to_string())?;
-            store.db.execute(
-                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-                 VALUES(?1,'work_item_write_scope_confirmed',?2,?3)",
-                params![ticket_id,format!("WorkItem {}",item_key),storage::now()],
-            ).map_err(|error|error.to_string())?;
-        }
+        commit_work_item_write_scope(
+            &store,&ticket_id,&item.id,&item_key,&paths_json,expected_revision,
+        )?;
         inspect(&store,&ticket_id)?.ok_or_else(||"Demand plan disappeared after write scope.".to_owned())?
     };
     advance(&app).await?;
@@ -661,6 +711,59 @@ mod tests {
         assert!(db.execute(
             "DELETE FROM sa_work_item_write_scopes WHERE item_id='item'",[],
         ).is_err(),"the authorization audit must outlive Stop");
+    }
+
+    #[test]
+    fn scoped_write_grant_and_audit_are_atomic_and_idempotent() {
+        let db=rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE sa_tickets(id TEXT PRIMARY KEY);
+             CREATE TABLE sa_audit(ticket_id TEXT,kind TEXT,detail TEXT,at INTEGER);
+             INSERT INTO sa_tickets(id) VALUES('root');",
+        ).unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch(
+            "ALTER TABLE sa_work_items ADD COLUMN requires_write INTEGER
+             NOT NULL DEFAULT 0 CHECK(requires_write IN (0,1));",
+        ).unwrap();
+        db.execute_batch(WRITE_SCOPES_SCHEMA).unwrap();
+        db.execute(
+            "INSERT INTO sa_demand_plans(ticket_id,ticket_revision,team_version,
+             policy_revision,plan_sha256,state,created_at,updated_at)
+             VALUES('root',2,1,1,?1,'active',1,1)",
+            ["0".repeat(64)],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO sa_work_items(id,ticket_id,item_key,ordinal,objective,
+             worker_bot_id,state,created_at,updated_at,requires_write)
+             VALUES('item','root','implement',0,'Scoped change','worker','pending',1,1,1)",
+            [],
+        ).unwrap();
+        let store=Store{db,path:std::path::PathBuf::from(":memory:")};
+        store.db.execute_batch(
+            "CREATE TRIGGER reject_scope_audit BEFORE INSERT ON sa_audit
+             BEGIN SELECT RAISE(ABORT,'audit write rejected'); END;",
+        ).unwrap();
+        assert!(commit_work_item_write_scope(
+            &store,"root","item","implement",r#"["src/allowed.rs"]"#,2,
+        ).is_err());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_work_item_write_scopes",[],
+            |r|r.get::<_,i64>(0),
+        ).unwrap(),0,"a failed audit must roll back the executable scope");
+        store.db.execute_batch("DROP TRIGGER reject_scope_audit;").unwrap();
+        for _ in 0..2 {
+            commit_work_item_write_scope(
+                &store,"root","item","implement",r#"["src/allowed.rs"]"#,2,
+            ).unwrap();
+        }
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit",[],|r|r.get::<_,i64>(0),
+        ).unwrap(),1,"an identical replay must not create a second audit");
+        assert!(commit_work_item_write_scope(
+            &store,"root","item","implement",r#"["src/other.rs"]"#,2,
+        ).is_err(),"a replay cannot broaden the confirmed scope");
     }
 
     #[test]

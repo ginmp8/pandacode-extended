@@ -58,9 +58,21 @@
 
 The incomplete items still include advanced provider-local test execution and
 quality-backed autonomous acceptance without per-child human decisions, full
-multi-checkout concurrent writes, continuous headless admission after restart,
-GitHub Auto and native Worker-created recursive subagents. Cross-platform
+multi-checkout concurrent writes, all headless action parity, generic automated
+GitHub publishing, and complete recursive-subagent runtime verification.
+A bounded issue-opened Auto intake and opt-in Worker descendants are authored
+as separately guarded partial features. Cross-platform
 compilation, real authorization/denial oracles, migration/restart fixtures,
 Council callbacks, end-to-end UI/keyboard proof and the full AC/UX/DD/SA/NS/EGM
 ledger must be executed on the final exact SHA. Do not merge this draft based
 only on source presence or a partial green CI matrix.
+
+## Worker-created subagent integration
+
+An admitted Worker with the original local-user subagent policy may request one
+existing member through the app-owned `pandacode_superagent_spawn_child` ToolHost.
+The policy is depth/count-bounded, immutable, native and separate from the
+parent's file-write grants. The native scheduler records child/grandchild
+Ticket/Assignment ancestry and waits for the required child’s own verified
+completion. It exposes the graph in the Demand inspector; root Stop revokes
+all descendants. See [the subagent contract](superagent-native-subagents.md).

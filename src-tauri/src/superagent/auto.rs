@@ -3,7 +3,7 @@
 //! Auto may create read-only Demand Tickets; it cannot approve results, write
 //! files, push, comment, merge, deploy or broaden the original Team scope.
 
-use super::{configuration,events,require_main_window,Ticket};
+use super::{configuration,events,require_main_window};
 use crate::{bots,storage::{self,Store},AppState,Result};
 use rusqlite::{params,OptionalExtension};
 use serde::Serialize;
@@ -107,7 +107,9 @@ pub(crate) fn ticket_authorized(store:&Store,ticket_id:&str)->Result<bool> {
     let linked:Option<(String,String)>=store.db.query_row(
         "SELECT source_id,delivery_id FROM sa_auto_intake
          WHERE ticket_id=?1 OR ticket_id=(
-             SELECT ticket_id FROM sa_work_items WHERE child_ticket_id=?1 LIMIT 1)",
+             SELECT ticket_id FROM sa_work_items WHERE child_ticket_id=?1 LIMIT 1)
+           OR ticket_id=(
+             SELECT root_ticket_id FROM sa_subagent_nodes WHERE child_ticket_id=?1 LIMIT 1)",
         [ticket_id],|r|Ok((r.get(0)?,r.get(1)?)),
     ).optional().map_err(|e|e.to_string())?;
     let Some((source_id,delivery_id))=linked else {

@@ -468,7 +468,10 @@ fn hash_snapshot_permissions(hasher: &mut Sha256, metadata: &fs::Metadata) {
     #[cfg(unix)]
     hasher.update((metadata.permissions().mode() & 0o7777 & !0o222).to_be_bytes());
     #[cfg(not(unix))]
-    hasher.update([1_u8]);
+    {
+        let _=metadata;
+        hasher.update([1_u8]);
+    }
 }
 
 fn create_snapshot_symlink(
@@ -1247,6 +1250,11 @@ fn persist_finalization(
     // Recheck after acquiring the cross-process fence. Concurrent duplicate
     // native callbacks then observe the committed receipt and become no-ops.
     if finalization_exists(store,request,verdict)? { return Ok(true); }
+    if super::subagents::has_unsettled(store,&request.ticket_id)? {
+        // A reviewer cannot pass a WorkItem while required native children
+        // are still executing or waiting on their own Council/evidence gate.
+        return Ok(false);
+    }
     let ticket = super::get_ticket(store,&request.ticket_id)?;
     let binding_valid = current_binding_valid(store,request,&ticket,team)?;
     let verdict_valid = match verdict {
@@ -1379,6 +1387,9 @@ pub(crate) fn finalize_after_native_run(store: &Store, reviewer_session_id: &str
 }
 
 pub(super) fn prepare_human_accept(store: &Store, ticket_id: &str, expected_revision: i64) -> Result<String> {
+    if super::subagents::has_unsettled(store,ticket_id)? {
+        return Err("A required native child is not yet completed; Council acceptance cannot bypass descendants.".into());
+    }
     let ticket = super::get_ticket(store,ticket_id)?;
     if ticket.state != "waiting_review" || ticket.revision != expected_revision {
         return Err("Ticket is no longer waiting on this Council review.".into());
@@ -2088,7 +2099,7 @@ mod tests {
         assert!(team.workers.iter().all(|worker| worker.council.is_some() && worker.read_only));
         {
             let store=state.store.lock().unwrap();
-            let project_id=super::ticket_team_snapshot(&store,&ticket.id).unwrap().project_id;
+            let project_id=crate::superagent::ticket_team_snapshot(&store,&ticket.id).unwrap().project_id;
             assert!(team.workers.iter().all(|worker| {
                 store.workspace_root(&project_id,Some(&worker.session_id)).is_ok_and(|root| root == snapshot_root)
             }));

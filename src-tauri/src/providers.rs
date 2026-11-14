@@ -4408,6 +4408,65 @@ mod tests {
     }
 
     #[test]
+    fn superagent_bounded_spawn_tool_does_not_expose_shell_mcp_or_extra_tools() {
+        use crate::architect::reviewer_security::ReviewerToolPolicy;
+        let spawn=json!({
+            "type":"function",
+            "name":crate::superagent::subagents::TOOL_NAME,
+            "description":"Native read-only, mandate-bound child request",
+            "inputSchema":{
+                "type":"object","additionalProperties":false,
+                "properties":{
+                    "parentTicketId":{"type":"string","enum":["parent"]},
+                    "rootTicketId":{"type":"string","enum":["root"]},
+                    "workerBotId":{"type":"string","enum":["worker"]},
+                    "key":{"type":"string","maxLength":64},
+                    "objective":{"type":"string","maxLength":4096}
+                },
+                "required":["parentTicketId","rootTicketId","workerBotId","key","objective"]
+            }
+        });
+        let make=|tools:Vec<Value>|ToolHost {
+            tools,handler:Arc::new(|_,args|Box::pin(async move{Ok(args)})),
+            approval_tools:HashSet::new(),
+        };
+        let mut config=config("codex");
+        config.mode="plan".into();
+        config.reviewer_boundary=true;
+        config.reviewer_policy=Some(ReviewerToolPolicy::NativeReadOnly);
+        assert!(enforce_reviewer_policy(&config,Some(&make(vec![spawn.clone()]))).is_ok());
+        let write=json!({
+            "type":"function",
+            "name":crate::superagent::write_grants::TOOL_NAME,
+            "inputSchema":{
+                "type":"object","additionalProperties":false,
+                "properties":{
+                    "grantId":{"type":"string","enum":["approved-grant"]},
+                    "path":{"type":"string","enum":["src/allowed.rs"]},
+                    "content":{"type":"string",
+                        "maxLength":crate::superagent::write_grants::MAX_CONTENT_BYTES}
+                },
+                "required":["grantId","path","content"]
+            }
+        });
+        assert!(enforce_reviewer_policy(&config,
+            Some(&make(vec![write.clone(),spawn.clone()]))).is_ok());
+        let mut malicious=spawn.clone();
+        malicious["inputSchema"]["additionalProperties"]=json!(true);
+        assert!(enforce_reviewer_policy(&config,Some(&make(vec![malicious])))
+            .is_err(),"unbounded child input schema must be rejected");
+        assert!(enforce_reviewer_policy(&config,
+            Some(&make(vec![spawn.clone(),spawn.clone()])))
+            .is_err(),"duplicate native spawn tools must be rejected");
+        assert!(enforce_reviewer_policy(&config,Some(&make(vec![
+            spawn.clone(),json!({"type":"function","name":"mcp_exec"}),
+        ]))).is_err(),"foreign host tools must remain denied");
+        config.provider="claude".into();
+        assert!(enforce_reviewer_policy(&config,Some(&make(vec![spawn]))).is_err(),
+            "unsupported harnesses never inherit native child authorization");
+    }
+
+    #[test]
     fn superagent_write_tool_is_codex_only_and_native_shell_approval_stays_denied() {
         use crate::architect::reviewer_security::ReviewerToolPolicy;
         fn write_host(extra_shell: bool) -> ToolHost {

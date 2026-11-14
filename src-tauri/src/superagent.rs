@@ -6,6 +6,7 @@ use crate::{bots, storage::{self, Store}, AppState, Result};
 
 pub(crate) mod manifest;
 pub(crate) mod scheduler;
+pub(crate) mod subagents;
 pub(crate) mod roster;
 pub(crate) mod events;
 pub(crate) mod auto;
@@ -2812,6 +2813,7 @@ pub(crate) fn read_only_policy(
     ).optional().map_err(|e| e.to_string())?;
     if let Some(scope) = scope {
         if !scheduler::parent_active(store,&scope.ticket_id)? ||
+            !subagents::lineage_active(store,&scope.ticket_id)? ||
             !auto::ticket_authorized(store,&scope.ticket_id)? {
             return Err("policy_unsupported: parent Demand mandate was stopped or revoked.".into());
         }
@@ -3154,6 +3156,9 @@ fn accept_with_pause(
     // No terminal state may be visible without matching acceptance evidence.
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let ticket = get_ticket(store,ticket_id)?;
+    if subagents::has_unsettled(store,ticket_id)? {
+        return Err("A required native subagent is not yet completed; parent acceptance denied.".into());
+    }
     if ticket.state != "waiting_approval" || ticket.revision != expected_revision
         || ticket.evidence.as_deref().is_none_or(str::is_empty)
     {

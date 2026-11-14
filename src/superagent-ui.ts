@@ -43,6 +43,20 @@ interface DemandPlanEvidence {
   ticketId:string; ticketRevision:number; teamVersion:number; policyRevision:number;
   planSha256:string; state:string; items:WorkItemEvidence[];
 }
+interface NativeSubagentPolicy {
+  rootTicketId:string; teamVersion:number; policyRevision:number;
+  maxDepth:number; maxChildren:number; maxTotal:number; revoked:boolean;
+}
+interface NativeSubagentNode {
+  id:string; rootTicketId:string; parentTicketId:string;
+  parentAssignmentId:string; childTicketId:string|null;
+  key:string; workerBotId:string; depth:number; objective:string;
+  state:string; reason:string|null;
+}
+interface NativeSubagentTree {
+  rootTicketId:string; policy:NativeSubagentPolicy|null;
+  nodes:NativeSubagentNode[];
+}
 interface DemandIndex { id: string; orchestrationId: string; objective: string;
   state: string; revision: number; updatedAt: number }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
@@ -167,6 +181,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let demandObjective = '', demandMode: 'coordinated' | 'direct' | 'auto' = 'coordinated';
   let workPlan: DemandPlanEvidence | null = null, workPlanLoaded = false;
   let workWriteItemKey = '', workWritePaths = '';
+  let subagentTree:NativeSubagentTree|null = null, subagentTreeLoaded = false;
+  let subagentDepth=2, subagentPerParent=2, subagentTotal=8;
   let demandPreflight: ManualPreflight | null = null;
   let preflightObjective = '', preflightMode: 'coordinated' | 'direct' = 'coordinated';
   // Persist the user's editable preset draft across asynchronous list refreshes.
@@ -363,11 +379,54 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         : workPlanLoaded ? '<p>No native WorkItem plan belongs to this Ticket.</p>'
           : '<p>Plan not loaded.</p>') +
       '</section>';
+    const effectiveWorkerIds=ticketDetails?.teamSnapshot?.workerBotIds;
+    const isRootDemand=Boolean(ticketDetails?.activity.some(entry =>
+      entry.kind==='demand_auto_plan_requested') &&
+      Array.isArray(effectiveWorkerIds) && effectiveWorkerIds.length>=2 &&
+      ticketDetails && ['running','queued'].includes(ticketDetails.ticket.state));
+    const subagentPanel = '<section class="sa-pane" role="region" aria-label="Native Worker subagents">' +
+      '<h5>Worker-created subagents</h5><p>Optional, finite read-only native child delegation. ' +
+      'A local user must authorize the exact root Demand and child limits. ' +
+      'Children retain independent Tickets and cannot inherit file, shell, MCP or GitHub rights.</p>' +
+      '<button type="button" data-sa-load-subagents>Inspect native descendant tree</button>' +
+      (subagentTreeLoaded && subagentTree?.rootTicketId===inspectedTicket
+        ? '<p role="status">' +
+          (subagentTree.policy
+            ? 'Enabled · depth ≤ ' + subagentTree.policy.maxDepth +
+              ' · children per Worker ≤ ' + subagentTree.policy.maxChildren +
+              ' · total descendants ≤ ' + subagentTree.policy.maxTotal +
+              (subagentTree.policy.revoked ? ' · revoked' : '')
+            : 'No native descendant policy has been issued') + '</p>' +
+          '<ol class="sa-tickets">' +
+          subagentTree.nodes.map(node=>
+            '<li><strong>' + safe(node.key) + '</strong> · depth ' + node.depth +
+            ' · ' + safe(node.state) +
+            '<p>' + safe(node.objective) + '</p>' +
+            '<small>Parent Ticket ' + safe(node.parentTicketId) +
+            ' · Worker ' + safe(botName(node.workerBotId)) +
+            ' · Child Ticket ' + safe(node.childTicketId ?? 'not admitted') +
+            (node.reason ? ' · ' + safe(node.reason) : '') +
+            '</small></li>').join('') +
+          '</ol>' +
+          (!subagentTree.policy && isRootDemand
+            ? '<form data-sa-form="enable-subagents">' +
+              '<p>Only the native local confirmation dialog can authorize a bounded descendant policy.</p>' +
+              '<label>Maximum nesting depth (1–3)<input name="maxDepth" type="number" min="1" max="3" value="' +
+              safe(subagentDepth) + '" required></label>' +
+              '<label>Maximum children per Worker (1–4)<input name="maxChildren" type="number" min="1" max="4" value="' +
+              safe(subagentPerParent) + '" required></label>' +
+              '<label>Maximum total descendants (1–24)<input name="maxTotal" type="number" min="1" max="24" value="' +
+              safe(subagentTotal) + '" required></label>' +
+              '<button type="submit" class="primary-button">Review bounded subagent authorization</button>' +
+              '</form>' : '')
+        : subagentTreeLoaded ? '<p>No native descendants are associated with this Ticket.</p>'
+          : '<p>Descendant tree not loaded.</p>') +
+      '</section>';
     const details = inspected && ticketDetails
       ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
         '<h4>Ticket evidence</h4><p>Read-only native snapshot. Model output is not task approval.</p>' +
         renderTeamSnapshot(ticketDetails.teamSnapshot) +
-        demandPlanPanel +
+        demandPlanPanel + subagentPanel +
         '<dl><dt>Ticket ID</dt><dd><code>' + safe(inspected.id) + '</code></dd>' +
         '<dt>State / revision</dt><dd>' + safe(inspected.state) + ' / ' + inspected.revision + '</dd>' +
         '<dt>Actor</dt><dd>' + safe(ticketDetails.mandate.actor) + '</dd>' +
@@ -1457,6 +1516,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
+    if (target.hasAttribute('data-sa-load-subagents')) {
+      const ticketId=inspectedTicket;
+      if (ticketId && ticketDetails?.ticket.id===ticketId) void work(async () => {
+        const result=await call<NativeSubagentTree>('superagent_subagents',{ticketId});
+        if (inspectedTicket===ticketId && result.rootTicketId===ticketId) {
+          subagentTree=result; subagentTreeLoaded=true;
+        }
+      });
+      return;
+    }
     if (target.hasAttribute('data-sa-load-work-plan')) {
       const ticketId = inspectedTicket;
       const selectedTicket = tickets.find(ticket => ticket.id === ticketId);
@@ -1547,6 +1616,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       return;
     }
     if (target.dataset.saInspectTicket) {
+      subagentTree = null; subagentTreeLoaded = false;
       workPlan = null; workPlanLoaded = false;
       workWriteItemKey = ''; workWritePaths = '';
       const id = target.dataset.saInspectTicket;
@@ -1637,6 +1707,43 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         await reload();
         autoStatus=await call<AutoSourceStatus>('superagent_auto_status',{sourceId:src.id});
         feedback='Local GitHub Auto grant authorized for bounded read-only issue intake. Explicit file-write confirmations remain required.';
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'enable-subagents') {
+      const ticket=ticketDetails?.ticket;
+      const tree=subagentTree;
+      const currentWorkerIds=ticketDetails?.teamSnapshot?.workerBotIds;
+      const eligible=Boolean(ticketDetails?.activity.some(entry =>
+        entry.kind==='demand_auto_plan_requested') &&
+        Array.isArray(currentWorkerIds) && currentWorkerIds.length>=2);
+      const maxDepth=Number(data.get('maxDepth'));
+      const maxChildren=Number(data.get('maxChildren'));
+      const maxTotal=Number(data.get('maxTotal'));
+      if (!ticket || inspectedTicket!==ticket.id || !eligible ||
+          !['running','queued'].includes(ticket.state) || tree?.policy ||
+          !Number.isInteger(maxDepth) || maxDepth<1 || maxDepth>3 ||
+          !Number.isInteger(maxChildren) || maxChildren<1 || maxChildren>4 ||
+          !Number.isInteger(maxTotal) || maxTotal<1 || maxTotal>24 ||
+          maxChildren>maxTotal) {
+        error='Choose an active, multiworker Demand and finite nesting limits.';
+        render(); return;
+      }
+      subagentDepth=maxDepth; subagentPerParent=maxChildren; subagentTotal=maxTotal;
+      const ticketId=ticket.id, expectedRevision=ticket.revision;
+      void work(async () => {
+        const policy=await call<NativeSubagentPolicy>('superagent_enable_subagents',{
+          ticketId,expectedRevision,maxDepth,maxChildren,maxTotal,
+        });
+        if (policy.rootTicketId!==ticketId || policy.revoked) {
+          throw new Error('Native descendant policy does not belong to the selected Demand.');
+        }
+        await reload();
+        if (inspectedTicket===ticketId) {
+          subagentTree=await call<NativeSubagentTree>('superagent_subagents',{ticketId});
+          subagentTreeLoaded=true;
+        }
+        feedback='Native subagent policy authorized. Worker-created children remain bounded, read-only, and subject to their own review.';
       });
       return;
     }

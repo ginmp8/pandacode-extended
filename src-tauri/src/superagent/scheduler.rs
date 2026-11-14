@@ -487,7 +487,7 @@ pub async fn superagent_authorize_work_item_write(
                 params![ticket_id,format!("WorkItem {}",item_key),storage::now()],
             ).map_err(|error|error.to_string())?;
         }
-        inspect(&store,&ticket_id)?.ok_or("Demand plan disappeared after write scope.".into())?
+        inspect(&store,&ticket_id)?.ok_or_else(||"Demand plan disappeared after write scope.".to_owned())?
     };
     advance(&app).await?;
     Ok(result)

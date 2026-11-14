@@ -2449,21 +2449,25 @@ async fn launch_operation_admitted(
                 config.reviewer_policy.as_ref(),
                 Some(architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly)
             ) {
-                match superagent::write_grants::host(
+                let bounded=superagent::write_grants::host(
                     app.clone(),session_id.clone(),stopped.clone(),
-                ) {
-                    Err(error) => (None,false,Some(error)),
-                    // A granted SuperAgent worker receives this one app-owned
-                    // tool only; built-in provider tools remain read-only.
-                    Ok(Some(host)) => (Some(host),false,None),
-                    Ok(None) => {
-                        // Ordinary Council reviewers still receive only their
-                        // task-scoped, read-only skill evidence tools.
-                        let host = team.as_ref().and_then(|admission| {
+                ).and_then(|existing|superagent::subagents::extend_host(
+                    existing,app.clone(),session_id.clone(),stopped.clone(),
+                ));
+                match bounded {
+                    Err(error)=>(None,false,Some(error)),
+                    // A SuperAgent Worker may receive exactly the native
+                    // user-granted file tool and/or the bounded child-spawn
+                    // tool. Codex validates this restricted host catalog.
+                    Ok(Some(host))=>(Some(host),false,None),
+                    Ok(None)=>{
+                        // Ordinary Council reviewers never inherit a spawn or
+                        // executor write grant from their bot's normal profile.
+                        let host=team.as_ref().and_then(|admission|
                             architect::reviewer_skill_host(
-                                app.clone(), session_id.clone(), stopped.clone(), admission,
+                                app.clone(),session_id.clone(),stopped.clone(),admission,
                             )
-                        });
+                        );
                         (host,false,None)
                     }
                 }
@@ -2782,7 +2786,8 @@ async fn launch_operation_admitted(
         tauri::async_runtime::spawn(async move {
             let planned={
                 let state=demand_app.state::<AppState>();
-                match state.store.lock() {
+                let locked=state.store.lock();
+                match locked {
                     Ok(store)=>superagent::scheduler::capture_coordinator_plans(&store),
                     Err(error)=>Err(error.to_string()),
                 }
@@ -4542,6 +4547,8 @@ pub fn run() {
                 superagent::auto::superagent_auto_status,
                 superagent::auto::superagent_auto_authorize,
                 superagent::auto::superagent_auto_revoke,
+                superagent::subagents::superagent_enable_subagents,
+                superagent::subagents::superagent_subagents,
                 superagent::superagent_effect_receipts,
                 superagent::superagent_preflight,
                 superagent::superagent_submit,

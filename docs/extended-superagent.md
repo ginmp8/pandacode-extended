@@ -6,8 +6,11 @@
 > exact-file write capability for eligible Codex Workers. Once each native child
 > Ticket reaches its real completion gate, the scheduler unlocks dependent work
 > and can close the root Demand without an extra continuation prompt. This
-> does **not** implement full GitHub Auto, unrestricted provider writes,
-> hierarchical Worker-created subagents or all #131/#148 acceptance criteria.
+> The candidate now includes an explicit, bounded **read-only GitHub Auto**
+> pipeline and native Worker-created child/grandchild requests behind separate
+> local grants and provider/tool checks. Neither path authorizes unrestricted
+> shell/MCP/file/GitHub effects. The implementation does **not** satisfy all
+> #131/#148 acceptance criteria or substitute for exact-SHA runtime evidence.
 > Unix scoped file writes remain denied until a verified native adapter exists.
 > No draft source or unexecuted test is proof of issue completion.
 >
@@ -38,7 +41,7 @@ The standalone design packet and source map are [here](extended-superagent-desig
 | S1 — Native authority/leases | Durable Demand/Mandate/Run, manual admission, exact scoped writes, project/resource leases, correlated callbacks, stop/revoke and settlement. Unsupported OS/harness remains disabled. |
 | S2 — Teams/Demands/Runs | Versioned Teams; Coordinator, multiple Workers, optional native Reviewers; role policy/Skills/budget snapshots; work graph/scheduler; compatible manifest and UX-01–24. |
 | S3 — Council | Bind Team, Ticket, WorkItem/Run, assignment, artifact, cycle/round and reviewer policy; require a fresh native verdict or attributed human exception. |
-| S4 — Sources/Auto | Manual authenticated local-gh Observe for one exact linked thread, Off/Observe, allowlists, per-thread cursor/dedup and privacy disclosure. Polling, source-to-Team routing and Auto remain unavailable until S1/S5 gates pass. |
+| S4 — Sources/Auto | Manual authenticated local-gh Observe for one exact linked thread, Off/Observe, allowlists, per-thread cursor/dedup and privacy disclosure. A draft bounded local-GitHub polling/Auto intake exists behind separate exact-source grants; no ambient write privileges, default Off and provider validation remain required. |
 | S5 — Recovery/effects/headless/subagents | Restart/checkpoints, CAS effect claims/read-back, stop races, budgets/watchdogs, serve parity and policy-bound nested-child lineage. |
 | S6 — Exact-SHA verification | Trace AC-01–31, UX-01–24, EGM-01–07, DD-01–14, SA-01–09 and NS-01–12 to tests, exact SHA, CI, screenshots and residual risk. |
 
@@ -61,8 +64,8 @@ The standalone design packet and source map are [here](extended-superagent-desig
 | S2 UX-P1 persistent workspace | Implemented and browser-verified; preserve non-modal route |
 | S2 multi-role Teams/work graph | Partial: a bounded persisted native WorkItem DAG now admits eligible Team Workers through separate child Tickets and native checkout leases; real multi-checkout parallelism, automated quality gates and broader scheduler recovery remain outstanding. |
 | S3 task-bound Council | Integrated candidate native independent reviewer start, exact Ticket/artifact correlation and completion callbacks; native acceptance tests and final integration SHA still unverified |
-| S4 manual Observe / Auto | Integrated authenticated bounded operator-invoked GitHub Events polling and Checks API observation, plus exact thread metadata; Auto admission and background subscription remain unavailable |
-| S5 recovery/headless/subagents | Partial: root Stop revokes child Tickets and cancels active sessions; restarted unfinished child work, deep child lineage and full headless parity remain outstanding. Native Rust validation pending. |
+| S4 manual Observe / Auto | Partial: native 24-hour, exact-repository/actor/event operator grant, authenticated bounded issue-opened polling, read-only Ticket intake and revoke; full action-class policy, controlled external write effects and disposable-repository evidence remain outstanding |
+| S5 recovery/headless/subagents | Partial: native Worker-created descendants, depth/count limits, immutable lineage, Council parent gate, root Stop cascade and shared desktop/headless scheduler; full restart/fault-injection, cross-process oracles, nested provider compatibility and headless write admission remain unverified. |
 | S6 exact-SHA evidence | In progress on PR #154; source-level implementation is not compiled/verified for the final integration HEAD |
 | Live GitHub smoke | not_run until a disposable authorized repository is available |
 

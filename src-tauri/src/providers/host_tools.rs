@@ -180,31 +180,78 @@ impl HostTools {
 /// SuperAgent executor tool. Its handler independently rechecks the durable
 /// user grant before every write; no shell, MCP or other host tool can share
 /// this exception.
+/// Exactly the app-owned native scoped SuperAgent tools are allowed on a
+/// Codex task under its read-only provider boundary. Neither model text nor
+/// a general MCP catalog may widen these capabilities.
 pub(super) fn is_superagent_write_only(host: &ToolHost) -> bool {
-    if host.tools.len() != 1 || !host.approval_tools.is_empty() {
+    if host.tools.is_empty() || host.tools.len()>2 || !host.approval_tools.is_empty() {
         return false;
     }
-    let spec = &host.tools[0];
-    let properties = &spec["inputSchema"]["properties"];
-    let required = spec["inputSchema"]["required"].as_array();
-    let names = required.map(|items| {
-        items.iter().filter_map(Value::as_str).collect::<HashSet<_>>()
-    });
-    let grant_ids = properties["grantId"]["enum"].as_array();
-    let paths = properties["path"]["enum"].as_array();
-    spec["type"] == "function"
-        && spec["name"] == crate::superagent::write_grants::TOOL_NAME
-        && spec["inputSchema"]["type"] == "object"
-        && spec["inputSchema"]["additionalProperties"] == false
-        && properties["grantId"]["type"] == "string"
-        && grant_ids.is_some_and(|ids| ids.len() == 1 && ids[0].as_str().is_some_and(|id| !id.is_empty()))
-        && properties["path"]["type"] == "string"
-        && paths.is_some_and(|paths| !paths.is_empty() && paths.len() <= crate::superagent::write_grants::MAX_PATHS
-            && paths.iter().all(|path| path.as_str().is_some_and(|value| !value.is_empty())))
-        && properties["content"]["type"] == "string"
-        && properties["content"]["maxLength"] == crate::superagent::write_grants::MAX_CONTENT_BYTES
-        && names.as_ref().is_some_and(|names| names.len() == 3
-            && names.contains("grantId") && names.contains("path") && names.contains("content"))
+    let mut writing=false;
+    let mut spawning=false;
+    for spec in &host.tools {
+        match spec["name"].as_str() {
+            Some(crate::superagent::write_grants::TOOL_NAME) if !writing
+                && is_native_write_spec(spec) => writing=true,
+            Some(crate::superagent::subagents::TOOL_NAME) if !spawning
+                && is_native_spawn_spec(spec) => spawning=true,
+            _=>return false,
+        }
+    }
+    writing || spawning
+}
+
+fn is_native_write_spec(spec:&Value)->bool {
+    let properties=&spec["inputSchema"]["properties"];
+    let required=spec["inputSchema"]["required"].as_array();
+    let names=required.map(|items|items.iter()
+        .filter_map(Value::as_str).collect::<HashSet<_>>());
+    let grant_ids=properties["grantId"]["enum"].as_array();
+    let paths=properties["path"]["enum"].as_array();
+    spec["type"]=="function" &&
+        spec["name"]==crate::superagent::write_grants::TOOL_NAME &&
+        spec["inputSchema"]["type"]=="object" &&
+        spec["inputSchema"]["additionalProperties"]==false &&
+        properties["grantId"]["type"]=="string" &&
+        grant_ids.is_some_and(|ids|ids.len()==1 &&
+            ids[0].as_str().is_some_and(|id|!id.is_empty())) &&
+        properties["path"]["type"]=="string" &&
+        paths.is_some_and(|paths|!paths.is_empty() &&
+            paths.len()<=crate::superagent::write_grants::MAX_PATHS &&
+            paths.iter().all(|path|path.as_str().is_some_and(|value|!value.is_empty()))) &&
+        properties["content"]["type"]=="string" &&
+        properties["content"]["maxLength"]==crate::superagent::write_grants::MAX_CONTENT_BYTES &&
+        names.as_ref().is_some_and(|names|names.len()==3 &&
+            names.contains("grantId") && names.contains("path") && names.contains("content"))
+}
+
+fn is_native_spawn_spec(spec:&Value)->bool {
+    let schema=&spec["inputSchema"];
+    let properties=&schema["properties"];
+    let names=schema["required"].as_array().map(|array|array.iter()
+        .filter_map(Value::as_str).collect::<HashSet<_>>());
+    let exact=|key:&str| {
+        properties[key]["type"]=="string" &&
+        properties[key]["enum"].as_array().is_some_and(|array|
+            array.len()==1 && array[0].as_str().is_some_and(|value|!value.is_empty()))
+    };
+    let workers=properties["workerBotId"]["enum"].as_array();
+    spec["type"]=="function" &&
+        spec["name"]==crate::superagent::subagents::TOOL_NAME &&
+        schema["type"]=="object" && schema["additionalProperties"]==false &&
+        exact("rootTicketId") && exact("parentTicketId") &&
+        properties["workerBotId"]["type"]=="string" &&
+        workers.is_some_and(|list|!list.is_empty() &&
+            list.len()<=crate::superagent::MAX_WORKERS_PER_TEAM &&
+            list.iter().all(|worker|
+                worker.as_str().is_some_and(|id|!id.is_empty()))) &&
+        properties["key"]["type"]=="string" &&
+        properties["key"]["maxLength"].as_u64()==Some(64) &&
+        properties["objective"]["type"]=="string" &&
+        properties["objective"]["maxLength"].as_u64()==Some(4096) &&
+        names.as_ref().is_some_and(|set|set.len()==5 &&
+            set.contains("rootTicketId") && set.contains("parentTicketId") &&
+            set.contains("workerBotId") && set.contains("key") && set.contains("objective"))
 }
 /// Only app-owned callbacks create this envelope. Keep image bytes out of tool
 /// activity text and render them as protocol image blocks, not a base64 transcript.

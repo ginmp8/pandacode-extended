@@ -16,7 +16,11 @@ pub(crate) fn parent_active(store:&Store,child_ticket_id:&str)->Result<bool> {
         "SELECT ticket_id FROM sa_work_items WHERE child_ticket_id=?1",
         [child_ticket_id],|r|r.get(0),
     ).optional().map_err(|e|e.to_string())?;
-    let Some(parent)=parent else{return Ok(true)};
+    let Some(parent)=parent else {
+        // A dynamic subagent may have another WorkItem child as its parent.
+        // Its entire immutable ancestry must remain authorized.
+        return superagent::subagents::lineage_active(store,child_ticket_id);
+    };
     let permitted:bool=store.db.query_row(
         "SELECT EXISTS(
            SELECT 1 FROM sa_demand_plans plan
@@ -48,7 +52,11 @@ pub(crate) fn sessions_for_root(store:&Store,root:&str)->Result<Vec<String>> {
     ).map_err(|e|e.to_string())?;
     let sessions=statement.query_map([root],|r|r.get::<_,String>(0))
         .map_err(|e|e.to_string())?;
-    sessions.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())
+    let mut recorded=sessions.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?;
+    recorded.extend(superagent::subagents::descendant_sessions(store,root)?);
+    recorded.sort();
+    recorded.dedup();
+    Ok(recorded)
 }
 
 /// Invoked within the original parent's Stop transaction. This revokes all
@@ -91,6 +99,9 @@ pub(crate) fn revoke_descendants(tx:&Connection,root:&str,now:i64)->Result<()> {
          FROM sa_work_items WHERE ticket_id=?1 AND child_ticket_id IS NOT NULL",
         params![root,now],
     ).map_err(|e|e.to_string())?;
+    // All dynamically created descendants are revoked inside the same root
+    // transaction; no child/grandchild may continue after Stop.
+    superagent::subagents::revoke_descendants(tx,root,now)?;
     Ok(())
 }
 
@@ -100,7 +111,10 @@ fn reconcile(store:&Store)->Result<()> {
     store.db.execute(
         "UPDATE sa_work_items SET state='completed',last_reason=NULL,updated_at=?1
          WHERE state IN ('running','waiting_review') AND child_ticket_id IN
-         (SELECT id FROM sa_tickets WHERE state='completed')",[now],
+         (SELECT id FROM sa_tickets WHERE state='completed')
+           AND NOT EXISTS(SELECT 1 FROM sa_subagent_nodes child
+              WHERE child.parent_ticket_id=sa_work_items.child_ticket_id
+                AND child.state<>'completed')",[now],
     ).map_err(|e|e.to_string())?;
     store.db.execute(
         "UPDATE sa_work_items SET state='waiting_review',updated_at=?1
@@ -138,6 +152,10 @@ fn reconcile(store:&Store)->Result<()> {
                    AND (item.state<>'completed' OR child.state IS NULL
                         OR child.state<>'completed'))
                AND NOT EXISTS(
+                 SELECT 1 FROM sa_subagent_nodes descendant
+                 WHERE descendant.root_ticket_id=plan.ticket_id
+                   AND descendant.state<>'completed')
+               AND NOT EXISTS(
                  SELECT 1 FROM sa_effect_receipts effect
                  WHERE effect.state IN ('pending','uncertain')
                    AND (effect.ticket_id=plan.ticket_id
@@ -145,12 +163,15 @@ fn reconcile(store:&Store)->Result<()> {
                            SELECT child_ticket_id FROM sa_work_items
                            WHERE ticket_id=plan.ticket_id)))"
         ).map_err(|e|e.to_string())?;
-        query.query_map([now],|row|row.get::<_,String>(0))
-            .map_err(|e|e.to_string())?
-            .collect::<rusqlite::Result<Vec<_>>>()
+        let rows=query.query_map([now],|row|row.get::<_,String>(0))
+            .map_err(|e|e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e|e.to_string())?
     };
     for root in roots {
+        if !superagent::auto::ticket_authorized(store,&root)? {
+            continue;
+        }
         let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
         let moved=tx.execute(
             "UPDATE sa_tickets SET state='completed',revision=revision+1,updated_at=?2
@@ -160,6 +181,9 @@ fn reconcile(store:&Store)->Result<()> {
                             WHERE grant.ticket_id=?1 AND grant.revoked=0
                               AND grant.expires_at>?2)
                AND EXISTS(SELECT 1 FROM sa_work_items item WHERE item.ticket_id=?1)
+             AND NOT EXISTS(
+                 SELECT 1 FROM sa_subagent_nodes descendant
+                 WHERE descendant.root_ticket_id=?1 AND descendant.state<>'completed')
              AND NOT EXISTS(
                  SELECT 1 FROM sa_work_items item
                  LEFT JOIN sa_tickets child ON child.id=item.child_ticket_id
@@ -329,7 +353,8 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
         }).await;
         if let Err(error)=result {
             let state=app.state::<AppState>();
-            if let Ok(store)=state.store.lock(){
+            let locked=state.store.lock();
+            if let Ok(store)=locked {
                 let _=superagent::fail_launch(&store,&child.id,&error);
                 let _=store.db.execute(
                     "UPDATE sa_work_items SET state='blocked',
@@ -340,5 +365,8 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
             }
         } else {progressed+=1;}
     }
-    Ok(progressed)
+    // The same native scheduler advances worker-created descendants only
+    // after their parent released the protected checkout/Assignment.
+    let nested=superagent::subagents::advance(app).await?;
+    Ok(progressed+nested)
 }

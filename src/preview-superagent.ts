@@ -54,6 +54,8 @@ export async function invokeSuperagent<T>(
     // coordinator and read-only reviewer bots may own different projects.
     if(workers.some(bot=>bot.projectId!==workers[0].projectId))
       throw Error('Executor Workers must share one project scope.');
+    if(input.councilRequired && reviewerBotIds.length < 2)
+      throw Error('Council-required Teams need two independent reviewers.');
     return {coordinator,workers,reviewers,workerBotIds:[...workerBotIds] as string[],
       reviewerBotIds:[...reviewerBotIds] as string[]};
   };
@@ -62,7 +64,7 @@ export async function invokeSuperagent<T>(
     name:config.name,projectId:config.projectId,coordinatorBotId:config.coordinatorBotId,
     workerBotIds:[...config.workerBotIds],reviewerBotIds:[...config.reviewerBotIds],
     policy:{policyRevision:config.policyRevision,autonomy:'off',maxConcurrentTasks:1,
-      maxAttemptsPerAssignment:2,councilEnabled:false},
+      maxAttemptsPerAssignment:2,councilEnabled:config.councilRequired===true},
     roles:[
       {role:'coordinator',ordinal:0,botId:config.coordinatorBotId,effectiveConfig:null,effectiveConfigSha256:null},
       ...config.workerBotIds.map((botId,ordinal)=>({role:'worker',ordinal,botId,

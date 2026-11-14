@@ -201,3 +201,16 @@ scheduler, or a substitute for native Council/effect-time authorization.
 
 Rust regressions cover replay, changed bot profile denial, fresh-Demand profiles,
 restart persistence and schema-v45 upgrade preserving historical Tickets.
+
+
+### Guided five-step native Team setup
+
+The main-content Orchestrations workspace provides a local-only guided Team
+builder for purpose, existing Coordinator and ordered Workers/Reviewers,
+Skills and supported permissions, review policy, and native preflight/save.
+The wizard cannot grant tools, change bot profiles, launch a provider or mark
+Council evidence verified. Save uses the trusted native atomic Team creation;
+new Teams remain disabled and Off. Unsupported Auto/write modes are marked
+unavailable, not silently enabled. The quick-create path remains for existing
+users. Final UX-01..24 acceptance requires native/browser evidence and real
+PandaCode screenshots.

@@ -1,10 +1,12 @@
 import './superagent.css';
 import { escape } from './dom';
+import { GuidedTeamBuilder } from './superagent-team-builder';
 
 // This interface only invokes native policy/authorization decisions. It cannot
 // grant tools, infer work, start tasks on import or bypass Council review.
 type Call = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-interface Bot { id: string; name: string; paused: boolean }
+interface Bot { id: string; name: string; paused: boolean;
+  provider?: string; model?: string; mode?: string; projectId?: string; skills?: string[] }
 interface Config {
   id: string; name: string; coordinatorBotId: string; workerBotId: string;
   enabled: boolean; policyRevision: number; councilRequired?:boolean;
@@ -211,6 +213,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let preflightObjective = '', preflightMode: 'coordinated' | 'direct' = 'coordinated';
   // Persist the user's editable preset draft across asynchronous list refreshes.
   let draftPresetName = '', draftPresetTemplate = '';
+  const guidedBuilder = new GuidedTeamBuilder();
   let rejectingTicket = '', inspectedTicket = '';
   let inspectedAssignmentId = '';
   let activityMode: 'all' | 'compact' | 'json' = 'all';
@@ -1000,7 +1003,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<option value="">Choose bot</option>' + choices + '</select></label>' +
           '<label>Worker<select name="workerBotId" required><option value="">Choose bot</option>' +
           choices + '</select></label></div><button class="primary-button" type="submit"' +
-          (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' + overview + teamRoles
+          (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' +
+           guidedBuilder.render(bots) + overview + teamRoles
         : '') +
       (workspaceView === 'runs' ? globalDemands + (active ||
         '<section class="sa-pane"><p>Select a Team from the directory to assign and inspect native Tickets.</p></section>') : '') +
@@ -1117,6 +1121,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   // Templates populate editable names only; no bot, tool or task is selected.
   host.addEventListener('change', event => {
     const target = event.target;
+    if (target instanceof Element && guidedBuilder.handleChange(target)) {
+      render();
+      return;
+    }
     if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-worker-select')) {
       if (busy || !roleRoster || roleRoster.orchestrationId !== selected) return;
       const next = Array.from(target.selectedOptions, option => option.value);
@@ -1190,6 +1198,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   });
   host.addEventListener('input', event => {
     const target = event.target;
+    if (target instanceof Element && guidedBuilder.handleInput(target)) return;
     if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-demand-search')) {
       demandSearchDraft = target.value;
       return;
@@ -1233,6 +1242,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   host.addEventListener('click', event => {
     const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button') : null;
     if (!target || !host.contains(target) || target.disabled) return;
+    if (guidedBuilder.handleClick(target, bots)) {
+      render();
+      host.querySelector<HTMLElement>('[aria-label="Team setup step"] h4')
+        ?.focus({preventScroll:true});
+      return;
+    }
     if (target.dataset.saWorkerMove) {
       if (busy || roleRoster?.orchestrationId !== selected || current()?.enabled) return;
       const index = workerOrder.indexOf(target.dataset.saWorkerMove);
@@ -2092,6 +2107,18 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         await call('superagent_update',{ orchestrationId:existing.id, expectedRevision:existing.policyRevision, input });
         await reload();
       });
+    }
+    if (form.dataset.saForm === 'guided-builder') {
+      const input = guidedBuilder.validatedInput(bots);
+      if (!input) { render(); return; }
+      void work(async () => {
+        const created = await call<Config>('superagent_create',{ input });
+        guidedBuilder.reset();
+        selected = created.id; workspaceView = 'runs';
+        await reload();
+        feedback = 'Team saved Off; enable Manual only after native role checks.';
+      });
+      return;
     }
     if (form.dataset.saForm === 'create') {
       const input = { name:String(data.get('name') ?? '').trim(),

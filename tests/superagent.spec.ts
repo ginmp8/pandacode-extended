@@ -89,6 +89,37 @@ test('duplicating a native Team retains its roles but never its saved runtime au
 });
 
 
+
+test('guided SuperAgent Team Builder validates five native-backed stages and saves Off', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  await host.getByRole('button',{name:'Guided Team setup (five steps)'}).click();
+  const builder=host.getByRole('region',{name:'Guided Team Builder'});
+  await expect(builder).toContainText('Step 1 of 5');
+  await builder.getByRole('button',{name:'Next'}).click();
+  await expect(builder.getByRole('alert')).toContainText('Choose a Team name');
+  await builder.getByRole('textbox',{name:'Team name'}).fill('Team via guided setup');
+  await builder.getByRole('button',{name:'Next'}).click();
+  await expect(builder).toContainText('Step 2 of 5');
+  await builder.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
+  await builder.getByRole('combobox',{name:'Primary Worker'}).selectOption({label:'Writer'});
+  await builder.getByRole('button',{name:'Next'}).click();
+  await expect(builder).toContainText('Step 3 of 5');
+  await expect(builder).toContainText('Skill presence alone does not prove');
+  await builder.getByRole('button',{name:'Next'}).click();
+  await expect(builder).toContainText('Step 4 of 5');
+  await expect(builder).toContainText('Saved execution mode:');
+  await builder.getByRole('button',{name:'Next'}).click();
+  await expect(builder).toContainText('Step 5 of 5');
+  await expect(builder).toContainText('no new task or tool grants');
+  await builder.getByRole('button',{name:'Create Team (disabled)'}).click();
+  await expect(host.locator('.sa-list .sa-item strong'))
+    .toHaveText('Team via guided setup',{timeout:15_000});
+  await expect(host.getByRole('region',{name:'Guided Team Builder'})).toHaveCount(0);
+  await expect(host.getByRole('button',{name:'Enable manual'})).toBeVisible();
+});
+
 test('native SuperAgent manual dispatch requires opt-in and supports explicit revocation',async ({page})=>{
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

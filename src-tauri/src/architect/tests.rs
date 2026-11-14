@@ -2216,6 +2216,11 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
             })), "{mode_name} × {strategy:?} root bindings remain correlated and read-only");
             assert!(root_seats.iter().all(|worker| state.store.lock().unwrap().session(&worker.session_id).is_ok()),
                 "{mode_name} × {strategy:?} must allocate real root reviewer sessions");
+            assert!(root_seats.iter().all(|worker| worker.reviewer_binding.as_ref().is_some_and(|binding| {
+                reviewer_security::validate_recorded_authority(
+                    &state.store.lock().unwrap(), &root_id, binding,
+                ).is_ok()
+            })), "{mode_name} × {strategy:?} root seats must have persisted native authority");
 
             let nested = root_seats.iter().filter(|worker| worker.reviewer_binding.as_ref()
                 .and_then(|binding| binding.composition_mode.as_deref()) == Some("nested")).cloned().collect::<Vec<_>>();
@@ -2253,6 +2258,11 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
                 let child_leaves = child.workers.iter().filter(|worker| worker.council.is_some()).collect::<Vec<_>>();
                 assert_eq!(child_leaves.len(), 2,
                     "{mode_name} × {strategy:?} must dispatch actual leaf-review workers in the child task");
+                assert!(child_leaves.iter().all(|worker| worker.reviewer_binding.as_ref().is_some_and(|binding| {
+                    reviewer_security::validate_recorded_authority(
+                        &state.store.lock().unwrap(), &child.session_id, binding,
+                    ).is_ok()
+                })), "{mode_name} × {strategy:?} child leaves need task-scoped native authority");
                 assert!(child_leaves.iter().all(|leaf| leaf.reviewer_binding.as_ref().and_then(|binding| binding.parent_council.as_ref()).is_some_and(|parent| {
                     parent.session_id == root_id
                         && parent.council_cycle_id == root_cycle_id

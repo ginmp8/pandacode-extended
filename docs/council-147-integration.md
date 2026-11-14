@@ -79,3 +79,17 @@ revocation, and legacy compatibility.
 
 Code and tests are published, but actual Rust, browser, and live provider
 validation remain not_run at this integration SHA.
+
+
+## Mandatory child budget preflight and all-mode grant coverage
+
+Composition validation now rejects a leaf-review budget that cannot admit
+even the mandatory Always-nested child reviewers, including the fresh second
+phase required by the TwoPhase strategy. OnTrigger branches remain conditional
+and may be admitted with a smaller initial budget; a later trigger is subject
+to the existing runtime hard cap.
+
+The existing native 7-mode x 3-strategy dispatch test now additionally
+requires persisted native authority records for every allocated root reviewer
+and child leaf. This expands real dispatch regression coverage; it does **not**
+yet execute or prove 21 end-to-end terminal accept/reject scenarios.

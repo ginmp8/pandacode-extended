@@ -271,6 +271,32 @@ fn composed_reviewer_tool_authority_denies_unissued_and_modified_bindings() {
 }
 
 #[test]
+fn mandatory_nested_leaf_budget_is_validated_before_any_dispatch() {
+    use council::{AutomaticReviewerCount as Count, CouncilStrategy as Strategy};
+    let mut plan = composition(false, Count::Fixed(0), vec![
+        nested_reviewer("nested-one"), nested_reviewer("nested-two"),
+    ]);
+    plan.limits.max_leaf_reviews_per_round = 3;
+    assert!(matches!(plan.validate(), Err(council::CouncilCompositionError::InvalidLimit(_))),
+        "two mandatory nested Councils each need two leaf reviewers");
+    plan.limits.max_leaf_reviews_per_round = 4;
+    assert!(plan.validate().is_ok(), "exact minimum is schedulable");
+    plan.strategy = Strategy::TwoPhase;
+    plan.limits.max_leaf_reviews_per_round = 7;
+    assert!(matches!(plan.validate(), Err(council::CouncilCompositionError::InvalidLimit(_))),
+        "each mandatory child needs fresh phase-two leaf challengers");
+    plan.limits.max_leaf_reviews_per_round = 8;
+    assert!(plan.validate().is_ok(), "both native phases fit exactly");
+
+    for selected in &mut plan.selected {
+        selected.nested.as_mut().unwrap().escalation = council::NestedEscalation::OnTrigger;
+    }
+    plan.limits.max_leaf_reviews_per_round = 1;
+    assert!(plan.validate().is_ok(),
+        "on-trigger children do not consume mandatory leaf budget until escalation");
+}
+
+#[test]
 fn selected_bot_config_requires_distinct_bounded_identity_roster() {
     let mut c = on(9.0, 10, 0);
     c.reviewer_bot_ids = vec!["bot-1".into()];

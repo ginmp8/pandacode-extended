@@ -1034,6 +1034,21 @@ impl CouncilComposition {
             }
         }
 
+        // Mandatory nested Councils must be able to seat their minimum leaf
+        // reviewers within a root round. An impossible fixed budget should
+        // fail before any root/child tasks are admitted.
+        let mandatory_leaves: usize = self.selected.iter()
+            .filter_map(|selected| selected.nested.as_ref())
+            .filter(|nested| nested.escalation == NestedEscalation::Always)
+            .map(|nested| nested.child_reviewer_count)
+            .sum();
+        let required_reviews = mandatory_leaves
+            * if self.strategy == CouncilStrategy::TwoPhase { 2 } else { 1 };
+        if required_reviews > self.limits.max_leaf_reviews_per_round {
+            return Err(CouncilCompositionError::InvalidLimit(
+                "maxLeafReviewsPerRound cannot cover the mandatory nested Council leaf reviews",
+            ));
+        }
         if self.selected.len() > self.limits.max_root_seats as usize {
             return Err(CouncilCompositionError::RootSeatLimit { actual: self.selected.len(), maximum: self.limits.max_root_seats as usize });
         }

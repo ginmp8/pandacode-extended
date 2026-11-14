@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 56;
+pub const SCHEMA_VERSION: i64 = 57;
 pub(crate) const COUNCIL_REVIEW_SNAPSHOT_DIRECTORY: &str = "council-review-snapshots";
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
@@ -916,6 +916,19 @@ impl Store {
                     .map_err(|e|e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=56;")
                     .map_err(|e|e.to_string())?;
+            }
+            if version < 57 {
+                // Existing installations used project-ID-only native leases.
+                // Replace the triggers transactionally; different project IDs
+                // may still address the same physical checkout.
+                migration.execute_batch(
+                    "DROP TRIGGER IF EXISTS sa_project_lease_insert;
+                     DROP TRIGGER IF EXISTS sa_project_lease_update;",
+                ).map_err(|e| e.to_string())?;
+                migration.execute_batch(crate::superagent::PROJECT_LEASE)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=57;")
+                    .map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
         }

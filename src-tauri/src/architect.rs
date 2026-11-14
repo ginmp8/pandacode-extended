@@ -3277,7 +3277,7 @@ fn composed_child_attempt_total(
     let mut attempts = 0usize;
     for link in council_child_links_for_root_cycle(store, &root.session_id, &root_cycle_id)? {
         if link.child_session_id == root.session_id
-            || !seen_children.insert(link.child_session_id.as_str())
+            || !seen_children.insert(link.child_session_id.clone())
         {
             return Err("reviewer_session_mismatch: duplicate or recursive child in Council attempt accounting.".into());
         }
@@ -4750,17 +4750,18 @@ pub(crate) fn start_state(
     team.objective = text.to_owned();
     // "Keep going" after a stop continues an unfinished Council cycle and its rounds.
     refresh_council(&store, &mut team);
-    if completed_composed_cycle
-        || (team.config.council.as_ref().is_some_and(|config| config.composition.is_some())
-            && team.workers.iter().any(|worker|
-                worker.council.is_some() && worker.created_at >= team.council_since
-                    && worker.status == "completed")
-            && native_council_finish_refusal(&store, &team).is_none())
-    {
+    if completed_composed_cycle {
         // A cycle ID is a receipt namespace. Even same-tick starts must advance.
         team.council_since = storage::now().max(team.council_since.saturating_add(1));
     } else if native_council_finish_refusal(&store, &team).is_none() {
-        team.council_since = storage::now();
+        let now = storage::now();
+        team.council_since = if team.config.council.as_ref()
+            .is_some_and(|config| config.composition.is_some())
+        {
+            now.max(team.council_since.saturating_add(1))
+        } else {
+            now
+        };
     }
     team.error = None;
     team.summary = None;

@@ -117,6 +117,20 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
               ? 'unknown' : escape(String(measured.costAmount) + ' ' + measured.costCurrency)) +
             '</p>'
           : '<p>No child leaf attempts have been admitted.</p>';
+        const leafAttempts = (child.leafAttempts ?? []).slice(0, 8);
+        const leafHtml = leafAttempts.length
+          ? '<section aria-label="Child native reviewer attempts"><h5>Native child reviewer attempts (not root votes)</h5><ul>' +
+            leafAttempts.map(attempt => {
+              const score = attempt.score === null || !Number.isFinite(attempt.score)
+                ? 'No native score' : attempt.score.toFixed(1) + '/10 (reported)';
+              return '<li><strong>' + escape(attempt.name + ' — ' + attempt.lens) + '</strong>' +
+                '<small>' + escape(attempt.status + ' · ' + score + ' · ' + attempt.workerId) +
+                ' · ' + escape(attempt.provider + ' / ' + attempt.model) +
+                ' · ' + escape(observedDuration('Queue', attempt.queueWaitMs)) +
+                ' · ' + escape(observedDuration('Observed span', attempt.observedSpanMs)) +
+                ' · Tokens unknown · Cost unknown</small></li>';
+            }).join('') + '</ul></section>'
+          : '<p>No native child reviewer attempts are available for drill-down.</p>';
         const receiptHtml = receipt ? (correlated
           ? '<p>Native child evidence recorded (root approval pending): minimum score ' +
             escape(receipt.lowestScore.toFixed(1)) + '/10 · ' +
@@ -130,7 +144,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
           '<p>Configured leaf reviewers: ' + escape(String(child.requiredLeafReviewers)) +
           ' · Task session: ' + escape(child.childSessionId) +
           ' · Parent cycle: ' + escape(child.rootCycleId) +
-          '</p>' + childUsageHtml + receiptHtml + '</details></li>';
+          '</p>' + childUsageHtml + leafHtml + receiptHtml + '</details></li>';
       }).join('') + '</ul></section>'
     : '';
   const hidden = inspection.attempts.length - shown.length;

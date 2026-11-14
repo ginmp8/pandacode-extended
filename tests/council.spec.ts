@@ -251,6 +251,47 @@ test('native child receipt inspector shows independent evidence without promotin
   await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
 });
 
+test('child Council drill-down shows actual native leaves without root votes or unsafe HTML', async ({ page }) => {
+  const inspection = {
+    mode: 'm4', cycleStartedAt: 1000, teamRevision: 7,
+    status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: true },
+    verifiedPass: false, criteria: [], attempts: [],
+    reservedChildren: [{
+      botId: 'security-child', childSessionId: 'child-session', rootCycleId: 'task:1000',
+      requiredLeafReviewers: 2, status: 'reviewing',
+      observedLeafUsage: { uniqueAttempts: 2, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
+        cumulativeQueueWaitMs: 250, cumulativeObservedSpanMs: 800,
+        tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+      leafAttempts: [
+        { workerId: 'leaf-one', name: '<img src=x onerror=alert(1)>', lens: 'Authorization',
+          reviewerSource: 'automatic', status: 'completed', score: 9.5, provider: 'codex',
+          model: 'model-a', queueWaitMs: 250, observedSpanMs: 800 },
+        { workerId: 'leaf-two', name: 'Security leaf', lens: 'Injection',
+          reviewerSource: 'automatic', status: 'running', score: null, provider: 'codex',
+          model: 'model-a', queueWaitMs: null, observedSpanMs: null },
+      ],
+    }],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const children = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await children.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  const leaves = children.getByRole('region', { name: 'Child native reviewer attempts' });
+  await expect(leaves.locator('li')).toHaveCount(2);
+  await expect(leaves).toContainText('9.5/10 (reported)');
+  await expect(leaves).toContainText('No native score');
+  await expect(leaves).toContainText('Queue 250 ms');
+  await expect(leaves).toContainText('Tokens unknown');
+  await expect(leaves.getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
+  await expect(leaves.locator('img')).toHaveCount(0);
+  await expect(children).toContainText('No verified child receipt is available; no parent vote');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
 test('native Council findings remain attributed unverified and safe to render', async ({ page }) => {
   const inspection = {
     cycleStartedAt: 1000, teamRevision: 9,

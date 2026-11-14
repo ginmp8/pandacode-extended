@@ -3548,6 +3548,14 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     assert!(inspected.iter().all(|view| view.observed_leaf_usage.as_ref().is_some_and(|usage|
         usage.unique_attempts == 2 && usage.token_count.is_none()
             && usage.cost_amount.is_none() && usage.cost_currency.is_none())));
+    assert!(inspected.iter().all(|view| view.leaf_attempts.len() == 2
+        && view.leaf_attempts.iter().all(|attempt|
+            attempt.round == 1 && attempt.reviewer_source == "automatic"
+                && attempt.status == "completed" && attempt.score == Some(9.5)
+                && attempt.cost_amount.is_none() && attempt.token_count.is_none())
+        && view.verified_child_receipt.as_ref().is_some_and(|receipt|
+            view.leaf_attempts.iter().all(|attempt|
+                receipt.leaf_worker_ids.contains(&attempt.worker_id)))));
     assert!(inspected.iter().all(|view| {
         view.status == "parent_composite_ready_root_pending"
             && view.verified_child_receipt.as_ref().is_some_and(|receipt|

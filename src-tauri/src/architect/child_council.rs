@@ -45,6 +45,10 @@ pub struct ChildReservationView {
     /// Issued native child leaves only; reservations are not measured work.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_leaf_usage: Option<super::council::CouncilUsageTotals>,
+    /// Root-authorized read-only drill-down of actual native child reviewer attempts.
+    /// A score is an observed reviewer report, never an additional parent vote.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub leaf_attempts: Vec<super::council::CouncilInspectionAttempt>,
     /// Native verified leaf result, not a verified composite parent vote.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified_child_receipt: Option<VerifiedChildReceipt>,
@@ -880,14 +884,19 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
         let verified_child_receipt = read_verified_receipt(store, root, &record, &team)?;
         let authenticated_parent_seat = parent_seat(store, root, &record, &team, false)?;
         let active = team.status == "running";
+        let (observed_leaf_usage, leaf_attempts) =
+            match super::council::inspection(&team, false) {
+                Some(report) if !team.workers.is_empty() =>
+                    (Some(report.usage), report.attempts),
+                _ => (None, Vec::new()),
+            };
         Ok(ChildReservationView {
             bot_id: child.bot_id.clone(),
             child_session_id: record.child_session_id,
             root_cycle_id: record.root_cycle_id,
             required_leaf_reviewers: child.child_reviewers,
-            observed_leaf_usage: (!team.workers.is_empty())
-                .then(|| super::council::inspection(&team, false).map(|view| view.usage))
-                .flatten(),
+            observed_leaf_usage,
+            leaf_attempts,
             status: if authenticated_parent_seat.is_some() {
                 "parent_composite_ready_root_pending"
             } else if verified_child_receipt.is_some() {

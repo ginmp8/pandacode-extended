@@ -96,6 +96,8 @@ export interface CouncilChildReservation {
   requiredLeafReviewers: number; status: string;
   /** Native child-leaf lifecycle measurements; no reservation or fabricated billing. */
   observedLeafUsage?: CouncilUsageTotals | null;
+  /** Actual native child leaves, scoped to this task; never additional root votes. */
+  leafAttempts?: CouncilInspectionAttempt[];
   /** Absent for unadmitted, incomplete, failed, or legacy child reviews. */
   verifiedChildReceipt?: CouncilVerifiedChildReceipt | null;
 }

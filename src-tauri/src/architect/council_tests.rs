@@ -1339,7 +1339,23 @@ fn mixed_council_never_substitutes_duplicate_bot_or_automatic_scores_for_require
         team.workers[0].council.as_ref().unwrap(),
     );
     direct_binding.reviewer_bot_id = Some("security-bot".into());
+    direct_binding.roster_bot_ids = config.reviewer_bot_ids.clone();
+    direct_binding.required_reviewers = Some(config.needed());
+    direct_binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+        name: "Security".into(), role: "Reviewer".into(), instructions: String::new(),
+        goals: String::new(), soul: String::new(), reasoning_effort: String::new(),
+        skill_ids: vec![],
+    });
     team.workers[0].reviewer_binding = Some(direct_binding.clone());
+    assert!(!council::complete(&team, &config, 1),
+        "a selected bot must not make an unbound automatic seat count");
+    let automatic = reviewer_security::ReviewerBinding::native(
+        &team, &team.workers[1].id, team.workers[1].created_at,
+        &team.workers[1].provider, &team.workers[1].model,
+        team.workers[1].council.as_ref().unwrap(),
+    );
+    team.workers[1].reviewer_binding = Some(automatic);
+    assert!(team.workers.iter().all(|w| w.reviewer_binding.as_ref().unwrap().validate(&team, w).is_ok()));
     assert!(council::complete(&team, &config, 1));
     assert_eq!(council::status(&team).unwrap().state, "passed");
 

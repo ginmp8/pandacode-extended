@@ -133,12 +133,46 @@ pub(super) fn ticket_profile(store:&Store,ticket_id:&str)->Result<Option<Admitte
     row.map(|(policy_revision,json,captured_at)| {
         let members=serde_json::from_str::<Vec<AdmittedMemberProfile>>(&json)
             .map_err(|_|"Invalid persisted task-effective Team profile.".to_owned())?;
-        let ticket_revision:i64=store.db.query_row(
-            "SELECT policy_revision FROM sa_tickets WHERE id=?1",
-            [ticket_id],|r|r.get(0),
+        let (ticket_revision, primary_worker, ticket_project):(i64,String,String)=store.db.query_row(
+            "SELECT policy_revision,worker_bot_id,project_id FROM sa_tickets WHERE id=?1",
+            [ticket_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
         ).map_err(|e|e.to_string())?;
-        if ticket_revision!=policy_revision || members.len()<2 || members.len()>13 {
+        if ticket_revision!=policy_revision || members.len()<2
+            || members.len()>1+MAX_WORKERS+MAX_REVIEWERS {
             return Err("Admitted Team profile disagrees with immutable Ticket policy.".into());
+        }
+        // A stored JSON snapshot is not self-authenticating authority. Fail
+        // closed on duplicate identities, reordered/forged roles or a Worker
+        // whose original execution scope differs from the admitted Ticket.
+        // Compare with the immutable Ticket, not the editable Team roster:
+        // historical settled Demands must survive later Team revisions.
+        let mut identities=HashSet::new();
+        let (mut workers,mut reviewers)=(0_usize,0_usize);
+        for (index,member) in members.iter().enumerate() {
+            if member.bot_id.is_empty() || !identities.insert(member.bot_id.as_str()) {
+                return Err("Invalid persisted task-effective Team role identity.".into());
+            }
+            let valid=match member.role.as_str() {
+                "coordinator"=>index==0 && member.position==0,
+                "worker"=>index>0 && reviewers==0 && workers<MAX_WORKERS
+                    && member.position==workers
+                    && (workers>0 || member.bot_id==primary_worker)
+                    && member.project_id==ticket_project,
+                "reviewer"=>index>0 && workers>0 && reviewers<MAX_REVIEWERS
+                    && member.position==reviewers,
+                _=>false,
+            };
+            if !valid {
+                return Err("Invalid persisted task-effective Team role ordering or scope.".into());
+            }
+            match member.role.as_str() {
+                "worker"=>workers+=1,
+                "reviewer"=>reviewers+=1,
+                _=>{},
+            }
+        }
+        if workers==0 {
+            return Err("Admitted Team profile is missing its primary Worker.".into());
         }
         Ok(AdmittedTeamProfile{policy_revision,captured_at,members})
     }).transpose()
@@ -472,6 +506,78 @@ pub async fn superagent_roster_update(window:tauri::WebviewWindow,state:State<'_
 mod tests {
     use super::*;
     use crate::storage;
+
+    #[test]
+    fn admitted_team_snapshot_rejects_corrupt_roles_without_reauthorizing_execution() {
+        let path=std::env::temp_dir().join(format!("sa-profile-integrity-{}.sqlite3",storage::id()));
+        let mut store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('p','Team','/tmp/sa-profile-integrity')",[],
+        ).unwrap();
+        for id in ["coordinator","primary"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'p','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let cfg=super::super::create_configuration(&store,NewOrchestration {
+            name:"Snapshot integrity".into(),
+            coordinator_bot_id:"coordinator".into(),worker_bot_id:"primary".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&cfg.id],
+        ).unwrap();
+        let (ticket,started)=super::super::admit(
+            &mut store,&cfg.id,"Unchanged scope","snapshot-integrity",false,
+        ).unwrap();
+        assert!(started);
+        let original=ticket_profile(&store,&ticket.id).unwrap().unwrap().members;
+        assert_eq!(original.len(),2);
+
+        let mut duplicate=original.clone();
+        duplicate[1].bot_id=duplicate[0].bot_id.clone();
+        let mut swapped=original.clone();
+        swapped.swap(0,1);
+        let mut wrong_primary=original.clone();
+        wrong_primary[1].bot_id="unassigned-worker".into();
+        let mut wrong_project=original.clone();
+        wrong_project[1].project_id="unassigned-project".into();
+        let mut skipped_position=original.clone();
+        skipped_position[1].position=1;
+        let mut missing_worker=original.clone();
+        missing_worker[1].role="reviewer".into();
+        let mut reviewer_first=original.clone();
+        reviewer_first[1].role="reviewer".into();
+        let mut later_worker=original[1].clone();
+        later_worker.bot_id="another-worker".into();
+        later_worker.position=1;
+        reviewer_first.push(later_worker);
+        for (case,members) in [
+            ("duplicate",duplicate),("swapped",swapped),
+            ("wrong primary",wrong_primary),("wrong project",wrong_project),
+            ("skipped position",skipped_position),("no worker",missing_worker),
+            ("worker after reviewer",reviewer_first),
+        ] {
+            let json=serde_json::to_string(&members).unwrap();
+            store.db.execute(
+                "UPDATE sa_ticket_profiles SET profiles_json=?2 WHERE ticket_id=?1",
+                params![&ticket.id,json],
+            ).unwrap();
+            assert!(ticket_profile(&store,&ticket.id).is_err(),"{case} must be rejected");
+            assert!(require_current_profile(&store,&ticket.id,"worker","primary").is_err(),
+                "{case} must not authorize provider admission");
+        }
+        store.db.execute(
+            "UPDATE sa_ticket_profiles SET profiles_json=?2 WHERE ticket_id=?1",
+            params![&ticket.id,serde_json::to_string(&original).unwrap()],
+        ).unwrap();
+        assert_eq!(ticket_profile(&store,&ticket.id).unwrap().unwrap().members,original);
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert_eq!(ticket_profile(&reopened,&ticket.id).unwrap().unwrap().members,original);
+    }
+
     #[test]
     fn effective_team_reports_actual_roles_models_and_skill_inventory_without_grants() {
         let path=std::env::temp_dir().join(format!("sa-effective-{}.sqlite3",storage::id()));

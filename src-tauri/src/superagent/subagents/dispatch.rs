@@ -6,6 +6,28 @@ use super::*;
 use crate::superagent;
 use rusqlite::Connection;
 
+/// Descendant authority is anchored to the original Demand mandate, not
+/// merely to its current Ticket state or the child's later-created grant.
+/// Root expiration/revocation must fence every child and grandchild.
+fn root_mandate_active(store:&Store,root:&str)->Result<bool> {
+    store.db.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sa_tickets ticket
+           JOIN sa_mandates grant ON grant.ticket_id=ticket.id
+           JOIN sa_subagent_policies policy ON policy.root_ticket_id=ticket.id
+           WHERE ticket.id=?1 AND ticket.state='queued'
+             AND ticket.active_assignment_id IS NULL
+             AND ticket.policy_revision=policy.policy_revision
+             AND policy.revoked_at IS NULL
+             AND grant.revoked=0 AND grant.expires_at>?2
+             AND grant.policy_revision=policy.policy_revision
+             AND grant.project_id=ticket.project_id
+             AND grant.actor=ticket.actor
+             AND grant.allowed_tools='[]' AND grant.allowed_side_effects=0)",
+        params![root,storage::now()],|row|row.get(0),
+    ).map_err(|e|e.to_string())
+}
+
 pub(crate) fn has_unsettled(store:&Store,parent_ticket_id:&str)->Result<bool> {
     store.db.query_row(
         "SELECT EXISTS(
@@ -32,14 +54,15 @@ pub(crate) fn lineage_active(store:&Store,child_ticket_id:&str)->Result<bool> {
     let settings=policy(store,&root)?.ok_or("Subagent root authorization was removed.")?;
     if settings.revoked || depth>settings.max_depth ||
         !super::super::auto::ticket_authorized(store,&root)? ||
-        !super::super::scheduler::parent_active(store,&root)? {
+        !root_mandate_active(store,&root)? {
         return Ok(false);
     }
     let root_ticket=get_ticket(store,&root)?;
     let parent_ticket=get_ticket(store,&parent)?;
     let root_team=configuration(store,&root_ticket.orchestration_id)?;
     if root_ticket.state!="queued" ||
-        !root_team.enabled || root_team.policy_revision!=settings.policy_revision ||
+        !root_team.enabled || root_team.project_id!=root_ticket.project_id ||
+        root_team.policy_revision!=settings.policy_revision ||
         parent_ticket.state!="running" && parent_ticket.state!="waiting_approval"
             && parent_ticket.state!="waiting_review" {
         return Ok(false);
@@ -300,4 +323,72 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
         } else {admitted+=1}
     }
     Ok(admitted)
+}
+
+
+#[cfg(test)]
+mod mandate_tests {
+    use super::*;
+
+    #[test]
+    fn nested_dispatch_requires_an_unexpired_unrevoked_original_root_mandate() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_tickets(
+                id TEXT PRIMARY KEY,state TEXT,active_assignment_id TEXT,
+                policy_revision INTEGER,project_id TEXT,actor TEXT);
+             CREATE TABLE sa_subagent_policies(
+                root_ticket_id TEXT PRIMARY KEY,policy_revision INTEGER,revoked_at INTEGER);
+             CREATE TABLE sa_mandates(
+                ticket_id TEXT PRIMARY KEY,revoked INTEGER,expires_at INTEGER,
+                policy_revision INTEGER,project_id TEXT,actor TEXT,
+                allowed_tools TEXT,allowed_side_effects INTEGER);
+             INSERT INTO sa_tickets VALUES('root','queued',NULL,1,'project','local-user');
+             INSERT INTO sa_subagent_policies VALUES('root',1,NULL);",
+        ).unwrap();
+        db.execute(
+            "INSERT INTO sa_mandates VALUES(
+                'root',0,?1,1,'project','local-user','[]',0)",
+            [storage::now()+60_000],
+        ).unwrap();
+        let store=Store{db,path:std::path::PathBuf::from(":memory:")};
+        assert!(root_mandate_active(&store,"root").unwrap());
+        assert!(!root_mandate_active(&store,"unknown").unwrap());
+
+        store.db.execute(
+            "UPDATE sa_mandates SET revoked=1 WHERE ticket_id='root'",[],
+        ).unwrap();
+        assert!(!root_mandate_active(&store,"root").unwrap(),
+            "revoking the parent must fence all descendants");
+
+        store.db.execute(
+            "UPDATE sa_mandates SET revoked=0,expires_at=1 WHERE ticket_id='root'",[],
+        ).unwrap();
+        assert!(!root_mandate_active(&store,"root").unwrap(),
+            "descendant Mandates must not outlive the root's expiry");
+
+        store.db.execute(
+            "UPDATE sa_mandates SET expires_at=?1,project_id='other' WHERE ticket_id='root'",
+            [storage::now()+60_000],
+        ).unwrap();
+        assert!(!root_mandate_active(&store,"root").unwrap(),
+            "a moved or widened project must never be inherited");
+
+        store.db.execute(
+            "UPDATE sa_mandates SET project_id='project',allowed_tools='[\"shell\"]'
+             WHERE ticket_id='root'",[],
+        ).unwrap();
+        assert!(!root_mandate_active(&store,"root").unwrap(),
+            "a root with escalated tools is not a valid read-only ancestry");
+
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_tools='[]' WHERE ticket_id='root'",[],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_subagent_policies SET revoked_at=?1 WHERE root_ticket_id='root'",
+            [storage::now()],
+        ).unwrap();
+        assert!(!root_mandate_active(&store,"root").unwrap(),
+            "explicit native delegation revocation must take effect");
+    }
 }

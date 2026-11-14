@@ -3567,6 +3567,9 @@ fn accept_with_pause(
     {
         return Err("Task has no current verified worker result to accept.".into());
     }
+    if !events::auto_intake::ticket_authorized(store,ticket_id)? {
+        return Err("External source consent or provenance is no longer valid; native acceptance denied.".into());
+    }
     let team_snapshot = ticket_team_snapshot(store,ticket_id)?;
     if work_items::progress::unverified_count(store,ticket_id)? > 0 {
         return Err("A native Work Plan still has unverified items; final acceptance is denied.".into());
@@ -4991,6 +4994,17 @@ mod tests {
         assert!(retry_blocked(&mut store,&ticket.id,false)
             .unwrap_err().contains("manual retry is forbidden"),
             "Revoked Auto sources cannot be replayed through manual retry.");
+        // Even a corrupted/stale source record which advertises a pending
+        // result must not bypass consent through final human acceptance.
+        store.db.execute(
+            "UPDATE sa_tickets SET state='waiting_approval',
+               evidence='unattributed stale evidence' WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let stale=get_ticket(&store,&ticket.id).unwrap();
+        assert!(accept_with_pause(&store,&ticket.id,stale.revision,false)
+            .unwrap_err().contains("source consent or provenance"),
+            "Final approval must recheck the authenticated Auto source.");
     }
 
     #[test]

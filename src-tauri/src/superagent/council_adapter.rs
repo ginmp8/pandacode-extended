@@ -1297,6 +1297,10 @@ fn persist_finalization(
     // native callbacks then observe the committed receipt and become no-ops.
     if finalization_exists(store,request,verdict)? { return Ok(true); }
     let ticket = super::get_ticket(store,&request.ticket_id)?;
+    if !super::events::auto_intake::ticket_authorized(store,&request.ticket_id)?
+        || super::work_items::progress::unverified_count(store,&request.ticket_id)? > 0 {
+        return Ok(false);
+    }
     let binding_valid = current_binding_valid(store,request,&ticket,team)?;
     let verdict_valid = match verdict {
         "passed" if architect::verified_council_pass(store,team) => true,
@@ -1456,6 +1460,10 @@ pub(super) fn prepare_human_accept(store: &Store, ticket_id: &str, expected_revi
     let ticket = super::get_ticket(store,ticket_id)?;
     if ticket.state != "waiting_review" || ticket.revision != expected_revision {
         return Err("Ticket is no longer waiting on this Council review.".into());
+    }
+    if !super::events::auto_intake::ticket_authorized(store,ticket_id)?
+        || super::work_items::progress::unverified_count(store,ticket_id)? > 0 {
+        return Err("Original source consent or Work Plan verification no longer permits Council acceptance.".into());
     }
     let request = request_for_ticket(store,ticket_id)?.ok_or("Required Council request is missing.")?;
     if request.state != "dispatched" {

@@ -204,3 +204,14 @@ manual retry accepts only explicitly local-user Tickets. Previously admitted
 GitHub Auto work cannot obtain a second session through manual or headless
 retry, regardless of whether its source was revoked. A future retry must
 create a fresh, consented, independently authenticated native demand.
+
+## Finalization checks for external-origin work
+
+A native human acceptance or verified Council pass is a state-changing
+finalization. Both paths must recheck the authenticated Auto receipt and its
+current source consent at the moment of the state transition. Any revoked,
+orphaned or mismatched source blocks completion even if a previous provider
+result exists. Required native work-plan items must also carry independent,
+verified evidence receipts before either Council or Council-Off finalization.
+These checks are performed under the existing cross-process dispatch fence;
+already finalized historical receipts remain immutable.

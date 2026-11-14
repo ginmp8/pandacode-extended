@@ -2185,6 +2185,69 @@ pub(crate) fn headless_stop_ticket(database_path: &std::path::Path, ticket_id: &
     headless_ticket_status(&ticket)
 }
 
+/// Operator quarantine never replays remote effects or claims to stop a live provider.
+pub(crate) fn headless_quarantine_terminal_orphan(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+) -> Result<String> {
+    let _dispatch_fence = effects::lock_dispatch(database_path)?;
+    let store = open_headless_transition_store(database_path)?;
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let (state, revision): (String, i64) = tx.query_row(
+        "SELECT state,revision FROM sa_tickets WHERE id=?1",
+        [ticket_id], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("SuperAgent Ticket not found.")?;
+    if revision != expected_revision {
+        return Err("SuperAgent Ticket revision changed before quarantine.".into());
+    }
+    if !matches!(state.as_str(), "completed" | "failed" | "stopped"
+        | "interrupted" | "inconclusive")
+    {
+        return Err("Only a terminal Ticket with an orphaned attempt can be quarantined.".into());
+    }
+    let running: i64 = tx.query_row(
+        "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1 AND state='running'",
+        [ticket_id], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    if running == 0 {
+        return Err("No orphaned running native assignment to quarantine.".into());
+    }
+    let now = storage::now();
+    if tx.execute(
+        "UPDATE sa_tickets SET active_assignment_id=NULL,revision=revision+1,updated_at=?3
+         WHERE id=?1 AND revision=?2
+         AND state IN ('completed','failed','stopped','interrupted','inconclusive')",
+        params![ticket_id,expected_revision,now],
+    ).map_err(|e| e.to_string())? != 1 {
+        return Err("SuperAgent Ticket changed before quarantine.".into());
+    }
+    tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
+        [ticket_id]).map_err(|e| e.to_string())?;
+    let quarantined = tx.execute(
+        "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+         WHERE ticket_id=?1 AND state='running'",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    let uncertain = tx.execute(
+        "UPDATE sa_effect_receipts SET state='uncertain',uncertainty_reason='terminal_orphan_quarantined',readback_state='not_attempted',updated_at=?2
+         WHERE ticket_id=?1 AND state='pending'",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'headless_orphan_quarantined',
+           'Terminal native assignment quarantined; no provider or effect replay',?2)",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket_id, "state": state, "revision": revision + 1,
+        "quarantinedAssignments": quarantined, "pendingEffectsMarkedUncertain": uncertain,
+        "providerStoppedByCommand": false, "liveProviderState": "unknown",
+        "externalEffectReplayAllowed": false,
+    })).map_err(|e| e.to_string())
+}
+
 pub(crate) fn headless_issue_comment(
     database_path: &std::path::Path,
     ticket_id: &str,

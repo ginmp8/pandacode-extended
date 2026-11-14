@@ -3192,7 +3192,6 @@ pub(crate) fn guard_run_admission(
     }
     // Native leases on another project ID can still own the same physical
     // checkout through dot components or symlinks.
-    let requested_path=checkout_path(store,&session.project_id)?;
     let live_native = {
         let mut stmt=store.db.prepare(
             "SELECT t.project_id,assigned.project_id
@@ -3207,14 +3206,20 @@ pub(crate) fn guard_run_admission(
         ))).map_err(|e|e.to_string())?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?
     };
-    for (native_project,assigned_project) in live_native {
-        for id in std::iter::once(native_project.as_str()).chain(assigned_project.as_deref()) {
-            if checkout_paths_equivalent(&requested_path,&checkout_path(store,id)?) {
-                return Err("Physical checkout is leased by a native SuperAgent assignment.".into());
+    // An ordinary chat without any competing native lease must not require
+    // checkout metadata that its existing host may never have configured.
+    if !live_native.is_empty() {
+        let requested_path=checkout_path(store,&session.project_id)?;
+        for (native_project,assigned_project) in live_native {
+            for id in std::iter::once(native_project.as_str()).chain(assigned_project.as_deref()) {
+                if checkout_paths_equivalent(&requested_path,&checkout_path(store,id)?) {
+                    return Err("Physical checkout is leased by a native SuperAgent assignment.".into());
+                }
             }
         }
     }
     if superagent_run {
+        let requested_path=checkout_path(store,&session.project_id)?;
         for other_id in running_sessions {
             if other_id == session_id { continue; }
             // A disappeared active session is not proof that a lease is free.

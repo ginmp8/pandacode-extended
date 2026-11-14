@@ -939,6 +939,8 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         "investigate_native_assignment_state"
     } else if expired_running > 0 {
         "investigate_expired_native_assignment_before_retry"
+    } else if ticket.state == "running" && (mandate.revoked || mandate.expires_at <= now) {
+        "stop_or_quarantine_revoked_native_execution"
     } else if running > 0 {
         "verify_live_serve_provider_before_intervention"
     } else if ticket.state == "waiting_review" {
@@ -1208,7 +1210,12 @@ pub(crate) fn list_headless_recovery_inbox_page(
                                     WHERE a.id=t.active_assignment_id
                                       AND a.ticket_id=t.id AND a.state='running'
                                       AND a.created_at>0 AND a.created_at<=?1
-                                      AND a.created_at>?2)))
+                                      AND a.created_at>?2)
+                      -- A live provider with revoked or expired authority
+                      -- must be visible before the watchdog intervenes.
+                      OR NOT EXISTS(SELECT 1 FROM sa_mandates m
+                                    WHERE m.ticket_id=t.id AND m.revoked=0
+                                      AND m.expires_at>?1)))
              )
              SELECT id,priority,updated_at FROM candidates
              WHERE ?3 IS NULL OR priority>?3
@@ -3813,6 +3820,62 @@ mod tests {
             "SELECT state FROM sa_assignments WHERE ticket_id=?1",
             [&ticket.id], |row| row.get::<_, String>(0)
         ).unwrap(), "running");
+    }
+
+    #[test]
+    fn headless_recovery_inbox_finds_revoked_and_expired_live_mandates_before_watchdog() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private native mandate recovery",
+            "mandate-recovery-inbox", false,
+        ).unwrap();
+        assert!(launched);
+        let path = store.path.clone();
+        let initial: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        assert!(initial["items"].as_array().unwrap().is_empty());
+
+        let audit_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        for fault in ["revoked", "expired"] {
+            store.db.execute(
+                "UPDATE sa_mandates SET revoked=?2,expires_at=?3 WHERE ticket_id=?1",
+                params![ticket.id, i64::from(fault == "revoked"),
+                    if fault == "expired" { storage::now() - 1 }
+                    else { storage::now() + 120_000 }],
+            ).unwrap();
+            let found: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            assert_eq!(found["items"].as_array().unwrap().len(), 1, "{fault}");
+            assert_eq!(found["items"][0]["ticketId"], ticket.id, "{fault}");
+            assert_eq!(found["items"][0]["state"], "running", "{fault}");
+            assert_eq!(found["items"][0]["recovery"]["nextOperatorAction"],
+                "stop_or_quarantine_revoked_native_execution", "{fault}");
+            assert_eq!(found["items"][0]["recovery"]["automaticReplayAllowed"], false);
+            assert_eq!(found["items"][0]["recovery"]["mandateRevoked"],
+                fault == "revoked");
+            assert_eq!(found["items"][0]["recovery"]["mandateExpired"],
+                fault == "expired");
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+            assert_eq!(store.db.query_row(
+                "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+                [&ticket.id], |row| row.get::<_, i64>(0),
+            ).unwrap(), audit_before);
+        }
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let after_restart: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        assert_eq!(after_restart["items"][0]["ticketId"], ticket.id);
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "running");
+        assert!(!serde_json::to_string(&after_restart).unwrap()
+            .contains("Private native mandate recovery"));
     }
 
     #[test]

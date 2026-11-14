@@ -166,6 +166,61 @@ fn native_skill_tools_observe_retrieval_and_integrity_without_model_self_reports
 }
 
 #[test]
+fn composed_root_authority_denies_unissued_tampered_and_revoked_seats() {
+    use council::AutomaticReviewerCount as Count;
+    let (state, sid) = state_fixture();
+    let store = state.store.lock().unwrap();
+    let plan = composition(true, Count::Fixed(2), vec![]);
+    let config = config_for_composition(plan);
+    let mut team = team_with(config, vec![]);
+    team.session_id = sid.clone();
+
+    for (id, score, created) in [
+        ("recorded-root-a", 9.8, SINCE + 1),
+        ("recorded-root-b", 9.7, SINCE + 2),
+    ] {
+        let mut worker = seat(id, 1, Some(score), created);
+        let mut binding = reviewer_security::ReviewerBinding::native(
+            &team, id, worker.created_at, &worker.provider, &worker.model,
+            worker.council.as_ref().unwrap(),
+        );
+        binding.composition_mode = Some("direct".into());
+        worker.reviewer_binding = Some(binding);
+        team.workers.push(worker);
+    }
+    assert!(!composed_native_authority_current(&store, &team, 1),
+        "scored in-memory automatic seats cannot approve without native grants");
+    let first = team.workers[0].reviewer_binding.as_ref().unwrap();
+    assert!(reviewer_security::validate_issued_authority(&store, &sid, first).is_ok(),
+        "legacy read-only fallback remains available outside composition");
+    assert!(reviewer_security::validate_recorded_authority(&store, &sid, first).is_err());
+    reviewer_security::record_native_authority(&store, &sid, first).unwrap();
+    assert!(!composed_native_authority_current(&store, &team, 1),
+        "one grant cannot substitute for a second required reviewer");
+    reviewer_security::record_native_authority(
+        &store, &sid, team.workers[1].reviewer_binding.as_ref().unwrap(),
+    ).unwrap();
+    assert!(composed_native_authority_current(&store, &team, 1));
+
+    let mut tampered = team.clone();
+    tampered.workers[0].reviewer_binding.as_mut().unwrap()
+        .artifact_revision.push_str("-forged");
+    assert!(!composed_native_authority_current(&store, &tampered, 1));
+    let changed = store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, "native-reviewer-authority:recorded-root-b"],
+    ).unwrap();
+    assert_eq!(changed, 1);
+    assert!(!composed_native_authority_current(&store, &team, 1),
+        "revoked authority cannot qualify a completed seat");
+
+    let mut legacy = team.clone();
+    legacy.config.council.as_mut().unwrap().composition = None;
+    assert!(composed_native_authority_current(&store, &legacy, 1),
+        "the pre-composition M1/M2 Council retains its compatibility path");
+}
+
+#[test]
 fn selected_bot_config_requires_distinct_bounded_identity_roster() {
     let mut c = on(9.0, 10, 0);
     c.reviewer_bot_ids = vec!["bot-1".into()];

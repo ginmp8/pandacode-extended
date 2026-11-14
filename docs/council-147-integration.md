@@ -36,3 +36,18 @@ Run `cargo test --locked --manifest-path src-tauri/Cargo.toml --lib`, `cargo cli
 - Retained the integration's existing root attempt and concurrency limits without introducing #149's competing Council engines.
 - The source `.gitignore` contains hundreds of generated test-artifact paths; source parity is preserved, but cleanup is separate from this checkpoint.
 - The original #152 acceptance ledger is pinned to an older SHA. Full #147 AC-01..40 and exact-HEAD test verification remain **pending/not_run**.
+
+
+## Composed-root native authority hardening (new integration batch)
+
+The integration now requires every active root reviewer in a passed composed Council,
+including read-only automatic reviewers, to have an exact persisted native grant.
+The same check applies before the root `finish_team` transition, while verifying
+a terminal task/channel verdict, and while validating persisted per-seat receipts.
+Missing, altered, or revoked grants fail closed; absence of the additive
+`composition` contract retains the original M1/M2 read-only compatibility path.
+
+A native negative regression covers missing first/second grants, the legacy
+fallback, modified immutable identity, and grant revocation. This adapts the
+security intent of PR #149's newer M3-only fix without introducing #149's
+competing Council engine. No runnable test or CI result is claimed here.

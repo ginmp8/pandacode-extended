@@ -706,6 +706,15 @@ fn native_council_finish_refusal(store: &Store, team: &TeamSnapshot) -> Option<S
         &ledger.council_findings,
     );
     if refusal.is_none()
+        && team.config.council.as_ref().is_some_and(|config| config.composition.is_some())
+        && native_council_status(store, team).is_some_and(|status| {
+            status.state == "passed"
+                && !composed_native_authority_current(store, team, status.round)
+        })
+    {
+        return Some("reviewer_session_mismatch: composed Council root seats require persisted native reviewer authority before completion.".into());
+    }
+    if refusal.is_none()
         && team.council_status.as_ref().is_some_and(|status| status.round > 1)
         && !s3_phase2_decisions_proven(store, team, team.council_status.as_ref().map_or(0, |status| status.round))
     {
@@ -804,6 +813,41 @@ pub(crate) fn council_evidence_is_current(store: &Store, team: &TeamSnapshot) ->
     council::changed_at(store, team).is_ok_and(|latest| latest <= team.changed_at)
 }
 
+/// A composed Council's root seats must all have a recorded, current native
+/// capability binding. A plausible completed worker snapshot is not authority.
+fn composed_native_authority_current(
+    store: &Store,
+    team: &TeamSnapshot,
+    round: usize,
+) -> bool {
+    let Some(config) = team.config.council.as_ref() else {
+        return false;
+    };
+    if config.composition.is_none() {
+        return true;
+    }
+    let seats = team.workers.iter().filter(|worker| {
+        !worker.abandoned
+            && worker.created_at >= team.council_since
+            && worker.council.as_ref().is_some_and(|seat| seat.round == round)
+    }).collect::<Vec<_>>();
+    if seats.len() < config.needed() {
+        return false;
+    }
+    seats.into_iter().all(|worker| {
+        if !worker.read_only || worker.status != "completed" {
+            return false;
+        }
+        let Some(binding) = worker.reviewer_binding.as_ref() else {
+            return false;
+        };
+        binding.validate(team, worker).is_ok()
+            && reviewer_security::validate_recorded_authority(
+                store, &team.session_id, binding,
+            ).is_ok()
+    })
+}
+
 /// Do not use a cached "passed" label as an authorization token. Recompute
 /// the native Council gate from frozen workers, scores, required skill receipts
 /// and current stored change evidence before publishing a successful result.
@@ -822,6 +866,7 @@ pub(crate) fn verified_council_pass(store: &Store, team: &TeamSnapshot) -> bool 
     };
     verified.state == "passed"
         && !verified.stale
+        && composed_native_authority_current(store, team, verified.round)
         && stored.round == verified.round
         && stored.lowest == verified.lowest
         && stored.target == verified.target
@@ -994,7 +1039,7 @@ fn verify_composition_terminal_receipts(
             return false;
         };
         if binding.validate(team, worker).is_err()
-            || reviewer_security::validate_issued_authority(store, &team.session_id, binding)
+            || reviewer_security::validate_recorded_authority(store, &team.session_id, binding)
                 .is_err()
             || bot_reviewers::validate_frozen_seat_for_task(store, &team.session_id, binding, false)
                 .is_err()

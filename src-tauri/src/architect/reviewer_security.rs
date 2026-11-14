@@ -282,6 +282,27 @@ pub(crate) fn validate_issued_authority(store: &Store, parent: &str, binding: &R
     }
 }
 
+/// A composed Council must have a native-issued authorization record for every
+/// root reviewer, including read-only automatic seats. The compatibility fallback
+/// in validate_issued_authority is intentionally limited to legacy Council flows.
+pub(crate) fn validate_recorded_authority(
+    store: &Store,
+    parent: &str,
+    binding: &ReviewerBinding,
+) -> Result<()> {
+    let exists: i64 = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2
+           AND kind='reviewer_authority' AND worker_id=?3)",
+        params![parent, authority_key(&binding.seat_id), binding.seat_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if exists != 1 {
+        return Err("capability_not_authorized: composed Council reviewer has no recorded native authority.".into());
+    }
+    validate_issued_authority(store, parent, binding)
+}
+
 /// Called by the future S2/S4 trusted user-action adapter; never from a model
 /// prompt. Both the user's requested grants and bot-configured grants must match.
 #[allow(dead_code)]

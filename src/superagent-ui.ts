@@ -19,7 +19,7 @@ interface EffectiveSkill {
 }
 interface EffectiveMember {
   role:string; position:number; botId:string; name:string;
-  provider:string; model:string; mode:string; projectId:string;
+  provider:string; model:string; mode:string; reasoningEffort?:string; projectId:string;
   paused:boolean; skills:EffectiveSkill[]; configurationIssues?:string[];
 }
 interface EffectiveTeam {
@@ -846,7 +846,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<li><strong>' + safe(member.role) + ' ' + (member.position + 1) +
           ': ' + safe(member.name) + '</strong>' +
           ' · Harness ' + safe(member.provider) + ' · Model ' + safe(member.model) +
-          ' · Bot mode ' + safe(member.mode) + ' · Project ' + safe(member.projectId) +
+          ' · Bot mode ' + safe(member.mode) +
+          ' · Reasoning effort ' + safe(member.reasoningEffort || 'not specified') +
+          ' · Project ' + safe(member.projectId) +
           (member.paused ? ' · Paused' : ' · Not paused (live availability unverified)') +
           '<section class="sa-member-issues" aria-label="Local configuration checks">' +
           (member.configurationIssues?.length

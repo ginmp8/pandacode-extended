@@ -70,8 +70,8 @@ struct PresetV2 {
     policy: TeamPolicy,
 }
 
-/// Schema v3 retains the original #150 portable layout, with an ordered
-/// non-secret profile per role. Source enabled state is informative only.
+/// Schema v3 retains the original #150 portable layout with ordered roles.
+/// Schema v4 also pins reasoning effort without exporting runtime authority.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BotProfile {
@@ -80,6 +80,8 @@ struct BotProfile {
     model: String,
     mode: String,
     skills: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -218,11 +220,21 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
                 })
                 .collect()
         }
-        3 => {
+        3 | 4 => {
             let manifest: ManifestV3 = serde_json::from_value(document.clone())
                 .map_err(|e| format!("Invalid SuperAgent companion manifest: {e}"))?;
-            if manifest.schema_version != 3 {
+            if manifest.schema_version != schema_version {
                 return Err("Unsupported SuperAgent manifest schema.".into());
+            }
+            for preset in &manifest.orchestrations {
+                if schema_version == 4 &&
+                    preset.bot_profiles.iter().any(|profile| profile.reasoning_effort.is_none()) {
+                    return Err("Schema v4 requires reasoning effort for every Team role.".into());
+                }
+                if schema_version == 3 &&
+                    preset.bot_profiles.iter().any(|profile| profile.reasoning_effort.is_some()) {
+                    return Err("Reasoning effort profiles require SuperAgent schema v4.".into());
+                }
             }
             manifest.orchestrations.into_iter().map(|preset| PortablePreset {
                 name: preset.name,
@@ -303,7 +315,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
             .iter()
             .map(|name| lookup(name))
             .collect::<Result<Vec<_>>>()?;
-        // Validate v3's complete, ordered, non-secret effective profile
+        // Validate the complete, ordered, non-secret effective profile
         // against the existing local bots *before* any private backup or
         // Team write. Never install a Skill or change model/authority on import.
         if let Some(profiles) = preset.bot_profiles.as_ref() {
@@ -312,7 +324,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
                 .chain(reviewers.iter().copied())
                 .collect::<Vec<_>>();
             if profiles.len() != ordered.len() {
-                return Err("Version 3 requires an effective profile for every Team role.".into());
+                return Err("Schema v3/v4 requires an effective profile for every Team role.".into());
             }
             for (profile, bot) in profiles.iter().zip(ordered.iter()) {
                 if !profile.bot.eq_ignore_ascii_case(&bot.name)
@@ -320,6 +332,8 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
                     || profile.model != bot.model
                     || profile.mode != bot.mode
                     || profile.skills != bot.skills
+                    || profile.reasoning_effort.as_deref()
+                        .is_some_and(|effort| effort != bot.reasoning_effort.as_str())
                 {
                     return Err(format!(
                         "Portable bot profile mismatch for {}; verify model, harness, mode and assigned Skills.",
@@ -543,6 +557,7 @@ fn export(store: &Store) -> Result<serde_json::Value> {
                 Ok(BotProfile {
                     bot: bot.name, provider: bot.provider, model: bot.model,
                     mode: bot.mode, skills: bot.skills,
+                    reasoning_effort: Some(bot.reasoning_effort),
                 })
             })
             .collect::<Result<Vec<_>>>()?;
@@ -564,7 +579,7 @@ fn export(store: &Store) -> Result<serde_json::Value> {
         });
     }
     serde_json::to_value(ManifestV3 {
-        schema_version: 3,
+        schema_version: 4,
         orchestrations: presets,
     })
     .map_err(|e| e.to_string())
@@ -735,7 +750,7 @@ mod tests {
         let path = first.backup_path.unwrap();
         let snapshot: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(snapshot["schemaVersion"], 3);
+        assert_eq!(snapshot["schemaVersion"], 4);
         assert_eq!(snapshot["orchestrations"].as_array().unwrap().len(), 0);
         let repeat =
             apply_with_backup(&store, &root, &document("Software Development"), true).unwrap();
@@ -804,7 +819,7 @@ mod tests {
         assert_eq!(imported.worker_bot_ids, vec!["worker"]);
         assert!(imported.reviewer_bot_ids.is_empty());
         let exported = export(&store).unwrap();
-        assert_eq!(exported["schemaVersion"], 3);
+        assert_eq!(exported["schemaVersion"], 4);
         assert_eq!(exported["orchestrations"][0]["enabled"], false);
         assert_eq!(exported["orchestrations"][0]["coordinatorBot"], "Router");
         assert_eq!(exported["orchestrations"][0]["workerBot"], "Builder");
@@ -856,7 +871,7 @@ mod tests {
         assert_eq!(imported.reviewer_bot_ids, vec!["reviewer"]);
 
         let exported = export(&store).unwrap();
-        assert_eq!(exported["schemaVersion"], 3);
+        assert_eq!(exported["schemaVersion"], 4);
         assert_eq!(exported["orchestrations"][0]["coordinatorBot"], "Router");
         assert_eq!(
             exported["orchestrations"][0]["workerBot"], "Builder");
@@ -1120,7 +1135,7 @@ mod tests {
         );
         let backup: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&backups[0]).unwrap()).unwrap();
-        assert_eq!(backup["schemaVersion"], 3);
+        assert_eq!(backup["schemaVersion"], 4);
         assert!(backup["orchestrations"].as_array().unwrap().is_empty());
         store
             .db
@@ -1136,14 +1151,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
     #[test]
-    fn v3_ordered_profile_drift_is_denied_before_backup_or_authorization() {
+    fn v4_ordered_profile_drift_is_denied_before_backup_or_authorization() {
         let origin = fixture();
         origin.db.execute(
-            "UPDATE bots SET skills='[\"required-skill\"]' WHERE id='worker'", [],
+            "UPDATE bots SET skills='[\"required-skill\"]',reasoning_effort='high' WHERE id='worker'", [],
         ).unwrap();
         apply(&origin, &document_v2("Pinned Team"), true).unwrap();
         let portable = export(&origin).unwrap();
-        assert_eq!(portable["schemaVersion"], 3);
+        assert_eq!(portable["schemaVersion"], 4);
         assert_eq!(portable["orchestrations"][0]["botProfiles"][1]["skills"],
             json!(["required-skill"]));
         let rendered = portable.to_string();

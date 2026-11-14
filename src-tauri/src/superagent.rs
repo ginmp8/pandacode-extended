@@ -1075,10 +1075,22 @@ pub(crate) fn list_headless_team_demands(
     database_path: &std::path::Path, orchestration_id: &str, state: &str,
     before_updated_at: Option<i64>, before_id: Option<&str>,
 ) -> Result<String> {
+    list_headless_team_demands_searched(
+        database_path, orchestration_id, state, before_updated_at, before_id, None,
+    )
+}
+
+/// Search applies the same pre-pagination native filters as desktop without
+/// exposing the objective, query text, or any worker/session evidence.
+pub(crate) fn list_headless_team_demands_searched(
+    database_path: &std::path::Path, orchestration_id: &str, state: &str,
+    before_updated_at: Option<i64>, before_id: Option<&str>, search_query: Option<&str>,
+) -> Result<String> {
     let store = Store::open_read_only(database_path)?;
     let state_filter = if state == "all" { None } else { Some(state) };
-    let page = list_all_demands_page_filtered(
-        &store, 200, before_updated_at, before_id, Some(orchestration_id), state_filter,
+    let page = list_all_demands_page_searched(
+        &store, 200, before_updated_at, before_id, Some(orchestration_id),
+        state_filter, search_query,
     )?;
     let may_have_more = page.len() == 200;
     let next_cursor = if may_have_more {
@@ -1089,6 +1101,7 @@ pub(crate) fn list_headless_team_demands(
     serde_json::to_string_pretty(&serde_json::json!({
         "orchestrationId": orchestration_id,
         "stateFilter": state,
+        "searchApplied": search_query.is_some(),
         "pageLimit": 200,
         "mayHaveMore": may_have_more,
         "nextCursor": next_cursor,
@@ -4620,6 +4633,32 @@ mod tests {
         let path = store.path.clone();
         drop(store);
         let first_raw = list_headless_team_demands(&path,&team.id,"blocked",None,None).unwrap();
+        let searched_raw = list_headless_team_demands_searched(
+            &path, &team.id, "blocked", None, None, Some("CURSOR"),
+        ).unwrap();
+        let searched: serde_json::Value = serde_json::from_str(&searched_raw).unwrap();
+        assert_eq!(searched["searchApplied"], true);
+        assert_eq!(searched["demands"].as_array().unwrap().len(), 200);
+        assert!(!searched_raw.contains("PRIVATE CURSOR OBJECTIVE"));
+        let no_match = list_headless_team_demands_searched(
+            &path, &team.id, "blocked", None, None, Some("unrelated"),
+        ).unwrap();
+        let no_match: serde_json::Value = serde_json::from_str(&no_match).unwrap();
+        assert_eq!(no_match["demands"].as_array().unwrap().len(), 0);
+        let injection = list_headless_team_demands_searched(
+            &path, &team.id, "blocked", None, None, Some("' OR 1=1 --"),
+        ).unwrap();
+        let injection: serde_json::Value = serde_json::from_str(&injection).unwrap();
+        assert_eq!(injection["demands"].as_array().unwrap().len(), 0);
+        for invalid in ["", "  ", "a\nnewline"] {
+            assert!(list_headless_team_demands_searched(
+                &path, &team.id, "blocked", None, None, Some(invalid),
+            ).is_err());
+        }
+        let oversized = "x".repeat(129);
+        assert!(list_headless_team_demands_searched(
+            &path, &team.id, "blocked", None, None, Some(&oversized),
+        ).is_err());
         let first:serde_json::Value = serde_json::from_str(&first_raw).unwrap();
         assert_eq!(first["demands"].as_array().unwrap().len(),200);
         assert_eq!(first["mayHaveMore"],true);
@@ -4630,6 +4669,11 @@ mod tests {
         ).unwrap();
         let next:serde_json::Value = serde_json::from_str(&next_raw).unwrap();
         assert_eq!(next["demands"].as_array().unwrap().len(),5);
+        let searched_next = list_headless_team_demands_searched(
+            &path, &team.id, "blocked", Some(time), Some(id), Some("CURSOR"),
+        ).unwrap();
+        let searched_next: serde_json::Value = serde_json::from_str(&searched_next).unwrap();
+        assert_eq!(searched_next["demands"].as_array().unwrap().len(), 5);
         assert_eq!(next["mayHaveMore"],false);
         assert!(next["nextCursor"].is_null());
         let ids:std::collections::HashSet<_> = first["demands"].as_array().unwrap()

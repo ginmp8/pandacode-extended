@@ -36,6 +36,7 @@ enum Command {
     ListTeamDemands {
         orchestration_id: String, state: String,
         before_updated_at: Option<i64>, before_id: Option<String>,
+        search_query: Option<String>,
     },
     InspectTicket { ticket_id: String },
     InspectTicketGraph { ticket_id: String },
@@ -258,16 +259,26 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 }
             }
             if let Command::ListTeamDemands {
-                orchestration_id, state, before_updated_at, before_id,
+                orchestration_id, state, before_updated_at, before_id, search_query,
             } = &command {
                 // Read the same source-of-truth Ticket state index as desktop,
                 // without mutating a concurrent live serve process.
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
-                    .and_then(|dir| crate::superagent::list_headless_team_demands(
-                        &dir.join("kingcode.sqlite3"), orchestration_id, state,
-                        *before_updated_at, before_id.as_deref(),
-                    ));
+                    .and_then(|dir| {
+                        let db = dir.join("kingcode.sqlite3");
+                        if let Some(query) = search_query.as_deref() {
+                            crate::superagent::list_headless_team_demands_searched(
+                                &db, orchestration_id, state, *before_updated_at,
+                                before_id.as_deref(), Some(query),
+                            )
+                        } else {
+                            crate::superagent::list_headless_team_demands(
+                                &db, orchestration_id, state, *before_updated_at,
+                                before_id.as_deref(),
+                            )
+                        }
+                    });
                 match result {
                     Ok(page) => { println!("{page}"); std::process::exit(0) }
                     Err(error) => {
@@ -861,9 +872,19 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                         index += 3;
                         (Some(timestamp), Some(cursor_id.clone()))
                     } else { (None, None) };
+                let search_query = if args.get(index + 3).map(String::as_str) == Some("--search") {
+                    let query = args.get(index + 4)
+                        .ok_or("--search needs a 1 to 128 byte objective fragment.")?;
+                    if query.trim().is_empty() || query.len() > 128
+                        || query.starts_with("--") || query.chars().any(char::is_control) {
+                        return Err("--search needs 1 to 128 non-control UTF-8 bytes.".into());
+                    }
+                    index += 2;
+                    Some(query.clone())
+                } else { None };
                 command = Command::ListTeamDemands {
                     orchestration_id: id.clone(), state: state.clone(),
-                    before_updated_at, before_id,
+                    before_updated_at, before_id, search_query,
                 };
                 ops += 1;
                 index += 2;
@@ -1149,7 +1170,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1179,7 +1200,7 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          redact objectives, never approve or run a reviewer; exit.
   --list-recovery-inbox  Prioritize up to 200 actual recovery/decision Tickets across Teams;
                          identify stale native runs and uncertain remote effects, read-only; exit.
-  --list-team-demands <id> <state> [--before <ms> <ticket-id>]
+  --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>]
                          Page up to 200 native Demands for one Team and exact Ticket state
                          (or all). Next page uses returned nextCursor; no private evidence
                          or startup recovery; exit.
@@ -1286,19 +1307,35 @@ mod tests {
         assert_eq!(parsed("--list-team-demands team_123 blocked"),
             Ok(Command::ListTeamDemands {
                 orchestration_id:"team_123".into(),state:"blocked".into(),
-                before_updated_at:None,before_id:None,
+                before_updated_at:None,before_id:None,search_query:None,
             }));
         assert_eq!(parsed("--list-team-demands team_123 all"),
             Ok(Command::ListTeamDemands {
                 orchestration_id:"team_123".into(),state:"all".into(),
-                before_updated_at:None,before_id:None,
+                before_updated_at:None,before_id:None,search_query:None,
             }));
         assert_eq!(parsed("--list-team-demands team_123 blocked --before 2000 ticket_099"),
             Ok(Command::ListTeamDemands {
                 orchestration_id:"team_123".into(),state:"blocked".into(),
                 before_updated_at:Some(2000),before_id:Some("ticket_099".into()),
+                search_query:None,
+            }));
+        assert_eq!(parsed("--list-team-demands team_123 blocked --search cursor"),
+            Ok(Command::ListTeamDemands {
+                orchestration_id:"team_123".into(),state:"blocked".into(),
+                before_updated_at:None,before_id:None,search_query:Some("cursor".into()),
+            }));
+        assert_eq!(parsed("--list-team-demands team_123 blocked --before 2000 ticket_099 --search cursor"),
+            Ok(Command::ListTeamDemands {
+                orchestration_id:"team_123".into(),state:"blocked".into(),
+                before_updated_at:Some(2000),before_id:Some("ticket_099".into()),
+                search_query:Some("cursor".into()),
             }));
         for invalid in [
+            "--list-team-demands team_123 blocked --search",
+            "--list-team-demands team_123 blocked --search --stop-ticket",
+            "--list-team-demands team_123 blocked --search cursor --stop-ticket ticket_123",
+            "--list-team-demands team_123 blocked --before 2000 ticket_099 --search",
             "--list-team-demands team_123 blocked --before",
             "--list-team-demands team_123 blocked --before 2",
             "--list-team-demands team_123 blocked --before 0 ticket_099",

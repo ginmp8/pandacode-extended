@@ -481,7 +481,13 @@ When present, `nextCursor` supplies `beforeUpdatedAt` (milliseconds) and
 <beforeUpdatedAt> <beforeId>`. Use the same Team and state for subsequent pages;
 page reads are live, so a concurrently changing Ticket may move in the index.
 The CLI rejects malformed or unpaired cursor values; without `--before`, the
-existing first-page behavior is unchanged. This is observational only: it reuses the native state/Team filter before
+existing first-page behavior is unchanged. To search before pagination, append `--search "objective fragment"` after the
+optional `--before` cursor. The literal substring filter is
+ASCII-case-insensitive and limited to 128 UTF-8 bytes. JSON includes
+`searchApplied` but never returns search phrases or matching objectives.
+Avoid sensitive phrases in CLI arguments, since process listings and shell
+history may expose them. Omitting `--search` preserves the previous view.
+This is observational only: it reuses the native state/Team filter before
 pagination and opens SQLite read-only without running startup recovery,
 granting permissions, admitting assignments or replaying external effects.
 

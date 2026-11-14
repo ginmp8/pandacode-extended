@@ -382,14 +382,22 @@ fn active_scope(db: &Connection, intent: &IssueCommentIntent) -> Result<ActiveSc
 /// task-owned worker thread, admitted role and frozen model before any write.
 fn effect_worker_session_current(store: &Store, intent: &IssueCommentIntent) -> Result<bool> {
     let scope = active_scope(&store.db, intent)?;
+    // A persisted effect grant does not renew an expired provider attempt.
+    // Ambiguous concurrent running assignments cannot authorize a remote write.
+    let now = storage::now();
     let (bot_id, attempt): (String, i64) = store.db.query_row(
         "SELECT bot_id,attempt FROM sa_assignments
-         WHERE id=?1 AND ticket_id=?2 AND state='running'",
-        params![scope.assignment_id,intent.ticket_id],
+         WHERE id=?1 AND ticket_id=?2 AND session_id=?3 AND state='running'
+           AND created_at>0 AND created_at<=?4 AND (?4-created_at)<?5
+           AND (SELECT COUNT(*) FROM sa_assignments other
+                WHERE other.ticket_id=?2 AND other.state='running')=1",
+        params![scope.assignment_id,intent.ticket_id,scope.session_id,
+            now,super::MAX_ASSIGNMENT_RUN_MS],
         |row| Ok((row.get(0)?,row.get(1)?)),
     ).map_err(|e| e.to_string())?;
     let session = store.session(&scope.session_id)?;
-    Ok(super::assignment_thread_current(store,&scope.session_id,&intent.ticket_id)?
+    Ok(session.project_id == scope.project_id
+        && super::assignment_thread_current(store,&scope.session_id,&intent.ticket_id)?
         && super::assignment_role_authorized(store,&intent.ticket_id,&bot_id,attempt)?
         && super::admitted_session_matches_profile(
             store,&intent.ticket_id,&bot_id,"worker",&session,
@@ -1190,6 +1198,33 @@ mod tests {
             .execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1", [&id])
             .unwrap();
         assert_eq!(reserve(&store, &intent).unwrap(), Reservation::AlreadyApplied);
+    }
+
+    #[test]
+    fn expired_worker_attempt_cannot_reserve_or_dispatch_an_effect() {
+        // Reservation and dispatch are separate authorization boundaries.
+        for expire_before_reservation in [true, false] {
+            let (store, id) = fixture();
+            let intent = make_intent(&id, "expired-worker-attempt");
+            authorize(&store, &intent).unwrap();
+            if !expire_before_reservation {
+                assert_eq!(reserve(&store, &intent).unwrap(), Reservation::Reserved);
+            }
+            let expired_at = storage::now() - superagent::MAX_ASSIGNMENT_RUN_MS - 1000;
+            let updated = store.db.execute(
+                "UPDATE sa_assignments SET created_at=?2
+                 WHERE ticket_id=?1 AND state='running'",
+                params![&id, expired_at],
+            ).unwrap();
+            assert_eq!(updated, 1);
+            if expire_before_reservation {
+                assert!(reserve(&store, &intent).is_err());
+                assert_eq!(unresolved_count(&store, &id).unwrap(), 0);
+            } else {
+                assert!(validate_pending_dispatch(&store, &intent).is_err());
+                assert_eq!(unresolved_count(&store, &id).unwrap(), 1);
+            }
+        }
     }
 
     #[test]

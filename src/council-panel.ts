@@ -153,14 +153,18 @@ function childCouncilHierarchyHtml(value: CouncilLedgerView, receipt: NonNullabl
   const findings = (value.findings ?? []).filter(item => item.cycleId === cycleId);
   const usage = (value.usage ?? []).filter(item => item.childCycleId === cycleId);
   const reviews = (value.reviewReceipts ?? []).filter(item => item.cycleId === cycleId);
-  const rounds = new Map<string, { findings: typeof findings; usage: typeof usage; reviews: typeof reviews }>();
+  const leaves = (value.childLeaves ?? []).filter(item => item.childCycleId === cycleId && item.parentSeatId === receipt.parentSeatId);
+  const outcomes = (value.criterionOutcomes ?? []).filter(item => item.taskCycleId === cycleId && item.parentSeatId === receipt.parentSeatId);
+  const rounds = new Map<string, { findings: typeof findings; usage: typeof usage; reviews: typeof reviews; leaves: typeof leaves; outcomes: typeof outcomes }>();
   const round = (id: string) => {
     let entry = rounds.get(id);
-    if (!entry) { entry = { findings: [], usage: [], reviews: [] }; rounds.set(id, entry); }
+    if (!entry) { entry = { findings: [], usage: [], reviews: [], leaves: [], outcomes: [] }; rounds.set(id, entry); }
     return entry;
   };
   for (const record of findings) round(record.roundId).findings.push(record);
   for (const record of usage) round(record.roundId).usage.push(record);
+  for (const item of leaves) round(item.roundId).leaves.push(item);
+  for (const item of outcomes) round(`${cycleId}:${item.round}`).outcomes.push(item);
   const mappedReviewIds = new Set<string>();
   for (const item of reviews) {
     const linked = usage.find(record => record.seatId === item.assignmentId);
@@ -169,14 +173,16 @@ function childCouncilHierarchyHtml(value: CouncilLedgerView, receipt: NonNullabl
   for (const item of reviews) if (!mappedReviewIds.has(item.requestId)) round('').reviews.push(item);
 
   const roundMarkup = [...rounds.entries()].map(([roundId, entry]) => {
-    const seats = new Map<string, { reviewerIds: Set<string>; findings: typeof findings; usage: typeof usage; reviews: typeof reviews }>();
+    const seats = new Map<string, { reviewerIds: Set<string>; findings: typeof findings; usage: typeof usage; reviews: typeof reviews; leaves: typeof leaves; outcomes: typeof outcomes }>();
     const seat = (id: string) => {
       let entry = seats.get(id);
-      if (!entry) { entry = { reviewerIds: new Set(), findings: [], usage: [], reviews: [] }; seats.set(id, entry); }
+      if (!entry) { entry = { reviewerIds: new Set(), findings: [], usage: [], reviews: [], leaves: [], outcomes: [] }; seats.set(id, entry); }
       return entry;
     };
     for (const item of entry.findings) seat(item.seatId).findings.push(item);
     for (const item of entry.usage) { const found = seat(item.seatId); found.reviewerIds.add(item.reviewerId); found.usage.push(item); }
+    for (const item of entry.leaves) { const found = seat(item.seatId); found.reviewerIds.add(item.reviewerId); found.leaves.push(item); }
+    for (const item of entry.outcomes) seat(item.seatId).outcomes.push(item);
     for (const item of entry.reviews) {
       const id = item.assignmentId ?? `unknown-reviewer-${item.requestId}`;
       seat(id).reviews.push(item);
@@ -189,20 +195,36 @@ function childCouncilHierarchyHtml(value: CouncilLedgerView, receipt: NonNullabl
         ...records.reviews.flatMap(item => item.evidenceRefs),
       ])];
       const verdicts = [...new Set([...records.usage.map(item => item.terminalStatus), ...records.reviews.map(item => item.verdict)])];
+      const scored = records.leaves.find(item => typeof item.score === 'number' && Number.isFinite(item.score));
+      const scoreText = scored ? `Reported score ${formatScore(scored.score!)} / 10` : 'Score Unknown';
+      const leafStatus = [...new Set(records.leaves.map(item => item.status))].join(', ');
+      const criteriaMarkup = records.outcomes.length
+        ? `<ul class="council-inspector-criteria">${records.outcomes.map(item => `<li><strong>Criterion ${escape(item.outcome.criterionId)} · ${formatScore(item.outcome.score)} / 10</strong><span>Verified evidence: ${item.outcome.verifiedEvidenceRefs.length}</span>${evidenceDetails(item.outcome.verifiedEvidenceRefs, true)}</li>`).join('')}</ul>`
+        : '<p class="council-ledger-empty">Criterion coverage not available for this reviewer.</p>';
       const findingsMarkup = records.findings.length
         ? `<ul class="council-inspector-findings">${records.findings.map(item => `<li><strong>${escape(item.category)} · ${escape(item.severity)}</strong><span>${escape(item.summary)}</span></li>`).join('')}</ul>`
         : '<p class="council-ledger-empty">No finding details were projected for this reviewer.</p>';
       const evidenceKnown = records.findings.length > 0 || records.reviews.length > 0 || value.findings !== undefined || value.reviewReceipts !== undefined;
-      return `<details class="council-inspector-node" data-level="reviewer"><summary>Reviewer ${escape(label)} · Score Unknown${verdicts.length ? ` · ${escape(verdicts.join(', '))}` : ' · status Unknown'}</summary><dl><div><dt>Reviewer seat</dt><dd>${escape(seatId)}</dd></div><div><dt>Score</dt><dd>Unknown · child reviewer scores are not included in this projection.</dd></div><div><dt>Verdict</dt><dd>${escape(verdicts.join(', ') || 'Unknown')}</dd></div><div><dt>Evidence</dt><dd>${evidence.length ? `${evidence.length} reference${evidence.length === 1 ? '' : 's'}` : records.findings.length || records.reviews.length ? 'No references recorded' : 'Unknown'}</dd></div></dl>${findingsMarkup}${evidenceDetails(evidence, evidenceKnown)}</details>`;
+      return `<details class="council-inspector-node" data-level="reviewer"><summary>Reviewer ${escape(label)} · ${escape(scoreText)}${verdicts.length ? ` · ${escape(verdicts.join(', '))}` : ' · status Unknown'}</summary><dl><div><dt>Reviewer seat</dt><dd>${escape(seatId)}</dd></div><div><dt>Score</dt><dd>${scored ? escape(scoreText) + ' · native approval is separate' : 'Unknown · no completed native reviewer score'}</dd></div><div><dt>Verdict</dt><dd>${escape(verdicts.join(', ') || leafStatus || 'Unknown')}</dd></div><div><dt>Evidence</dt><dd>${evidence.length ? `${evidence.length} reference${evidence.length === 1 ? '' : 's'}` : records.findings.length || records.reviews.length ? 'No references recorded' : 'Unknown'}</dd></div></dl>${criteriaMarkup}${findingsMarkup}${evidenceDetails(evidence, evidenceKnown)}</details>`;
     }).join('');
     return `<details class="council-inspector-node" data-level="round"${roundId ? '' : ' data-round-unknown="true"'}><summary>${escape(roundName(roundId))}${roundId ? ` · ${escape(roundId)}` : ' · round identity unknown'}</summary>${reviewerMarkup || '<p class="council-ledger-empty">Reviewer rows are not available for this round.</p>'}</details>`;
   }).join('');
   const minScore = receipt.minScore == null ? 'Unknown' : `${formatScore(receipt.minScore)} / 10`;
   const evidence = [...new Set(receipt.evidenceRefs)];
   const scoreRefs = receipt.leafScoreRefs.length
-    ? `<p class="council-inspector-score-refs">Leaf score references: ${receipt.leafScoreRefs.map(escape).join(', ')}. Numeric reviewer scores are not included in this projection.</p>`
+    ? `<p class="council-inspector-score-refs">Leaf score references: ${receipt.leafScoreRefs.map(escape).join(', ')}. Reported scores appear per reviewer when authorized native rows are available.</p>`
     : '<p class="council-ledger-empty">No leaf score references were projected.</p>';
   return `<details class="council-inspector-node" data-level="child-council" data-child-cycle="${escape(cycleId)}" data-stale="${receipt.status === 'stale'}"><summary>Child Council · ${escape(receipt.status)} · minimum score ${minScore}</summary><dl><div><dt>Bot</dt><dd>${escape(receipt.botId)}</dd></div><div><dt>Cycle</dt><dd>${escape(cycleId)}</dd></div><div><dt>Artifact revision</dt><dd>${escape(receipt.artifactRevision)}</dd></div><div><dt>Policy</dt><dd>${escape(receipt.policyFingerprint)}</dd></div><div><dt>Snapshot</dt><dd>${escape(receipt.snapshotFingerprint)}</dd></div></dl>${scoreRefs}${evidenceDetails(evidence, true)}<div class="council-inspector-children">${roundMarkup || '<p class="council-ledger-unavailable">Round details are unknown; the child receipt does not include reviewer round rows.</p>'}</div></details>`;
+}
+
+/** A child can be inspected while working, without synthesizing a passing receipt. */
+function pendingChildCouncilHtml(value: CouncilLedgerView, parentSeatId: string, cycleId: string): string {
+  const leaves = (value.childLeaves ?? []).filter(item => item.parentSeatId === parentSeatId && item.childCycleId === cycleId);
+  const rows = leaves.map(item => {
+    const score = item.score == null || !Number.isFinite(item.score) ? 'Score Unknown' : `Reported score ${formatScore(item.score)} / 10`;
+    return `<li><strong>${escape(item.reviewerId)} · ${escape(item.seatId)}</strong><span>${escape(item.roundId)} · ${escape(item.status)} · ${escape(score)}</span></li>`;
+  }).join('');
+  return `<details class="council-inspector-node" data-level="child-council" data-child-cycle="${escape(cycleId)}" data-terminal="pending"><summary>Child Council · pending native terminal</summary><p>Cycle ${escape(cycleId)} · root approval is not yet available.</p><ul class="council-inspector-findings">${rows}</ul></details>`;
 }
 
 function councilHierarchyHtml(value: CouncilLedgerView): string {
@@ -224,9 +246,13 @@ function councilHierarchyHtml(value: CouncilLedgerView): string {
     ])];
     const receipts = childReceipts.filter(item => item.parentSeatId === seat.id);
     for (const receipt of receipts) linkedReceipts.add(receipt);
+    const pendingCycles = new Set((value.childLeaves ?? []).filter(item => item.parentSeatId === seat.id).map(item => item.childCycleId));
+    for (const receipt of receipts) pendingCycles.delete(receipt.childCycleId);
     const selected = progress?.council.composition?.selected.find(item => item.botId === botId && item.mode === 'nested');
-    const children = receipts.map(receipt => childCouncilHierarchyHtml(value, receipt)).join('')
-      || (selected ? '<p class="council-ledger-unavailable" data-child-state="unknown">Child Council state Unknown · native has not projected a receipt for this bot.</p>' : '');
+    const children = [
+      ...receipts.map(receipt => childCouncilHierarchyHtml(value, receipt)),
+      ...[...pendingCycles].map(id => pendingChildCouncilHtml(value, seat.id, id)),
+    ].join('') || (selected ? '<p class="council-ledger-unavailable" data-child-state="unknown">Child Council state Unknown · native has not projected a receipt for this bot.</p>' : '');
     const evidenceKnown = value.findings !== undefined || value.reviewReceipts !== undefined;
     return `<details class="council-inspector-node" data-level="bot" data-seat-id="${escape(seat.id)}"><summary>${escape(name)} · ${escape(seat.council.lens || 'Reviewer')} · Round ${seat.council.round} · ${scoreText}</summary><dl><div><dt>Seat</dt><dd>${escape(seat.id)}</dd></div><div><dt>Review status</dt><dd>${escape(seat.status)}</dd></div><div><dt>Score</dt><dd>${scoreValue === null ? 'Unknown' : `${formatScore(scoreValue)} / 10`}</dd></div><div><dt>Target</dt><dd>${target == null ? 'Unknown' : `${formatScore(target)} / 10`}</dd></div></dl>${evidenceDetails(evidence, evidenceKnown)}${children}</details>`;
   }).join('');
@@ -242,7 +268,7 @@ function councilHierarchyHtml(value: CouncilLedgerView): string {
 export function councilReadOnlyPresenterHtml(value: CouncilLedgerView): string {
   if (value.unavailableMessage) return `<section class="council-ledger"><p class="council-ledger-unavailable">${escape(value.unavailableMessage)}</p></section>`;
   const findings = value.findings ?? [], dispositions = value.findingDispositions ?? [], receipts = value.reviewReceipts ?? [], children = value.childReceipts ?? [], usage = value.usage ?? [];
-  if (!value.findings && !value.findingDispositions && !value.reviewReceipts && !value.childReceipts && !value.usage) {
+  if (!value.findings && !value.findingDispositions && !value.reviewReceipts && !value.childReceipts && !value.childLeaves && !value.criterionOutcomes && !value.usage) {
     return '<section class="council-ledger"><p class="council-ledger-unavailable">This host snapshot does not include Council ledger records.</p></section>';
   }
   const dispositionByFinding = new Map<string, typeof dispositions>();
@@ -1161,7 +1187,7 @@ function stateLine(progress: CouncilProgress, team: TeamSnapshot): { text: strin
 export function councilSummaryHtml(native: TeamSnapshot): string {
   const team = shownTeam(native), progress = councilProgress(team);
   if (!progress) return '';
-  const hasProjection = Boolean(team.councilFindings || team.councilFindingDispositions || team.councilChildReceipts || team.councilReviewReceipts || team.councilUsage);
+  const hasProjection = Boolean(team.councilFindings || team.councilFindingDispositions || team.councilChildReceipts || team.councilChildLeaves || team.councilCriterionOutcomes || team.councilReviewReceipts || team.councilUsage);
   if (!progress.rounds.length && !progress.council.composition && !hasProjection) return '';
   const { text, score } = stateLine(progress, team);
   const composition = progress.council.composition;
@@ -1175,7 +1201,7 @@ export function councilSummaryHtml(native: TeamSnapshot): string {
 /** The current-cycle read-only ledger shared by Workers and Shared Channel report drilldowns. */
 export function councilLedgerHtmlForTeam(native: TeamSnapshot): string {
   const team = shownTeam(native), progress = councilProgress(team);
-  const hasProjection = Boolean(team.councilFindings || team.councilFindingDispositions || team.councilChildReceipts || team.councilReviewReceipts || team.councilUsage);
+  const hasProjection = Boolean(team.councilFindings || team.councilFindingDispositions || team.councilChildReceipts || team.councilChildLeaves || team.councilCriterionOutcomes || team.councilReviewReceipts || team.councilUsage);
   const composition = progress?.council.composition;
   return councilReadOnlyPresenterHtml({
     ...councilLedgerForCurrentCycle(team),

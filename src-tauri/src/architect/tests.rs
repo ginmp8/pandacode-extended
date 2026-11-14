@@ -7170,6 +7170,29 @@ fn composed_admission_test_config() -> council::CouncilConfig {
 }
 
 #[test]
+fn native_child_leaf_projection_reports_only_completed_finite_scores() {
+    let mut leaf = worker("nested-leaf", "completed", &[], &[]);
+    leaf.council = Some(CouncilSeat { round: 2, score: Some(9.4), ..CouncilSeat::default() });
+    let project = |leaf: &Worker| project_native_child_leaf(
+        "root:100", "parent-seat", "child:50", "reviewer-model",
+        leaf, leaf.council.as_ref().unwrap(),
+    );
+    let row = project(&leaf);
+    assert_eq!(row.score, Some(9.4));
+    assert_eq!(row.round_id, "child:50:2");
+    assert_eq!(row.parent_seat_id, "parent-seat");
+    assert_eq!(row.attempt, 1);
+    leaf.status = "running".into();
+    assert_eq!(project(&leaf).score, None);
+    leaf.status = "completed".into();
+    leaf.abandoned = true;
+    assert_eq!(project(&leaf).score, None);
+    leaf.abandoned = false;
+    leaf.council.as_mut().unwrap().score = Some(f64::NAN);
+    assert_eq!(project(&leaf).score, None);
+}
+
+#[test]
 fn composed_child_terminal_roster_rejects_phantom_and_duplicate_parent_seats() {
     let (_, mut team) = fixture();
     team.config.council = Some(composed_admission_test_config());

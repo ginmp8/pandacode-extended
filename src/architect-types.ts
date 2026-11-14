@@ -63,6 +63,18 @@ export interface ChildCouncilReceipt {
   minScore?: number | null; leafScoreRefs: string[]; findingsRefs: string[];
   evidenceRefs: string[]; snapshotFingerprint: string;
 }
+/** Native-authorized child reviewer row; never an extra root vote. */
+export interface CouncilChildLeafProjection {
+  rootCycleId: string; parentSeatId: string; childCycleId: string;
+  roundId: string; seatId: string; reviewerId: string; attempt: number;
+  status: string; score?: number | null;
+}
+export interface CouncilCriterionOutcomeReceipt {
+  schemaVersion: number; rootCycleId: string; taskId: string; taskCycleId: string;
+  childCycleId?: string | null; round: number; seatId: string; parentSeatId?: string | null;
+  attempt: number; artifactRevision: string;
+  outcome: { criterionId: string; score: number; verifiedEvidenceRefs: string[] };
+}
 export type CouncilReviewVerdict = 'passed' | 'accepted' | 'failed' | 'limit' | 'blocked' | 'stopped' | 'inconclusive' | 'stale';
 export interface CouncilReviewReceipt {
   schemaVersion: number; requestId: string; cycleId: string; taskId?: string | null;
@@ -223,6 +235,8 @@ export interface TeamSnapshot {
   councilFindings?: CouncilFinding[];
   councilFindingDispositions?: CouncilFindingDisposition[];
   councilChildReceipts?: ChildCouncilReceipt[];
+  councilChildLeaves?: CouncilChildLeafProjection[];
+  councilCriterionOutcomes?: CouncilCriterionOutcomeReceipt[];
   councilReviewReceipts?: CouncilReviewReceipt[];
   councilUsage?: CouncilUsageRecord[];
   updatedAt: number;

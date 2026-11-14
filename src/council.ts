@@ -1,6 +1,6 @@
 /* Council: independent reviewers score the work out of 10 until every one reaches the user's target.
  * What a snapshot means, with no DOM, plus the remembered defaults. See docs/architect-workers.md. */
-import { teamActive, type ChildCouncilReceipt, type CouncilComposition, type CouncilConfig, type CouncilCriteriaSource, type CouncilCriterion, type CouncilFinding, type CouncilFindingDisposition, type CouncilReviewReceipt, type CouncilState, type CouncilStatus, type CouncilStrategy, type CouncilReviewerMode, type CouncilUsageRecord, type TeamSnapshot, type TeamWorker } from './architect-types.ts';
+import { teamActive, type ChildCouncilReceipt, type CouncilComposition, type CouncilConfig, type CouncilCriteriaSource, type CouncilCriterion, type CouncilChildLeafProjection, type CouncilCriterionOutcomeReceipt, type CouncilFinding, type CouncilFindingDisposition, type CouncilReviewReceipt, type CouncilState, type CouncilStatus, type CouncilStrategy, type CouncilReviewerMode, type CouncilUsageRecord, type TeamSnapshot, type TeamWorker } from './architect-types.ts';
 
 export type { CouncilState, CouncilStatus };
 export const COUNCIL_KEY = 'pandacode.council';
@@ -159,6 +159,8 @@ export interface CouncilLedgerProjection {
   findings?: CouncilFinding[];
   findingDispositions?: CouncilFindingDisposition[];
   childReceipts?: ChildCouncilReceipt[];
+  childLeaves?: CouncilChildLeafProjection[];
+  criterionOutcomes?: CouncilCriterionOutcomeReceipt[];
   reviewReceipts?: CouncilReviewReceipt[];
   usage?: CouncilUsageRecord[];
 }
@@ -166,23 +168,30 @@ export interface CouncilLedgerProjection {
 /** Keep the UI bounded to native's projected root cycle and its correlated child cycles. RootCycleId is native's
  *  `<sessionId>:<councilSince>`; child cycles are admitted only by current-root child receipts or usage records. */
 export function councilLedgerForCurrentCycle(
-  team: Pick<TeamSnapshot, 'sessionId' | 'councilSince' | 'councilFindings' | 'councilFindingDispositions' | 'councilChildReceipts' | 'councilReviewReceipts' | 'councilUsage'>,
+  team: Pick<TeamSnapshot, 'sessionId' | 'councilSince' | 'councilFindings' | 'councilFindingDispositions' | 'councilChildReceipts' | 'councilChildLeaves' | 'councilCriterionOutcomes' | 'councilReviewReceipts' | 'councilUsage'>,
 ): CouncilLedgerProjection {
   const cycleId = councilCycleId(team);
   const childReceipts = team.councilChildReceipts?.filter(receipt => receipt.rootCycleId === cycleId);
   const usage = team.councilUsage?.filter(record => record.rootCycleId === cycleId);
+  const childLeaves = team.councilChildLeaves?.filter(leaf => leaf.rootCycleId === cycleId);
   const childCycleIds = new Set([
     ...(childReceipts ?? []).map(receipt => receipt.childCycleId),
     ...(usage ?? []).map(record => record.childCycleId).filter((id): id is string => Boolean(id)),
+    ...(childLeaves ?? []).map(leaf => leaf.childCycleId),
   ]);
   const allowedCycleIds = new Set([cycleId, ...childCycleIds]);
   const findings = team.councilFindings?.filter(finding => allowedCycleIds.has(finding.cycleId));
   const findingIds = new Set((findings ?? []).map(finding => finding.id));
+  const criterionOutcomes = team.councilCriterionOutcomes?.filter(receipt =>
+    receipt.rootCycleId === cycleId && allowedCycleIds.has(receipt.taskCycleId) &&
+    (!receipt.childCycleId || allowedCycleIds.has(receipt.childCycleId)));
   return {
     cycleId,
     ...(findings === undefined ? {} : { findings }),
     ...(team.councilFindingDispositions === undefined ? {} : { findingDispositions: team.councilFindingDispositions.filter(item => findingIds.has(item.findingId)) }),
     ...(childReceipts === undefined ? {} : { childReceipts }),
+    ...(childLeaves === undefined ? {} : { childLeaves }),
+    ...(criterionOutcomes === undefined ? {} : { criterionOutcomes }),
     ...(team.councilReviewReceipts === undefined ? {} : { reviewReceipts: team.councilReviewReceipts.filter(receipt => allowedCycleIds.has(receipt.cycleId)) }),
     ...(usage === undefined ? {} : { usage }),
   };

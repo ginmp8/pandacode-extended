@@ -97,6 +97,15 @@ test('native ledger projection is pinned to the current root cycle and its corre
     councilChildReceipts: [
       { rootCycleId: root, childCycleId: child }, { rootCycleId: old, childCycleId: 'old-child:1' },
     ],
+    councilChildLeaves: [
+      { rootCycleId: root, childCycleId: child, seatId: 'leaf', score: 9.4 },
+      { rootCycleId: old, childCycleId: 'old-child:1', seatId: 'stale', score: 10 },
+    ],
+    councilCriterionOutcomes: [
+      { rootCycleId: root, taskCycleId: root, outcome: { criterionId: 'root' } },
+      { rootCycleId: root, taskCycleId: child, childCycleId: child, outcome: { criterionId: 'child' } },
+      { rootCycleId: old, taskCycleId: old, outcome: { criterionId: 'old' } },
+    ],
     councilReviewReceipts: [
       { cycleId: root, requestId: 'root' }, { cycleId: child, requestId: 'child' }, { cycleId: old, requestId: 'old' },
     ],
@@ -109,6 +118,8 @@ test('native ledger projection is pinned to the current root cycle and its corre
   assert.deepEqual(projection.findings.map(item => item.id), ['root', 'child']);
   assert.deepEqual(projection.findingDispositions.map(item => item.findingId), ['root', 'child']);
   assert.deepEqual(projection.childReceipts.map(item => item.childCycleId), [child]);
+  assert.deepEqual(projection.childLeaves.map(item => item.seatId), ['leaf']);
+  assert.deepEqual(projection.criterionOutcomes.map(item => item.outcome.criterionId), ['root', 'child']);
   assert.deepEqual(projection.reviewReceipts.map(item => item.requestId), ['root', 'child']);
   assert.deepEqual(projection.usage.map(item => item.id), ['root', 'child']);
 });

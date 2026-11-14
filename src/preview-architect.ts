@@ -533,6 +533,13 @@ export function createPreviewArchitect(host: PreviewHost) {
         { rootCycleId: cycleId, parentSeatId: rootSeat.id, childCycleId, botId: 'reviewer-nested', artifactRevision: 'preview-revision-1', policyFingerprint: 'preview-policy', status: 'passed', minScore: 9.6, leafScoreRefs: ['score:child'], findingsRefs: [childFindingId], evidenceRefs: ['src/main.ts'], snapshotFingerprint: 'preview-snapshot' },
         { rootCycleId: `${parent.id}:older-cycle`, parentSeatId: 'old-seat', childCycleId: 'old-child:1', botId: 'old-reviewer', artifactRevision: 'old-revision', policyFingerprint: 'old-policy', status: 'stale', leafScoreRefs: [], findingsRefs: [], evidenceRefs: [], snapshotFingerprint: 'old-snapshot' },
       ];
+      snapshot.councilChildLeaves = [
+        { rootCycleId: cycleId, parentSeatId: rootSeat.id, childCycleId, roundId: `${childCycleId}:1`, seatId: 'nested-review-seat', reviewerId: 'codex child reviewer', attempt: 1, status: 'completed', score: 9.6 },
+        { rootCycleId: `${parent.id}:older-cycle`, parentSeatId: 'old-seat', childCycleId: 'old-child:1', roundId: 'old-child:1:1', seatId: 'old-leaf', reviewerId: 'old reviewer', attempt: 1, status: 'completed', score: 10 },
+      ];
+      snapshot.councilCriterionOutcomes = [
+        { schemaVersion: 1, rootCycleId: cycleId, taskId: 'nested-review-task', taskCycleId: childCycleId, childCycleId, round: 1, seatId: 'nested-review-seat', parentSeatId: rootSeat.id, attempt: 1, artifactRevision: 'preview-revision-1', outcome: { criterionId: 'security', score: 9.6, verifiedEvidenceRefs: ['src/main.ts'] } },
+      ];
       snapshot.councilReviewReceipts = [
         { schemaVersion: 1, requestId: 'preview-request-root', cycleId, taskId: parent.id, assignmentId: rootSeat.id, policyFingerprint: 'preview-policy', artifactDigest: 'sha256:root-artifact', verdict: 'passed', findingsRefs: [rootFindingId], evidenceRefs: ['src/main.ts'], terminalRevision: 1, idempotencyKey: 'preview-terminal-root' },
         { schemaVersion: 1, requestId: 'preview-request-child', cycleId: childCycleId, taskId: 'nested-review-task', assignmentId: 'nested-review-seat', policyFingerprint: 'preview-child-policy', artifactDigest: 'sha256:child-artifact', verdict: 'passed', findingsRefs: [childFindingId], evidenceRefs: ['src/main.ts'], terminalRevision: 1, idempotencyKey: 'preview-terminal-child' },

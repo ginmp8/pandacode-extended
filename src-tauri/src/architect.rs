@@ -1276,9 +1276,43 @@ pub struct ArchitectReadSnapshot {
     council_findings: Vec<council::CouncilFinding>,
     council_finding_dispositions: Vec<council::CouncilFindingDisposition>,
     council_child_receipts: Vec<council::ChildCouncilReceipt>,
+    council_child_leaves: Vec<CouncilChildLeafProjection>,
     council_review_receipts: Vec<council::CouncilReviewReceipt>,
     council_criterion_outcomes: Vec<council::CouncilCriterionOutcomeReceipt>,
     council_usage: Vec<council::CouncilUsageRecord>,
+}
+
+/// Native authorized child leaf projection. A reported score is not a pass.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CouncilChildLeafProjection {
+    root_cycle_id: String,
+    parent_seat_id: String,
+    child_cycle_id: String,
+    round_id: String,
+    seat_id: String,
+    reviewer_id: String,
+    attempt: usize,
+    status: String,
+    score: Option<f64>,
+}
+
+fn project_native_child_leaf(
+    root_cycle_id: &str, parent_seat_id: &str, child_cycle_id: &str,
+    reviewer_id: &str, worker: &Worker, seat: &CouncilSeat,
+) -> CouncilChildLeafProjection {
+    CouncilChildLeafProjection {
+        root_cycle_id: root_cycle_id.into(),
+        parent_seat_id: parent_seat_id.into(),
+        child_cycle_id: child_cycle_id.into(),
+        round_id: format!("{}:{}", child_cycle_id, seat.round),
+        seat_id: worker.id.clone(),
+        reviewer_id: reviewer_id.into(),
+        attempt: worker.attempt,
+        status: worker.status.clone(),
+        score: seat.score.filter(|score| worker.status == "completed"
+            && !worker.abandoned && score.is_finite() && (0.0..=10.0).contains(score)),
+    }
 }
 
 #[derive(Clone)]
@@ -1327,6 +1361,7 @@ fn empty_council_ledger(team: TeamSnapshot) -> ArchitectReadSnapshot {
         council_findings: Vec::new(),
         council_finding_dispositions: Vec::new(),
         council_child_receipts: Vec::new(),
+        council_child_leaves: Vec::new(),
         council_review_receipts: Vec::new(),
         council_criterion_outcomes: Vec::new(),
         council_usage: Vec::new(),
@@ -1354,6 +1389,7 @@ fn council_ledger_projection(store: &Store, team: &TeamSnapshot) -> ArchitectRea
         .map(|criterion| criterion.id.clone())
         .collect::<HashSet<_>>();
     let mut seats = Vec::<CouncilLedgerSeat>::new();
+    let mut child_leaves = Vec::<CouncilChildLeafProjection>::new();
     let mut nested_roots = Vec::<(
         Worker,
         reviewer_security::ReviewerBinding,
@@ -1466,6 +1502,21 @@ fn council_ledger_projection(store: &Store, team: &TeamSnapshot) -> ArchitectRea
             let Ok(policy_fingerprint) = council_policy_fingerprint(child_binding) else {
                 continue;
             };
+            if child_binding.parent_council.as_ref().is_none_or(|parent| {
+                parent.session_id != team.session_id
+                    || parent.council_cycle_id != root_cycle_id
+                    || parent.seat_id != parent_worker.id
+                    || parent.artifact_revision != link.root_artifact_revision
+                    || parent.depth != link.depth as usize
+            }) {
+                continue;
+            }
+            let reviewer_id = child_binding.reviewer_bot_id.as_deref()
+                .unwrap_or(worker.profile_id.as_str());
+            child_leaves.push(project_native_child_leaf(
+                &root_cycle_id, &parent_worker.id, &child_cycle_id,
+                reviewer_id, worker, seat,
+            ));
             seats.push(CouncilLedgerSeat {
                 task_id: child.session_id.clone(),
                 cycle_id: child_cycle_id.clone(),
@@ -1848,6 +1899,7 @@ fn council_ledger_projection(store: &Store, team: &TeamSnapshot) -> ArchitectRea
     projected.council_findings = findings;
     projected.council_criterion_outcomes = criterion_outcomes.clone();
     projected.council_child_receipts = child_receipts;
+    projected.council_child_leaves = child_leaves;
     projected.council_review_receipts = review_receipts;
     projected.council_usage = usage;
     let Ok(raw_dispositions) = council_records::<council::CouncilFindingDisposition>(

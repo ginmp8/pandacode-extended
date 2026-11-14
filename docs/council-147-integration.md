@@ -193,3 +193,12 @@ states and the fixed versus OnTrigger budget boundary.
 
 - Reconciled PR #149's unique child-parent binding invariant with PR #155's existing immutable child links. The native child lookup now examines up to two matching records and fails closed on duplicate ownership rather than selecting an arbitrary first row.
 - Added a negative Rust regression using two stored native links for the same child session. No new Council storage format or subsystem was introduced.
+
+
+## Native child reviewer inspection (AC-10/11/39)
+
+The unified Council projects read-only leaf rows (`councilChildLeaves`) only after validating the root-child link and each native reviewer binding. Each row includes the root/child cycle, round, parent seat, reviewer identity, attempt, status and reported score. Failed, abandoned or unscored workers remain `Unknown` rather than fabricating approval.
+
+The existing native `councilCriterionOutcomes` projection is now typed and consumed by the shared inspector. UI filtering retains only the active root and correlated child cycles, displays actual child scores and criterion evidence when available, and retains a **pending native terminal** state when leaf reviews exist but no composite receipt has been issued. A reported leaf score never becomes another root vote.
+
+New Rust, Node and Playwright tests cover reported-score limits, stale-cycle exclusion, criterion evidence and pending-versus-passed UI. Exact-HEAD Rust/browser test execution is pending; this is implementation evidence, not a passed acceptance receipt.

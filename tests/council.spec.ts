@@ -325,6 +325,8 @@ test('read-only inspector renders supplied findings, receipts, usage, stale stat
       findings: [{ id: 'finding-1', cycleId: 'root:1', roundId: 'root:1:1', seatId: 'seat-1', artifactDigest: 'digest-1', criterionId: 'security', severity: 'high', category: 'Security', summary: '<img src=x onerror=alert(1)>', evidenceRefs: ['file:src/security.ts'], locationStatus: 'verified', location: { file: 'src/security.ts', line: 12 }, suggestedFix: 'Use a bounded parser.' }],
       findingDispositions: [{ findingId: 'finding-1', disposition: 'waived_by_authorized_human', actorId: 'user-17', rationale: 'Accepted the documented exception.', timestampMs: 1000, artifactLinks: ['artifact:revision-2'] }],
       childReceipts: [{ rootCycleId: 'root:1', parentSeatId: 'seat-2', childCycleId: 'child:3', botId: 'reviewer-a', artifactRevision: 'rev-3', policyFingerprint: 'policy-hash', status: 'passed', minScore: 9.2, leafScoreRefs: ['score:1'], findingsRefs: ['finding-1'], evidenceRefs: ['file:src/security.ts'], snapshotFingerprint: 'snapshot-hash' }],
+      childLeaves: [{ rootCycleId: 'root:1', parentSeatId: 'seat-2', childCycleId: 'child:3', roundId: 'child:3:1', seatId: 'child-seat', reviewerId: 'child-reviewer', attempt: 1, status: 'completed', score: 9.2 }],
+      criterionOutcomes: [{ schemaVersion: 1, rootCycleId: 'root:1', taskId: 'child', taskCycleId: 'child:3', childCycleId: 'child:3', round: 1, seatId: 'child-seat', parentSeatId: 'seat-2', attempt: 1, artifactRevision: 'rev-3', outcome: { criterionId: 'security', score: 9.2, verifiedEvidenceRefs: ['file:src/security.ts'] } }],
       reviewReceipts: [{ schemaVersion: 1, requestId: 'request-1', cycleId: 'root:1', taskId: 'task-1', assignmentId: 'seat-1', policyFingerprint: 'policy-hash', artifactDigest: 'digest-1', verdict: 'passed', findingsRefs: ['finding-1'], evidenceRefs: ['file:src/security.ts'], terminalRevision: 4, idempotencyKey: 'terminal-1' }],
       workers: [{ id: 'seat-1', name: 'Security reviewer', council: { round: 1, lens: 'Security' }, reviewerBinding: { reviewerBotId: 'reviewer-a' } }],
       usage: [{ id: 'usage-1', rootCycleId: 'root:1', childCycleId: null, attemptId: 'attempt-1', reviewerId: 'reviewer-a', roundId: 'root:1:1', seatId: 'seat-1', scope: 'root', phase: 'review', strategy: 'parallel', startedAtMs: 1000, finishedAtMs: 2500, queueWaitMs: { status: 'measured', value: 100 }, elapsedMs: { status: 'measured', value: 1500 }, retries: { status: 'measured', value: 0 }, escalations: { status: 'measured', value: 0 }, provider: 'codex', model: 'gpt-6', harness: 'codex', inputTokens: { status: 'unknown' }, outputTokens: { status: 'unknown' }, requestCount: { status: 'measured', value: 1 }, terminalStatus: 'passed', budgetConsumption: { concurrentLeaves: { status: 'measured', value: 1 }, leafReviews: { status: 'measured', value: 1 }, estimatedCostMicros: { status: 'unknown' } }, costEstimate: null }],
@@ -338,6 +340,8 @@ test('read-only inspector renders supplied findings, receipts, usage, stale stat
   const ledger = page.locator('#council-ledger-test .council-ledger');
   await expect(ledger).toContainText('Security');
   await expect(ledger).toContainText('Review receipts · 1');
+  await expect(ledger).toContainText('Reported score 9.2 / 10');
+  await expect(ledger).toContainText('Criterion security · 9.2 / 10');
   await expect(ledger).toContainText('Usage and hard-limit records · 1');
   await expect(ledger).toContainText('Stale: native reports');
   await expect(ledger).toContainText('Accepted by user-17');
@@ -358,6 +362,26 @@ test('read-only inspector renders supplied findings, receipts, usage, stale stat
   await expect(exception).toHaveAttribute('open', '');
 });
 
+
+test('child reviewer reported scores remain pending until the native child terminal is issued', async ({ page }) => {
+  await open(page, '/?council=composition');
+  const html = await page.evaluate(async () => {
+    const { councilReadOnlyPresenterHtml } = await import('/src/council-panel.ts');
+    const reviewer = { id: 'parent', name: 'Nested bot reviewer', status: 'waiting', council: { round: 1, lens: 'Security', score: null }, reviewerBinding: { reviewerBotId: 'nested-bot' } };
+    return councilReadOnlyPresenterHtml({
+      cycleId: 'root:77', findings: [], childReceipts: [], reviewReceipts: [], usage: [],
+      childLeaves: [{ rootCycleId: 'root:77', parentSeatId: 'parent', childCycleId: 'child:1', roundId: 'child:1:1', seatId: 'leaf', reviewerId: 'child-reviewer', attempt: 1, status: 'completed', score: 8.6 }],
+      progress: { status: { target: 9, round: 1 }, council: { composition: { selected: [{ botId: 'nested-bot', mode: 'nested' }] } }, rounds: [{ number: 1, seats: [reviewer] }] },
+      status: { state: 'reviewing', round: 1, lowest: null, target: 9, stale: false },
+    } as any);
+  });
+  await page.evaluate(markup => { const host = document.createElement('section'); host.id = 'child-pending-test'; host.innerHTML = markup; document.body.append(host); }, html);
+  const ledger = page.locator('#child-pending-test');
+  await expect(ledger).toContainText('Child Council · pending native terminal');
+  await expect(ledger).toContainText('Reported score 8.6 / 10');
+  await expect(ledger).toContainText('root approval is not yet available');
+  await expect(ledger).not.toContainText('Child Council · passed');
+});
 test('current-cycle projected records hide stale cycles and open evidence only through the workspace file view', async ({ page }) => {
   await open(page, '/?council=ledger');
   await page.locator('#agents-toggle').click();

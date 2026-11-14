@@ -1123,11 +1123,18 @@ pub(super) fn reviewer_source_for(
     requested: Option<CouncilReviewerSource>,
 ) -> Result<CouncilReviewerSource> {
     let config = team.config.council.as_ref().ok_or("Council is off.")?;
-    if !config.nested_bot_reviewers.is_empty() {
-        return Err("child_council_unavailable: nested seats require isolated native child admission.".into());
+    let nested = !config.nested_bot_reviewers.is_empty();
+    // S2/S3 nested transitions still require native child replay/challenge
+    // authorization. Do not dispatch a root reviewer as a shortcut.
+    if nested && config.strategy != CouncilExecutionStrategy::Parallel {
+        return Err("child_council_unavailable: nested S2/S3 root reviewers require native escalation/challenge admission.".into());
     }
     let selected = !config.reviewer_bot_ids.is_empty();
-    let mixed = config.automatic_reviewers > 0;
+    let automatic = config.automatic_reviewers > 0 || (!selected && !nested);
+    let mixed = selected && config.automatic_reviewers > 0;
+    if nested && !selected && !automatic {
+        return Err("child_council_unavailable: child-only Council has no direct or automatic root reviewer seats.".into());
+    }
     let source = match requested {
         Some(source) => source,
         None if mixed => return Err("Mixed Council requires councilReviewerSource on every reviewer assignment.".into()),
@@ -1135,7 +1142,7 @@ pub(super) fn reviewer_source_for(
         None => CouncilReviewerSource::Automatic,
     };
     if (source == CouncilReviewerSource::DirectBot && !selected)
-        || (source == CouncilReviewerSource::Automatic && selected && !mixed)
+        || (source == CouncilReviewerSource::Automatic && !automatic)
     {
         return Err("Council reviewer source is not enabled for this task.".into());
     }
@@ -1149,7 +1156,7 @@ pub(super) fn reviewer_source_for(
             return Err("reviewer_session_mismatch: a replacement cannot change its reviewer source.".into());
         }
     }
-    if mixed {
+    if mixed || nested {
         let occupied = team.workers.iter()
             .filter(|worker| worker.created_at >= team.council_since && worker.council.as_ref().is_some_and(|s| s.round == seat.round))
             .filter(|worker| !worker.abandoned || worker.council.as_ref().is_some_and(|s| s.score.is_some()))
@@ -1925,8 +1932,13 @@ pub(super) fn lead_rules(team: &TeamSnapshot, routed: bool) -> String {
         return String::new();
     };
     let selected = !config.reviewer_bot_ids.is_empty();
-    let mixed = config.automatic_reviewers > 0;
-    let count = if mixed {
+    let nested = !config.nested_bot_reviewers.is_empty();
+    let mixed = selected && config.automatic_reviewers > 0;
+    let count = if nested {
+        format!("exactly {} top-level seats: {} selected direct bots, {} automatic reviewers and {} task-owned child Councils",
+            config.needed(), config.reviewer_bot_ids.len(), config.automatic_reviewers,
+            config.nested_bot_reviewers.len())
+    } else if mixed {
         format!("exactly {} seats: {} selected configured bots and {} additional automatic reviewers",
             config.needed(), config.reviewer_bot_ids.len(), config.automatic_reviewers)
     } else if selected {
@@ -1938,7 +1950,7 @@ pub(super) fn lead_rules(team: &TeamSnapshot, routed: bool) -> String {
         }
     };
     let models: std::collections::HashSet<_> = team.config.workers.iter().map(|p| (&p.provider, &p.model)).collect();
-    let models = if mixed { "native selected-bot seats and independent automatic model profiles" } else if selected { "native selected-bot seats" } else if routed || models.len() < 2 { "profileId \"auto\"" } else { "a different roster model for each reviewer, since one model is a weak council" };
+    let models = if nested { "native task-scoped independent root reviewer sessions; child Architects use their isolated Council admission path" } else if mixed { "native selected-bot seats and independent automatic model profiles" } else if selected { "native selected-bot seats" } else if routed || models.len() < 2 { "profileId \"auto\"" } else { "a different roster model for each reviewer, since one model is a weak council" };
     let limit = format!("Never finish below the target unless the limit of {} rounds is reached; after the last round make no more changes, and say so plainly.", config.max_rounds);
     let selected_note = if selected {
         let source_rule = if mixed {
@@ -1946,6 +1958,9 @@ pub(super) fn lead_rules(team: &TeamSnapshot, routed: bool) -> String {
         } else { String::new() };
         format!(" The user selected persistent reviewer bot IDs: {}. Native Council assigns each selected-bot seat to one of those bots with a frozen model and persona. Dispatch one unique Council lens per seat; never substitute a worker or claim unavailable bots reviewed. Disclose reduced diversity when reviewers use the same provider/model. Provider/model/profileId fields cannot override a selected bot.{source_rule}", config.reviewer_bot_ids.join(", "))
     } else { String::new() };
+    let nested_note = if nested {
+        " Each nested bot coordinates one task-owned child Council through native child admission, never through an ordinary root worker assignment. Dispatch only the explicitly enabled direct/automatic root reviewer seats, without counting child leaves as additional root votes. No root pass is possible until every child emits an independently verified, artifact-bound composite receipt and all root reviewer authority is revalidated."
+    } else { "" };
     let criteria_note = match config.criteria_source {
         CouncilCriteriaSource::Architect => String::new(),
         CouncilCriteriaSource::User | CouncilCriteriaSource::Hybrid => {
@@ -1965,7 +1980,7 @@ pub(super) fn lead_rules(team: &TeamSnapshot, routed: bool) -> String {
     } else {
         ""
     };
-    format!(" Council is on, target {}/10. Before finishing work that changed anything, convene a council: you decide the reviewers, choosing distinct lenses that fit this work (correctness, security, UX, performance, visual quality, pacing, overall senior review, whatever matters here; round 1 fixes the lenses: each sits again in every later round under its name, and no new lens joins later), {count}, dispatched in one batch with councilLens and {models}, after writers settle. Give each reviewer the user's goal, where the work is and its lens; never prior scores, and never the score you want. The bar is every reviewer at or above the target, not the average. After a round below it, read the reports, fix real blockers through workers, verify, and convene FRESH reviewers. {limit} If the user says to accept the current scores, tell them to press Accept and finish on the Council card. End your final message with a table of each lens's first and final score.{selected_note}{criteria_note}{phase_note}", config.target)
+    format!(" Council is on, target {}/10. Before finishing work that changed anything, convene a council: you decide the reviewers, choosing distinct lenses that fit this work (correctness, security, UX, performance, visual quality, pacing, overall senior review, whatever matters here; round 1 fixes the lenses: each sits again in every later round under its name, and no new lens joins later), {count}, dispatched in one batch with councilLens and {models}, after writers settle. Give each reviewer the user's goal, where the work is and its lens; never prior scores, and never the score you want. The bar is every reviewer at or above the target, not the average. After a round below it, read the reports, fix real blockers through workers, verify, and convene FRESH reviewers. {limit} If the user says to accept the current scores, tell them to press Accept and finish on the Council card. End your final message with a table of each lens's first and final score.{selected_note}{nested_note}{criteria_note}{phase_note}", config.target)
 }
 
 /// A reviewer's rules. They never carry the target or earlier scores.

@@ -245,7 +245,9 @@ fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_execu
 pub(super) fn freeze_mixed_roster(
     store: &Store, team: &TeamSnapshot, round: usize, library: Option<&crate::skills::Library>,
 ) -> Result<()> {
-    if team.config.council.as_ref().is_some_and(|config| config.automatic_reviewers > 0) {
+    if team.config.council.as_ref().is_some_and(|config|
+        config.automatic_reviewers > 0 && !config.reviewer_bot_ids.is_empty())
+    {
         round_reviewers(store, team, round, true, library)?;
     }
     Ok(())

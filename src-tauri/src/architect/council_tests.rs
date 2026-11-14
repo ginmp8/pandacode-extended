@@ -1123,16 +1123,86 @@ fn seven_native_source_combinations_have_distinct_modes_without_unsafe_child_dis
             assert!(inspected.attempts.is_empty(), "{mode}/{strategy:?} cannot invent workers");
             if children > 0 {
                 assert_eq!(council::status(&team).unwrap().state, "blocked");
-                assert!(council::reviewer_source_for(
+                let source = council::reviewer_source_for(
                     &team,
                     &CouncilSeat { round: 1, lens: "Security".into(), score: None, started_at: 0, closed_by_selection: false, reported_severe_finding: false, reported_conflict: false },
                     None, None,
-                ).unwrap_err().contains("child_council_unavailable"));
+                );
+                match (mode, strategy) {
+                    ("m5", council::CouncilExecutionStrategy::Parallel) =>
+                        assert_eq!(source.unwrap(), council::CouncilReviewerSource::Automatic),
+                    ("m6", council::CouncilExecutionStrategy::Parallel) =>
+                        assert_eq!(source.unwrap(), council::CouncilReviewerSource::DirectBot),
+                    ("m7", council::CouncilExecutionStrategy::Parallel) =>
+                        assert!(source.unwrap_err().contains("councilReviewerSource")),
+                    _ => assert!(source.unwrap_err().contains("child_council_unavailable")),
+                }
             } else {
                 assert_ne!(inspected.status.state, "passed");
             }
         }
     }
+}
+
+
+#[test]
+fn nested_parallel_root_admits_only_enabled_native_sources_with_separate_quotas() {
+    let child = council::CouncilNestedReviewer {
+        bot_id: "child".into(), child_reviewers: 2,
+        child_target: 9.0, child_max_rounds: 2,
+    };
+    let pending = CouncilSeat {
+        round: 1, lens: "Security".into(), score: None, started_at: 0,
+        closed_by_selection: false, reported_severe_finding: false,
+        reported_conflict: false,
+    };
+    let mut config = on(9.0, 3, 0);
+    config.nested_bot_reviewers.push(child);
+    config.automatic_reviewers = 1;
+    let mut automatic = team_with(config.clone(), vec![]);
+    assert_eq!(council::reviewer_source_for(&automatic, &pending, None, None).unwrap(),
+        council::CouncilReviewerSource::Automatic);
+    assert!(council::reviewer_source_for(&automatic, &pending, None,
+        Some(council::CouncilReviewerSource::DirectBot)).is_err());
+    automatic.workers.push(seat("automatic-one", 1, None, SINCE + 1));
+    assert!(council::reviewer_source_for(&automatic, &pending, None, None)
+        .unwrap_err().contains("no remaining seats"));
+
+    config.automatic_reviewers = 0;
+    config.reviewer_bot_ids = vec!["direct".into()];
+    let mut direct = team_with(config.clone(), vec![]);
+    assert_eq!(council::reviewer_source_for(&direct, &pending, None, None).unwrap(),
+        council::CouncilReviewerSource::DirectBot);
+    assert!(council::reviewer_source_for(&direct, &pending, None,
+        Some(council::CouncilReviewerSource::Automatic)).is_err());
+    let mut direct_worker = seat("direct-one", 1, None, SINCE + 1);
+    let mut binding = reviewer_security::ReviewerBinding::native(
+        &direct, &direct_worker.id, direct_worker.created_at,
+        &direct_worker.provider, &direct_worker.model, direct_worker.council.as_ref().unwrap(),
+    );
+    binding.reviewer_bot_id = Some("direct".into());
+    direct_worker.reviewer_binding = Some(binding);
+    direct.workers.push(direct_worker.clone());
+    assert!(council::reviewer_source_for(&direct, &pending, None, None)
+        .unwrap_err().contains("no remaining seats"));
+
+    config.automatic_reviewers = 1;
+    let mut combined = team_with(config, vec![direct_worker]);
+    assert!(council::reviewer_source_for(&combined, &pending, None, None)
+        .unwrap_err().contains("councilReviewerSource"));
+    assert_eq!(council::reviewer_source_for(&combined, &pending, None,
+        Some(council::CouncilReviewerSource::Automatic)).unwrap(),
+        council::CouncilReviewerSource::Automatic);
+    assert!(council::reviewer_source_for(&combined, &pending, None,
+        Some(council::CouncilReviewerSource::DirectBot))
+        .unwrap_err().contains("no remaining seats"));
+    combined.workers.push(seat("automatic-two", 1, None, SINCE + 2));
+    assert!(council::reviewer_source_for(&combined, &pending, None,
+        Some(council::CouncilReviewerSource::Automatic))
+        .unwrap_err().contains("no remaining seats"));
+    assert_eq!(council::status(&combined).unwrap().state, "blocked",
+        "root-only scores cannot approve a mixed Council without verified child receipts");
+    assert!(council::lead_rules(&combined, false).contains("1 task-owned child Councils"));
 }
 
 #[test]

@@ -653,6 +653,27 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
             status.notice = Some("council_cost_cap_unproven: the configured estimated-cost cap cannot be verified from current native estimate and usage receipts.".into());
         }
     }
+    if let Some(notice) = team.council_status.as_ref()
+        .and_then(|status| composed_native_authority_notice(store, team, status))
+    {
+        if let Some(status) = &mut team.council_status {
+            status.state = "blocked".into();
+            status.notice = Some(notice);
+        }
+    }
+}
+
+/// A cached composed "passed" state is not a displayed approval while the
+/// native grant for any current root reviewer is absent, changed or revoked.
+fn composed_native_authority_notice(
+    store: &Store,
+    team: &TeamSnapshot,
+    status: &CouncilStatus,
+) -> Option<String> {
+    (status.state == "passed"
+        && team.config.council.as_ref().is_some_and(|config| config.composition.is_some())
+        && !composed_native_authority_current(store, team, status.round))
+        .then(|| "reviewer_session_mismatch: composed Council root seats require persisted native reviewer authority before approval.".into())
 }
 
 fn native_council_status(store: &Store, team: &TeamSnapshot) -> Option<CouncilStatus> {
@@ -677,6 +698,10 @@ fn native_council_status(store: &Store, team: &TeamSnapshot) -> Option<CouncilSt
     {
         status.state = "blocked".into();
         status.notice = Some("council_cost_cap_unproven: the configured estimated-cost cap cannot be verified from current native estimate and usage receipts.".into());
+    }
+    if let Some(notice) = composed_native_authority_notice(store, team, &status) {
+        status.state = "blocked".into();
+        status.notice = Some(notice);
     }
     Some(status)
 }
@@ -705,14 +730,15 @@ fn native_council_finish_refusal(store: &Store, team: &TeamSnapshot) -> Option<S
         &ledger.council_criterion_outcomes,
         &ledger.council_findings,
     );
-    if refusal.is_none()
-        && team.config.council.as_ref().is_some_and(|config| config.composition.is_some())
-        && native_council_status(store, team).is_some_and(|status| {
-            status.state == "passed"
-                && !composed_native_authority_current(store, team, status.round)
-        })
-    {
-        return Some("reviewer_session_mismatch: composed Council root seats require persisted native reviewer authority before completion.".into());
+    if refusal.is_none() {
+        let status = council::status_with_ledger(
+            team, &ledger.council_criterion_outcomes, &ledger.council_findings,
+        );
+        if let Some(notice) = status.as_ref()
+            .and_then(|status| composed_native_authority_notice(store, team, status))
+        {
+            return Some(notice);
+        }
     }
     if refusal.is_none()
         && team.council_status.as_ref().is_some_and(|status| status.round > 1)
@@ -970,6 +996,17 @@ pub(crate) fn verified_council_task_evidence(
     })
 }
 
+/// Match one and only one persisted native receipt for a task/seat identity.
+/// A duplicate must never approve a root seat after retry or restart.
+fn unique_council_receipt<T>(
+    items: &[T],
+    matches: impl Fn(&T) -> bool,
+) -> Option<&T> {
+    let mut found = items.iter().filter(|item| matches(item));
+    let receipt = found.next()?;
+    found.next().is_none().then_some(receipt)
+}
+
 /// A composed pass needs one correlated native receipt for every root seat and
 /// a single current ChildCouncilReceipt for every nested seat. Cost remains an
 /// explicit unknown until a provider pricing source can calculate it, so a
@@ -1062,7 +1099,7 @@ fn verify_composition_terminal_receipts(
             if link.timeout_at <= storage::now() {
                 return false;
             }
-            let Some(receipt) = child_receipts.iter().find(|receipt| {
+            let Some(receipt) = unique_council_receipt(&child_receipts, |receipt| {
                 receipt.root_cycle_id == root_cycle_id && receipt.parent_seat_id == worker.id
             }) else {
                 return false;
@@ -1132,7 +1169,7 @@ fn verify_composition_terminal_receipts(
             let Ok(policy) = council_policy_fingerprint(binding) else {
                 return false;
             };
-            let Some(receipt) = review_receipts.iter().find(|receipt| {
+            let Some(receipt) = unique_council_receipt(&review_receipts, |receipt| {
                 receipt.request_id == request_id
                     && receipt.assignment_id.as_deref() == Some(worker.id.as_str())
             }) else {

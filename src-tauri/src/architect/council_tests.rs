@@ -221,6 +221,17 @@ fn composed_root_authority_denies_unissued_tampered_and_revoked_seats() {
 }
 
 #[test]
+fn composed_terminal_receipt_selector_rejects_duplicates_and_replays() {
+    assert_eq!(unique_council_receipt(&[1], |item| *item == 1), Some(&1));
+    assert_eq!(unique_council_receipt(&[1, 2], |item| *item == 2), Some(&2));
+    assert_eq!(unique_council_receipt(&[1, 2], |item| *item == 3), None);
+    assert_eq!(unique_council_receipt(&[1, 1], |item| *item == 1), None,
+        "two native records for one current seat cannot approve it");
+    assert_eq!(unique_council_receipt(&[1, 2, 1], |item| *item == 1), None,
+        "a replayed receipt remains ambiguous even with other seats present");
+}
+
+#[test]
 fn selected_bot_config_requires_distinct_bounded_identity_roster() {
     let mut c = on(9.0, 10, 0);
     c.reviewer_bot_ids = vec!["bot-1".into()];

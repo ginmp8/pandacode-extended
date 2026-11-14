@@ -51,3 +51,17 @@ A native negative regression covers missing first/second grants, the legacy
 fallback, modified immutable identity, and grant revocation. This adapts the
 security intent of PR #149's newer M3-only fix without introducing #149's
 competing Council engine. No runnable test or CI result is claimed here.
+
+
+## Display and receipt identity consistency
+
+Composed Council native reads and stored UI snapshots now show a `blocked`
+state when a scored root reviewer lacks its persisted grant, rather than
+presenting an unauthorizable `passed` label. The finish gate compares the
+unmodified Council score/evidence verdict before applying this authorization
+notice, so a blocked display does not inadvertently allow completion.
+
+The root terminal gate also rejects multiple native review or child receipts
+for the same current seat identity, rather than choosing the first match.
+A regression test covers zero, one, duplicate and replayed receipt matches.
+Automated execution remains outstanding for this connector-authored batch.

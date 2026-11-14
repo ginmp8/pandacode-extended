@@ -1244,6 +1244,30 @@ fn composed_root_admission_caps_actual_reviewer_attempts_without_legacy_changes(
 }
 
 #[test]
+fn composed_runtime_budget_counts_actual_child_and_root_attempts() {
+    let mut config = on(9.0, 3, 0);
+    config.nested_bot_reviewers = ["security-child", "architecture-child"]
+        .into_iter().map(|bot_id| council::CouncilNestedReviewer {
+            bot_id: bot_id.into(), child_reviewers: 2,
+            child_target: 9.0, child_max_rounds: 2,
+        }).collect();
+    let mut root = team_with(config, Vec::new());
+    assert!(council::require_composed_attempt_budget(&root, 1023, 1).is_ok());
+    assert!(council::require_composed_attempt_budget(&root, 1023, 2)
+        .unwrap_err().contains("1024 admitted root and child reviewer attempts"));
+    root.workers.push(seat("admitted-root", 1, None, SINCE + 1));
+    assert!(council::require_composed_attempt_budget(&root, 1022, 1).is_ok());
+    assert!(council::require_composed_attempt_budget(&root, 1023, 1).is_err(),
+        "one direct root review and issued child leaves must share the budget");
+    root.workers[0].abandoned = true;
+    assert!(council::require_composed_attempt_budget(&root, 1023, 1).is_err(),
+        "abandoned reviewer attempts cannot refund consumed capacity");
+    root.config.council = Some(on(9.0, 100, 8));
+    assert!(council::require_composed_attempt_budget(&root, usize::MAX, 2).is_ok(),
+        "legacy M1 keeps its existing, non-composed budget");
+}
+
+#[test]
 fn composed_council_rejects_forged_failed_and_duplicate_native_seats_at_limit() {
     let mut config = on(9.0, 1, 0);
     config.reviewer_bot_ids = vec!["selected-reviewer".into()];
@@ -3543,6 +3567,13 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     assert_eq!(inspected.len(), 2);
     let complete_roster = child_council::verified_parent_seats(&store, &root).unwrap().unwrap();
     assert_eq!(complete_roster.len(), 2, "two children yield two root seats, not four leaf votes");
+    let already_admitted = root.workers.iter().filter(|worker|
+        worker.council.is_some() && worker.created_at >= root.council_since).count();
+    let remaining = 1024usize - already_admitted - 4;
+    assert!(child_council::require_total_attempt_capacity(&store, &root, remaining).is_ok());
+    assert!(child_council::require_total_attempt_capacity(&store, &root, remaining + 1)
+        .unwrap_err().contains("1024 admitted root and child reviewer attempts"),
+        "four real issued child leaves must reduce the native root dispatch budget");
     assert_ne!(complete_roster[0].parent_worker_id, complete_roster[1].parent_worker_id);
     assert_ne!(complete_roster[0].child_session_id, complete_roster[1].child_session_id);
     assert!(inspected.iter().all(|view| view.observed_leaf_usage.as_ref().is_some_and(|usage|

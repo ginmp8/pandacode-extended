@@ -2373,6 +2373,7 @@ fn dispatch_as(
                     // The budget covers actual new admissions, not duplicated keys;
                     // the whole batch is transactional, including earlier seats.
                     council::require_root_attempt_capacity(&team)?;
+                    child_council::require_total_attempt_capacity(&store, &team, 1)?;
                 }
                 let reviewer_source = seat.as_ref().map(|seat| council::reviewer_source_for(
                     &team, seat, assignment.replaces.as_deref(), assignment.council_reviewer_source,

@@ -665,6 +665,24 @@ pub(super) fn verified_parent_seats(
     Ok((ready && artifact_pinned).then_some(seats))
 }
 
+/// Recount every task-owned child leaf from authenticated native reservations.
+/// The root transaction owns this check before dispatching any new review.
+pub(super) fn require_total_attempt_capacity(
+    store: &Store, root: &TeamSnapshot, additional_attempts: usize,
+) -> Result<()> {
+    let Some(config) = root.config.council.as_ref() else { return Ok(()) };
+    if config.nested_bot_reviewers.is_empty() { return Ok(()); }
+    let mut child_attempts = 0usize;
+    for choice in &config.nested_bot_reviewers {
+        let record = read(store, root, choice)?
+            .ok_or("child_council_stale: missing reservation during attempt accounting.")?;
+        let child = super::load(store, &record.child_session_id)?
+            .ok_or("child_council_stale: missing child during attempt accounting.")?;
+        child_attempts = child_attempts.saturating_add(child.workers.len());
+    }
+    super::council::require_composed_attempt_budget(root, child_attempts, additional_attempts)
+}
+
 /// Trusted root-only transition: allocate fresh read-only reviewer sessions
 /// after the root's actual writing workers settle. No bot conversation, prompt
 /// claim or persisted child reservation can request this operation.
@@ -696,6 +714,7 @@ pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
         if child.status != "blocked" || !child.workers.is_empty() {
             return Err("child_council_stale: child review is not eligible for admission.".into());
         }
+        require_total_attempt_capacity(store, root, choice.child_reviewers)?;
         let session = store.session(&record.child_session_id)?;
         super::validate_worker_role(&session.provider, true)?;
         child.status = "running".into();

@@ -374,6 +374,28 @@ pub(super) fn require_root_attempt_capacity(team: &TeamSnapshot) -> Result<()> {
     Ok(())
 }
 
+/// Count real root and child reviewer admissions against one composed-task cap.
+/// Cancelled and replaced native attempts never refund this budget.
+pub(super) fn require_composed_attempt_budget(
+    team: &TeamSnapshot, child_attempts: usize, additional_attempts: usize,
+) -> Result<()> {
+    let Some(config) = team.config.council.as_ref() else { return Ok(()) };
+    if config.automatic_reviewers == 0 && config.nested_bot_reviewers.is_empty() {
+        return Ok(());
+    }
+    let root_attempts = team.workers.iter()
+        .filter(|worker| worker.council.is_some() && worker.created_at >= team.council_since)
+        .count();
+    if root_attempts.saturating_add(child_attempts).saturating_add(additional_attempts)
+        > MAX_COMPOSED_REVIEW_ATTEMPTS
+    {
+        return Err(format!(
+            "Composed Council reached {MAX_COMPOSED_REVIEW_ATTEMPTS} admitted root and child reviewer attempts; no additional reviewer may be dispatched."
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct CouncilSeat {

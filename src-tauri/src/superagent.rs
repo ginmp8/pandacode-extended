@@ -440,6 +440,18 @@ fn list_tickets(store: &Store, config_id: &str, limit: i64) -> Result<Vec<Ticket
 /// Bounded cross-Team demand index for the trusted local workspace. The
 /// projection intentionally excludes worker evidence, actor, request keys,
 /// mandates and session IDs; detailed access stays within native Ticket reads.
+/// A read-only request groups native page filters without adding implicit authority.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DemandQuery {
+    limit: Option<i64>,
+    before_updated_at: Option<i64>,
+    before_id: Option<String>,
+    orchestration_id: Option<String>,
+    state_filter: Option<String>,
+    search_query: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DemandIndex {
@@ -2849,16 +2861,14 @@ pub async fn superagent_tickets(window: tauri::WebviewWindow,
 
 #[tauri::command]
 pub async fn superagent_all_demands(
-    window: tauri::WebviewWindow, state: State<'_, AppState>, limit: Option<i64>,
-    before_updated_at: Option<i64>, before_id: Option<String>,
-    orchestration_id: Option<String>, state_filter: Option<String>,
-    search_query: Option<String>,
+    window: tauri::WebviewWindow, state: State<'_, AppState>, query: DemandQuery,
 ) -> Result<Vec<DemandIndex>> {
     require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     list_all_demands_page_searched(
-        &store, limit.unwrap_or(200), before_updated_at, before_id.as_deref(),
-        orchestration_id.as_deref(), state_filter.as_deref(), search_query.as_deref(),
+        &store, query.limit.unwrap_or(200), query.before_updated_at,
+        query.before_id.as_deref(), query.orchestration_id.as_deref(),
+        query.state_filter.as_deref(), query.search_query.as_deref(),
     )
 }
 
@@ -3305,6 +3315,27 @@ pub async fn superagent_stop(window: tauri::WebviewWindow, app: tauri::AppHandle
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_demand_query_accepts_camel_case_and_rejects_execution_fields() {
+        let query: DemandQuery = serde_json::from_value(serde_json::json!({
+            "limit": 25, "beforeUpdatedAt": 2000, "beforeId": "ticket-5",
+            "orchestrationId": "team-1", "stateFilter": "blocked",
+            "searchQuery": "literal %_needle",
+        })).unwrap();
+        assert_eq!(query.limit, Some(25));
+        assert_eq!(query.before_updated_at, Some(2000));
+        assert_eq!(query.before_id.as_deref(), Some("ticket-5"));
+        assert_eq!(query.orchestration_id.as_deref(), Some("team-1"));
+        assert_eq!(query.state_filter.as_deref(), Some("blocked"));
+        assert_eq!(query.search_query.as_deref(), Some("literal %_needle"));
+        let empty: DemandQuery = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(empty.limit, None);
+        assert_eq!(empty.search_query, None);
+        assert!(serde_json::from_value::<DemandQuery>(serde_json::json!({
+            "limit": 200, "allowedTools": ["write_file"]
+        })).is_err());
+    }
 
     #[test]
     fn headless_queue_demand_is_durable_idempotent_and_never_dispatches() {

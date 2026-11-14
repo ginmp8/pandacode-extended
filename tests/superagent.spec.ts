@@ -825,10 +825,12 @@ test('cross-Team native Demand pages load older Tickets without inferring new wo
         coordinatorBotId:'router',workerBotId:'worker',enabled:true,policyRevision:1}] as never;
       if(command==='superagent_tickets')return [] as never;
       if(command==='superagent_all_demands'){
-        pages.push({...args});
-        if(args?.beforeId==='demand-199'&&args?.beforeUpdatedAt===1801)
+        const query = args?.query as Record<string, unknown> | undefined;
+        if (!query) throw Error('Native Demand query envelope required');
+        pages.push({...query});
+        if(query?.beforeId==='demand-199'&&query?.beforeUpdatedAt===1801)
           return [makeDemand(200),makeDemand(201)] as never;
-        if(!args?.beforeId)return Array.from({length:200},(_,index)=>makeDemand(index)) as never;
+        if(!query?.beforeId)return Array.from({length:200},(_,index)=>makeDemand(index)) as never;
         throw Error('Native pagination cursor mismatch');
       }
       throw Error('Unexpected native call: '+command);
@@ -875,19 +877,21 @@ test('native Team filter pages independently and resets pagination when changing
       ] as never;
       if(command==='superagent_tickets')return [] as never;
       if(command==='superagent_all_demands'){
-        queries.push({...args});
-        if(args?.stateFilter==='running')return [] as never;
-        if(args?.stateFilter && args.stateFilter!=='blocked')
+        const query = args?.query as Record<string, unknown> | undefined;
+        if (!query) throw Error('Native Demand query envelope required');
+        queries.push({...query});
+        if(query?.stateFilter==='running')return [] as never;
+        if(query?.stateFilter && query.stateFilter!=='blocked')
           throw Error('Invalid native Demand state');
-        if(args?.orchestrationId==='team-b'){
-          if(args?.beforeId==='b-199' && args?.beforeUpdatedAt===1801)
+        if(query?.orchestrationId==='team-b'){
+          if(query?.beforeId==='b-199' && query?.beforeUpdatedAt===1801)
             return [demand('b-200','team-b',1800)] as never;
-          if(!args?.beforeId)return Array.from({length:200},(_,i)=>
+          if(!query?.beforeId)return Array.from({length:200},(_,i)=>
             demand('b-'+i,'team-b',2000-i)) as never;
         }
-        if(args?.orchestrationId==='team-a' && !args?.beforeId)
+        if(query?.orchestrationId==='team-a' && !query?.beforeId)
           return [demand('a-0','team-a',1900)] as never;
-        if(!args?.orchestrationId && !args?.beforeId)
+        if(!query?.orchestrationId && !query?.beforeId)
           return [demand('a-0','team-a',1900),demand('b-0','team-b',2000)] as never;
         throw Error('Invalid native Team-scoped cursor');
       }
@@ -952,12 +956,14 @@ test('native objective search filters durable Demands before pagination without 
       ] as never;
       if(command==='superagent_tickets')return [] as never;
       if(command==='superagent_all_demands') {
-        queries.push({...args});
-        if(args?.searchQuery==='NEEDLE')return [
+        const query = args?.query as Record<string, unknown> | undefined;
+        if (!query) throw Error('Native Demand query envelope required');
+        queries.push({...query});
+        if(query?.searchQuery==='NEEDLE')return [
           demand('match-a','team-a','Needle hidden past page 200'),
           demand('match-b','team-b','NEEDLE in another Team'),
         ] as never;
-        if(args?.searchQuery)throw Error('Native objective filter mismatch');
+        if(query?.searchQuery)throw Error('Native objective filter mismatch');
         return [demand('recent','team-a','Recent unrelated work')] as never;
       }
       throw Error('Unexpected native command: '+command);

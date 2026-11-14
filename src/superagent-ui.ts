@@ -29,6 +29,8 @@ interface EffectiveTeam {
 interface Ticket { id: string; orchestrationId: string; objective: string; state: string; revision: number; evidence: string | null }
 interface DemandIndex { id: string; orchestrationId: string; objective: string;
   state: string; revision: number; updatedAt: number }
+interface DemandQuery { limit?: number; beforeUpdatedAt?: number; beforeId?: string;
+  orchestrationId?: string; stateFilter?: string; searchQuery?: string }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
 interface ImportResult { created: string[]; unchanged: string[]; backupPath?: string }
 interface Mandate {
@@ -125,6 +127,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let sourceIntegrity: SourceIntegrity | null = null;
   let linkedDecisions: SourceDecision[] = [], linkedDecisionsLoaded = false;
   const safe = (value: unknown) => escape(String(value ?? ''));
+  const fetchDemandPage = (query: DemandQuery) =>
+    call<DemandIndex[]>('superagent_all_demands', {query});
   const current = () => presets.find(item => item.id === selected);
   const botName = (id: string) => bots.find(bot => bot.id === id)?.name ?? 'Missing bot';
   const activityTime = (timestamp?: number): string => typeof timestamp === 'number' &&
@@ -848,7 +852,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
       render();
       void work(async () => {
-        const loaded = await call<DemandIndex[]>('superagent_all_demands',{
+        const loaded = await fetchDemandPage({
           limit:200, orchestrationId:filter || undefined,
           stateFilter:demandStateFilter || undefined,
           searchQuery:demandSearch || undefined,
@@ -870,7 +874,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
       render();
       void work(async () => {
-        const loaded = await call<DemandIndex[]>('superagent_all_demands',{
+        const loaded = await fetchDemandPage({
           limit:200, orchestrationId:demandTeamFilter || undefined,
           stateFilter:filter || undefined,
           searchQuery:demandSearch || undefined,
@@ -1082,7 +1086,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       void work(async () => {
         allDemands = [];
         allDemandsLoaded = false; allDemandsHasMore = false;
-        const loaded = await call<DemandIndex[]>('superagent_all_demands',{
+        const loaded = await fetchDemandPage({
           limit:200, orchestrationId:demandTeamFilter || undefined,
           stateFilter:demandStateFilter || undefined,
           searchQuery:demandSearch || undefined,
@@ -1097,7 +1101,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const last = allDemands[allDemands.length - 1];
       if (!allDemandsLoaded || !allDemandsHasMore || !last) return;
       void work(async () => {
-        const loaded = await call<DemandIndex[]>('superagent_all_demands',{
+        const loaded = await fetchDemandPage({
           limit:200, beforeUpdatedAt:last.updatedAt, beforeId:last.id,
           orchestrationId:demandTeamFilter || undefined,
           stateFilter:demandStateFilter || undefined,
@@ -1391,7 +1395,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
       render();
       void work(async () => {
-        const loaded = await call<DemandIndex[]>('superagent_all_demands',{
+        const loaded = await fetchDemandPage({
           limit:200, orchestrationId:demandTeamFilter || undefined,
           stateFilter:demandStateFilter || undefined,
           searchQuery:demandSearch || undefined,

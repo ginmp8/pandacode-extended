@@ -678,6 +678,25 @@ pub(crate) fn verified_council_pass(store: &Store, team: &TeamSnapshot) -> bool 
         && stored.target == verified.target
 }
 
+/// Admit the *root* part of a forced hierarchical S2 second wave only after
+/// the original native root and child receipts independently pass. This does
+/// not approve the Council: a fresh child wave is still required at the
+/// terminal gate. Reuse the existing native gate rather than trusting scores
+/// from a stale or locally reconstructed reviewer snapshot.
+fn eligible_hierarchical_s2_root_escalation(store: &Store, team: &TeamSnapshot) -> bool {
+    let Some(config) = team.config.council.as_ref() else { return false };
+    if config.strategy != council::CouncilExecutionStrategy::Escalated
+        || !config.force_escalation || config.nested_bot_reviewers.is_empty()
+    {
+        return false;
+    }
+    let mut first = team.clone();
+    first.workers.retain(|worker| worker.council.as_ref().is_none_or(|seat| seat.round == 1));
+    first.config.council.as_mut().unwrap().force_escalation = false;
+    refresh_council(store, &mut first);
+    verified_council_pass(store, &first)
+}
+
 /// A settled run's save that fails is logged; the watchdog then reaps the worker that still reads
 /// as running (`watchdog::reconcile`), so nothing waits on it forever.
 fn save_settled(store: &Store, team: &mut TeamSnapshot) -> bool {
@@ -2432,6 +2451,12 @@ fn dispatch_as(
                     }
                 }
                 let seat = council::seat_for(&team, assignment.council_lens.as_deref(), assignment.replaces.as_deref())?;
+                if seat.as_ref().is_some_and(|seat| seat.round > 1)
+                    && team.config.council.as_ref().is_some_and(|config| !config.nested_bot_reviewers.is_empty())
+                    && !eligible_hierarchical_s2_root_escalation(&store, &team)
+                {
+                    return Err("child_council_unavailable: a fresh S2 root wave requires complete, authenticated first-wave root and child receipts.".into());
+                }
                 if seat.is_some() {
                     // The budget covers actual new admissions, not duplicated keys;
                     // the whole batch is transactional, including earlier seats.

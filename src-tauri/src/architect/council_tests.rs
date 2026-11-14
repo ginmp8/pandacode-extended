@@ -4157,6 +4157,77 @@ fn run_nested_mixed_root_callbacks(include_automatic: bool) {
         "a revoked real direct-bot grant invalidates the composed terminal verdict");
 }
 
+/// Forced hierarchical S2 can issue genuinely new root callbacks only after
+/// the first-wave child has produced a verified composite seat. Phase-two
+/// root scores alone must never substitute for a new child Council receipt.
+#[test]
+fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('security-child','security-child',?1,'codex','default','plan',?2,?2)",
+            rusqlite::params![project, storage::now()],
+        ).unwrap();
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.strategy = council::CouncilExecutionStrategy::Escalated;
+        config.force_escalation = true;
+        config.automatic_reviewers = 1;
+        config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+            bot_id: "security-child".into(), child_reviewers: 2,
+            child_target: 9.5, child_max_rounds: 2,
+        });
+        config.validate().unwrap();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid, "Force a second independent Council wave", None, None).unwrap();
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments":[reviewer_assignment("s2-root-first", "correctness")]
+    })).unwrap();
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (first_run, _) = claim(&state, action);
+    finish(&state, &first_run, "Independent root review.\\nCouncil score: 9.7/10", true);
+    let second_request = json!({
+        "assignments":[reviewer_assignment("s2-root-second", "correctness")]
+    });
+    let early = call(&state, &sid, "pandacode_dispatch_workers", second_request.clone()).unwrap_err();
+    assert!(early.contains("first-wave root and child receipts"), "{early}");
+    let (pending, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Await real child callbacks"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(pending["completed"], false);
+    for _ in 0..2 {
+        let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&action.sid, "assistant", "Independent child evidence.\\nCouncil score: 9.5/10").unwrap();
+        }
+        completed_state(&state, &action.sid, Some(&action.admission), true, false, &mut |_| {});
+    }
+    let (pending, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"First wave settled"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(pending["completed"], false, "forced S2 cannot pass on its first wave");
+    let assigned = call(&state, &sid, "pandacode_dispatch_workers", second_request).unwrap();
+    assert_eq!(assigned["queued"], true);
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (second_run, _) = claim(&state, action);
+    assert_ne!(first_run.config.session_id, second_run.config.session_id);
+    assert!(second_run.config.reviewer_boundary);
+    finish(&state, &second_run, "Independent follow-up root review.\\nCouncil score: 9.8/10", true);
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    assert_eq!(root.workers.iter().filter(|w| w.council.as_ref().is_some_and(|s| s.round == 2)).count(), 1);
+    assert!(!verified_council_pass(&store, &root),
+        "fresh root callbacks cannot replace missing phase-two child evidence");
+}
+
 #[test]
 fn nested_m6_direct_bot_and_child_require_independent_native_callbacks() {
     assert_nested_mixed_root_callbacks(false);

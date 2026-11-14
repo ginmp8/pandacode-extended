@@ -1146,8 +1146,10 @@ pub(super) fn reviewer_source_for(
     if nested && config.strategy == CouncilExecutionStrategy::TwoPhase {
         return Err("child_council_unavailable: nested S3 needs native independent challenge admission.".into());
     }
-    if nested && config.strategy == CouncilExecutionStrategy::Escalated && seat.round > 1 {
-        return Err("child_council_unavailable: nested S2 escalation needs a fresh native child/root wave.".into());
+    if nested && config.strategy == CouncilExecutionStrategy::Escalated && seat.round > 1
+        && !(config.force_escalation && seat.round == 2)
+    {
+        return Err("child_council_unavailable: triggered S2 escalation needs fresh native root and child review waves.".into());
     }
     let selected = !config.reviewer_bot_ids.is_empty();
     let automatic = config.automatic_reviewers > 0 || (!selected && !nested);

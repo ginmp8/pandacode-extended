@@ -1,14 +1,41 @@
 /** Deterministic preview-only SuperAgent adapter. No real harness or external writes. */
 type Bot = { id:string; name:string; paused:boolean; projectId:string };
 type Config = { id:string; name:string; coordinatorBotId:string; workerBotId:string;
-  projectId:string; enabled:boolean; policyRevision:number };
+  workerBotIds:string[]; reviewerBotIds:string[]; teamVersion:number;
+  projectId:string; enabled:boolean; policyRevision:number; councilRequired?:boolean };
+type StrategyPolicy = {
+  priority:string; attemptTimeoutMs:number; tokenCeiling?:number;
+  estimatedCostCeilingMinor?:number; subagentDelegationEnabled:boolean;
+};
+type Strategy = {settings:StrategyPolicy;maxConcurrentTasks:number;maxAttemptsPerAssignment:number};
+const defaultStrategy = ():Strategy => ({
+  settings:{priority:'balanced',attemptTimeoutMs:1_800_000,
+    subagentDelegationEnabled:false},
+  maxConcurrentTasks:1,maxAttemptsPerAssignment:2,
+});
 type Ticket = { id:string; orchestrationId:string; objective:string;
   state:string; revision:number; evidence:null };
+type TeamSnapshot = {
+  snapshotVersion:number; provenance:string; orchestrationId:string; teamVersion:number;
+  name:string; projectId:string; coordinatorBotId:string; workerBotIds:string[];
+  reviewerBotIds:string[];
+  policy:{policyRevision:number;autonomy:string;maxConcurrentTasks:number;
+    maxAttemptsPerAssignment:number;councilEnabled:boolean;strategy:StrategyPolicy};
+  roles:Array<{role:string;ordinal:number;botId:string;effectiveConfig:null;effectiveConfigSha256:null}>;
+};
 type Activity = { id:number; kind:string; detail:string; at:number };
 type Assignment = { id:string; botId:string; sessionId:string; attempt:number; state:string };
 const activity = new Map<string,Activity[]>(), assignments = new Map<string,Assignment[]>();
-const threadLinks = new Map<string,Array<{sourceId:string;ticketId:string;repository:string;subjectKey:string;createdAt:number}>>();
+const PREVIEW_OBSERVE_EVENT_KINDS = [
+  'issues.opened','issues.edited','issue_comment.created','pull_request.opened',
+  'pull_request_review.submitted','check_run.completed',
+] as const;
+const threadLinks = new Map<string,Array<{sourceId:string;ticketId:string;repository:string;subjectKey:string;
+  actorFilter:string;eventKind:string;mode:'off'|'observe';createdAt:number}>>();
 const configs = new Map<string,Config>(), tickets = new Map<string,Ticket[]>();
+const teamSnapshots = new Map<string,TeamSnapshot>();
+const teamStrategies = new Map<string,Strategy>();
+const strategyFor = (id:string):Strategy => teamStrategies.get(id) ?? defaultStrategy();
 const get = (id:string):Config => { const c=configs.get(id); if(!c)throw Error('Orchestration not found.'); return c; };
 export async function invokeSuperagent<T>(
   command:string,args:Record<string,any>,listBots:()=>Promise<Bot[]>,
@@ -20,6 +47,46 @@ export async function invokeSuperagent<T>(
   const bots=needsBots?await listBots():[];
   const find=(id:string)=>{ const b=bots.find(b=>b.id===id); if(!b)throw Error('Bot no longer exists.'); return b; };
   const configName=(name:string)=>[...configs.values()].find(c=>c.name.toLowerCase()===name.toLowerCase());
+  const resolveRoles=(input:any)=>{
+    if(!input||typeof input!=='object')throw Error('Invalid Team input.');
+    const workerBotIds=Array.isArray(input.workerBotIds)?input.workerBotIds:[input.workerBotId];
+    const reviewerBotIds=Array.isArray(input.reviewerBotIds)?input.reviewerBotIds:[];
+    if(workerBotIds.length<1||workerBotIds.length>16||reviewerBotIds.length>8||
+      workerBotIds.some((id:unknown)=>typeof id!=='string'||!id)||
+      reviewerBotIds.some((id:unknown)=>typeof id!=='string'||!id)||
+      workerBotIds[0]!==input.workerBotId)
+      throw Error('A Team needs one coordinator, 1–16 workers and at most 8 reviewers, with workerBotId matching the first worker.');
+    const coordinator=find(input.coordinatorBotId);
+    const workers=(workerBotIds as string[]).map(find);
+    const reviewers=(reviewerBotIds as string[]).map(find);
+    const ids=[coordinator.id,...workers.map(bot=>bot.id),...reviewers.map(bot=>bot.id)];
+    if(new Set(ids).size!==ids.length)throw Error('A bot can have only one role in a Team.');
+    // Match native Team admission: each existing bot retains its own project;
+    // only executor Workers must share the scoped checkout. Independent
+    // coordinator and read-only reviewer bots may own different projects.
+    if(workers.some(bot=>bot.projectId!==workers[0].projectId))
+      throw Error('Executor Workers must share one project scope.');
+    if(input.councilRequired && reviewerBotIds.length < 2)
+      throw Error('Council-required Teams need two independent reviewers.');
+    return {coordinator,workers,reviewers,workerBotIds:[...workerBotIds] as string[],
+      reviewerBotIds:[...reviewerBotIds] as string[]};
+  };
+  const makeTeamSnapshot=(config:Config):TeamSnapshot=>({
+    snapshotVersion:1,provenance:'native',orchestrationId:config.id,teamVersion:config.teamVersion,
+    name:config.name,projectId:config.projectId,coordinatorBotId:config.coordinatorBotId,
+    workerBotIds:[...config.workerBotIds],reviewerBotIds:[...config.reviewerBotIds],
+    policy:{policyRevision:config.policyRevision,autonomy:'off',
+      maxConcurrentTasks:strategyFor(config.id).maxConcurrentTasks,
+      maxAttemptsPerAssignment:strategyFor(config.id).maxAttemptsPerAssignment,
+      councilEnabled:config.councilRequired===true,strategy:strategyFor(config.id).settings},
+    roles:[
+      {role:'coordinator',ordinal:0,botId:config.coordinatorBotId,effectiveConfig:null,effectiveConfigSha256:null},
+      ...config.workerBotIds.map((botId,ordinal)=>({role:'worker',ordinal,botId,
+        effectiveConfig:null as null,effectiveConfigSha256:null as null})),
+      ...config.reviewerBotIds.map((botId,ordinal)=>({role:'reviewer',ordinal,botId,
+        effectiveConfig:null as null,effectiveConfigSha256:null as null})),
+    ],
+  });
   let value:unknown;
   switch(command){
     case 'superagent_list': value=[...configs.values()].map(config=>({
@@ -29,7 +96,93 @@ export async function invokeSuperagent<T>(
       blockedCount:(tickets.get(config.id)||[]).filter(ticket=>ticket.state==='blocked').length,
       lastActivityAt:Date.now(),
     }));break;
+    case 'superagent_roster':{
+      const c=get(args.orchestrationId);
+      value={orchestrationId:c.id,policyRevision:c.policyRevision,
+        coordinatorBotId:c.coordinatorBotId,workerBotIds:[...c.workerBotIds],
+        reviewerBotIds:[...c.reviewerBotIds],councilRequired:!!c.councilRequired,
+        executionReady:c.workerBotIds.length===1 && c.reviewerBotIds.length===0};
+      break;
+    }
+    case 'superagent_strategy_get':
+    case 'superagent_strategy_update': {
+      const config = get(args.orchestrationId);
+      let saved = strategyFor(config.id);
+      if(command==='superagent_strategy_update'){
+        const request=args.input;
+        if(config.enabled || config.policyRevision!==args.expectedRevision ||
+           (tickets.get(config.id)||[]).some(ticket=>!['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)))
+          throw Error('Settle Tickets and disable this Team before changing strategy.');
+        const validPriority=['balanced','cost','latency','throughput','quality'].includes(request?.priority);
+        if(!validPriority || !Number.isInteger(request.maxConcurrentTasks) ||
+           request.maxConcurrentTasks<1 || request.maxConcurrentTasks>8 ||
+           !Number.isInteger(request.maxAttemptsPerAssignment) ||
+           request.maxAttemptsPerAssignment<1 || request.maxAttemptsPerAssignment>8 ||
+           !Number.isInteger(request.attemptTimeoutMs) ||
+           request.attemptTimeoutMs<60_000 || request.attemptTimeoutMs>1_800_000 ||
+           [request.tokenCeiling,request.estimatedCostCeilingMinor]
+            .some(value=>value!==undefined && (!Number.isSafeInteger(value)||value<=0)))
+          throw Error('Invalid bounded Team strategy.');
+        const next:Strategy={
+          settings:{priority:request.priority,attemptTimeoutMs:request.attemptTimeoutMs,
+            tokenCeiling:request.tokenCeiling,
+            estimatedCostCeilingMinor:request.estimatedCostCeilingMinor,
+            subagentDelegationEnabled:request.subagentDelegationEnabled===true},
+          maxConcurrentTasks:request.maxConcurrentTasks,
+          maxAttemptsPerAssignment:request.maxAttemptsPerAssignment,
+        };
+        if(JSON.stringify(saved)!==JSON.stringify(next)){
+          saved=next;teamStrategies.set(config.id,saved);
+          config.policyRevision++;config.teamVersion++;
+        }
+      }
+      const enableBlockers = [
+        ...(saved.maxConcurrentTasks!==1
+          ? ['Parallel writes over one leased checkout are not supported; the current native scheduler serializes conflicting workers.'] : []),
+        ...(saved.settings.tokenCeiling!==undefined
+          ? ['A native provider token meter is not available for a hard token ceiling.'] : []),
+        ...(saved.settings.estimatedCostCeilingMinor!==undefined
+          ? ['A verified price/usage meter is not available for a hard monetary ceiling.'] : []),
+        ...(saved.settings.subagentDelegationEnabled
+          ? ['The Team strategy alone cannot authorize descendant execution; a separate exact native delegation policy is required.'] : []),
+      ];
+      value={orchestrationId:config.id,policyRevision:config.policyRevision,
+        teamVersion:config.teamVersion,settings:{...saved.settings},
+        maxConcurrentTasks:saved.maxConcurrentTasks,
+        maxAttemptsPerAssignment:saved.maxAttemptsPerAssignment,
+        executableParallelWorkers:1,tokenMeteringAvailable:false,
+        pricedCostMeteringAvailable:false,nestedChildAdmissionAvailable:true,enableBlockers};
+      break;
+    }
     case 'superagent_tickets':value=tickets.get(args.orchestrationId)||[];break;
+    case 'superagent_observed_child_tree':{
+      const ticket=[...tickets.values()].flat().find(t=>t.id===args.ticketId);
+      if(!ticket)throw Error('Ticket not found.');
+      const team=get(ticket.orchestrationId);
+      value={ticketId:ticket.id,teamVersion:team.teamVersion,
+        configuredWorkers:team.workerBotIds.length,councilReviewers:team.reviewerBotIds.length,
+        observedChildren:0,reportedRunning:0,reportedWaiting:0,reportedNested:0,
+        hasUnresolvedLineage:false,truncated:false,canSpawnNativeChildren:false,
+        providerStatusIsNotVerification:true,nodes:[]};
+      break;
+    }
+    case 'superagent_delivery_inspect':{
+      const ticket=[...tickets.values()].flat().find(t=>t.id===args.ticketId);
+      if(!ticket)throw Error('Ticket not found.');
+      const state=ticket.state;
+      value={
+        ticketId:ticket.id,ticketRevision:ticket.revision,ticketState:state,
+        deliveryState:state==='completed'?'native_complete_delivery_unverified':
+          ['blocked','failed','stopped','interrupted','inconclusive'].includes(state)?'blocked':
+          ['waiting_approval','waiting_review'].includes(state)?'awaiting_native_review':'in_progress',
+        totalWorkItems:0,verifiedWorkItems:0,unresolvedExternalEffects:0,
+        repositoryHeadSha:null,worktreeStatusSha256:null,worktreeDiffSha256:null,
+        observedStatusEntries:null,checkoutObservation:'preview_only_no_native_git',
+        sourceAttribution:'not_attributed_to_ticket',
+        testExecutionVerified:false,ciResultVerified:false,
+        externalDeliveryVerified:false,checkedAt:Date.now(),readOnly:true,
+      };break;
+    }
     case 'superagent_snapshot':
     case 'superagent_mandate':
     case 'superagent_assignments':
@@ -44,47 +197,61 @@ export async function invokeSuperagent<T>(
       if(command==='superagent_assignments')value=assignments.get(t.id)||[];
       else if(command==='superagent_activity')value=activity.get(t.id)||[];
       else if(command==='superagent_mandate')value=mandate;
-      else value={ticket:t,mandate,assignments:assignments.get(t.id)||[],activity:activity.get(t.id)||[]};
+      else value={ticket:t,teamSnapshot:teamSnapshots.get(t.id)||null,mandate,
+        assignments:assignments.get(t.id)||[],activity:activity.get(t.id)||[]};
       break;
     }
     case 'superagent_source_thread_links':
       value=threadLinks.get(args.ticketId)||[];break;
+    case 'superagent_source_fetch_thread':
+      value={previewOnly:true,message:`Preview only. Manual Observe supports ${PREVIEW_OBSERVE_EVENT_KINDS.join(', ')}. No GitHub request was sent and no event or decision receipt was stored.`};break;
     // These are preview-only references. Real native code verifies source and
     // Ticket orchestration ownership and rejects conflicting thread reuse.
     case 'superagent_source_link_thread':
       throw Error('Source linking requires a native trusted event source.');
     case 'superagent_create':{
-      const input=args.input;const a=find(input.coordinatorBotId),b=find(input.workerBotId);
-      if(!input.name?.trim()||a.id===b.id||configName(input.name))throw Error('Invalid or duplicate orchestration.');
-      const c:Config={id:crypto.randomUUID(),name:input.name,coordinatorBotId:a.id,
-        workerBotId:b.id,projectId:b.projectId,enabled:false,policyRevision:1};
-      configs.set(c.id,c);value=c;break;
+      const input=args.input,roles=resolveRoles(input),b=roles.workers[0];
+      if(!input.name?.trim()||configName(input.name))throw Error('Invalid or duplicate orchestration.');
+      const c:Config={id:crypto.randomUUID(),name:input.name,coordinatorBotId:roles.coordinator.id,
+        workerBotId:b.id,workerBotIds:roles.workerBotIds,reviewerBotIds:roles.reviewerBotIds,
+        teamVersion:1,projectId:b.projectId,enabled:false,policyRevision:1,
+        councilRequired:!!input.councilRequired};
+      configs.set(c.id,c);teamStrategies.set(c.id,defaultStrategy());value=c;break;
     }
     case 'superagent_update':{
       const c=get(args.orchestrationId),input=args.input;
       if(c.enabled||c.policyRevision!==args.expectedRevision||(tickets.get(c.id)?.length||0)>0)
         throw Error('Preset cannot change after use or while enabled.');
-      const a=find(input.coordinatorBotId),b=find(input.workerBotId);
-      if(!input.name?.trim()||a.id===b.id||configName(input.name)?.id!==undefined&&configName(input.name)?.id!==c.id)
+      const roles=resolveRoles(input),b=roles.workers[0];
+      if(!input.name?.trim()||configName(input.name)?.id!==undefined&&configName(input.name)?.id!==c.id)
         throw Error('Invalid or duplicate preset.');
-      c.name=input.name;c.coordinatorBotId=a.id;c.workerBotId=b.id;c.projectId=b.projectId;c.policyRevision++;
+      c.name=input.name;c.coordinatorBotId=roles.coordinator.id;c.workerBotId=b.id;
+      c.workerBotIds=roles.workerBotIds;c.reviewerBotIds=roles.reviewerBotIds;
+      c.projectId=b.projectId;c.teamVersion++;c.policyRevision++;
       value=c;break;
     }
     case 'superagent_set_enabled':{
       const c=get(args.orchestrationId);if(c.policyRevision!==args.expectedRevision)throw Error('Stale policy.');
+      const strategy=strategyFor(c.id);
+      if(args.enabled && (strategy.maxConcurrentTasks!==1 ||
+          strategy.settings.tokenCeiling!==undefined ||
+          strategy.settings.estimatedCostCeilingMinor!==undefined ||
+          strategy.settings.subagentDelegationEnabled))
+          throw Error('Requested Team policy cannot run with current native capabilities.');
       if(c.enabled!==args.enabled){c.enabled=args.enabled;c.policyRevision++;}
       value=c;break;
     }
     case 'superagent_delete':{
       const c=get(args.orchestrationId);if(c.enabled||c.policyRevision!==args.expectedRevision||
         (tickets.get(c.id)?.length||0)>0)throw Error('Cannot delete used or enabled preset.');
-      configs.delete(c.id);value=null;break;
+      configs.delete(c.id);teamStrategies.delete(c.id);value=null;break;
     }
     case 'superagent_submit':
     case 'superagent_submit_coordinated':{
       const c=get(args.orchestrationId);if(!c.enabled)throw Error('Orchestration disabled.');
       const t:Ticket={id:crypto.randomUUID(),orchestrationId:c.id,objective:args.objective,
         state:'running',revision:0,evidence:null};
+      teamSnapshots.set(t.id,makeTeamSnapshot(c));
       tickets.set(c.id,[...(tickets.get(c.id)||[]),t]);
       assignments.set(t.id,[{id:'preview-assignment-'+t.id,botId:c.workerBotId,
         sessionId:'preview-session-'+t.id,attempt:1,state:'running'}]);
@@ -121,6 +288,32 @@ export async function invokeSuperagent<T>(
       activity.set(t.id,events);
       value=t;break;
     }
+    case 'superagent_dispatch_worker_with_write_grant':{
+      const t=[...tickets.values()].flat().find(t=>t.id===args.ticketId);
+      if(!t)throw Error('Ticket not found.');
+      if(t.revision!==args.expectedRevision)throw Error('Ticket revision changed before preview.');
+      const paths=args.allowedPaths;
+      if(!Array.isArray(paths)||paths.length===0||paths.length>16||paths.some((path:unknown)=>typeof path!=='string'))
+        throw Error('Authorize between 1 and 16 exact file paths.');
+      const unique=new Set<string>();
+      for(const path of paths as string[]){
+        const invalidSegment=path.split('/').some(part=>part===''||part==='.'||part==='..'||
+          part.toLowerCase()==='.git'||[...part].some(character=>{
+            const code=character.codePointAt(0)??0;return code<=0x1f||(code>=0x7f&&code<=0x9f);
+          }));
+        if(new TextEncoder().encode(path).length>4096||path.includes('\\')||path.includes('\0')||
+           path.includes(':')||invalidSegment)throw Error('Invalid exact project-relative file path.');
+        if(unique.has(path))throw Error('A write scope cannot repeat a file path.');
+        unique.add(path);
+      }
+      value={previewOnly:true,ticket:t,allowedPaths:[...(paths as string[])],
+        message:'Preview only. No native authorization or worker dispatch occurred.'};
+      break;
+    }
+    case 'superagent_issue_comment':{
+      value={previewOnly:true,message:'Preview only. No GitHub comment was sent.'};
+      break;
+    }
     case 'superagent_manifest_export':{
       value={schemaVersion:1,orchestrations:[...configs.values()].map(c=>({
         name:c.name,coordinatorBot:find(c.coordinatorBotId).name,workerBot:find(c.workerBotId).name,
@@ -148,6 +341,7 @@ export async function invokeSuperagent<T>(
           const preset=doc.orchestrations.find((item:any)=>item.name===name);
           const a=bots.find(b=>b.name===preset.coordinatorBot)!,b=bots.find(b=>b.name===preset.workerBot)!;
           const c:Config={id:crypto.randomUUID(),name,coordinatorBotId:a.id,workerBotId:b.id,
+            workerBotIds:[b.id],reviewerBotIds:[],teamVersion:1,
             projectId:b.projectId,enabled:false,policyRevision:1};configs.set(c.id,c);
         }
         value={created:pending,unchanged};

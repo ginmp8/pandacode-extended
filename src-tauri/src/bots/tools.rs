@@ -37,9 +37,27 @@ fn names() -> Vec<String> {
     catalog().iter().filter_map(|tool| tool["name"].as_str().map(str::to_owned)).collect()
 }
 
+/// A SuperAgent Assignment is NOT an ordinary bot conversation. Its native
+/// read-only Mandate never authorizes bot memory, schedules, notifications,
+/// channel posts or delegation. Recheck immediately before dispatch too:
+/// removing a tool from the advertised catalog alone is not a security fence.
+pub(crate) fn ensure_ambient_bot_tool_permission(
+    store: &crate::storage::Store, session_id: &str,
+) -> Result<()> {
+    if crate::superagent::read_only_policy(store, session_id)?.is_some() {
+        return Err("policy_unsupported: SuperAgent assignments cannot invoke ambient bot tools.".into());
+    }
+    Ok(())
+}
+
 /// Adds bot tools when the task belongs to a bot; otherwise returns the host unchanged.
 pub(crate) fn with_bot(base: Option<ToolHost>, app: tauri::AppHandle, session_id: String, stopped: Arc<AtomicBool>) -> Option<ToolHost> {
-    let owned = app.state::<AppState>().store.lock().ok().and_then(|store| owner_of(&store, &session_id).ok().flatten()).is_some();
+    let owned = app.state::<AppState>().store.lock().ok().and_then(|store| {
+        // A blocked, revoked, or active SuperAgent session must not advertise
+        // the bot's ordinary self-scoped tools, even if it has a bot_threads row.
+        ensure_ambient_bot_tool_permission(&store, &session_id).ok()?;
+        owner_of(&store, &session_id).ok().flatten()
+    }).is_some();
     if !owned {
         return base;
     }
@@ -70,7 +88,11 @@ pub(crate) fn with_bot(base: Option<ToolHost>, app: tauri::AppHandle, session_id
 
 pub(crate) async fn dispatch(app: &tauri::AppHandle, session_id: &str, name: &str, args: &Value) -> Result<Value> {
     let state = app.state::<AppState>();
-    let (bot, source_thread) = owner_of(&*state.store.lock().map_err(|e| e.to_string())?, session_id)?.ok_or("This task no longer belongs to a bot.")?;
+    let (bot, source_thread) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        ensure_ambient_bot_tool_permission(&store, session_id)?;
+        owner_of(&store, session_id)?.ok_or("This task no longer belongs to a bot.")?
+    };
     let string = |key: &str| args[key].as_str().unwrap_or_default().to_owned();
     if name == "pandacode_bot_post_channel" {
         let posted = {

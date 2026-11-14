@@ -1037,7 +1037,7 @@ fn live_subagents(state: &AppState, session_id: &str) -> Result<Option<Arc<Mutex
 
 /// A task's children as list rows. Live snapshots are read after the store, so stale disk data
 /// can't beat an in-memory update or the final flush, and neither lock waits on the other.
-fn task_subagents(state: &AppState, session_id: &str) -> Result<Vec<subagent_state::SubagentRow>> {
+pub(crate) fn task_subagents(state: &AppState, session_id: &str) -> Result<Vec<subagent_state::SubagentRow>> {
     let live = {
         // Held only when no run owns the task, so none can start while its children are settled.
         let agents = state.agents.lock().map_err(|error| error.to_string())?;
@@ -1869,6 +1869,10 @@ fn prepare_cloud_attach(
     stopped: Arc<AtomicBool>,
 ) -> Result<PreparedRun> {
     let session_id = session.id.clone();
+    // Cloud reattachment is a separate provider entrypoint from normal run
+    // preparation. Never let a task-owned SuperAgent session reattach through
+    // this unrestricted path (reviewer_boundary=false, reviewer_policy=None).
+    superagent::guard_cloud_attach(store, &session_id)?;
     let cloud = cloud_agents::load(store, &session_id)?
         .filter(|cloud| cloud.active())
         .ok_or("This cloud run already ended.")?;
@@ -2445,14 +2449,28 @@ async fn launch_operation_admitted(
                 config.reviewer_policy.as_ref(),
                 Some(architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly)
             ) {
-                // Read-only reviewers still need the two task-scoped, native skill
-                // retrieval/verification tools. Never expose Architect or bot tools.
-                let host = team.as_ref().and_then(|admission| {
-                    architect::reviewer_skill_host(
-                        app.clone(), session_id.clone(), stopped.clone(), admission,
-                    )
-                });
-                (host, false, None)
+                let bounded=superagent::write_grants::host(
+                    app.clone(),session_id.clone(),stopped.clone(),
+                ).and_then(|existing|superagent::subagents::extend_host(
+                    existing,app.clone(),session_id.clone(),stopped.clone(),
+                ));
+                match bounded {
+                    Err(error)=>(None,false,Some(error)),
+                    // A SuperAgent Worker may receive exactly the native
+                    // user-granted file tool and/or the bounded child-spawn
+                    // tool. Codex validates this restricted host catalog.
+                    Ok(Some(host))=>(Some(host),false,None),
+                    Ok(None)=>{
+                        // Ordinary Council reviewers never inherit a spawn or
+                        // executor write grant from their bot's normal profile.
+                        let host=team.as_ref().and_then(|admission|
+                            architect::reviewer_skill_host(
+                                app.clone(),session_id.clone(),stopped.clone(),admission,
+                            )
+                        );
+                        (host,false,None)
+                    }
+                }
             } else {
                 (None, false, None)
             };
@@ -2723,6 +2741,35 @@ async fn launch_operation_admitted(
             architect::completed(&app, &session_id, team.as_ref(), successful, was_stopped, provider_error.as_deref(), registry);
         }
         drop(registry);
+        // Persist a just-finished native Council reviewer result before its
+        // SuperAgent callback inspects the native score and skill receipts.
+        if let Ok(db) = store.lock() {
+            if let Err(error) = superagent::council_adapter::finalize_after_native_run(&db,&session_id) {
+                eprintln!("SuperAgent Council finalization failed: {error}");
+            }
+        }
+        // Successful bot workers have no failover path. Settle their Ticket
+        // synchronously so the exact artifact is frozen before actual native
+        // reviewers are dispatched; the later gateway callback is idempotent.
+        if successful && !was_stopped {
+            let required = store.lock().ok().and_then(|db| {
+                superagent::council_adapter::required_worker_session(&db,&session_id).ok()
+            }).unwrap_or(false);
+            if required {
+                let reply = store.lock().ok().and_then(|db| db.db.query_row(
+                    "SELECT content FROM messages WHERE session_id=?1 AND role='assistant' ORDER BY id DESC LIMIT 1",
+                    [&session_id],|row| row.get::<_,String>(0),
+                ).ok()).unwrap_or_default();
+                let settled = store.lock().ok().and_then(|db| {
+                    superagent::on_run_finished(&db,&session_id,true,&reply).ok()
+                }).unwrap_or(false);
+                if settled {
+                    if let Err(error) = superagent::council_adapter::start_after_worker_completion(&app,&session_id) {
+                        eprintln!("SuperAgent Council dispatch failed: {error}");
+                    }
+                }
+            }
+        }
         // A turn's approval requests expire even if Council is still reviewing
         // or the user stopped the run. This must precede deferred final callbacks.
         bots::gateway::turn_ended(&session_id);
@@ -2732,6 +2779,26 @@ async fn launch_operation_admitted(
         if !was_stopped {
             bots::run_finished(&app, &session_id, successful);
         }
+        // The native scheduler reacts to durable Ticket/Council state. It
+        // never treats a bot turn as approval and cannot issue new grants.
+        // CI or a paused/unavailable provider does not block other ready work.
+        let demand_app=app.clone();
+        tauri::async_runtime::spawn(async move {
+            let planned={
+                let state=demand_app.state::<AppState>();
+                let locked=state.store.lock();
+                match locked {
+                    Ok(store)=>superagent::scheduler::capture_coordinator_plans(&store),
+                    Err(error)=>Err(error.to_string()),
+                }
+            };
+            if let Err(error)=planned {
+                eprintln!("SuperAgent structured plan capture failed: {error}");
+            }
+            if let Err(error)=superagent::scheduler::advance(&demand_app).await {
+                eprintln!("SuperAgent dependency scheduler failed: {error}");
+            }
+        });
         // Start the next turn's agent now, so a follow-up skips the CLI's own startup.
         if let (true, Some((mut next, (tools, approvals)))) = (successful && !was_stopped, warm_next) {
             // A turn that ended without any reply (seen after background commands) may have
@@ -4088,10 +4155,19 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     app.manage(architect::Runtime::default());
     architect::watchdog::watch(app.handle().clone());
     bots::start(app.handle());
+    // Fail closed on starts interrupted before their exact native session was
+    // linked. Startup recovery never replays reviewer dispatch.
+    superagent::council_adapter::recover_starting(app.handle());
     skills::begin_startup_sync(app.handle().clone());
     // Machine threads that settled while PandaCode was closed wake their idle tasks.
     remote::orchestrate::reconcile(app.handle());
     schedules::start(app.handle().clone());
+    // One native scheduler for desktop and serve. It resumes only already
+    // authorized Demand DAGs; no startup GitHub Auto or ambient grants.
+    superagent::scheduler::start_native(app.handle().clone());
+    // Authenticated GH source polling is inert until a local user explicitly
+    // issues an expiring exact-repository/event/actor Auto grant.
+    superagent::auto::start_native(app.handle().clone());
     Ok(dir)
 }
 
@@ -4437,29 +4513,60 @@ pub fn run() {
                 bots::bot_project_ids,
                 bots::bot_message,
                 superagent::superagent_create,
+                superagent::strategy::superagent_strategy_get,
+                superagent::strategy::superagent_strategy_update,
                 superagent::events::superagent_source_create,
                 superagent::events::superagent_source_list,
                 superagent::events::superagent_source_decisions,
+                superagent::events::superagent_source_integrity,
                 superagent::events::superagent_source_set_mode,
                 superagent::events::superagent_source_observe,
+                superagent::events::superagent_source_poll_authenticated,
+                superagent::events::superagent_source_observe_check_run,
+                superagent::events::superagent_source_fetch_thread,
                 superagent::events::superagent_source_link_thread,
+                superagent::events::superagent_source_link_issue_pull,
+                superagent::events::superagent_source_unlink_thread,
                 superagent::events::superagent_source_thread_links,
+                superagent::events::superagent_source_thread_activity,
                 superagent::superagent_list,
+                superagent::roster::superagent_roster,
+                superagent::roster::superagent_roster_update,
+                superagent::roster::superagent_effective_team,
                 superagent::superagent_set_enabled,
                 superagent::superagent_update,
                 superagent::superagent_delete,
                 superagent::superagent_ticket,
                 superagent::superagent_mandate,
                 superagent::superagent_tickets,
+                superagent::superagent_all_demands,
+                superagent::superagent_review_inbox,
                 superagent::superagent_assignments,
                 superagent::superagent_activity,
                 superagent::superagent_snapshot,
+                superagent::delivery::superagent_delivery_inspect,
+                superagent::children::superagent_observed_child_tree,
+                superagent::superagent_graph,
+                superagent::scheduler::superagent_plan_demand,
+                superagent::scheduler::superagent_demand_plan,
+                superagent::scheduler::superagent_start_demand,
+                superagent::scheduler::superagent_authorize_work_item_write,
+                superagent::auto::superagent_auto_status,
+                superagent::auto::superagent_auto_authorize,
+                superagent::auto::superagent_auto_revoke,
+                superagent::subagents::superagent_enable_subagents,
+                superagent::subagents::superagent_subagents,
+                superagent::superagent_effect_receipts,
+                superagent::superagent_preflight,
                 superagent::superagent_submit,
                 superagent::superagent_submit_coordinated,
                 superagent::superagent_dispatch_worker,
+                superagent::superagent_dispatch_worker_with_write_grant,
+                superagent::superagent_revoke_worker_write_grant,
                 superagent::superagent_retry,
                 superagent::superagent_accept,
                 superagent::superagent_reject,
+                superagent::superagent_issue_comment,
                 superagent::manifest::superagent_manifest_export,
                 superagent::manifest::superagent_manifest_preview,
                 superagent::manifest::superagent_manifest_import,
@@ -4535,6 +4642,7 @@ pub fn run() {
                 architect::architect_set_council,
                 architect::architect_council_reviewer_options,
                 architect::architect_council_accept,
+                superagent::superagent_accept_council,
                 architect::architect_start,
                 architect::architect_control,
                 architect::architect_worker_messages,

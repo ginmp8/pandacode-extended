@@ -3884,8 +3884,7 @@ fn child_only_parallel_root_finishes_from_real_revalidated_composite_seats() {
 }
 
 
-#[test]
-fn nested_m5_parallel_terminal_requires_real_root_and_child_callbacks() {
+fn assert_nested_m5_root_and_child_callbacks(strategy: council::CouncilExecutionStrategy) {
     let (state, sid) = state_fixture();
     {
         let store = state.store.lock().unwrap();
@@ -3897,6 +3896,7 @@ fn nested_m5_parallel_terminal_requires_real_root_and_child_callbacks() {
         ).unwrap();
         let mut root = load(&store, &sid).unwrap().unwrap();
         let mut config = on(9.0, 3, 0);
+        config.strategy = strategy;
         config.automatic_reviewers = 1;
         config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
             bot_id: "security-child".into(), child_reviewers: 2,
@@ -3952,6 +3952,30 @@ fn nested_m5_parallel_terminal_requires_real_root_and_child_callbacks() {
     assert_eq!(saved.council_status.as_ref().unwrap().state, "passed");
     assert_eq!(saved.council_status.as_ref().unwrap().lowest, Some(9.5));
     assert!(verified_council_pass(&store, &saved));
+    if strategy == council::CouncilExecutionStrategy::Escalated {
+        let children = child_council::verified_parent_seats(&store, &saved)
+            .unwrap().unwrap();
+        let mut forced = saved.clone();
+        forced.config.council.as_mut().unwrap().force_escalation = true;
+        assert!(council::status_for_authenticated_children(&forced, &children).is_none(),
+            "forced S2 must wait for a second fresh native root/child wave");
+        let mut contradicted = saved.clone();
+        contradicted.workers.iter_mut()
+            .find(|worker| worker.council.is_some()).unwrap()
+            .council.as_mut().unwrap().reported_conflict = true;
+        assert!(council::status_for_authenticated_children(&contradicted, &children).is_none(),
+            "native reviewer conflict must trigger independent escalation");
+        let mut historical = saved.clone();
+        let mut prior = historical.workers.iter()
+            .find(|worker| worker.council.is_some()).unwrap().clone();
+        prior.id = "historical-failed-reviewer".into();
+        prior.session_id = "historical-failed-session".into();
+        prior.abandoned = true;
+        prior.council.as_mut().unwrap().score = Some(7.0);
+        historical.workers.push(prior);
+        assert!(council::status_for_authenticated_children(&historical, &children).is_none(),
+            "a superseded failing reviewer still requires a fresh escalation wave");
+    }
     let root_worker = saved.workers.iter()
         .find(|worker| worker.council.is_some()).unwrap();
     let authority_key = format!("native-reviewer-authority:{}", root_worker.id);
@@ -3970,4 +3994,14 @@ fn nested_m5_parallel_terminal_requires_real_root_and_child_callbacks() {
         .find(|worker| worker.id == root_worker.id).unwrap()
         .council.as_mut().unwrap().score = Some(10.0);
     assert!(!verified_council_pass(&store, &forged));
+}
+
+#[test]
+fn nested_m5_parallel_terminal_requires_real_root_and_child_callbacks() {
+    assert_nested_m5_root_and_child_callbacks(council::CouncilExecutionStrategy::Parallel);
+}
+
+#[test]
+fn nested_m5_escalated_clean_first_wave_passes_without_synthetic_reviewers() {
+    assert_nested_m5_root_and_child_callbacks(council::CouncilExecutionStrategy::Escalated);
 }

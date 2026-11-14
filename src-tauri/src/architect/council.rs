@@ -1124,10 +1124,14 @@ pub(super) fn reviewer_source_for(
 ) -> Result<CouncilReviewerSource> {
     let config = team.config.council.as_ref().ok_or("Council is off.")?;
     let nested = !config.nested_bot_reviewers.is_empty();
-    // S2/S3 nested transitions still require native child replay/challenge
-    // authorization. Do not dispatch a root reviewer as a shortcut.
-    if nested && config.strategy != CouncilExecutionStrategy::Parallel {
-        return Err("child_council_unavailable: nested S2/S3 root reviewers require native escalation/challenge admission.".into());
+    // S2 may admit only enabled first-wave root sources. A fully clean,
+    // always-nested first wave can pass; forced or triggered escalation must
+    // await an independently admitted second child/root wave. S3 remains closed.
+    if nested && config.strategy == CouncilExecutionStrategy::TwoPhase {
+        return Err("child_council_unavailable: nested S3 needs native independent challenge admission.".into());
+    }
+    if nested && config.strategy == CouncilExecutionStrategy::Escalated && seat.round > 1 {
+        return Err("child_council_unavailable: nested S2 escalation needs a fresh native child/root wave.".into());
     }
     let selected = !config.reviewer_bot_ids.is_empty();
     let automatic = config.automatic_reviewers > 0 || (!selected && !nested);
@@ -1770,13 +1774,25 @@ pub(super) fn status_for_authenticated_children(
     let automatic_needed = config.automatic_reviewers;
     let root_needed = direct_needed + automatic_needed;
     if !matches!(config.mode(), "m4" | "m5" | "m6" | "m7")
-        || config.strategy != CouncilExecutionStrategy::Parallel
+        || (config.strategy != CouncilExecutionStrategy::Parallel
+            && !(config.strategy == CouncilExecutionStrategy::Escalated && !config.force_escalation))
         || accepted(team)
         || team.council_since <= 0
         || !(MIN_REVIEWERS..=MAX_REVIEWERS).contains(&config.needed())
         || children.len() != config.nested_bot_reviewers.len()
         || children.len() + root_needed != config.needed()
         || latest_round(team) > 1
+        // An abandoned/replaced low-scoring reviewer still triggers S2.
+        // A clean later snapshot must not conceal that first-wave history.
+        || (config.strategy == CouncilExecutionStrategy::Escalated
+            && team.workers.iter().any(|worker| {
+                worker.created_at >= team.council_since
+                    && worker.council.as_ref().is_some_and(|seat| {
+                        worker.abandoned || seat.round != 1
+                            || seat.score.is_none_or(|score| score < config.target)
+                            || seat.reported_severe_finding || seat.reported_conflict
+                    })
+            }))
         || team.workers.iter().any(|worker| !worker.read_only && unsettled(&worker.status))
         || (root_needed > 0 && stale(team, 1))
     {

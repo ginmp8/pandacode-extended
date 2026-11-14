@@ -638,6 +638,21 @@ pub(super) fn verified_parent_seats(
             ready = false;
             continue;
         };
+        // A previously failed, replaced or contradictory child review is an
+        // S2 trigger, not a clean first-wave success. Retain the native receipt
+        // for inspection, but withhold root approval until fresh admission exists.
+        if config.strategy == super::council::CouncilExecutionStrategy::Escalated
+            && (child.workers.len() != choice.child_reviewers
+                || child.workers.iter().any(|worker| {
+                    worker.abandoned || worker.status != "completed"
+                        || worker.council.as_ref().is_none_or(|seat| {
+                            seat.score.is_none_or(|score| score < choice.child_target.max(config.target))
+                                || seat.reported_severe_finding || seat.reported_conflict
+                        })
+                }))
+        {
+            ready = false;
+        }
         if seat.parent_worker_id.is_empty() || seat.child_session_id.is_empty()
             || !bots.insert(seat.bot_id.clone())
             || !workers.insert(seat.parent_worker_id.clone())

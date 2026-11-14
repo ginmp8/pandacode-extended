@@ -1774,6 +1774,29 @@ fn assignment_role_authorized(
     })
 }
 
+/// Fence the actual provider session to its admission-time native Team
+/// profile. Mutating a session cannot elevate its model, mode or harness, while
+/// changes to a reusable bot must not rewrite an already admitted session.
+/// Pre-v46 legacy tasks remain read-only under their original no-tools Mandate.
+fn admitted_session_matches_profile(
+    store: &Store, ticket_id: &str, bot_id: &str, role: &str,
+    session: &storage::Session,
+) -> Result<bool> {
+    let Some(profile) = roster::ticket_profile(store, ticket_id)? else {
+        return Ok(true);
+    };
+    let Some(member) = profile.members.iter()
+        .find(|member| member.role == role && member.bot_id == bot_id)
+    else {
+        return Ok(false);
+    };
+    Ok(session.project_id == member.project_id
+        && session.provider == member.provider
+        && session.model == member.model
+        && session.mode == member.mode
+        && session.reasoning_effort.as_deref().unwrap_or("") == member.reasoning_effort)
+}
+
 /// Only the active, user-admitted read-only assignment is allowed to run.
 /// Leverages the existing provider-level Council isolation (native plan,
 /// tool-host removal, external MCP checks and permission denial), not a prompt.
@@ -1862,6 +1885,16 @@ pub(crate) fn read_only_policy(
         let active_bot = bots::get(store, &scope.bot_id)?;
         let coordinator = bots::get(store, &scope.coordinator_id)?;
         let assigned_session = store.session(session_id)?;
+        let assigned_role = if scope.bot_id == scope.coordinator_id {
+            "coordinator"
+        } else {
+            "worker"
+        };
+        if !admitted_session_matches_profile(
+            store, &scope.ticket_id, &scope.bot_id, assigned_role, &assigned_session,
+        )? {
+            return Err("policy_unsupported: native SuperAgent session profile differs from admitted Demand.".into());
+        }
         if coordinator.paused || active_bot.paused || active_bot.project_id != assigned_session.project_id
             || (scope.bot_id == scope.worker_id && active_bot.project_id != scope.project_id)
             || (scope.bot_id == scope.worker_id && !coordinator_plan_current(
@@ -2072,8 +2105,17 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     // callback. A stale success must not become approvable after global pause.
     let within_budget = assignment_within_budget(started_at, storage::now());
     let thread_current = assignment_thread_current(store, session_id, &task_id)?;
+    // A provider callback cannot authorize a changed runtime profile, even
+    // when the original bot and native Ticket still exist.
+    let session_profile_current = store.session(session_id).ok()
+        .and_then(|session| admitted_session_matches_profile(
+            store, &task_id, &bot_id,
+            if coordinator { "coordinator" } else { "worker" }, &session,
+        ).ok())
+        .unwrap_or(false);
     let authorized = execution_permitted(
-        authorized && role_current && provenance_ok && within_budget && thread_current,
+        authorized && role_current && provenance_ok && within_budget && thread_current
+            && session_profile_current,
         crate::feature_controls::get().bots_paused,
     );
     let next = if !authorized { "blocked" }
@@ -3446,6 +3488,64 @@ mod tests {
             [&ticket.id], |row| row.get::<_, String>(0),
         ).unwrap(), "uncertain");
         assert!(inspect_headless_status(&store.path, Some("unknown-ticket")).is_err());
+    }
+
+    #[test]
+    fn admitted_session_profile_drift_denies_provider_and_final_callback() {
+        for (field, changed) in [
+            ("provider", "claude"),
+            ("model", "unauthorized-model"),
+            ("mode", "ask"),
+            ("reasoning_effort", "high"),
+        ] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let key = format!("session-drift-{field}");
+            let (ticket, started) = admit(
+                &mut store, &cfg.id, "Session-bound inspection", &key, false,
+            ).unwrap();
+            assert!(started, "{field}");
+            let session_id = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(read_only_policy(&store, &session_id).unwrap().is_some());
+            // Only fixed test-owned SQL column names are used; model text
+            // never has permission to change the production session directly.
+            let change = format!("UPDATE sessions SET {field}=?2 WHERE id=?1");
+            store.db.execute(&change, params![session_id, changed]).unwrap();
+            assert!(read_only_policy(&store, &session_id).is_err(),
+                "{field} drift must deny native provider/tool admission");
+            assert!(on_run_finished(
+                &store, &session_id, true, "Untrusted apparent completion",
+            ).unwrap());
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked",
+                "{field} drift must not become a human-approvable result");
+            let grant = mandate(&store, &ticket.id).unwrap();
+            assert!(grant.allowed_tools.is_empty() && !grant.allowed_side_effects);
+        }
+    }
+
+    #[test]
+    fn admitted_session_survives_bot_profile_edits_without_inheriting_permissions() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &cfg.id, "Frozen provider inspection", "frozen-session", false,
+        ).unwrap();
+        assert!(started);
+        let session_id = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let original = store.session(&session_id).unwrap();
+        store.db.execute(
+            "UPDATE bots SET provider='claude',model='other-model',mode='full',
+             reasoning_effort='high' WHERE id='worker'",
+            [],
+        ).unwrap();
+        assert!(read_only_policy(&store, &session_id).unwrap().is_some());
+        let preserved = store.session(&session_id).unwrap();
+        assert_eq!(preserved.provider, original.provider);
+        assert_eq!(preserved.model, original.model);
+        assert_eq!(preserved.mode, original.mode);
+        assert_eq!(preserved.reasoning_effort, original.reasoning_effort);
+        assert!(on_run_finished(&store, &session_id, true, "Read-only evidence").unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "waiting_approval");
     }
 
     #[test]

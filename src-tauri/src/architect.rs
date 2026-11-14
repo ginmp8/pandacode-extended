@@ -9068,6 +9068,32 @@ pub(crate) fn completed_state(
         state, &agents, sid, admission, successful, stopped, None, notify,
     );
 }
+/// Recheck task-owned child callbacks against the live root before accepting
+/// a terminal update. A child generation alone cannot authorize a callback
+/// after its parent cycle, artifact or selected review seat was revoked.
+fn nested_council_callback_current(store: &Store, parent: &str) -> bool {
+    let link = match load_council_child_link(store, parent) {
+        Ok(None) => return true, // Legacy and root Architect callbacks.
+        Ok(Some(link)) => link,
+        Err(_) => return false,
+    };
+    if validate_council_child_link(store, parent).ok().flatten().is_none() {
+        return false;
+    }
+    let Ok(Some(root)) = load(store, &link.root_session_id) else {
+        return false;
+    };
+    active(&root.status)
+        && root.workers.iter().any(|worker| {
+            worker.id == link.root_worker_id
+                && worker.session_id == link.child_session_id
+                && !worker.abandoned
+                && matches!(worker.status.as_str(), "waiting" | "running" | "parked")
+                && worker.council.as_ref()
+                    .is_some_and(|seat| seat.round == link.root_round)
+        })
+}
+
 // Final persistence, removing the old run, and team settlement share the same
 // registry lock so a scheduler cannot claim a new turn between those steps.
 #[allow(clippy::too_many_arguments)]
@@ -9083,6 +9109,9 @@ fn completed_with_agents(
 ) {
     if let Some(admission) = admission {
         if let Ok(store) = state.store.lock() {
+            if !nested_council_callback_current(&store, &admission.parent) {
+                return;
+            }
             if let Ok(Some(mut team)) = load(&store, &admission.parent) {
                 if team.generation == admission.generation {
                     if let Some(index) = team.workers.iter().position(|w| w.session_id == sid) {

@@ -7244,6 +7244,29 @@ fn finished_composed_council_starts_a_strictly_new_cycle_even_when_old_review_is
 }
 
 #[test]
+fn stale_nested_council_callback_cannot_mutate_child_after_parent_revocation() {
+    let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();
+    assert!(nested_council_callback_current(&state.store.lock().unwrap(), &root_id),
+        "ordinary root callbacks keep their existing admission behavior");
+    {
+        let store = state.store.lock().unwrap();
+        let mut root = load(&store, &root_id).unwrap().unwrap();
+        root.status = "paused".into();
+        save(&store, &mut root).unwrap();
+        assert!(!nested_council_callback_current(&store, &child_id),
+            "a paused root cannot admit an in-flight task-owned child callback");
+    }
+    let previous = load(&state.store.lock().unwrap(), &child_id).unwrap().unwrap();
+    let sid = previous.workers[0].session_id.clone();
+    let admission = Admission { parent: child_id.clone(), generation: previous.generation };
+    completed_state(&state, &sid, Some(&admission), true, false, &mut |_| {});
+    let current = load(&state.store.lock().unwrap(), &child_id).unwrap().unwrap();
+    assert_eq!(current.workers[0].status, previous.workers[0].status);
+    assert_eq!(current.dispatch_revision, previous.dispatch_revision,
+        "a late callback must not credit work to a now-revoked child Council");
+}
+
+#[test]
 fn task_owned_child_council_reviewer_never_fails_over_to_another_harness() {
     let (state, _root_id, child_id, _) = nested_child_lifecycle_fixture();
     let store = state.store.lock().unwrap();

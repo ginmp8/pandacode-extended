@@ -180,3 +180,9 @@ states and the fixed versus OnTrigger budget boundary.
 - Reconciled PR #149's task-owned leaf failover restriction with PR #155's own nested Council runtime. A failed child reviewer keeps its frozen provider, model, native session and tool-policy boundary; a new independent review requires a new authorized seat.
 - Existing root/native worker fallback and the selected-bot freeze policy are unchanged.
 - Added a Rust regression using a nested Council fixture with two configured harnesses. Exact-HEAD Rust validation is delegated to CI; this change has not been locally compiled.
+
+## November 14: validate child callbacks against the active root
+
+- Adapted PR #149's final native leaf-callback authority recheck into the existing composed Council runtime. A task-owned child callback now requires its stored child link, current root authority, active root status and the original non-abandoned parent seat before it can mutate child results; ordinary root and legacy callbacks are unchanged.
+- Added a regression that simulates a revoked/paused root with an in-flight old-generation child callback and verifies that no child reviewer result or revision is credited.
+- This is an additional native guard, not a substitute for the existing immutable child terminal receipt or the root final approval gate.

@@ -122,6 +122,76 @@ test('versioned Team strategies keep unsupported budgets visible and prevent sil
   await expect(host.getByRole('button',{name:'Enable manual'})).toBeVisible();
 });
 
+test('GitHub Auto requires explicit bounded source consent and never grants writes', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await openOrchestrationWorkspace(page);
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const existing=document.querySelector<HTMLElement>('#superagent-host')!;
+    const host=document.createElement('div');
+    host.id='superagent-host';existing.replaceWith(host);
+    let revision=0;
+    let mode:'off'|'staging'|'active'='off';
+    const commands:string[]=[];
+    const source={id:'source-1',orchestrationId:'team-1',repository:'owner/repo',
+      actorFilter:'trusted-bot',eventKind:'issues.opened',
+      mode:'observe',policyRevision:2,lastSequence:0};
+    const policy=()=>({sourceId:source.id,mode,policyRevision:revision,
+      sourcePolicyRevision:source.policyRevision,maxEventsPerHour:4,maxEventsPerDay:20,
+      activationAt:0,staged:0,dispatched:0,uncertain:0,
+      autoWritesAllowed:false,pollingGapFree:false});
+    mountSuperagent(host,async(command,args) => {
+      commands.push(command);
+      if(command==='bots_list')return [
+        {id:'lead',name:'Coordinator',paused:false,projectId:'project'},
+        {id:'worker',name:'Worker',paused:false,projectId:'project'},
+      ] as never;
+      if(command==='superagent_list')return [{
+        id:'team-1',name:'Review Team',coordinatorBotId:'lead',workerBotId:'worker',
+        enabled:true,policyRevision:1,projectId:'project',
+        workerCount:1,reviewerCount:0,
+      }] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_source_list')return [source] as never;
+      if(command==='superagent_auto_policy_get')return policy() as never;
+      if(command==='superagent_auto_policy_update'){
+        if(args?.sourceId!==source.id || args?.expectedRevision!==revision)
+          throw Error('Source revision changed.');
+        const input=args?.input as {mode:'off'|'staging'|'active'};
+        mode=input.mode;revision++;
+        return policy() as never;
+      }
+      throw Error('Unexpected privileged command: '+command);
+    });
+    Object.assign(window,{autoCommandLog:()=>commands.slice()});
+  });
+  const host=page.locator('#superagent-host');
+  await expect(host).toHaveAttribute('aria-busy','false');
+  await host.getByRole('button',{name:'Sources',exact:true}).click();
+  await host.getByRole('button',{name:'Load sources'}).click();
+  await host.getByRole('button',{name:'Configure GitHub Auto'}).click();
+  const auto=host.getByRole('region',{name:'GitHub Auto source consent'});
+  await expect(auto).toContainText('Mode off');
+  await expect(auto).toContainText('Bounded authenticated polling is not gap-free');
+  const form=auto.locator('form[data-sa-form="auto-policy"]');
+  await form.getByRole('combobox',{name:'Native Auto mode'}).selectOption('staging');
+  await form.getByRole('spinbutton',{name:'Maximum events per hour (1–20)'}).fill('3');
+  await form.getByRole('spinbutton',{name:'Maximum events per day (1–100)'}).fill('15');
+  await form.getByRole('button',{name:'Save native Auto consent'}).click();
+  const approval=host.getByRole('alertdialog',{name:'Confirm orchestration action'});
+  await expect(approval).toContainText('without launching a Worker');
+  await approval.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(host.getByRole('status').filter({hasText:'GitHub Auto staging saved'})).toBeVisible();
+  await expect(auto).toContainText('Mode staging');
+  const commands=await page.evaluate(()=>
+    (window as unknown as {autoCommandLog:()=>string[]}).autoCommandLog());
+  expect(commands).toContain('superagent_auto_policy_update');
+  expect(commands).not.toContain('superagent_submit');
+  expect(commands).not.toContain('superagent_issue_comment');
+  expect(commands).not.toContain('superagent_dispatch_worker');
+});
+
 test('guided SuperAgent Team Builder validates five native-backed stages and saves Off', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

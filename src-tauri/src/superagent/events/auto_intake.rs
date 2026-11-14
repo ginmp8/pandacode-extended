@@ -564,6 +564,107 @@ pub async fn superagent_auto_policy_update(
 mod tests {
     use super::*;
 
+    fn test_store() -> Store {
+        let file=std::env::temp_dir()
+            .join(format!("sa-auto-test-{}.sqlite3",storage::id()));
+        let store=Store::open(&file).unwrap();
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_orchestrations
+             (id,name,coordinator_bot_id,worker_bot_id,project_id,created_at,updated_at)
+             VALUES('team','Native Auto fixture','lead','worker','project',?1,?1)",
+            [now],
+        ).unwrap();
+        store
+    }
+
+    #[test]
+    fn authenticated_auto_receipts_are_unique_quota_bound_and_revocable() {
+        let store=test_store();
+        let created=super::create_source(
+            &store,"team","owner/repo","trusted-bot","issues.opened",
+        ).unwrap();
+        let source=super::set_mode(
+            &store,&created.id,created.policy_revision,"observe",
+        ).unwrap();
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_auto_source_policies
+             (source_id,mode,policy_revision,source_policy_revision,
+              max_events_per_hour,max_events_per_day,activation_at,updated_at)
+             VALUES(?1,'staging',1,?2,1,2,?3,?3)",
+            params![&source.id,source.policy_revision,now-1000],
+        ).unwrap();
+        for (delivery,sequence,expected_state) in [
+            ("5000000201",5000000201_i64,"staged"),
+            ("5000000202",5000000202_i64,"quota_rejected"),
+        ] {
+            let event=EventEnvelope {
+                source_id:source.id.clone(),delivery_id:delivery.into(),
+                repository:"owner/repo".into(),actor:"trusted-bot".into(),
+                event_kind:"issues.opened".into(),subject_key:"issue:42".into(),
+                sequence,
+            };
+            let tx=store.db.unchecked_transaction().unwrap();
+            let decision=super::observe_authenticated_in_tx(
+                &tx,&source,&event,"local-operator",
+            ).unwrap();
+            assert_eq!(decision.decision,"observed_permitted");
+            stage(&tx,&source,&event,&decision,now+1).unwrap();
+            // Reusing the delivery cannot mint a second native receipt.
+            let repeated=super::observe_authenticated_in_tx(
+                &tx,&source,&event,"local-operator",
+            ).unwrap();
+            assert!(repeated.duplicate);
+            stage(&tx,&source,&event,&repeated,now+1).unwrap();
+            tx.commit().unwrap();
+            let state:String=store.db.query_row(
+                "SELECT state FROM sa_auto_intakes
+                 WHERE source_id=?1 AND delivery_id=?2",
+                params![&source.id,delivery],|row|row.get(0),
+            ).unwrap();
+            assert_eq!(state,expected_state);
+        }
+        let rows:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_auto_intakes WHERE source_id=?1",
+            [&source.id],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(rows,2);
+        let no_ticket:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(no_ticket,0);
+        let tx=store.db.unchecked_transaction().unwrap();
+        revoke_source(&tx,&source.id).unwrap();
+        tx.commit().unwrap();
+        let count:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_auto_intakes
+             WHERE source_id=?1 AND state='quarantined'",
+            [&source.id],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(count,1);
+    }
+
+    #[test]
+    fn disabled_team_never_activates_github_auto() {
+        let store=test_store();
+        let created=super::create_source(
+            &store,"team","owner/repo","trusted-bot","issues.opened",
+        ).unwrap();
+        let source=super::set_mode(
+            &store,&created.id,created.policy_revision,"observe",
+        ).unwrap();
+        let status=current(&store,&source.id).unwrap();
+        assert_eq!(status.mode,"off");
+        assert_eq!(status.policy_revision,0);
+        let request=AutoPolicyUpdate {
+            mode:"active".into(),max_events_per_hour:1,max_events_per_day:2,
+        };
+        assert!(configure(&store,&source.id,0,&request).is_err());
+        assert!(current(&store,&source.id).unwrap().mode=="off");
+        assert!(ticket_authorized(&store,"normal-non-auto-ticket").unwrap());
+    }
+
     #[test]
     fn auto_ingress_has_strict_source_consent_and_receipt_identity() {
         assert!(SCHEMA.contains("sa_auto_intake_source_integrity"));

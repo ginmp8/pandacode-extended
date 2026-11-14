@@ -123,3 +123,42 @@ backward compatibility; the **live authenticated adapter** does not. This is
 a read-only extra repository-metadata request after explicit Observe opt-in,
 not a durable GitHub subscription or Auto authorization. Source configuration
 still defaults Off, and no Ticket, Worker, Council or external write is created.
+
+## Explicit authenticated GitHub Auto (schema v57)
+
+GitHub Auto is configured on an existing **Observe** event source and its
+explicitly enabled, single-Worker Team. An event source continues to use its
+original Off/Observe authorization and receipt cursor; the separate native
+\`sa_auto_source_policies\` sidecar stores Auto consent, its revision and
+bounded hourly/daily intake quotas. Only authenticated \`issues.opened\` and
+\`pull_request.opened\` events from the exact configured repository and actor
+are eligible. The signed-in operator's own events are ignored.
+
+The **Sources → Configure GitHub Auto** inspector exposes three native modes:
+**Off** (no new intent), **Staging** (authenticated receipts recorded without a
+Worker), and **Active** (a verified event may admit one read-only Worker using
+the existing native Team/Ticket mechanism). Changing modes requires explicit
+confirmation and a matching consent revision. The source must remain Observe;
+turning its source Off or changing its revision revokes outstanding
+source-linked Auto mandates and quarantines undecided intake receipts.
+
+A bounded host monitor (desktop or headless) polls one eligible source per
+cycle through the existing authenticated GitHub CLI adapter, at most three
+pages per poll. It does **not** claim gap-free webhook/subscription delivery.
+A durable composite \`(source_id,delivery_id)\` key, native policy revisions,
+activation time, quota checks and a SQLite authorization trigger prevent
+duplicate or pre-consent events from becoming new tasks. The provider dispatch
+is guarded by the same native bot/project lease and provider session policy
+as manual tasks. Source text is data; no GitHub issue, PR, comment, reviewer or
+LLM output may create a tool grant, change the Team roster, authorize external
+writes or accept evidence.
+
+An uncertain provider handoff is **never retried automatically**. The outbox
+records the original Ticket and an explicit uncertain/quarantined state;
+restart quarantines in-flight claims and native assignment recovery revokes
+unsettled authority. Manual or native Council evidence acceptance remains
+required after worker completion. This feature is a bounded consented
+read-only intake path, **not** a fully autonomous code-writing/review/release
+pipeline or a guarantee that every GitHub event will be delivered. Follow
+the original #148 task authorization, effects and provider safety gates for
+any future writable Auto capabilities.

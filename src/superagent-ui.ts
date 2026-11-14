@@ -429,8 +429,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
                  item.ready ? 'Ready but not admitted' : 'Dependency gate pending') +
                '<p>Acceptance: ' + safe(item.acceptance) + '</p>' +
                (item.state === 'observed' && inspected.state === 'waiting_approval' &&
-                !ticketDetails.mandate.revoked && ticketDetails.finalizationGate !== 'council_required' &&
-                ticketDetails.unresolvedExternalEffects === 0
+                ticketDetails?.mandate.revoked === false && ticketDetails?.finalizationGate !== 'council_required' &&
+                ticketDetails?.unresolvedExternalEffects === 0
                  ? '<button type="button" data-sa-verify-work-item="' + safe(item.key) +
                    '">Verify native item evidence</button>' : '') +
                '</li>').join('') + '</ol>'           : '<p>No work plan loaded for this Ticket.</p>') +
@@ -583,7 +583,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<button type="submit" class="primary-button">Save native Auto consent</button>' +
         '</form></section>' : '';
     const sourcePanel = '<section class="sa-event-sources" aria-label="GitHub event sources">' +
-      '<h4>GitHub event sources</h4><p>Off/Observe only. Authenticated GitHub Events polling is bounded; Checks API requires an explicit Check Run ID and a unique matching PR head. Neither is a gap-free subscription or an authorization to launch tasks or external writes.</p>' +
+      '<h4>GitHub event sources</h4><p>GitHub event sources remain Off/Observe. A separate, explicit native Auto consent can stage or dispatch bounded read-only work for issue/PR opening events only. Authenticated polling is not gap-free and source events never grant external writes.</p>' +
       (!sourcesLoaded ? '<button type="button" data-sa-load-sources>Load sources</button>'
         : '<form data-sa-form="source"><div class="sa-grid">' +
           '<label>Repository (owner/name)<input name="repository" maxlength="200" required></label>' +

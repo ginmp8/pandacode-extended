@@ -108,7 +108,7 @@ Rollback first disables Auto/admission, durably revokes grants and stops session
 
 ## 9. Acceptance map
 
-- #131 REQ-01–08 and AC-01–31 remain normative baseline.
+- #131 REQ-01–08 and AC-01–31 remain normative baseline. Their verbatim, source-pinned text is [extended-superagent-131-baseline.md](extended-superagent-131-baseline.md); the #148 proof table below extends it and never replaces it.
 - #148 stages S0–S6 plus S2-UX UX-01–24 are normative; UX-01 modal removal is already present in this checkout and must not regress.
 - EGM-01–07 governs the standalone packet, isolated review, findings, non-authoritative design review and exact-SHA drift.
 - DD-01–14 governs unified authorized intake, autonomous one-shot lifecycle, scheduler, recovery, workspace views, immutable policy and concurrency.
@@ -134,7 +134,9 @@ Design review does not issue a Ticket grant or final approval, cannot self-revie
 
 | Lens | Worker | Context/read-list disclosure | Findings and disposition | State |
 | --- | --- | --- | --- | --- |
-| Comprehension | Not dispatched | No reviewer context or read performed | No findings claimed; review unavailable | not_run — Router and dispatch returned “Team is no longer active” |
-| Simplicity and reuse | Not dispatched | No reviewer context or read performed | No findings claimed; review unavailable | not_run — Router and dispatch returned “Team is no longer active” |
-| Design risks | Not dispatched | No reviewer context or read performed | No findings claimed; review unavailable | not_run — Router and dispatch returned “Team is no longer active” |
-| Implementation readiness | Not dispatched | No reviewer context or read performed | No findings claimed; review unavailable | not_run — Router and dispatch returned “Team is no longer active” |
+| Comprehension | `0da1a8d7` (fresh isolated worker) | Read this packet, source map, status doc, acceptance ledger, #148 body and addenda, and the #131 normative text; listed files and injected instruction sources | 8 findings CMP-01..08: 1 blocker (EGM-01 corpus missing #131 REQ/AC — repaired by the source-pinned baseline appendix), 6 major (Run/Assignment model, lifecycle and WorkItem contract, policy-axis conflation, migration/rollback, budgets, scheduled-source scope), 1 minor (journey coverage); blocker accepted and repaired, majors accepted for packet revision | completed at `d5d7c1f8`; not a Ticket approval |
+| Simplicity and reuse | `2dce0015` (fresh isolated worker) | Read this packet, source map, status doc, ledger, and the architect, SuperAgent, bots and Skills sources; listed files and injected instruction sources | 8 findings REU-01..08: dual Council state/verdict and advisory-only UI, duplicate worker admission, hand-built bot/Skills snapshot, copied Team validation, duplicate workspace walkers and path validators, five dispatch wrappers, Architect↔SuperAgent circular binding; accepted, extraction/consolidation items deferred | completed at `d5d7c1f8`; not a Ticket approval |
+| Design risks | `355792b1` (fresh isolated worker) | Read this packet, source map, status doc, ledger, and Council, effects, write-grant, workspace, headless and storage paths; listed files and injected instruction sources | Findings RSK-01..: RSK-01 blocker (pre-existing Store→fence ABBA can deadlock Stop against Council finalization), RSK-02 major (tree hashes/`gh` inside fence and Store), RSK-03 major (review snapshots leak without a reaper); accepted, open | completed at `d5d7c1f8`; not a Ticket approval |
+| Implementation readiness | `cae71060` (fresh isolated worker) | Read this packet, source map, status doc, ledger, #148 requirements/addenda and exact-SHA CI evidence; listed files and injected instruction sources | Findings RDY-01..: RDY-01 major (required Council unreachable from Team Builder; manifest v2 downgrades Council-enabled Teams; human exception has no shipped caller), RDY-02 blocker (no WorkItem graph/scheduler; project-wide lease forbids multi-worker), RDY-03 blocker (NS-01..12 absent); accepted, RDY-01 is the next reachability slice | completed at `d5d7c1f8`; not a Ticket approval |
+
+The four reviewers ran in separate fresh worker sessions against the frozen packet at `d5d7c1f8`, each with the packet as data rather than instruction. This register records finding IDs, severities and dispositions; the full per-finding text remains in the reviewer transcripts and is not yet persisted in-repo, so EGM-04 remains partial.

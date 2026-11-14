@@ -1037,7 +1037,7 @@ fn live_subagents(state: &AppState, session_id: &str) -> Result<Option<Arc<Mutex
 
 /// A task's children as list rows. Live snapshots are read after the store, so stale disk data
 /// can't beat an in-memory update or the final flush, and neither lock waits on the other.
-fn task_subagents(state: &AppState, session_id: &str) -> Result<Vec<subagent_state::SubagentRow>> {
+pub(crate) fn task_subagents(state: &AppState, session_id: &str) -> Result<Vec<subagent_state::SubagentRow>> {
     let live = {
         // Held only when no run owns the task, so none can start while its children are settled.
         let agents = state.agents.lock().map_err(|error| error.to_string())?;
@@ -4487,6 +4487,7 @@ pub fn run() {
                 superagent::work_items::superagent_work_plan_create,
                 superagent::work_items::superagent_work_plan,
                 superagent::work_items::progress::superagent_work_item_verify,
+                superagent::children::superagent_observed_child_tree,
                 superagent::events::superagent_source_create,
                 superagent::events::superagent_source_list,
                 superagent::events::superagent_source_decisions,

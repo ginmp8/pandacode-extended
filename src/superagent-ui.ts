@@ -131,6 +131,20 @@ interface RunGraph {
   ticketId: string; ticketRevision: number; truncatedAttempts: boolean;
   nodes: RunGraphNode[]; edges: RunGraphEdge[];
 }
+interface ObservedChildNode {
+  id:string;parentId:string|null;rootAssignmentId:string;rootSessionId:string;
+  rootWorkerBotId:string;name:string;reportedStatus:string;depth:number;
+  missingParent:boolean;ancestryCycleOrOverflow:boolean;toolCount:number;
+  startedAt:number;updatedAt:number;independentlyVerified:false;
+  nativeChildGrantPresent:false;
+}
+interface ObservedChildTree {
+  ticketId:string;teamVersion:number;configuredWorkers:number;councilReviewers:number;
+  observedChildren:number;reportedRunning:number;reportedWaiting:number;
+  reportedNested:number;hasUnresolvedLineage:boolean;truncated:boolean;
+  canSpawnNativeChildren:false;providerStatusIsNotVerification:true;
+  nodes:ObservedChildNode[];
+}
 interface NativeWorkItem {
   key: string; title: string; acceptance: string; dependsOn: string[];
   state: 'planned' | 'running' | 'observed' | 'verified' | 'failed'; ready: boolean;
@@ -199,6 +213,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let ticketDetails: TicketDetails | null = null;
   let effectReceipts: EffectReceipt[] = [], effectReceiptsLoaded = false;
   let runGraph: RunGraph | null = null, runGraphLoaded = false;
+  let childTree: ObservedChildTree | null = null, childTreeLoaded = false;
   let workPlan: NativeWorkPlan | null = null, workPlanLoaded = false;
   let workPlanDraft = '', workPlanError = '', workPlanDraftTicket = '';
   let roleRoster: TeamRoster | null = null;
@@ -410,6 +425,34 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             '</ol>' + (runGraph.truncatedAttempts
               ? '<p>Only the latest 50 attempts are shown.</p>' : '') :
             '<p>Graph not loaded.</p>') + '</section>' +
+        '<section class="sa-child-lineage" role="region" aria-label="Provider subagent hierarchy">' +
+          '<h5>Provider-observed subagent hierarchy</h5>' +
+          '<p>Real provider child events, not independently granted Worker seats or Council votes. ' +
+          'Status is provider-reported, not accepted evidence.</p>' +
+          '<button type="button" data-sa-load-child-tree>Inspect actual subagents</button>' +
+          (childTreeLoaded && childTree?.ticketId===inspected.id
+            ? '<p>Configured Workers ' + childTree.configuredWorkers +
+              ' · Council Reviewers ' + childTree.councilReviewers +
+              ' · Observed children ' + childTree.observedChildren +
+              ' · Running ' + childTree.reportedRunning +
+              ' · Waiting ' + childTree.reportedWaiting +
+              ' · Nested ' + childTree.reportedNested + '</p>' +
+              (childTree.hasUnresolvedLineage
+                ? '<p role="status">Some provider child ancestry is incomplete or cyclic; no native child grant is inferred.</p>' : '') +
+              (childTree.truncated ? '<p>List capped at 256 provider-observed children.</p>' : '') +
+              '<ol aria-label="Actual provider subagents">' +
+              (childTree.nodes.map(child=>'<li style="padding-inline-start:' +
+                Math.min(8,Math.max(1,child.depth))*14 + 'px">' +
+                '<strong>' + safe(child.name) + '</strong> · ' +
+                safe(child.reportedStatus) + ' · Root Worker ' +
+                safe(botName(child.rootWorkerBotId)) +
+                ' · Native assignment ' + safe(child.rootAssignmentId) +
+                ' · Provider tools reported ' + child.toolCount +
+                (child.missingParent ? ' · Missing parent' : '') +
+                (child.ancestryCycleOrOverflow ? ' · Invalid ancestry' : '') +
+                ' · Independent verification: not recorded' +
+                '</li>').join('') || '<li>No provider subagents observed.</li>') + '</ol>'
+            : '<p>Subagent hierarchy not loaded.</p>') + '</section>' +
         '<section class="sa-work-plan" role="region" aria-label="Native work plan">' +
          '<h5>Work item dependency plan</h5><p>Native work-item attempts and independent evidence decisions are persisted. ' +
          'A ready frontier is NOT an execution grant or Council approval.</p>' +
@@ -1018,6 +1061,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     // revision change refreshes the snapshot before a later human decision.
     effectReceipts = []; effectReceiptsLoaded = false;
     runGraph = null; runGraphLoaded = false;
+    childTree = null; childTreeLoaded = false;
     workPlan = null; workPlanLoaded = false; workPlanError = '';
     const [snapshot, links] = await Promise.all([
       call<TicketDetails>('superagent_snapshot', { ticketId:id, limit:50 }),
@@ -1359,6 +1403,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           throw new Error('Saved work plan conflicts with the current Ticket revision.');
         }
         workPlan = plan; workPlanLoaded = true;
+      });
+      return;
+    }
+    if (target.hasAttribute('data-sa-load-child-tree')) {
+      const ticketId=inspectedTicket;
+      if (ticketId && ticketDetails) void work(async()=>{
+        const observed=await call<ObservedChildTree>('superagent_observed_child_tree',{
+          ticketId,
+        });
+        if (inspectedTicket!==ticketId || observed.ticketId!==ticketId ||
+            observed.teamVersion!==ticketDetails?.teamSnapshot.teamVersion) {
+          throw new Error('Provider child evidence changed before inspection.');
+        }
+        childTree=observed;childTreeLoaded=true;
       });
       return;
     }

@@ -341,3 +341,25 @@ closed; provider output alone can never pass it. GitHub Auto admission,
 parallel leased Workers, real cost metering and unattended final acceptance
 remain independent implementation requirements.
 
+## Provider-observed subagent hierarchy (native Read Inspector)
+
+The native Ticket Inspector can read **actual** subagent events already persisted
+by the providers' run tracker, without importing another bot registry or
+fabricating runtime child sessions. The native child-tree command resolves
+only child rows of the Ticket's persisted native Assignment sessions, preserves
+parent-child IDs and the originating Worker bot, and derives counts for active,
+waiting and nested descendants. It caps the displayed collection at 256 and
+flags missing/cyclic ancestry, which never counts as accepted evidence.
+
+The **Provider subagent hierarchy** list is an accessible alternative to an
+execution graph. It deliberately distinguishes configured Team Workers, Council
+Reviewers and provider-reported subagents. A provider claiming completed does
+**not** create a new native Worker grant, prove its own independent permissions
+or satisfy Council acceptance; those checks belong to the native Ticket and
+finalization state machine.
+
+This observation feature does **not** enable a new recursive spawn capability,
+parent/child tool authority or autonomous child scheduling. Native child
+admission must be implemented and verified before Team strategy can advertise
+that ability. Historical provider subagent events are evidence, not a source
+of writable credentials or permission escalation.

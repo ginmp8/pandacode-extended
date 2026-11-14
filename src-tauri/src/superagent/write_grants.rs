@@ -674,7 +674,7 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn editing_a_future_team_version_keeps_an_active_ticket_snapshot_and_grant_unchanged() {
+    fn rejected_team_edits_keep_an_active_ticket_snapshot_and_grant_unchanged() {
         let fixture=Fixture::new();
         let old_ticket=fixture.queued_ticket(&fixture.config_a,"snapshot-grant-edit");
         let paths=vec!["src/allowed.txt".to_owned()];
@@ -706,29 +706,58 @@ mod tests {
                 params![project,provider,storage::now()],
             ).unwrap();
             let current=super::super::configuration(&store,&fixture.config_a).unwrap();
-            let updated=super::super::update_configuration_roles(
-                &store,&current.id,current.policy_revision,&super::super::NewOrchestration{
-                    name:"Write fixture A v2".into(),coordinator_bot_id:"router-a".into(),
-                    worker_bot_id:"worker-a".into(),
-                },vec!["worker-a".into(),"worker-extra".into()],vec!["reviewer-extra".into()],
-            ).unwrap();
-            assert_eq!(updated.team_version,2);
-            assert_eq!(updated.worker_bot_ids,vec!["worker-a","worker-extra"]);
-            assert_eq!(updated.reviewer_bot_ids,vec!["reviewer-extra"]);
+            let requested=super::super::NewOrchestration{
+                name:"Write fixture A v2".into(),coordinator_bot_id:"router-a".into(),
+                worker_bot_id:"worker-a".into(),
+            };
+            // An enabled Team rejects the edit before it can mutate the saved
+            // version. The active Ticket and its current grant stay exact.
+            let enabled_error=super::super::update_configuration_roles(
+                &store,&current.id,current.policy_revision,&requested,
+                vec!["worker-a".into(),"worker-extra".into()],vec!["reviewer-extra".into()],
+            ).unwrap_err();
+            assert!(enabled_error.contains("Disable the orchestration"),"{enabled_error}");
+            assert_eq!(super::super::configuration(&store,&current.id).unwrap().team_version,current.team_version);
             assert_eq!(super::super::ticket_team_snapshot(&store,&worker_ticket.id).unwrap(),old_snapshot);
             assert_eq!(serde_json::to_value(summary_for_ticket(&store,&worker_ticket.id).unwrap()).unwrap(),
                 serde_json::to_value(&grant_before).unwrap());
             let active=current_grant(&store,&session_id,Some(&grant_before.id)).unwrap().unwrap();
             assert_eq!(serde_json::to_value(active.summary).unwrap(),serde_json::to_value(&grant_before).unwrap());
+
+            // Versioned future Team edits are not implemented: once a Ticket
+            // exists the native guard rejects every edit. Disabling is a native
+            // revocation, not a Team edit. The immutable Ticket snapshot
+            // survives, while the live grant is revoked with its mandate and
+            // Ticket history still blocks the edit.
+            let disabled=super::super::change_enabled(
+                &store,&fixture.config_a,current.policy_revision,false,
+            ).unwrap();
+            assert!(!disabled.enabled);
+            assert_eq!(super::super::ticket_team_snapshot(&store,&worker_ticket.id).unwrap(),old_snapshot);
+            assert!(summary_for_ticket(&store,&worker_ticket.id).unwrap().revoked);
+            assert!(matches!(current_grant(&store,&session_id,Some(&grant_before.id)),Err(_)|Ok(None)));
+            let disabled_error=super::super::update_configuration_roles(
+                &store,&current.id,disabled.policy_revision,&requested,
+                vec!["worker-a".into(),"worker-extra".into()],vec!["reviewer-extra".into()],
+            ).unwrap_err();
+            assert!(disabled_error.contains("Orchestrations with Tickets cannot be edited"),"{disabled_error}");
+            assert_eq!(super::super::ticket_team_snapshot(&store,&worker_ticket.id).unwrap(),old_snapshot);
+
+            // Re-enable only after the rejected edit. A future Ticket still
+            // binds the original saved Team version; no silently edited Team
+            // version can take effect while this Ticket history exists.
+            let reenabled=super::super::change_enabled(
+                &store,&fixture.config_a,disabled.policy_revision,true,
+            ).unwrap();
+            assert!(reenabled.enabled);
             let (future,launched)=super::super::admit(
                 &mut store,&fixture.config_a,"Future ticket","snapshot-grant-future",true,
             ).unwrap();
             assert!(!launched);
             let future_snapshot=super::super::ticket_team_snapshot(&store,&future.id).unwrap();
-            assert_eq!(future_snapshot.team_version,2);
-            assert_eq!(future_snapshot.worker_bot_ids,vec!["worker-a","worker-extra"]);
-            assert_eq!(future_snapshot.reviewer_bot_ids,vec!["reviewer-extra"]);
-            assert!(current_grant(&store,&session_id,Some(&grant_before.id)).unwrap().is_some());
+            assert_eq!(future_snapshot.team_version,old_snapshot.team_version);
+            assert_eq!(future_snapshot.worker_bot_ids,old_snapshot.worker_bot_ids);
+            assert_eq!(future_snapshot.reviewer_bot_ids,old_snapshot.reviewer_bot_ids);
         }
     }
 
@@ -929,10 +958,17 @@ mod tests {
         let error = call(&context.host,"shell_exec",&context.grant.id,"src/allowed.txt","touch forbidden").await.unwrap_err();
         assert!(error.contains("unsupported_tool"),"{error}");
 
+        {
+            let store = fixture.store();
+            // The unsupported provider must belong to the admitted Team
+            // snapshot. Changing the saved bot profile after admission is
+            // rejected by the snapshot/profile binding check first and never
+            // reaches the scoped-write provider policy.
+            store.db.execute("UPDATE bots SET provider='claude' WHERE id='worker-b'",[]).unwrap();
+        }
         let queued = fixture.queued_ticket(&fixture.config_b,"write-unsupported-provider");
         {
             let mut store = fixture.store();
-            store.db.execute("UPDATE bots SET provider='claude' WHERE id='worker-b'",[]).unwrap();
             let error = super::prepare_coordinated_worker_with_write_grant(
                 &mut store,&queued.id,false,queued.revision,&allowed_paths(),
             ).unwrap_err();

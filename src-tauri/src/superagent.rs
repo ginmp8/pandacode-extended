@@ -1531,6 +1531,10 @@ pub struct TaskSnapshot {
     /// Advisory native Council status, never a SuperAgent approval.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub council: Option<council_adapter::CouncilObservation>,
+    /// The authenticated source receipt is explanatory, not execution
+    /// authority. A missing or revoked receipt must remain inspectable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auto_origin: Option<events::auto_intake::AutoTicketOrigin>,
 }
 
 fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSnapshot> {
@@ -1574,6 +1578,7 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
         finalization_gate: finalization_gate.to_owned(),
         unresolved_external_effects,
         council: council_adapter::inspect(store, &ticket)?,
+        auto_origin: events::auto_intake::ticket_origin(store,ticket_id)?,
         team_snapshot: admitted_team,
         ticket,
         mandate: native_mandate,
@@ -1706,6 +1711,14 @@ pub(crate) fn inspect_headless_status(
             "hasEvidence": snapshot.ticket.evidence.as_ref().is_some_and(|e| !e.is_empty()),
             "unresolvedExternalEffects": effects::unresolved_count(&store, ticket_id)?,
             "recovery": headless_recovery_summary(&store, &snapshot.ticket, observed_at)?,
+            // Redacted Auto provenance: never print delivery, subject, bot
+            // credentials, original prompt or private repository context.
+            "autoOrigin": snapshot.auto_origin.as_ref().map(|origin| serde_json::json!({
+                "kind": origin.kind,
+                "eventKind": origin.event_kind,
+                "receiptState": origin.receipt_state,
+                "currentlyAuthorized": origin.currently_authorized
+            })),
             "mandate": {
                 "revoked": snapshot.mandate.revoked,
                 "policyRevision": snapshot.mandate.policy_revision,
@@ -4297,6 +4310,12 @@ fn retry_blocked(
     store: &mut Store, ticket_id: &str, busy: bool,
 ) -> Result<(Ticket, String, String)> {
     let ticket = get_ticket(store,ticket_id)?;
+    // Authenticated GitHub Auto work is tied to a separate immutable event
+    // receipt and consent scope. It cannot be re-admitted by a manual retry,
+    // even while that source is still active.
+    if ticket.actor != "local-user" {
+        return Err("External-source Tickets require a new authenticated native admission; manual retry is forbidden.".into());
+    }
     if ticket.state != "blocked" {
         return Err("Only a blocked SuperAgent ticket can be retried manually.".into());
     }
@@ -4921,6 +4940,18 @@ mod tests {
         assert!(launched);
         assert_eq!(ticket.actor,"github-auto");
         assert!(events::auto_intake::ticket_authorized(&store,&ticket.id).unwrap());
+        let origin=events::auto_intake::ticket_origin(&store,&ticket.id)
+            .unwrap().unwrap();
+        assert_eq!(origin.receipt_state,"admitted");
+        assert_eq!(origin.event_kind.as_deref(),Some("issues.opened"));
+        assert!(origin.currently_authorized);
+        let redacted=inspect_headless_status(&store.path,Some(&ticket.id)).unwrap();
+        assert!(redacted.contains("\"authenticated-github-auto\""));
+        assert!(redacted.contains("\"issues.opened\""));
+        assert!(!redacted.contains("issue:42"),
+            "Headless inspection must not print private event subject keys.");
+        assert!(!redacted.contains("delivery-42"),
+            "Headless inspection must not expose authenticated delivery IDs.");
         let mandate=mandate(&store,&ticket.id).unwrap();
         assert_eq!(mandate.actor,"github-auto");
         let exact_link:bool=store.db.query_row(
@@ -4944,10 +4975,16 @@ mod tests {
              WHERE source_id='source-auto'", [],
         ).unwrap();
         assert!(!events::auto_intake::ticket_authorized(&store,&ticket.id).unwrap());
+        let revoked_origin=events::auto_intake::ticket_origin(&store,&ticket.id)
+            .unwrap().unwrap();
+        assert!(!revoked_origin.currently_authorized);
         assert!(read_only_policy(&store,&session).is_err(),
             "Revoking source consent must invalidate an already running worker.");
         assert!(on_run_finished(&store,&session,true,"Stale completion").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+        assert!(retry_blocked(&mut store,&ticket.id,false)
+            .unwrap_err().contains("manual retry is forbidden"),
+            "Revoked Auto sources cannot be replayed through manual retry.");
     }
 
     #[test]

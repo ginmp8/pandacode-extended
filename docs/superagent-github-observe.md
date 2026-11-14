@@ -187,3 +187,20 @@ request-key reuse. A Ticket claiming `github-auto` with a missing link has
 ordinary manual Ticket stays independent of GitHub Auto source activation.
 An in-flight provider whose consent is revoked is blocked or interrupted,
 never promoted to a successful completion by a stale callback.
+
+## Source-origin inspection and retry authority
+
+The Ticket Inspector displays an authenticated Auto event kind, subject
+reference, receipt state and a live indication of whether the original
+source's consent still authorizes it. It retains historical attribution even
+when consent is revoked, a receipt is quarantined, or the source is removed
+from the active poll set. A missing receipt is shown as **missing-receipt**,
+not as a local-user request.
+
+One-shot headless Ticket inspection exposes only the coarse authenticated
+origin kind, event class, receipt state and current authorization boolean;
+the repository, subject reference and delivery ID remain redacted. Native
+manual retry accepts only explicitly local-user Tickets. Previously admitted
+GitHub Auto work cannot obtain a second session through manual or headless
+retry, regardless of whether its source was revoked. A future retry must
+create a fresh, consented, independently authenticated native demand.

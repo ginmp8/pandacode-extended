@@ -291,6 +291,67 @@ pub(super) fn stage(tx:&rusqlite::Transaction<'_>,source:&EventSource,
     Ok(())
 }
 
+/// An operator-facing source attribution is descriptive only. It never
+/// becomes a grant and must retain revoked/orphaned Auto histories.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct AutoTicketOrigin {
+    pub kind: &'static str,
+    pub source_id: Option<String>,
+    pub delivery_id: Option<String>,
+    pub event_kind: Option<String>,
+    pub subject_key: Option<String>,
+    pub receipt_state: &'static str,
+    pub source_policy_revision: Option<i64>,
+    pub consent_revision: Option<i64>,
+    pub currently_authorized: bool,
+}
+
+pub(crate) fn ticket_origin(store:&Store,ticket_id:&str)->Result<Option<AutoTicketOrigin>> {
+    let actor:Option<String>=store.db.query_row(
+        "SELECT actor FROM sa_tickets WHERE id=?1",
+        [ticket_id],|row|row.get(0),
+    ).optional().map_err(|error|error.to_string())?;
+    if actor.as_deref()!=Some("github-auto") {
+        return Ok(None);
+    }
+    let receipt:Option<(String,String,String,String,String,i64,i64)>=store.db.query_row(
+        "SELECT source_id,delivery_id,event_kind,subject_key,state,
+                source_policy_revision,consent_revision
+         FROM sa_auto_intakes WHERE ticket_id=?1",
+        [ticket_id],|row|Ok((
+            row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,
+            row.get(5)?,row.get(6)?,
+        )),
+    ).optional().map_err(|error|error.to_string())?;
+    let currently_authorized=ticket_authorized(store,ticket_id)?;
+    Ok(Some(match receipt {
+        Some((source_id,delivery_id,event_kind,subject_key,state,
+              source_policy_revision,consent_revision)) => AutoTicketOrigin {
+            kind:"authenticated-github-auto",
+            source_id:Some(source_id),delivery_id:Some(delivery_id),
+            event_kind:Some(event_kind),subject_key:Some(subject_key),
+            receipt_state:match state.as_str() {
+                "admitted"=>"admitted",
+                "dispatched"=>"dispatched",
+                "blocked"=>"blocked",
+                "uncertain"=>"uncertain",
+                "quarantined"=>"quarantined",
+                _=>"not-authorized",
+            },
+            source_policy_revision:Some(source_policy_revision),
+            consent_revision:Some(consent_revision),currently_authorized,
+        },
+        None=>AutoTicketOrigin {
+            kind:"authenticated-github-auto",
+            source_id:None,delivery_id:None,event_kind:None,subject_key:None,
+            receipt_state:"missing-receipt",
+            source_policy_revision:None,consent_revision:None,
+            currently_authorized:false,
+        },
+    }))
+}
+
 /// Runtime authorization must be checked at every provider/tool boundary.
 pub(crate) fn ticket_authorized(store:&Store,ticket_id:&str)->Result<bool> {
     let actor:Option<String>=store.db.query_row(
@@ -605,6 +666,9 @@ mod tests {
         ).unwrap();
         assert!(!ticket_authorized(&store,"orphan-auto").unwrap(),
             "An Auto Ticket without a durable receipt must fail closed.");
+        let missing=ticket_origin(&store,"orphan-auto").unwrap().unwrap();
+        assert_eq!(missing.receipt_state,"missing-receipt");
+        assert!(!missing.currently_authorized);
         store.db.execute(
             "INSERT INTO sa_tickets
              (id,orchestration_id,request_key,objective,actor,source,

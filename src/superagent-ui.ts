@@ -95,10 +95,17 @@ interface CouncilObservation {
   nativeStatus: string; nativeRound: number; nativeStale: boolean;
   nativePassVerified: boolean; ticketArtifactBound: boolean;
 }
+interface AutoTicketOrigin {
+  kind:'authenticated-github-auto'; sourceId?:string | null; deliveryId?:string | null;
+  eventKind?:string | null; subjectKey?:string | null;
+  receiptState:string; sourcePolicyRevision?:number | null;
+  consentRevision?:number | null; currentlyAuthorized:boolean;
+}
 interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
   attemptInsights?: AssignmentInsight[];
   activity: Activity[]; teamSnapshot?: TeamSnapshot | null; council?: CouncilObservation | null;
+  autoOrigin?: AutoTicketOrigin | null;
   finalizationGate?: 'not_pending' | 'native_recheck_required' | 'council_required' | 'effects_unresolved';
   unresolvedExternalEffects?: number;
 }
@@ -376,6 +383,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<dl><dt>Ticket ID</dt><dd><code>' + safe(inspected.id) + '</code></dd>' +
         '<dt>State / revision</dt><dd>' + safe(inspected.state) + ' / ' + inspected.revision + '</dd>' +
         '<dt>Actor</dt><dd>' + safe(ticketDetails.mandate.actor) + '</dd>' +
+        '<dt>Native origin</dt><dd>' +
+        (ticketDetails.autoOrigin
+          ? 'Authenticated GitHub Auto · ' +
+            safe(ticketDetails.autoOrigin.eventKind ?? 'Unknown event') + ' · ' +
+            safe(ticketDetails.autoOrigin.subjectKey ?? 'Unknown subject') +
+            ' · Receipt ' + safe(ticketDetails.autoOrigin.receiptState) +
+            ' · ' + (ticketDetails.autoOrigin.currentlyAuthorized
+              ? 'Source consent valid' : 'Source consent missing or revoked')
+          : ticketDetails.mandate.actor === 'local-user'
+            ? 'Explicit local request (no authenticated Auto receipt)'
+            : 'Unverified nonlocal origin; native authority unavailable') + '</dd>' +
         '<dt>Authorization</dt><dd><code>' + safe(ticketDetails.mandate.authorizationId) + '</code></dd>' +
         '<dt>Project / policy</dt><dd>' + safe(ticketDetails.mandate.projectId) + ' / ' +
         ticketDetails.mandate.policyRevision + '</dd>' +

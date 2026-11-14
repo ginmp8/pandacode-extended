@@ -202,3 +202,14 @@ The unified Council projects read-only leaf rows (`councilChildLeaves`) only aft
 The existing native `councilCriterionOutcomes` projection is now typed and consumed by the shared inspector. UI filtering retains only the active root and correlated child cycles, displays actual child scores and criterion evidence when available, and retains a **pending native terminal** state when leaf reviews exist but no composite receipt has been issued. A reported leaf score never becomes another root vote.
 
 New Rust, Node and Playwright tests cover reported-score limits, stale-cycle exclusion, criterion evidence and pending-versus-passed UI. Exact-HEAD Rust/browser test execution is pending; this is implementation evidence, not a passed acceptance receipt.
+
+
+## Measured and estimated Council usage aggregation (AC-37/38)
+
+The shared inspector now computes a per-root-cycle rollup from native-validated usage rows, keyed by `(rootCycleId, childCycleId, attemptId)`. Identical attempts are counted once even if their persisted usage is projected more than once; conflicting duplicates make dependent totals Unknown instead of arbitrarily selecting a value.
+
+Token, request and reviewer-duration sums preserve `measured`, `provider_estimated`, `calculated_estimated` and `unknown` provenance. An unknown component keeps its aggregate unknown, without treating absent measurements as zero. Reviewer-duration sums are explicitly not root wall-clock duration because reviewers overlap.
+
+Cost estimates are summed only when every attempt has bounded priced provenance in a single currency. Missing pricing or mixed currencies produce an Unknown aggregate. The UI identifies pinned source/version/calculation timestamp and does not present the estimate as a bill. Budget-consumption snapshots are not summed as if they were independent leaf attempts.
+
+Added Node cases for measured, missing, cross-currency and conflicting-duplicate records, plus a Playwright inspector aggregate assertion. No provider billing data is inferred or generated.

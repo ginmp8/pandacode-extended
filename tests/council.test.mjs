@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 const memory = new Map();
 globalThis.localStorage = { getItem: key => memory.get(key) ?? null, setItem: (key, value) => memory.set(key, String(value)), removeItem: key => memory.delete(key) };
-const { COUNCIL_KEY, COUNCIL_COMPOSITION_MODES, acceptsCouncilSnapshot, councilCompositionMode, councilCycleId, councilLedgerForCurrentCycle, newCouncilComposition, validateCouncilComposition, withCouncilComposition, seatVerdict, formatScore, finishedBelow, outOfTen, councilAsking, councilDefaults, councilNotice, councilProgress, councilRounds, councilForNewThreads, councilStateText, firstAndFinal, provisional, saveCouncilDefaults, scoreVerdict, setCouncilForNewThreads } = await import('../src/council.ts');
+const { COUNCIL_KEY, COUNCIL_COMPOSITION_MODES, acceptsCouncilSnapshot, councilCompositionMode, councilCycleId, councilLedgerForCurrentCycle, summarizeCouncilUsage, newCouncilComposition, validateCouncilComposition, withCouncilComposition, seatVerdict, formatScore, finishedBelow, outOfTen, councilAsking, councilDefaults, councilNotice, councilProgress, councilRounds, councilForNewThreads, councilStateText, firstAndFinal, provisional, saveCouncilDefaults, scoreVerdict, setCouncilForNewThreads } = await import('../src/council.ts');
 const { createPreviewArchitect } = await import('../src/preview-architect.ts');
 
 test('composition derives all seven source modes and preserves the additive schema shape', () => {
@@ -122,6 +122,40 @@ test('native ledger projection is pinned to the current root cycle and its corre
   assert.deepEqual(projection.criterionOutcomes.map(item => item.outcome.criterionId), ['root', 'child']);
   assert.deepEqual(projection.reviewReceipts.map(item => item.requestId), ['root', 'child']);
   assert.deepEqual(projection.usage.map(item => item.id), ['root', 'child']);
+});
+
+
+test('usage rollup deduplicates native attempts and preserves unknown values and cost provenance', () => {
+  const known = value => ({ status: 'measured', value });
+  const row = (id, scope, inputTokens, costEstimate) => ({
+    id, rootCycleId: 'root:1', childCycleId: scope === 'child' ? 'child:1' : null,
+    attemptId: id, scope, elapsedMs: known(100), inputTokens, outputTokens: known(50),
+    requestCount: known(1), costEstimate,
+  });
+  const priced = (amountMicros, currency = 'USD') => ({
+    amountMicros, currency, pricingSource: 'Pinned pricing', pricingVersion: 'v1', calculatedAtMs: 300,
+  });
+  const root = row('root-attempt', 'root', known(1000), priced(120000));
+  const child = row('child-attempt', 'child', known(2000), priced(80000));
+  const totals = summarizeCouncilUsage([root, child, { ...child }]);
+  assert.equal(totals.attempts, 2, 'duplicate native child usage must not create a third attempt');
+  assert.equal(totals.duplicateAttempts, 1);
+  assert.equal(totals.rootAttempts, 1);
+  assert.equal(totals.childAttempts, 1);
+  assert.deepEqual(totals.inputTokens, known(3000));
+  assert.deepEqual(totals.reviewerElapsedMs, known(200));
+  assert.deepEqual(totals.estimatedCostMicros, { status: 'calculated_estimated', value: 200000 });
+  assert.equal(totals.currency, 'USD');
+  assert.deepEqual(totals.pricingProvenance, ['Pinned pricing v1 @ 300']);
+  const partial = summarizeCouncilUsage([root, row('missing', 'child', { status: 'unknown' }, null)]);
+  assert.equal(partial.inputTokens.status, 'unknown');
+  assert.equal(partial.estimatedCostMicros.status, 'unknown');
+  assert.equal(partial.reviewerElapsedMs.value, 200, 'other independent measured fields remain usable');
+  const crossCurrency = summarizeCouncilUsage([root, row('eur-child', 'child', known(0), priced(100000, 'EUR'))]);
+  assert.equal(crossCurrency.estimatedCostMicros.status, 'unknown', 'never sum unmatched currencies');
+  const conflicting = summarizeCouncilUsage([root, { ...root, inputTokens: known(99999) }]);
+  assert.equal(conflicting.conflictingAttempts, 1);
+  assert.equal(conflicting.inputTokens.status, 'unknown', 'conflicting duplicate data must not be arbitrarily chosen');
 });
 
 test('snapshot updates require the active session, non-older cycle, and non-older revision', () => {

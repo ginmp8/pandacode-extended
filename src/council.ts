@@ -1,6 +1,6 @@
 /* Council: independent reviewers score the work out of 10 until every one reaches the user's target.
  * What a snapshot means, with no DOM, plus the remembered defaults. See docs/architect-workers.md. */
-import { teamActive, type ChildCouncilReceipt, type CouncilComposition, type CouncilConfig, type CouncilCriteriaSource, type CouncilCriterion, type CouncilChildLeafProjection, type CouncilCriterionOutcomeReceipt, type CouncilFinding, type CouncilFindingDisposition, type CouncilReviewReceipt, type CouncilState, type CouncilStatus, type CouncilStrategy, type CouncilReviewerMode, type CouncilUsageRecord, type TeamSnapshot, type TeamWorker } from './architect-types.ts';
+import { teamActive, type ChildCouncilReceipt, type CouncilComposition, type CouncilConfig, type CouncilCriteriaSource, type CouncilCriterion, type CouncilChildLeafProjection, type CouncilCriterionOutcomeReceipt, type CouncilFinding, type CouncilFindingDisposition, type CouncilReviewReceipt, type CouncilState, type CouncilStatus, type CouncilStrategy, type CouncilReviewerMode, type CouncilUsageRecord, type CouncilUsageValue, type TeamSnapshot, type TeamWorker } from './architect-types.ts';
 
 export type { CouncilState, CouncilStatus };
 export const COUNCIL_KEY = 'pandacode.council';
@@ -194,6 +194,76 @@ export function councilLedgerForCurrentCycle(
     ...(criterionOutcomes === undefined ? {} : { criterionOutcomes }),
     ...(team.councilReviewReceipts === undefined ? {} : { reviewReceipts: team.councilReviewReceipts.filter(receipt => allowedCycleIds.has(receipt.cycleId)) }),
     ...(usage === undefined ? {} : { usage }),
+  };
+}
+
+/** Aggregates distinct, native-validated reviewer attempts without claiming
+ * overlapping reviewer durations are root wall-clock time. Unknown data
+ * never becomes a measured zero or an invented monetary total. */
+export interface CouncilUsageSummary {
+  attempts: number;
+  rootAttempts: number;
+  childAttempts: number;
+  duplicateAttempts: number;
+  conflictingAttempts: number;
+  reviewerElapsedMs: CouncilUsageValue<number>;
+  inputTokens: CouncilUsageValue<number>;
+  outputTokens: CouncilUsageValue<number>;
+  requestCount: CouncilUsageValue<number>;
+  estimatedCostMicros: CouncilUsageValue<number>;
+  currency: string | null;
+  pricingProvenance: string[];
+}
+
+export function summarizeCouncilUsage(records: readonly CouncilUsageRecord[]): CouncilUsageSummary {
+  const unique = new Map<string, CouncilUsageRecord>();
+  let duplicateAttempts = 0, conflictingAttempts = 0;
+  for (const record of records) {
+    const key = JSON.stringify([record.rootCycleId, record.childCycleId ?? null, record.attemptId]);
+    const previous = unique.get(key);
+    if (previous) {
+      duplicateAttempts++;
+      if (JSON.stringify(previous) !== JSON.stringify(record)) conflictingAttempts++;
+    } else {
+      unique.set(key, record);
+    }
+  }
+  const rows = [...unique.values()];
+  const unknown = (): CouncilUsageValue<number> => ({ status: 'unknown' });
+  const sum = (pick: (record: CouncilUsageRecord) => CouncilUsageValue<number>): CouncilUsageValue<number> => {
+    if (!rows.length || conflictingAttempts) return unknown();
+    const values = rows.map(pick);
+    if (values.some(item => item.value == null || item.status === 'unknown' ||
+      !Number.isSafeInteger(item.value) || item.value < 0)) return unknown();
+    const value = values.reduce((total, item) => total + item.value!, 0);
+    if (!Number.isSafeInteger(value)) return unknown();
+    const status = values.some(item => item.status === 'calculated_estimated') ? 'calculated_estimated'
+      : values.some(item => item.status === 'provider_estimated') ? 'provider_estimated' : 'measured';
+    return { status, value };
+  };
+  const costs = rows.map(item => item.costEstimate);
+  const currencies = new Set(costs.filter(item => item != null).map(item => item!.currency));
+  const costKnown = rows.length > 0 && !conflictingAttempts && currencies.size === 1 &&
+    costs.every(item => item != null && Number.isSafeInteger(item.amountMicros) &&
+      item.amountMicros >= 0 && !!item.currency && !!item.pricingSource &&
+      !!item.pricingVersion && Number.isSafeInteger(item.calculatedAtMs));
+  const costTotal = costs.reduce((total, item) => total + (item?.amountMicros ?? 0), 0);
+  const estimatedCostMicros: CouncilUsageValue<number> = costKnown && Number.isSafeInteger(costTotal)
+    ? { status: 'calculated_estimated', value: costTotal } : unknown();
+  const pricingProvenance = costKnown ? [...new Set(costs.map(item =>
+    item!.pricingSource + ' ' + item!.pricingVersion + ' @ ' + String(item!.calculatedAtMs)))].sort() : [];
+  return {
+    attempts: rows.length,
+    rootAttempts: rows.filter(item => item.scope === 'root').length,
+    childAttempts: rows.filter(item => item.scope === 'child').length,
+    duplicateAttempts, conflictingAttempts,
+    reviewerElapsedMs: sum(item => item.elapsedMs),
+    inputTokens: sum(item => item.inputTokens),
+    outputTokens: sum(item => item.outputTokens),
+    requestCount: sum(item => item.requestCount),
+    estimatedCostMicros,
+    currency: costKnown ? [...currencies][0] : null,
+    pricingProvenance,
   };
 }
 

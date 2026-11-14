@@ -343,6 +343,8 @@ test('read-only inspector renders supplied findings, receipts, usage, stale stat
   await expect(ledger).toContainText('Reported score 9.2 / 10');
   await expect(ledger).toContainText('Criterion security · 9.2 / 10');
   await expect(ledger).toContainText('Usage and hard-limit records · 1');
+  await expect(ledger).toContainText('Usage summary · 1 unique reviewer attempts');
+  await expect(ledger).toContainText('Pricing provenance: Unknown');
   await expect(ledger).toContainText('Stale: native reports');
   await expect(ledger).toContainText('Accepted by user-17');
   await expect(ledger).toContainText('Authorized finding exceptions · 1');

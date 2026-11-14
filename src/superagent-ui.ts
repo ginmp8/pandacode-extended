@@ -480,7 +480,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         'Native admission rechecks all policy, availability and checkout limits.</p></section>' : '';
     const active = chosen ? '<section class="sa-pane" aria-label="Selected orchestration"><header><h3>' +
       safe(chosen.name) + '</h3><div class="sa-actions"><button type="button" data-sa-enable="' +
-      safe(chosen.id) + '">' + (chosen.enabled ? 'Disable' : 'Enable manual') +
+      safe(chosen.id) + '"' +
+      (!chosen.enabled && ((chosen.workerCount ?? 1)>1 || (chosen.reviewerCount ?? 0)>0)
+        ? ' disabled title="Multi-member execution requires native scoped admission"'
+        : '') + '>' + (chosen.enabled ? 'Disable' : 'Enable manual') +
       '</button><button type="button" data-sa-delete="' + safe(chosen.id) + '"' +
       (chosen.enabled ? ' disabled' : '') + '>Delete unused</button></div></header>' +
       '<form data-sa-form="edit"><label>Preset title<input name="name" required maxlength="120" value="' + safe(chosen.name) + '"></label>' +
@@ -685,7 +688,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" required>' +
           '<option value="">Choose bot</option>' + choices + '</select></label>' +
           '<label>Worker<select name="workerBotId" required><option value="">Choose bot</option>' +
-          choices + '</select></label></div><button class="primary-button" type="submit"' +
+          choices + '</select></label></div>' +
+          '<details class="sa-new-members"><summary>Additional Team members (optional)</summary>' +
+          '<p>Choose up to seven additional Workers and four independent Reviewers. ' +
+          'Each bot has one role, and Workers must share the primary Worker project. ' +
+          'Multi-member Teams remain Off until scoped admission is supported.</p>' +
+          '<label>Additional Workers<select name="additionalWorkers" multiple size="4">' +
+          choices + '</select></label>' +
+          '<label>Optional Reviewers<select name="reviewers" multiple size="4">' +
+          choices + '</select></label></details>' +
+          '<button class="primary-button" type="submit"' +
           (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' + overview + teamRoles
         : '') +
       (workspaceView === 'runs' ? globalDemands + (active ||
@@ -1385,10 +1397,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const input = { name:String(data.get('name') ?? '').trim(),
         coordinatorBotId:String(data.get('coordinatorBotId') ?? ''),
         workerBotId:String(data.get('workerBotId') ?? '') };
+      const additionalWorkers=data.getAll('additionalWorkers').map(String);
+      const reviewerBotIds=data.getAll('reviewers').map(String);
       void work(async () => {
-        if (!input.name || !input.coordinatorBotId || !input.workerBotId ||
-          input.coordinatorBotId === input.workerBotId) throw new Error('Choose two different existing bots.');
-        const created = await call<Config>('superagent_create',{ input });
+        if (!input.name || !input.coordinatorBotId || !input.workerBotId)
+          throw new Error('Choose a Team name, Coordinator and primary Worker.');
+        if (additionalWorkers.length>7 || reviewerBotIds.length>4)
+          throw new Error('Choose up to seven additional Workers and four Reviewers.');
+        const ids=[input.coordinatorBotId,input.workerBotId,...additionalWorkers,...reviewerBotIds];
+        if(new Set(ids).size!==ids.length)
+          throw new Error('Each Team bot must have exactly one role.');
+        const roster=additionalWorkers.length || reviewerBotIds.length
+          ? {workerBotIds:[input.workerBotId,...additionalWorkers],reviewerBotIds}
+          : undefined;
+        const created = await call<Config>('superagent_create',{ input,roster });
         draftPresetName = ''; draftPresetTemplate = '';
         selected = created.id; workspaceView = 'runs'; await reload();
       });

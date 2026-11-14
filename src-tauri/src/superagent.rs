@@ -2387,10 +2387,16 @@ pub(crate) fn invalidate_bot(store: &Store, bot_id: &str, removed: bool) -> Resu
 
 
 #[tauri::command]
-pub async fn superagent_create(window: tauri::WebviewWindow, state: State<'_,AppState>, input: NewOrchestration) -> Result<Orchestration> {
+pub async fn superagent_create(
+    window: tauri::WebviewWindow, state: State<'_,AppState>,
+    input: NewOrchestration, roster: Option<roster::RosterInput>,
+) -> Result<Orchestration> {
     require_main_window(&window)?;
     let store=state.store.lock().map_err(|e|e.to_string())?;
-    create_configuration(&store,input)
+    match roster {
+        Some(members) => roster::create_with_roster(&store,input,members),
+        None => create_configuration(&store,input),
+    }
 }
 
 #[tauri::command]

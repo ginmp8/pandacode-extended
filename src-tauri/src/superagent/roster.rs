@@ -1,7 +1,7 @@
 //! Persistent configured Team member roles, separate from runtime assignments.
 //! Additional Workers/Reviewers do not become authorized providers or Council seats.
 //! The current native runner remains single-worker until scoped role admission exists.
-use super::{configuration,require_main_window};
+use super::{configuration,create_configuration,require_main_window,NewOrchestration,Orchestration};
 use crate::{bots,storage::{self,Store},AppState,Result};
 use rusqlite::params;
 use serde::{Deserialize,Serialize};
@@ -317,6 +317,55 @@ pub async fn superagent_effective_team(
     effective_team(&store,&orchestration_id,&library)
 }
 
+fn validate_member_ids(store:&Store,cfg:&Orchestration,input:&RosterInput)->Result<()> {
+    if input.worker_bot_ids.is_empty() || input.worker_bot_ids.len()>MAX_WORKERS
+       || input.reviewer_bot_ids.len()>MAX_REVIEWERS
+       || input.worker_bot_ids.first()!=Some(&cfg.worker_bot_id) {
+        return Err("Choose the original primary Worker, up to 8 Workers and 4 Reviewers.".into());
+    }
+    let mut unique=HashSet::new();
+    unique.insert(cfg.coordinator_bot_id.as_str());
+    for bot_id in input.worker_bot_ids.iter().chain(input.reviewer_bot_ids.iter()) {
+        if !unique.insert(bot_id.as_str()) {
+            return Err("A bot cannot occupy multiple Team roles.".into());
+        }
+        let bot=bots::get(store,bot_id)?;
+        if bot.paused {return Err("Paused bots cannot join a Team.".into());}
+        if input.worker_bot_ids.contains(bot_id) && bot.project_id!=cfg.project_id {
+            return Err("All configured Workers must belong to the Team project.".into());
+        }
+    }
+    Ok(())
+}
+
+fn insert_member_roles(store:&Store,id:&str,input:&RosterInput)->Result<()> {
+    for (idx,bot_id) in input.worker_bot_ids.iter().enumerate().skip(1) {
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'worker',?2,?3)",params![id,idx as i64,bot_id],
+        ).map_err(|e|e.to_string())?;
+    }
+    for (idx,bot_id) in input.reviewer_bot_ids.iter().enumerate() {
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'reviewer',?2,?3)",params![id,idx as i64,bot_id],
+        ).map_err(|e|e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Atomic creation never leaves a disabled orphan Team after failed role preflight.
+pub(super) fn create_with_roster(
+    store:&Store,input:NewOrchestration,roster:RosterInput,
+)->Result<Orchestration> {
+    let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
+    let cfg=create_configuration(store,input)?;
+    validate_member_ids(store,&cfg,&roster)?;
+    insert_member_roles(store,&cfg.id,&roster)?;
+    tx.commit().map_err(|e|e.to_string())?;
+    configuration(store,&cfg.id)
+}
+
 fn set(store:&Store,id:&str,expected:i64,input:&RosterInput)->Result<TeamRoster> {
     let cfg=configuration(store,id)?;
     if cfg.enabled || cfg.policy_revision!=expected {
@@ -336,24 +385,7 @@ fn set(store:&Store,id:&str,expected:i64,input:&RosterInput)->Result<TeamRoster>
          )",[id],|row|row.get(0),
     ).map_err(|e|e.to_string())?;
     if unsettled {return Err("Active Tickets or unresolved effects prevent Team roster changes.".into());}
-    if input.worker_bot_ids.is_empty() || input.worker_bot_ids.len()>MAX_WORKERS
-       || input.reviewer_bot_ids.len()>MAX_REVIEWERS
-       || input.worker_bot_ids.first()!=Some(&cfg.worker_bot_id) {
-        return Err("Choose the original primary Worker, up to 8 Workers and 4 Reviewers.".into());
-    }
-    let mut unique=HashSet::new();
-    unique.insert(cfg.coordinator_bot_id.as_str());
-    for bot_id in input.worker_bot_ids.iter().chain(input.reviewer_bot_ids.iter()) {
-        if !unique.insert(bot_id.as_str()) {
-            return Err("A bot cannot occupy multiple Team roles.".into());
-        }
-        let bot=bots::get(store,bot_id)?;
-        if bot.paused {return Err("Paused bots cannot join a Team.".into());}
-        // Worker execution is bound to one project, even when not yet admitted.
-        if input.worker_bot_ids.contains(bot_id) && bot.project_id!=cfg.project_id {
-            return Err("All configured Workers must belong to the Team project.".into());
-        }
-    }
+    validate_member_ids(store,&cfg,input)?;
     let previous=read(store,id)?;
     if previous.worker_bot_ids==input.worker_bot_ids
        && previous.reviewer_bot_ids==input.reviewer_bot_ids {return Ok(previous);}
@@ -374,16 +406,7 @@ fn set(store:&Store,id:&str,expected:i64,input:&RosterInput)->Result<TeamRoster>
     if changed!=1{return Err("Concurrent Team policy change; reload required.".into());}
     tx.execute("DELETE FROM sa_team_roles WHERE orchestration_id=?1",[id])
         .map_err(|e|e.to_string())?;
-    for (idx,bot_id) in input.worker_bot_ids.iter().enumerate().skip(1) {
-        tx.execute("INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
-                    VALUES(?1,'worker',?2,?3)",params![id,idx as i64,bot_id])
-            .map_err(|e|e.to_string())?;
-    }
-    for (idx,bot_id) in input.reviewer_bot_ids.iter().enumerate() {
-        tx.execute("INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
-                    VALUES(?1,'reviewer',?2,?3)",params![id,idx as i64,bot_id])
-            .map_err(|e|e.to_string())?;
-    }
+    insert_member_roles(store,id,input)?;
     tx.commit().map_err(|e|e.to_string())?;
     read(store,id)
 }
@@ -606,4 +629,58 @@ mod tests {
         assert_eq!(original_after,(config.policy_revision,"completed".into()));
     }
 
+
+    #[test]
+    fn multirole_creation_is_atomic_disabled_and_persistent() {
+        let path=std::env::temp_dir().join(format!("sa-new-team-{}.sqlite3",storage::id()));
+        let store=Store::open(&path).unwrap();
+        store.db.execute("INSERT INTO projects(id,name,path) VALUES('p','Team','/tmp/sa-team-p')",[]).unwrap();
+        store.db.execute("INSERT INTO projects(id,name,path) VALUES('other','Other','/tmp/sa-other')",[]).unwrap();
+        for id in ["lead","primary","w2","w3","r1","r2","foreign"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                params![id,if id=="foreign" {"other"} else {"p"},storage::now()],
+            ).unwrap();
+        }
+        let input=||NewOrchestration {
+            name:"Atomic Team".into(),coordinator_bot_id:"lead".into(),worker_bot_id:"primary".into(),
+        };
+        let roles=RosterInput {
+            worker_bot_ids:vec!["primary".into(),"w3".into(),"w2".into()],
+            reviewer_bot_ids:vec!["r2".into(),"r1".into()],
+        };
+        assert!(create_with_roster(&store,input(),RosterInput {
+            worker_bot_ids:vec!["primary".into(),"foreign".into()],reviewer_bot_ids:vec![],
+        }).unwrap_err().contains("Team project"));
+        assert!(create_with_roster(&store,input(),RosterInput {
+            worker_bot_ids:vec!["primary".into(),"w2".into()],reviewer_bot_ids:vec!["w2".into()],
+        }).unwrap_err().contains("multiple Team roles"));
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='r1'",[]).unwrap();
+        assert!(create_with_roster(&store,input(),roles.clone()).unwrap_err().contains("Paused bots"));
+        store.db.execute("UPDATE bots SET paused=0 WHERE id='r1'",[]).unwrap();
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations",[],|r|r.get::<_,i64>(0),
+        ).unwrap(),0,"all failed role preflights must roll back the Team");
+        let cfg=create_with_roster(&store,input(),roles.clone()).unwrap();
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.policy_revision,1);
+        let saved=read(&store,&cfg.id).unwrap();
+        assert_eq!(saved.worker_bot_ids,roles.worker_bot_ids);
+        assert_eq!(saved.reviewer_bot_ids,roles.reviewer_bot_ids);
+        assert!(!saved.execution_ready);
+        assert!(super::super::change_enabled(&store,&cfg.id,cfg.policy_revision,true)
+            .unwrap_err().contains("multi-member"));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0),
+        ).unwrap(),0);
+        let reopened=Store::open_read_only(&path).unwrap();
+        let persisted=read(&reopened,&cfg.id).unwrap();
+        assert_eq!(persisted.worker_bot_ids,roles.worker_bot_ids);
+        assert_eq!(persisted.reviewer_bot_ids,roles.reviewer_bot_ids);
+        let legacy=super::super::create_configuration(&store,NewOrchestration {
+            name:"Legacy".into(),coordinator_bot_id:"lead".into(),worker_bot_id:"primary".into(),
+        }).unwrap();
+        assert!(read(&store,&legacy.id).unwrap().execution_ready);
+    }
 }

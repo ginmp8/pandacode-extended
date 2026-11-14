@@ -1,7 +1,8 @@
 /** Deterministic preview-only SuperAgent adapter. No real harness or external writes. */
 type Bot = { id:string; name:string; paused:boolean; projectId:string };
 type Config = { id:string; name:string; coordinatorBotId:string; workerBotId:string;
-  projectId:string; enabled:boolean; policyRevision:number };
+  projectId:string; enabled:boolean; policyRevision:number;
+  workerCount?:number; reviewerCount?:number };
 type Ticket = { id:string; orchestrationId:string; objective:string;
   state:string; revision:number; evidence:null };
 type Activity = { id:number; kind:string; detail:string; at:number };
@@ -9,6 +10,7 @@ type Assignment = { id:string; botId:string; sessionId:string; attempt:number; s
 const activity = new Map<string,Activity[]>(), assignments = new Map<string,Assignment[]>();
 const threadLinks = new Map<string,Array<{sourceId:string;ticketId:string;repository:string;subjectKey:string;createdAt:number}>>();
 const configs = new Map<string,Config>(), tickets = new Map<string,Ticket[]>();
+const rosters = new Map<string,{workerBotIds:string[];reviewerBotIds:string[]}>();
 const get = (id:string):Config => { const c=configs.get(id); if(!c)throw Error('Orchestration not found.'); return c; };
 export async function invokeSuperagent<T>(
   command:string,args:Record<string,any>,listBots:()=>Promise<Bot[]>,
@@ -24,12 +26,24 @@ export async function invokeSuperagent<T>(
   switch(command){
     case 'superagent_list': value=[...configs.values()].map(config=>({
       ...config,
+      workerCount:rosters.get(config.id)?.workerBotIds.length??1,
+      reviewerCount:rosters.get(config.id)?.reviewerBotIds.length??0,
       ticketCount:(tickets.get(config.id)||[]).length,
       runningCount:(tickets.get(config.id)||[]).filter(ticket=>ticket.state==='running').length,
       blockedCount:(tickets.get(config.id)||[]).filter(ticket=>ticket.state==='blocked').length,
       lastActivityAt:Date.now(),
     }));break;
     case 'superagent_tickets':value=tickets.get(args.orchestrationId)||[];break;
+    case 'superagent_roster':{
+      const c=get(args.orchestrationId),members=rosters.get(c.id)??{
+        workerBotIds:[c.workerBotId],reviewerBotIds:[],
+      };
+      value={orchestrationId:c.id,policyRevision:c.policyRevision,
+        coordinatorBotId:c.coordinatorBotId,workerBotIds:[...members.workerBotIds],
+        reviewerBotIds:[...members.reviewerBotIds],
+        executionReady:members.workerBotIds.length===1&&!members.reviewerBotIds.length};
+      break;
+    }
     case 'superagent_snapshot':
     case 'superagent_mandate':
     case 'superagent_assignments':
@@ -56,9 +70,24 @@ export async function invokeSuperagent<T>(
     case 'superagent_create':{
       const input=args.input;const a=find(input.coordinatorBotId),b=find(input.workerBotId);
       if(!input.name?.trim()||a.id===b.id||configName(input.name))throw Error('Invalid or duplicate orchestration.');
+      const workers:string[]=args.roster?.workerBotIds??[b.id];
+      const reviewers:string[]=args.roster?.reviewerBotIds??[];
+      if(!Array.isArray(workers)||!Array.isArray(reviewers)||workers[0]!==b.id||
+          workers.length<1||workers.length>8||reviewers.length>4)
+        throw Error('Invalid Team role limits.');
+      if(new Set([a.id,...workers,...reviewers]).size!==1+workers.length+reviewers.length)
+        throw Error('A bot cannot occupy multiple Team roles.');
+      for(const id of workers) {
+        const member=find(id);
+        if(member.paused||member.projectId!==b.projectId)throw Error('Worker project or availability mismatch.');
+      }
+      for(const id of reviewers)if(find(id).paused)throw Error('Paused reviewer bot.');
       const c:Config={id:crypto.randomUUID(),name:input.name,coordinatorBotId:a.id,
-        workerBotId:b.id,projectId:b.projectId,enabled:false,policyRevision:1};
-      configs.set(c.id,c);value=c;break;
+        workerBotId:b.id,projectId:b.projectId,enabled:false,policyRevision:1,
+        workerCount:workers.length,reviewerCount:reviewers.length};
+      configs.set(c.id,c);
+      rosters.set(c.id,{workerBotIds:[...workers],reviewerBotIds:[...reviewers]});
+      value=c;break;
     }
     case 'superagent_update':{
       const c=get(args.orchestrationId),input=args.input;
@@ -72,13 +101,15 @@ export async function invokeSuperagent<T>(
     }
     case 'superagent_set_enabled':{
       const c=get(args.orchestrationId);if(c.policyRevision!==args.expectedRevision)throw Error('Stale policy.');
+      if(args.enabled && ((c.workerCount??1)>1||(c.reviewerCount??0)>0))
+        throw Error('Multi-member execution requires native scoped admission.');
       if(c.enabled!==args.enabled){c.enabled=args.enabled;c.policyRevision++;}
       value=c;break;
     }
     case 'superagent_delete':{
       const c=get(args.orchestrationId);if(c.enabled||c.policyRevision!==args.expectedRevision||
         (tickets.get(c.id)?.length||0)>0)throw Error('Cannot delete used or enabled preset.');
-      configs.delete(c.id);value=null;break;
+      configs.delete(c.id);rosters.delete(c.id);value=null;break;
     }
     case 'superagent_submit':
     case 'superagent_submit_coordinated':{

@@ -191,3 +191,8 @@ scheduler, or a substitute for native Council/effect-time authorization.
 
 Rust regressions cover replay, changed bot profile denial, fresh-Demand profiles,
 restart persistence and schema-v45 upgrade preserving historical Tickets.
+
+
+## Atomic multi-role Team creation (partial UX-P2)
+
+The native `superagent_create` IPC accepts an optional ordered `roster` with `workerBotIds` and `reviewerBotIds`. Existing callers without this argument retain the one-Worker contract. With a roster, the Team and all role rows are created in one SQLite transaction. Duplicate, paused, missing, over-limit and cross-project Worker roles fail without leaving a partially created Team. All roles reuse existing bot IDs. Teams remain disabled/Off; multi-member execution remains unavailable pending native scoped admission. The workspace exposes these optional members before Save and disables unsupported execution. Rust rollback/restart and Playwright creation regressions are authored, but their execution requires verification on the published SHA.

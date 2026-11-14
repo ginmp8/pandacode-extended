@@ -1311,3 +1311,26 @@ test('native Team directory counts configured roles and filters without creating
     (window as unknown as {teamDirectoryCalls:()=>string[]}).teamDirectoryCalls());
   expect(calls.every(command=>['bots_list','superagent_list','superagent_tickets'].includes(command))).toBe(true);
 });
+
+test('new Team persists optional reviewers as one disabled role configuration', async ({page}) => {
+  await page.goto('/?bots=sample');
+  const bar=page.locator('.sidebar-bots-bar');
+  if(await bar.getAttribute('aria-pressed')!=='true')await bar.click();
+  const sidebar=page.getByRole('region',{name:'Bots',exact:true});
+  await sidebar.getByRole('button',{name:'Bot actions'}).click();
+  await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
+  const workspace=page.getByRole('region',{name:'Orchestrations'});
+  await workspace.getByRole('button',{name:'Teams',exact:true}).click();
+  const form=workspace.locator('form[data-sa-form="create"]');
+  await form.getByRole('textbox',{name:'Name',exact:true}).fill('Security Review Team');
+  await form.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption({label:'Scout'});
+  await form.getByRole('combobox',{name:'Worker',exact:true}).selectOption({label:'Writer'});
+  await form.locator('summary').click();
+  await form.locator('select[name="reviewers"]').selectOption({label:'Ledger'});
+  await form.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(workspace.locator('.sa-role-counts')).toContainText('1 Coordinator · 1 Workers · 1 Reviewers');
+  await expect(workspace.getByRole('button',{name:'Enable manual'})).toBeDisabled();
+  await workspace.getByRole('button',{name:'Teams',exact:true}).click();
+  await workspace.getByRole('button',{name:'Load native members'}).click();
+  await expect(workspace.getByRole('region',{name:'Configured Team roles'})).toContainText('Ledger');
+});

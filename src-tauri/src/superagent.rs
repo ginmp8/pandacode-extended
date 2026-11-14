@@ -3177,8 +3177,12 @@ pub(crate) fn guard_run_admission(
             JOIN sa_tickets t ON t.id=a.ticket_id AND t.active_assignment_id=a.id
             LEFT JOIN sessions assigned ON assigned.id=a.session_id
             WHERE a.state='running' AND t.state='running'
-              AND (t.project_id=?1 OR assigned.project_id=?1 OR assigned.id IS NULL)
-              AND a.session_id<>?2
+              AND (t.project_id=?1 OR assigned.project_id=?1 OR assigned.id IS NULL
+                OR EXISTS(SELECT 1 FROM projects requested,projects leased
+                          WHERE requested.id=?1
+                            AND leased.id IN (t.project_id,assigned.project_id)
+                            AND requested.path=leased.path))
+              AND (a.session_id IS NULL OR a.session_id<>?2)
          )",
         params![session.project_id, session_id],
         |row| row.get(0),
@@ -3186,12 +3190,37 @@ pub(crate) fn guard_run_admission(
     if leased_by_other {
         return Err("Project is reserved by another native SuperAgent assignment.".into());
     }
+    // Native leases on another project ID can still own the same physical
+    // checkout through dot components or symlinks.
+    let requested_path=checkout_path(store,&session.project_id)?;
+    let live_native = {
+        let mut stmt=store.db.prepare(
+            "SELECT t.project_id,assigned.project_id
+             FROM sa_assignments a
+             JOIN sa_tickets t ON t.id=a.ticket_id AND t.active_assignment_id=a.id
+             LEFT JOIN sessions assigned ON assigned.id=a.session_id
+             WHERE a.state='running' AND t.state='running'
+               AND (a.session_id IS NULL OR a.session_id<>?1)",
+        ).map_err(|e|e.to_string())?;
+        let rows=stmt.query_map([session_id],|r|Ok((
+            r.get::<_,String>(0)?,r.get::<_,Option<String>>(1)?,
+        ))).map_err(|e|e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())?
+    };
+    for (native_project,assigned_project) in live_native {
+        for id in std::iter::once(native_project.as_str()).chain(assigned_project.as_deref()) {
+            if checkout_paths_equivalent(&requested_path,&checkout_path(store,id)?) {
+                return Err("Physical checkout is leased by a native SuperAgent assignment.".into());
+            }
+        }
+    }
     if superagent_run {
         for other_id in running_sessions {
             if other_id == session_id { continue; }
             // A disappeared active session is not proof that a lease is free.
             let other = store.session(other_id)?;
-            if other.project_id == session.project_id {
+            if other.project_id == session.project_id
+                || checkout_paths_equivalent(&requested_path,&checkout_path(store,&other.project_id)?) {
                 return Err("Project has another active agent; SuperAgent dispatch denied.".into());
             }
         }

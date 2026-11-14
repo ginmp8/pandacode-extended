@@ -5129,6 +5129,217 @@ mod tests {
     }
 
     #[test]
+    fn headless_terminal_orphan_quarantine_is_atomic_revisioned_and_restart_safe() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(&mut store, &cfg.id,
+            "Private objective", "headless-orphan-quarantine", false).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let original = get_ticket(&store, &ticket.id).unwrap().revision;
+        assert!(headless_quarantine_terminal_orphan(
+            &store.path, &ticket.id, original,
+        ).is_err(), "Running Ticket cannot be quarantined");
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'unverified-effect','private-digest','pending',?2,?2)",
+            params![&ticket.id,now],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_tickets SET state='completed',revision=revision+1,
+             evidence='Original evidence' WHERE id=?1", [&ticket.id],
+        ).unwrap();
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        assert!(headless_quarantine_terminal_orphan(
+            &store.path, &ticket.id, revision - 1,
+        ).is_err(), "Stale revision must deny repair");
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_quarantine_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='headless_orphan_quarantined'
+             BEGIN SELECT RAISE(ABORT,'injected audit error'); END;",
+        ).unwrap();
+        assert!(headless_quarantine_terminal_orphan(
+            &store.path, &ticket.id, revision,
+        ).is_err(), "Audit failure must roll back the quarantine");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, revision);
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "running");
+        store.db.execute_batch("DROP TRIGGER deny_quarantine_audit").unwrap();
+        let json: serde_json::Value = serde_json::from_str(
+            &headless_quarantine_terminal_orphan(
+                &store.path, &ticket.id, revision,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(json["state"], "completed");
+        assert_eq!(json["quarantinedAssignments"], 1);
+        assert_eq!(json["pendingEffectsMarkedUncertain"], 1);
+        assert_eq!(json["externalEffectReplayAllowed"], false);
+        assert!(headless_quarantine_terminal_orphan(
+            &store.path, &ticket.id, revision,
+        ).is_err());
+        assert!(headless_quarantine_terminal_orphan(
+            &store.path, &ticket.id, revision + 1,
+        ).is_err());
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().iter()
+            .filter(|e| e.kind == "headless_orphan_quarantined").count(), 1);
+        assert!(!on_run_finished(&store, &session, true, "Late provider result").unwrap());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let terminal = get_ticket(&reopened, &ticket.id).unwrap();
+        assert_eq!(terminal.state, "completed");
+        assert_eq!(terminal.evidence.as_deref(), Some("Original evidence"));
+        assert!(terminal.active_assignment_id.is_none());
+        assert!(mandate(&reopened, &ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&reopened, &ticket.id, 10).unwrap()[0].state, "interrupted");
+        assert_eq!(reopened.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
+            [&ticket.id], |r| r.get::<_, String>(0),
+        ).unwrap(), "uncertain");
+    }
+
+    #[test]
+    fn native_demand_search_is_pre_paginated_scoped_literal_and_restart_safe() {
+        let store = fixture();
+        let first = create_configuration(&store, NewOrchestration {
+            name: "Searchable Team".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let other = create_configuration(&store, NewOrchestration {
+            name: "Unrelated Team".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        for index in 0..205_i64 {
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Unrelated newer demand','local-user','manual',
+                        ?4,'worker',?5,'blocked',?6,?6)",
+                params![format!("recent-{index:03}"), first.id,
+                    format!("recent-request-{index:03}"), first.project_id,
+                    first.policy_revision, 5000 + index],
+            ).unwrap();
+        }
+        for (id, objective, timestamp) in [
+            ("match-a", "Needle delivery", 3000_i64),
+            ("match-b", "Review 100%_NEEDLE evidence", 2000_i64),
+            ("match-c", "needle regression", 1000_i64),
+        ] {
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,?4,'local-user','manual',
+                        ?5,'worker',?6,'blocked',?7,?7)",
+                params![id,first.id,format!("{id}-request"),objective,
+                    first.project_id,first.policy_revision,timestamp],
+            ).unwrap();
+        }
+        store.db.execute(
+            "INSERT INTO sa_tickets
+             (id,orchestration_id,request_key,objective,actor,source,project_id,
+              worker_bot_id,policy_revision,state,created_at,updated_at)
+             VALUES('other-needle',?1,'other-needle-request','Needle other Team',
+                    'local-user','manual',?2,'worker',?3,'blocked',9000,9000)",
+            params![other.id,other.project_id,other.policy_revision],
+        ).unwrap();
+        let search = |before_at, before_id| list_all_demands_page_searched(
+            &store, 2, before_at, before_id, Some(&first.id), Some("blocked"),
+            Some("NEEDLE"),
+        );
+        let first_page = search(None, None).unwrap();
+        assert_eq!(first_page.iter().map(|item| item.id.as_str())
+            .collect::<Vec<_>>(), vec!["match-a", "match-b"]);
+        let second_page = search(Some(2000), Some("match-b")).unwrap();
+        assert_eq!(second_page.len(), 1);
+        assert_eq!(second_page[0].id, "match-c");
+        assert!(search(Some(1000), Some("match-c")).unwrap().is_empty());
+        assert_eq!(list_all_demands_page_searched(
+            &store, 200, None, None, Some(&first.id), Some("blocked"), Some("%_needle"),
+        ).unwrap()[0].id, "match-b");
+        assert!(list_all_demands_page_searched(
+            &store, 200, None, None, Some(&first.id), Some("running"), Some("needle"),
+        ).unwrap().is_empty());
+        assert!(list_all_demands_page_searched(
+            &store, 200, None, None, Some(&first.id), Some("blocked"),
+            Some("' OR 1=1 --"),
+        ).unwrap().is_empty());
+        for invalid in ["", "   ", "a\nneedle", "a\u{0000}needle"] {
+            assert!(list_all_demands_page_searched(
+                &store, 200, None, None, Some(&first.id), None, Some(invalid),
+            ).is_err());
+        }
+        let oversized = "n".repeat(129);
+        assert!(list_all_demands_page_searched(
+            &store, 200, None, None, None, None, Some(&oversized),
+        ).is_err());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(list_all_demands_page_searched(
+            &reopened, 200, None, None, Some(&first.id), Some("blocked"), Some("needle"),
+        ).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn ordinary_chat_admission_retains_legacy_empty_project_path_behavior() {
+        let store=fixture();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('legacy-empty-project','Legacy','')",[]
+        ).unwrap();
+        let ordinary=store.create_session("legacy-empty-project","codex","default","ask").unwrap();
+        // No SuperAgent owns this session. The new exact-checkout guard cannot
+        // turn a legacy ordinary chat into a task-scoped provider admission.
+        assert!(guard_run_admission(&store,&ordinary.id,&[]).is_ok());
+    }
+
+    #[test]
+    fn physical_checkout_aliases_block_native_and_ordinary_cross_project_admission() {
+        let mut store=fixture();
+        let checkout=std::env::temp_dir().join(format!(
+            "sa-checkout-identity-{}",storage::id(),
+        ));
+        std::fs::create_dir_all(&checkout).unwrap();
+        let physical=checkout.to_string_lossy().to_string();
+        let alias=checkout.join(".").to_string_lossy().to_string();
+        assert_ne!(physical,alias);
+        assert!(checkout_paths_equivalent(&physical,&alias));
+        store.db.execute(
+            "UPDATE projects SET path=?1 WHERE id='project'",[&physical],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('alias-project','Alias',?1)",
+            [&alias],
+        ).unwrap();
+        let cfg=enabled(&store);
+        let (ticket,started)=admit(
+            &mut store,&cfg.id,"Protect the physical checkout","physical-alias",false,
+        ).unwrap();
+        assert!(started);
+        let native=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        let ordinary=store.create_session(
+            "alias-project","codex","default","plan",
+        ).unwrap();
+        assert!(active_manual_conflict(
+            &store,std::slice::from_ref(&ordinary.id),"worker","project",
+        ).unwrap());
+        assert!(manual_candidate_occupied(
+            &store,"unrelated-worker","alias-project","alias-project",
+        ).unwrap());
+        assert!(guard_run_admission(&store,&ordinary.id,&[]).is_err());
+        assert!(guard_run_admission(
+            &store,&native,std::slice::from_ref(&ordinary.id),
+        ).is_err());
+        stop(&store,&ticket.id).unwrap();
+        assert!(!manual_candidate_occupied(
+            &store,"unrelated-worker","alias-project","alias-project",
+        ).unwrap());
+        assert!(guard_run_admission(&store,&ordinary.id,&[]).is_ok());
+        std::fs::remove_dir(&checkout).unwrap();
+    }
+    #[test]
     fn headless_recovery_inbox_flags_terminal_ticket_with_orphan_running_assignment() {
         let mut store = fixture();
         let cfg = enabled(&store);

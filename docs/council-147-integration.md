@@ -281,3 +281,10 @@ The run launcher now checks that a native child coordinator has a valid task-own
 `providers::RunConfig.native_reviewer_host` is a private-to-native-run, explicit enum marker set by the trusted launcher only after filter validation; unknown/forged host tools are rejected before reaching the provider. A missing host for the token, a token on a non-reviewer, a token on a scoped user-grant reviewer, or an unsupported host bridge such as ZCode fails closed. Existing non-reviewer and selected-bot Scoped host grants continue through their separate paths.
 
 Added Rust contract tests for native evidence and isolated child tool allowlists, unsupported/marker mismatches, and legitimate 7 × 3 child ownership. These are static/test-source additions; exact-HEAD provider smoke and native test results remain unverified.
+
+
+## Native reviewer process isolation across launches
+
+Claude warm-process eligibility is now restricted to ordinary tasks with no reviewer boundary, reviewer policy or native host token. Native evidence reviewers and task-owned child coordinator sessions never reuse a prelaunched or previously active warm harness. This avoids carrying a previous root/child cycle context or tool-host grant into the next admission even when advertised tool schemas are identical.
+
+The optimization for ordinary non-reviewer tasks remains unchanged. A Rust regression asserts that read-only reviewers, both native reviewer host kinds and orphaned host tokens cannot enter the warm pool.

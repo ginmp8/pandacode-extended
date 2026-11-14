@@ -7171,6 +7171,33 @@ fn composed_admission_test_config() -> council::CouncilConfig {
 
 
 #[test]
+fn channel_composed_council_never_displays_cached_pass_without_native_terminal() {
+    let (store, mut team) = fixture();
+    team.config.council = Some(composed_admission_test_config());
+    team.status = "completed".into();
+    team.council_since = storage::now().max(1);
+    team.council_status = Some(CouncilStatus {
+        state: "passed".into(),
+        round: 1,
+        lowest: Some(10.0),
+        target: 9.0,
+        stale: false,
+        notice: None,
+    });
+    assert!(!crate::bots::shared_channels::display_verified_council_pass(&store, &team, true),
+        "a forged/cached pass with no native reviewer grants or receipts must not display Passed");
+    assert!(!crate::bots::shared_channels::display_verified_council_pass(&store, &team, false),
+        "a different delivery cannot borrow a Council approval");
+
+    team.config.council = Some(council::CouncilConfig::default());
+    assert!(crate::bots::shared_channels::display_verified_council_pass(&store, &team, true),
+        "legacy M1/M2 display remains compatible");
+    team.council_status.as_mut().unwrap().stale = true;
+    assert!(!crate::bots::shared_channels::display_verified_council_pass(&store, &team, true),
+        "a stale result cannot display native approval");
+}
+
+#[test]
 fn repeated_finding_under_one_native_criterion_keeps_its_first_scored_receipt_immutable() {
     let original = council::CouncilCriterionOutcomeReceipt {
         schema_version: 1,

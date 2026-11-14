@@ -245,3 +245,10 @@ The native `pandacode_council_record_finding` handler now validates the one immu
 If a later call tries to change the scored criterion, artifact revision or binding, it is rejected with `council_criterion_conflict` before writing any new finding. The root/child finding records, both criterion projections and refreshed snapshots now share one SQLite transaction: any failure rolls back the entire call, including an otherwise-valid new finding. Exact identical retries remain idempotent.
 
 A Rust regression proves unchanged score/identity across distinct evidence-backed findings and denial of score/artifact mutation. End-to-end native filesystem-hash and SQLite fault-injection checks are still required before accepting AC-33/36 as passed.
+
+
+## Shared Channel status cannot outpace native terminal approval (AC-18/19/26)
+
+Channel callback settlement already requires a completed task and `verified_council_pass`, but the read-only Channel Council view previously labeled any cached `passed` snapshot as Passed when the frozen message selection matched. For composed M3-M7 native reviews, its display now additionally requires completed root task status and the same independently reverified native Council grant/criterion/terminal receipt gate. Missing or stale evidence displays Inconclusive with an explicit pending-terminal notice, not an unsupported approval. Historical uncomposed M1/M2 display behavior remains unchanged.
+
+A Rust regression checks forged cached pass, cross-delivery mismatch, stale score and legacy compatibility without granting any new callback authority.

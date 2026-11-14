@@ -343,6 +343,27 @@ pub(super) fn skipped_skill_status(reason: &str) -> &'static str {
     else { "skipped" }
 }
 
+/// A composed Council status is an observation, not authorization.
+/// Legacy Council displays retain their previous behavior, while composed
+/// tasks must have the exact native terminal evidence before showing Passed.
+pub(crate) fn display_verified_council_pass(
+    store: &Store, team: &crate::architect::TeamSnapshot, original_matches: bool,
+) -> bool {
+    if !original_matches
+        || !team.council_status.as_ref().is_some_and(|status| {
+            status.state == "passed" && !status.stale
+        })
+    {
+        return false;
+    }
+    match team.config.council.as_ref() {
+        Some(config) if config.composition.is_some() =>
+            team.status == "completed" && crate::architect::verified_council_pass(store, team),
+        Some(_) => true,
+        None => false,
+    }
+}
+
 fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_status: &str) -> Result<Option<ChannelCouncilView>> {
     let cycle: Option<(String, String, String)> = store.db.query_row(
         "SELECT cycle_id,artifact_revision,source_message_id FROM extended_channel_council_deliveries WHERE delivery_id=?1",
@@ -362,6 +383,7 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
         let status = team.council_status.as_ref();
         let original_matches = original.as_ref() == team.config.council.as_ref()
             && original_revision == format!("cycle:{}",team.council_since);
+        let verified_display_pass = display_verified_council_pass(store, &team, original_matches);
         let authorized_exception = original_matches && proof.as_ref().is_some_and(|(since,dispatch,changed,_)| {
             team.council_accepted == Some(*since) && team.council_since == *since
                 && team.dispatch_revision as i64 == *dispatch && team.changed_at == *changed
@@ -372,7 +394,7 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
             "failed" => "Failed",
             "interrupted" => "Paused",
             _ => match status.map(|s| s.state.as_str()) {
-                Some("passed") if original_matches => "Passed",
+                Some("passed") if verified_display_pass => "Passed",
                 Some("passed") => "Inconclusive",
                 Some("accepted") if authorized_exception => "Accepted by user",
                 Some("accepted") => "Inconclusive",
@@ -434,6 +456,11 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
             .then(|| "Council settings or cycle differ from this channel delivery; approval is unavailable.".to_string())
             .or_else(|| (team.status == "interrupted")
                 .then(|| "PandaCode restarted during Council review. Open the Council report and resume this task; no result has been approved.".to_string()))
+            .or_else(|| (original_matches
+                && team.config.council.as_ref().is_some_and(|config| config.composition.is_some())
+                && status.is_some_and(|status| status.state == "passed")
+                && !verified_display_pass)
+                .then(|| "Council approval is pending independently verified native terminal receipts and a settled root task.".to_owned()))
             .or_else(|| status.and_then(|s| s.notice.as_ref()).map(|s| s.chars().take(300).collect()))
             .or_else(|| (status.is_some_and(|s| s.state == "accepted") && !authorized_exception)
                 .then(|| "Council acceptance requires a reasoned user action in this channel.".into()));

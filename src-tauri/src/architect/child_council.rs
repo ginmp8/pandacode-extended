@@ -398,6 +398,60 @@ fn receipt_key(root: &TeamSnapshot, bot_id: &str) -> String {
     format!("native-council-child-receipt:{}:{bot_id}", root.council_since)
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RootArtifactRevision {
+    root_cycle_id: String,
+    changed_at: i64,
+    writer_stamps_sha256: String,
+}
+
+fn root_artifact_revision_key(root: &TeamSnapshot) -> String {
+    format!("native-council-root-artifact:{}", root.council_since)
+}
+
+/// Pin the root's actual native change index when child review begins, not
+/// when children are reserved before writers finish. Revalidate on every
+/// composite read so later writes cannot reuse old child reviewer scores.
+fn root_artifact_revision(
+    store: &Store, root: &TeamSnapshot, persist: bool,
+) -> Result<bool> {
+    let mut writers = root.workers.iter()
+        .filter(|worker| worker.wrote_at > 0)
+        .map(|worker| (worker.id.as_str(), worker.wrote_at))
+        .collect::<Vec<_>>();
+    writers.sort_unstable();
+    let current = RootArtifactRevision {
+        root_cycle_id: format!("{}:{}", root.session_id, root.council_since),
+        changed_at: super::council::changed_at(store, root)?,
+        writer_stamps_sha256: digest(
+            &serde_json::to_vec(&writers).map_err(|e| e.to_string())?,
+        ),
+    };
+    let key = root_artifact_revision_key(root);
+    let recorded: Option<String> = store.db.query_row(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_root_artifact'",
+        params![root.session_id, key],
+        |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if let Some(recorded) = recorded {
+        let pinned: RootArtifactRevision = serde_json::from_str(&recorded)
+            .map_err(|_| "child_council_stale: malformed root artifact revision.")?;
+        if pinned != current {
+            return Err("child_council_stale: root artifact revision changed after child admission.".into());
+        }
+        return Ok(true);
+    }
+    if !persist { return Ok(false); }
+    super::record_request(
+        store, &root.session_id, &key, "council_root_artifact",
+        &serde_json::to_string(&current).map_err(|e| e.to_string())?,
+        &root.session_id,
+    )?;
+    Ok(true)
+}
+
 /// Construct child evidence only from settled, freshly scored native leaves.
 /// The root Council remains blocked until its separate composite-seat gate exists.
 fn verified_receipt(
@@ -566,6 +620,7 @@ pub(super) fn verified_parent_seats(
     crate::bots::shared_channels::validate_delivery_council(
         store, &root.session_id, config,
     )?;
+    let artifact_pinned = root_artifact_revision(store, root, false)?;
     let mut workers = HashSet::new();
     let mut sessions = HashSet::new();
     let mut bots = HashSet::new();
@@ -576,6 +631,9 @@ pub(super) fn verified_parent_seats(
             .ok_or("child_council_stale: required child reservation is missing.")?;
         let child = super::load(store, &record.child_session_id)?
             .ok_or("child_council_stale: required child Council is missing.")?;
+        if !artifact_pinned && (child.status != "blocked" || !child.workers.is_empty()) {
+            return Err("child_council_stale: root artifact revision pin is missing.".into());
+        }
         let Some(seat) = parent_seat(store, root, &record, &child, false)? else {
             ready = false;
             continue;
@@ -604,7 +662,7 @@ pub(super) fn verified_parent_seats(
     if recorded != seats.len() as i64 {
         return Err("child_council_stale: unexpected or unverifiable composite seat in root cycle.".into());
     }
-    Ok(ready.then_some(seats))
+    Ok((ready && artifact_pinned).then_some(seats))
 }
 
 /// Trusted root-only transition: allocate fresh read-only reviewer sessions
@@ -620,6 +678,7 @@ pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
         return Err("child_council_denied: root work must be settled before native child review.".into());
     }
     crate::bots::shared_channels::validate_delivery_council(store, &root.session_id, config)?;
+    root_artifact_revision(store, root, true)?;
     let mut created = false;
     for choice in &config.nested_bot_reviewers {
         let record = read(store, root, choice)?

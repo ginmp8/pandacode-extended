@@ -84,6 +84,26 @@ The existing `--inspect-ticket` and `--inspect-ticket-effects` commands show
 redacted state without touching live sessions. Per-effect dispatch and full
 headless admission/retry still require explicit user-authorized native grants.
 
+### Quarantine a terminal Ticket's orphaned assignment
+
+The read-only recovery inbox may find a terminal Ticket with a stranded native
+running Assignment after a legacy/partial state transition. A trusted local
+operator can explicitly quarantine the anomaly with the current Ticket revision:
+
+```sh
+pandacode serve --list-recovery-inbox
+pandacode serve --quarantine-terminal-orphan <ticket-id> <expected-revision>
+```
+
+The native transaction revokes the Mandate, interrupts the stray Assignment,
+turns pending external-effect receipts uncertain, clears the stale active link,
+increments the Ticket revision and records one audit event. Terminal state and
+evidence are preserved. A stale revision, live Ticket or duplicate quarantine
+is denied. The detached CLI does not stop a provider in another process; the
+owning serve watchdog must terminate it. This operation cannot launch work,
+acknowledge a remote write or authorize effect replay. Independently reconcile
+any uncertain remote effect before another authorized action.
+
 ### GitHub source cursor diagnostics
 
 Use the trusted local headless inspector to examine a configured GitHub source

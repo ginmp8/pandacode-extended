@@ -27,6 +27,9 @@ enum Command {
     ExportBots { path: PathBuf },
     SyncBots { path: PathBuf },
     PreviewOrchestrations { path: PathBuf },
+    CreateOrchestration { path: PathBuf },
+    ConfigureTeamRoles { orchestration_id: String, expected_revision: i64, path: PathBuf },
+    EnableOrchestration { orchestration_id: String, expected_revision: i64 },
     ImportOrchestrations { path: PathBuf },
     ExportOrchestrations { path: PathBuf },
     InspectOrchestrations,
@@ -369,6 +372,30 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::CreateOrchestration { path } = &command {
+                let result=(||->Result<String,String> {
+                    let input:crate::superagent::OrchestrationInput=read_bounded_json_input(path)?;
+                    let dir=app.path().app_data_dir().map_err(|e|e.to_string())?;
+                    crate::superagent::headless_create_orchestration(&dir.join("kingcode.sqlite3"),input)
+                })();
+                match result {
+                    Ok(receipt)=>{println!("{receipt}");std::process::exit(0)}
+                    Err(error)=>{eprintln!("Team creation failed: {error}");std::process::exit(1)}
+                }
+            }
+            if let Command::ConfigureTeamRoles { orchestration_id,expected_revision,path } = &command {
+                let result=(||->Result<String,String> {
+                    let input:crate::superagent::roster::RosterInput=read_bounded_json_input(path)?;
+                    let dir=app.path().app_data_dir().map_err(|e|e.to_string())?;
+                    crate::superagent::headless_configure_team_roles(
+                        &dir.join("kingcode.sqlite3"),orchestration_id,*expected_revision,input,
+                    )
+                })();
+                match result {
+                    Ok(receipt)=>{println!("{receipt}");std::process::exit(0)}
+                    Err(error)=>{eprintln!("Team update failed: {error}");std::process::exit(1)}
+                }
+            }
             if let Command::QueueDemand { orchestration_id, request_key, objective_file } = &command {
                 // The objective is a bounded local file, never a command-line
                 // argument or console payload. This command stages but does not run.
@@ -398,7 +425,7 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 }
             }
             let native_action = matches!(&command,
-                Command::RetryTicket { .. } | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
+                Command::EnableOrchestration { .. } | Command::RetryTicket { .. } | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
                 | Command::StopTicket { .. } | Command::QuarantineTerminalOrphan { .. }
                 | Command::DisableOrchestration { .. }
                 | Command::RenameOrchestration { .. } | Command::IssueComment { .. });
@@ -408,6 +435,10 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     .and_then(|dir| {
                         let database = dir.join("kingcode.sqlite3");
                         match &command {
+                            Command::EnableOrchestration { orchestration_id,expected_revision } =>
+                                crate::superagent::headless_enable_orchestration(
+                                    &database,orchestration_id,*expected_revision,
+                                ),
                             Command::RetryTicket { ticket_id, expected_revision } =>
                                 crate::superagent::headless_dispatch::request(
                                     &database,ticket_id,*expected_revision,
@@ -480,6 +511,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::ObserveSource { .. } | Command::ObserveCheckRun { .. }
         | Command::QueueDemand { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
+        | Command::CreateOrchestration { .. } | Command::ConfigureTeamRoles { .. }
+        | Command::EnableOrchestration { .. }
         | Command::RetryTicket { .. } | Command::InspectRetryRequest { .. }
         | Command::StopTicket { .. } | Command::QuarantineTerminalOrphan { .. }
         | Command::DisableOrchestration { .. }
@@ -889,6 +922,31 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 command = Command::ExportBots { path: PathBuf::from(value) };
                 ops += 1;
                 index += 1;
+            }
+            "--create-orchestration" => {
+                let file=args.get(index+1).ok_or("--create-orchestration requires a Team JSON file.")?;
+                command=Command::CreateOrchestration {path:PathBuf::from(file)};
+                ops+=1;index+=1;
+            }
+            "--configure-team-roles" => {
+                let id=args.get(index+1).ok_or("--configure-team-roles requires a Team ID.")?;
+                validate_orchestration_id(id)?;
+                let revision=args.get(index+2).ok_or("Missing expected Team policy revision.")?;
+                let file=args.get(index+3).ok_or("--configure-team-roles requires JSON file.")?;
+                command=Command::ConfigureTeamRoles {
+                    orchestration_id:id.clone(),expected_revision:parse_ticket_revision(revision)?,
+                    path:PathBuf::from(file),
+                };
+                ops+=1;index+=3;
+            }
+            "--enable-orchestration" => {
+                let id=args.get(index+1).ok_or("--enable-orchestration requires Team ID.")?;
+                validate_orchestration_id(id)?;
+                let revision=args.get(index+2).ok_or("Missing expected Team policy revision.")?;
+                command=Command::EnableOrchestration {
+                    orchestration_id:id.clone(),expected_revision:parse_ticket_revision(revision)?,
+                };
+                ops+=1;index+=2;
             }
             "--preview-orchestrations" => {
                 let value = args.get(index + 1)
@@ -1323,6 +1381,22 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
     Ok((command, import))
 }
 
+/// Parse bounded operator-owned JSON before passing it to native Team validation.
+fn read_bounded_json_input<T: serde::de::DeserializeOwned>(
+    path:&std::path::Path,
+)->Result<T,String> {
+    use std::io::Read;
+    let file=std::fs::File::open(path)
+        .map_err(|e|format!("Cannot open local Team JSON: {e}"))?;
+    let mut data=Vec::new();
+    file.take(64*1024+1).read_to_end(&mut data)
+        .map_err(|e|format!("Cannot read local Team JSON: {e}"))?;
+    if data.len()>64*1024 {
+        return Err("Team JSON exceeds the 64 KiB input limit.".into());
+    }
+    serde_json::from_slice(&data).map_err(|e|format!("Invalid Team JSON: {e}"))
+}
+
 fn validate_ticket_id(value: &str) -> Result<(), String> {
     if value.is_empty() || value.len() > 128
         || !value.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
@@ -1369,7 +1443,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --retry-ticket <id> <revision> | --inspect-retry-request <id> <revision> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --create-orchestration <file> | --configure-team-roles <id> <revision> <file> | --enable-orchestration <id> <revision> | --retry-ticket <id> <revision> | --inspect-retry-request <id> <revision> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1440,6 +1514,12 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          Accept current worker evidence at the expected Ticket revision; exit.
   --reject-ticket <id> <revision> <reason>
                          Reject current worker evidence with a required reason; quote it if it has spaces.
+  --create-orchestration <file>
+                         Create an Off Team from bounded local JSON.
+  --configure-team-roles <id> <revision> <file>
+                         Edit future-only role policy using revision CAS and native guards.
+  --enable-orchestration <id> <revision>
+                         Explicit Manual enable; never dispatch a provider.
   --retry-ticket <id> <revision>
                          Persist a read-only retry intent; live serve owns dispatch.
   --inspect-retry-request <id> <revision>
@@ -1474,6 +1554,28 @@ mod tests {
     /// The command half of a parse, for tests that don't care about the import path.
     fn parsed(flags: &str) -> Result<Command, String> {
         parse(&argv(flags)).map(|(command, _)| command)
+    }
+
+    #[test]
+    fn native_headless_team_admin_requires_bounded_explicit_inputs() {
+        assert_eq!(parsed("--create-orchestration team.json"),
+            Ok(Command::CreateOrchestration {path:PathBuf::from("team.json")}));
+        assert_eq!(parsed("--configure-team-roles team_1 2 roles.json"),
+            Ok(Command::ConfigureTeamRoles {
+                orchestration_id:"team_1".into(),expected_revision:2,
+                path:PathBuf::from("roles.json"),
+            }));
+        assert_eq!(parsed("--enable-orchestration team_1 2"),
+            Ok(Command::EnableOrchestration {
+                orchestration_id:"team_1".into(),expected_revision:2,
+            }));
+        for invalid in ["--create-orchestration","--configure-team-roles",
+            "--configure-team-roles team_1 2","--configure-team-roles ../bad 2 roles.json",
+            "--configure-team-roles team_1 nope roles.json","--enable-orchestration",
+            "--enable-orchestration team_1 0",
+            "--enable-orchestration team_1 2 --disable-orchestration team_1 2"] {
+            assert!(parsed(invalid).is_err(),"{invalid}");
+        }
     }
 
     #[test]

@@ -2143,6 +2143,48 @@ pub(crate) fn headless_queue_demand(
     })).map_err(|e| e.to_string())
 }
 
+/// One-shot headless Team creation reuses Desktop's atomic native validation.
+/// It does not start a worker, issue grants or enable the new Team.
+pub(crate) fn headless_create_orchestration(
+    database_path: &std::path::Path, input: OrchestrationInput,
+) -> Result<String> {
+    let store=open_headless_transition_store(database_path)?;
+    let (legacy,workers,reviewers,council_required)=input.into_parts()?;
+    let team=create_configuration_roles_with_policy(
+        &store,legacy,workers,reviewers,council_required.unwrap_or(false),
+    )?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId":team.id,"name":team.name,"enabled":team.enabled,
+        "policyRevision":team.policy_revision,"teamVersion":team.team_version,
+        "workerCount":team.worker_bot_ids.len(),
+        "reviewerCount":team.reviewer_bot_ids.len(),
+        "councilRequired":team.council_required,"grantIssued":false,
+    })).map_err(|e|e.to_string())
+}
+
+/// Native policy CAS applies only to future Team versions, never to admitted tasks.
+pub(crate) fn headless_configure_team_roles(
+    database_path:&std::path::Path,orchestration_id:&str,
+    expected_revision:i64,input:roster::RosterInput,
+)->Result<String> {
+    let store=open_headless_transition_store(database_path)?;
+    let updated=roster::set(&store,orchestration_id,expected_revision,&input)?;
+    serde_json::to_string_pretty(&updated).map_err(|e|e.to_string())
+}
+
+/// Manual enable is an explicit action; it never dispatches an assignment.
+pub(crate) fn headless_enable_orchestration(
+    database_path:&std::path::Path,orchestration_id:&str,expected_revision:i64,
+)->Result<String> {
+    let store=open_headless_transition_store(database_path)?;
+    let team=change_enabled(&store,orchestration_id,expected_revision,true)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId":team.id,"enabled":team.enabled,
+        "policyRevision":team.policy_revision,
+        "grantIssued":false,"providerDispatchedByCommand":false,
+    })).map_err(|e|e.to_string())
+}
+
 /// Explicit local headless Team rename uses the same desktop CAS and guard
 /// without startup recovery. This never changes bot identities, roles, grants
 /// or the historical Ticket snapshot; an active Team is always rejected.
@@ -6036,6 +6078,60 @@ mod tests {
             "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
             [&ticket.id], |r| r.get::<_, String>(0),
         ).unwrap(), "uncertain");
+    }
+
+    #[test]
+    fn headless_team_admin_uses_native_disabled_creation_and_policy_cas() {
+        let store=fixture();
+        let value=headless_create_orchestration(&store.path,OrchestrationInput {
+            name:"CLI Team".into(),
+            coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
+            worker_bot_ids:Some(vec!["worker".into()]),
+            reviewer_bot_ids:Some(vec![]),council_required:Some(false),
+        }).unwrap();
+        let created:serde_json::Value=serde_json::from_str(&value).unwrap();
+        assert_eq!(created["enabled"],false);
+        assert_eq!(created["grantIssued"],false);
+        let id=created["orchestrationId"].as_str().unwrap();
+        let initial=configuration(&store,id).unwrap();
+        add_worker(&store,"worker-two");
+        let value=headless_configure_team_roles(
+            &store.path,id,initial.policy_revision,roster::RosterInput {
+                worker_bot_ids:vec!["worker".into(),"worker-two".into()],
+                reviewer_bot_ids:vec![],council_required:Some(false),
+            },
+        ).unwrap();
+        let roster:roster::TeamRoster=serde_json::from_str(&value).unwrap();
+        assert_eq!(roster.worker_bot_ids,vec!["worker","worker-two"]);
+        assert_eq!(roster.policy_revision,initial.policy_revision+1);
+        assert!(headless_configure_team_roles(
+            &store.path,id,initial.policy_revision,roster::RosterInput {
+                worker_bot_ids:vec!["worker".into()],
+                reviewer_bot_ids:vec![],council_required:None,
+            },
+        ).is_err());
+        let enabled:serde_json::Value=serde_json::from_str(
+            &headless_enable_orchestration(&store.path,id,roster.policy_revision).unwrap()
+        ).unwrap();
+        assert_eq!(enabled["enabled"],true);
+        assert_eq!(enabled["providerDispatchedByCommand"],false);
+        assert!(headless_configure_team_roles(
+            &store.path,id,enabled["policyRevision"].as_i64().unwrap(),
+            roster::RosterInput {
+                worker_bot_ids:vec!["worker".into()],
+                reviewer_bot_ids:vec![],council_required:None,
+            },
+        ).is_err());
+        assert!(headless_create_orchestration(&store.path,OrchestrationInput {
+            name:"Invalid Role".into(),
+            coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
+            worker_bot_ids:Some(vec!["router".into()]),
+            reviewer_bot_ids:None,council_required:None,
+        }).is_err());
+        let total:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(total,0);
     }
 
     #[test]

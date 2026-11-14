@@ -718,3 +718,22 @@ arguments. A separate CLI never launches providers or invokes startup recovery.
 Only the live server claims queued requests using native admission, assignment,
 mandate, effect and checkout guards. Duplicate requests deduplicate; an ambiguous
 handoff remains uncertain and never automatically replays.
+
+
+### Native headless Team administration
+
+One-shot commands use the same trusted native Team policy and revision guards
+as Desktop, without a Webview or startup recovery:
+
+```sh
+pandacode serve --create-orchestration /path/to/team.json
+pandacode serve --configure-team-roles TEAM_ID REVISION /path/to/roles.json
+pandacode serve --enable-orchestration TEAM_ID REVISION
+```
+
+JSON is limited to 64 KiB and uses the Desktop `OrchestrationInput` and
+`RosterInput` camelCase contracts. Teams are created disabled; modifying
+role policy requires exact revision and an eligible disabled Team. Manual
+enable never launches a provider, grants tools or enables authenticated Auto.
+Multi-worker Teams may use the separate native scheduler where supported;
+legacy single-worker manual admission does not silently execute multi-role plans.

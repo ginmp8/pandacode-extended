@@ -286,7 +286,7 @@ pub async fn superagent_effective_team(
     effective_team(&store,&orchestration_id,&library)
 }
 
-fn set(store: &Store, id: &str, expected: i64, input: &RosterInput) -> Result<TeamRoster> {
+pub(super) fn set(store: &Store, id: &str, expected: i64, input: &RosterInput) -> Result<TeamRoster> {
     let current = configuration(store, id)?;
     let worker_id = input.worker_bot_ids.first()
         .ok_or("A Team needs at least one Worker.")?.clone();

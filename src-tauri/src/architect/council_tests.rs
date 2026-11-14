@@ -3390,11 +3390,11 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
         &std::sync::atomic::AtomicBool::new(false),
     ).unwrap();
     // A single scored leaf is not a child receipt or a parent vote.
-    for index in 0..4 {
+    for _ in 0..4 {
         let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
         {
             let store = state.store.lock().unwrap();
-            store.message(&launch.sid, "assistant", "Independent evidence.\\nCouncil score: 9.5/10").unwrap();
+            store.message(&launch.sid, "assistant", "Independent evidence.\nCouncil score: 9.5/10").unwrap();
         }
         completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
         let store = state.store.lock().unwrap();
@@ -3406,7 +3406,6 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
             [&sid], |row| row.get::<_, i64>(0),
         ).unwrap(), 0, "a completed model turn alone must never persist a child verdict");
         drop(store);
-        assert!(index < 4);
     }
     let store = state.store.lock().unwrap();
     let root = load(&store, &sid).unwrap().unwrap();

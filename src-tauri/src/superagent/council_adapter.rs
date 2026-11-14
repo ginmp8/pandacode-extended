@@ -1600,11 +1600,11 @@ mod tests {
 
         let foreign_request_error = crate::superagent_council_task_request_for_client(
             &store, &first.id, &second_capability,
-        ).err().expect("foreign capability must fail at the command boundary");
+        ).expect_err("foreign capability must fail at the command boundary");
         assert!(foreign_request_error.contains("task_client_denied"));
         let forged_request_error = crate::superagent_council_task_request_for_client(
             &store, &first.id, "callerId=superagent-ticket:forged",
-        ).err().expect("callerId text must not authenticate a request");
+        ).expect_err("callerId text must not authenticate a request");
         assert!(forged_request_error.contains("task_client_denied"));
 
         let foreign_read_error = crate::superagent_council_evidence_read_for_client(
@@ -1613,7 +1613,7 @@ mod tests {
             &second_capability,
             "native-council-request:foreign",
             "native-council-evidence:v1:foreign",
-        ).err().expect("foreign capability must fail before evidence lookup");
+        ).expect_err("foreign capability must fail before evidence lookup");
         assert!(foreign_read_error.contains("task_client_denied"));
         assert_eq!(store.db.query_row::<i64, _, _>(
             "SELECT COUNT(*) FROM architect_requests WHERE kind='council_task_request'",

@@ -268,6 +268,8 @@ pub enum CouncilCompositionMode {
 }
 
 impl CouncilCompositionMode {
+    /// Mode labels are test-facing documentation; nothing in the native path needs them.
+    #[cfg(test)]
     pub fn id(self) -> &'static str {
         match self {
             Self::Architect => "M1",
@@ -347,6 +349,19 @@ pub struct CouncilCriterionOutcomeReceipt {
     pub outcome: CouncilCriterionOutcome,
 }
 
+/// The frozen correlation a persisted criterion outcome must match before it
+/// can count toward its seat's gate.
+pub(super) struct CriterionOutcomeCorrelation<'a> {
+    pub(super) root_cycle_id: &'a str,
+    pub(super) task_id: &'a str,
+    pub(super) task_cycle_id: &'a str,
+    pub(super) round: usize,
+    pub(super) seat_id: &'a str,
+    pub(super) parent_seat_id: Option<&'a str>,
+    pub(super) attempt: usize,
+    pub(super) artifact_revision: &'a str,
+}
+
 impl CouncilCriterionOutcomeReceipt {
     pub fn validate(&self) -> std::result::Result<(), CouncilCompositionError> {
         if self.schema_version != 1
@@ -378,26 +393,16 @@ impl CouncilCriterionOutcomeReceipt {
         Ok(())
     }
 
-    pub fn validates_for(
-        &self,
-        root_cycle_id: &str,
-        task_id: &str,
-        task_cycle_id: &str,
-        round: usize,
-        seat_id: &str,
-        parent_seat_id: Option<&str>,
-        attempt: usize,
-        artifact_revision: &str,
-    ) -> bool {
+    pub(super) fn validates_for(&self, expected: &CriterionOutcomeCorrelation<'_>) -> bool {
         self.validate().is_ok()
-            && self.root_cycle_id == root_cycle_id
-            && self.task_id == task_id
-            && self.task_cycle_id == task_cycle_id
-            && self.round == round
-            && self.seat_id == seat_id
-            && self.parent_seat_id.as_deref() == parent_seat_id
-            && self.attempt == attempt
-            && self.artifact_revision == artifact_revision
+            && self.root_cycle_id == expected.root_cycle_id
+            && self.task_id == expected.task_id
+            && self.task_cycle_id == expected.task_cycle_id
+            && self.round == expected.round
+            && self.seat_id == expected.seat_id
+            && self.parent_seat_id.as_deref() == expected.parent_seat_id
+            && self.attempt == expected.attempt
+            && self.artifact_revision == expected.artifact_revision
     }
 }
 
@@ -738,11 +743,16 @@ fn safe_relative_file(path: &str) -> bool {
     !path.replace('\\', "/").split('/').any(|part| part == ".." || part.is_empty())
 }
 fn valid_usage_value<T>(value: &CouncilUsageValue<T>) -> bool {
-    match (value.status, value.value.is_some()) {
-        (CouncilUsageValueStatus::Unknown, false) => true,
-        (CouncilUsageValueStatus::Measured | CouncilUsageValueStatus::ProviderEstimated | CouncilUsageValueStatus::CalculatedEstimated, true) => true,
-        _ => false,
-    }
+    matches!(
+        (value.status, value.value.is_some()),
+        (CouncilUsageValueStatus::Unknown, false)
+            | (
+                CouncilUsageValueStatus::Measured
+                    | CouncilUsageValueStatus::ProviderEstimated
+                    | CouncilUsageValueStatus::CalculatedEstimated,
+                true
+            )
+    )
 }
 
 impl CouncilFinding {
@@ -1122,10 +1132,6 @@ impl CouncilComposition {
     pub fn maximum_automatic_seats(&self) -> usize {
         if !self.automatic.enabled { return 0; }
         (self.limits.max_root_seats as usize).saturating_sub(self.selected.len())
-    }
-
-    pub fn minimum_root_seats(&self) -> usize {
-        self.selected.len().saturating_add(self.minimum_automatic_seats())
     }
 
     pub fn validate_required_criteria_gate(
@@ -1779,7 +1785,7 @@ pub(super) fn seat_for(team: &TeamSnapshot, lens: Option<&str>, replaces: Option
     if round > 1 && !fixed.is_empty() && !fixed.iter().any(|known| same_lens(known, lens)) {
         return Err(format!("Council lenses are fixed by round 1: {}. Use one of them for {lens:?}.", fixed.join(", ")));
     }
-    Ok(Some(CouncilSeat { round, lens: lens.trim().into(), score: None, started_at: 0, closed_by_selection: false, ..CouncilSeat::default() }))
+    Ok(Some(CouncilSeat { round, lens: lens.trim().into(), score: None, started_at: 0, closed_by_selection: false }))
 }
 
 /// When a new round opens over an incomplete one (changes overtook it), that round's unscored
@@ -1857,12 +1863,6 @@ pub(super) fn asks_user(team: &TeamSnapshot) -> bool {
     verdict(team).is_some_and(|(_, asks)| asks)
 }
 
-pub(super) fn asks_user_with_criterion_outcomes(
-    team: &TeamSnapshot,
-    outcomes: &[CouncilCriterionOutcomeReceipt],
-) -> bool {
-    verdict_with_criterion_outcomes(team, outcomes).is_some_and(|(_, asks)| asks)
-}
 pub(super) fn asks_user_with_ledger(
     team: &TeamSnapshot,
     outcomes: &[CouncilCriterionOutcomeReceipt],
@@ -1881,6 +1881,9 @@ pub(super) fn asks_user_with_ledger(
 pub(super) fn finish_refusal(team: &TeamSnapshot) -> Option<String> {
     verdict(team).map(|(refusal, _)| refusal)
 }
+/// Only the native tests still call the criterion-outcome-only verdict; the shipped path
+/// reads the full ledger.
+#[cfg(test)]
 pub(super) fn finish_refusal_with_criterion_outcomes(
     team: &TeamSnapshot,
     outcomes: &[CouncilCriterionOutcomeReceipt],
@@ -2110,16 +2113,16 @@ fn required_criteria_gate(
                     && receipt.child_cycle_id.as_deref() == Some(receipt.task_cycle_id.as_str())
                     && receipt.parent_seat_id.as_deref() == Some(worker.id.as_str())
             } else {
-                receipt.validates_for(
-                    &root_cycle_id,
-                    &team.session_id,
-                    &root_cycle_id,
-                    seat.round,
-                    &worker.id,
-                    None,
-                    worker.attempt,
-                    &binding.artifact_revision,
-                )
+                receipt.validates_for(&CriterionOutcomeCorrelation {
+                    root_cycle_id: &root_cycle_id,
+                    task_id: &team.session_id,
+                    task_cycle_id: &root_cycle_id,
+                    round: seat.round,
+                    seat_id: &worker.id,
+                    parent_seat_id: None,
+                    attempt: worker.attempt,
+                    artifact_revision: &binding.artifact_revision,
+                })
             };
             if !correlated || receipt.validate().is_err() {
                 continue;
@@ -2242,10 +2245,16 @@ pub(super) fn nested_preliminary_trigger(
     }
     let mut own = std::collections::BTreeMap::new();
     for receipt in outcomes.iter().filter(|receipt| receipt.validate().is_ok()) {
-        if receipt.validates_for(
-            &cycle_id, &team.session_id, &cycle_id, seat.round, &worker.id, None,
-            worker.attempt, &binding.artifact_revision,
-        ) {
+        if receipt.validates_for(&CriterionOutcomeCorrelation {
+            root_cycle_id: &cycle_id,
+            task_id: &team.session_id,
+            task_cycle_id: &cycle_id,
+            round: seat.round,
+            seat_id: &worker.id,
+            parent_seat_id: None,
+            attempt: worker.attempt,
+            artifact_revision: &binding.artifact_revision,
+        }) {
             own.insert(receipt.outcome.criterion_id.as_str(), &receipt.outcome);
         }
     }
@@ -2395,12 +2404,6 @@ fn strategy_terminal_pass(
     }
 }
 
-pub(super) fn unreviewed_with_criterion_outcomes(
-    team: &TeamSnapshot,
-    outcomes: &[CouncilCriterionOutcomeReceipt],
-) -> Option<String> {
-    finish_refusal_with_criterion_outcomes(team, outcomes).filter(|_| has_writer(team))
-}
 pub(super) fn unreviewed_with_ledger(
     team: &TeamSnapshot,
     outcomes: &[CouncilCriterionOutcomeReceipt],
@@ -2450,16 +2453,13 @@ fn status_in(
     } else if live(team, round) {
         "reviewing"
     } else if config.composition.as_ref().is_some_and(|composition| {
-        composition.strategy == CouncilStrategy::TwoPhase
+        (composition.strategy == CouncilStrategy::TwoPhase
             && view.complete(round)
             && round == 1
-            && two_phase_phase1_passes(team, config, view, outcomes)
-    }) {
-        "dispatch"
-    } else if config.composition.as_ref().is_some_and(|composition| {
-        composition.strategy == CouncilStrategy::Escalated
-            && view.complete(round)
-            && !s2_escalation_signals(team, round, outcomes, findings).is_empty()
+            && two_phase_phase1_passes(team, config, view, outcomes))
+            || (composition.strategy == CouncilStrategy::Escalated
+                && view.complete(round)
+                && !s2_escalation_signals(team, round, outcomes, findings).is_empty())
     }) {
         "dispatch"
     } else if config.composition.as_ref().is_some_and(|composition| {

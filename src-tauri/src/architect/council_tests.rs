@@ -361,7 +361,7 @@ fn selected_council_failover_never_changes_its_frozen_provider_or_permissions() 
     let mut team = load(&store, &sid).unwrap().unwrap();
     team.workers[0].status = "failed".into();
     team.workers[0].council = Some(CouncilSeat {
-        round: 1, lens: "security".into(), score: None, started_at: 1, closed_by_selection: false, ..CouncilSeat::default()
+        round: 1, lens: "security".into(), score: None, started_at: 1, closed_by_selection: false
     });
     let worker = &team.workers[0];
     let mut binding = reviewer_security::ReviewerBinding::native(
@@ -596,7 +596,7 @@ fn seat(id: &str, round: usize, score: Option<f64>, created: i64) -> Worker {
     reviewer.read_only = true;
     reviewer.created_at = created;
     reviewer.updated_at = created;
-    reviewer.council = Some(CouncilSeat { round, lens: format!("lens {id}"), score, started_at: created, closed_by_selection: false, ..CouncilSeat::default() });
+    reviewer.council = Some(CouncilSeat { round, lens: format!("lens {id}"), score, started_at: created, closed_by_selection: false });
     reviewer
 }
 fn writer(id: &str, wrote_at: i64) -> Worker {
@@ -978,7 +978,7 @@ fn a_replacement_joins_the_seat_it_replaces_and_keeps_its_lens() {
     let team = saved(&state, &sid);
     let new = team.workers.last().unwrap();
     assert!(new.read_only);
-    assert_eq!(new.council, Some(CouncilSeat { round: 1, lens: "lens b".into(), score: None, started_at: 0, closed_by_selection: false, ..CouncilSeat::default() }));
+    assert_eq!(new.council, Some(CouncilSeat { round: 1, lens: "lens b".into(), score: None, started_at: 0, closed_by_selection: false }));
     assert!(team.workers[2].abandoned);
 }
 
@@ -2024,7 +2024,7 @@ fn actual_composed_gate_requires_current_persisted_criterion_outcomes_and_eviden
         vec!["file:src/security.rs#sha256:abcd".into()],
     );
     assert_eq!(
-        council::status_with_criterion_outcomes(&team, &[valid.clone()])
+        council::status_with_criterion_outcomes(&team, std::slice::from_ref(&valid))
             .unwrap()
             .state,
         "passed"
@@ -2032,7 +2032,7 @@ fn actual_composed_gate_requires_current_persisted_criterion_outcomes_and_eviden
 
     let stale = receipt("stale-artifact-revision".into(), 10.0, vec!["file:src/security.rs#sha256:abcd".into()]);
     assert_ne!(
-        council::status_with_criterion_outcomes(&team, &[stale.clone()])
+        council::status_with_criterion_outcomes(&team, std::slice::from_ref(&stale))
             .unwrap()
             .state,
         "passed"

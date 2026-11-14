@@ -134,3 +134,17 @@ still defaults Off, and no Ticket, Worker, Council or external write is created.
 Every explicit authenticated GitHub Events or Checks API observation resolves the repository's numeric GitHub ID through `gh api repos/<owner>/<repo>`. The first successful observation pins that ID to the source within the same SQLite transaction as decisions and cursor updates. Subsequent polls reject a changed ID, including a repository deleted and recreated under the same name, without altering existing receipts or advancing the cursor. Disabling and re-enabling Observe does not reset the pin.
 
 Sources created before v48 preserve their historic receipts, but those historic records have **unknown repository-ID provenance**; migration does not fabricate an ID. Their first successful new authenticated observation establishes the pin prospectively. This remains **Observe-only**: no task admission, GitHub Auto, external effect or Council approval is authorized by these receipts. Operators can inspect the pinned `repositoryId` (or `null` before attestation) through source-integrity diagnostics. If the ID changes, the existing source must not silently rebind; investigate the repository identity and configure an independently authorized replacement source.
+
+## Cross-source thread correlation and numeric repository identity
+
+An explicit Ticket issue/PR association and its source-linked activity compare
+the independently pinned numeric GitHub repository IDs when available. Two
+source classes with the same owner/name but different IDs never share receipts,
+including after deletion and recreation of a repository. A pinned source does
+not silently match a source whose repository identity is still unknown.
+Existing legacy associations where **both** sources have unknown identities
+remain readable as historical context, not authenticated proof of sameness.
+Each source's own explicitly linked receipts remain visible without an
+unrelated source's attestation. Operators can explicitly observe eligible
+sources to establish prospective identity pins; importing, linking, or reading
+a receipt never issues a grant, infers a GitHub task or starts Auto.

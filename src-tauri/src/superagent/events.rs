@@ -285,7 +285,14 @@ fn link_issue_to_pull(store: &Store, source_id: &str, ticket_id: &str,
          WHERE l.ticket_id=?2 AND l.subject_key=?3
            AND initial.orchestration_id=t.orchestration_id
            AND target.orchestration_id=t.orchestration_id
-           AND initial.repository=target.repository COLLATE NOCASE LIMIT 1",
+           AND initial.repository=target.repository COLLATE NOCASE
+           -- A reused GitHub owner/name must not join independently attested
+           -- repositories. Both missing IDs preserve legacy-only references.
+           AND (SELECT repository_id FROM sa_source_repository_identity
+                WHERE source_id=initial.id)
+               IS (SELECT repository_id FROM sa_source_repository_identity
+                   WHERE source_id=target.id)
+           LIMIT 1",
         params![source_id,ticket_id,issue_key], |r| r.get(0),
     ).optional().map_err(|e| e.to_string())?;
     if issue_linked.is_none() {
@@ -1541,6 +1548,12 @@ fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<Ev
              WHERE l.ticket_id=?1 AND l.subject_key=d.subject_key
                AND linked.repository=observed.repository COLLATE NOCASE
                AND linked.orchestration_id=observed.orchestration_id
+               -- Do not correlate source classes from two real repositories
+               -- merely because their display owner/name is identical.
+               AND (SELECT repository_id FROM sa_source_repository_identity
+                    WHERE source_id=linked.id)
+                   IS (SELECT repository_id FROM sa_source_repository_identity
+                       WHERE source_id=observed.id)
            )
          ORDER BY d.at DESC,d.source_id DESC,d.delivery_id DESC LIMIT ?3",
     ).map_err(|e| e.to_string())?;
@@ -3184,6 +3197,87 @@ mod tests {
         assert_eq!(headless_linked_activity(&path, "ticket-two", 50).unwrap(), "[]");
         assert!(headless_linked_activity(&path, "ticket-one", 101).is_err());
         assert!(headless_linked_activity(&path, "unknown-ticket", 50).is_err());
+    }
+
+    #[test]
+    fn pinned_repository_ids_fence_cross_source_ticket_activity_and_pr_links() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "identity-ticket", "orch");
+        let issue = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let pull = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request.opened").unwrap();
+        let matching_review = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request_review.submitted").unwrap();
+        let foreign_review = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request_review.updated").unwrap();
+        let issue = set_mode(&store, &issue.id, issue.policy_revision, "observe").unwrap();
+        let matching_review = set_mode(&store, &matching_review.id,
+            matching_review.policy_revision, "observe").unwrap();
+        let foreign_review = set_mode(&store, &foreign_review.id,
+            foreign_review.policy_revision, "observe").unwrap();
+        let make = |source: &EventSource, delivery: &str, subject: &str| EventEnvelope {
+            source_id: source.id.clone(), delivery_id: delivery.into(),
+            repository: source.repository.clone(), actor: "trusted-bot".into(),
+            event_kind: source.event_kind.clone(), subject_key: subject.into(),
+            sequence: 1,
+        };
+        observe(&store, &make(&issue, "original-issue", "issue:42")).unwrap();
+        observe(&store, &make(&matching_review, "same-repo-review", "pull:88")).unwrap();
+        observe(&store, &make(&foreign_review, "reused-name-review", "pull:88")).unwrap();
+        link_thread(&store, &issue.id, "identity-ticket", "issue:42").unwrap();
+        let attested_at = storage::now();
+        for (id, repository_id) in [
+            (&issue.id, 101_i64), (&foreign_review.id, 202_i64),
+        ] {
+            store.db.execute(
+                "INSERT INTO sa_source_repository_identity
+                 (source_id,repository_id,attested_at) VALUES(?1,?2,?3)",
+                params![id, repository_id, attested_at],
+            ).unwrap();
+        }
+        // A known source and an unknown source cannot be assumed to be the
+        // same GitHub repository for an issue-to-PR operator association.
+        assert!(link_issue_to_pull(&store, &pull.id, "identity-ticket",
+            "issue:42", "pull:88").is_err());
+        let links: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_source_thread_links WHERE ticket_id='identity-ticket'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(links, 1, "Denied association must not write a PR link");
+        store.db.execute(
+            "INSERT INTO sa_source_repository_identity
+             (source_id,repository_id,attested_at) VALUES(?1,101,?2)",
+            params![&pull.id, attested_at],
+        ).unwrap();
+        link_issue_to_pull(&store, &pull.id, "identity-ticket", "issue:42", "pull:88").unwrap();
+
+        let only_issue = linked_decisions(&store, "identity-ticket", 50).unwrap();
+        assert_eq!(only_issue.len(), 1, "Unknown and mismatched IDs must stay private");
+        assert_eq!(only_issue[0].delivery_id, "original-issue");
+
+        store.db.execute(
+            "INSERT INTO sa_source_repository_identity
+             (source_id,repository_id,attested_at) VALUES(?1,101,?2)",
+            params![&matching_review.id, attested_at],
+        ).unwrap();
+        let correlated = linked_decisions(&store, "identity-ticket", 50).unwrap();
+        assert_eq!(correlated.len(), 2, "Only the matching attested repository can join");
+        assert!(correlated.iter().any(|row| row.delivery_id == "same-repo-review"));
+        assert!(correlated.iter().all(|row| row.delivery_id != "reused-name-review"));
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(linked_decisions(&reopened, "identity-ticket", 50).unwrap().len(), 2);
+        let headless: serde_json::Value = serde_json::from_str(
+            &headless_linked_activity(&path, "identity-ticket", 50).unwrap()
+        ).unwrap();
+        assert!(headless.as_array().unwrap().iter().all(|row|
+            row["deliveryId"] != "reused-name-review"));
+        let tasks: i64 = reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(tasks, 1, "Observation and correlation never admit work");
     }
 
     #[test]

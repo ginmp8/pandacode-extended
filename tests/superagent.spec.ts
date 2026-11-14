@@ -915,10 +915,12 @@ test('cross-Team native Demand pages load older Tickets without inferring new wo
         coordinatorBotId:'router',workerBotId:'worker',enabled:true,policyRevision:1}] as never;
       if(command==='superagent_tickets')return [] as never;
       if(command==='superagent_all_demands'){
-        pages.push({...args});
-        if(args?.beforeId==='demand-199'&&args?.beforeUpdatedAt===1801)
+        const query = args?.query as Record<string, unknown> | undefined;
+        if (!query) throw Error('Native Demand query envelope required');
+        pages.push({...query});
+        if(query?.beforeId==='demand-199'&&query?.beforeUpdatedAt===1801)
           return [makeDemand(200),makeDemand(201)] as never;
-        if(!args?.beforeId)return Array.from({length:200},(_,index)=>makeDemand(index)) as never;
+        if(!query?.beforeId)return Array.from({length:200},(_,index)=>makeDemand(index)) as never;
         throw Error('Native pagination cursor mismatch');
       }
       throw Error('Unexpected native call: '+command);
@@ -965,19 +967,21 @@ test('native Team filter pages independently and resets pagination when changing
       ] as never;
       if(command==='superagent_tickets')return [] as never;
       if(command==='superagent_all_demands'){
-        queries.push({...args});
-        if(args?.stateFilter==='running')return [] as never;
-        if(args?.stateFilter && args.stateFilter!=='blocked')
+        const query = args?.query as Record<string, unknown> | undefined;
+        if (!query) throw Error('Native Demand query envelope required');
+        queries.push({...query});
+        if(query?.stateFilter==='running')return [] as never;
+        if(query?.stateFilter && query.stateFilter!=='blocked')
           throw Error('Invalid native Demand state');
-        if(args?.orchestrationId==='team-b'){
-          if(args?.beforeId==='b-199' && args?.beforeUpdatedAt===1801)
+        if(query?.orchestrationId==='team-b'){
+          if(query?.beforeId==='b-199' && query?.beforeUpdatedAt===1801)
             return [demand('b-200','team-b',1800)] as never;
-          if(!args?.beforeId)return Array.from({length:200},(_,i)=>
+          if(!query?.beforeId)return Array.from({length:200},(_,i)=>
             demand('b-'+i,'team-b',2000-i)) as never;
         }
-        if(args?.orchestrationId==='team-a' && !args?.beforeId)
+        if(query?.orchestrationId==='team-a' && !query?.beforeId)
           return [demand('a-0','team-a',1900)] as never;
-        if(!args?.orchestrationId && !args?.beforeId)
+        if(!query?.orchestrationId && !query?.beforeId)
           return [demand('a-0','team-a',1900),demand('b-0','team-b',2000)] as never;
         throw Error('Invalid native Team-scoped cursor');
       }
@@ -1015,6 +1019,69 @@ test('native Team filter pages independently and resets pagination when changing
     {limit:200,orchestrationId:undefined,stateFilter:'blocked'},
   ]);
   expect(queries).toHaveLength(6);
+});
+
+
+test('native objective search filters durable Demands before pagination without dispatch', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div'); host.id='sa-native-objective-search';
+    document.body.appendChild(host);
+    const queries:Record<string,unknown>[]=[];
+    (window as unknown as {saSearchQueries:Record<string,unknown>[]}).saSearchQueries=queries;
+    const demand=(id:string,team:string,objective:string)=>({
+      id,orchestrationId:team,objective,state:'blocked',revision:1,updatedAt:2000,
+    });
+    mountSuperagent(host,async(command,args) => {
+      if(command==='bots_list')return [
+        {id:'lead',name:'Lead',paused:false},{id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [
+        {id:'team-a',name:'Economy',coordinatorBotId:'lead',
+          workerBotId:'worker',enabled:false,policyRevision:1},
+        {id:'team-b',name:'Security',coordinatorBotId:'lead',
+          workerBotId:'worker',enabled:false,policyRevision:1},
+      ] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_all_demands') {
+        const query = args?.query as Record<string, unknown> | undefined;
+        if (!query) throw Error('Native Demand query envelope required');
+        queries.push({...query});
+        if(query?.searchQuery==='NEEDLE')return [
+          demand('match-a','team-a','Needle hidden past page 200'),
+          demand('match-b','team-b','NEEDLE in another Team'),
+        ] as never;
+        if(query?.searchQuery)throw Error('Native objective filter mismatch');
+        return [demand('recent','team-a','Recent unrelated work')] as never;
+      }
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-native-objective-search');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  const global=host.getByRole('region',{name:'All Demands across Teams'});
+  const search=global.getByRole('searchbox',{name:'Search Demands by objective'});
+  await search.fill('NEEDLE');
+  await search.press('Enter');
+  await expect(global).toContainText('2 native Demands loaded.');
+  await expect(global).toContainText('Needle hidden past page 200');
+  await expect(global).not.toContainText('Recent unrelated work');
+  await expect(global).toContainText('matching objective "NEEDLE"');
+  await global.getByRole('button',{name:'List',exact:true}).click();
+  await expect(global.locator('.sa-global-demand-list li')).toHaveCount(2);
+  await search.fill('');
+  await global.getByRole('button',{name:'Search Demands'}).click();
+  await expect(global).toContainText('Recent unrelated work');
+  await expect(global).not.toContainText('matching objective "NEEDLE"');
+  const queries=await page.evaluate(()=>
+    (window as unknown as {saSearchQueries:Record<string,unknown>[]}).saSearchQueries);
+  expect(queries).toMatchObject([
+    {limit:200,searchQuery:'NEEDLE'},
+    {limit:200,searchQuery:undefined},
+  ]);
+  expect(queries).toHaveLength(2);
 });
 
 test('manual demand preflight shows native read-only scope and never admits work', async ({page}) => {

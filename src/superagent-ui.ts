@@ -43,6 +43,25 @@ interface DemandPlanEvidence {
   ticketId:string; ticketRevision:number; teamVersion:number; policyRevision:number;
   planSha256:string; state:string; items:WorkItemEvidence[];
 }
+
+/// Read-only interpretation of native dependency evidence. This is never
+/// a scheduling decision, approval or substitute for server-side admission.
+function workItemProgressHint(item:WorkItemEvidence, items:WorkItemEvidence[]):string {
+  if(item.state==='completed') return 'Completed: native child Ticket settled.';
+  if(item.state==='blocked') return 'Blocked: native recovery required.';
+  if(item.state==='waiting_review') return 'Waiting for native review; dependencies cannot advance.';
+  if(item.state==='running') return 'Native Worker assignment running.';
+  const waiting=item.dependsOn.flatMap(key=>{
+    const predecessor=items.find(candidate=>candidate.key===key);
+    return predecessor?.state==='completed' ? [] :
+      [key+' ('+(predecessor?.state??'unknown')+')'];
+  });
+  if(waiting.length) return 'Waiting for prerequisite Tickets: '+waiting.join(', ');
+  if(item.requiresWrite && !item.writeAuthorized) {
+    return 'Awaiting local authorization of exact file paths.';
+  }
+  return 'Pending native Worker admission and checkout availability checks.';
+}
 interface NativeSubagentPolicy {
   rootTicketId:string; teamVersion:number; policyRevision:number;
   maxDepth:number; maxChildren:number; maxTotal:number; revoked:boolean;
@@ -360,6 +379,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             ' · Child Ticket: ' + safe(item.childTicketId ?? 'not admitted') +
             ' · Native state: ' + safe(item.childTicketState ?? 'not started') +
             (item.lastReason ? ' · ' + safe(item.lastReason) : '') + '</small>' +
+            '<small class="sa-item-progress" aria-label="WorkItem progress">' +
+              safe(workItemProgressHint(item, workPlan.items)) + '</small>' +
             (item.requiresWrite && !item.writeAuthorized && item.state === 'pending'
               ? ' <button type="button" data-sa-authorize-work="' + safe(item.key) +
                 '">Authorize exact file paths</button>' : '') +

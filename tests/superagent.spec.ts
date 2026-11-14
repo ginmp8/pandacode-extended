@@ -1482,3 +1482,65 @@ test('SuperAgent issue comments use a stable receipt and report uncertain state 
 });
 
 
+test('Demand WorkItem inspector explains native dependency blockers without launching tasks',async ({page})=>{
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-workitem-blockers-test';document.body.appendChild(host);
+    const calls:string[]=[];
+    (window as unknown as {workItemReadCalls:()=>string[]}).workItemReadCalls=()=>calls;
+    const ticket={id:'root',orchestrationId:'team',objective:'Complete native DAG',
+      state:'queued',revision:4,evidence:'Validated Coordinator plan'};
+    const item=(key:string,state:string,dependsOn:string[],
+      requiresWrite=false,writeAuthorized=false)=>({
+      id:key,key,ordinal:0,workerBotId:'worker',objective:'Task '+key,dependsOn,
+      state,childTicketId:state==='completed'?'ticket-'+key:null,
+      childTicketState:state==='completed'?'completed':null,lastReason:null,
+      requiresWrite,writeAuthorized,
+    });
+    mountSuperagent(host,async command=>{
+      calls.push(command);
+      if(command==='bots_list')return [
+        {id:'lead',name:'Lead',paused:false},{id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [{
+        id:'team',name:'Native team',coordinatorBotId:'lead',
+        workerBotId:'worker',enabled:true,policyRevision:1,
+      }] as never;
+      if(command==='superagent_tickets')return [ticket] as never;
+      if(command==='superagent_snapshot')return {
+        ticket,assignments:[],activity:[],finalizationGate:'not_pending',
+      } as never;
+      if(command==='superagent_source_thread_links')return [] as never;
+      if(command==='superagent_demand_plan')return {
+        ticketId:'root',ticketRevision:4,teamVersion:2,policyRevision:1,
+        planSha256:'a'.repeat(64),state:'active',items:[
+          item('compile','completed',[]),
+          item('verify','pending',['compile']),
+          item('publish','pending',['verify']),
+          item('edit','pending',['compile'],true,false),
+          item('review','waiting_review',['compile']),
+          item('blocked','blocked',[]),
+        ],
+      } as never;
+      throw Error('Unexpected native call: '+command);
+    });
+  });
+  const host=page.locator('#sa-workitem-blockers-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const plan=host.getByRole('region',{name:'Demand WorkItems'});
+  await plan.getByRole('button',{name:'Inspect WorkItems'}).click();
+  await expect(plan.getByText('Waiting for prerequisite Tickets: verify (pending)')).toBeVisible();
+  await expect(plan.getByText('Awaiting local authorization of exact file paths.')).toBeVisible();
+  await expect(plan.getByText('Pending native Worker admission and checkout availability checks.')).toBeVisible();
+  await expect(plan.getByText('Waiting for native review; dependencies cannot advance.')).toBeVisible();
+  await expect(plan.getByText('Blocked: native recovery required.')).toBeVisible();
+  await expect(plan.getByText('Completed: native child Ticket settled.')).toBeVisible();
+  const calls=await page.evaluate(()=>
+    (window as unknown as {workItemReadCalls:()=>string[]}).workItemReadCalls());
+  expect(calls.filter(c=>c==='superagent_demand_plan')).toHaveLength(1);
+  expect(calls.some(c=>/authorize|dispatch|accept|stop|retry|spawn/.test(c))).toBe(false);
+});
+

@@ -994,10 +994,10 @@ export function createCouncil(host: CouncilHost) {
         // Focus only; Enter or Space picks (buttons do), so arrowing never changes the council.
         event.preventDefault(); for (const button of row) button.tabIndex = button === next ? 0 : -1; next.focus(); return;
       }
-      // Tab and Shift+Tab always move inside the panel, in document order (the switch, each row's stop, the footer
-      // checkbox), wrapping like a dialog: WebKit would otherwise skip plain checkboxes and leave the panel.
+      // Tab and Shift+Tab always move inside the panel, including composition fields and native disclosures,
+      // wrapping like a dialog: WebKit would otherwise skip plain checkboxes and leave the panel.
       if (event.key !== 'Tab' || !panel?.isConnected) return;
-      const controls = [...panel.querySelectorAll<HTMLElement>('input:not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not(:disabled)')].filter(control => control.tabIndex !== -1 && control.offsetParent !== null);
+      const controls = [...panel.querySelectorAll<HTMLElement>('input:not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not(:disabled), summary, a[href], [tabindex]:not(:disabled)')].filter(control => control.tabIndex >= 0 && control.offsetParent !== null);
       if (!controls.length) return;
       event.preventDefault();
       const at = controls.indexOf(document.activeElement as HTMLElement), dir = event.shiftKey ? -1 : 1;

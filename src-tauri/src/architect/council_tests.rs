@@ -2469,7 +2469,7 @@ fn critical_findings_require_verified_or_current_human_disposition() {
     );
     assert_eq!(
         council::unresolved_critical_findings(&findings, &[valid_waiver], "root:cycle-4"),
-        vec![second.id],
+        vec![second.id.clone()],
     );
     let native_verification = disposition(
         &first.id, "native:verification", Kind::Addressed,

@@ -1018,32 +1018,47 @@ test('Auto is explained, the off note is plain, and the button is busy while a s
 });
 
 test('Tab and Shift+Tab stay inside the panel through every control, from any of them (WebKit too)', async ({ page }) => {
-  await open(page, '/?council');
+  await open(page, '/?council=composition');
   await button(page).click();
   await expect(toggle(page)).toBeFocused();
-  // Composition inputs and buttons intentionally have no [data-field] ancestor. Query live tab stops before each focus.
-  const controls = panel(page).locator('input:not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not(:disabled)');
-  const stops = await controls.evaluateAll(nodes => nodes.flatMap((node, index) => (node as HTMLElement).tabIndex !== -1 && (node as HTMLElement).offsetParent !== null ? [index] : []));
+  // Exercise textareas as well as the selects, inputs, buttons and plan disclosure in the full editor.
+  await panel(page).getByRole('button', { name: 'Add Architect criterion', exact: true }).click();
+  await expect(panel(page).locator('.council-criterion textarea')).toBeVisible();
+  const controls = panel(page).locator('input, select, textarea, button, summary, a[href], [tabindex]');
+  const stops = await controls.evaluateAll(nodes => nodes.flatMap((node, index) => !node.matches(':disabled') && (node as HTMLElement).tabIndex >= 0 && (node as HTMLElement).offsetParent !== null ? [index] : []));
   const count = stops.length;
   expect(count).toBeGreaterThan(5); // base controls plus the schema v1 composition editor
-  expect(await controls.evaluateAll(nodes => nodes.some(node => !node.closest('[data-field]') && (node as HTMLElement).tabIndex !== -1 && (node as HTMLElement).offsetParent !== null))).toBe(true);
+  const stop = (index: number) => controls.nth(stops[(index + count) % count]);
+  const preview = panel(page).locator('.council-plan-preview');
+  expect(stops).toContain(await controls.evaluateAll(nodes => nodes.findIndex(node => node.matches('.council-plan-preview > summary'))));
+  // The disclosure is reachable and operable without a pointer.
+  await preview.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  await expect(preview).toHaveAttribute('open', '');
+  await page.keyboard.press('Enter');
+  await expect(preview).not.toHaveAttribute('open');
   // Both boundaries wrap, including the composition controls between the standard rows and footer.
+  await toggle(page).focus();
   await page.keyboard.press('Shift+Tab');
   await expect(panel(page).locator('.council-new-threads')).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(toggle(page)).toBeFocused();
+  // Check each directed edge independently from every stop, including both wraps. Repeating two full cycles
+  // from every stop was quadratic in the editor's size and timed out in CI without testing new transitions.
   for (let start = 0; start < count; start++) {
-    await page.evaluate(({ selector, index }) => {
-      const candidates = [...document.querySelectorAll<HTMLElement>(selector)];
-      const focusable = candidates.filter(node => node.tabIndex !== -1 && node.offsetParent !== null);
-      focusable[index].focus();
-    }, { selector: '.council-panel input:not(:disabled), .council-panel select:not(:disabled), .council-panel textarea:not(:disabled), .council-panel button:not(:disabled)', index: start });
-    for (const key of ['Tab', 'Shift+Tab']) {
-      for (let step = 0; step < count * 2; step++) {
-        await page.keyboard.press(key);
-        const focus = await page.evaluate(() => ({ inside: document.activeElement?.closest('.council-panel') !== null, tag: document.activeElement?.tagName, className: (document.activeElement as HTMLElement | null)?.className }));
-        expect(focus.inside, `${key} escaped from stop ${start} at step ${step}: ${focus.tag}.${focus.className}`).toBe(true);
-      }
+    for (const [key, direction] of [['Tab', 1], ['Shift+Tab', -1]] as const) {
+      await stop(start).focus();
+      await expect(stop(start)).toBeFocused();
+      await page.keyboard.press(key);
+      await expect(stop(start + direction), `${key} from stop ${start}`).toBeFocused();
+    }
+  }
+  // Also walk uninterrupted cycles in each direction: no control may be skipped or absorb Tab.
+  for (const [key, direction] of [['Tab', 1], ['Shift+Tab', -1]] as const) {
+    await stop(0).focus();
+    for (let step = 1; step <= count; step++) {
+      await page.keyboard.press(key);
+      await expect(stop((direction * step + count) % count), `${key} cycle step ${step}`).toBeFocused();
     }
   }
   expect(await panel(page).locator('.council-new-threads').getAttribute('tabindex')).toBe('0');

@@ -3,6 +3,7 @@
 use crate::{storage::{self, Store}, Result};
 use rusqlite::{params, OptionalExtension};
 use sha2::{Digest, Sha256};
+use serde::Serialize;
 
 pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sa_effect_receipts (
@@ -36,17 +37,26 @@ pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Res
         return Err("Invalid or oversized effect identity.".into());
     }
     let digest=format!("{:x}",Sha256::digest(payload));
+    // Global pause is a native revocation, not a UI-only switch. This
+    // reservation guard is defense-in-depth; an eventual dispatcher must
+    // revalidate the same authority immediately before the remote call.
+    if crate::feature_controls::get().bots_paused {
+        return Err("SuperAgent effects are disabled while bots are paused.".into());
+    }
+    let now = storage::now();
     let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
     // A receipt is not a grant. Require the live worker assignment and every
     // immutable scope field to still agree before allowing a caller to attempt
     // an effect. Current production mandates are read-only.
-    let authorized: bool=tx.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sa_tickets t
+    let active_worker: Option<(String, String, i64, String, String)> = tx.query_row(
+        "SELECT a.session_id,a.bot_id,a.attempt,o.coordinator_bot_id,t.worker_bot_id
+         FROM sa_tickets t
          JOIN sa_mandates m ON m.ticket_id=t.id
          JOIN sa_orchestrations o ON o.id=t.orchestration_id
          JOIN sa_assignments a ON a.id=t.active_assignment_id
            AND a.ticket_id=t.id AND a.state='running'
            AND a.bot_id=t.worker_bot_id
+         JOIN sessions s ON s.id=a.session_id AND s.project_id=t.project_id
          JOIN bots b ON b.id=a.bot_id
          WHERE t.id=?1 AND t.state='running' AND m.revoked=0
            AND m.expires_at>?2
@@ -55,10 +65,32 @@ pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Res
            AND t.project_id=m.project_id AND m.project_id=o.project_id
            AND t.actor=m.actor AND m.authorization_id<>''
            AND b.project_id=t.project_id AND b.paused=0
-           AND m.allowed_side_effects=1 AND o.enabled=1)",
-        params![ticket_id,storage::now()],|r|r.get(0)
-    ).map_err(|e|e.to_string())?;
-    if !authorized {return Err("Native effect authorization unavailable.".into());}
+           AND a.bot_id<>o.coordinator_bot_id
+           AND a.created_at>0 AND a.created_at<=?2
+           AND (?2-a.created_at)<?3
+           AND (SELECT COUNT(*) FROM sa_assignments other
+                WHERE other.ticket_id=t.id AND other.state='running')=1
+           AND m.allowed_side_effects=1 AND o.enabled=1",
+        params![ticket_id,now,super::MAX_ASSIGNMENT_RUN_MS],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+    ).optional().map_err(|e|e.to_string())?;
+    let Some((session_id,bot_id,attempt,coordinator_id,worker_id))=active_worker else {
+        return Err("Native effect authorization unavailable.".into());
+    };
+    // Receipts do not authorize a remote call. Before any future dispatch,
+    // require the original task-owned thread, role and admitted session
+    // profile, not merely a matching bot ID or an unrevoked mandate.
+    let session=store.session(&session_id)?;
+    if !super::assignment_thread_current(store,&session_id,ticket_id)?
+        || !super::assignment_role_authorized(
+            store,ticket_id,&bot_id,attempt,&coordinator_id,&worker_id,
+        )?
+        || !super::admitted_session_matches_profile(
+            store,ticket_id,&bot_id,"worker",&session,
+        )?
+    {
+        return Err("Native effect authorization unavailable: worker session changed.".into());
+    }
     let existing: Option<(String,String)>=tx.query_row(
         "SELECT payload_sha256,state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key=?2",
         params![ticket_id,key],|r|Ok((r.get(0)?,r.get(1)?))
@@ -90,11 +122,18 @@ pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Res
 pub fn mark_uncertain(store:&Store,ticket_id:&str,key:&str)->Result<()>{
     let n=store.db.execute(
         "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?3
-         WHERE ticket_id=?1 AND effect_key=?2 AND state IN ('pending','uncertain')",
+         WHERE ticket_id=?1 AND effect_key=?2 AND state='pending'",
         params![ticket_id,key,storage::now()]
     ).map_err(|e|e.to_string())?;
-    if n!=1{return Err("No unresolved effect receipt.".into());}
-    Ok(())
+    if n==1 { return Ok(()); }
+    // A duplicated timeout/recovery notification must not rewrite the
+    // original uncertainty timestamp or turn an applied effect uncertain.
+    let state:Option<String>=store.db.query_row(
+        "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key=?2",
+        params![ticket_id,key],|r|r.get(0),
+    ).optional().map_err(|e|e.to_string())?;
+    if state.as_deref()==Some("uncertain") { return Ok(()); }
+    Err("No unresolved effect receipt.".into())
 }
 
 /// Caller must verify the external provider result independently: this
@@ -104,11 +143,62 @@ pub fn acknowledge_applied(store:&Store,ticket_id:&str,key:&str,payload:&[u8])->
     let digest=format!("{:x}",Sha256::digest(payload));
     let n=store.db.execute(
         "UPDATE sa_effect_receipts SET state='applied',updated_at=?4
-         WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3",
+         WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3
+           AND state IN ('pending','uncertain')",
         params![ticket_id,key,digest,storage::now()]
     ).map_err(|e|e.to_string())?;
-    if n!=1{return Err("Missing receipt or mismatched payload.".into());}
-    Ok(())
+    if n==1 { return Ok(()); }
+    // Duplicate provider reconciliation is a no-op only for the same
+    // payload. Never mutate a terminal receipt or bless an unknown key.
+    let state:Option<String>=store.db.query_row(
+        "SELECT state FROM sa_effect_receipts
+         WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3",
+        params![ticket_id,key,digest],|r|r.get(0),
+    ).optional().map_err(|e|e.to_string())?;
+    if state.as_deref()==Some("applied") { return Ok(()); }
+    Err("Missing receipt or mismatched payload.".into())
+}
+
+/// A bounded, task-owned operational projection of immutable effect identities.
+/// This never performs a provider lookup, retries an effect, or authorizes a
+/// pending receipt. Only the native task owner or local headless operator reads
+/// it; external payload bytes and any provider responses are never returned.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct EffectReceiptView {
+    pub effect_key: String,
+    pub payload_sha256: String,
+    pub state: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+pub(crate) fn receipt_history(
+    store: &Store, ticket_id: &str, limit: i64,
+) -> Result<Vec<EffectReceiptView>> {
+    if !(1..=100).contains(&limit) {
+        return Err("Effect receipt page size must be between 1 and 100.".into());
+    }
+    let exists: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE id=?1)",
+        [ticket_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if !exists {
+        return Err("SuperAgent Ticket not found.".into());
+    }
+    let mut stmt = store.db.prepare(
+        "SELECT effect_key,payload_sha256,state,created_at,updated_at
+         FROM sa_effect_receipts WHERE ticket_id=?1
+         ORDER BY created_at DESC,effect_key DESC LIMIT ?2",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![ticket_id, limit], |row| Ok(EffectReceiptView {
+        effect_key: row.get(0)?,
+        payload_sha256: row.get(1)?,
+        state: row.get(2)?,
+        created_at: row.get(3)?,
+        updated_at: row.get(4)?,
+    })).map_err(|e| e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
 pub(crate) fn unresolved_count(store:&Store,ticket_id:&str)->Result<i64>{
@@ -144,6 +234,105 @@ mod tests{
     }
 
     #[test]
+    fn headless_receipt_inspection_reports_only_actual_unresolved_effects() {
+        let (store,id) = fixture();
+        let empty: serde_json::Value = serde_json::from_str(
+            &crate::superagent::inspect_headless_effect_receipts(&store.path,&id).unwrap(),
+        ).unwrap();
+        assert_eq!(empty["requiresIndependentRemoteReconciliation"], false);
+        assert_eq!(empty["observationalOnly"], true);
+        assert_eq!(empty["replayed"], false);
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+            [&id],
+        ).unwrap();
+        assert_eq!(reserve(&store,&id,"github:issue:42",b"payload").unwrap(),Reservation::Reserved);
+        let pending: serde_json::Value = serde_json::from_str(
+            &crate::superagent::inspect_headless_effect_receipts(&store.path,&id).unwrap(),
+        ).unwrap();
+        assert_eq!(pending["requiresIndependentRemoteReconciliation"], true);
+        assert_eq!(pending["receipts"][0]["state"], "pending");
+        acknowledge_applied(&store,&id,"github:issue:42",b"payload").unwrap();
+        let applied: serde_json::Value = serde_json::from_str(
+            &crate::superagent::inspect_headless_effect_receipts(&store.path,&id).unwrap(),
+        ).unwrap();
+        assert_eq!(applied["totalUnresolved"], 0);
+        assert_eq!(applied["requiresIndependentRemoteReconciliation"], false);
+    }
+
+    #[test]
+    fn headless_reconciliation_indicator_counts_unresolved_effects_beyond_history_page() {
+        let (store, id) = fixture();
+        // The read-only CLI returns at most 100 newest receipts; an older
+        // uncertain effect must still block a false "nothing to reconcile".
+        for index in 0..=100 {
+            let state = if index == 0 { "uncertain" } else { "applied" };
+            let digest = format!("{index:064x}");
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,?4,?5,?5)",
+                params![&id,format!("effect:{index:03}"),digest,state,1_000+index],
+            ).unwrap();
+        }
+        let read = |path: &std::path::Path| -> serde_json::Value {
+            serde_json::from_str(
+                &superagent::inspect_headless_effect_receipts(path, &id).unwrap(),
+            ).unwrap()
+        };
+        let status = read(&store.path);
+        assert_eq!(status["receipts"].as_array().unwrap().len(), 100);
+        assert!(status["receipts"].as_array().unwrap().iter()
+            .all(|receipt| receipt["state"] == "applied"));
+        assert_eq!(status["totalUnresolved"], 1);
+        assert_eq!(status["requiresIndependentRemoteReconciliation"], true);
+        assert_eq!(status["observationalOnly"], true);
+        assert_eq!(status["replayed"], false);
+        let path = store.path.clone();
+        drop(store);
+        // Inspection cannot mutate receipts; a process restart preserves
+        // the older uncertain identity rather than replaying it.
+        let reopened = Store::open(&path).unwrap();
+        let after_restart = read(&path);
+        assert_eq!(after_restart["totalUnresolved"], 1);
+        assert_eq!(after_restart["requiresIndependentRemoteReconciliation"], true);
+        assert_eq!(unresolved_count(&reopened, &id).unwrap(), 1);
+    }
+
+    #[test]
+    fn receipt_history_is_bounded_task_owned_and_survives_restart() {
+        let (store, id) = fixture();
+        assert!(receipt_history(&store, &id, 0).is_err());
+        assert!(receipt_history(&store, &id, 101).is_err());
+        assert!(receipt_history(&store, "missing", 10).is_err());
+        assert!(receipt_history(&store, &id, 10).unwrap().is_empty());
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+            [&id],
+        ).unwrap();
+        assert_eq!(reserve(&store, &id, "github:issue:8", b"secret body").unwrap(), Reservation::Reserved);
+        let first = receipt_history(&store, &id, 1).unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].effect_key, "github:issue:8");
+        assert_eq!(first[0].state, "pending");
+        let json = serde_json::to_string(&first).unwrap();
+        assert!(!json.contains("secret body"));
+        assert_eq!(unresolved_count(&store, &id).unwrap(), 1);
+        let path = store.path.clone();
+        drop(store);
+        // Read-only headless inspection must not change an in-flight receipt.
+        let read = Store::open_read_only(&path).unwrap();
+        assert_eq!(receipt_history(&read, &id, 10).unwrap()[0].state, "pending");
+        drop(read);
+        let recovered = Store::open(&path).unwrap();
+        assert_eq!(receipt_history(&recovered, &id, 10).unwrap()[0].state, "uncertain");
+        assert_eq!(unresolved_count(&recovered, &id).unwrap(), 1);
+        // A second task must not be able to inspect the original receipt under
+        // its own ID; unknown task IDs cannot return an empty pseudo-history.
+        assert!(receipt_history(&recovered, "not-a-task", 10).is_err());
+    }
+
+    #[test]
     fn receipt_never_grants_write_and_prevents_mismatched_or_uncertain_replay(){
         let (store,id)=fixture();
         assert!(reserve(&store,&id,"github:comment:7",b"payload").is_err());
@@ -162,6 +351,35 @@ mod tests{
         assert_eq!(unresolved_count(&store,&id).unwrap(),0);
         store.db.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[&id]).unwrap();
         assert!(reserve(&store,&id,"github:comment:8",b"payload").is_err());
+    }
+
+    #[test]
+    fn effect_reservation_denies_expired_or_future_assignment_attempts() {
+        for started_at in [
+            storage::now() - crate::superagent::MAX_ASSIGNMENT_RUN_MS - 1000,
+            storage::now() + 60_000,
+        ] {
+            let (store,id)=fixture();
+            // The fixture simulates a native grant only for the receipt
+            // primitive. No production API may issue this write authority.
+            store.db.execute(
+                "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+                [&id],
+            ).unwrap();
+            store.db.execute(
+                "UPDATE sa_assignments SET created_at=?2 WHERE ticket_id=?1 AND state='running'",
+                params![&id,started_at],
+            ).unwrap();
+            assert!(reserve(&store,&id,"github:issue:late",b"body").is_err());
+            assert_eq!(unresolved_count(&store,&id).unwrap(),0);
+        }
+        let (store,id)=fixture();
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+            [&id],
+        ).unwrap();
+        assert_eq!(reserve(&store,&id,"github:issue:valid",b"body").unwrap(),
+            Reservation::Reserved);
     }
 
     #[test]
@@ -184,6 +402,129 @@ mod tests{
         store.db.execute("UPDATE sa_assignments SET state='finished' WHERE ticket_id=?1",[&id]).unwrap();
         assert!(reserve(&store,&id,"github:issue:finished",b"body").is_err());
         assert_eq!(unresolved_count(&store,&id).unwrap(),0);
+    }
+
+    #[test]
+    fn effect_reservation_denies_detached_moved_or_modified_worker_session() {
+        for mutation in ["detached_thread", "moved_session", "changed_model"] {
+            let (store,id)=fixture();
+            store.db.execute(
+                "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+                [&id],
+            ).unwrap();
+            let session_id: String=store.db.query_row(
+                "SELECT session_id FROM sa_assignments
+                 WHERE ticket_id=?1 AND state='running'",
+                [&id], |row| row.get(0),
+            ).unwrap();
+            let changed=match mutation {
+                "detached_thread"=>store.db.execute(
+                    "UPDATE bot_threads SET external_id='detached'
+                     WHERE session_id=?1 AND channel_id=?2",
+                    params![&session_id,superagent::CHANNEL],
+                ).unwrap(),
+                "moved_session"=>{
+                    store.db.execute(
+                        "INSERT INTO projects(id,name,path)
+                         VALUES('outside','Outside','/tmp/outside-sa-effects')", [],
+                    ).unwrap();
+                    store.db.execute(
+                        "UPDATE sessions SET project_id='outside' WHERE id=?1",
+                        [&session_id],
+                    ).unwrap()
+                },
+                "changed_model"=>store.db.execute(
+                    "UPDATE sessions SET model='unapproved-model' WHERE id=?1",
+                    [&session_id],
+                ).unwrap(),
+                _=>unreachable!(),
+            };
+            assert_eq!(changed,1, "fixture must change the native {mutation}");
+            assert!(reserve(&store,&id,"github:issue:session-fence",b"body").is_err(),
+                "{mutation} cannot reserve any external effect");
+            assert_eq!(unresolved_count(&store,&id).unwrap(),0);
+        }
+    }
+
+    #[test]
+    fn effect_reservation_denies_multiple_active_attempts_on_one_ticket() {
+        let (store,id)=fixture();
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+            [&id],
+        ).unwrap();
+        // Simulate an inconsistent legacy database; the native lease trigger
+        // normally forbids this. The effect guard must fail closed regardless.
+        store.db.execute_batch(
+            "DROP TRIGGER sa_project_lease_insert;
+             DROP TRIGGER sa_project_lease_update;",
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_assignments
+             (id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
+             VALUES(?1,?2,'co','orphan-legacy-session','running',2,?3,?3)",
+            params![storage::id(),&id,storage::now()],
+        ).unwrap();
+        assert!(reserve(&store,&id,"github:issue:duplicate",b"body").is_err());
+        assert_eq!(unresolved_count(&store,&id).unwrap(),0);
+        store.db.execute(
+            "UPDATE sa_assignments SET state='stopped'
+             WHERE ticket_id=?1 AND attempt=2",
+            [&id],
+        ).unwrap();
+        assert_eq!(reserve(&store,&id,"github:issue:duplicate",b"body").unwrap(),
+            Reservation::Reserved);
+    }
+
+    #[test]
+    fn repeated_effect_reconciliation_is_idempotent_and_preserves_terminal_receipt() {
+        let (store, id) = fixture();
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+            [&id],
+        ).unwrap();
+        let key = "github:comment:reconcile";
+        let payload = b"approved immutable bytes";
+        assert_eq!(reserve(&store, &id, key, payload).unwrap(), Reservation::Reserved);
+        mark_uncertain(&store, &id, key).unwrap();
+        store.db.execute(
+            "UPDATE sa_effect_receipts SET updated_at=111 WHERE ticket_id=?1 AND effect_key=?2",
+            params![&id,key],
+        ).unwrap();
+        mark_uncertain(&store, &id, key).unwrap();
+        let unchanged: i64 = store.db.query_row(
+            "SELECT updated_at FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key=?2",
+            params![&id,key], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(unchanged, 111);
+        assert!(acknowledge_applied(&store, &id, key, b"changed bytes").is_err());
+        assert!(acknowledge_applied(&store, &id, "missing-key", payload).is_err());
+        acknowledge_applied(&store, &id, key, payload).unwrap();
+        assert!(mark_uncertain(&store, &id, key).is_err());
+        store.db.execute(
+            "UPDATE sa_effect_receipts SET updated_at=222 WHERE ticket_id=?1 AND effect_key=?2",
+            params![&id,key],
+        ).unwrap();
+        acknowledge_applied(&store, &id, key, payload).unwrap();
+        assert!(acknowledge_applied(&store, &id, key, b"changed bytes").is_err());
+        let applied: (String, i64) = store.db.query_row(
+            "SELECT state,updated_at FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND effect_key=?2",
+            params![&id,key], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        assert_eq!(applied, ("applied".to_string(), 222));
+        assert_eq!(unresolved_count(&store, &id).unwrap(), 0);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        acknowledge_applied(&reopened, &id, key, payload).unwrap();
+        assert!(mark_uncertain(&reopened, &id, key).is_err());
+        let persisted: (String, i64) = reopened.db.query_row(
+            "SELECT state,updated_at FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND effect_key=?2",
+            params![&id,key], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        assert_eq!(persisted, applied);
     }
 
     #[test]

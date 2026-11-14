@@ -42,6 +42,110 @@ to answer noninteractive reads). macOS always uses the same 0600 file.
 When adding something new that the frontend does after a run or on a timer with real
 effects, give serve mode a native twin in `headless.rs` — see the checklist at the bottom.
 
+### SuperAgent watchdog recovery boundaries
+
+The owning `serve` process checks a bounded batch of active native assignments
+every 30 seconds. Besides the absolute attempt budget, it interrupts and revokes
+assignments whose recorded start clock is invalid or whose Team, mandate,
+coordinator, worker, or session is no longer authorized or available. The
+interruption is revision-guarded and audited with a sanitized reason. A
+late provider callback cannot approve the task, and the previous session is
+stopped. This is a **stop-and-investigate** safety mechanism, not automatic
+retry or recovery of unverified external work.
+
+The watchdog also treats a mismatched Ticket/Team policy revision, a moved Team
+project, or a persisted tool/effect grant unsupported by the read-only provider
+as an immediate revocation condition. Provider admission and callback settlement
+repeat the policy and project checks: late model responses cannot repair or
+widen an invalidated mandate.
+
+A coordinator may legitimately have a different project checkout from the
+Ticket's worker. The watchdog validates an admitted coordinator against that
+coordinator bot's current checkout and its exact native session, while Workers
+remain bound to the Ticket's immutable worker project. A moved, missing or
+unadmitted assignment remains interruptible; valid separate coordinator
+checkouts are not falsely revoked. Coordinated Worker dispatch also repeats
+the native session-aware lease check used by initial admission and retry:
+another Team's active coordinator checkout and missing session records cannot
+silently permit an overlapping Worker before the SQLite lease guard runs.
+
+Headless generic usage-limit resets and message-queue drain explicitly skip
+every session recorded in native SuperAgent assignment history, including
+settled and revoked attempts after process restart. Missing assignment-history
+data fails closed. The ordinary non-SuperAgent session paths are unchanged.
+A task-owned provider turn can only run through a new explicit native admission,
+never through unattended generic resume or queue recovery.
+
+An interrupted Ticket remains durable and cannot be restarted by an inferred
+source event. On restart, existing `pending` external-effect receipts become
+`uncertain`; they require independent provider reconciliation before any
+future retry. A paused or revoked Team is not re-enabled by a watchdog tick.
+The existing `--inspect-ticket` and `--inspect-ticket-effects` commands show
+redacted state without touching live sessions. Per-effect dispatch and full
+headless admission/retry still require explicit user-authorized native grants.
+
+### Quarantine a terminal Ticket's orphaned assignment
+
+The read-only recovery inbox may find a terminal Ticket with a stranded native
+running Assignment after a legacy/partial state transition. A trusted local
+operator can explicitly quarantine the anomaly with the current Ticket revision:
+
+```sh
+pandacode serve --list-recovery-inbox
+pandacode serve --quarantine-terminal-orphan <ticket-id> <expected-revision>
+```
+
+The native transaction revokes the Mandate, interrupts the stray Assignment,
+turns pending external-effect receipts uncertain, clears the stale active link,
+increments the Ticket revision and records one audit event. Terminal state and
+evidence are preserved. A stale revision, live Ticket or duplicate quarantine
+is denied. The detached CLI does not stop a provider in another process; the
+owning serve watchdog must terminate it. This operation cannot launch work,
+acknowledge a remote write or authorize effect replay. Independently reconcile
+any uncertain remote effect before another authorized action.
+
+### GitHub source cursor diagnostics
+
+Use the trusted local headless inspector to examine a configured GitHub source
+without polling GitHub, granting tools or interrupting another active server:
+
+```sh
+pandacode serve --inspect-source-health <source-id>
+```
+
+The read-only response reports Off/Observe mode, policy revision, receipt count,
+permitted receipt count, stored cursor and highest immutable receipt sequence.
+For GitHub Events the cursor is a verified event-ID high-watermark; for explicit
+Check Runs it is a **local observation counter**, not an upstream event ID.
+Neither value proves a complete provider subscription. When receipt capacity is
+exhausted, operator intervention is necessary. If the cursor is behind durable
+receipts, native Observe fails closed pending reconciliation: it does not reset
+the cursor, delete receipts or reclassify historical observations. The inspector
+redacts event bodies, actor filters and task content, uses no provider credentials
+and never runs startup recovery.
+
+### Operator-staged headless Demands
+
+A trusted local operator can persist a blocked, read-only manual Ticket in the
+existing native Ticket/Mandate store, without launching a provider. Use a private
+UTF-8 objective file (up to 16 KiB) to avoid exposing its content in process
+arguments or stdout:
+
+```sh
+pandacode serve --queue-demand <team-id> <stable-request-key> /private/objective.txt
+```
+
+The Team must be enabled, its selected bots available, and its existing native
+single-Worker policy valid. Repeating the stable key with identical content is
+idempotent; changing the content or reusing a desktop-dispatch key is denied.
+The output is redacted and includes the Ticket ID, blocked state and the
+explicit-dispatch requirement. The objective file should only be readable by
+the dedicated headless service account. **Staging is not provider admission**:
+it creates no Assignment/session, never dispatches a bot, and grants no tools or
+external effects. The live native retry/dispatch path must separately recheck
+mandate expiry, revocation, policy revision, project and checkout lease. Stopped
+Tickets cannot be restarted through key replay.
+
 ## First run
 
 ```sh
@@ -250,15 +354,51 @@ identifiers and secrets. Unknown Ticket IDs and incompatible database schemas
 fail with a nonzero exit code. Output is local stdout, not an unauthenticated
 remote API.
 
+Ticket inspection also computes a **read-only recovery assessment** from all
+native running Assignments and all pending/uncertain effect receipts (not only
+the truncated receipt history). The `recovery` object reports native
+assignment consistency, mandate expiry/revocation, live-host uncertainty and
+an actionable next-step code. `automaticReplayAllowed` is always `false`:
+a running provider may still exist in another process; an uncertain remote
+write requires authoritative provider reconciliation, not an inferred retry.
+These observations do not create, admit, resume or approve a Ticket.
+
 Unlike import/export or ordinary serve startup, inspection opens
 `kingcode.sqlite3` **read-only before `setup_common`**. It neither starts bots
 nor runs the Store's migration/restart recovery; inspecting a live host must
 not mark a healthy worker as interrupted.
 
+### Authenticated GitHub Observe from headless (local operator)
+
+```sh
+pandacode serve --observe-source <source-id>
+pandacode serve --observe-check-run <source-id> <check-run-id>
+```
+
+An explicit, one-shot CLI invocation polls a previously configured **Observe**
+source through the same authenticated native GitHub Events adapter, bounded
+history validation, policy-revision recheck and transactional decision/cursor
+persistence as the desktop command. It opens only the existing SQLite schema,
+not the migration/restart recovery path, so a concurrently running host is not
+interrupted. The command reports a redacted poll summary, never event bodies.
+An Off source, stale revision, unsupported Check Run source, missing GitHub
+authentication, incomplete Events window or API failure exits nonzero without
+admitting a Ticket. For an explicit `check_run.completed` source, the separate
+`--observe-check-run` command reuses desktop's authenticated Checks API
+lookup, immutable result/commit SHA receipt, one-PR correlation, timestamp
+and transactional policy guards. A missing, ambiguous, stale or changed Check
+Run is rejected rather than treated as approval. Both commands return redacted
+receipts and never expose event bodies. They do **not** register a subscription,
+run continuously, enable Auto, launch a Worker, approve a Council review or
+execute an external effect.
+
 ### Ticket review and stop commands
 
 ```sh
 pandacode serve --list-tickets
+pandacode serve --list-review-inbox
+pandacode serve --list-recovery-inbox
+pandacode serve --list-team-demands <team-id> blocked
 pandacode serve --accept-ticket <ticket-id> <expected-revision>
 pandacode serve --reject-ticket <ticket-id> <expected-revision> "Needs changes"
 pandacode serve --stop-ticket <ticket-id>
@@ -270,3 +410,267 @@ provider call already held in memory by a running serve process is not forcibly
 terminated; its late completion is denied by the native state and mandate
 checks. These commands do not create, retry, or resume tasks, and authenticated
 event intake remains unavailable.
+
+### Emergency Team disable (local operator)
+
+```sh
+pandacode serve --disable-orchestration <orchestration-id> <expected-policy-revision>
+```
+
+This one-shot local command uses the desktop's native revision-guarded policy
+transition against the existing SQLite database. It atomically turns the Team
+Off, revokes nonterminal Ticket mandates, interrupts active assignments,
+releases native leases and preserves audit/history. It does **not** open
+`Store::open`, run startup recovery, start a provider, re-enable a Team, or
+create an external network management endpoint. A stale revision, missing Team
+or incompatible schema produces an error without changing that Team.
+
+A running provider may still have an in-memory call; the CLI cannot forcibly
+terminate it, but subsequent SuperAgent-authorized tool admissions and late
+callbacks are denied by native mandate/state checks. This is not process
+termination or completed external-effect reconciliation. Use the inspection
+commands above to verify the final native state.
+
+
+### Cross-Team headless review inbox (read-only)
+
+`pandacode serve --list-review-inbox` returns up to 200 actual pending
+`waiting_approval` and `waiting_review` Tickets from the same native query as
+Bots → Orchestrations. Its bounded JSON includes Team ID, Ticket ID, revision,
+state, update time and a distinct next operator action, **not** objective,
+private evidence, worker result, Mandate or review contents. `mayHaveMore` only
+indicates that the cap was reached; it does not certify an additional page.
+A pending native Council review is never represented as a pass. This command
+opens existing SQLite read-only and cannot perform provider dispatch, recovery,
+review acceptance, external effects or policy grants. Use a separate current
+Ticket inspection before any explicitly authorized native human decision.
+
+### Cross-Team recovery and reconciliation inbox (read-only)
+
+`pandacode serve --list-recovery-inbox` returns a native SQLite
+snapshot of up to 200 Tickets needing a decision or recovery investigation:
+queued, blocked, review/approval-pending, failed/interrupted/inconclusive,
+expired or inconsistent running assignments, terminal Tickets with
+orphan running assignments, and terminal Tickets with still-unresolved
+external-effect receipts. The current single-active-assignment contract also
+flags duplicate running attempts even when one active link looks valid.
+Healthy running assignments and genuinely settled terminal Tickets are excluded. Unresolved effects are prioritized; the
+returned JSON includes Ticket/Team IDs, revision, state, a redacted native
+recovery assessment, `mayHaveMore`, and an explicit next operator action.
+A page is limited to 200 Tickets. When `mayHaveMore` is true, `nextCursor`
+contains the last returned `priority` (0 = unresolved remote effects,
+1 = live/inconsistent assignment, 2 = other decisions), `updatedAt` in
+milliseconds, and `ticketId`. Request the next page with
+`pandacode serve --list-recovery-inbox --before <priority> <ms> <ticket-id>`.
+Cursor ordering preserves older unresolved effects that would otherwise be
+hidden by the first-page cap. Each invocation is a new read-only snapshot:
+concurrent state changes may reorder candidates, so do not treat several pages
+as an atomic audit or as authorization to act.
+
+The command deliberately does **not** run startup recovery, inspect a live
+provider handle, resend/acknowledge a remote write, resume an assignment,
+issue grants, invoke Council or change Ticket state. An expired assignment is
+reported for investigation, not silently terminated by an inspector. A native
+operator must separately verify the current revision, server state and remote
+effect receipt before any authorized action. Sensitive objectives, results,
+credentials, effect keys and private audit details are not returned.
+
+### Read-only global Demand queue
+
+Use `pandacode serve --list-demands <state>` to page native Ticket status
+across all Teams, with `all` or an exact native state. Append
+`--before <beforeUpdatedAt> <beforeId>` and optionally
+`--search "objective fragment"` to filter before the 200-item page limit.
+Results include each Ticket ID, Team ID, state, revision, timestamp and
+`nextCursor`; objectives, search terms, actors, sessions, mandates and evidence
+are withheld. The query opens SQLite read-only and cannot launch providers,
+change authorization or perform restart recovery. Cursor pages are live
+snapshots rather than one long transaction; concurrently changing Tickets
+may move between pages. Avoid sensitive CLI search phrases in shell history
+and process arguments.
+
+### Read-only Team Demand status inspection
+
+Use `pandacode serve --list-team-demands <team-id> <state>` to inspect up to
+200 actual native Tickets for one Team, filtered by an exact Ticket state
+(`queued`, `running`, `waiting_approval`, `waiting_review`, `blocked`,
+`completed`, `failed`, `stopped`, `interrupted`, `inconclusive`) or
+`all`. JSON includes Ticket ID, state, revision and updated timestamp, but
+not objectives, transcripts, worker results, mandates or authentication data.
+`mayHaveMore` indicates the 200-row cap, not that the next page was verified.
+When present, `nextCursor` supplies `beforeUpdatedAt` (milliseconds) and
+`beforeId` (Ticket ID) for `--list-team-demands <team-id> <state> --before
+<beforeUpdatedAt> <beforeId>`. Use the same Team and state for subsequent pages;
+page reads are live, so a concurrently changing Ticket may move in the index.
+The CLI rejects malformed or unpaired cursor values; without `--before`, the
+existing first-page behavior is unchanged. To search before pagination, append `--search "objective fragment"` after the
+optional `--before` cursor. The literal substring filter is
+ASCII-case-insensitive and limited to 128 UTF-8 bytes. JSON includes
+`searchApplied` but never returns search phrases or matching objectives.
+Avoid sensitive phrases in CLI arguments, since process listings and shell
+history may expose them. Omitting `--search` preserves the previous view.
+This is observational only: it reuses the native state/Team filter before
+pagination and opens SQLite read-only without running startup recovery,
+granting permissions, admitting assignments or replaying external effects.
+
+### Read-only Team readiness inspection
+
+`pandacode serve --inspect-team-readiness <team-id>` opens the existing database
+read-only without running startup recovery or interrupting the serving process.
+It reuses the native manual coordinator/worker availability, policy revision,
+Team project and checkout-occupancy checks. The JSON returns redacted role IDs,
+current reasons for denial and the existing read-only tool/effect ceiling; it
+never creates a Ticket, mandate, assignment, lease or provider call.
+
+`eligibleAtSnapshot` is **not an authorization or admission guarantee**: the
+one-shot CLI cannot observe every live in-memory provider session and cannot
+reserve a checkout. `requiresLiveAdmissionRecheck` is always true. The real
+native admission path must repeat its checks and may still reject the request.
+No objective text, private evidence or authentication credential is printed.
+
+
+### Inspecting durable external-effect receipts (read-only)
+
+`pandacode serve --inspect-ticket-effects <ticket-id>` inspects up to 100
+existing native receipt identities on the same local SQLite database without
+running restart recovery against a healthy serve process. An unknown Ticket
+or malformed ID exits nonzero. The native UI also offers **Inspect receipts**
+under a Ticket's read-only inspector; neither surface can dispatch an effect.
+
+Each entry includes an exact effect key, canonical payload SHA-256, persistent
+`pending` / `uncertain` / `applied` state, and creation/update timestamps.
+These are **local operator diagnostics**, so protect CLI output as operational
+metadata. No payload, provider response or private conversation is returned.
+`pending` may represent a live in-flight attempt; on a genuine process restart
+native recovery changes it to `uncertain` (read-only inspection does not).
+Never retry pending/uncertain receipts or mark them applied based on this
+inspection alone. Independent authoritative remote reconciliation and a
+separate explicitly authorized dispatcher are still required; this command
+is not headless admission, resume or effect-dispatch parity.
+
+
+### Unresolved external effects block final acceptance
+
+Native manual and headless Ticket acceptance now share an atomic guard: if a
+Ticket has any `pending` or `uncertain` external-effect receipt, it cannot
+transition to `completed`, even when the worker has recorded evidence and a
+human explicitly accepts it. No `human_accepted` audit or final reply is
+written on denial. An operator must first reconcile the **authoritative
+remote provider state**, including exact effect key and payload identity;
+text-only model evidence and a timeout do not establish that a remote action
+happened. A receipt marked `applied` by verified reconciliation no longer
+blocks this particular guard. This does not enable a production external
+dispatcher or bypass native Council-required completion checks.
+
+### Revocation leaves external work explicitly uncertain
+
+When native Stop, Team Off, watchdog interruption or bot reset/removal revokes
+an active Ticket, any `pending` external-effect receipt is marked `uncertain`
+in the same SQLite transaction. No provider call, retry, acknowledgment or
+terminal approval is inferred. A failure during revocation rolls back the
+receipt change as well as the mandate transition. Only independent
+authoritative remote reconciliation can move an uncertain receipt to
+`applied` after verification.
+
+
+### Council-required Tickets never use legacy manual acceptance
+
+When the worker's native Architect team has Council enabled, or its Ticket has
+an immutable native Council review target, the existing Council-Off manual
+Accept action refuses completion. A cached `passed` label, deleted Council team
+or stale artifact never authorizes a terminal result. This is a protective
+fail-closed guard, not a new reviewer invocation or exception workflow. The
+native task-bound reviewer request/verdict and attributed, reason-bound human
+exception remain unimplemented; Council-Off Tickets retain normal manual
+acceptance.
+
+
+### Cross-process Stop propagation to the serve-owned provider
+
+`pandacode serve --stop-ticket <ticket-id>` is a separate one-shot CLI
+process. It atomically revokes the native mandate and marks the Ticket stopped
+in the shared SQLite database; the CLI cannot directly access a running
+`serve` process's in-memory provider handle. The serve-owned native watchdog
+now also reads **already stopped/interrupted** task assignments at each
+30-second tick and calls the existing `stop_session` for any still-active
+provider session belonging to that exact native assignment. Ordinary bot
+sessions are never selected. A failed stop is logged and retried on a later
+tick while the provider remains active; no Ticket or external-effect receipt is
+replayed or reauthorized. The SQLite-side effect and callback gates apply
+immediately, even before the asynchronous provider handle is terminated.
+
+### Inspect linked GitHub source activity without Desktop
+
+`pandacode serve --inspect-ticket-source <ticket-id>` returns up to 50 native
+verified Observe receipt metadata entries for the Ticket's explicitly linked
+repository/issue or PR thread. The query combines same-Team and same-repository
+source classes without duplicating receipts or exposing another Ticket's
+private objective. It never polls GitHub, issues grants, starts Workers,
+replays effects, approves Council or invokes startup recovery against another
+live serve process. An observed Check Run result is not acceptance evidence.
+
+### Explicit Team rename with durable history
+
+A trusted local operator can rename a disabled reusable Team without discarding completed Demands or editing their original admission policy:
+
+```bash
+pandacode serve --rename-orchestration <team-id> <expected-policy-revision> "New Team name"
+```
+
+The native write is a CAS-guarded, revisioned **name-only** update through the same SuperAgent policy handler as the desktop. It does not change Coordinator, Workers, Reviewers, project, task grants, history, provider sessions or external effects. Active/reviewable Tickets, running assignments and pending/uncertain external effects reject the action. The live database is opened without startup recovery, so a concurrent server's unrelated sessions are not interrupted. A repeated command with a stale revision fails closed. This is a local operator action, not a GitHub Auto trigger.
+
+### Headless revocation of a GitHub Ticket context link
+
+An authorized **local operator** can revoke an exact manually created source
+association without opening the desktop workspace:
+
+```sh
+pandacode serve --unlink-source-thread <source-id> <ticket-id> issue:42
+pandacode serve --unlink-source-thread <source-id> <ticket-id> pull:123
+```
+
+This one-shot operation uses the **same native transactional unlink** as the
+Ticket inspector. IDs and typed keys must match, or the operation exits nonzero.
+It atomically removes only that link and writes a durable Ticket audit entry.
+Historical authenticated Observe receipts, source cursors, Mandates, Ticket
+state and original evidence are never deleted or modified. Remaining explicit
+links to the same Team/repository/thread continue to correlate that context.
+The response is bounded JSON metadata (`unlinked`, identities,
+`authorizationIssued: false`); it includes no private objectives or event
+bodies. No GitHub call, provider admission, worker or automatic retry occurs.
+The CLI opens the existing storage path without running process-start recovery
+on a concurrently active headless host.
+
+### Read-only multi-role Team inspection
+
+Use `pandacode serve --inspect-team-roster <team-id>` for a bounded JSON
+projection of the saved Coordinator, ordered Workers and optional Reviewers
+while a desktop or headless service may still be active. The one-shot command
+uses the existing native role tables and bot profiles via a **read-only
+SQLite connection**; no startup recovery, provider, Council seat or grant is
+created. It exposes configured provider/model/mode and assigned Skill IDs
+without credentials, transcripts, Ticket objectives, effects or private tasks.
+It does not perform a Skills Library scan: `skillLibraryStatus=not_scanned`,
+`harnessCapability=not_verified`, `invocationEvidence=not_verified`.
+`multiRoleExecutionAvailable=false` remains explicit; all execution
+requires a separate task-scoped native authorization and live recheck.
+
+### Read-only headless Ticket execution graph
+
+Use `pandacode serve --inspect-ticket-graph <ticket-id>` to retrieve the same
+bounded native Ticket/Assignment graph used by the Orchestrations workspace.
+The result is JSON containing `graph.ticketId`, `graph.ticketRevision`,
+`graph.nodes`, `graph.edges` and `graph.truncatedAttempts`. Up to the most
+recent 50 durable assignment attempts are represented; the graph distinguishes
+exactly 50 attempts from a truncated history.
+
+This command is **observational only**: it opens SQLite read-only beside a
+running headless or desktop host, does not run startup recovery, and never
+admits a provider, replays external effects or grants permissions. Its graph
+contains no objectives, tool outputs, worker results, private evidence or
+transcripts. Assignment edges mean **Ticket owns attempt**, not a verified
+dynamic subagent hierarchy. The response sets
+`dynamicSubagentsRepresented: false` and
+`councilVerdictIncluded: false`; a pending-review node is **not** a Council
+pass. Native authorization, live state and independent review still require
+the corresponding guarded operations.

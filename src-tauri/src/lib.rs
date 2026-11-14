@@ -1869,6 +1869,10 @@ fn prepare_cloud_attach(
     stopped: Arc<AtomicBool>,
 ) -> Result<PreparedRun> {
     let session_id = session.id.clone();
+    // Cloud reattachment is a separate provider entrypoint from normal run
+    // preparation. Never let a task-owned SuperAgent session reattach through
+    // this unrestricted path (reviewer_boundary=false, reviewer_policy=None).
+    superagent::guard_cloud_attach(store, &session_id)?;
     let cloud = cloud_agents::load(store, &session_id)?
         .filter(|cloud| cloud.active())
         .ok_or("This cloud run already ended.")?;
@@ -4440,20 +4444,34 @@ pub fn run() {
                 superagent::events::superagent_source_create,
                 superagent::events::superagent_source_list,
                 superagent::events::superagent_source_decisions,
+                superagent::events::superagent_source_integrity,
                 superagent::events::superagent_source_set_mode,
                 superagent::events::superagent_source_observe,
+                superagent::events::superagent_source_poll_authenticated,
+                superagent::events::superagent_source_observe_check_run,
                 superagent::events::superagent_source_link_thread,
+                superagent::events::superagent_source_link_issue_pull,
+                superagent::events::superagent_source_unlink_thread,
                 superagent::events::superagent_source_thread_links,
+                superagent::events::superagent_source_thread_activity,
                 superagent::superagent_list,
+                superagent::roster::superagent_roster,
+                superagent::roster::superagent_roster_update,
+                superagent::roster::superagent_effective_team,
                 superagent::superagent_set_enabled,
                 superagent::superagent_update,
                 superagent::superagent_delete,
                 superagent::superagent_ticket,
                 superagent::superagent_mandate,
                 superagent::superagent_tickets,
+                superagent::superagent_all_demands,
+                superagent::superagent_review_inbox,
                 superagent::superagent_assignments,
                 superagent::superagent_activity,
                 superagent::superagent_snapshot,
+                superagent::superagent_graph,
+                superagent::superagent_effect_receipts,
+                superagent::superagent_preflight,
                 superagent::superagent_submit,
                 superagent::superagent_submit_coordinated,
                 superagent::superagent_dispatch_worker,

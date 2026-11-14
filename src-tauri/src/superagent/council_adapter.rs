@@ -117,6 +117,23 @@ pub(super) fn bind_finished(
     Ok(())
 }
 
+/// Existing Council-enabled worker sessions are not eligible for legacy
+/// Council-Off manual acceptance. The persisted review target remains binding
+/// even if the underlying Architect team is later removed or its Council
+/// toggle changed. This is a denial guard, not reviewer invocation, verification
+/// or an exception-grant mechanism.
+pub(super) fn requires_task_review(
+    store: &Store, ticket_id: &str, worker_session_id: &str,
+) -> Result<bool> {
+    let frozen: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_council_targets WHERE ticket_id=?1)",
+        [ticket_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if frozen { return Ok(true); }
+    Ok(architect::load(store, worker_session_id)?
+        .is_some_and(|team| team.config.council.is_some()))
+}
+
 /// Only the latest, finished, exactly correlated worker evidence is eligible
 /// for a Council lookup. A different session, coordinator plan, stale attempt
 /// or remapped bot thread cannot borrow Council status from another task.
@@ -347,6 +364,63 @@ mod tests {
             [&session],
         ).unwrap();
         assert!(inspect(&store,&first).unwrap().is_none());
+    }
+
+    #[test]
+    fn council_required_manual_accept_denies_unbound_and_forged_pass_without_changing_ticket() {
+        let mut store = fixture();
+        let (ticket, session) = settled(&mut store, "required-no-gate");
+        attach_native_council(&store, &session);
+        assert!(requires_task_review(&store, &ticket.id, &session).unwrap());
+        let denied = superagent::accept(&store, &ticket.id, ticket.revision).unwrap_err();
+        assert!(denied.contains("Native Council review is required"));
+        assert_eq!(superagent::get_ticket(&store, &ticket.id).unwrap().state, "waiting_approval");
+
+        // A status that merely claims pass must never authorize terminal
+        // acceptance, even when there is no frozen Ticket artifact.
+        store.db.execute(
+            "UPDATE architect_teams SET content=json_set(content,
+              '$.councilStatus.state','passed','$.councilStatus.round',1)
+             WHERE session_id=?1", [&session],
+        ).unwrap();
+        assert!(superagent::accept(&store, &ticket.id, ticket.revision).is_err());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1
+             AND kind='human_accepted'", [&ticket.id], |r| r.get::<_, i64>(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn frozen_council_target_never_becomes_council_off_when_team_disappears() {
+        let mut store = fixture();
+        let cfg = superagent::create_configuration(&store, NewOrchestration {
+            name: "Frozen review must remain required".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1
+             WHERE id=?1", [&cfg.id],
+        ).unwrap();
+        let (ticket, launched) = superagent::admit(
+            &mut store, &cfg.id, "Review actual artifact", "frozen-review", false,
+        ).unwrap();
+        assert!(launched);
+        let session = superagent::assignment_session(&store, &ticket.id).unwrap().unwrap();
+        attach_native_council(&store, &session);
+        assert!(superagent::on_run_finished(
+            &store, &session, true, "Worker artifact",
+        ).unwrap());
+        let waiting = superagent::get_ticket(&store, &ticket.id).unwrap();
+        assert!(requires_task_review(&store, &ticket.id, &session).unwrap());
+        // Removing the native team must not downgrade the task to legacy
+        // Council-Off approval while the original frozen target remains.
+        store.db.execute(
+            "DELETE FROM architect_teams WHERE session_id=?1", [&session],
+        ).unwrap();
+        assert!(requires_task_review(&store, &ticket.id, &session).unwrap());
+        assert!(superagent::accept(&store, &ticket.id, waiting.revision).is_err());
+        assert_eq!(superagent::get_ticket(&store, &ticket.id).unwrap().state,
+            "waiting_approval");
     }
 
     #[test]

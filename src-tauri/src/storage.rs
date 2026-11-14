@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 43;
+pub const SCHEMA_VERSION: i64 = 48;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -689,6 +689,49 @@ impl Store {
                 migration.execute_batch(crate::superagent::effects::SCHEMA)
                     .map_err(|e| e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=43;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 44 {
+                // Additive, non-authorizing Team member configuration sidecar.
+                migration.execute_batch(crate::superagent::roster::SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=44;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 45 {
+                // Additive observed Check Run outcome, never task authority.
+                // Previous receipt identities stay intact, with unknown results.
+                migration.execute_batch(crate::superagent::events::CHECK_RESULT_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=45;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 46 {
+                // Immutable task-effective bot profiles for newly admitted Demands.
+                // Legacy Tickets retain a missing/unknown profile, never a fabricated grant.
+                migration.execute_batch(crate::superagent::roster::TICKET_PROFILE_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=46;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 47 {
+                // Different project IDs may refer to the same checkout.
+                // Replace both native lease triggers within the migration transaction.
+                migration.execute_batch(
+                    "DROP TRIGGER IF EXISTS sa_project_lease_insert;
+                     DROP TRIGGER IF EXISTS sa_project_lease_update;",
+                ).map_err(|e| e.to_string())?;
+                migration.execute_batch(crate::superagent::PROJECT_LEASE)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=47;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 48 {
+                // Pin authenticated GitHub repository IDs across Observe polls.
+                // Existing source receipts remain intact and historically unverified.
+                migration.execute_batch(crate::superagent::events::REPOSITORY_ID_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=48;")
                     .map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;

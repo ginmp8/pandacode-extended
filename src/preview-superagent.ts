@@ -1,5 +1,6 @@
 /** Deterministic preview-only SuperAgent adapter. No real harness or external writes. */
-type Bot = { id:string; name:string; paused:boolean; projectId:string };
+type Bot = { id:string; name:string; paused:boolean; projectId:string;
+  provider?:string; model?:string; mode?:string; skills?:string[]; reasoningEffort?:string };
 type Config = { id:string; name:string; coordinatorBotId:string; workerBotId:string;
   workerBotIds:string[]; reviewerBotIds:string[]; teamVersion:number;
   projectId:string; enabled:boolean; policyRevision:number; councilRequired?:boolean };
@@ -290,34 +291,141 @@ export async function invokeSuperagent<T>(
       break;
     }
     case 'superagent_manifest_export':{
-      value={schemaVersion:1,orchestrations:[...configs.values()].map(c=>({
-        name:c.name,coordinatorBot:find(c.coordinatorBotId).name,workerBot:find(c.workerBotId).name,
-        enabled:c.enabled,autonomy:'off',maxConcurrentTasks:1,maxAttemptsPerAssignment:2,
-        council:{enabled:false}
-      }))};break;
+      const profile=(id:string)=>{
+        const b=find(id);
+        return {bot:b.name,provider:b.provider??'codex',
+          model:b.model??'default',mode:b.mode??'plan',skills:b.skills??[],
+          reasoningEffort:b.reasoningEffort??'medium'};
+      };
+      value={schemaVersion:5,orchestrations:[...configs.values()].map(c=>{
+        const policy=strategyFor(c.id);
+        return {
+          name:c.name,coordinatorBot:find(c.coordinatorBotId).name,
+          workerBot:find(c.workerBotId).name,
+          extraWorkerBots:c.workerBotIds.slice(1).map(id=>find(id).name),
+          reviewerBots:c.reviewerBotIds.map(id=>find(id).name),
+          botProfiles:[c.coordinatorBotId,...c.workerBotIds,...c.reviewerBotIds].map(profile),
+          enabled:false,autonomy:'off',
+          maxConcurrentTasks:policy.maxConcurrentTasks,
+          maxAttemptsPerAssignment:policy.maxAttemptsPerAssignment,
+          council:{enabled:c.councilRequired===true},
+          strategy:{...policy.settings},
+        };
+      })};break;
     }
     case 'superagent_manifest_preview':
     case 'superagent_manifest_import':{
-      const doc=args.document;if(doc?.schemaVersion!==1||!Array.isArray(doc.orchestrations))throw Error('Invalid manifest.');
+      const doc=args.document,version=doc?.schemaVersion;
+      if(![1,2,3,4,5].includes(version)||!Array.isArray(doc?.orchestrations)||
+         doc.orchestrations.length>64)throw Error('Unsupported portable Team manifest.');
+      const seen=new Set<string>();
       const pending:string[]=[],unchanged:string[]=[];
+      const prepared:Array<{name:string;coordinator:Bot;workers:Bot[];
+        reviewers:Bot[];councilRequired:boolean;policy:Strategy}>=[];
+      const botProfile=(bot:Bot)=>({
+        bot:bot.name,provider:bot.provider??'codex',
+        model:bot.model??'default',mode:bot.mode??'plan',
+        skills:bot.skills??[],reasoningEffort:bot.reasoningEffort??'medium',
+      });
+      const lookup=(name:unknown):Bot=>{
+        if(typeof name!=='string'||!name.trim()||name.length>120)
+          throw Error('Portable role name is invalid.');
+        const matches=bots.filter(b=>b.name.toLowerCase()===name.toLowerCase());
+        if(matches.length!==1||matches[0].paused)
+          throw Error('Portable role is missing, ambiguous or paused.');
+        return matches[0];
+      };
       for(const preset of doc.orchestrations){
+        if(!preset||typeof preset.name!=='string'||preset.name.trim()!==preset.name||
+           preset.name.length===0||preset.name.length>120||
+           /[\x00-\x1f\x7f]/.test(preset.name)||seen.has(preset.name.toLowerCase()))
+          throw Error('Invalid or repeated portable Team name.');
+        seen.add(preset.name.toLowerCase());
+        const coordinator=lookup(preset.coordinatorBot);
+        const workerNames=version===2?preset.workers:
+          version>=3?[preset.workerBot,...(preset.extraWorkerBots??[])]:
+          [preset.workerBot];
+        const reviewerNames=version===2?(preset.reviewers??[]):
+          version>=3?(preset.reviewerBots??[]):[];
+        if(!Array.isArray(workerNames)||workerNames.length<1||workerNames.length>16||
+           !Array.isArray(reviewerNames)||reviewerNames.length>8)
+          throw Error('Portable Team role bounds are invalid.');
+        const workers=workerNames.map(lookup),reviewers=reviewerNames.map(lookup);
+        const identities=[coordinator,...workers,...reviewers].map(bot=>bot.id);
+        if(new Set(identities).size!==identities.length ||
+           workers.some(bot=>bot.projectId!==workers[0].projectId))
+          throw Error('Portable Team contains duplicate roles or cross-project Workers.');
+        const policySource=version===2?preset.policy:preset;
+        const autonomy=policySource?.autonomy;
+        const councilRequired=version===2?policySource?.councilEnabled===true:
+          preset.council?.enabled===true;
+        const maxConcurrentTasks=policySource?.maxConcurrentTasks;
+        const maxAttemptsPerAssignment=policySource?.maxAttemptsPerAssignment;
+        if(autonomy!=='off'||!Number.isInteger(maxConcurrentTasks)||
+           maxConcurrentTasks<1||maxConcurrentTasks>8||
+           !Number.isInteger(maxAttemptsPerAssignment)||
+           maxAttemptsPerAssignment<1||maxAttemptsPerAssignment>8||
+           (councilRequired && reviewers.length<2))
+          throw Error('Portable Team autonomy, worker budget or Council review policy is unsupported.');
+        let settings=defaultStrategy().settings;
+        if(version===5){
+          const raw=preset.strategy;
+          if(!raw || !['balanced','cost','latency','throughput','quality'].includes(raw.priority)||
+             !Number.isInteger(raw.attemptTimeoutMs)||raw.attemptTimeoutMs<60_000||
+             raw.attemptTimeoutMs>1_800_000||
+             [raw.tokenCeiling,raw.estimatedCostCeilingMinor].some((value:any)=>
+               value!==undefined && (!Number.isSafeInteger(value)||value<=0))||
+             typeof raw.subagentDelegationEnabled!=='boolean')
+            throw Error('Invalid portable v5 bounded strategy.');
+          settings={priority:raw.priority,attemptTimeoutMs:raw.attemptTimeoutMs,
+            tokenCeiling:raw.tokenCeiling,
+            estimatedCostCeilingMinor:raw.estimatedCostCeilingMinor,
+            subagentDelegationEnabled:raw.subagentDelegationEnabled};
+        }else if(preset.strategy!==undefined) {
+          throw Error('Portable strategy requires Team schema v5.');
+        }
+        if(version>=3){
+          const profiles=preset.botProfiles;
+          const expected=[coordinator,...workers,...reviewers].map(botProfile);
+          if(!Array.isArray(profiles)||profiles.length!==expected.length)
+            throw Error('Portable role profile count does not match its Team.');
+          for(let index=0;index<expected.length;index++){
+            const actual=profiles[index],effective=expected[index];
+            if(!actual||String(actual.bot).toLowerCase()!==effective.bot.toLowerCase()||
+               actual.provider!==effective.provider||actual.model!==effective.model||
+               actual.mode!==effective.mode||JSON.stringify(actual.skills)!==JSON.stringify(effective.skills)||
+               (version>=4 && actual.reasoningEffort!==effective.reasoningEffort)||
+               (version===3 && actual.reasoningEffort!==undefined))
+              throw Error('Portable role profile mismatch; inspect native bot settings.');
+          }
+        }
+        const policy:Strategy={settings,maxConcurrentTasks,maxAttemptsPerAssignment};
         const found=configName(preset.name);
-        if(preset.autonomy!=='off'||preset.council?.enabled||preset.maxConcurrentTasks!==1)throw Error('Unsupported policy.');
-        const a=bots.filter(b=>b.name.toLowerCase()===String(preset.coordinatorBot).toLowerCase());
-        const b=bots.filter(b=>b.name.toLowerCase()===String(preset.workerBot).toLowerCase());
-        if(a.length!==1||b.length!==1||a[0].id===b[0].id)throw Error('Invalid portable bot reference.');
-        if(found){if(found.coordinatorBotId!==a[0].id||found.workerBotId!==b[0].id)throw Error('Conflicting preset.');
+        if(found){
+          const original=strategyFor(found.id);
+          if(found.coordinatorBotId!==coordinator.id ||
+             JSON.stringify(found.workerBotIds)!==JSON.stringify(workers.map(bot=>bot.id))||
+             JSON.stringify(found.reviewerBotIds)!==JSON.stringify(reviewers.map(bot=>bot.id))||
+             (found.councilRequired===true)!==councilRequired||
+             JSON.stringify(original)!==JSON.stringify(policy))
+            throw Error('Existing Team conflicts with portable role or strategy snapshot.');
           unchanged.push(preset.name);
         }else pending.push(preset.name);
+        prepared.push({name:preset.name,coordinator,workers,reviewers,councilRequired,policy});
       }
       if(command==='superagent_manifest_import'){
         if(args.confirmed!==true)throw Error('Confirmation required.');
-        for(const name of pending){
-          const preset=doc.orchestrations.find((item:any)=>item.name===name);
-          const a=bots.find(b=>b.name===preset.coordinatorBot)!,b=bots.find(b=>b.name===preset.workerBot)!;
-          const c:Config={id:crypto.randomUUID(),name,coordinatorBotId:a.id,workerBotId:b.id,
-            workerBotIds:[b.id],reviewerBotIds:[],teamVersion:1,
-            projectId:b.projectId,enabled:false,policyRevision:1};configs.set(c.id,c);
+        // All references, role bounds and strategy contracts are validated
+        // before any new preview state is committed.
+        for(const candidate of prepared.filter(item=>pending.includes(item.name))){
+          const c:Config={id:crypto.randomUUID(),name:candidate.name,
+            coordinatorBotId:candidate.coordinator.id,workerBotId:candidate.workers[0].id,
+            workerBotIds:candidate.workers.map(bot=>bot.id),
+            reviewerBotIds:candidate.reviewers.map(bot=>bot.id),
+            councilRequired:candidate.councilRequired,
+            teamVersion:1,projectId:candidate.workers[0].projectId,
+            enabled:false,policyRevision:1};
+          configs.set(c.id,c);teamStrategies.set(c.id,candidate.policy);
         }
         value={created:pending,unchanged};
       }else value={wouldCreate:pending,unchanged,importedPresetsDisabled:true};

@@ -47,7 +47,7 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await dialog.getByRole('button',{name:'Portable configuration'}).click();
   await dialog.getByRole('button',{name:'Export'}).click();
   const text=dialog.getByRole('textbox',{name:'Companion manifest JSON'});
-  await expect(text).toContainText('"schemaVersion": 1');
+  await expect(text).toContainText('"schemaVersion": 5');
   await dialog.getByRole('button',{name:'Preview import'}).click();
   await expect(dialog.getByText(/0 new; 1 unchanged/)).toBeVisible();
   await dialog.getByRole('button',{name:'Confirm import'}).click();
@@ -120,6 +120,15 @@ test('versioned Team strategies keep unsupported budgets visible and prevent sil
     .getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(host.getByRole('alert')).toContainText('Requested Team policy cannot run');
   await expect(host.getByRole('button',{name:'Enable manual'})).toBeVisible();
+  await host.getByRole('button',{name:'Portable configuration'}).click();
+  await host.getByRole('button',{name:'Export'}).click();
+  const portable = host.getByRole('textbox',{name:'Companion manifest JSON'});
+  await expect(portable).toContainText('"schemaVersion": 5');
+  await expect(portable).toContainText('"priority": "cost"');
+  await expect(portable).toContainText('"maxConcurrentTasks": 2');
+  await expect(portable).toContainText('"attemptTimeoutMs": 300000');
+  await host.getByRole('button',{name:'Preview import'}).click();
+  await expect(host.getByText(/0 new; 1 unchanged/)).toBeVisible();
 });
 
 test('GitHub Auto requires explicit bounded source consent and never grants writes', async ({page}) => {

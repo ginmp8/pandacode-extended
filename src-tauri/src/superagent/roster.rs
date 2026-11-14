@@ -86,6 +86,7 @@ pub struct EffectiveMember {
     pub provider:String,
     pub model:String,
     pub mode:String,
+    pub reasoning_effort:String,
     pub project_id:String,
     pub paused:bool,
     pub skills:Vec<EffectiveSkill>,
@@ -150,7 +151,7 @@ fn effective_team(
         members.push(EffectiveMember {
             role:role.into(),position,bot_id:bot.id,name:bot.name,
             provider:bot.provider,model:bot.model,mode:bot.mode,
-            project_id:bot.project_id,paused:bot.paused,skills,configuration_issues,
+            reasoning_effort:bot.reasoning_effort,project_id:bot.project_id,paused:bot.paused,skills,configuration_issues,
         });
         Ok(())
     };

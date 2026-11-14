@@ -2346,6 +2346,9 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
                 assert!(child.config.council.is_some(), "{mode_name} × {strategy:?} child has its own Council");
                 let child_link = validate_council_child_link(&state.store.lock().unwrap(), &child.session_id)
                     .unwrap().unwrap_or_else(|| panic!("{mode_name} × {strategy:?} child is missing its native ownership link"));
+                assert!(nested_council_callback_current(
+                    &state.store.lock().unwrap(), &child.session_id
+                ), "{mode_name} × {strategy:?} legitimate child must retain callback authority");
                 assert_eq!(child_link.root_session_id, root_id);
                 assert_eq!(child_link.root_council_cycle_id, root_cycle_id);
                 assert_eq!(child_link.root_worker_id, parent_seat.id);

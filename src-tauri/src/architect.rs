@@ -9086,7 +9086,9 @@ fn nested_council_callback_current(store: &Store, parent: &str) -> bool {
     active(&root.status)
         && root.workers.iter().any(|worker| {
             worker.id == link.root_worker_id
-                && worker.session_id == link.child_session_id
+                // OnTrigger escalations allocate a distinct child session after
+                // the direct preliminary reviewer; the validated native link
+                // (above) proves that separate session is owned by this seat.
                 && !worker.abandoned
                 && matches!(worker.status.as_str(), "waiting" | "running" | "parked")
                 && worker.council.as_ref()

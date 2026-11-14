@@ -186,3 +186,5 @@ states and the fixed versus OnTrigger budget boundary.
 - Adapted PR #149's final native leaf-callback authority recheck into the existing composed Council runtime. A task-owned child callback now requires its stored child link, current root authority, active root status and the original non-abandoned parent seat before it can mutate child results; ordinary root and legacy callbacks are unchanged.
 - Added a regression that simulates a revoked/paused root with an in-flight old-generation child callback and verifies that no child reviewer result or revision is credited.
 - This is an additional native guard, not a substitute for the existing immutable child terminal receipt or the root final approval gate.
+
+- Callback authorization uses the existing validated child-to-parent decision link rather than requiring the parent reviewer's session ID to equal the child coordinator's session ID; OnTrigger escalation legitimately allocates a distinct child session. The 7×3 native dispatch test now asserts child callback authorization for configured nested modes.

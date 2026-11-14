@@ -231,3 +231,14 @@ This delivers **real persisted planning data**, not the outstanding
 dependency-aware execution scheduler. Multi-worker dispatch, advancement
 after actual verified work, retries, budgets and Council-backed completion
 still require additional task-bound native runtime integration.
+
+The **Ticket evidence → Work item dependency plan** panel now exposes explicit
+native commands for registering and inspecting this immutable, revision-bound
+DAG. The local JSON editor cannot alter Ticket identity or revision; those
+are obtained from the current native Ticket snapshot. The UI escapes all
+user-generated titles and acceptance text, displays the exact stored digest
+and shows every item as *not executed / not verified*. No ready-frontier
+entry grants a task, provider or external effect. The editable JSON draft
+is isolated to its original inspected Ticket rather than silently reused
+when switching Demands. Unsupported native plan inspection remains an
+explicit error, not synthesized content.

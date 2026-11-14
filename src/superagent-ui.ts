@@ -109,6 +109,17 @@ interface RunGraph {
   ticketId: string; ticketRevision: number; truncatedAttempts: boolean;
   nodes: RunGraphNode[]; edges: RunGraphEdge[];
 }
+interface NativeWorkItem {
+  key: string; title: string; acceptance: string; dependsOn: string[];
+  state: 'planned'; ready: boolean;
+  executionAdmitted: false; evidenceVerified: false;
+}
+interface NativeWorkPlan {
+  ticketId: string; ticketRevision: number; planSha256: string;
+  source: string; createdAt: number; items: NativeWorkItem[];
+  readyFrontier: string[]; activeAssignments: number;
+  executionGrantedByPlan: false;
+}
 interface SourceDecision {
   sourceId: string; deliveryId: string; eventKind: string; subjectKey: string;
   decision: string; sequence: number; policyRevision: number; at: number;
@@ -161,6 +172,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let ticketDetails: TicketDetails | null = null;
   let effectReceipts: EffectReceipt[] = [], effectReceiptsLoaded = false;
   let runGraph: RunGraph | null = null, runGraphLoaded = false;
+  let workPlan: NativeWorkPlan | null = null, workPlanLoaded = false;
+  let workPlanDraft = '', workPlanError = '', workPlanDraftTicket = '';
   let roleRoster: TeamRoster | null = null;
   // Draft order is committed only by the native revision-guarded roster update.
   let workerOrder: string[] = [];
@@ -366,7 +379,36 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             '</ol>' + (runGraph.truncatedAttempts
               ? '<p>Only the latest 50 attempts are shown.</p>' : '') :
             '<p>Graph not loaded.</p>') + '</section>' +
-        '<section class="sa-effect-receipts" role="region" aria-label="Native effect receipts">' +
+        '<section class="sa-work-plan" role="region" aria-label="Native work plan">' +
+         '<h5>Work item dependency plan</h5><p>Immutable native operator planning only. ' +
+         'A ready frontier is NOT an execution grant, verified test or Council approval.</p>' +
+         '<button type="button" data-sa-load-work-plan>Inspect work plan</button>' +
+         (workPlanLoaded && workPlan && workPlan.ticketId === inspected.id &&
+          workPlan.ticketRevision <= inspected.revision
+           ? '<p>Native plan SHA-256 <code>' + safe(workPlan.planSha256) + '</code> · ' +
+             workPlan.items.length + ' items · ' +
+             workPlan.activeAssignments + ' running native assignments.</p>' +
+             '<ol>' + workPlan.items.map(item => '<li><strong>' + safe(item.title) +
+               '</strong> · ' + safe(item.key) +
+               ' · Dependencies ' + safe(item.dependsOn.join(', ') || 'none') +
+               ' · ' + (item.ready ? 'initial frontier' : 'pending dependency') +
+               ' · Not executed / not verified' +
+               '<p>Acceptance: ' + safe(item.acceptance) + '</p></li>').join('') + '</ol>'
+           : '<p>No work plan loaded for this Ticket.</p>') +
+         (inspected.state === 'blocked' && !ticketDetails.mandate.revoked &&
+          !ticketDetails.mandate.allowedSideEffects &&
+          ticketDetails.mandate.allowedTools.length === 0
+           ? '<form data-sa-form="work-plan">' +
+             '<label>Work plan JSON (items and dependencies)' +
+             '<textarea name="workPlanJson" rows="7" spellcheck="false" maxlength="65536" ' +
+             'placeholder="Enter JSON with bounded items">' +
+             safe(workPlanDraft) + '</textarea></label>' +
+             (workPlanError ? '<p role="alert">' + safe(workPlanError) + '</p>' : '') +
+             '<button type="submit" class="primary-button">Register immutable plan</button>' +
+             '</form>'
+           : '') +
+         '</section>' +
+         '<section class="sa-effect-receipts" role="region" aria-label="Native effect receipts">' +
         '<h5>External effect receipts</h5><p>Read-only native identity and state. ' +
         'Pending may still be running; uncertain requires independent provider reconciliation. ' +
         'Neither state permits replay, approval or assumed success.</p>' +
@@ -847,12 +889,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const id = inspectedTicket;
     if (!id || !tickets.some(ticket => ticket.id === id)) {
       inspectedTicket = ''; ticketDetails = null; threadLinks = [];
+      workPlanDraftTicket = ''; workPlanDraft = '';
       inspectedAssignmentId = ''; return;
+    }
+    if (workPlanDraftTicket !== id) {
+      workPlanDraft = ''; workPlanDraftTicket = id;
     }
     // Use existing native read endpoints, not model-generated summaries. A
     // revision change refreshes the snapshot before a later human decision.
     effectReceipts = []; effectReceiptsLoaded = false;
     runGraph = null; runGraphLoaded = false;
+    workPlan = null; workPlanLoaded = false; workPlanError = '';
     const [snapshot, links] = await Promise.all([
       call<TicketDetails>('superagent_snapshot', { ticketId:id, limit:50 }),
       call<ThreadLink[]>('superagent_source_thread_links', { ticketId:id }),
@@ -1036,6 +1083,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         target.closest<HTMLFormElement>('form[data-sa-form="create"]')) {
       draftPresetName = target.value;
     }
+    if (target instanceof HTMLTextAreaElement && target.name === 'workPlanJson' &&
+        target.closest('form[data-sa-form="work-plan"]')) {
+      workPlanDraft = target.value;
+      workPlanError = '';
+      return;
+    }
     if (target instanceof HTMLTextAreaElement && target.hasAttribute('data-sa-manifest')) {
       importText = target.value; preview = null; inspected = null;
     }
@@ -1129,6 +1182,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         demandObjective = objective;
         preflightObjective = objective;
         preflightMode = coordinated ? 'coordinated' : 'direct';
+      });
+      return;
+    }
+    if (target.hasAttribute('data-sa-load-work-plan')) {
+      const ticketId = inspectedTicket;
+      if (ticketId && ticketDetails?.ticket.id === ticketId) void work(async () => {
+        const plan = await call<NativeWorkPlan>('superagent_work_plan',{ticketId});
+        if (inspectedTicket !== ticketId) return;
+        if (plan.ticketId !== ticketId ||
+            plan.ticketRevision > (ticketDetails?.ticket.revision ?? -1)) {
+          throw new Error('Saved work plan conflicts with the current Ticket revision.');
+        }
+        workPlan = plan; workPlanLoaded = true;
       });
       return;
     }
@@ -1603,6 +1669,36 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         feedback = result.state === 'applied' && result.reconciliation === 'exact-readback'
           ? 'GitHub comment applied and verified by exact read-back.'
           : 'GitHub comment state: ' + result.state + ' (' + result.reconciliation + '). Repeating the same comment checks its saved receipt and does not blindly post again.';
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'work-plan') {
+      const nativeTicket = ticketDetails?.ticket;
+      if (!nativeTicket || nativeTicket.id !== inspectedTicket ||
+          nativeTicket.state !== 'blocked' || ticketDetails?.mandate.revoked) return;
+      workPlanDraft = String(data.get('workPlanJson') ?? '');
+      let parsed: unknown;
+      try { parsed = JSON.parse(workPlanDraft); }
+      catch { workPlanError = 'Enter valid JSON with an items array.'; render(); return; }
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) ||
+          !Array.isArray((parsed as Record<string, unknown>).items)) {
+        workPlanError = 'Provide an object with a bounded items array.';
+        render(); return;
+      }
+      const {items} = parsed as {items:unknown[]};
+      if (items.length === 0 || items.length > 64 ||
+          new TextEncoder().encode(workPlanDraft).length > 64*1024) {
+        workPlanError = 'Provide 1–64 work items within 64 KiB.';
+        render(); return;
+      }
+      workPlanError = '';
+      void work(async () => {
+        const saved = await call<NativeWorkPlan>('superagent_work_plan_create', {
+          input:{ ticketId:nativeTicket.id,expectedRevision:nativeTicket.revision,items },
+        });
+        if (inspectedTicket !== nativeTicket.id) return;
+        workPlan = saved; workPlanLoaded = true;
+        feedback = 'Native work-plan DAG saved without dispatch or acceptance.';
       });
       return;
     }

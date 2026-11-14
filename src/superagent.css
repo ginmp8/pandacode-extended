@@ -128,3 +128,8 @@
 .sa-team-builder .sa-builder-error { color: var(--text-danger, #bb3333); }
 .sa-team-builder form dl { display: grid; grid-template-columns: minmax(7rem, 1fr) 2fr; gap: 0.4rem 1rem; }
 .sa-team-builder form dd { margin: 0; overflow-wrap: anywhere; }
+
+.sa-work-plan ol { padding-inline-start: 1.4rem; }
+.sa-work-plan ol li { margin-block: 0.55rem; overflow-wrap: anywhere; }
+.sa-work-plan textarea { width: 100%; min-height: 7rem; resize: vertical; }
+.sa-work-plan code { overflow-wrap: anywhere; }

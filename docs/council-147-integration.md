@@ -5,7 +5,7 @@
 - Canonical implementation: [PR #152](https://github.com/ginmp8/pandacode-extended/pull/152), commit `455774df73fad829defd5765c89f91a601cd6297`.
 - Additional hardening: [PR #149](https://github.com/ginmp8/pandacode-extended/pull/149), commit `664c530152693f403199496a450ce17df550cf74`.
 - New destination: `feat/issue-147-council-unified`; target `extended/development`, base `f9efb3a1c7558dcf7d5688bb1687cfff9253f967`.
-- This is one conventional, single-parent integration commit. Source branches are never modified.
+- Every integration commit has one parent and follows Conventional Commits; the source branches are never modified.
 - **Draft only**: source integration and issue acceptance are not interchangeable.
 
 ## Canonical native implementation
@@ -27,3 +27,12 @@ Other unsatisfied #147 criteria remain explicit: 7 x 3 real terminal native scen
 ## Verification and release gate
 
 Run `cargo test --locked --manifest-path src-tauri/Cargo.toml --lib`, `cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`, `npm run build` and focused Playwright Council/Channel tests against the new exact commit. This connector-only integration has **not run** local Rust, Node, browser, Desktop or provider tests. Keep the PR a draft until all material divergences, missing acceptance cases and regressions are resolved.
+
+## Source-sync checkpoint (2026-11-13)
+
+- PR #149 remains at `664c530152693f403199496a450ce17df550cf74` (no new commits since the initial integration).
+- PR #152 advanced from `455774df73fad829defd5765c89f91a601cd6297` to `48a8076ddac65ddd5ae790cce93dc2d8ad73ea0e` (one new commit).
+- Reconciled source updates: Council finding disposition cycle/artifact verification, native human waiver, task-bound evidence checks, Channel delivery correlation and native/browser regressions; tool catalog v15; Astro 7.4.12 and lockfile; source `.gitignore`.
+- Retained the integration's existing root attempt and concurrency limits without introducing #149's competing Council engines.
+- The source `.gitignore` contains hundreds of generated test-artifact paths; source parity is preserved, but cleanup is separate from this checkpoint.
+- The original #152 acceptance ledger is pinned to an older SHA. Full #147 AC-01..40 and exact-HEAD test verification remain **pending/not_run**.

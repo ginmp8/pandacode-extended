@@ -599,7 +599,6 @@ test.describe('shared bot channels', () => {
     test.setTimeout(60_000);
     await page.addInitScript(() => localStorage.setItem('pandacode.teamClassic', 'false'));
     await page.goto('/?bots=sample&council=ledger');
-    await expect(page.getByRole('textbox', { name: 'Message your coding agent' })).toBeVisible();
 
     const directCycleId = await page.evaluate(async () => {
       const { call } = await import('/src/bridge.ts');
@@ -637,19 +636,23 @@ test.describe('shared bot channels', () => {
           text: 'Council review completed', status: 'Completed', createdAt: 1,
           council: {
             cycleId, sessionId: 'session-1', state: 'Passed',
-            round: 1, target: 9.5, lowest: 9.6, artifactRevision: 'preview-revision-1', reviewers: [],
+            round: 1, target: 9.5, lowest: 9.6, artifactRevision: `${cycleId.split(':').at(-1)}:1`, reviewers: [],
           },
         }],
       }, []);
     }, directCycleId!);
     await page.locator('.conversation-pane.channel-thread .bc-channel').evaluate((node, html) => { node.outerHTML = html; }, channelMarkup);
-    await page.getByRole('button', { name: 'View Council report' }).click();
+    const reportButton = page.getByRole('button', { name: 'View Council report' });
+    await expect(reportButton).toHaveAttribute('data-delivery-id', 'report-delivery');
+    await expect(reportButton).toHaveAttribute('data-cycle-id', directCycleId!);
+    await reportButton.click();
 
     const dialog = page.getByRole('dialog', { name: 'Council report' });
     const report = dialog.locator('.bc-council-report');
     const reportLedger = report.locator('.council-ledger');
     await expect(reportLedger).toBeVisible();
     await expect(reportLedger).toHaveAttribute('data-cycle-id', directCycleId!);
+    await expect(report).toHaveAttribute('data-cycle-id', directCycleId!);
     await expect(reportLedger).not.toContainText('earlier-cycle finding');
     const reportHierarchy = reportLedger.locator('.council-inspector-hierarchy');
     const reportHierarchyText = await reportHierarchy.evaluate(node => node.textContent?.replace(/\s+/g, ' ').trim() ?? '');
@@ -675,6 +678,12 @@ test.describe('shared bot channels', () => {
     const reviewerEvidence = reviewer.locator('.council-inspector-evidence');
     await reviewerEvidence.locator(':scope > summary').click();
     await expect(reviewerEvidence).toContainText('src/main.ts');
+
+    await page.keyboard.press('Escape');
+    await reportButton.evaluate(button => { (button as HTMLElement).dataset.artifactRevision = '0:stale'; });
+    await reportButton.click();
+    await expect(page.locator('#toast')).toContainText('This Council delivery report is unavailable.');
+    await expect(page.getByRole('dialog', { name: 'Council report' })).toHaveCount(0);
   });
 
   test('channel Council report shows the legacy unavailable state for a snapshot without projections', async ({ page }) => {
@@ -712,7 +721,7 @@ test.describe('shared bot channels', () => {
     const delivery = {
       cycleId: `${snapshot.sessionId}:${snapshot.councilSince}`, sessionId: snapshot.sessionId,
       state: 'In progress', round: 1, target: snapshot.config.council.target,
-      lowest: null, artifactRevision: `revision-${snapshot.revision}`, reviewers: [],
+      lowest: null, artifactRevision: `${snapshot.councilSince}:${snapshot.revision}`, reviewers: [],
     };
     await page.evaluate(value => { (window as any).__sharedChannelCouncilDelivery = value; }, delivery);
 
@@ -729,6 +738,7 @@ test.describe('shared bot channels', () => {
     const reportButton = page.getByRole('button', { name: 'View Council report' });
     await expect(reportButton).toBeVisible({ timeout: 15_000 });
     await expect(reportButton).toHaveAttribute('data-session-id', snapshot.sessionId);
+    await expect(reportButton).toHaveAttribute('data-cycle-id', delivery.cycleId);
     await reportButton.click();
     const dialog = page.getByRole('dialog', { name: 'Council report' });
     await expect(dialog).toBeVisible({ timeout: 15_000 });

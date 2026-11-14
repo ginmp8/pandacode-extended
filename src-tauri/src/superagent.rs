@@ -4495,7 +4495,7 @@ mod tests {
         let first_client = authorize_task_client_capability(&store, &first.id, &first_capability).unwrap();
         assert!(first_client.caller_id.starts_with("superagent-task-client:v1:"));
         assert!(!first_client.caller_id.contains(first.id.as_str()));
-        assert!(serde_json::to_value(&get_ticket(&store, &first.id).unwrap()).unwrap()
+        assert!(serde_json::to_value(get_ticket(&store, &first.id).unwrap()).unwrap()
             .get("taskClientCapability").is_none(),
             "ticket history must not disclose the issued bearer capability");
 

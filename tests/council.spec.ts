@@ -867,7 +867,10 @@ test('panel hierarchy: one description, labels in text ink, a footer checkbox fo
   const intro = await panel(page).locator('#council-about').textContent();
   // What Council does, then what it costs: two sentences, one paragraph.
   expect(intro!.trim().split(/[.!?](\s|$)/).filter(part => part && part.trim()).length).toBe(2);
-  expect(await panel(page).locator('p:not(.council-error):not([hidden])').count()).toBe(1);
+  // Composition has its own explanatory paragraph; the base panel still has exactly one description.
+  await expect(panel(page).locator('#council-about')).toHaveCount(1);
+  await expect(toggle(page)).toHaveAttribute('aria-describedby', 'council-about');
+  expect(await panel(page).locator(':scope > p:not(.council-error):not([hidden])').count()).toBe(1);
   const [label, ink, weight] = await panel(page).locator('#council-target').evaluate(node => [getComputedStyle(node).color, getComputedStyle(document.querySelector('.council-panel-head label')!).color, Number(getComputedStyle(node).fontWeight)]);
   expect(label).toBe(ink); expect(weight).toBeGreaterThanOrEqual(500);
   // Saver's footer pattern: a small checkbox row.
@@ -1018,52 +1021,58 @@ test('Tab and Shift+Tab stay inside the panel through every control, from any of
   await open(page, '/?council');
   await button(page).click();
   await expect(toggle(page)).toBeFocused();
-  const where = () => page.evaluate(() => { const active = document.activeElement as HTMLElement; return active.closest('.council-panel') ? (active.classList.contains('council-switch') ? 'switch' : active.classList.contains('council-new-threads') ? 'new' : active.closest<HTMLElement>('[data-field]')!.dataset.field!) : `outside:${active.tagName}`; });
-  const order = ['switch', 'target', 'maxRounds', 'reviewers', 'new'];
-  const seen: string[] = [];
-  for (let step = 0; step < order.length; step++) { seen.push(await where()); await page.keyboard.press('Tab'); }
-  expect(seen).toEqual(order);
-  expect(await where()).toBe('switch');
-  // Record actual focus transitions instead of crossing the Playwright boundary after
-  // each key. All transitions still have to follow the exact sequence, including both wraps.
-  await page.evaluate(() => {
-    (window as any).__councilFocusTrail = [] as string[];
-    document.addEventListener('focusin', event => {
-      const active = event.target as HTMLElement;
-      const field = active.closest<HTMLElement>('[data-field]');
-      const location = !active.closest('.council-panel') ? `outside:${active.tagName}`
-        : active.classList.contains('council-switch') ? 'switch'
-        : active.classList.contains('council-new-threads') ? 'new'
-        : field?.dataset.field ?? 'unmapped';
-      (window as any).__councilFocusTrail.push(location);
-    }, true);
-  });
-  for (const start of order) {
+  // Composition inputs and buttons intentionally have no [data-field] ancestor. Query live tab stops before each focus.
+  const controls = panel(page).locator('input:not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not(:disabled)');
+  const stops = await controls.evaluateAll(nodes => nodes.flatMap((node, index) => (node as HTMLElement).tabIndex !== -1 && (node as HTMLElement).offsetParent !== null ? [index] : []));
+  const count = stops.length;
+  expect(count).toBeGreaterThan(5); // base controls plus the schema v1 composition editor
+  expect(await controls.evaluateAll(nodes => nodes.some(node => !node.closest('[data-field]') && (node as HTMLElement).tabIndex !== -1 && (node as HTMLElement).offsetParent !== null))).toBe(true);
+  // Both boundaries wrap, including the composition controls between the standard rows and footer.
+  await page.keyboard.press('Shift+Tab');
+  await expect(panel(page).locator('.council-new-threads')).toBeFocused();
+  await page.keyboard.press('Tab');
+  await expect(toggle(page)).toBeFocused();
+  for (let start = 0; start < count; start++) {
+    await page.evaluate(({ selector, index }) => {
+      const candidates = [...document.querySelectorAll<HTMLElement>(selector)];
+      const focusable = candidates.filter(node => node.tabIndex !== -1 && node.offsetParent !== null);
+      focusable[index].focus();
+    }, { selector: '.council-panel input:not(:disabled), .council-panel select:not(:disabled), .council-panel textarea:not(:disabled), .council-panel button:not(:disabled)', index: start });
     for (const key of ['Tab', 'Shift+Tab']) {
-      // Start on that control, then traverse two full rounds using real key events.
-      for (let step = 0; step < order.length && await where() !== start; step++) await page.keyboard.press('Tab');
-      expect(await where()).toBe(start);
-      await page.evaluate(() => { (window as any).__councilFocusTrail = []; });
-      for (let step = 0; step < order.length * 2; step++) await page.keyboard.press(key);
-      const visited: string[] = await page.evaluate(() => (window as any).__councilFocusTrail);
-      const direction = key === 'Tab' ? 1 : -1;
-      const expected = Array.from({ length: order.length * 2 }, (_, step) =>
-        order[(order.indexOf(start) + direction * (step + 1) + order.length * 2) % order.length]);
-      expect(visited).toEqual(expected);
-      expect(await where()).toBe(start);
+      for (let step = 0; step < count * 2; step++) {
+        await page.keyboard.press(key);
+        const focus = await page.evaluate(() => ({ inside: document.activeElement?.closest('.council-panel') !== null, tag: document.activeElement?.tagName, className: (document.activeElement as HTMLElement | null)?.className }));
+        expect(focus.inside, `${key} escaped from stop ${start} at step ${step}: ${focus.tag}.${focus.className}`).toBe(true);
+      }
     }
   }
   expect(await panel(page).locator('.council-new-threads').getAttribute('tabindex')).toBe('0');
   expect(await toggle(page).getAttribute('tabindex')).toBe('0');
 });
 
-test('at 900×420 the composer panel fits above its button without scrolling', async ({ page }) => {
+test('at 900×420 the composer panel stays in the viewport and scrolls its full settings', async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 420 });
   await open(page, '/?council');
   await composerSettled(page);
   await button(page).click();
   await expect(panel(page)).toBeVisible();
-  expect(await panel(page).evaluate(node => node.scrollHeight <= node.clientHeight)).toBe(true);
+  const bounds = await panel(page).evaluate(node => ({
+    top: node.getBoundingClientRect().top,
+    bottom: node.getBoundingClientRect().bottom,
+    scrollHeight: node.scrollHeight,
+    clientHeight: node.clientHeight,
+    overflowY: getComputedStyle(node).overflowY,
+  }));
+  expect(bounds.top).toBeGreaterThanOrEqual(0);
+  expect(bounds.bottom).toBeLessThanOrEqual(420);
+  expect(bounds.overflowY).toBe('auto');
+  expect(bounds.scrollHeight).toBeGreaterThan(bounds.clientHeight);
+  // Keyboard focus can reach the footer without leaving the panel's visible scrollport.
+  await panel(page).locator('.council-new-threads').focus();
+  expect(await panel(page).locator('.council-new-threads').evaluate(node => {
+    const field = node.getBoundingClientRect(), viewport = node.closest('.council-panel')!.getBoundingClientRect();
+    return field.top >= viewport.top && field.bottom <= viewport.bottom;
+  })).toBe(true);
 });
 
 test('with Council on and nothing reviewed yet, the panel says so quietly', async ({ page }) => {

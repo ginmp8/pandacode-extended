@@ -258,6 +258,12 @@ test.describe('bot collaboration', () => {
             council: { cycleId: 'isolated-one', sessionId: 'council-task-one', state: 'Reviewing', round: 1, target: 9, lowest: null,
               artifactRevision: '1:2', reviewers: [{ botId: 'reviewer', name: 'Reviewer', score: null }] } },
           { id: 'two', kind: 'assigned', authorBotId: 'reviewer', text: 'Assigned', status: 'Completed', createdAt: 2 },
+          { id: 'recipient-two', kind: 'assigned', authorBotId: 'reviewer', text: 'Second recipient', status: 'In progress', createdAt: 2.5,
+            council: { cycleId: 'recipient-cycle', sessionId: 'recipient-task', state: 'Reviewing', round: 1, target: 9, lowest: null,
+              artifactRevision: '21:1', reviewers: [] } },
+          { id: 'same-bot-two', kind: 'assigned', authorBotId: 'executor', text: 'Second message', status: 'In progress', createdAt: 2.75,
+            council: { cycleId: 'same-bot-cycle', sessionId: 'same-bot-task', state: 'Reviewing', round: 1, target: 9, lowest: null,
+              artifactRevision: '31:1', reviewers: [] } },
           { id: 'exception', kind: 'assigned', authorBotId: 'executor', text: 'Accepted', status: 'Completed', createdAt: 3,
             council: { cycleId: 'accepted-one', sessionId: 'accepted-session', state: 'Accepted by user', round: 1, target: 9,
               lowest: 7.5, artifactRevision: '1:3', reviewers: [], acceptedBy: 'local_user', acceptanceReason: 'Accepted documented limitation',
@@ -285,6 +291,15 @@ test.describe('bot collaboration', () => {
     await expect(fixture.locator('.bc-assigned[data-message-id="one"]')).toContainText('Council: Reviewing');
     await expect(fixture.locator('.bc-assigned[data-message-id="one"]')).toContainText('Reviewer');
     await expect(fixture.locator('.bc-assigned[data-message-id="one"] [data-action="channel-council-report"]')).toHaveAttribute('data-session-id', 'council-task-one');
+    const firstReport = fixture.locator('.bc-assigned[data-message-id="one"] [data-action="channel-council-report"]');
+    const recipientReport = fixture.locator('.bc-assigned[data-message-id="recipient-two"] [data-action="channel-council-report"]');
+    const sameBotReport = fixture.locator('.bc-assigned[data-message-id="same-bot-two"] [data-action="channel-council-report"]');
+    await expect(firstReport).toHaveAttribute('data-delivery-id', 'one');
+    await expect(firstReport).toHaveAttribute('data-cycle-id', 'isolated-one');
+    await expect(recipientReport).toHaveAttribute('data-cycle-id', 'recipient-cycle');
+    await expect(sameBotReport).toHaveAttribute('data-cycle-id', 'same-bot-cycle');
+    await expect(recipientReport).toHaveAttribute('data-session-id', 'recipient-task');
+    await expect(sameBotReport).toHaveAttribute('data-session-id', 'same-bot-task');
     await expect(fixture.locator('.bc-assigned[data-message-id="two"]')).not.toContainText('Council:');
     await expect(fixture.locator('.bc-assigned[data-message-id="exception"]')).toContainText('Accepted by local user: Accepted documented limitation');
     await expect(fixture.locator('.bc-assigned[data-message-id="exception"] a[href="https://github.com/owner/repo/issues/42"]')).toHaveCount(1);

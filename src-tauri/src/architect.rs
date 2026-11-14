@@ -44,7 +44,7 @@ use tauri::{Emitter, Manager, State};
 /// 12: scoped native Council tool catalogs require fresh Codex worker contexts
 /// so an older writable or differently scoped catalog is never resumed.
 /// 13: task tools are also available to team leads across supported harnesses.
-const TOOL_CATALOG_VERSION: u32 = 14;
+const TOOL_CATALOG_VERSION: u32 = 15;
 /// Auto teams carry a roster of installed models the lead may choose from.
 const AUTO_ROSTER_MAX: usize = 24;
 /// Team tools only change this team's own state, and every call is checked against the
@@ -629,6 +629,12 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
         &ledger.council_criterion_outcomes,
         &ledger.council_findings,
     );
+    if let Some(notice) = unresolved_critical_finding_notice(store, team, &ledger) {
+        if let Some(status) = &mut team.council_status {
+            status.state = "blocked".into();
+            status.notice = Some(notice);
+        }
+    }
     if team.council_status.as_ref().is_some_and(|status| status.state == "passed")
         && !s3_phase2_decisions_proven(store, team, team.council_status.as_ref().map_or(0, |status| status.round))
     {
@@ -656,6 +662,10 @@ fn native_council_status(store: &Store, team: &TeamSnapshot) -> Option<CouncilSt
         &ledger.council_criterion_outcomes,
         &ledger.council_findings,
     )?;
+    if let Some(notice) = unresolved_critical_finding_notice(store, team, &ledger) {
+        status.state = "blocked".into();
+        status.notice = Some(notice);
+    }
     if status.state == "passed" && !s3_phase2_decisions_proven(store, team, status.round) {
         status.state = "blocked".into();
         status.notice = Some("council_phase2_decision_missing: every S3 challenge must have a persisted independent challenge receipt.".into());
@@ -673,6 +683,9 @@ fn native_council_status(store: &Store, team: &TeamSnapshot) -> Option<CouncilSt
 
 fn native_council_finish_refusal(store: &Store, team: &TeamSnapshot) -> Option<String> {
     let ledger = council_ledger_projection(store, team);
+    if let Some(notice) = unresolved_critical_finding_notice(store, team, &ledger) {
+        return Some(notice);
+    }
     if let Some(config) = team.config.council.as_ref().and_then(|config| config.composition.as_ref()) {
         let signals = council::s2_escalation_signals(
             team,
@@ -699,6 +712,73 @@ fn native_council_finish_refusal(store: &Store, team: &TeamSnapshot) -> Option<S
         return Some("council_phase2_decision_missing: every S3 challenge must have a persisted independent challenge receipt.".into());
     }
     refusal
+}
+
+fn unresolved_critical_finding_notice(
+    store: &Store,
+    team: &TeamSnapshot,
+    ledger: &ArchitectReadSnapshot,
+) -> Option<String> {
+    if team.config.council.as_ref()?.composition.is_none() {
+        return None;
+    }
+    let cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    let raw_findings = match council_records::<council::CouncilFinding>(
+        store, &team.session_id, "council_finding",
+    ) {
+        Ok(findings) => findings,
+        Err(_) => return Some("council_finding_ledger_invalid: persisted finding records cannot be validated.".into()),
+    };
+    let projected_ids = ledger.council_findings.iter().map(|finding| finding.id.as_str())
+        .collect::<HashSet<_>>();
+    if raw_findings.iter().any(|finding| {
+        finding.cycle_id == cycle_id
+            && (finding.validate().is_err()
+                || !finding.has_content_identity()
+                || !projected_ids.contains(finding.id.as_str()))
+    }) {
+        return Some("council_finding_ledger_invalid: a structured finding is malformed, lacks verified evidence, or has no current reviewer/artifact attribution.".into());
+    }
+    let raw_dispositions = match council_records::<council::CouncilFindingDisposition>(
+        store, &team.session_id, "council_finding_disposition",
+    ) {
+        Ok(dispositions) => dispositions,
+        Err(_) => return Some("council_finding_disposition_invalid: persisted disposition records cannot be validated.".into()),
+    };
+    if raw_dispositions.iter().any(|disposition| {
+        if disposition.validate().is_err() {
+            return true;
+        }
+        let finding = ledger.council_findings.iter().find(|finding| {
+            finding.id == disposition.finding_id
+        });
+        match finding {
+            Some(finding) => {
+                finding.cycle_id != disposition.cycle_id
+                    || finding.artifact_digest != disposition.artifact_digest
+            }
+            None => disposition.cycle_id == cycle_id,
+        }
+    }) {
+        return Some("council_finding_disposition_invalid: a disposition is malformed, stale, or not bound to a current finding artifact.".into());
+    }
+    let unresolved = council::unresolved_critical_findings(
+        &ledger.council_findings,
+        &ledger.council_finding_dispositions,
+        &cycle_id,
+    );
+    (!unresolved.is_empty()).then(|| format!(
+        "council_critical_findings_unresolved: critical findings require native verification or an explicit user waiver for this cycle and artifact: {}.",
+        unresolved.join(", ")
+    ))
+}
+
+fn ensure_no_unresolved_critical_findings(store: &Store, team: &TeamSnapshot) -> Result<()> {
+    let ledger = council_ledger_projection(store, team);
+    if let Some(notice) = unresolved_critical_finding_notice(store, team, &ledger) {
+        return Err(notice);
+    }
+    Ok(())
 }
 
 fn native_council_unreviewed(store: &Store, team: &TeamSnapshot) -> Option<String> {
@@ -756,6 +836,8 @@ pub(crate) struct VerifiedCouncilTaskEvidence {
     pub policy_fingerprint: String,
     pub terminal_revision: u64,
     pub findings: Vec<council::CouncilFinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub finding_dispositions: Vec<council::CouncilFindingDisposition>,
     pub review_receipts: Vec<council::CouncilReviewReceipt>,
     pub child_receipts: Vec<council::ChildCouncilReceipt>,
 }
@@ -837,6 +919,7 @@ pub(crate) fn verified_council_task_evidence(
         policy_fingerprint,
         terminal_revision: team.dispatch_revision,
         findings: ledger.council_findings,
+        finding_dispositions: ledger.council_finding_dispositions,
         review_receipts,
         child_receipts: ledger.council_child_receipts,
     })
@@ -873,6 +956,7 @@ fn verify_composition_terminal_receipts(
     };
     if persisted_status.state != "passed"
         || persisted_status.stale
+        || unresolved_critical_finding_notice(store, team, &persisted_ledger).is_some()
         || persisted_status.round != status.round
         || persisted_status.lowest != status.lowest
         || persisted_status.target != status.target
@@ -1663,7 +1747,16 @@ fn council_ledger_projection(store: &Store, team: &TeamSnapshot) -> ArchitectRea
         .collect::<HashSet<_>>();
     let mut latest_dispositions = std::collections::BTreeMap::<String, council::CouncilFindingDisposition>::new();
     for disposition in raw_dispositions {
-        if disposition.validate().is_err() || !visible_finding_ids.contains(disposition.finding_id.as_str()) {
+        let Some(finding) = projected.council_findings.iter().find(|finding| {
+            finding.id == disposition.finding_id
+        }) else {
+            continue;
+        };
+        if disposition.validate().is_err()
+            || !visible_finding_ids.contains(disposition.finding_id.as_str())
+            || disposition.cycle_id != finding.cycle_id
+            || disposition.artifact_digest != finding.artifact_digest
+        {
             continue;
         }
         let replace = latest_dispositions.get(&disposition.finding_id)
@@ -4111,6 +4204,11 @@ pub async fn architect_council_accept(
     state: State<'_, AppState>,
     session_id: String,
 ) -> Result<ArchitectReadSnapshot> {
+    {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let team = load(&store, &session_id)?.ok_or("Team is unavailable.")?;
+        ensure_no_unresolved_critical_findings(&store, &team)?;
+    }
     let team = council::accept(&state, &session_id)?;
     emit(&app, &team);
     wake(app);
@@ -4124,11 +4222,86 @@ pub(crate) fn accept_channel_delivery(
     state: &AppState,
     session_id: &str,
 ) -> Result<TeamSnapshot> {
+    {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let team = load(&store, session_id)?.ok_or("Team is unavailable.")?;
+        ensure_no_unresolved_critical_findings(&store, &team)?;
+    }
     let team = council::accept(state, session_id)?;
     emit(app, &team);
     // The originating command must persist the user-acceptance audit record
     // before waking the lead, or a fast finish could outrun authorization.
     Ok(team)
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CouncilFindingWaiverInput {
+    finding_id: String,
+    rationale: String,
+}
+
+fn waive_council_finding_state(
+    state: &AppState,
+    session_id: &str,
+    input: CouncilFindingWaiverInput,
+) -> Result<()> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    refuse_mirror(&store, session_id)?;
+    let team = load(&store, session_id)?.ok_or("Council task is unavailable.")?;
+    if parent_of(&store, session_id)?.is_some()
+        || matches!(team.status.as_str(), "running" | "waiting")
+    {
+        return Err("Only a settled root Council can record a finding waiver.".into());
+    }
+    if team.config.council.as_ref().and_then(|config| config.composition.as_ref()).is_none() {
+        return Err("Finding waivers require a composed Council.".into());
+    }
+    if !council_evidence_is_current(&store, &team) {
+        return Err("review_revision_stale: task artifacts changed after this Council cycle was frozen.".into());
+    }
+    let cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    let finding = council_records::<council::CouncilFinding>(&store, session_id, "council_finding")?
+        .into_iter()
+        .find(|finding| finding.id == input.finding_id && finding.cycle_id == cycle_id)
+        .ok_or("council_finding_unavailable: finding is not part of the current root cycle.")?;
+    finding.validate().map_err(|error| error.to_string())?;
+    if !finding.has_content_identity() {
+        return Err("council_finding_unavailable: legacy findings cannot receive a revision-bound waiver.".into());
+    }
+    let disposition = council::CouncilFindingDisposition {
+        finding_id: finding.id.clone(),
+        cycle_id: finding.cycle_id.clone(),
+        artifact_digest: finding.artifact_digest.clone(),
+        disposition: council::CouncilFindingDispositionKind::WaivedByAuthorizedHuman,
+        actor_id: "user".into(),
+        rationale: input.rationale,
+        timestamp_ms: storage::now().max(1) as u64,
+        artifact_links: vec![format!("artifact:{}", finding.artifact_digest)],
+    };
+    disposition.validate().map_err(|error| error.to_string())?;
+    let key = format!("native-council-waiver:{}:{}:{}", cycle_id, finding.id, disposition.timestamp_ms);
+    persist_council_record(&store, session_id, &key, "council_finding_disposition", &disposition, "user")
+}
+
+/// Records an explicit, reasoned user waiver for one current-cycle finding.
+#[tauri::command]
+pub async fn architect_council_waive_finding(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    session_id: String,
+    finding_id: String,
+    rationale: String,
+) -> Result<ArchitectReadSnapshot> {
+    let input = CouncilFindingWaiverInput { finding_id, rationale };
+    waive_council_finding_state(&state, &session_id, input)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    let team = load(&store, &session_id)?.ok_or("Council task is unavailable.")?;
+    let snapshot = council_ledger_projection(&store, &team);
+    drop(store);
+    emit(&app, &team);
+    wake(app);
+    Ok(snapshot)
 }
 /// A task on another computer runs its team there (docs/remote-access.md): this computer
 /// only shows it, so nothing may configure, start or control a local team for it.
@@ -4844,7 +5017,7 @@ fn council_finding_tool() -> Value {
         "severity":{"type":"string","enum":["critical","high","medium","low","info"]},
         "category":{"type":"string"},
         "summary":{"type":"string"},
-        "evidenceFiles":{"type":"array","items":{"type":"string"}},
+        "evidenceFiles":{"type":"array","minItems":1,"items":{"type":"string"}},
         "location":{"type":"object","properties":{"file":{"type":"string"},"line":{"type":"integer","minimum":1}},"required":["file"]},
         "suggestedFix":{"type":"string"}
     }), &["criterionId","criterionScore","severity","category","summary"])
@@ -5064,11 +5237,8 @@ fn record_council_finding_state(
     } else {
         (None, council::CouncilFindingLocationStatus::Missing)
     };
-    if criterion.evidence_required && evidence.is_empty() {
-        return Err(format!(
-            "Council criterion {:?} requires a native file evidence reference.",
-            criterion.id
-        ));
+    if evidence.is_empty() {
+        return Err("reviewer_evidence_invalid: every structured finding requires at least one native file evidence reference.".into());
     }
     let cycle_id = binding.council_cycle_id.clone();
     let mut finding = council::CouncilFinding {
@@ -5223,6 +5393,8 @@ fn record_council_finding_disposition_state(
     finding.validate().map_err(|error| error.to_string())?;
     let disposition = council::CouncilFindingDisposition {
         finding_id: finding.id.clone(),
+        cycle_id: finding.cycle_id.clone(),
+        artifact_digest: finding.artifact_digest.clone(),
         disposition: input.disposition,
         actor_id: actor.id().to_owned(),
         rationale: input.rationale,
@@ -5257,6 +5429,114 @@ fn council_finding_disposition_tool() -> Value {
         }),
         &["findingId","disposition","rationale"],
     )
+}
+
+fn council_finding_verification_tool() -> Value {
+    tool(
+        "council_verify_finding",
+        "Request native verification that a critical finding was resolved in a later, independent Council round. Native code requires a changed artifact and current criterion evidence before recording addressed.",
+        json!({"findingId":{"type":"string"}}),
+        &["findingId"],
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CouncilFindingVerificationInput {
+    finding_id: String,
+}
+
+fn verify_council_finding_state(
+    state: &AppState,
+    team_session_id: &str,
+    generation: u64,
+    actor: &coordination::Actor,
+    args: Value,
+) -> Result<Value> {
+    let input: CouncilFindingVerificationInput =
+        serde_json::from_value(args).map_err(|error| error.to_string())?;
+    let coordination::Actor::Worker { id: worker_id, attempt } = actor else {
+        return Err("Only a native Council reviewer can request finding verification.".into());
+    };
+    let store = state.store.lock().map_err(|error| error.to_string())?;
+    let team = load(&store, team_session_id)?.ok_or("Council task is unavailable.")?;
+    if !active(&team.status) || team.generation != generation
+        || parent_of(&store, team_session_id)?.is_some()
+    {
+        return Err("Council root changed before finding verification.".into());
+    }
+    let worker = team.workers.iter().find(|worker| {
+        worker.id == *worker_id && worker.attempt == *attempt
+            && active(&worker.status) && !worker.abandoned
+    }).ok_or("Council reviewer run is no longer active.")?;
+    let (binding, seat) = worker.reviewer_binding.as_ref().zip(worker.council.as_ref())
+        .ok_or("Only a native Council reviewer can verify a finding.")?;
+    binding.validate(&team, worker)?;
+    reviewer_security::validate_issued_authority(&store, team_session_id, binding)?;
+    let cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    let finding = council_records::<council::CouncilFinding>(
+        &store, team_session_id, "council_finding",
+    )?.into_iter().find(|finding| {
+        finding.id == input.finding_id && finding.cycle_id == cycle_id
+    }).ok_or("council_finding_unavailable: finding is not part of the current root cycle.")?;
+    finding.validate().map_err(|error| error.to_string())?;
+    let author = team.workers.iter().find(|candidate| candidate.id == finding.seat_id)
+        .ok_or("council_finding_unverified: the finding author is not part of this root cycle.")?;
+    if !finding.has_content_identity() || finding.severity != council::CouncilFindingSeverity::Critical
+        || finding.seat_id == worker.id || binding.council_cycle_id != cycle_id
+        || challenge_reviewer_identity(author) == challenge_reviewer_identity(worker)
+        || seat.round <= finding.round_id.rsplit(':').next().and_then(|value| value.parse::<usize>().ok()).unwrap_or(usize::MAX)
+        || council_artifact_digest(&binding.artifact_revision) == finding.artifact_digest
+    {
+        return Err("council_finding_unverified: verification requires a later independent review of a changed artifact.".into());
+    }
+    if !council_evidence_is_current(&store, &team) {
+        return Err("review_revision_stale: task artifacts changed after this Council review was frozen.".into());
+    }
+    let config = team.config.council.as_ref()
+        .and_then(|config| config.composition.as_ref())
+        .ok_or("council_composition_invalid: explicit criteria are unavailable.")?;
+    let criterion = config.criteria.iter().find(|criterion| criterion.id == finding.criterion_id)
+        .ok_or("council_criteria_gate_blocked: finding criterion is not in the frozen plan.")?;
+    let ledger = council_ledger_projection(&store, &team);
+    let outcome = ledger.council_criterion_outcomes.iter().find(|receipt| {
+        receipt.validate().is_ok()
+            && receipt.validates_for(
+                &cycle_id, team_session_id, &cycle_id, seat.round, &worker.id, None,
+                worker.attempt, &binding.artifact_revision,
+            )
+            && receipt.outcome.criterion_id == criterion.id
+    }).ok_or("council_finding_unverified: the fresh reviewer has no current native criterion receipt.")?;
+    if outcome.outcome.score < criterion.target || outcome.outcome.verified_evidence_refs.is_empty() {
+        return Err("council_finding_unverified: fresh criterion score or evidence is insufficient.".into());
+    }
+    for reference in &outcome.outcome.verified_evidence_refs {
+        let file_reference = reference.strip_prefix("file:")
+            .ok_or("council_finding_unverified: criterion evidence is not a native file reference.")?;
+        let (relative, digest) = file_reference.split_once("#sha256:")
+            .ok_or("council_finding_unverified: criterion evidence has no content digest.")?;
+        let (_, verified, _) = verified_council_file_evidence(&store, team_session_id, relative)?;
+        if verified != *reference || digest.len() != 64 {
+            return Err("council_finding_unverified: criterion evidence no longer matches the current artifact.".into());
+        }
+    }
+    let disposition = council::CouncilFindingDisposition {
+        finding_id: finding.id.clone(),
+        cycle_id: finding.cycle_id.clone(),
+        artifact_digest: finding.artifact_digest.clone(),
+        disposition: council::CouncilFindingDispositionKind::Addressed,
+        actor_id: "native:verification".into(),
+        rationale: "A later independent Council round met the frozen criterion target with current native file evidence.".into(),
+        timestamp_ms: storage::now().max(1) as u64,
+        artifact_links: vec![format!("artifact:{}", council_artifact_digest(&binding.artifact_revision))],
+    };
+    disposition.validate().map_err(|error| error.to_string())?;
+    let key = format!(
+        "native-council-verification:{}:{}:{}:{}:{}",
+        cycle_id, finding.id, seat.round, worker.id, worker.attempt
+    );
+    persist_council_record(&store, team_session_id, &key, "council_finding_disposition", &disposition, &worker.id)?;
+    Ok(json!({"findingId":finding.id,"disposition":disposition.disposition,"verified":true}))
 }
 
 /// The dispatch tool. A direct worker's copy is scoped to its own sub-workers and has no
@@ -5412,6 +5692,7 @@ pub fn host(
             .unwrap_or(false);
         if findings_enabled {
             tools.push(council_finding_tool());
+            tools.push(council_finding_verification_tool());
         }
     }
     Some(ToolHost {
@@ -5481,6 +5762,14 @@ pub fn host(
                     )
                 } else if name == "pandacode_council_set_finding_disposition" {
                     record_council_finding_disposition_state(
+                        &app.state::<AppState>(),
+                        &sid,
+                        generation,
+                        &actor,
+                        args,
+                    )
+                } else if name == "pandacode_council_verify_finding" {
+                    verify_council_finding_state(
                         &app.state::<AppState>(),
                         &sid,
                         generation,

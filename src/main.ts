@@ -7198,7 +7198,13 @@ async function action(name: string, element: HTMLElement): Promise<void> {
     }
     case 'channel-council-report': {
       const taskId = element.dataset.sessionId;
-      if (!taskId) break;
+      const deliveryId = element.dataset.deliveryId;
+      const cycleId = element.dataset.cycleId;
+      const artifactRevision = element.dataset.artifactRevision;
+      const deliveryRow = element.closest<HTMLElement>('.bc-assigned');
+      if (!taskId || !deliveryId || deliveryRow?.dataset.messageId !== deliveryId || !cycleId || !artifactRevision) {
+        notify('This Council delivery report is unavailable.'); break;
+      }
       if (!state.sessions.some(task => task.id === taskId)) await reloadSessions();
       const task = state.sessions.find(item => item.id === taskId);
       const readSnapshot = () => task?.remoteDevice
@@ -7210,7 +7216,7 @@ async function action(name: string, element: HTMLElement): Promise<void> {
       const { openSharedChannelCouncilReport } = await import('./bot-shared-channels');
       const ui = sharedChannelUi();
       ui.loadCouncilSnapshot = async () => snapshot;
-      await openSharedChannelCouncilReport(taskId, ui);
+      await openSharedChannelCouncilReport(taskId, cycleId, artifactRevision, ui);
       break;
     }
     case 'bot-settings': if (element.dataset.bot) await showBotSettings(element.dataset.bot, element.dataset.tab as import('./bots').Section | undefined); break;

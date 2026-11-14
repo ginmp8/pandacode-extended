@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 use tauri::{Manager,State};
 
 mod dispatch;
+pub(crate) mod evidence;
 pub(crate) use dispatch::{advance,parent_active,revoke_descendants,sessions_for_root};
 
 const MAX_ITEMS: usize = 32;
@@ -106,6 +107,9 @@ pub struct WorkItem {
     pub last_reason: Option<String>,
     pub requires_write: bool,
     pub write_authorized: bool,
+    pub evidence_sha256: Option<String>,
+    pub approval_kind: Option<String>,
+    pub evidence_verified_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -204,9 +208,15 @@ fn inspect(store:&Store,ticket_id:&str) -> Result<Option<DemandPlan>> {
             "SELECT EXISTS(SELECT 1 FROM sa_work_item_write_scopes WHERE item_id=?1)",
             [&id],|r|r.get(0),
         ).map_err(|error|error.to_string())?;
+        let verification=evidence::receipt(store,&id)?;
+        let (evidence_sha256,approval_kind,evidence_verified_at)=match verification {
+            Some((digest,kind,at))=>(Some(digest),Some(kind),Some(at)),
+            None=>(None,None,None),
+        };
         items.push(WorkItem{id,key,ordinal:ordinal as usize,worker_bot_id,
             objective,depends_on,state:item_state,child_ticket_id,child_ticket_state,
-            last_reason,requires_write,write_authorized});
+            last_reason,requires_write,write_authorized,evidence_sha256,
+            approval_kind,evidence_verified_at});
     }
     Ok(Some(DemandPlan{ticket_id:ticket_id.into(),ticket_revision,team_version,
         policy_revision,plan_sha256,state,items}))

@@ -529,8 +529,13 @@ fn attested_worker_scope(
 ) -> Result<()> {
     let assignment: Option<(String, i64)> = store.db.query_row(
         "SELECT bot_id,attempt FROM sa_assignments
-         WHERE id=?1 AND ticket_id=?2 AND session_id=?3 AND state='running'",
-        params![scope.assignment_id, intent.ticket_id, scope.session_id],
+         WHERE id=?1 AND ticket_id=?2 AND session_id=?3 AND state='running'
+           AND created_at>0 AND created_at<=?4
+           AND (?4-created_at)<?5
+           AND (SELECT COUNT(*) FROM sa_assignments other
+                WHERE other.ticket_id=?2 AND other.state='running')=1",
+        params![scope.assignment_id, intent.ticket_id, scope.session_id,
+            storage::now(), super::MAX_ASSIGNMENT_RUN_MS],
         |row| Ok((row.get(0)?, row.get(1)?)),
     ).optional().map_err(|e| e.to_string())?;
     let (bot_id, attempt) = assignment
@@ -1218,10 +1223,12 @@ mod tests {
                     ).unwrap();
                 }
                 "detached_thread" => {
-                    store.db.execute(
-                        "DELETE FROM bot_threads WHERE session_id=?1",
-                        [&session_id],
+                    let changed=store.db.execute(
+                        "UPDATE bot_threads SET external_id='detached'
+                         WHERE session_id=?1 AND channel_id=?2",
+                        params![&session_id, super::CHANNEL],
                     ).unwrap();
+                    assert_eq!(changed, 1);
                 }
                 _ => unreachable!(),
             }

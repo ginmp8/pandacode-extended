@@ -90,6 +90,38 @@ test('duplicating a native Team retains its roles but never its saved runtime au
     .toContainText('Writer');
 });
 
+test('versioned Team strategies keep unsupported budgets visible and prevent silent enable', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  const create=host.locator('form[data-sa-form="create"]');
+  await create.getByRole('textbox',{name:'Name',exact:true}).fill('Economy Strategy');
+  await create.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption({label:'Scout'});
+  await create.getByRole('combobox',{name:'Worker',exact:true}).selectOption({label:'Writer'});
+  await create.getByRole('button',{name:'Create disabled preset'}).click();
+  const strategy=host.getByRole('region',{name:'Team runtime strategy'});
+  await strategy.getByRole('button',{name:'Inspect native policy'}).click();
+  await expect(strategy).toContainText('Native executable parallel Workers: 1');
+  await expect(strategy).toContainText('Real token metering: Not supported');
+  const form=strategy.locator('form[data-sa-form="strategy-update"]');
+  await form.getByRole('combobox',{name:'Optimization priority'}).selectOption('cost');
+  await form.getByRole('spinbutton',{name:'Maximum concurrent tasks (1–8)'}).fill('2');
+  await form.getByRole('spinbutton',{name:'Maximum attempts per Worker (1–8)'}).fill('3');
+  await form.getByRole('spinbutton',{name:'Attempt timeout (milliseconds, 60000–1800000)'}).fill('300000');
+  await form.getByRole('button',{name:'Save future-Team policy'}).click();
+  await expect(host.getByRole('status').filter({hasText:'Strategy saved for future Tickets.'})).toBeVisible();
+  await strategy.getByRole('button',{name:'Inspect native policy'}).click();
+  await expect(strategy).toContainText('Team version 2');
+  await expect(strategy).toContainText('Parallel worker execution has no admitted isolated scheduler yet.');
+  await expect(form.getByRole('combobox',{name:'Optimization priority'})).toHaveValue('cost');
+  await expect(form.getByRole('spinbutton',{name:'Maximum attempts per Worker (1–8)'})).toHaveValue('3');
+  await host.getByRole('button',{name:'Enable manual'}).click();
+  await host.getByRole('alertdialog',{name:'Confirm orchestration action'})
+    .getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(host.getByRole('alert')).toContainText('Requested Team policy cannot run');
+  await expect(host.getByRole('button',{name:'Enable manual'})).toBeVisible();
+});
+
 test('guided SuperAgent Team Builder validates five native-backed stages and saves Off', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

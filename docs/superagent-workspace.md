@@ -280,3 +280,30 @@ keyset pagination execute in SQLite before returning a page. Search input
 is bounded to 128 bytes and does not grant execution, approval, or access
 to private task transcripts. The headless counterpart returns only redacted
 Ticket metadata, not the matching objective text.
+
+## Native Team optimization policy
+
+Each reusable Team has an immutable, versioned strategy snapshot. The **Teams**
+workspace exposes **Resource strategy and native capability** for an existing
+Team. A local operator can choose `balanced`, `cost`, `latency`,
+`throughput`, or `quality` as a planning preference, a bounded worker
+attempt limit, and a timeout of 1–30 minutes. The selected configuration is
+pinned when a new Ticket is admitted; future Team changes never edit an
+already-admitted Ticket's authorization or previous Team version.
+
+The strategy can also retain requested concurrency (1–8), optional token and
+estimated-cost ceilings, and an explicit future subagent-delegation preference.
+These fields are **not** a grant: native parallel scheduling, trustworthy
+token/price metering, and task-scoped nested subagents are not yet available,
+so enabling a Team requiring them fails closed. UI and native inspection
+identify each unsupported capability rather than claiming a real Economy or
+Performance optimization result. Ordinary default manual Teams remain
+compatible. The headless inspection path
+`pandacode serve --inspect-team-strategy <team-id>` reads the saved policy and
+support blockers without starting or recovering a provider.
+
+Execution timeout checks use the Ticket's immutable versioned budget at
+provider admission, result settlement, watchdog expiration, and external
+effect attestation. The hard platform limit remains 30 minutes. Ticket
+history, evidence, native Council requirements, write-scope restrictions,
+and GitHub receipt reconciliation are independent mandatory gates.

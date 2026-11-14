@@ -14,6 +14,17 @@ interface Config {
   ticketCount?: number; runningCount?: number; blockedCount?: number; lastActivityAt?: number;
   workerCount?: number; reviewerCount?: number;
 }
+interface StrategySettings {
+  priority:string; attemptTimeoutMs:number; tokenCeiling?:number;
+  estimatedCostCeilingMinor?:number; subagentDelegationEnabled:boolean;
+}
+interface StrategyView {
+  orchestrationId:string; policyRevision:number; teamVersion:number;
+  settings:StrategySettings; maxAttemptsPerAssignment:number; maxConcurrentTasks:number;
+  executableParallelWorkers:number; tokenMeteringAvailable:boolean;
+  pricedCostMeteringAvailable:boolean; nestedChildAdmissionAvailable:boolean;
+  enableBlockers:string[];
+}
 interface TeamRoster { orchestrationId:string; policyRevision:number; coordinatorBotId:string;
   workerBotIds:string[]; reviewerBotIds:string[]; councilRequired?:boolean; executionReady:boolean }
 interface EffectiveSkill {
@@ -180,6 +191,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let workPlan: NativeWorkPlan | null = null, workPlanLoaded = false;
   let workPlanDraft = '', workPlanError = '', workPlanDraftTicket = '';
   let roleRoster: TeamRoster | null = null;
+  let teamStrategy: StrategyView | null = null;
   // Draft order is committed only by the native revision-guarded roster update.
   let workerOrder: string[] = [];
   let effectiveTeam: EffectiveTeam | null = null;
@@ -748,6 +760,43 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             ' · Invocation/evidence ' + safe(skill.invocationEvidence) + '</li>').join('') ||
             '<li>No bot-assigned Skills</li>') + '</ul></li>').join('') + '</ol></section>'
       : '';
+    const strategyPane = chosen
+      ? '<section class="sa-pane" aria-label="Team runtime strategy">' +
+        '<header><h3>Resource strategy and native capability</h3>' +
+        '<button type="button" data-sa-strategy-load>Inspect native policy</button></header>' +
+        (!teamStrategy || teamStrategy.orchestrationId !== chosen.id ||
+          teamStrategy.policyRevision !== chosen.policyRevision
+          ? '<p>Load the immutable Team policy to see cost, latency, attempts and executable limits.</p>'
+          : '<p>Team version ' + teamStrategy.teamVersion +
+            ' · Native executable parallel Workers: ' + teamStrategy.executableParallelWorkers +
+            ' · Real token metering: ' + (teamStrategy.tokenMeteringAvailable ? 'Available' : 'Not supported') +
+            ' · Priced cost metering: ' + (teamStrategy.pricedCostMeteringAvailable ? 'Available' : 'Not supported') +
+            ' · Nested delegation: ' + (teamStrategy.nestedChildAdmissionAvailable ? 'Available' : 'Not supported') + '</p>' +
+            (teamStrategy.enableBlockers.length
+              ? '<p role="status">Enable blockers: ' + safe(teamStrategy.enableBlockers.join('; ')) + '</p>' : '') +
+            '<form data-sa-form="strategy-update">' +
+            '<label>Optimization priority<select name="priority">' +
+            (['balanced','cost','latency','throughput','quality'] as const).map(priority =>
+              '<option value="' + priority + '"' +
+              (teamStrategy?.settings.priority === priority ? ' selected' : '') + '>' +
+              priority + '</option>').join('') + '</select></label>' +
+            '<label>Maximum concurrent tasks (1–8)<input type="number" name="maxConcurrentTasks" min="1" max="8" required value="' +
+              teamStrategy.maxConcurrentTasks + '"></label>' +
+            '<label>Maximum attempts per Worker (1–8)<input type="number" name="maxAttemptsPerAssignment" min="1" max="8" required value="' +
+              teamStrategy.maxAttemptsPerAssignment + '"></label>' +
+            '<label>Attempt timeout (milliseconds, 60000–1800000)<input type="number" name="attemptTimeoutMs" min="60000" max="1800000" required value="' +
+              teamStrategy.settings.attemptTimeoutMs + '"></label>' +
+            '<label>Token ceiling (optional; requires native metering)<input type="number" name="tokenCeiling" min="1" placeholder="Not configured" value="' +
+              safe(teamStrategy.settings.tokenCeiling ?? '') + '"></label>' +
+            '<label>Estimated cost ceiling, minor units (optional; requires verified pricing)<input type="number" name="estimatedCostCeilingMinor" min="1" placeholder="Not configured" value="' +
+              safe(teamStrategy.settings.estimatedCostCeilingMinor ?? '') + '"></label>' +
+            '<label><input type="checkbox" name="subagentDelegationEnabled"' +
+              (teamStrategy.settings.subagentDelegationEnabled ? ' checked' : '') +
+              '> Request hierarchical subagent delegation (not executable yet)</label>' +
+            '<p>Only the native runtime issues grants. Strategy preferences never override Council, checkout isolation or tool enforcement. Unsupported ceilings and parallelism keep the Team Off.</p>' +
+            '<button class="primary-button" type="submit"' +
+              (chosen.enabled ? ' disabled' : '') + '>Save future-Team policy</button></form>') +
+        '</section>' : '';
     const teamRoles = chosen
       ? '<section class="sa-pane" aria-label="Configured Team roles"><h3>Configure Team roles</h3>' +
         '<p>Roles reuse existing bot identities, models, harnesses and Skills. Additional Workers remain unavailable for autonomous parallel dispatch; configured Reviewers can be required through native Council.</p>' +
@@ -886,7 +935,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<label>Worker<select name="workerBotId" required><option value="">Choose bot</option>' +
           choices + '</select></label></div><button class="primary-button" type="submit"' +
           (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' +
-           guidedBuilder.render(bots) + overview + teamRoles
+           guidedBuilder.render(bots) + overview + teamRoles + strategyPane
         : '') +
       (workspaceView === 'runs' ? globalDemands + (active ||
         '<section class="sa-pane"><p>Select a Team from the directory to assign and inspect native Tickets.</p></section>') : '') +
@@ -956,6 +1005,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       }
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
+        teamStrategy = null;
         inspectedTicket = ''; threadLinks = [];
         linkedDecisions = []; linkedDecisionsLoaded = false; roleRoster = null; workerOrder = []; effectiveTeam = null;
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
@@ -970,6 +1020,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (roleRoster && selected) {
         roleRoster = await call<TeamRoster>('superagent_roster',{orchestrationId:selected});
         workerOrder = roleRoster.workerBotIds.slice(1);
+      }
+      if (teamStrategy && !presets.some(config =>
+        config.id === teamStrategy?.orchestrationId &&
+        config.policyRevision === teamStrategy?.policyRevision)) {
+        teamStrategy = null;
       }
       // Any native refresh invalidates this non-authoritative, time-bound scan.
       effectiveTeam = null;
@@ -1326,6 +1381,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
+    if (target.hasAttribute('data-sa-strategy-load')) {
+      const cfg = current();
+      if (cfg) void work(async () => {
+        const snapshot = await call<StrategyView>('superagent_strategy_get',{
+          orchestrationId:cfg.id,
+        });
+        if (selected !== cfg.id || snapshot.orchestrationId !== cfg.id ||
+            snapshot.policyRevision !== cfg.policyRevision) {
+          throw new Error('Team strategy changed. Reload before editing.');
+        }
+        teamStrategy = snapshot;
+      });
+      return;
+    }
     if (target.hasAttribute('data-sa-effective-load')) {
       const cfg=current();
       if (cfg && roleRoster?.orchestrationId===cfg.id) void work(async () => {
@@ -1353,7 +1422,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       selected = next;
       tickets = [];
       inspectedTicket = ''; ticketDetails = null; threadLinks = [];
-      inspectedAssignmentId = ''; roleRoster = null; effectiveTeam = null;
+      inspectedAssignmentId = ''; roleRoster = null; effectiveTeam = null; teamStrategy = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       sourceIntegrity = null;
       void work(async () => {
@@ -1795,6 +1864,47 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         allDemands = loaded;
         allDemandsHasMore = loaded.length === 200;
         allDemandsLoaded = true;
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'strategy-update') {
+      const cfg = current();
+      const loaded = teamStrategy;
+      if (!cfg || !loaded || cfg.id !== loaded.orchestrationId ||
+          cfg.policyRevision !== loaded.policyRevision || cfg.enabled) return;
+      const optionalPositive = (name: string): number | undefined => {
+        const raw = String(data.get(name) ?? '').trim();
+        if (!raw) return undefined;
+        const value = Number(raw);
+        return Number.isSafeInteger(value) && value > 0 ? value : NaN;
+      };
+      const input = {
+        priority:String(data.get('priority') ?? ''),
+        maxConcurrentTasks:Number(data.get('maxConcurrentTasks')),
+        maxAttemptsPerAssignment:Number(data.get('maxAttemptsPerAssignment')),
+        attemptTimeoutMs:Number(data.get('attemptTimeoutMs')),
+        tokenCeiling:optionalPositive('tokenCeiling'),
+        estimatedCostCeilingMinor:optionalPositive('estimatedCostCeilingMinor'),
+        subagentDelegationEnabled:data.has('subagentDelegationEnabled'),
+      };
+      if (!['balanced','cost','latency','throughput','quality'].includes(input.priority) ||
+          !Number.isInteger(input.maxConcurrentTasks) || input.maxConcurrentTasks < 1 || input.maxConcurrentTasks > 8 ||
+          !Number.isInteger(input.maxAttemptsPerAssignment) || input.maxAttemptsPerAssignment < 1 ||
+          input.maxAttemptsPerAssignment > 8 || !Number.isInteger(input.attemptTimeoutMs) ||
+          input.attemptTimeoutMs < 60000 || input.attemptTimeoutMs > 1800000 ||
+          Number.isNaN(input.tokenCeiling) || Number.isNaN(input.estimatedCostCeilingMinor)) {
+        error = 'Correct the bounded strategy settings before saving.';
+        render(); return;
+      }
+      void work(async () => {
+        const saved = await call<StrategyView>('superagent_strategy_update',{
+          orchestrationId:cfg.id, expectedRevision:loaded.policyRevision, input,
+        });
+        teamStrategy = saved;
+        await reload();
+        feedback = saved.enableBlockers.length
+          ? 'Strategy saved for future Tickets. This Team remains Off: ' + saved.enableBlockers.join('; ')
+          : 'Versioned Team strategy saved. Existing Ticket snapshots were not modified.';
       });
       return;
     }

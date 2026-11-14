@@ -3790,6 +3790,19 @@ fn child_only_parallel_root_finishes_from_real_revalidated_composite_seats() {
     assert_eq!(inspect.verified_completion.unwrap().lowest, 9.5);
     assert_eq!(inspect.reserved_children.len(), 2);
     let child_id = inspect.reserved_children[0].child_session_id.clone();
+    drop(store);
+    // A second task cannot inherit the first task's composite receipts or
+    // the same cycle namespace. New child teams are reserved for this task.
+    let (next, _) = start_state(
+        &state, &sid, "A new independent Council review", None, None,
+    ).unwrap();
+    assert!(next.council_since > saved.council_since);
+    let store = state.store.lock().unwrap();
+    let new_children = child_council::inspect(&store, &next).unwrap();
+    assert_eq!(new_children.len(), 2);
+    assert!(new_children.iter().all(|child|
+        child.root_cycle_id != format!("{}:{}", sid, saved.council_since)
+            && child.verified_child_receipt.is_none()));
     store.db.execute(
         "UPDATE architect_requests SET content='{}'
          WHERE parent_session_id=?1 AND kind='council_child_receipt'

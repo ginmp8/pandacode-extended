@@ -1523,6 +1523,13 @@ pub(crate) fn start_state(
     if team.workers.iter().any(|w| stoppable(&w.status)) {
         return Err("Resume or stop the pending team before starting another request.".into());
     }
+    // A fully verified nested terminal must start a new frozen cycle. Capture
+    // this before replacing the old objective: its authenticated child receipts
+    // would correctly become stale once the objective changes.
+    let completed_nested_cycle = team.status == "completed"
+        && team.config.council.as_ref()
+            .is_some_and(|config| !config.nested_bot_reviewers.is_empty())
+        && verified_council_pass(&store, &team);
     // A stopped team's parked workers belong to the old objective.
     for worker in team.workers.iter_mut().filter(|w| w.status == "parked") {
         worker.status = "stopped".into();
@@ -1534,7 +1541,11 @@ pub(crate) fn start_state(
     team.objective = text.to_owned();
     // "Keep going" after a stop continues an unfinished Council cycle and its rounds.
     refresh_council(&store, &mut team);
-    if council::new_cycle(&team) {
+    if completed_nested_cycle {
+        // The cycle key is also the receipt namespace. Make it strictly
+        // increasing even when two objectives begin within one clock tick.
+        team.council_since = storage::now().max(team.council_since.saturating_add(1));
+    } else if council::new_cycle(&team) {
         team.council_since = storage::now();
     }
     team.error = None;

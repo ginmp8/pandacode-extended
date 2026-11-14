@@ -2467,10 +2467,13 @@ fn stop(store: &Store, ticket_id: &str) -> Result<(Ticket,Option<String>)> {
         params![ticket_id,now,ticket.revision],
     ).map_err(|e| e.to_string())?;
     if updated != 1 { return Err("SuperAgent ticket changed before Stop.".into()); }
+    // Stop every still-running task-owned attempt, including a detached
+    // legacy/orphan assignment. The live host observes these stopped rows and
+    // cancels the corresponding provider sessions; no callback may revive them.
     tx.execute(
         "UPDATE sa_assignments SET state='stopped',updated_at=?2
-         WHERE id=?1 AND state='running'",
-        params![ticket.active_assignment_id,now],
+         WHERE ticket_id=?1 AND state='running'",
+        params![ticket_id,now],
     ).map_err(|e| e.to_string())?;
     // Revoking a Ticket cannot prove an in-flight provider effect failed.
     // Preserve its identity and require explicit remote reconciliation.
@@ -6357,6 +6360,41 @@ mod tests {
         let (ticket, launch) = admit(&mut store, &config.id, "Must roll back", "fault-1", false).unwrap();
         assert!(launch);
         assert_eq!(ticket.state, "running");
+    }
+
+    #[test]
+    fn stop_quarantines_detached_native_attempt_and_preserves_restart_evidence() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Stop detached attempt", "stop-orphan-native-1", false,
+        ).unwrap();
+        assert!(launched);
+        let session_id = assignment_session(&store, &ticket.id).unwrap().unwrap();
+
+        // A legacy interrupted state writer lost the active link while its
+        // provider session remained running. Stop must not leave a live
+        // assignment merely because the current Ticket pointer is absent.
+        store.db.execute(
+            "UPDATE sa_tickets SET active_assignment_id=NULL WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let (stopped, direct_session) = stop(&store, &ticket.id).unwrap();
+        assert_eq!(stopped.state, "stopped");
+        assert!(direct_session.is_none());
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "stopped");
+        assert_eq!(
+            headless_cancelled_assignments(&store, &[session_id.clone()]).unwrap(),
+            vec![session_id.clone()],
+        );
+        assert!(read_only_policy(&store, &session_id).is_err());
+        assert!(!on_run_finished(&store, &session_id, true, "late completion").unwrap());
+        let database_path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&database_path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "stopped");
+        assert_eq!(assignments(&reopened, &ticket.id, 10).unwrap()[0].state, "stopped");
     }
 
     #[test]

@@ -1356,8 +1356,9 @@ test('new Team persists optional reviewers as one disabled role configuration', 
   await sidebar.getByRole('button',{name:'Bot actions'}).click();
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
   const workspace=page.getByRole('region',{name:'Orchestrations'});
-  await workspace.getByRole('button',{name:'Teams',exact:true}).click();
+  // Teams is the default workspace surface; await native form rendering.
   const form=workspace.locator('form[data-sa-form="create"]');
+  await expect(form).toBeVisible();
   await form.getByRole('textbox',{name:'Name',exact:true}).fill('Security Review Team');
   await form.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption({label:'Scout'});
   await form.getByRole('combobox',{name:'Worker',exact:true}).selectOption({label:'Writer'});
@@ -1365,6 +1366,7 @@ test('new Team persists optional reviewers as one disabled role configuration', 
   await form.locator('select[name="reviewers"]').selectOption({label:'Ledger'});
   await form.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(workspace.locator('.sa-role-counts')).toContainText('1 Coordinator · 1 Workers · 1 Reviewers');
+  await workspace.getByRole('button',{name:'Demands / Runs',exact:true}).click();
   await expect(workspace.getByRole('button',{name:'Enable manual'})).toBeDisabled();
   await workspace.getByRole('button',{name:'Teams',exact:true}).click();
   await workspace.getByRole('button',{name:'Load native members'}).click();

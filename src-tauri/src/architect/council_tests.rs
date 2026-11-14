@@ -3567,6 +3567,16 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     assert_eq!(inspected.len(), 2);
     let complete_roster = child_council::verified_parent_seats(&store, &root).unwrap().unwrap();
     assert_eq!(complete_roster.len(), 2, "two children yield two root seats, not four leaf votes");
+    let composite = council::status_for_authenticated_children(&root, &complete_roster)
+        .expect("two authenticated child Councils satisfy the M4 S1 root quorum");
+    assert_eq!(composite.state, "passed");
+    assert_eq!(composite.lowest, Some(9.5));
+    assert_eq!(composite.round, 1);
+    let mut forbidden_strategy = root.clone();
+    forbidden_strategy.config.council.as_mut().unwrap().strategy =
+        council::CouncilExecutionStrategy::TwoPhase;
+    assert!(council::status_for_authenticated_children(&forbidden_strategy, &complete_roster).is_none());
+    assert!(council::status_for_authenticated_children(&root, &complete_roster[..1]).is_none());
     let already_admitted = root.workers.iter().filter(|worker|
         worker.council.is_some() && worker.created_at >= root.council_since).count();
     let remaining = 1024usize - already_admitted - 4;
@@ -3643,6 +3653,10 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     assert!(child_council::verified_parent_seats(&store, &root)
         .unwrap_err().contains("root artifact revision changed"),
         "a persisted native root write after child completion must revoke its receipt");
+    let mut stale_projection = root.clone();
+    refresh_council(&store, &mut stale_projection);
+    assert!(!verified_council_pass(&store, &stale_projection),
+        "a persisted root write must revoke even high-scoring child composite evidence");
     store.db.execute("DELETE FROM turn_changes WHERE id=?1", [changed_id]).unwrap();
     store.db.execute("DELETE FROM messages WHERE id=?1", [message_id]).unwrap();
     assert_eq!(child_council::verified_parent_seats(&store, &root)
@@ -3710,4 +3724,78 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     ).unwrap();
     assert!(child_council::inspect(&store, &root).is_err(),
         "forged or stale receipt must be rejected instead of granting a parent vote");
+}
+
+
+#[test]
+fn child_only_parallel_root_finishes_from_real_revalidated_composite_seats() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["security-child", "architecture-child"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
+            .map(|bot| council::CouncilNestedReviewer {
+                bot_id: (*bot).into(), child_reviewers: 2,
+                child_target: 9.5, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (root, _) = start_state(&state, &sid, "Review frozen project", None, None).unwrap();
+    let (pending, _) = dispatch_state(
+        &state, &sid, root.generation, "pandacode_finish_team",
+        json!({"summary":"Await real child reviews"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    for _ in 0..4 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant", "Independent native evidence.\nCouncil score: 9.5/10").unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    }
+    {
+        let store = state.store.lock().unwrap();
+        let before = load(&store, &sid).unwrap().unwrap();
+        assert!(!verified_council_pass(&store, &before),
+            "leaf callbacks alone cannot approve a root without persisted composite receipts");
+    }
+    let (finished, _) = dispatch_state(
+        &state, &sid, root.generation, "pandacode_finish_team",
+        json!({"summary":"All required child Councils passed"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(finished["completed"], true);
+    let store = state.store.lock().unwrap();
+    let saved = load(&store, &sid).unwrap().unwrap();
+    assert_eq!(saved.status, "completed");
+    assert_eq!(saved.council_status.as_ref().unwrap().state, "passed");
+    assert_eq!(saved.council_status.as_ref().unwrap().lowest, Some(9.5));
+    assert!(verified_council_pass(&store, &saved));
+    let inspect = council_inspection_state(&store, &sid).unwrap().unwrap();
+    assert!(inspect.verified_pass);
+    assert_eq!(inspect.verified_completion.unwrap().lowest, 9.5);
+    assert_eq!(inspect.reserved_children.len(), 2);
+    let child_id = inspect.reserved_children[0].child_session_id.clone();
+    store.db.execute(
+        "UPDATE architect_requests SET content='{}'
+         WHERE parent_session_id=?1 AND kind='council_child_receipt'
+         AND worker_id=?2",
+        rusqlite::params![sid, child_id],
+    ).unwrap();
+    assert!(!verified_council_pass(&store, &saved),
+        "forged persisted child receipts revoke the terminal gate after completion");
 }

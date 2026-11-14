@@ -688,7 +688,13 @@ pub(super) fn report_claims_escalation(
 
 pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<CouncilInspection> {
     let config = team.config.council.as_ref()?;
-    let status = status(team)?;
+    // A stored nested status alone is not evidence. The caller must have
+    // revalidated every child receipt and its root artifact before display.
+    let status = if verified_pass && !config.nested_bot_reviewers.is_empty() {
+        team.council_status.clone().or_else(|| status(team))?
+    } else {
+        status(team)?
+    };
     let verified_pass = verified_pass && status.state == "passed" && !status.stale;
     let verified_completion = if verified_pass && team.status == "completed" {
         status.lowest.map(|lowest| CouncilVerifiedCompletion {
@@ -1742,6 +1748,53 @@ pub(super) fn new_cycle(team: &TeamSnapshot) -> bool {
     // objective still needs a fresh native cycle identity before child admission.
     // A stopped, previously started child cycle must keep its existing identity.
     team.council_since <= 0 || finish_refusal(team).is_none()
+}
+
+/// Only a fully revalidated roster of real child Council receipts may
+/// settle a child-only parallel root. Each authenticated composite is one
+/// top-level seat with its actual minimum child reviewer score. The child
+/// native Council has already applied every required criterion/evidence gate.
+/// Other modes and strategies remain fail-closed until separately integrated.
+pub(super) fn status_for_authenticated_children(
+    team: &TeamSnapshot,
+    seats: &[super::child_council::AuthenticatedParentSeat],
+) -> Option<CouncilStatus> {
+    let config = team.config.council.as_ref()?;
+    if config.mode() != "m4"
+        || config.strategy != CouncilExecutionStrategy::Parallel
+        || accepted(team)
+        || team.council_since <= 0
+        || !(MIN_REVIEWERS..=MAX_REVIEWERS).contains(&seats.len())
+        || seats.len() != config.needed()
+        || team.workers.iter().any(|worker|
+            (worker.council.is_some() && worker.created_at >= team.council_since)
+                || (!worker.read_only && unsettled(&worker.status)))
+    {
+        return None;
+    }
+    let mut ids = std::collections::HashSet::new();
+    let mut sessions = std::collections::HashSet::new();
+    let mut bots = std::collections::HashSet::new();
+    let mut lowest = f64::INFINITY;
+    for seat in seats {
+        if seat.root_session_id != team.session_id
+            || seat.root_cycle_id != format!("{}:{}", team.session_id, team.council_since)
+            || !config.nested_bot_reviewers.iter().any(|choice| choice.bot_id == seat.bot_id)
+            || seat.parent_worker_id.is_empty() || seat.child_session_id.is_empty()
+            || !ids.insert(&seat.parent_worker_id)
+            || !sessions.insert(&seat.child_session_id)
+            || !bots.insert(&seat.bot_id)
+            || !seat.lowest_score.is_finite()
+            || seat.lowest_score < config.target
+        {
+            return None;
+        }
+        lowest = lowest.min(seat.lowest_score);
+    }
+    Some(CouncilStatus {
+        state: "passed".into(), round: 1, lowest: Some(lowest),
+        target: config.target, stale: false, notice: None,
+    })
 }
 
 /// The snapshot's `councilStatus`, from the same checks as the gate.

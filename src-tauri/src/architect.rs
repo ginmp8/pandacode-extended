@@ -576,7 +576,15 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
         Ok(at) => team.changed_at = at,
         Err(error) => eprintln!("Reading team {} changes: {error}", team.session_id),
     }
-    team.council_status = council::status(team);
+    team.council_status = if team.config.council.as_ref()
+        .is_some_and(|config| !config.nested_bot_reviewers.is_empty())
+    {
+        child_council::verified_parent_seats(store, team).ok().flatten()
+            .and_then(|seats| council::status_for_authenticated_children(team, &seats))
+            .or_else(|| council::status(team))
+    } else {
+        council::status(team)
+    };
 }
 /// A stored verdict cannot approve writes recorded after the last native
 /// snapshot. Compare the persisted change index at the final admission boundary.
@@ -623,7 +631,15 @@ pub(crate) fn verified_council_pass(store: &Store, team: &TeamSnapshot) -> bool 
     if !council_evidence_is_current(store, team) { return false; }
     let Some(stored) = team.council_status.as_ref() else { return false };
     if stored.state != "passed" || stored.stale { return false; }
-    let Some(verified) = council::status(team) else { return false };
+    let verified = if team.config.council.as_ref()
+        .is_some_and(|config| !config.nested_bot_reviewers.is_empty())
+    {
+        child_council::verified_parent_seats(store, team).ok().flatten()
+            .and_then(|seats| council::status_for_authenticated_children(team, &seats))
+    } else {
+        council::status(team)
+    };
+    let Some(verified) = verified else { return false };
     verified.state == "passed" && !verified.stale
         && mixed_native_authority_current(store, team)
         && stored.round == verified.round
@@ -2683,12 +2699,21 @@ fn dispatch_as(
                 .is_some_and(|config| !config.nested_bot_reviewers.is_empty())
                 && team.council_accepted != Some(team.council_since)
             {
-                // A real root finish attempt is the native review barrier:
-                // all writers settled, frozen cycle and a single transaction.
-                // Child leaf work is admitted but never counted as root approval.
+                // Admit real child leaf reviews, then consume only revalidated
+                // composite receipts through the existing native root gate.
+                // Mixed modes and S2/S3 cannot pass this partial integration.
                 let admitted = child_council::admit_leaves(&store, &team)?;
-                changed = admitted;
-                json!({"completed":false,"status":"child_council_reviewing"})
+                refresh_council(&store, &mut team);
+                if verified_council_pass(&store, &team) {
+                    team.status = "completed".into();
+                    team.summary = Some(finish.summary);
+                    team.error = None;
+                    changed = true;
+                    json!({"completed":true})
+                } else {
+                    changed = admitted;
+                    json!({"completed":false,"status":"child_council_reviewing"})
+                }
             } else {
                 // Turns that ended since the last save may have recorded changes.
                 refresh_council(&store, &mut team);

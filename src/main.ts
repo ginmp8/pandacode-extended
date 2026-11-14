@@ -7431,7 +7431,7 @@ document.addEventListener('submit', event => {
     }
     const issueEnabled = councilEnabled && data.get('councilGithubIssue') === 'on';
     const issueRepo = String(data.get('councilGithubRepo') ?? '').trim();
-    const validIssueRepo = /^[a-zA-Z0-9_.-]{1,100}\\/[a-zA-Z0-9_.-]{1,100}$/.test(issueRepo)
+    const validIssueRepo = /^[a-zA-Z0-9_.-]{1,100}\/[a-zA-Z0-9_.-]{1,100}$/.test(issueRepo)
       && !issueRepo.split('/').some(part => part === '.' || part === '..');
     if (issueEnabled && !validIssueRepo) {
       notify('Specify the exact authorized GitHub repository as owner/name.');

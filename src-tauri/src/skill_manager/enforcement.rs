@@ -730,6 +730,7 @@ mod behavior_tests {
             let mut config = crate::providers::RunConfig {
             reviewer_boundary: false,
             reviewer_policy: None,
+            native_reviewer_host: None,
                 session_id: "skill-enforcement".into(),
                 provider: provider.into(),
                 model: "default".into(),

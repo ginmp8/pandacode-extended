@@ -153,6 +153,7 @@ fn skill_manager_ask_only_reminder_skips_slash_command_turns() {
     let config = |provider: &str, prompt: &str| crate::providers::RunConfig {
             reviewer_boundary: false,
             reviewer_policy: None,
+            native_reviewer_host: None,
         session_id: "slash".into(),
         provider: provider.into(),
         model: "default".into(),

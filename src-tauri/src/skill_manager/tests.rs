@@ -249,6 +249,7 @@ fn soft_instructions_are_idempotent_on_resumes_and_claude_uses_only_tools() {
         let mut config = crate::providers::RunConfig {
             reviewer_boundary: false,
             reviewer_policy: None,
+            native_reviewer_host: None,
             session_id: "fixture".into(),
             provider: provider.into(),
             model: "default".into(),

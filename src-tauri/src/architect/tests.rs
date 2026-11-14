@@ -7167,6 +7167,46 @@ fn composed_admission_test_config() -> council::CouncilConfig {
 }
 
 #[test]
+fn composed_child_terminal_roster_rejects_phantom_and_duplicate_parent_seats() {
+    let mut team = team_with(composed_admission_test_config(), vec![]);
+    team.council_since = 10;
+    let mut reviewer = seat("nested-root-parent", 1, Some(9.6), 11);
+    let mut binding = reviewer_security::ReviewerBinding::native(
+        &team, &reviewer.id, reviewer.created_at, &reviewer.provider,
+        &reviewer.model, reviewer.council.as_ref().unwrap(),
+    );
+    binding.composition_mode = Some("nested".into());
+    reviewer.reviewer_binding = Some(binding);
+    team.workers.push(reviewer);
+    let current_cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    let receipt = council::ChildCouncilReceipt {
+        root_cycle_id: current_cycle_id,
+        parent_seat_id: "nested-root-parent".into(),
+        child_cycle_id: "nested-child:10".into(),
+        bot_id: "nested-bot".into(),
+        artifact_revision: "frozen-revision".into(),
+        policy_fingerprint: "frozen-policy".into(),
+        status: council::ChildCouncilStatus::Passed,
+        min_score: Some(9.6),
+        leaf_score_refs: vec!["leaf-a".into(), "leaf-b".into()],
+        findings_refs: vec![], evidence_refs: vec![],
+        snapshot_fingerprint: "child-fingerprint".into(),
+    };
+    assert!(child_receipt_roster_current(&team, &[receipt.clone()]));
+    assert!(!child_receipt_roster_current(&team, &[receipt.clone(), receipt.clone()]),
+        "a second receipt for one root seat must not silently count as another child");
+    let mut phantom = receipt.clone();
+    phantom.parent_seat_id = "unknown-root-seat".into();
+    assert!(!child_receipt_roster_current(&team, &[receipt.clone(), phantom]),
+        "a receipt for an unissued parent seat blocks native terminal approval");
+    let mut historical = receipt.clone();
+    historical.root_cycle_id = "historical-root:1".into();
+    historical.parent_seat_id = "historical-parent".into();
+    assert!(child_receipt_roster_current(&team, &[receipt, historical]),
+        "older cycle records remain audit evidence but cannot affect the active roster");
+}
+
+#[test]
 fn finished_composed_council_starts_a_strictly_new_cycle_even_when_old_review_is_blocked() {
     let (state, sid) = state_fixture();
     let previous_cycle;

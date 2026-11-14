@@ -1027,6 +1027,25 @@ fn unique_council_receipt<T>(
 /// a single current ChildCouncilReceipt for every nested seat. Cost remains an
 /// explicit unknown until a provider pricing source can calculate it, so a
 /// configured cost ceiling cannot be treated as satisfied by a guessed zero.
+/// Current-cycle child receipts cannot manufacture or duplicate root reviewer
+/// identities. Historical receipts from earlier cycles remain audit history.
+fn child_receipt_roster_current(
+    team: &TeamSnapshot, receipts: &[council::ChildCouncilReceipt],
+) -> bool {
+    let root_cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    let native_nested_seats = team.workers.iter()
+        .filter(|worker| worker.created_at >= team.council_since && worker.council.is_some())
+        .filter(|worker| worker.reviewer_binding.as_ref()
+            .is_some_and(|binding| binding.composition_mode.as_deref() == Some("nested")))
+        .map(|worker| worker.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut seen_parent_seats = HashSet::new();
+    receipts.iter().filter(|receipt| receipt.root_cycle_id == root_cycle_id)
+        .all(|receipt| receipt.validate().is_ok()
+            && native_nested_seats.contains(receipt.parent_seat_id.as_str())
+            && seen_parent_seats.insert(receipt.parent_seat_id.as_str()))
+}
+
 fn verify_composition_terminal_receipts(
     store: &Store,
     team: &TeamSnapshot,
@@ -1079,6 +1098,9 @@ fn verify_composition_terminal_receipts(
     ) else {
         return false;
     };
+    if !child_receipt_roster_current(team, &child_receipts) {
+        return false;
+    }
     let mut seats = 0usize;
     for worker in team.workers.iter().filter(|worker| {
         !worker.abandoned

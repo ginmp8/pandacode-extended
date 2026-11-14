@@ -167,3 +167,10 @@ states and the fixed versus OnTrigger budget boundary.
 - An old blocked or now-stale terminal verdict cannot keep a newly submitted objective in the previous receipt namespace. Incomplete/paused Council continuation retains its existing behavior.
 - Added a Rust regression for a completed composed task with an old non-passing review, new objective, and exclusion of prior-cycle reviewer seats.
 - Native tests are not run in this connector-only environment; no full issue #147 terminal acceptance is claimed.
+
+## November 14: authenticated current-cycle child receipt roster
+
+- Adapted PR #149's complete-composite-roster defense to PR #155's existing native terminal receipt verification.
+- Before root approval, every current-cycle child receipt must validate and correlate to a real native nested root reviewer seat. Duplicate receipts for one parent or records for unknown parent identities fail closed; old-cycle receipts remain audit history.
+- Added negative Rust tests for duplicate and phantom child receipts and historical-cycle isolation. This is additive to PR #155's existing child evidence, frozen policy, terminal CAS and task-correlation verification.
+- This does not introduce a duplicate child Council engine; exact-HEAD Rust tests remain unrun in this environment.

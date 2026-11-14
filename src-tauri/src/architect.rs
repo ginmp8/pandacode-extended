@@ -592,22 +592,27 @@ pub(crate) fn council_evidence_is_current(store: &Store, team: &TeamSnapshot) ->
     council::changed_at(store, team).is_ok_and(|latest| latest <= team.changed_at)
 }
 
-/// M3 is a new composed Council mode: a scored, completed read-only seat must
-/// also have its real native authority record, not merely a plausible worker
-/// snapshot in architect_teams. Legacy M1/M2 completion remains unchanged.
+/// Revalidate actual native authority on every newly composed root reviewer
+/// seat. Nested composite seats are independently verified against their child
+/// receipts, while direct/automatic roots must also own current native grants.
+/// M1/M2 retain the existing legacy completion contract.
 fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
     let Some(config) = team.config.council.as_ref() else { return false };
-    if config.mode() != "m3" { return true; }
-    let Some(status) = council::status(team) else { return false };
-    if status.state != "passed" || status.stale { return false; }
-    // An S3 challenge cannot authenticate a forged or revoked first phase.
-    // Revalidate both phases against durable native grants, not just the
-    // latest scored round. M1/M2 keep their established completion contract.
-    let mut rounds = vec![status.round];
-    if config.strategy == council::CouncilExecutionStrategy::TwoPhase {
-        if status.round != 2 { return false; }
-        rounds.push(1);
-    }
+    let mode = config.mode();
+    if !matches!(mode, "m3" | "m5" | "m6" | "m7") { return true; }
+    let (rounds, required) = if mode == "m3" {
+        let Some(status) = council::status(team) else { return false };
+        if status.state != "passed" || status.stale { return false; }
+        let mut rounds = vec![status.round];
+        if config.strategy == council::CouncilExecutionStrategy::TwoPhase {
+            if status.round != 2 { return false; }
+            rounds.push(1);
+        }
+        (rounds, config.needed())
+    } else {
+        if config.strategy != council::CouncilExecutionStrategy::Parallel { return false; }
+        (vec![1], config.reviewer_bot_ids.len() + config.automatic_reviewers)
+    };
     rounds.into_iter().all(|round| {
         let eligible = team.workers.iter().filter(|worker| {
             worker.created_at >= team.council_since
@@ -615,11 +620,29 @@ fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
                     seat.round == round && seat.score.is_some()
                         && (!worker.abandoned || seat.score.is_some()))
         }).collect::<Vec<_>>();
-        eligible.len() == config.needed() && eligible.iter().all(|worker| {
+        eligible.len() == required && eligible.iter().all(|worker| {
             if !worker.read_only || worker.status != "completed" { return false; }
             let Some(binding) = worker.reviewer_binding.as_ref() else { return false };
-            binding.validate(team, worker).is_ok()
-                && reviewer_security::validate_recorded_authority(store, &team.session_id, binding).is_ok()
+            if binding.validate(team, worker).is_err()
+                || reviewer_security::validate_recorded_authority(store, &team.session_id, binding).is_err()
+            {
+                return false;
+            }
+            if mode != "m3" {
+                // The persisted score must still match a real native callback
+                // rather than a plausible or restored snapshot field.
+                if worker.council.as_ref().and_then(|seat| seat.score)
+                    != council::latest_score(store, &worker.session_id)
+                {
+                    return false;
+                }
+                if binding.reviewer_bot_id.is_some()
+                    && bot_reviewers::validate_frozen_seat(store, binding, true).is_err()
+                {
+                    return false;
+                }
+            }
+            true
         })
     })
 }

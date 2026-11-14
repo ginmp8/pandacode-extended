@@ -3882,3 +3882,92 @@ fn child_only_parallel_root_finishes_from_real_revalidated_composite_seats() {
     assert!(!verified_council_pass(&store, &saved),
         "forged persisted child receipts revoke the terminal gate after completion");
 }
+
+
+#[test]
+fn nested_m5_parallel_terminal_requires_real_root_and_child_callbacks() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('security-child','security-child',?1,'codex','default','plan',?2,?2)",
+            rusqlite::params![project, storage::now()],
+        ).unwrap();
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.automatic_reviewers = 1;
+        config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+            bot_id: "security-child".into(), child_reviewers: 2,
+            child_target: 9.5, child_max_rounds: 2,
+        });
+        assert_eq!(config.mode(), "m5");
+        config.validate().unwrap();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(
+        &state, &sid, "Review the frozen artifact with independent root and child", None, None,
+    ).unwrap();
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [reviewer_assignment("automatic-root", "correctness")]
+    })).unwrap();
+    let root_launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (root_run, _) = claim(&state, root_launch);
+    assert!(root_run.config.reviewer_boundary);
+    finish(&state, &root_run, "Independent root review.\nCouncil score: 9.7/10", true);
+
+    let (pending, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Await independently authenticated child reviews"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    for _ in 0..2 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                "Independent native child report.\nCouncil score: 9.5/10").unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    }
+    {
+        let store = state.store.lock().unwrap();
+        let before = load(&store, &sid).unwrap().unwrap();
+        assert!(!verified_council_pass(&store, &before),
+            "native root scores and child callbacks cannot replace composite receipts");
+    }
+    let (finished, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Root and child reviewers independently passed"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(finished["completed"], true);
+    let store = state.store.lock().unwrap();
+    let saved = load(&store, &sid).unwrap().unwrap();
+    assert_eq!(saved.council_status.as_ref().unwrap().state, "passed");
+    assert_eq!(saved.council_status.as_ref().unwrap().lowest, Some(9.5));
+    assert!(verified_council_pass(&store, &saved));
+    let root_worker = saved.workers.iter()
+        .find(|worker| worker.council.is_some()).unwrap();
+    let authority_key = format!("native-reviewer-authority:{}", root_worker.id);
+    store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, authority_key],
+    ).unwrap();
+    assert!(!verified_council_pass(&store, &saved),
+        "revoking a root native grant after completion must revoke the composite pass");
+    // A forged persisted score cannot replace the original native callback.
+    reviewer_security::record_native_authority(
+        &store, &sid, root_worker.reviewer_binding.as_ref().unwrap(),
+    ).unwrap();
+    let mut forged = saved.clone();
+    forged.workers.iter_mut()
+        .find(|worker| worker.id == root_worker.id).unwrap()
+        .council.as_mut().unwrap().score = Some(10.0);
+    assert!(!verified_council_pass(&store, &forged));
+}

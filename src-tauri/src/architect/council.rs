@@ -1757,50 +1757,93 @@ pub(super) fn new_cycle(team: &TeamSnapshot) -> bool {
     team.council_since <= 0 || finish_refusal(team).is_none()
 }
 
-/// Only a fully revalidated roster of real child Council receipts may
-/// settle a child-only parallel root. Each authenticated composite is one
-/// top-level seat with its actual minimum child reviewer score. The child
-/// native Council has already applied every required criterion/evidence gate.
-/// Other modes and strategies remain fail-closed until separately integrated.
+/// Only real, revalidated child Council receipts and independently completed
+/// native root reviewers may settle a parallel hierarchical Council. Each child
+/// remains one top-level seat. Neither a child leaf nor an unchecked root score
+/// can be counted as an additional approval.
 pub(super) fn status_for_authenticated_children(
     team: &TeamSnapshot,
-    seats: &[super::child_council::AuthenticatedParentSeat],
+    children: &[super::child_council::AuthenticatedParentSeat],
 ) -> Option<CouncilStatus> {
     let config = team.config.council.as_ref()?;
-    if config.mode() != "m4"
+    let direct_needed = config.reviewer_bot_ids.len();
+    let automatic_needed = config.automatic_reviewers;
+    let root_needed = direct_needed + automatic_needed;
+    if !matches!(config.mode(), "m4" | "m5" | "m6" | "m7")
         || config.strategy != CouncilExecutionStrategy::Parallel
         || accepted(team)
         || team.council_since <= 0
-        || !(MIN_REVIEWERS..=MAX_REVIEWERS).contains(&seats.len())
-        || seats.len() != config.needed()
-        || team.workers.iter().any(|worker|
-            (worker.council.is_some() && worker.created_at >= team.council_since)
-                || (!worker.read_only && unsettled(&worker.status)))
+        || !(MIN_REVIEWERS..=MAX_REVIEWERS).contains(&config.needed())
+        || children.len() != config.nested_bot_reviewers.len()
+        || children.len() + root_needed != config.needed()
+        || latest_round(team) > 1
+        || team.workers.iter().any(|worker| !worker.read_only && unsettled(&worker.status))
+        || (root_needed > 0 && stale(team, 1))
     {
         return None;
     }
-    let mut ids = std::collections::HashSet::new();
-    let mut sessions = std::collections::HashSet::new();
-    let mut bots = std::collections::HashSet::new();
+    let roots: Vec<_> = in_round(team, 1)
+        .filter(|(worker, seat)| counts(worker, seat))
+        .collect();
+    if roots.len() != root_needed
+        || !unverified_required_skill_checks(team, 1).is_empty()
+        || !criterion_blockers(team, config, 1).is_empty()
+    {
+        return None;
+    }
+    let mut worker_ids = std::collections::HashSet::new();
+    let mut session_ids = std::collections::HashSet::new();
+    let mut bot_ids = std::collections::HashSet::new();
     let mut lowest = f64::INFINITY;
-    for seat in seats {
-        if seat.root_session_id != team.session_id
-            || seat.root_cycle_id != format!("{}:{}", team.session_id, team.council_since)
-            || !config.nested_bot_reviewers.iter().any(|choice| choice.bot_id == seat.bot_id)
-            || seat.parent_worker_id.is_empty() || seat.child_session_id.is_empty()
-            || !ids.insert(&seat.parent_worker_id)
-            || !sessions.insert(&seat.child_session_id)
-            || !bots.insert(&seat.bot_id)
-            || !seat.lowest_score.is_finite()
-            || seat.lowest_score < config.target
+    for child in children {
+        if child.root_session_id != team.session_id
+            || child.root_cycle_id != format!("{}:{}", team.session_id, team.council_since)
+            || !config.nested_bot_reviewers.iter().any(|choice| choice.bot_id == child.bot_id)
+            || child.parent_worker_id.is_empty()
+            || child.child_session_id.is_empty()
+            || !worker_ids.insert(child.parent_worker_id.as_str())
+            || !session_ids.insert(child.child_session_id.as_str())
+            || !bot_ids.insert(child.bot_id.as_str())
+            || !child.lowest_score.is_finite()
+            || child.lowest_score < config.target
         {
             return None;
         }
-        lowest = lowest.min(seat.lowest_score);
+        lowest = lowest.min(child.lowest_score);
+    }
+    let mut direct = 0usize;
+    let mut automatic = 0usize;
+    for (worker, seat) in roots {
+        let score = seat.score?;
+        let binding = worker.reviewer_binding.as_ref()?;
+        if !worker.read_only || worker.status != "completed" || worker.abandoned
+            || worker.wrote_at != 0 || !worker.files.is_empty()
+            || seat.started_at <= 0 || seat.reported_severe_finding || seat.reported_conflict
+            || !score.is_finite() || score < config.target
+            || !worker_ids.insert(worker.id.as_str())
+            || !session_ids.insert(worker.session_id.as_str())
+            || binding.validate(team, worker).is_err()
+        {
+            return None;
+        }
+        match binding.reviewer_bot_id.as_deref() {
+            Some(bot) if config.reviewer_bot_ids.iter().any(|id| id == bot)
+                && bot_ids.insert(bot) => direct += 1,
+            Some(_) => return None,
+            None => automatic += 1,
+        }
+        lowest = lowest.min(score);
+    }
+    if direct != direct_needed || automatic != automatic_needed {
+        return None;
     }
     Some(CouncilStatus {
-        state: "passed".into(), round: 1, lowest: Some(lowest),
-        target: config.target, stale: false, notice: None,
+        state: "passed".into(),
+        round: 1,
+        lowest: Some(lowest),
+        target: config.target,
+        stale: false,
+        notice: None,
     })
 }
 

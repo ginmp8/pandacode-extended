@@ -2130,6 +2130,100 @@ fn native_task_council_admission_is_idempotent_and_rejects_foreign_or_stale_requ
 }
 
 #[test]
+fn native_criterion_outcome_can_report_clean_work_without_a_fabricated_finding() {
+    let (state, sid) = state_fixture();
+    let generation;
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        let mut config = composed_admission_test_config();
+        let composition = config.composition.as_mut().unwrap();
+        composition.criteria_source = council::CouncilCriteriaSource::User;
+        composition.criteria = vec![
+            council::CouncilCriterion {
+                id: "coverage".into(),
+                lens: "coverage".into(),
+                description: "Verify required coverage without inventing defects.".into(),
+                required: true,
+                target: 9.0,
+                evidence_required: false,
+                source: council::CouncilCriterionOrigin::User,
+            },
+            council::CouncilCriterion {
+                id: "security".into(),
+                lens: "security".into(),
+                description: "Verify security with a native file reference.".into(),
+                required: true,
+                target: 9.0,
+                evidence_required: true,
+                source: council::CouncilCriterionOrigin::User,
+            },
+        ];
+        config.validate().unwrap();
+        team.config.council = Some(config);
+        team.status = "running".into();
+        team.council_since = storage::now().max(1);
+        team.objective = "Review frozen native task criteria.".into();
+        let mut reviewer = worker("clean-native-reviewer", "running", &[], &[]);
+        reviewer.created_at = team.council_since.saturating_add(1);
+        reviewer.updated_at = reviewer.created_at;
+        reviewer.read_only = true;
+        reviewer.council = Some(CouncilSeat {
+            round: 1,
+            lens: "coverage".into(),
+            score: None,
+            started_at: reviewer.created_at,
+            ..CouncilSeat::default()
+        });
+        let binding = reviewer_security::ReviewerBinding::native(
+            &team, &reviewer.id, reviewer.created_at, &reviewer.provider,
+            &reviewer.model, reviewer.council.as_ref().unwrap(),
+        );
+        reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+        reviewer.reviewer_binding = Some(binding);
+        team.workers.push(reviewer);
+        save(&store, &mut team).unwrap();
+        generation = team.generation;
+    }
+    let actor = coordination::Actor::Worker {
+        id: "clean-native-reviewer".into(),
+        attempt: 1,
+    };
+    let clean = json!({"criterionId":"coverage","score":9.5,"evidenceFiles":[]});
+    let first = record_council_criterion_state(
+        &state, &sid, generation, &actor, clean.clone(),
+    ).unwrap();
+    assert_eq!(first["criterionId"], "coverage");
+    assert_eq!(first["recorded"], true);
+    assert_eq!(record_council_criterion_state(
+        &state, &sid, generation, &actor, clean,
+    ).unwrap()["recorded"], false,
+        "exact repeated native criterion reports are idempotent");
+
+    let error = record_council_criterion_state(
+        &state, &sid, generation, &actor,
+        json!({"criterionId":"coverage","score":10,"evidenceFiles":[]}),
+    ).unwrap_err();
+    assert!(error.contains("council_criterion_conflict"), "{error}");
+    let error = record_council_criterion_state(
+        &state, &sid, generation, &actor,
+        json!({"criterionId":"security","score":9.5,"evidenceFiles":[]}),
+    ).unwrap_err();
+    assert!(error.contains("verified file evidence"), "{error}");
+    let store = state.store.lock().unwrap();
+    let criteria = council_records::<council::CouncilCriterionOutcomeReceipt>(
+        &store, &sid, "council_criterion_outcome",
+    ).unwrap();
+    assert_eq!(criteria.len(), 1);
+    assert_eq!(criteria[0].outcome.criterion_id, "coverage");
+    assert_eq!(criteria[0].outcome.score, 9.5);
+    assert!(criteria[0].outcome.verified_evidence_refs.is_empty());
+    assert!(council_records::<council::CouncilFinding>(
+        &store, &sid, "council_finding",
+    ).unwrap().is_empty(), "a legitimate clean criterion must not forge an issue");
+}
+
+#[test]
 fn native_task_client_records_one_verified_terminal_and_revalidates_evidence_reads() {
     use council::{CouncilReviewReceipt, CouncilReviewVerdict};
     let (state, sid) = state_fixture();

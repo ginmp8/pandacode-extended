@@ -24,8 +24,8 @@
 | AC-08 | Two through eight independent root seats and no duplicate bots | `src-tauri/src/architect/council.rs`; `src-tauri/src/architect/council_tests.rs` | Native bounds present; exact-HEAD tests unrun |
 | AC-09 | Child scopes/read-only guard and no grandchildren | `src-tauri/src/architect.rs`; `src-tauri/src/architect/reviewer_security.rs` | Read-only policy present; supported-harness smoke pending |
 | AC-10 | Native nested lifecycle and one parent seat per child | `src-tauri/src/architect.rs`; `src-tauri/src/architect/tests.rs` | Isolated child lifecycle present; terminal evidence integration pending |
-| AC-11 | Architect/User/Hybrid criteria sources and provenance | `src-tauri/src/architect/council.rs`; `src-tauri/src/architect.rs` | Native validation present; UI/browser exact-HEAD unrun |
-| AC-12 | Required scores/evidence and minimum-based gate | `src-tauri/src/architect/council.rs`; `src-tauri/src/architect/council_tests.rs` | 21-mode/strategy negative fixture present; execution unrun |
+| AC-11 | Architect/User/Hybrid criteria sources and provenance | `src-tauri/src/architect/council.rs`; `src-tauri/src/architect.rs` | Native clean-criterion tool, frozen criteria and separate finding tools added; exact-HEAD execution unrun |
+| AC-12 | Required scores/evidence and minimum-based gate | `src-tauri/src/architect/council.rs`; `src-tauri/src/architect/council_tests.rs` | 21-mode/strategy negative fixtures plus evidence-required criterion check present; execution unrun |
 | AC-13 | S1 parallel/concurrency limits | `src-tauri/src/architect.rs`; `src-tauri/src/architect/tests.rs` | Native capacity paths present; concurrent provider smoke pending |
 | AC-14 | S2 escalation and deterministic trigger evidence | `src-tauri/src/architect.rs`; `src-tauri/src/architect/council_tests.rs` | Native S2 decisions and tests present; provider smoke pending |
 | AC-15 | S3 independent second-phase challenge | `src-tauri/src/architect/council.rs`; `src-tauri/src/architect/council_tests.rs` | Phase1-only denial and distinct sessions tested in source; execution unrun |
@@ -33,7 +33,7 @@
 | AC-17 | Artifact revision staleness/re-review | `src-tauri/src/architect.rs`; `src-tauri/src/architect/council_tests.rs` | Native revision checks present; end-to-end invalidation pending |
 | AC-18 | Native root terminal gate and typed child receipts | `src-tauri/src/architect.rs`; `src-tauri/src/architect/native_council_task.rs` | Native verified proof required; positive terminal smoke pending |
 | AC-19 | One terminal delivery callback, idempotent recovery | `src-tauri/src/bots/shared_channels.rs`; `src-tauri/src/bots/tests.rs` | CAS/duplicate callback tests present; live race pending |
-| AC-20 | Supported harnesses preserve read-only authority | `src-tauri/src/architect/reviewer_security.rs`; `src-tauri/src/architect/bot_reviewers.rs` | Contract paths present; per-harness smoke pending |
+| AC-20 | Supported harnesses preserve read-only authority | `src-tauri/src/architect/reviewer_security.rs`; `src-tauri/src/architect/bot_reviewers.rs` | Exact-schema native evidence-only host policy and security regression added; per-harness smoke pending |
 | AC-21 | Task-scoped skill pins/provenance/native check evidence | `src-tauri/src/architect/reviewer_security.rs`; `src-tauri/src/bots/tests.rs` | Native checks and negative tests present; live Skills smoke pending |
 | AC-22 | Independent tasks for concurrent same-bot deliveries | `src-tauri/src/bots/shared_channels.rs`; `src-tauri/src/bots/tests.rs` | Two-concurrent-message test present; runtime race pending |
 | AC-23 | Durable nested child restart and resume | `src-tauri/src/architect.rs`; `src-tauri/src/architect/tests.rs` | Recovery and idempotency tests present; crash-injection pending |
@@ -46,7 +46,7 @@
 | AC-30 | All seven modes x three execution strategies | `src-tauri/src/architect/tests.rs`; `src-tauri/src/architect/council_tests.rs` | 21 native dispatch/status fixtures and denial matrix present; exact-HEAD unrun |
 | AC-31 | Cost, fallback and progress evidence transparency | `src/council.ts`; `src/council-panel.ts`; `src-tauri/src/architect.rs` | Summary/code present; cost under unknown data testing pending |
 | AC-32 | Docs with source/branch, concept screenshots and decisions | `docs/council-147-integration.md`; `docs/architect-workers.md` | Docs present; live screenshots and final verification pending |
-| AC-33 | Multiple typed findings with titles, explanations, verified refs | `src-tauri/src/architect.rs`; `src-tauri/src/architect/council.rs` | Immutable finding code and transactional writes present; real-file integration pending |
+| AC-33 | Multiple typed findings with titles, explanations, verified refs | `src-tauri/src/architect.rs`; `src-tauri/src/architect/council.rs` | Separate clean criterion and evidence-backed finding tools; native immutable/transaction tests added; real-file integration pending |
 | AC-34 | Remediation/waiver dispositions revision- and actor-bound | `src-tauri/src/architect.rs`; `src-tauri/src/architect/council_tests.rs` | Native authorization present; positive human workflow smoke pending |
 | AC-35 | Standalone task/delivery Council request and terminal client | `src-tauri/src/architect/native_council_task.rs`; `src-tauri/src/architect/tests.rs` | Native API and deterministic positive terminal CAS/evidence test added; live provider integration unrun |
 | AC-36 | Wrong-caller/request/artifact and duplicate-write denial | `src-tauri/src/architect/native_council_task.rs`; `src-tauri/src/architect/tests.rs` | Native request/CAS tests present; race/fault-injection pending |

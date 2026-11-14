@@ -5226,8 +5226,29 @@ fn tool(name: &str, description: &str, properties: Value, required: &[&str]) -> 
 fn files_schema() -> Value {
     json!({"type":"array","description":"Repo-relative paths; '/' only, no absolute, '.'/'..' or globs; [] reserves all.","items":{"type":"string"}})
 }
+fn council_criterion_tool() -> Value {
+    tool("council_record_criterion",
+        "Record a scored native criterion outcome even when no finding was discovered. This is a read-only reviewer ledger action, not checkout access or terminal approval. Native authority, current task/cycle, verified file evidence and immutable score are enforced.",
+        json!({
+            "criterionId":{"type":"string"},
+            "score":{"type":"number","minimum":0,"maximum":10},
+            "evidenceFiles":{"type":"array","maxItems":16,"items":{"type":"string"}}
+        }),
+        &["criterionId","score"],
+    )
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CouncilCriterionInput {
+    criterion_id: String,
+    score: f64,
+    #[serde(default)]
+    evidence_files: Vec<String>,
+}
+
 fn council_finding_tool() -> Value {
-    tool("council_record_finding", "Record one criterion finding with native file-hash evidence. One outcome per criterion per reviewer seat; the tool cannot change permissions, run checks, or waive findings.", json!({
+    tool("council_record_finding", "Record a distinct evidence-backed problem. The prior criterion score, artifact and original evidence cannot be rewritten. Use council_record_criterion for a clean review with no finding; this tool cannot grant permissions or waive findings.", json!({
         "criterionId":{"type":"string"},
         "criterionScore":{"type":"number","minimum":0,"maximum":10},
         "severity":{"type":"string","enum":["critical","high","medium","low","info"]},
@@ -5361,6 +5382,151 @@ fn immutable_council_criterion_outcome(
         return Err("council_criterion_conflict: a reviewer cannot rewrite the immutable criterion score, artifact, or authority with another finding.".into());
     }
     Ok(existing.clone())
+}
+
+/// A successful review with no findings must still be able to report each
+/// mandatory criterion. This tool never invents a finding or confers approval.
+fn record_council_criterion_state(
+    state: &AppState,
+    team_session_id: &str,
+    generation: u64,
+    actor: &coordination::Actor,
+    args: Value,
+) -> Result<Value> {
+    let input: CouncilCriterionInput =
+        serde_json::from_value(args).map_err(|error| error.to_string())?;
+    if !input.score.is_finite() || !(0.0..=10.0).contains(&input.score) {
+        return Err("Council criterion score must be finite and between 0 and 10.".into());
+    }
+    let coordination::Actor::Worker { id: worker_id, attempt } = actor else {
+        return Err("Only a native Council reviewer can report a criterion.".into());
+    };
+    let store = state.store.lock().map_err(|error| error.to_string())?;
+    let mut team = load(&store, team_session_id)?.ok_or("Council task is unavailable.")?;
+    if !active(&team.status) || team.generation != generation {
+        return Err("Team changed before the Council criterion was recorded.".into());
+    }
+    let worker = team.workers.iter().find(|worker| {
+        worker.id == *worker_id && worker.attempt == *attempt
+            && active(&worker.status) && !worker.abandoned && worker.read_only
+    }).ok_or("Council reviewer run is no longer authorized.")?;
+    let seat = worker.council.as_ref()
+        .ok_or("Only a native Council reviewer can report a criterion.")?;
+    let binding = worker.reviewer_binding.as_ref()
+        .ok_or("reviewer_session_mismatch: Council reviewer authority is missing.")?;
+    binding.validate(&team, worker)?;
+    validate_current_reviewer_authority(&store, &team, binding)?;
+    bot_reviewers::validate_frozen_seat_for_task(&store, team_session_id, binding, false)?;
+    let link = if load_council_child_link(&store, team_session_id)?.is_some() {
+        validate_council_child_link(&store, team_session_id)?
+    } else {
+        None
+    };
+    let root_id = link.as_ref().map_or(team_session_id, |link| link.root_session_id.as_str());
+    let mut root = load(&store, root_id)?.ok_or("Council root task is unavailable.")?;
+    if !active(&root.status) {
+        return Err("reviewer_session_mismatch: Council root is no longer active.".into());
+    }
+    let composition = team.config.council.as_ref().and_then(|config| config.composition.clone())
+        .or_else(|| root.config.council.as_ref().and_then(|config| config.composition.clone()))
+        .ok_or("council_composition_invalid: explicit criteria are required.")?;
+    if let Some(link) = &link {
+        let expected = nested_child_criteria(
+            root.config.council.as_ref().and_then(|config| config.composition.as_ref())
+                .ok_or("council_composition_invalid: root criteria are unavailable.")?,
+            &link.nested,
+        );
+        if team.config.council.as_ref().and_then(|config| config.composition.as_ref())
+            .is_none_or(|child| child.criteria_source != link.nested.child_criteria_source
+                || child.criteria != expected)
+        {
+            return Err("reviewer_session_mismatch: child criteria differ from the frozen root.".into());
+        }
+    }
+    let criterion = composition.criteria.iter().find(|criterion| criterion.id == input.criterion_id)
+        .ok_or("council_criteria_gate_blocked: an unknown criterion cannot be scored.")?;
+    if !council_evidence_is_current(&store, &root) {
+        return Err("review_revision_stale: task artifacts changed after the Council was frozen.".into());
+    }
+    if input.evidence_files.len() > 16 {
+        return Err("reviewer_evidence_invalid: at most 16 evidence files may support a criterion.".into());
+    }
+    let mut evidence = Vec::new();
+    let mut paths = HashSet::new();
+    for path in &input.evidence_files {
+        let (normalized, reference, _) = verified_council_file_evidence(&store, root_id, path)?;
+        if !paths.insert(normalized) {
+            return Err("reviewer_evidence_invalid: evidence files must be unique.".into());
+        }
+        evidence.push(reference);
+    }
+    if criterion.required && criterion.evidence_required && evidence.is_empty() {
+        return Err("council_criteria_gate_blocked: this required criterion needs verified file evidence.".into());
+    }
+    let cycle_id = binding.council_cycle_id.clone();
+    let receipt = council::CouncilCriterionOutcomeReceipt {
+        schema_version: 1,
+        root_cycle_id: format!("{}:{}", root.session_id, root.council_since),
+        task_id: team.session_id.clone(),
+        task_cycle_id: cycle_id.clone(),
+        child_cycle_id: link.as_ref().map(|link| link.child_council_cycle_id.clone()),
+        round: seat.round,
+        seat_id: worker.id.clone(),
+        parent_seat_id: link.as_ref().map(|link| link.root_worker_id.clone()),
+        attempt: worker.attempt,
+        artifact_revision: link.as_ref().map_or_else(
+            || binding.artifact_revision.clone(),
+            |link| link.root_artifact_revision.clone(),
+        ),
+        outcome: council::CouncilCriterionOutcome {
+            criterion_id: criterion.id.clone(),
+            score: input.score,
+            verified_evidence_refs: evidence,
+        },
+    };
+    receipt.validate().map_err(|error| error.to_string())?;
+    let key = format!("native-council-criterion:{}:{}:{}:{}",
+        cycle_id, seat.round, worker.id, criterion.id);
+    let prior: Option<String> = store.db.query_row(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_criterion_outcome'",
+        params![root_id, &key], |row| row.get(0),
+    ).optional().map_err(|error| error.to_string())?;
+    let prior = prior.map(|raw| {
+        serde_json::from_str::<council::CouncilCriterionOutcomeReceipt>(&raw)
+            .map_err(|_| "council_criterion_conflict: invalid frozen criterion receipt.".to_string())
+    }).transpose()?;
+    if prior.as_ref().is_some_and(|previous| previous != &receipt) {
+        return Err("council_criterion_conflict: score, evidence, artifact or reviewer authority cannot be rewritten.".into());
+    }
+    let transaction = store.db.unchecked_transaction().map_err(|error| error.to_string())?;
+    persist_council_record(
+        &store, root_id, &key, "council_criterion_outcome", &receipt, worker_id,
+    )?;
+    if link.is_some() {
+        let mut child_receipt = receipt.clone();
+        child_receipt.root_cycle_id = child_receipt.task_cycle_id.clone();
+        child_receipt.child_cycle_id = None;
+        child_receipt.parent_seat_id = None;
+        child_receipt.validate().map_err(|error| error.to_string())?;
+        persist_council_record(
+            &store, team_session_id, &key, "council_criterion_outcome", &child_receipt, worker_id,
+        )?;
+        save(&store, &mut team)?;
+    }
+    if root.session_id == team.session_id {
+        team = root;
+        save(&store, &mut team)?;
+    } else {
+        save(&store, &mut root)?;
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
+    Ok(json!({
+        "criterionId": criterion.id,
+        "score": input.score,
+        "recorded": prior.is_none(),
+        "verifiedEvidenceRefs": receipt.outcome.verified_evidence_refs,
+    }))
 }
 
 fn record_council_finding_state(
@@ -5936,6 +6102,7 @@ pub fn host(
             .and_then(|store| council_finding_tool_enabled(&store, &parent, id).ok())
             .unwrap_or(false);
         if findings_enabled {
+            tools.push(council_criterion_tool());
             tools.push(council_finding_tool());
             tools.push(council_finding_verification_tool());
         }
@@ -5997,6 +6164,14 @@ pub fn host(
                         emit(&app, &team);
                     }
                     Ok(result)
+                } else if name == "pandacode_council_record_criterion" {
+                    record_council_criterion_state(
+                        &app.state::<AppState>(),
+                        &sid,
+                        generation,
+                        &actor,
+                        args,
+                    )
                 } else if name == "pandacode_council_record_finding" {
                     record_council_finding_state(
                         &app.state::<AppState>(),

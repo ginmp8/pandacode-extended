@@ -126,6 +126,40 @@ impl ReviewerToolPolicy {
     /// The wrapped handler independently checks every call, including MCP transports.
     pub(crate) fn restrict_host(&self, host: Option<ToolHost>) -> Result<Option<ToolHost>> {
         self.validate()?;
+        // A native read-only reviewer may submit exact built-in Council
+        // evidence and skill verification. It must not inherit generic native,
+        // MCP, shell, network or workspace tools from the host.
+        let native_reporting = [
+            super::council_criterion_tool(),
+            super::council_finding_tool(),
+            super::council_finding_verification_tool(),
+        ];
+        let native_skill_evidence = super::reviewer_skill_evidence::tools();
+        if matches!(self, Self::NativeReadOnly) {
+            let Some(host) = host else { return Ok(None) };
+            let tools = host.tools.into_iter().filter(|spec| {
+                native_reporting.iter().chain(native_skill_evidence.iter())
+                    .any(|expected| expected == spec)
+            }).collect::<Vec<_>>();
+            if tools.is_empty() {
+                return Ok(None);
+            }
+            let allowed = tools.iter().filter_map(|spec| spec["name"].as_str())
+                .map(str::to_owned).collect::<HashSet<_>>();
+            let original = host.handler;
+            let handler = Arc::new(move |name: String, args: Value| {
+                let permitted = allowed.contains(&name);
+                let original = original.clone();
+                let future: crate::providers::ToolFuture = Box::pin(async move {
+                    if !permitted {
+                        return Err("capability_not_authorized: only native Council evidence tools are available to read-only reviewers.".into());
+                    }
+                    (original)(name, args).await
+                });
+                future
+            });
+            return Ok(Some(ToolHost { tools, handler, approval_tools: HashSet::new() }));
+        }
         let Self::Scoped(policy) = self else { return Ok(None) };
         if policy.phase != ReviewerPhase::Review {
             return Err("policy_unsupported: post-acceptance tools cannot run as Council reviewers.".into());
@@ -154,10 +188,22 @@ impl ReviewerToolPolicy {
                 tools.push(spec.clone());
             }
         }
+        // Built-in reviewer evidence tools require the exact app-owned schema,
+        // not an arbitrary MCP tool sharing the same name.
+        let mut native_report_tools = HashSet::new();
+        for spec in native_reporting {
+            if host.tools.iter().any(|candidate| candidate == &spec) {
+                let name = spec["name"].as_str().unwrap_or_default().to_string();
+                if seen.insert(name.clone()) {
+                    tools.push(spec);
+                    native_report_tools.insert(name);
+                }
+            }
+        }
         // Only these exact PandaCode-defined, immutable read-only skill tools
         // may accompany scoped user grants. A skill cannot introduce tool names.
         let mut native_skill_tools = HashSet::new();
-        for spec in super::reviewer_skill_evidence::tools() {
+        for spec in native_skill_evidence {
             if host.tools.iter().any(|candidate| candidate == &spec) {
                 let name = spec["name"].as_str().unwrap_or_default().to_string();
                 if seen.insert(name.clone()) {
@@ -169,7 +215,8 @@ impl ReviewerToolPolicy {
         let grants = policy.grants.clone();
         let original = host.handler;
         let handler = Arc::new(move |name: String, args: Value| {
-            let allowed = native_skill_tools.contains(&name) || grants.iter().any(|grant| grant.permits(&name, &args));
+            let allowed = native_report_tools.contains(&name) || native_skill_tools.contains(&name)
+                || grants.iter().any(|grant| grant.permits(&name, &args));
             let original = original.clone();
             let future: crate::providers::ToolFuture = Box::pin(async move {
                 if !allowed {
@@ -557,6 +604,49 @@ mod tests {
             resource: "owner/repo".into(),
         }
     }
+    #[tokio::test]
+    async fn native_read_only_reviewer_keeps_only_exact_builtin_council_evidence_tools() {
+        let legitimate = vec![
+            super::super::council_criterion_tool(),
+            super::super::council_finding_tool(),
+            super::super::council_finding_verification_tool(),
+        ];
+        let mut provided = legitimate.clone();
+        provided.push(json!({
+            "type":"function",
+            "name":"pandacode_council_record_criterion",
+            "inputSchema":{"type":"object","properties":{"command":{"type":"string"}}}
+        }));
+        provided.push(json!({
+            "type":"function", "name":"pandacode_dispatch_workers",
+            "inputSchema":{"type":"object","properties":{"assignments":{"type":"array"}}}
+        }));
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let counter = invoked.clone();
+        let host = ToolHost {
+            tools: provided,
+            approval_tools: HashSet::new(),
+            handler: Arc::new(move |_, _| {
+                counter.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(json!({"acceptedByNativeHandler":true})) })
+            }),
+        };
+        let filtered = ReviewerToolPolicy::NativeReadOnly
+            .restrict_host(Some(host)).unwrap().unwrap();
+        assert_eq!(filtered.tools, legitimate,
+            "schema-spoofed or arbitrary native tools cannot enter the Council evidence host");
+        assert!(filtered.approval_tools.is_empty());
+        assert!((filtered.handler)(
+            "pandacode_dispatch_workers".into(), json!({"assignments":[]}),
+        ).await.is_err(), "a read-only native reviewer has no writer dispatcher");
+        assert_eq!(invoked.load(Ordering::SeqCst), 0);
+        assert!((filtered.handler)(
+            "pandacode_council_record_criterion".into(),
+            json!({"criterionId":"coverage","score":9.5,"evidenceFiles":[]}),
+        ).await.is_ok());
+        assert_eq!(invoked.load(Ordering::SeqCst), 1);
+    }
+
     #[tokio::test]
     async fn scoped_reviewer_keeps_only_preapproved_grants_and_native_skill_reads() {
         let grant = issue_grant();

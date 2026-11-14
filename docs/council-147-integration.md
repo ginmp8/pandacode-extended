@@ -259,3 +259,14 @@ A Rust regression checks forged cached pass, cross-delivery mismatch, stale scor
 The standalone native task client now has a positive Rust integration regression that admits a frozen artifact before review, creates two distinct bound read-only Council reviewers, persists each native reviewer authority and typed passing review receipt, verifies the current Council gate, then uses the real `native_council_task` methods to claim exactly one terminal, replay that terminal idempotently, and read correlated evidence. A changed objective must revoke the prior terminal/evidence reads.
 
 This is a deterministic **native protocol integration test**, not a live provider or external-harness acceptance. The already existing negative tests continue to cover wrong caller/project/request/artifact, missing native score, stale policy and restart. A live harness and independent future task client remain a separate acceptance gate.
+
+
+## Independent criterion reporting without fabricated findings (C-1 / AC-11/12/33)
+
+The composed reviewer host now exposes an explicit native `pandacode_council_record_criterion` action in addition to distinct `pandacode_council_record_finding` reports. A clean review can submit each required criterion score without manufacturing a defect. The new handler validates an active native reviewer attempt, frozen root/child ownership, immutable authorization, source-aware current criteria, unchanged checkout revision, finite score, and independently hashed file evidence. Required evidence criteria reject empty evidence. Repeated identical reports are idempotent; changing score, evidence, artifact or reviewer identity is rejected.
+
+Root and child criterion receipts and snapshots share a SQLite transaction. A separate finding never creates an additional reviewer vote and cannot overwrite the criterion's prior evidence. Root/child terminal approval still requires every mandatory criterion and native receipts.
+
+`NativeReadOnly` previously removed all host tools, including read-only Council evidence actions. Its policy now reconstructs a **strict schema-exact whitelist** from the app-owned native criterion/finding/finding-verification tools plus native Skill evidence tools; it wraps the handler with the same allowlist to deny calls to hidden tools. The `Scoped` user-authorized policy keeps its exact user grants and adds only the same schema-exact native reporting actions. This does not grant workspace mutation, shell, network or arbitrary MCP tools.
+
+New native security tests prove the read-only host strips writer tools and schema-spoofed substitutes; native criterion tests cover clean score, exact retry, score rewrite rejection, evidence-required rejection and no invented finding. These tests were authored but not independently executed at the time of this integration.

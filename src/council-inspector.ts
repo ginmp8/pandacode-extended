@@ -99,7 +99,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       '<p>Reservations are not executed reviews or parent Council votes.</p><ul>' +
       children.map(child => {
         const receipt = child.verifiedChildReceipt;
-        const ids = receipt?.leafWorkerIds;
+        const ids = receipt?.leafWorkerIds ?? [];
         const correlated = receipt && receipt.rootCycleId === child.rootCycleId
           && receipt.childSessionId === child.childSessionId && receipt.botId === child.botId
           && Number.isFinite(receipt.lowestScore) && receipt.lowestScore >= 0 && receipt.lowestScore <= 10

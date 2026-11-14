@@ -2237,7 +2237,10 @@ async fn native_reviewer_host_records_pinned_skills_and_file_evidence_and_reject
     assert!((host.handler)("pandacode_council_record_finding".into(), finding.clone()).await.unwrap_err()
         .contains("reviewer_session_mismatch"));
     std::fs::write(&evidence_path, "Resolved review evidence.\n").unwrap();
-    let fresh_sid = {
+    // A different seat with the same frozen artifact is not a changed
+    // artifact: verification must reject it instead of relying on the
+    // seat-specific suffix of the artifact token.
+    let same_epoch_sid = {
         let store = state.store.lock().unwrap();
         let mut team = load(&store, &sid).unwrap().unwrap();
         team.workers[0].attempt = reviewer.attempt;
@@ -2257,12 +2260,60 @@ async fn native_reviewer_host_records_pinned_skills_and_file_evidence_and_reject
         save(&store, &mut team).unwrap();
         session.id
     };
-    let fresh_host = native_reviewer_test_host(state.clone(), fresh_sid, admission.clone()).unwrap();
+    let same_epoch_host = native_reviewer_test_host(state.clone(), same_epoch_sid, admission.clone()).unwrap();
     finding["severity"] = json!("info");
     finding["criterionScore"] = json!(9.5);
     finding["summary"] = json!("Independent review confirms the fix with current evidence.");
-    (fresh_host.handler)("pandacode_council_record_finding".into(), finding).await.unwrap();
-    let disposition = (fresh_host.handler)("pandacode_council_verify_finding".into(),
+    (same_epoch_host.handler)("pandacode_council_record_finding".into(), finding.clone()).await.unwrap();
+    let unchanged_error = (same_epoch_host.handler)("pandacode_council_verify_finding".into(),
+        json!({"findingId":receipt["findingId"]})).await.unwrap_err();
+    assert!(unchanged_error.contains("changed artifact"), "{unchanged_error}");
+    // A write recorded between the author's report and this later review
+    // advances the native change epoch, so a fresh seat can verify it.
+    let changed_sid = {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.workers[0].attempt = reviewer.attempt;
+        let change_id = uuid::Uuid::new_v4().to_string();
+        let summary = crate::turn_changes::TurnChanges {
+            id: change_id,
+            files: vec![crate::turn_changes::ChangedFile {
+                path: "src/resolved.rs".into(), old_path: None, status: "modified".into(),
+                additions: Some(1), deletions: Some(0), binary: false, truncated: false,
+            }],
+            additions: 1, deletions: 0, truncated: false, concurrent: false,
+            attributed: true, error: None,
+        };
+        let detail = crate::turn_changes::TurnChangeDiff {
+            path: "src/resolved.rs".into(), old_path: None, patch: "+fixed\n".into(),
+            binary: false, truncated: false, error: None,
+        };
+        crate::turn_changes::persist(
+            &store,
+            &sid,
+            crate::turn_changes::Captured { summary, details: vec![detail] },
+        ).unwrap();
+        refresh_council(&store, &mut team);
+        assert!(team.changed_at > 0, "the written change advances the artifact epoch");
+        team.dispatch_revision += 1;
+        let project = store.session(&sid).unwrap().project_id;
+        let session = store.create_session(&project, "codex", "independent-review-2", "plan").unwrap();
+        let mut fresh = worker("independent-host-leaf-2", "waiting", &[], &[]);
+        fresh.session_id = session.id.clone();
+        fresh.model = "independent-review-2".into();
+        fresh.read_only = true;
+        fresh.council = Some(CouncilSeat { round: 2, lens: "coverage".into(), ..CouncilSeat::default() });
+        let binding = reviewer_security::ReviewerBinding::native(&team, &fresh.id, fresh.created_at,
+            &fresh.provider, &fresh.model, fresh.council.as_ref().unwrap());
+        reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+        fresh.reviewer_binding = Some(binding);
+        team.workers.push(fresh);
+        save(&store, &mut team).unwrap();
+        session.id
+    };
+    let changed_host = native_reviewer_test_host(state.clone(), changed_sid, admission.clone()).unwrap();
+    (changed_host.handler)("pandacode_council_record_finding".into(), finding).await.unwrap();
+    let disposition = (changed_host.handler)("pandacode_council_verify_finding".into(),
         json!({"findingId":receipt["findingId"]})).await.unwrap();
     assert_eq!(disposition["verified"], true);
     assert_eq!(disposition["disposition"], "addressed");
@@ -2562,6 +2613,497 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
     }
 }
 
+fn two_phase_test_config(
+    automatic: usize,
+    selected: &[(&str, council::SelectedReviewerMode)],
+) -> council::CouncilConfig {
+    use council::{AutomaticReviewerCount as Count, CouncilCriteriaSource as Source, CouncilCriterionOrigin as Origin};
+    let selected = selected.iter().map(|(bot_id, mode)| council::SelectedCouncilReviewer {
+        bot_id: (*bot_id).into(),
+        mode: *mode,
+        required: true,
+        nested: (*mode == council::SelectedReviewerMode::Nested).then_some(council::NestedCouncilConfig {
+            template: council::NestedCouncilTemplate::ValidatedDefault,
+            child_criteria_source: Source::User,
+            child_reviewer_count: 2,
+            target: 9.0,
+            max_rounds: 5,
+            escalation: council::NestedEscalation::Always,
+            user_forced: false,
+        }),
+    }).collect::<Vec<_>>();
+    let composition = council::CouncilComposition {
+        schema_version: 1,
+        automatic: council::CouncilAutomaticReviewers {
+            enabled: automatic > 0,
+            count: Count::Fixed(automatic),
+        },
+        selected: selected.clone(),
+        criteria_source: Source::User,
+        criteria: vec![council::CouncilCriterion {
+            id: "coverage".into(),
+            lens: "coverage".into(),
+            description: "Verify the native two-phase review path.".into(),
+            required: true,
+            target: 9.0,
+            evidence_required: false,
+            source: Origin::User,
+        }],
+        strategy: council::CouncilStrategy::TwoPhase,
+        limits: council::CouncilCompositionLimits {
+            max_depth: 2,
+            max_root_seats: 8,
+            max_concurrent_leaves: 4,
+            max_leaf_reviews_per_round: 32,
+            timeout_ms: 3_600_000,
+            max_estimated_cost_micros: None,
+        },
+    };
+    composition.validate().unwrap();
+    council::CouncilConfig {
+        target: 9.0,
+        max_rounds: 5,
+        reviewers: automatic,
+        reviewer_bot_ids: selected.iter().map(|reviewer| reviewer.bot_id.clone()).collect(),
+        composition: Some(composition),
+        ..council::CouncilConfig::default()
+    }
+}
+
+fn install_two_phase_team(
+    state: &AppState,
+    root_id: &str,
+    automatic: usize,
+    selected: &[(&str, council::SelectedReviewerMode)],
+) {
+    let project_id = state.store.lock().unwrap().session(root_id).unwrap().project_id;
+    for (id, _) in selected {
+        state.store.lock().unwrap().db.execute(
+            "INSERT INTO bots(id,name,role,instructions,goals,soul,project_id,provider,model,mode,created_at,updated_at,skills) VALUES(?1,?1,'Reviewer','Review only the assigned task.','','',?2,'codex','gpt-5-nano','full',1,1,'[]')",
+            params![id, project_id],
+        ).unwrap();
+    }
+    let store = state.store.lock().unwrap();
+    let mut team = load(&store, root_id).unwrap().unwrap();
+    team.config.council = Some(two_phase_test_config(automatic, selected));
+    team.council_since = storage::now().max(1);
+    save(&store, &mut team).unwrap();
+}
+
+fn council_review_assignment(
+    key: &str,
+    profile: Option<&str>,
+    bot: Option<&str>,
+    lens: &str,
+) -> Value {
+    let mut assignment = json!({
+        "key": key,
+        "name": key,
+        "prompt": "Review the frozen task independently and report real defects.",
+        "files": ["src"],
+        "readOnly": true,
+        "councilLens": lens,
+    });
+    if let Some(profile) = profile {
+        assignment["profileId"] = json!(profile);
+    }
+    if let Some(bot) = bot {
+        assignment["councilSource"] = json!("selected_bot");
+        assignment["reviewerBotId"] = json!(bot);
+    } else {
+        assignment["councilSource"] = json!("automatic");
+    }
+    assignment
+}
+
+fn dispatch_council_round(
+    state: &AppState,
+    sid: &str,
+    assignments: Vec<Value>,
+) -> Result<Vec<String>> {
+    let generation = load(&state.store.lock().unwrap(), sid)?.unwrap().generation;
+    let (result, _) = dispatch_state_runtime_test(
+        state,
+        sid,
+        generation,
+        "pandacode_dispatch_workers",
+        json!({ "assignments": assignments }),
+    )?;
+    Ok(result["workerIds"].as_array().unwrap().iter()
+        .map(|id| id.as_str().unwrap().to_string())
+        .collect())
+}
+
+fn settle_council_round(state: &AppState, sid: &str, round: usize) {
+    let store = state.store.lock().unwrap();
+    let mut team = load(&store, sid).unwrap().unwrap();
+    let now = storage::now().max(team.council_since + 1);
+    let indexes = team.workers.iter().enumerate()
+        .filter(|(_, worker)| worker.council.as_ref().is_some_and(|seat| seat.round == round))
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    let mut revision = team.dispatch_revision;
+    for index in indexes {
+        let worker = &mut team.workers[index];
+        worker.status = "completed".into();
+        worker.updated_at = now;
+        if let Some(seat) = worker.council.as_mut() {
+            seat.score = Some(9.6);
+            if seat.started_at == 0 {
+                seat.started_at = now;
+            }
+        }
+        revision = revision.saturating_add(1);
+        worker.result_revision = revision;
+    }
+    team.dispatch_revision = revision;
+    save(&store, &mut team).unwrap();
+}
+
+/// Persist the direct/automatic half of the frozen criterion evidence. Nested
+/// seats settle through their own child ledger; this S3 path only needs the
+/// native gate to see the frozen criterion covered by the current seats.
+fn persist_direct_round_outcomes(state: &AppState, sid: &str, round: usize) {
+    let store = state.store.lock().unwrap();
+    let mut team = load(&store, sid).unwrap().unwrap();
+    let cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    let receipts = team.workers.iter().filter_map(|worker| {
+        let (seat, binding) = (worker.council.as_ref()?, worker.reviewer_binding.as_ref()?);
+        if seat.round != round
+            || binding.composition_mode.as_deref() == Some("nested")
+        {
+            return None;
+        }
+        let receipt = council::CouncilCriterionOutcomeReceipt {
+            schema_version: 1,
+            root_cycle_id: cycle_id.clone(),
+            task_id: team.session_id.clone(),
+            task_cycle_id: binding.council_cycle_id.clone(),
+            child_cycle_id: None,
+            round,
+            seat_id: worker.id.clone(),
+            parent_seat_id: None,
+            attempt: worker.attempt,
+            artifact_revision: binding.artifact_revision.clone(),
+            outcome: council::CouncilCriterionOutcome {
+                criterion_id: "coverage".into(),
+                score: 9.5,
+                verified_evidence_refs: Vec::new(),
+            },
+        };
+        receipt.validate().unwrap();
+        Some((receipt, worker.id.clone()))
+    }).collect::<Vec<_>>();
+    for (receipt, seat_id) in receipts {
+        let key = format!("native-council-criterion:{}:{}:{}:coverage", cycle_id, round, seat_id);
+        persist_council_record(&store, &team.session_id, &key, "council_criterion_outcome", &receipt, &seat_id).unwrap();
+    }
+    save(&store, &mut team).unwrap();
+}
+
+fn record_team_write(state: &AppState, sid: &str, at: i64, path: &str) {
+    let store = state.store.lock().unwrap();
+    let message: i64 = store.db.query_row(
+        "INSERT INTO messages(session_id,role,content,created_at) VALUES(?1,'changes','',?2) RETURNING id",
+        params![sid, at],
+        |row| row.get(0),
+    ).unwrap();
+    let summary = json!({
+        "id": format!("change-{}", storage::id()),
+        "files": [{"path": path, "status": "modified", "additions": 1, "deletions": 0, "binary": false, "truncated": false}],
+        "additions": 1,
+        "deletions": 0,
+        "truncated": false,
+        "concurrent": false,
+        "attributed": true,
+    });
+    store.db.execute(
+        "INSERT INTO turn_changes(id,session_id,message_id,summary,created_at,diff_bytes) VALUES(?1,?2,?3,?4,?5,0)",
+        params![summary["id"].as_str().unwrap(), sid, message, summary.to_string(), at],
+    ).unwrap();
+}
+
+#[test]
+fn artifact_epoch_tracks_recorded_writes_not_dispatch_scheduling() {
+    let (_, mut team) = fixture();
+    team.council_since = 10;
+    let seat = CouncilSeat { round: 1, lens: "security".into(), ..CouncilSeat::default() };
+    let first = reviewer_security::ReviewerBinding::native(
+        &team, "epoch-seat-a", 20, "codex", "default", &seat,
+    );
+    team.dispatch_revision += 7;
+    let second = reviewer_security::ReviewerBinding::native(
+        &team, "epoch-seat-b", 21, "codex", "default", &seat,
+    );
+    assert!(
+        council::same_artifact_revision(&first.artifact_revision, &second.artifact_revision),
+        "dispatching another seat must not change the frozen artifact epoch",
+    );
+    team.changed_at = 500;
+    let third = reviewer_security::ReviewerBinding::native(
+        &team, "epoch-seat-c", 22, "codex", "default", &seat,
+    );
+    assert!(
+        !council::same_artifact_revision(&first.artifact_revision, &third.artifact_revision),
+        "a recorded write must change the artifact epoch",
+    );
+    assert_eq!(reviewer_security::artifact_epoch(&team), 500);
+
+    let mut author = worker("epoch-seat-a", "completed", &[], &[]);
+    author.created_at = 20;
+    author.council = Some(seat);
+    author.reviewer_binding = Some(first);
+    team.workers.push(author);
+    team.workers[0].reviewer_binding.as_ref().unwrap()
+        .validate(&team, &team.workers[0])
+        .expect("an earlier epoch stays a structurally valid frozen token");
+}
+
+#[test]
+fn selected_source_two_phase_rounds_dispatch_after_settlement_and_reach_the_s3_terminal_pass() {
+    use council::SelectedReviewerMode as Mode;
+    let cases = [
+        ("M2", 0usize, vec![("direct-a", Mode::Direct), ("direct-b", Mode::Direct)]),
+        ("M3", 1, vec![("direct-a", Mode::Direct)]),
+        ("M5", 1, vec![("nested-a", Mode::Nested)]),
+        ("M7", 1, vec![("direct-a", Mode::Direct), ("nested-a", Mode::Nested)]),
+    ];
+    for (mode, automatic, selected) in cases {
+        let (state, root_id) = state_fixture();
+        let state = Arc::new(state);
+        install_two_phase_team(&state, &root_id, automatic, &selected);
+        let phase1 = match mode {
+            "M2" => vec![
+                council_review_assignment("m2-p1-a", None, Some("direct-a"), "security"),
+                council_review_assignment("m2-p1-b", None, Some("direct-b"), "quality"),
+            ],
+            "M3" | "M5" => vec![
+                council_review_assignment("mixed-p1-selected", None, Some(selected[0].0), "quality"),
+                council_review_assignment("mixed-p1-auto", Some("fast"), None, "security"),
+            ],
+            "M7" => vec![
+                council_review_assignment("m7-p1-direct", None, Some("direct-a"), "security"),
+                council_review_assignment("m7-p1-nested", None, Some("nested-a"), "quality"),
+                council_review_assignment("m7-p1-auto", Some("fast"), None, "architecture"),
+            ],
+            _ => unreachable!(),
+        };
+        dispatch_council_round(&state, &root_id, phase1)
+            .unwrap_or_else(|error| panic!("{mode} phase 1 dispatch failed: {error}"));
+        let phase1_team = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap();
+        assert_eq!(
+            phase1_team.workers.iter().filter(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 1)).count(),
+            automatic + selected.len(),
+            "{mode} phase 1 must seat exactly the frozen sources",
+        );
+        let mut phase1_tokens = phase1_team.workers.iter()
+            .filter(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 1))
+            .map(|worker| (worker.id.clone(), worker.reviewer_binding.as_ref().unwrap().artifact_revision.clone()))
+            .collect::<Vec<_>>();
+        phase1_tokens.sort_by(|left, right| left.0.cmp(&right.0));
+        settle_council_round(&state, &root_id, 1);
+        persist_direct_round_outcomes(&state, &root_id, 1);
+        let ready = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap();
+        assert_eq!(
+            ready.council_status.as_ref().map(|status| status.state.as_str()),
+            Some("dispatch"),
+            "{mode} phase 1 must ask for the challenger phase",
+        );
+
+        let phase2 = match mode {
+            "M2" => vec![
+                council_review_assignment("m2-p2-b", None, Some("direct-b"), "security"),
+                council_review_assignment("m2-p2-a", None, Some("direct-a"), "quality"),
+            ],
+            "M3" | "M5" => vec![
+                council_review_assignment("mixed-p2-selected", None, Some(selected[0].0), "security"),
+                council_review_assignment("mixed-p2-auto", Some("fast"), None, "quality"),
+            ],
+            "M7" => vec![
+                council_review_assignment("m7-p2-direct", None, Some("direct-a"), "quality"),
+                council_review_assignment("m7-p2-nested", None, Some("nested-a"), "architecture"),
+                council_review_assignment("m7-p2-auto", Some("fast"), None, "security"),
+            ],
+            _ => unreachable!(),
+        };
+        dispatch_council_round(&state, &root_id, phase2)
+            .unwrap_or_else(|error| panic!("{mode} phase 2 dispatch after phase-1 settlement failed: {error}"));
+
+        let store = state.store.lock().unwrap();
+        let phase2_team = load(&store, &root_id).unwrap().unwrap();
+        let challengers = phase2_team.workers.iter()
+            .filter(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 2))
+            .collect::<Vec<_>>();
+        assert_eq!(challengers.len(), automatic + selected.len(), "{mode} phase 2 seat count");
+        assert!(challengers.iter().all(|challenger| {
+            let receipt = s3_challenge_receipt_for_worker(&store, &phase2_team, challenger)
+                .unwrap()
+                .unwrap_or_else(|| panic!("{mode} challenger {} has no S3 receipt", challenger.id));
+            let phase1_ids = phase1_tokens.iter().map(|(id, _)| id.clone()).collect::<Vec<_>>();
+            receipt.schema_version == 1
+                && receipt.round == 2
+                && receipt.author_seat_ids == phase1_ids
+                && receipt.finding_ids.is_empty()
+        }), "{mode} every challenger must retain the frozen phase-1 author set");
+        assert!(challengers.iter().all(|challenger| {
+            let challenger_revision = &challenger.reviewer_binding.as_ref().unwrap().artifact_revision;
+            phase1_tokens.iter().all(|(id, revision)| {
+                let author = phase2_team.workers.iter().find(|worker| worker.id == *id).unwrap();
+                let same_lens_author = author.council.as_ref().unwrap().lens
+                    .trim().eq_ignore_ascii_case(challenger.council.as_ref().unwrap().lens.trim());
+                council::same_artifact_revision(revision, challenger_revision)
+                    && (!same_lens_author
+                        || challenge_reviewer_identity(author) != challenge_reviewer_identity(challenger))
+            })
+        }), "{mode} phase 2 must share the frozen artifact while its own lens changes identity");
+        let mut after_phase2 = phase2_team.workers.iter()
+            .filter(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 1))
+            .map(|worker| (worker.id.clone(), worker.reviewer_binding.as_ref().unwrap().artifact_revision.clone()))
+            .collect::<Vec<_>>();
+        after_phase2.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(after_phase2, phase1_tokens, "{mode} dispatch must not rewrite phase-1 authors");
+        drop(store);
+
+        settle_council_round(&state, &root_id, 2);
+        persist_direct_round_outcomes(&state, &root_id, 2);
+        let store = state.store.lock().unwrap();
+        let team = load(&store, &root_id).unwrap().unwrap();
+        assert_eq!(
+            team.council_status.as_ref().map(|status| status.state.as_str()),
+            Some("passed"),
+            "{mode} S3 must reach its terminal pass after both phases",
+        );
+        assert!(
+            s3_phase2_decisions_proven(&store, &team, 2),
+            "{mode} every phase-2 seat must retain a native challenge decision",
+        );
+    }
+}
+
+#[test]
+fn two_phase_rejects_a_same_lens_author_but_accepts_an_independent_challenger() {
+    use council::SelectedReviewerMode as Mode;
+    let (state, root_id) = state_fixture();
+    let state = Arc::new(state);
+    install_two_phase_team(&state, &root_id, 0, &[("direct-a", Mode::Direct), ("direct-b", Mode::Direct)]);
+    dispatch_council_round(&state, &root_id, vec![
+        council_review_assignment("guard-p1-a", None, Some("direct-a"), "security"),
+        council_review_assignment("guard-p1-b", None, Some("direct-b"), "quality"),
+    ]).unwrap();
+    settle_council_round(&state, &root_id, 1);
+    persist_direct_round_outcomes(&state, &root_id, 1);
+    let phase1 = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap();
+    let phase1_snapshot = phase1.workers.iter()
+        .filter(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 1))
+        .map(|worker| (
+            worker.id.clone(),
+            worker.status.clone(),
+            worker.council.as_ref().unwrap().score,
+            worker.reviewer_binding.as_ref().unwrap().artifact_revision.clone(),
+        ))
+        .collect::<Vec<_>>();
+
+    // `direct-a` authored the security lens in phase 1, so it cannot challenge
+    // that same lens in phase 2.
+    let error = dispatch_council_round(&state, &root_id, vec![
+        council_review_assignment("guard-same-lens", None, Some("direct-a"), "security"),
+    ]).unwrap_err();
+    assert!(error.contains("council_phase2_blocked") && error.contains("own lens"), "{error}");
+    let after_rejection = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap();
+    assert!(after_rejection.workers.iter().all(|worker| worker.council.as_ref().is_none_or(|seat| seat.round != 2)),
+        "a rejected challenge must not persist a phase-2 seat");
+
+    // An independent challenger for that same lens is accepted, and the
+    // frozen phase-1 authors stay untouched.
+    dispatch_council_round(&state, &root_id, vec![
+        council_review_assignment("guard-independent", None, Some("direct-b"), "security"),
+    ]).unwrap();
+    let after_accept = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap();
+    let guard = after_accept.workers.iter()
+        .find(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 2))
+        .expect("the independent challenger must persist");
+    assert_eq!(guard.reviewer_binding.as_ref().unwrap().reviewer_bot_id.as_deref(), Some("direct-b"));
+    assert!(s3_challenge_receipt_for_worker(&state.store.lock().unwrap(), &after_accept, guard)
+        .unwrap().is_some(), "the independent challenger must receive its native S3 receipt");
+    let untouched = after_accept.workers.iter()
+        .filter(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 1))
+        .map(|worker| (
+            worker.id.clone(),
+            worker.status.clone(),
+            worker.council.as_ref().unwrap().score,
+            worker.reviewer_binding.as_ref().unwrap().artifact_revision.clone(),
+        ))
+        .collect::<Vec<_>>();
+    assert_eq!(untouched, phase1_snapshot, "other phase-1 authors must remain frozen and visible");
+
+    // Completing the phase lets the S3 gate settle independently.
+    dispatch_council_round(&state, &root_id, vec![
+        council_review_assignment("guard-p2-a", None, Some("direct-a"), "quality"),
+    ]).unwrap();
+    settle_council_round(&state, &root_id, 2);
+    persist_direct_round_outcomes(&state, &root_id, 2);
+    let team = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap();
+    assert_eq!(team.council_status.as_ref().map(|status| status.state.as_str()), Some("passed"));
+}
+
+#[test]
+fn two_phase_rejects_phase_two_after_an_intervening_write() {
+    use council::SelectedReviewerMode as Mode;
+    let (state, root_id) = state_fixture();
+    let state = Arc::new(state);
+    install_two_phase_team(&state, &root_id, 0, &[("direct-a", Mode::Direct), ("direct-b", Mode::Direct)]);
+    dispatch_council_round(&state, &root_id, vec![
+        council_review_assignment("stale-p1-a", None, Some("direct-a"), "security"),
+        council_review_assignment("stale-p1-b", None, Some("direct-b"), "quality"),
+    ]).unwrap();
+    settle_council_round(&state, &root_id, 1);
+    persist_direct_round_outcomes(&state, &root_id, 1);
+    let started = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap()
+        .workers.iter().filter_map(|worker| worker.council.as_ref().map(|seat| seat.started_at))
+        .min().unwrap();
+    record_team_write(&state, &root_id, started + 60_000, "src/changed-between-phases.rs");
+    let mut written = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap();
+    refresh_council(&state.store.lock().unwrap(), &mut written);
+    assert!(written.changed_at > started, "the intervening write must advance the native change index");
+    let error = dispatch_council_round(&state, &root_id, vec![
+        council_review_assignment("stale-p2-b", None, Some("direct-b"), "security"),
+        council_review_assignment("stale-p2-a", None, Some("direct-a"), "quality"),
+    ]).unwrap_err();
+    assert!(error.contains("council_phase2_blocked"), "{error}");
+    let after = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap();
+    assert!(after.workers.iter().all(|worker| worker.council.as_ref().is_none_or(|seat| seat.round != 2)),
+        "a stale phase 2 must not persist");
+}
+
+#[test]
+fn automatic_only_two_phase_council_keeps_s3_coexistence() {
+    let (state, root_id) = state_fixture();
+    let state = Arc::new(state);
+    install_two_phase_team(&state, &root_id, 2, &[]);
+    dispatch_council_round(&state, &root_id, vec![
+        council_review_assignment("auto-p1-a", Some("fast"), None, "security"),
+        council_review_assignment("auto-p1-b", Some("kimi"), None, "quality"),
+    ]).unwrap();
+    settle_council_round(&state, &root_id, 1);
+    persist_direct_round_outcomes(&state, &root_id, 1);
+    dispatch_council_round(&state, &root_id, vec![
+        council_review_assignment("auto-p2-a", Some("kimi"), None, "security"),
+        council_review_assignment("auto-p2-b", Some("fast"), None, "quality"),
+    ]).unwrap_or_else(|error| panic!("M1 automatic phase 2 failed: {error}"));
+    settle_council_round(&state, &root_id, 2);
+    persist_direct_round_outcomes(&state, &root_id, 2);
+    let store = state.store.lock().unwrap();
+    let team = load(&store, &root_id).unwrap().unwrap();
+    assert_eq!(team.council_status.as_ref().map(|status| status.state.as_str()), Some("passed"));
+    let round2 = team.workers.iter()
+        .filter(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 2))
+        .collect::<Vec<_>>();
+    assert_eq!(round2.len(), 2);
+    assert!(round2.iter().all(|worker| worker.reviewer_binding.as_ref().unwrap().reviewer_bot_id.is_none()));
+    assert!(round2.iter().all(|worker| s3_challenge_receipt_for_worker(&store, &team, worker)
+        .unwrap().is_some()));
+}
+
 #[test]
 fn s2_usage_phase_requires_a_saved_trigger_for_the_followup_round() {
     let setup = || {
@@ -2859,6 +3401,30 @@ fn s3_usage_phase_requires_a_persisted_independent_challenge_decision() {
     assert_eq!(
         s3_challenge_receipt_for_worker(&store, &team, &challenger).unwrap().unwrap(),
         decision,
+    );
+
+    // Replay applies the same per-lens rule: a receipt that claims the
+    // phase-1 author's identity for the challenged lens cannot count.
+    let mut reused = team.clone();
+    let mut reused_worker = reused.workers[2].clone();
+    reused_worker.model = "author-a".into();
+    if let Some(binding) = reused_worker.reviewer_binding.as_mut() {
+        binding.snapshot.model = reused_worker.model.clone();
+    }
+    reused.workers[2] = reused_worker.clone();
+    let mut forged = decision.clone();
+    forged.reviewer_id = "codex:author-a".into();
+    persist_council_record(
+        &store,
+        &team.session_id,
+        "forged-same-lens-challenge",
+        "council_s3_challenge",
+        &forged,
+        &reused_worker.id,
+    ).unwrap();
+    assert!(
+        s3_challenge_receipt_for_worker(&store, &reused, &reused_worker).unwrap().is_none(),
+        "a replay must reject the phase-1 author's own identity for that lens",
     );
 }
 

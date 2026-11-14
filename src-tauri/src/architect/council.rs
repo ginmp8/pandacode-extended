@@ -1568,7 +1568,7 @@ fn in_round(team: &TeamSnapshot, round: usize) -> impl Iterator<Item = (&Worker,
 fn counts(worker: &Worker, seat: &CouncilSeat) -> bool {
     !worker.abandoned || seat.score.is_some()
 }
-fn same_lens(a: &str, b: &str) -> bool {
+pub(super) fn same_lens(a: &str, b: &str) -> bool {
     a.trim().to_lowercase() == b.trim().to_lowercase()
 }
 /// Seats that have settled with a score.
@@ -2327,7 +2327,7 @@ pub(super) fn s2_escalation_signals(
     signals
 }
 
-fn reviewer_identity(worker: &Worker) -> String {
+pub(super) fn reviewer_identity(worker: &Worker) -> String {
     worker.reviewer_binding.as_ref().map_or_else(
         || format!("{}:{}", worker.provider, worker.model),
         |binding| binding.reviewer_bot_id.clone().unwrap_or_else(|| {
@@ -2336,6 +2336,10 @@ fn reviewer_identity(worker: &Worker) -> String {
     )
 }
 
+/// Two issued artifact revisions name the same frozen artifact when they share
+/// the Council cycle and its native content epoch. The seat-specific suffix is
+/// intentionally ignored: seats, rounds and dispatch scheduling differ without
+/// the reviewed artifact changing. A recorded write advances the epoch.
 pub(super) fn same_artifact_revision(left: &str, right: &str) -> bool {
     let mut left = left.split(':');
     let mut right = right.split(':');
@@ -2343,6 +2347,10 @@ pub(super) fn same_artifact_revision(left: &str, right: &str) -> bool {
         && matches!((left.next(), right.next()), (Some(a), Some(b)) if a == b)
 }
 
+/// S3 independence is per challenged lens: a phase-2 challenger may reuse the
+/// identity of a phase-1 author from another lens, but never the identity of
+/// the phase-1 author whose lens it now challenges. The whole phase-1 author
+/// set and artifact must still be frozen on the same cycle and delivery.
 fn two_phase_independent(team: &TeamSnapshot, phase1: usize, phase2: usize) -> bool {
     let earlier: Vec<_> = in_round(team, phase1)
         .filter(|(worker, seat)| counts(worker, seat))
@@ -2350,6 +2358,28 @@ fn two_phase_independent(team: &TeamSnapshot, phase1: usize, phase2: usize) -> b
     let later: Vec<_> = in_round(team, phase2)
         .filter(|(worker, seat)| counts(worker, seat))
         .collect();
+    let frozen_artifact = later.iter().all(|(challenger, _)| {
+        earlier.iter().all(|(author, _)| {
+            author.reviewer_binding.as_ref().zip(challenger.reviewer_binding.as_ref())
+                .is_some_and(|(author, challenger)| {
+                    // Reviewer authority revisions are seat-specific. Shared root cycle,
+                    // delivery and unchanged artifact establish the same challenge target.
+                    author.council_cycle_id == challenger.council_cycle_id
+                        && author.delivery_id == challenger.delivery_id
+                        && same_artifact_revision(&author.artifact_revision, &challenger.artifact_revision)
+                })
+        })
+    });
+    let independent_per_lens = later.iter().all(|(challenger, challenge_seat)| {
+        let mut challenged = false;
+        let independent = earlier.iter()
+            .filter(|(_, author_seat)| same_lens(&author_seat.lens, &challenge_seat.lens))
+            .all(|(author, _)| {
+                challenged = true;
+                reviewer_identity(author) != reviewer_identity(challenger)
+            });
+        challenged && independent
+    });
     !earlier.is_empty()
         && later.len() == earlier.len()
         && !stale(team, phase1)
@@ -2357,20 +2387,8 @@ fn two_phase_independent(team: &TeamSnapshot, phase1: usize, phase2: usize) -> b
         && later.iter().enumerate().all(|(index, (challenger, _))| {
             later.iter().skip(index + 1).all(|(other, _)| reviewer_identity(challenger) != reviewer_identity(other))
         })
-        && later.iter().all(|(challenger, challenge_seat)| {
-            earlier.iter().all(|(author, _)| reviewer_identity(author) != reviewer_identity(challenger))
-                && earlier.iter().any(|(author, author_seat)| {
-                    same_lens(&author_seat.lens, &challenge_seat.lens)
-                        && author.reviewer_binding.as_ref().zip(challenger.reviewer_binding.as_ref())
-                            .is_some_and(|(author, challenger)| {
-                                // Reviewer authority revisions are seat-specific. Shared root cycle,
-                                // delivery and unchanged artifact establish the same challenge target.
-                                author.council_cycle_id == challenger.council_cycle_id
-                                    && author.delivery_id == challenger.delivery_id
-                                    && same_artifact_revision(&author.artifact_revision, &challenger.artifact_revision)
-                            })
-                })
-        })
+        && frozen_artifact
+        && independent_per_lens
 }
 
 fn two_phase_phase1_passes(
@@ -2658,7 +2676,7 @@ pub(super) fn reviewer_access(
     let artifact = worker.reviewer_binding.as_ref()
         .map(|binding| binding.artifact_revision.as_str())
         .unwrap_or("unavailable");
-    format!("{base} This is a fresh phase-2 challenge against the frozen phase-1 artifact revision {artifact}. Independently check the artifact and each phase-1 finding below for contradictions, omissions, and missing evidence. Do not rewrite, close, or approve a phase-1 finding on behalf of its author; report your own evidence and score. Your reviewer identity must differ from the author of every challenged report. Phase-1 findings: {}", serde_json::to_string(&phase1).unwrap_or_else(|_| "[]".into()))
+    format!("{base} This is a fresh phase-2 challenge against the frozen phase-1 artifact revision {artifact}. Independently check the artifact and each phase-1 finding below for contradictions, omissions, and missing evidence. Do not rewrite, close, or approve a phase-1 finding on behalf of its author; report your own evidence and score. Your reviewer identity must differ from the phase-1 author of the lens you challenge. Phase-1 findings: {}", serde_json::to_string(&phase1).unwrap_or_else(|_| "[]".into()))
 }
 
 /// A live or stopped run's edits may have landed until now. A run that ended was marked when it did.

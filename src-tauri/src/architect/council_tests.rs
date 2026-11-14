@@ -1931,6 +1931,29 @@ fn two_phase_fixture(with_challengers: bool) -> (TeamSnapshot, Vec<council::Coun
 }
 
 #[test]
+fn two_phase_allows_a_challenger_that_authored_a_different_lens() {
+    let (mut crossed, receipts) = two_phase_fixture(true);
+    // Swap the phase-2 reviewer identities across lenses: each challenger is a
+    // phase-1 author, but never of the lens it now challenges. This is the
+    // selected-source case where the same frozen bot roster must return.
+    for (index, worker) in crossed.workers.iter_mut()
+        .filter(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 2))
+        .enumerate()
+    {
+        let other_lens_author = if index == 0 { 1 } else { 0 };
+        worker.model = format!("phase1-model-{other_lens_author}");
+        if let Some(binding) = &mut worker.reviewer_binding {
+            binding.snapshot.model = worker.model.clone();
+        }
+    }
+    assert_eq!(
+        council::status_with_criterion_outcomes(&crossed, &receipts).unwrap().state,
+        "passed",
+        "per-lens independence accepts a phase-1 author challenging another lens",
+    );
+}
+
+#[test]
 fn two_phase_requires_both_correlated_rounds_and_independent_challengers() {
     let (phase1_only, phase1_receipts) = two_phase_fixture(false);
     let phase1_status = council::status_with_criterion_outcomes(&phase1_only, &phase1_receipts).unwrap();

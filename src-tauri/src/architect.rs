@@ -1866,6 +1866,15 @@ fn council_artifact_digest(revision: &str) -> String {
     council_sha256(revision.as_bytes())
 }
 
+/// The root artifact token a native finding is recorded against: the reviewer's
+/// own frozen seat token, or its root parent's token for a nested leaf review.
+fn finding_artifact_revision(binding: &reviewer_security::ReviewerBinding) -> &str {
+    binding
+        .parent_council
+        .as_ref()
+        .map_or(&binding.artifact_revision, |parent| &parent.artifact_revision)
+}
+
 fn council_policy_fingerprint(binding: &reviewer_security::ReviewerBinding) -> Result<String> {
     let frozen = serde_json::to_vec(&(
         &binding.snapshot.tool_policy,
@@ -2117,23 +2126,36 @@ fn s3_challenge_receipt_for_worker(
         .collect::<Vec<_>>();
     expected_findings.sort();
     expected_findings.dedup();
-    let independent = authors.iter().all(|author| {
-        author.reviewer_binding.as_ref().is_some_and(|author_binding| {
-            author_binding.council_cycle_id == binding.council_cycle_id
-                && council::same_artifact_revision(&author_binding.artifact_revision, &binding.artifact_revision)
-                && author_binding.delivery_id == binding.delivery_id
-                && challenge_reviewer_identity(author) != receipt.reviewer_id
-        })
-    });
-    let matching_lens = authors.iter().any(|author| {
-        author.council.as_ref().is_some_and(|author_seat| {
-            author_seat.lens.trim().eq_ignore_ascii_case(seat.lens.trim())
-        })
-    });
+    let mut frozen_artifact = true;
+    let mut same_lens_author = false;
+    let mut independent_for_lens = true;
+    for author in &authors {
+        let (Some(author_binding), Some(author_seat)) = (&author.reviewer_binding, &author.council) else {
+            frozen_artifact = false;
+            break;
+        };
+        if author_binding.council_cycle_id != binding.council_cycle_id
+            || !council::same_artifact_revision(&author_binding.artifact_revision, &binding.artifact_revision)
+            || author_binding.delivery_id != binding.delivery_id
+        {
+            frozen_artifact = false;
+            break;
+        }
+        // Independence is per challenged lens. A phase-2 seat may reuse an
+        // identity that reviewed a different lens in phase 1, but never the
+        // identity of the phase-1 author of the lens it now challenges.
+        if council::same_lens(&author_seat.lens, &seat.lens) {
+            same_lens_author = true;
+            if challenge_reviewer_identity(author) == receipt.reviewer_id {
+                independent_for_lens = false;
+            }
+        }
+    }
     if receipt.author_seat_ids != expected_authors
         || receipt.finding_ids != expected_findings
-        || !independent
-        || !matching_lens
+        || !frozen_artifact
+        || !same_lens_author
+        || !independent_for_lens
     {
         return Ok(None);
     }
@@ -2178,6 +2200,7 @@ fn persist_s3_challenge_decision(store: &Store, team: &TeamSnapshot, worker: &Wo
         return Err("council_phase2_blocked: challenge reviewers must use distinct reviewer identities.".into());
     }
     let mut has_matching_lens = false;
+    let mut same_lens_independent = true;
     for author in &authors {
         let (Some(author_binding), Some(author_seat)) = (&author.reviewer_binding, &author.council) else {
             return Err("council_phase2_blocked: a phase-1 report has no frozen reviewer identity.".into());
@@ -2188,13 +2211,22 @@ fn persist_s3_challenge_decision(store: &Store, team: &TeamSnapshot, worker: &Wo
         {
             return Err("council_phase2_blocked: phase-1 reports and challenge seat do not share one frozen artifact and delivery.".into());
         }
-        has_matching_lens |= author_seat.lens.trim().eq_ignore_ascii_case(seat.lens.trim());
-        if challenge_reviewer_identity(author) == challenger_identity {
-            return Err("council_phase2_blocked: every challenge reviewer must be independent of every phase-1 report author.".into());
+        // A phase-2 challenger must be independent of the phase-1 author for
+        // the lens it challenges. Reusing an identity that reviewed another
+        // lens in phase 1 stays valid: the frozen sources and quorum decide who
+        // may sit in phase 2, not a global author ban.
+        if council::same_lens(&author_seat.lens, &seat.lens) {
+            has_matching_lens = true;
+            if challenge_reviewer_identity(author) == challenger_identity {
+                same_lens_independent = false;
+            }
         }
     }
     if !has_matching_lens {
         return Err("council_phase2_blocked: the challenge lens has no matching phase-1 report.".into());
+    }
+    if !same_lens_independent {
+        return Err("council_phase2_blocked: a challenge reviewer must be independent of the phase-1 author for its own lens.".into());
     }
     let author_ids = authors.iter().map(|author| author.id.clone()).collect::<Vec<_>>();
     let author_set = author_ids.iter().map(String::as_str).collect::<HashSet<_>>();
@@ -5494,11 +5526,14 @@ fn verify_council_finding_state(
     finding.validate().map_err(|error| error.to_string())?;
     let author = team.workers.iter().find(|candidate| candidate.id == finding.seat_id)
         .ok_or("council_finding_unverified: the finding author is not part of this root cycle.")?;
+    let author_binding = author.reviewer_binding.as_ref()
+        .ok_or("council_finding_unverified: the finding author has no frozen artifact revision.")?;
     if !finding.has_content_identity() || finding.severity != council::CouncilFindingSeverity::Critical
         || finding.seat_id == worker.id || binding.council_cycle_id != cycle_id
         || challenge_reviewer_identity(author) == challenge_reviewer_identity(worker)
         || seat.round <= finding.round_id.rsplit(':').next().and_then(|value| value.parse::<usize>().ok()).unwrap_or(usize::MAX)
-        || council_artifact_digest(&binding.artifact_revision) == finding.artifact_digest
+        || council_artifact_digest(finding_artifact_revision(author_binding)) != finding.artifact_digest
+        || council::same_artifact_revision(finding_artifact_revision(author_binding), finding_artifact_revision(binding))
     {
         return Err("council_finding_unverified: verification requires a later independent review of a changed artifact.".into());
     }

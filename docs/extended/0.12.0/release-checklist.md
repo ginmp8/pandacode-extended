@@ -1,5 +1,18 @@
 # PandaCode Extended 0.12.0 — release readiness checklist
 
+## 2026-11-14 — source HEAD import candidate (not approved)
+
+- [x] Freeze [source `6c42278ff598`](https://github.com/ginmp8/pandacode/commit/6c42278ff5981e50c9dc494986b4380123d4686d) and confirm app version **0.3.125**.
+- [x] Reconcile **62** changed source paths and verify complete untruncated Git tree inventory (2,051 source / 2,109 Extended; 0 missing or mode differences).
+- [x] Preserve planned Extended **0.12.0 DRAFT**, previous release history and upstream notes exactly.
+- [x] Preserve Extended configuration gates and dependency remediation at source level; verify basic Rust lock dependency graph consistency.
+- [ ] Obtain exact published candidate SHA and **that SHA's** CI results; previous [previous Extended `5530431964e1`](https://github.com/ginmp8/pandacode-extended/commit/5530431964e114b90c4464450fde63bf4682544b) CI is historical, not candidate evidence.
+- [ ] Run Rust `cargo check/test/clippy --locked`, Node `npm ci` and builds, Expo and dependency audits on the reconciled tree.
+- [ ] Validate Cursor, Antigravity MCP, updater certificates, installed platforms and native Extended On/Off/direct/automatic workflows.
+- [ ] Independently establish functional parity across the remaining **81** customized shared paths and release readiness approvals.
+
+Extended **0.12.0 is not an approved distribution**.
+
 ## 2026-11-13 — Astro remediation CI evidence checkpoint
 
 - [x] Confirm the exact inherited source SHA [`9739736d`](https://github.com/ginmp8/pandacode/commit/9739736d134ba29c6a07d92eca5745c3c4e5999b) and declared native application version **0.3.125**; retain planned Extended **0.12.0 DRAFT** separately.

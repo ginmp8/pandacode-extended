@@ -416,6 +416,7 @@ fn known_provider(provider: &str) -> bool {
             | "devin"
             | "zcode"
             | "hermes"
+            | "cursor"
     )
 }
 

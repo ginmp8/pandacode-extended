@@ -3467,6 +3467,10 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     assert!(child_council::admit_leaves(&store, &root).unwrap());
     let inspected = child_council::inspect(&store, &root).unwrap();
     assert_eq!(inspected.len(), 2);
+    let complete_roster = child_council::verified_parent_seats(&store, &root).unwrap().unwrap();
+    assert_eq!(complete_roster.len(), 2, "two children yield two root seats, not four leaf votes");
+    assert_ne!(complete_roster[0].parent_worker_id, complete_roster[1].parent_worker_id);
+    assert_ne!(complete_roster[0].child_session_id, complete_roster[1].child_session_id);
     assert!(inspected.iter().all(|view| view.observed_leaf_usage.as_ref().is_some_and(|usage|
         usage.unique_attempts == 2 && usage.token_count.is_none()
             && usage.cost_amount.is_none() && usage.cost_currency.is_none())));
@@ -3514,6 +3518,29 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     ).unwrap();
     assert_eq!(child_council::inspect(&store, &root).unwrap().iter()
         .filter(|view| view.authenticated_parent_seat.is_some()).count(), 2);
+    // A forged root snapshot cannot reuse a child coordinator's native worker
+    // identity for a second top-level vote, even with valid leaf receipts.
+    let mut conflicting_root = root.clone();
+    let mut duplicate = load(&store, &inspected[0].child_session_id).unwrap().unwrap()
+        .workers[0].clone();
+    duplicate.id = inspected[0].authenticated_parent_seat.as_ref().unwrap()
+        .parent_worker_id.clone();
+    conflicting_root.workers.push(duplicate);
+    assert!(child_council::verified_parent_seats(&store, &conflicting_root)
+        .unwrap_err().contains("conflicting root composite seat identity"));
+
+    // SQL persistence is not an authority source for undeclared third seats.
+    let phantom_key = format!("native-council-parent-seat:{}:ghost", root.council_since);
+    record_request(&store, &sid, &phantom_key, "council_parent_seat", "{}", "ghost-child").unwrap();
+    assert!(child_council::verified_parent_seats(&store, &root)
+        .unwrap_err().contains("unexpected or unverifiable composite seat"));
+    assert!(child_council::inspect(&store, &root).is_err());
+    store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2
+         AND kind='council_parent_seat'",
+        rusqlite::params![sid, phantom_key],
+    ).unwrap();
+    assert_eq!(child_council::verified_parent_seats(&store, &root).unwrap().unwrap().len(), 2);
     store.db.execute(
         "UPDATE architect_requests SET content='{}'
          WHERE parent_session_id=?1 AND kind='council_child_receipt' AND worker_id=?2",

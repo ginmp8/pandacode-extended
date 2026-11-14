@@ -545,6 +545,64 @@ fn parent_seat(
     Ok(candidate.filter(|_| persist))
 }
 
+/// Revalidate the *entire* frozen root composite roster before any consumer can
+/// use it. Individual receipts prove leaves, but cannot prove that sibling
+/// child seats are distinct or that an extra persisted parent seat was not
+/// injected. Incomplete children return None; stale or forged state fails closed.
+/// This is an evidence boundary, not a second Council verdict or an approval.
+pub(super) fn verified_parent_seats(
+    store: &Store, root: &TeamSnapshot,
+) -> Result<Option<Vec<AuthenticatedParentSeat>>> {
+    let Some(config) = root.config.council.as_ref() else { return Ok(None) };
+    if config.nested_bot_reviewers.is_empty()
+        || root.council_since <= 0 || root.objective.trim().is_empty()
+    {
+        return Ok(None);
+    }
+    crate::bots::shared_channels::validate_delivery_council(
+        store, &root.session_id, config,
+    )?;
+    let mut workers = HashSet::new();
+    let mut sessions = HashSet::new();
+    let mut bots = HashSet::new();
+    let mut ready = true;
+    let mut seats = Vec::with_capacity(config.nested_bot_reviewers.len());
+    for choice in &config.nested_bot_reviewers {
+        let record = read(store, root, choice)?
+            .ok_or("child_council_stale: required child reservation is missing.")?;
+        let child = super::load(store, &record.child_session_id)?
+            .ok_or("child_council_stale: required child Council is missing.")?;
+        let Some(seat) = parent_seat(store, root, &record, &child, false)? else {
+            ready = false;
+            continue;
+        };
+        if seat.parent_worker_id.is_empty() || seat.child_session_id.is_empty()
+            || !bots.insert(seat.bot_id.as_str())
+            || !workers.insert(seat.parent_worker_id.as_str())
+            || !sessions.insert(seat.child_session_id.as_str())
+            || root.workers.iter().any(|worker|
+                worker.id == seat.parent_worker_id || worker.session_id == seat.child_session_id)
+        {
+            return Err("child_council_stale: duplicate or conflicting root composite seat identity.".into());
+        }
+        seats.push(seat);
+    }
+    // Bind the record count to this cycle only. Old cycles are harmless,
+    // but phantom seats in this cycle may not be silently ignored.
+    let key_prefix = format!("native-council-parent-seat:{}:", root.council_since);
+    let recorded: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_parent_seat'
+         AND substr(key,1,length(?2))=?2",
+        params![root.session_id, key_prefix],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if recorded != seats.len() as i64 {
+        return Err("child_council_stale: unexpected or unverifiable composite seat in root cycle.".into());
+    }
+    Ok(ready.then_some(seats))
+}
+
 /// Trusted root-only transition: allocate fresh read-only reviewer sessions
 /// after the root's actual writing workers settle. No bot conversation, prompt
 /// claim or persisted child reservation can request this operation.
@@ -632,6 +690,9 @@ pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
             .ok_or("child_council_stale: native child admission was not persisted.")?;
         created = true;
     }
+    // A completed child cannot be used while any sibling composite identity
+    // or extra persisted root seat conflicts with the frozen roster.
+    let _ = verified_parent_seats(store, root)?;
     Ok(created)
 }
 
@@ -808,6 +869,9 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
     crate::bots::shared_channels::validate_delivery_council(
         store, &root.session_id, council,
     )?;
+    // Read-only inspection must not mistake independently valid but jointly
+    // conflicting child records for a trustworthy root roster.
+    let _ = verified_parent_seats(store, root)?;
     council.nested_bot_reviewers.iter().map(|child| {
         let record = read(store, root, child)?
             .ok_or("child_council_stale: expected native child reservation is missing.")?;

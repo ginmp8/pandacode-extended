@@ -3265,6 +3265,38 @@ fn council_child_links_for_root_cycle(
         .collect()
 }
 
+/// Count every previously admitted native child reviewer in the current root
+/// cycle, including failed, cancelled, replaced and earlier-round attempts.
+/// The active child snapshot may include admissions still inside this dispatch
+/// transaction; do not reload and undercount it from persistent storage.
+fn composed_child_attempt_total(
+    store: &Store, root: &TeamSnapshot, current_task: &TeamSnapshot,
+) -> Result<usize> {
+    let root_cycle_id = format!("{}:{}", root.session_id, root.council_since);
+    let mut seen_children = HashSet::new();
+    let mut attempts = 0usize;
+    for link in council_child_links_for_root_cycle(store, &root.session_id, &root_cycle_id)? {
+        if link.child_session_id == root.session_id
+            || !seen_children.insert(link.child_session_id.as_str())
+        {
+            return Err("reviewer_session_mismatch: duplicate or recursive child in Council attempt accounting.".into());
+        }
+        let child = if link.child_session_id == current_task.session_id {
+            current_task.clone()
+        } else {
+            load(store, &link.child_session_id)?
+                .ok_or("reviewer_session_mismatch: nested Council child is missing during attempt accounting.")?
+        };
+        if link.child_council_cycle_id != format!("{}:{}", child.session_id, child.council_since) {
+            return Err("reviewer_session_mismatch: nested Council cycle changed during attempt accounting.".into());
+        }
+        attempts = attempts.saturating_add(
+            child.workers.iter().filter(|worker| worker.council.is_some()).count()
+        );
+    }
+    Ok(attempts)
+}
+
 fn nested_leaf_total(
     store: &Store,
     root_session_id: &str,
@@ -6832,6 +6864,11 @@ fn dispatch_as_inner(
                     } else {
                         team.clone()
                     };
+                    // Count all root and child attempts across the root cycle,
+                    // not just the current round's per-leaf quota. The transaction
+                    // rolls back the whole batch if this combined budget is spent.
+                    let child_attempts = composed_child_attempt_total(&store, &root, &team)?;
+                    council::require_composed_attempt_budget(&root, child_attempts, 1)?;
                     let root_cycle_id = format!("{}:{}", root.session_id, root.council_since);
                     let root_round = nested_child_link.as_ref().map_or(seat.round, |link| link.root_round);
                     let used = council_leaf_review_total(&store, &root, &team, &root_cycle_id, root_round)?;

@@ -153,3 +153,10 @@ states and the fixed versus OnTrigger budget boundary.
 - Existing PR #155 native composition, task-isolated child Council, immutable child receipt, Shared Channel composition UI and current terminal-evidence code remain authoritative. The #149 `child_council.rs` and `council-inspector.ts` implementations are **not** copied into parallel, competing runtime/UI pipelines.
 - **Not a full semantic source sync:** the remaining #149-only child lifecycle, shared consumed root/child admission budget, child-only terminal/restart rotation and inspector drill-down differences still require path-by-path behavior comparison and exact-HEAD native/UI tests. Source patches overlap heavily with PR #155's independently evolved architecture; raw cherry-picks would replace working contracts.
 - No source or base ref is mutated here. The original #149/#152 commit SHAs are evidence pointers, not integrated-commit ancestry. Exact-HEAD Rust/Node/Playwright tests and full #147 acceptance remain unverified; keep this PR in draft.
+
+## November 14: combined root/child admission cap
+
+- Adapted PR #149's cumulative 1,024-attempt model to the single #152-derived native Council: root reviewer admission and all linked child Council leaf admissions share one cycle-wide ceiling, across all rounds and retries.
+- Preserved the existing configured `maxLeafReviewsPerRound` limit and legacy M1/M2 behavior. The cumulative check runs before new root **and** child reviewer creation inside the native dispatch transaction; duplicates or changed child-cycle identities fail closed.
+- Added native regression cases for abandoned and failed child leaves, multiple rounds, in-flight batch accounting, old-cycle exclusion, and legacy compatibility.
+- This change does not copy PR #149's parallel child engine or claim end-to-end integration acceptance. Rust and UI tests remain unexecuted from the connector environment.

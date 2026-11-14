@@ -82,6 +82,27 @@ pub(super) fn require_root_attempt_capacity(team: &TeamSnapshot) -> Result<()> {
     Ok(())
 }
 
+/// Bound real root and child reviewer admissions together for one composed
+/// root cycle. Failed, abandoned and replaced attempts never refund capacity.
+pub(super) fn require_composed_attempt_budget(
+    team: &TeamSnapshot, child_attempts: usize, additional_attempts: usize,
+) -> Result<()> {
+    if !team.config.council.as_ref().is_some_and(|config| config.composition.is_some()) {
+        return Ok(());
+    }
+    let root_attempts = team.workers.iter()
+        .filter(|worker| worker.council.is_some() && worker.created_at >= team.council_since)
+        .count();
+    if root_attempts.saturating_add(child_attempts).saturating_add(additional_attempts)
+        > MAX_COMPOSED_ROOT_REVIEW_ATTEMPTS
+    {
+        return Err(format!(
+            "council_attempt_budget_exhausted: a composed Council permits at most              {MAX_COMPOSED_ROOT_REVIEW_ATTEMPTS} root and child reviewer admissions per root cycle."
+        ));
+    }
+    Ok(())
+}
+
 pub(super) const FAILED_REVIEWER: &str = " A failed Council reviewer is never followed up: cancel it (it has no score) and dispatch a fresh reviewer with councilLens.";
 
 /// The number of root automatic reviewers is either explicit or delegated to the root Architect.

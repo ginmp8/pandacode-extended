@@ -7167,6 +7167,50 @@ fn composed_admission_test_config() -> council::CouncilConfig {
 }
 
 #[test]
+fn composed_attempt_budget_counts_child_failures_and_all_rounds_without_refunds() {
+    let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();
+    let store = state.store.lock().unwrap();
+    let mut root = load(&store, &root_id).unwrap().unwrap();
+    root.config.council = Some(composed_admission_test_config());
+    let mut admitted_root = worker("current-root-review", "failed", &[], &[]);
+    admitted_root.created_at = root.council_since;
+    admitted_root.abandoned = true;
+    admitted_root.council = Some(CouncilSeat { round: 2, ..CouncilSeat::default() });
+    root.workers.push(admitted_root);
+
+    let mut child = load(&store, &child_id).unwrap().unwrap();
+    child.workers[0].council = Some(CouncilSeat { round: 1, ..CouncilSeat::default() });
+    child.workers[0].status = "stopped".into();
+    child.workers[0].abandoned = true;
+    let mut retry = worker("child-retry", "failed", &[], &[]);
+    retry.council = Some(CouncilSeat { round: 2, ..CouncilSeat::default() });
+    child.workers.push(retry);
+    save(&store, &mut child).unwrap();
+
+    let used = composed_child_attempt_total(&store, &root, &root).unwrap();
+    assert_eq!(used, 2, "failed and abandoned child leaves from earlier rounds are not refunded");
+    assert!(council::require_composed_attempt_budget(&root, used, 1021).is_ok());
+    assert!(council::require_composed_attempt_budget(&root, used, 1022)
+        .unwrap_err().contains("council_attempt_budget_exhausted"));
+
+    let mut in_flight_child = child.clone();
+    let mut extra = worker("child-unsaved", "queued", &[], &[]);
+    extra.council = Some(CouncilSeat { round: 2, ..CouncilSeat::default() });
+    in_flight_child.workers.push(extra);
+    assert_eq!(composed_child_attempt_total(&store, &root, &in_flight_child).unwrap(), 3,
+        "same-batch native child admissions must count before their team is saved");
+
+    let mut next_cycle = root.clone();
+    next_cycle.council_since = next_cycle.council_since.saturating_add(1);
+    assert_eq!(composed_child_attempt_total(&store, &next_cycle, &next_cycle).unwrap(), 0,
+        "old-cycle child records cannot consume or grant attempts in the next objective");
+
+    root.config.council = Some(council::CouncilConfig::default());
+    assert!(council::require_composed_attempt_budget(&root, usize::MAX, usize::MAX).is_ok(),
+        "legacy Council is not constrained by the new composed root budget");
+}
+
+#[test]
 fn composed_root_default_parallelism_is_bounded_without_changing_legacy_or_explicit_limits() {
     let (_, mut team) = fixture();
     team.config.max_parallel = 0;

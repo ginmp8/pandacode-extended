@@ -33,6 +33,16 @@ interface TeamSnapshot {
   workerBotIds?: unknown; reviewerBotIds?: unknown; policy?: unknown; roles?: unknown;
 }
 interface Ticket { id: string; orchestrationId: string; objective: string; state: string; revision: number; evidence: string | null }
+interface WorkItemEvidence {
+  id:string; key:string; ordinal:number; workerBotId:string; objective:string;
+  dependsOn:string[]; state:string; childTicketId:string|null;
+  childTicketState:string|null; lastReason:string|null;
+  requiresWrite:boolean; writeAuthorized:boolean;
+}
+interface DemandPlanEvidence {
+  ticketId:string; ticketRevision:number; teamVersion:number; policyRevision:number;
+  planSha256:string; state:string; items:WorkItemEvidence[];
+}
 interface DemandIndex { id: string; orchestrationId: string; objective: string;
   state: string; revision: number; updatedAt: number }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
@@ -146,7 +156,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let writePathsDraft = '', writePathsError = '';
   let commentRepository = '', commentIssueNumber = '', commentDraft = '';
   let issueCommentError = '', issueCommentStatus: IssueCommentStatus | null = null;
-  let demandObjective = '', demandMode: 'coordinated' | 'direct' = 'coordinated';
+  let demandObjective = '', demandMode: 'coordinated' | 'direct' | 'auto' = 'coordinated';
+  let workPlan: DemandPlanEvidence | null = null, workPlanLoaded = false;
+  let workWriteItemKey = '', workWritePaths = '';
   let demandPreflight: ManualPreflight | null = null;
   let preflightObjective = '', preflightMode: 'coordinated' | 'direct' = 'coordinated';
   // Persist the user's editable preset draft across asynchronous list refreshes.
@@ -307,10 +319,46 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           Math.max(0, Math.floor(insight.remainingRunBudgetMs / 1000)) + ' seconds remain') +
         '</dd></dl><button type="button" data-sa-close-assignment>Close attempt</button></section>'
       : '';
+    const demandPlanPanel = '<section class="sa-pane" role="region" aria-label="Demand WorkItems">' +
+      '<h5>Native dependency plan</h5><p>Each WorkItem has a separate native Ticket and review gate. ' +
+      'No Coordinator text can issue write authorization.</p>' +
+      '<button type="button" data-sa-load-work-plan>Inspect WorkItems</button>' +
+      (workPlanLoaded && workPlan?.ticketId === inspectedTicket
+        ? '<p role="status">Plan ' + safe(workPlan.state) +
+          ' · Team version ' + safe(workPlan.teamVersion) +
+          ' · SHA-256 ' + safe(workPlan.planSha256) + '</p>' +
+          '<ol class="sa-tickets">' + workPlan.items.map(item =>
+            '<li><strong>' + safe(item.key) + '</strong> · ' + safe(item.state) +
+            ' · Worker ' + safe(botName(item.workerBotId)) +
+            '<p>' + safe(item.objective) + '</p>' +
+            '<small>Prerequisites: ' + safe(item.dependsOn.join(', ') || 'none') +
+            ' · Child Ticket: ' + safe(item.childTicketId ?? 'not admitted') +
+            ' · Native state: ' + safe(item.childTicketState ?? 'not started') +
+            (item.lastReason ? ' · ' + safe(item.lastReason) : '') + '</small>' +
+            (item.requiresWrite && !item.writeAuthorized && item.state === 'pending'
+              ? ' <button type="button" data-sa-authorize-work="' + safe(item.key) +
+                '">Authorize exact file paths</button>' : '') +
+            (item.requiresWrite && item.writeAuthorized
+              ? ' <small>Exact file scope confirmed locally</small>' : '') +
+            '</li>').join('') + '</ol>' +
+          (workWriteItemKey && workPlan.items.some(item => item.key === workWriteItemKey &&
+            item.requiresWrite && item.state === 'pending' && !item.writeAuthorized)
+            ? '<form data-sa-form="work-write-scope" aria-label="WorkItem file authorization">' +
+              '<p>Native local-user confirmation required for ' + safe(workWriteItemKey) +
+              '. Only exact file paths; other tool and GitHub rights remain denied.</p>' +
+              '<label>Exact project-relative paths, one per line' +
+              '<textarea name="allowedPaths" rows="4" spellcheck="false" required>' +
+              safe(workWritePaths) + '</textarea></label>' +
+              '<button type="submit" class="primary-button">Review native authorization</button>' +
+              '<button type="button" data-sa-work-write-cancel>Cancel</button></form>' : '')
+        : workPlanLoaded ? '<p>No native WorkItem plan belongs to this Ticket.</p>'
+          : '<p>Plan not loaded.</p>') +
+      '</section>';
     const details = inspected && ticketDetails
       ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
         '<h4>Ticket evidence</h4><p>Read-only native snapshot. Model output is not task approval.</p>' +
         renderTeamSnapshot(ticketDetails.teamSnapshot) +
+        demandPlanPanel +
         '<dl><dt>Ticket ID</dt><dd><code>' + safe(inspected.id) + '</code></dd>' +
         '<dt>State / revision</dt><dd>' + safe(inspected.state) + ' / ' + inspected.revision + '</dd>' +
         '<dt>Actor</dt><dd>' + safe(ticketDetails.mandate.actor) + '</dd>' +
@@ -610,10 +658,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '<label>Dispatch<select name="mode"><option value="coordinated"' +
       (demandMode === 'coordinated' ? ' selected' : '') + '>Coordinator, then worker</option>' +
       '<option value="direct"' + (demandMode === 'direct' ? ' selected' : '') +
-      '>Worker directly</option></select></label>' +
+      '>Worker directly</option>' +
+      '<option value="auto"' + (demandMode === 'auto' ? ' selected' : '') +
+      '>Supervised Demand · native WorkItems</option></select></label>' +
       '<button type="button" data-sa-preflight>Review native preflight</button>' +
       '<button class="primary-button" type="submit"' + (chosen.enabled ? '' : ' disabled') +
-      '>Dispatch manually</button></form>' + nativePreflight +
+      '>' + (demandMode === 'auto' ? 'Start supervised Demand' : 'Dispatch manually') +
+      '</button></form>' + nativePreflight +
       '<div class="sa-title"><h4>Tickets</h4><button type="button" data-sa-refresh>Refresh</button></div>' +
       '<ul class="sa-tickets">' + (tickets.map(ticket =>
         '<li><div><strong>' + safe(ticket.objective) + '</strong><small>' + safe(ticket.state) +
@@ -990,7 +1041,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (target instanceof HTMLSelectElement && target.name === 'mode' &&
         target.closest<HTMLFormElement>('form[data-sa-form="run"]')) {
-      demandMode = target.value === 'direct' ? 'direct' : 'coordinated';
+      demandMode = target.value === 'auto' ? 'auto' :
+        target.value === 'direct' ? 'direct' : 'coordinated';
       demandPreflight = null;
       host.querySelector('[aria-label="Native demand preflight"]')?.remove();
       return;
@@ -1101,6 +1153,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       return;
     }
     if (target.hasAttribute('data-sa-preflight')) {
+      if (demandMode === 'auto') {
+        feedback = 'Native Demand admission will recheck the saved Team, original project, Coordinator, member profiles and checkout leases before dispatch. Planned file writes require separate local confirmation.';
+        render();
+        return;
+      }
       const form = host.querySelector<HTMLFormElement>('form[data-sa-form="run"]');
       const chosen = current();
       const objective = form?.querySelector<HTMLTextAreaElement>('textarea[name="objective"]')?.value.trim() ?? '';
@@ -1336,6 +1393,36 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
+    if (target.hasAttribute('data-sa-load-work-plan')) {
+      const ticketId = inspectedTicket;
+      const selectedTicket = tickets.find(ticket => ticket.id === ticketId);
+      if (ticketId && selectedTicket && ticketDetails?.ticket.id === ticketId) void work(async () => {
+        const plan = await call<DemandPlanEvidence | null>('superagent_demand_plan',{ticketId});
+        if (inspectedTicket === ticketId) {
+          if (plan && plan.ticketId !== ticketId) {
+            throw new Error('Native WorkItem plan belongs to a different Ticket.');
+          }
+          workPlan = plan;
+          workPlanLoaded = true;
+        }
+      });
+      return;
+    }
+    if (target.dataset.saAuthorizeWork) {
+      const item = workPlan?.items.find(item => item.key === target.dataset.saAuthorizeWork);
+      const ticket = tickets.find(ticket => ticket.id === inspectedTicket);
+      if (item?.requiresWrite && item.state === 'pending' && !item.writeAuthorized &&
+          ticket?.state === 'queued' && workPlan?.state === 'active' &&
+          workPlan.ticketId === ticket.id) {
+        workWriteItemKey = item.key; workWritePaths = ''; render();
+        host.querySelector<HTMLTextAreaElement>('form[data-sa-form="work-write-scope"] textarea')?.focus();
+      }
+      return;
+    }
+    if (target.hasAttribute('data-sa-work-write-cancel')) {
+      workWriteItemKey = ''; workWritePaths = ''; render();
+      return;
+    }
     if (target.hasAttribute('data-sa-refresh')) { void work(reload); return; }
     if (target.hasAttribute('data-sa-load-effect-receipts')) {
       const ticketId = inspectedTicket;
@@ -1396,6 +1483,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       return;
     }
     if (target.dataset.saInspectTicket) {
+      workPlan = null; workPlanLoaded = false;
+      workWriteItemKey = ''; workWritePaths = '';
       const id = target.dataset.saInspectTicket;
       if (inspectedTicket === id) {
         inspectedTicket = ''; ticketDetails = null; inspectedAssignmentId = '';
@@ -1462,6 +1551,38 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (!(form instanceof HTMLFormElement) || !host.contains(form)) return;
     event.preventDefault();
     const data = new FormData(form);
+    if (form.dataset.saForm === 'work-write-scope') {
+      const ticketId = inspectedTicket;
+      const plan = workPlan;
+      const itemKey = workWriteItemKey;
+      const ticket = tickets.find(ticket => ticket.id === ticketId);
+      workWritePaths = String(data.get('allowedPaths') ?? '');
+      const paths = workWritePaths.split(/\r\n?|\n/).filter(Boolean);
+      if (!plan || !ticket || ticket.state !== 'queued' || plan.state !== 'active' ||
+          plan.ticketId !== ticketId || plan.ticketRevision !== ticket.revision ||
+          !plan.items.some(item => item.key === itemKey && item.state === 'pending' &&
+            item.requiresWrite && !item.writeAuthorized) || paths.length === 0 || paths.length > 16) {
+        error = 'A current, pending WorkItem and 1 to 16 exact paths are required.';
+        render(); return;
+      }
+      void work(async () => {
+        const result = await call<DemandPlanEvidence>('superagent_authorize_work_item_write', {
+          ticketId, expectedRevision:plan.ticketRevision, itemKey, allowedPaths:paths,
+        });
+        if (result.ticketId !== ticketId || !result.items.some(item =>
+          item.key === itemKey && item.requiresWrite && item.writeAuthorized)) {
+          throw new Error('Native file permission did not match the selected WorkItem.');
+        }
+        workWriteItemKey = ''; workWritePaths = '';
+        await reload();
+        if (inspectedTicket === ticketId) {
+          workPlan = await call<DemandPlanEvidence | null>('superagent_demand_plan',{ticketId});
+          workPlanLoaded = true;
+        }
+        feedback = 'Exact WorkItem file scope confirmed natively. The scheduler will admit the eligible Worker without broader tool rights.';
+      });
+      return;
+    }
     if (form.dataset.saForm === 'write-grant') {
       const ticketId = writeGrantTicket;
       const expectedRevision = writeGrantRevision;
@@ -1689,7 +1810,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (form.dataset.saForm === 'run') {
       const selectedConfig = current(), objective = String(data.get('objective') ?? '').trim();
-      const command = data.get('mode') === 'direct' ? 'superagent_submit' : 'superagent_submit_coordinated';
+      const command = data.get('mode') === 'auto' ? 'superagent_start_demand' :
+        data.get('mode') === 'direct' ? 'superagent_submit' : 'superagent_submit_coordinated';
       if (!selectedConfig?.enabled || !objective) return;
       const key = taskKey;
       void work(async () => {

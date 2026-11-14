@@ -4532,6 +4532,7 @@ pub fn run() {
                 superagent::scheduler::superagent_plan_demand,
                 superagent::scheduler::superagent_demand_plan,
                 superagent::scheduler::superagent_start_demand,
+                superagent::scheduler::superagent_authorize_work_item_write,
                 superagent::superagent_effect_receipts,
                 superagent::superagent_preflight,
                 superagent::superagent_submit,

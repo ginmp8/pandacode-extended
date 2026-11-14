@@ -2429,6 +2429,26 @@ fn admit_role_with_selected(
     request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
     selected_worker: Option<&str>,
 ) -> Result<(Ticket, bool)> {
+    admit_role_with_grant(store,config_id,objective,request_key,busy,coordinate,
+        headless_staging,selected_worker,None)
+}
+
+/// App-managed exact-file writes are available only with a separately
+/// confirmed immutable WorkItem scope. No coordinator or legacy call
+/// acquires a write capability by choosing a different Worker.
+fn admit_role_with_grant(
+    store: &mut Store, config_id: &str, objective: &str,
+    request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
+    selected_worker: Option<&str>,
+    authorized_paths: Option<&[String]>,
+) -> Result<(Ticket, bool)> {
+    if let Some(paths)=authorized_paths {
+        if coordinate || headless_staging || selected_worker.is_none() ||
+            !crate::workspace::scoped_writes_supported() {
+            return Err("policy_unsupported: scoped Demand writes require a selected Worker and a native supported checkout.".into());
+        }
+        write_grants::validate_paths(paths)?;
+    }
     let objective = objective.trim();
     if objective.is_empty() || objective.len() > MAX_OBJECTIVE_BYTES || objective.chars().any(|c| c == '\0') {
         return Err("A nonempty, bounded objective is required.".into());
@@ -2453,6 +2473,16 @@ fn admit_role_with_selected(
             ).ok().as_deref() != Some(id)
         }) {
             return Err("The work-item request key belongs to a different Worker.".into());
+        }
+        if let Some(paths)=authorized_paths {
+            let stored:Option<String>=store.db.query_row(
+                "SELECT allowed_paths FROM sa_worker_write_grants WHERE ticket_id=?1",
+                [&ticket.id],|row|row.get(0),
+            ).optional().map_err(|error|error.to_string())?;
+            let expected=serde_json::to_string(paths).map_err(|error|error.to_string())?;
+            if stored.as_deref()!=Some(expected.as_str()) {
+                return Err("WorkItem replay requested a different file-write authorization.".into());
+            }
         }
         // A key identifies the original native dispatch intent as well as its
         // objective. Replaying a direct worker request as a coordinator request
@@ -2492,6 +2522,9 @@ fn admit_role_with_selected(
     }
     let coordinator = bots::get(store, &config.coordinator_bot_id)?;
     let worker = bots::get(store, chosen_worker)?;
+    if authorized_paths.is_some() && worker.provider!="codex" {
+        return Err("policy_unsupported: scoped Demand file writes require a native Codex Worker.".into());
+    }
     if config.team_version <= 0 || coordinator.paused || worker.paused
         || worker.project_id != config.project_id
     {
@@ -2573,6 +2606,21 @@ fn admit_role_with_selected(
             council_adapter::admit_required(
                 store,&tx,&ticket_id,assignment_id,session_id,0,&team_snapshot,
             )?;
+            if let Some(paths)=authorized_paths {
+                let original_session=store.session(session_id)?;
+                let root=store.workspace_root(&original_session.project_id,Some(session_id))?;
+                write_grants::validate_paths_in_root(&root,paths)?;
+                write_grants::insert_for_assignment(
+                    &tx,&ticket_id,assignment_id,session_id,&config.project_id,
+                    &root.to_string_lossy(),0,team_snapshot.policy.policy_revision,paths,now,
+                )?;
+                tx.execute(
+                    "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                     VALUES(?1,'work_item_write_authorized',?2,?3)",
+                    params![ticket_id,
+                        serde_json::json!({"tool":write_grants::TOOL_NAME,"paths":paths}).to_string(),now],
+                ).map_err(|error|error.to_string())?;
+            }
         }
     }
     tx.execute(

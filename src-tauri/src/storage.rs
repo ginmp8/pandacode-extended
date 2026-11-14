@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 53;
+pub const SCHEMA_VERSION: i64 = 54;
 pub(crate) const COUNCIL_REVIEW_SNAPSHOT_DIRECTORY: &str = "council-review-snapshots";
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
@@ -880,6 +880,26 @@ impl Store {
                     .map_err(|e| e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=53;")
                     .map_err(|e| e.to_string())?;
+            }
+            if version < 54 {
+                // The Coordinator may flag a required file write, but only a
+                // separate local-user decision grants exact file paths. Keep
+                // v53 databases upgradeable without rewriting their plans.
+                let already:bool=migration.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_work_items')
+                     WHERE name='requires_write')",
+                    [],|row|row.get(0),
+                ).map_err(|e|e.to_string())?;
+                if !already {
+                    migration.execute_batch(
+                        "ALTER TABLE sa_work_items ADD COLUMN requires_write INTEGER
+                         NOT NULL DEFAULT 0 CHECK(requires_write IN (0,1));"
+                    ).map_err(|e|e.to_string())?;
+                }
+                migration.execute_batch(crate::superagent::scheduler::WRITE_SCOPES_SCHEMA)
+                    .map_err(|e|e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=54;")
+                    .map_err(|e|e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
         }

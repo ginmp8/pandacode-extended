@@ -1,17 +1,18 @@
 # Extended SuperAgent orchestration
 
-> **Integration status:** PR #153 is a draft semantic reconciliation of PR #150
-> and PR #151, not a completed delivery of issue #148. The main-content
-> Teams/Demands/Review/Sources workspace, versioned Team snapshots, native
-> task-bound Council implementation, authenticated operator-invoked Observe,
-> restricted Worker write grants and exact GitHub issue-comment reconciliation
-> coexist in this branch. Windows-only scoped writes remain guarded; Unix is
-> unsupported. The dependency-aware autonomous scheduler, multi-worker
-> execution, GitHub Auto, nested subagents, full headless parity and complete
-> #131/#148 acceptance evidence remain outstanding.
+> **Integration status:** PR #154 extends the previous #153 reconciliation
+> with a draft native Demand scheduler, immutable WorkItem dependency graph,
+> existing-Team Worker selection, isolated child Tickets and a user-confirmed
+> exact-file write capability for eligible Codex Workers. Once each native child
+> Ticket reaches its real completion gate, the scheduler unlocks dependent work
+> and can close the root Demand without an extra continuation prompt. This
+> does **not** implement full GitHub Auto, unrestricted provider writes,
+> hierarchical Worker-created subagents or all #131/#148 acceptance criteria.
+> Unix scoped file writes remain denied until a verified native adapter exists.
+> No draft source or unexecuted test is proof of issue completion.
 >
-> **Integration branch:** `feat/issue-148-superagent-unified`; see
-> [the unified integration contract](superagent-unified-integration.md).
+> **Integration branch:** `feat/issue-148-unified-150-151-v2`; see
+> [the Demand scheduler contract](superagent-demand-scheduler.md).
 > Earlier source-PR descriptions, worker-reported checks and historical
 > review packets are not independent proof for the integration HEAD.
 
@@ -21,7 +22,7 @@
 
 **Working source baseline:** f9efb3a1c7558dcf7d5688bb1687cfff9253f967
 
-**Current integration branch:** feat/issue-148-superagent-unified
+**Current integration branch:** feat/issue-148-unified-150-151-v2
 
 ## Purpose and ownership
 
@@ -58,11 +59,11 @@ The standalone design packet and source map are [here](extended-superagent-desig
 | S0 source map | Updated for #148 baseline and candidate boundaries |
 | S1 scoped writes | Integrated native exact-path grants and provider ToolHost; Windows-supported/Unix-denied boundaries; integration-head tests and effect replay gates pending |
 | S2 UX-P1 persistent workspace | Implemented and browser-verified; preserve non-modal route |
-| S2 multi-role Teams/work graph | Partial: Team Builder supports ordered Workers and Reviewers; Ticket evidence uses the immutable saved Team snapshot. Multi-worker scheduling and reviewer execution remain incomplete. |
+| S2 multi-role Teams/work graph | Partial: a bounded persisted native WorkItem DAG now admits eligible Team Workers through separate child Tickets and native checkout leases; real multi-checkout parallelism, automated quality gates and broader scheduler recovery remain outstanding. |
 | S3 task-bound Council | Integrated candidate native independent reviewer start, exact Ticket/artifact correlation and completion callbacks; native acceptance tests and final integration SHA still unverified |
 | S4 manual Observe / Auto | Integrated authenticated bounded operator-invoked GitHub Events polling and Checks API observation, plus exact thread metadata; Auto admission and background subscription remain unavailable |
-| S5 recovery/headless/subagents | Incomplete; Rust validation outstanding |
-| S6 exact-SHA evidence | In progress on PR #153; previous branch-specific CI results do not transfer to the integration HEAD |
+| S5 recovery/headless/subagents | Partial: root Stop revokes child Tickets and cancels active sessions; restarted unfinished child work, deep child lineage and full headless parity remain outstanding. Native Rust validation pending. |
+| S6 exact-SHA evidence | In progress on PR #154; source-level implementation is not compiled/verified for the final integration HEAD |
 | Live GitHub smoke | not_run until a disposable authorized repository is available |
 
 ## Existing safe import and thread behavior

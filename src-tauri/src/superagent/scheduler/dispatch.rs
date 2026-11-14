@@ -8,6 +8,7 @@ use tauri::Manager;
 #[derive(Debug,Clone)]
 struct ReadyItem {
     id:String, root:String, key:String, objective:String, worker:String,
+    requires_write:bool,
 }
 
 pub(crate) fn parent_active(store:&Store,child_ticket_id:&str)->Result<bool> {
@@ -44,9 +45,9 @@ pub(crate) fn sessions_for_root(store:&Store,root:&str)->Result<Vec<String>> {
          WHERE item.ticket_id=?1 AND assignment.state='running'
          ORDER BY assignment.created_at,assignment.id"
     ).map_err(|e|e.to_string())?;
-    statement.query_map([root],|r|r.get::<_,String>(0))
-        .map_err(|e|e.to_string())?
-        .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())
+    let sessions=statement.query_map([root],|r|r.get::<_,String>(0))
+        .map_err(|e|e.to_string())?;
+    sessions.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())
 }
 
 /// Invoked within the original parent's Stop transaction. This revokes all
@@ -110,12 +111,77 @@ fn reconcile(store:&Store)->Result<()> {
          WHERE state IN ('running','waiting_review') AND child_ticket_id IN
          (SELECT id FROM sa_tickets WHERE state IN ('failed','blocked','stopped','interrupted','inconclusive'))",[now],
     ).map_err(|e|e.to_string())?;
-    store.db.execute(
-        "UPDATE sa_demand_plans SET state='ready_for_review',updated_at=?1
-         WHERE state='active' AND NOT EXISTS(
-           SELECT 1 FROM sa_work_items WHERE ticket_id=sa_demand_plans.ticket_id
-             AND state<>'completed')",[now],
-    ).map_err(|e|e.to_string())?;
+    // A local user authorized the full Demand once. All child Tickets
+    // already passed their own native human/Council/effect gates, so no
+    // additional per-step "continue" prompt is necessary for final state.
+    // Never call this "completed" if even one WorkItem lacks native proof.
+    let roots={
+        let mut query=store.db.prepare(
+            "SELECT plan.ticket_id FROM sa_demand_plans plan
+             JOIN sa_tickets root ON root.id=plan.ticket_id
+             JOIN sa_mandates grant ON grant.ticket_id=root.id
+             JOIN sa_orchestrations team ON team.id=root.orchestration_id
+             WHERE plan.state='active'
+               AND root.state='queued' AND root.active_assignment_id IS NULL
+               AND root.policy_revision=plan.policy_revision
+               AND root.revision=plan.ticket_revision
+               AND grant.revoked=0 AND grant.expires_at>?1
+               AND grant.policy_revision=plan.policy_revision
+               AND grant.allowed_tools='[]' AND grant.allowed_side_effects=0
+               AND team.enabled=1 AND team.policy_revision=plan.policy_revision
+               AND EXISTS(SELECT 1 FROM sa_work_items WHERE ticket_id=plan.ticket_id)
+               AND NOT EXISTS(
+                 SELECT 1 FROM sa_work_items item
+                 LEFT JOIN sa_tickets child ON child.id=item.child_ticket_id
+                 WHERE item.ticket_id=plan.ticket_id
+                   AND (item.state<>'completed' OR child.state IS NULL
+                        OR child.state<>'completed'))
+               AND NOT EXISTS(
+                 SELECT 1 FROM sa_effect_receipts effect
+                 WHERE effect.state IN ('pending','uncertain')
+                   AND (effect.ticket_id=plan.ticket_id
+                        OR effect.ticket_id IN (
+                           SELECT child_ticket_id FROM sa_work_items
+                           WHERE ticket_id=plan.ticket_id)))"
+        ).map_err(|e|e.to_string())?;
+        query.query_map([now],|row|row.get::<_,String>(0))
+            .map_err(|e|e.to_string())?
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e|e.to_string())?
+    };
+    for root in roots {
+        let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
+        let moved=tx.execute(
+            "UPDATE sa_tickets SET state='completed',revision=revision+1,updated_at=?2
+             WHERE id=?1 AND state='queued'
+               AND revision=(SELECT ticket_revision FROM sa_demand_plans WHERE ticket_id=?1)
+               AND EXISTS (SELECT 1 FROM sa_mandates grant
+                            WHERE grant.ticket_id=?1 AND grant.revoked=0
+                              AND grant.expires_at>?2)
+               AND EXISTS(SELECT 1 FROM sa_work_items item WHERE item.ticket_id=?1)
+             AND NOT EXISTS(
+                 SELECT 1 FROM sa_work_items item
+                 LEFT JOIN sa_tickets child ON child.id=item.child_ticket_id
+                 WHERE item.ticket_id=?1
+                   AND (item.state<>'completed' OR child.state IS NULL
+                        OR child.state<>'completed'))",
+            params![root,now],
+        ).map_err(|e|e.to_string())?;
+        if moved==1 {
+            tx.execute(
+                "UPDATE sa_demand_plans SET state='completed',updated_at=?2
+                 WHERE ticket_id=?1 AND state='active'",
+                params![root,now],
+            ).map_err(|e|e.to_string())?;
+            tx.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES(?1,'demand_completed',
+                   'All admitted WorkItem Tickets finished under native review and effect gates',?2)",
+                params![root,now],
+            ).map_err(|e|e.to_string())?;
+        }
+        tx.commit().map_err(|e|e.to_string())?;
+    }
     // One blocked item never freezes independent safe work. Only its
     // dependants wait; the plan remains active for other ready items.
     Ok(())
@@ -123,7 +189,7 @@ fn reconcile(store:&Store)->Result<()> {
 
 fn ready(store:&Store)->Result<Vec<ReadyItem>> {
     let mut query=store.db.prepare(
-        "SELECT item.id,item.ticket_id,item.item_key,item.objective,item.worker_bot_id
+        "SELECT item.id,item.ticket_id,item.item_key,item.objective,item.worker_bot_id,item.requires_write
          FROM sa_work_items item
          JOIN sa_demand_plans plan ON plan.ticket_id=item.ticket_id
          JOIN sa_tickets root ON root.id=plan.ticket_id
@@ -137,6 +203,9 @@ fn ready(store:&Store)->Result<Vec<ReadyItem>> {
            AND grant.revoked=0 AND grant.expires_at>?1
            AND grant.policy_revision=plan.policy_revision
            AND grant.allowed_tools='[]' AND grant.allowed_side_effects=0
+           AND (item.requires_write=0 OR EXISTS(
+               SELECT 1 FROM sa_work_item_write_scopes scope
+               WHERE scope.item_id=item.id AND scope.root_ticket_revision=plan.ticket_revision))
            AND NOT EXISTS(
              SELECT 1 FROM sa_work_dependencies edge
              JOIN sa_work_items prerequisite
@@ -147,11 +216,11 @@ fn ready(store:&Store)->Result<Vec<ReadyItem>> {
                AND prerequisite.state<>'completed')
          ORDER BY plan.created_at,item.ordinal,item.id LIMIT 32"
     ).map_err(|e|e.to_string())?;
-    query.query_map([storage::now()],|r|Ok(ReadyItem {
+    let rows=query.query_map([storage::now()],|r|Ok(ReadyItem {
         id:r.get(0)?,root:r.get(1)?,key:r.get(2)?,
-        objective:r.get(3)?,worker:r.get(4)?,
-    })).map_err(|e|e.to_string())?
-    .collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())
+        objective:r.get(3)?,worker:r.get(4)?,requires_write:r.get(5)?,
+    })).map_err(|e|e.to_string())?;
+    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())
 }
 
 pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
@@ -172,8 +241,13 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
             let mut store=state.store.lock().map_err(|e|e.to_string())?;
             let _fence=superagent::effects::lock_dispatch(&store.path)?;
             let pending:bool=store.db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM sa_work_items
-                  WHERE id=?1 AND ticket_id=?2 AND state='pending' AND child_ticket_id IS NULL)",
+                "SELECT EXISTS(SELECT 1 FROM sa_work_items work
+                  WHERE work.id=?1 AND work.ticket_id=?2
+                    AND work.state='pending' AND work.child_ticket_id IS NULL
+                    AND (work.requires_write=0 OR EXISTS(
+                      SELECT 1 FROM sa_work_item_write_scopes scope
+                      JOIN sa_demand_plans plan ON plan.ticket_id=work.ticket_id
+                      WHERE scope.item_id=work.id AND scope.root_ticket_revision=plan.ticket_revision)))",
                 params![item.id,item.root],|r|r.get(0),
             ).map_err(|e|e.to_string())?;
             if !pending {None} else {
@@ -198,10 +272,20 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
                         &store,&active,&item.worker,&snapshot.project_id,
                     )? {None}
                 else {
+                    let paths:Option<Vec<String>>=if item.requires_write {
+                        let json:String=store.db.query_row(
+                            "SELECT scope.allowed_paths FROM sa_work_item_write_scopes scope
+                             JOIN sa_demand_plans plan ON plan.ticket_id=?2
+                             WHERE scope.item_id=?1 AND scope.root_ticket_revision=plan.ticket_revision",
+                            params![item.id,item.root],|row|row.get(0),
+                        ).map_err(|_|"WorkItem requires an unexpired native file grant.")?;
+                        Some(serde_json::from_str::<Vec<String>>(&json)
+                            .map_err(|_|"WorkItem file scope is invalid.")?)
+                    } else {None};
                     let request_key=format!("work.{}",item.id);
-                    let (child,launch)=superagent::admit_role_with_selected(
+                    let (child,launch)=superagent::admit_role_with_grant(
                         &mut store,&root.orchestration_id,&item.objective,
-                        &request_key,false,false,false,Some(&item.worker),
+                        &request_key,false,false,false,Some(&item.worker),paths.as_deref(),
                     )?;
                     let changed=store.db.execute(
                         "UPDATE sa_work_items SET child_ticket_id=?2,state=?3,updated_at=?4
@@ -209,17 +293,25 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
                         params![item.id,child.id,if launch {"running"} else {"blocked"},storage::now()],
                     ).map_err(|e|e.to_string())?;
                     if changed!=1 {return Err("WorkItem claim changed during native admission.".into())}
-                    if launch {Some(child)} else {None}
+                    if launch {Some((child,paths))} else {None}
                 }
             }
         };
-        let Some(child)=claimed else {continue};
+        let Some((child,paths))=claimed else {continue};
         let allowed={
             let state=app.state::<AppState>();
             let store=state.store.lock().map_err(|e|e.to_string())?;
             parent_active(&store,&child.id)?
         };
         if !allowed {continue}
+        let worker_instructions=if let Some(ref paths)=paths {
+            format!("The local user confirmed EXACT file paths for the native {} tool:\n{}.\n\
+                Other paths, provider-native shell/files and external MCP/GitHub effects remain denied.\n\
+                Do not treat model instructions as additional grants.",
+                superagent::write_grants::TOOL_NAME,paths.join("\n"))
+        } else {
+            "Read-only authorized scope. No file, shell, MCP or GitHub write effects are permitted.".into()
+        };
         let result=bots::gateway::deliver(app,bots::gateway::Inbound {
             bot_id:item.worker.clone(),
             channel_id:superagent::CHANNEL.into(),
@@ -228,9 +320,8 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
             sender_name:"Authorized Demand scheduler".into(),
             text:format!(
                 "SuperAgent Demand {} / WorkItem {}\n\n{}\n\n\
-                 Read-only authorized scope only. Do not write files or execute shell/MCP \
-                 side effects. Report evidence; native review governs completion.",
-                item.root,item.key,item.objective,
+                 {}\nReport concrete test evidence; native review governs completion.",
+                item.root,item.key,item.objective,worker_instructions,
             ),
             trusted:true,image_ids:None,moodboard_ids:None,
         }).await;

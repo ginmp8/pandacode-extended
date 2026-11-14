@@ -1248,6 +1248,18 @@ fn list_tickets(store: &Store, config_id: &str, limit: i64) -> Result<Vec<Ticket
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+/// A typed, read-only filter envelope for native Demand pagination.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DemandQuery {
+    limit: Option<i64>,
+    before_updated_at: Option<i64>,
+    before_id: Option<String>,
+    orchestration_id: Option<String>,
+    state_filter: Option<String>,
+    search_query: Option<String>,
+}
+
 /// Bounded cross-Team demand index for the trusted local workspace. The
 /// projection intentionally excludes worker evidence, actor, request keys,
 /// mandates and session IDs; detailed access stays within native Ticket reads.
@@ -1280,6 +1292,22 @@ fn list_all_demands_page_filtered(
     store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
     orchestration_id: Option<&str>, state_filter: Option<&str>,
 ) -> Result<Vec<DemandIndex>> {
+    list_all_demands_page_searched(store, limit, before_updated_at, before_id,
+        orchestration_id, state_filter, None)
+}
+
+/// Search uses a bound SQLite substring predicate before keyset paging.
+/// No wildcards, SQL interpolation, provider dispatch, or implicit authority.
+fn list_all_demands_page_searched(
+    store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
+    orchestration_id: Option<&str>, state_filter: Option<&str>, search_query: Option<&str>,
+) -> Result<Vec<DemandIndex>> {
+    if let Some(search) = search_query {
+        if search.is_empty() || search.len()>128 || search.trim()!=search
+            || search.chars().any(char::is_control) {
+            return Err("Demand search requires a bounded nonempty literal fragment.".into());
+        }
+    }
     if let Some(state) = state_filter {
         if !matches!(state, "queued" | "running" | "waiting_approval" |
             "waiting_review" | "blocked" | "completed" | "failed" |
@@ -1314,9 +1342,10 @@ fn list_all_demands_page_filtered(
                 OR (t.updated_at=?2 AND t.id < ?3))
            AND (?4 IS NULL OR t.orchestration_id=?4)
            AND (?5 IS NULL OR t.state=?5)
+           AND (?6 IS NULL OR instr(lower(t.objective),lower(?6)) > 0)
          ORDER BY t.updated_at DESC,t.id DESC LIMIT ?1",
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id,state_filter], |row| Ok(DemandIndex {
+    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id,state_filter,search_query], |row| Ok(DemandIndex {
         id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
         state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
     })).map_err(|e| e.to_string())?;
@@ -1857,10 +1886,19 @@ pub(crate) fn list_headless_team_demands(
     database_path: &std::path::Path, orchestration_id: &str, state: &str,
     before_updated_at: Option<i64>, before_id: Option<&str>,
 ) -> Result<String> {
+    list_headless_team_demands_searched(database_path, orchestration_id, state,
+        before_updated_at, before_id, None)
+}
+
+/// Return only redacted state metadata: objective matching is server-side.
+pub(crate) fn list_headless_team_demands_searched(
+    database_path: &std::path::Path, orchestration_id: &str, state: &str,
+    before_updated_at: Option<i64>, before_id: Option<&str>, search_query: Option<&str>,
+) -> Result<String> {
     let store = Store::open_read_only(database_path)?;
     let state_filter = if state == "all" { None } else { Some(state) };
-    let page = list_all_demands_page_filtered(
-        &store, 200, before_updated_at, before_id, Some(orchestration_id), state_filter,
+    let page = list_all_demands_page_searched(
+        &store, 200, before_updated_at, before_id, Some(orchestration_id), state_filter, search_query,
     )?;
     let may_have_more = page.len() == 200;
     let next_cursor = if may_have_more {
@@ -1871,6 +1909,7 @@ pub(crate) fn list_headless_team_demands(
     serde_json::to_string_pretty(&serde_json::json!({
         "orchestrationId": orchestration_id,
         "stateFilter": state,
+        "searchApplied": search_query.is_some(),
         "pageLimit": 200,
         "mayHaveMore": may_have_more,
         "nextCursor": next_cursor,
@@ -3792,12 +3831,19 @@ pub async fn superagent_all_demands(
     window: tauri::WebviewWindow, state: State<'_, AppState>, limit: Option<i64>,
     before_updated_at: Option<i64>, before_id: Option<String>,
     orchestration_id: Option<String>, state_filter: Option<String>,
+    query: Option<DemandQuery>,
 ) -> Result<Vec<DemandIndex>> {
     require_main_window(&window)?;
+    let (limit, before_updated_at, before_id, orchestration_id, state_filter, search_query) =
+        if let Some(q) = query {
+            (q.limit, q.before_updated_at, q.before_id, q.orchestration_id, q.state_filter, q.search_query)
+        } else {
+            (limit, before_updated_at, before_id, orchestration_id, state_filter, None)
+        };
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    list_all_demands_page_filtered(
+    list_all_demands_page_searched(
         &store, limit.unwrap_or(200), before_updated_at, before_id.as_deref(),
-        orchestration_id.as_deref(), state_filter.as_deref(),
+        orchestration_id.as_deref(), state_filter.as_deref(), search_query.as_deref(),
     )
 }
 

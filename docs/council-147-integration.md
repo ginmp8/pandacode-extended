@@ -115,3 +115,13 @@ outbound callback. A negative native test covers idempotency, mismatched
 caller/project/request/digest, absent approval, unauthorized evidence reads,
 and stale objective/policy. A terminal happy-path test and external native
 consumer wiring remain unverified.
+
+
+## Native task exclusive root-cycle ownership
+
+A Council root cycle now admits exactly one non-Channel native task assignment:
+its SQLite insertion atomically excludes other task records for the same
+cycle and rejects mismatched callers or artifact identities. Request storage
+keys contain the cycle so old request records survive later task cycles
+without granting reusable approval authority. This adds negative coverage
+for multiple assignments/callers on one Council review.

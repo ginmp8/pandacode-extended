@@ -2086,6 +2086,14 @@ fn native_task_council_admission_is_idempotent_and_rejects_foreign_or_stale_requ
         &store, "native-client", &sid, &project, "assignment-one", &artifact,
     ).unwrap(), "replay of the same native request keeps its original ID");
     assert!(native_council_task::admit(
+        &store, "native-client", &sid, &project, "assignment-two", &artifact,
+    ).unwrap_err().contains("council_task_conflict"),
+        "two assignments cannot share a Council root verdict");
+    assert!(native_council_task::admit(
+        &store, "other-client", &sid, &project, "assignment-one", &"b".repeat(64),
+    ).unwrap_err().contains("council_task_conflict"),
+        "a foreign caller must not share the root Council cycle");
+    assert!(native_council_task::admit(
         &store, "foreign-client", &sid, "wrong-project", "assignment-one", &artifact,
     ).is_err());
     assert!(native_council_task::inspect(

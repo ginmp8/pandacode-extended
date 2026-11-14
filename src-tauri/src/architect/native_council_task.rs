@@ -1,7 +1,7 @@
 //! Trusted, non-Channel native task client for the existing Council.
 //! This module does not create reviewers, change permissions, or act as a
 //! competing approval engine. Caller IDs must come from trusted app code.
-use super::{council, CouncilStatus, TeamSnapshot};
+use super::{CouncilStatus, TeamSnapshot};
 use crate::{storage::{self, Store}, Result};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -61,18 +61,26 @@ fn digest(data: &[u8]) -> String {
     format!("{:x}", Sha256::digest(data))
 }
 
-fn record_key(caller_id: &str, assignment_key: &str) -> Result<String> {
+fn record_key(
+    store: &Store, session_id: &str, caller_id: &str, assignment_key: &str,
+) -> Result<String> {
     if !super::valid_id(caller_id) || !super::valid_id(assignment_key) {
         return Err("council_task_denied: native caller and assignment require stable identifiers.".into());
     }
-    Ok(format!("native-council-task:{caller_id}:{assignment_key}"))
+    let team = super::load(store, session_id)?
+        .ok_or("council_task_denied: root Architect task does not exist.")?;
+    if team.council_since <= 0 {
+        return Err("council_task_denied: no active native Council cycle.".into());
+    }
+    // Current-cycle keys preserve old receipts while permitting a new cycle.
+    Ok(format!("native-council-task:{}:{caller_id}:{assignment_key}", team.council_since))
 }
 
 fn candidate(
     store: &Store, caller_id: &str, session_id: &str, project_id: &str,
     assignment_key: &str, artifact_sha256: &str, request_id: String, admitted_at: i64,
 ) -> Result<NativeCouncilTaskRequest> {
-    record_key(caller_id, assignment_key)?;
+    record_key(store, session_id, caller_id, assignment_key)?;
     if artifact_sha256.len() != 64
         || !artifact_sha256.bytes().all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
     {
@@ -120,7 +128,7 @@ fn candidate(
 fn read_record(
     store: &Store, caller_id: &str, session_id: &str, assignment_key: &str,
 ) -> Result<(String, NativeTaskRecord)> {
-    let key = record_key(caller_id, assignment_key)?;
+    let key = record_key(store, session_id, caller_id, assignment_key)?;
     let (kind, content, owner): (String, String, String) = store.db.query_row(
         "SELECT kind,content,worker_id FROM architect_requests
          WHERE parent_session_id=?1 AND key=?2",
@@ -171,13 +179,25 @@ pub fn admit(
     let body = serde_json::to_string(&NativeTaskRecord {
         request: candidate.clone(), receipt: None,
     }).map_err(|error| error.to_string())?;
-    let key = record_key(caller_id, assignment_key)?;
-    store.db.execute(
+    let key = record_key(store, session_id, caller_id, assignment_key)?;
+    // A single atomic writer statement prevents multiple artifact requests
+    // from sharing the same root review cycle, including raced assignments.
+    let inserted = store.db.execute(
         "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
-         VALUES(?1,?2,?3,?4,?5) ON CONFLICT(parent_session_id,key) DO NOTHING",
-        params![session_id,key,RECORD_KIND,body,caller_id],
+         SELECT ?1,?2,?3,?4,?5 WHERE NOT EXISTS (
+           SELECT 1 FROM architect_requests
+           WHERE parent_session_id=?1 AND kind='council_native_task'
+             AND key<>?2
+             AND (CASE WHEN json_valid(content)
+                   THEN json_extract(content,'$.request.cycleId')
+                   ELSE ?6 END)=?6
+         ) ON CONFLICT(parent_session_id,key) DO NOTHING",
+        params![session_id,key,RECORD_KIND,body,caller_id,candidate.cycle_id],
     ).map_err(|error| error.to_string())?;
-    let (_, saved) = read_record(store, caller_id, session_id, assignment_key)?;
+    let (_, saved) = read_record(store, caller_id, session_id, assignment_key)
+        .map_err(|error| if inserted == 0 {
+            "council_task_conflict: another native assignment owns the root Council cycle.".to_owned()
+        } else { error })?;
     let same = candidate(
         store, caller_id, session_id, project_id, assignment_key,
         artifact_sha256, saved.request.request_id.clone(), saved.request.admitted_at,
@@ -284,7 +304,7 @@ pub fn record_terminal(
     let updated = store.db.execute(
         "UPDATE architect_requests SET content=?1 WHERE parent_session_id=?2
          AND key=?3 AND kind=?4 AND worker_id=?5 AND content=?6",
-        params![next,session_id,record_key(caller_id,assignment_key)?,RECORD_KIND,caller_id,old_raw],
+        params![next,session_id,record_key(store,session_id,caller_id,assignment_key)?,RECORD_KIND,caller_id,old_raw],
     ).map_err(|error| error.to_string())?;
     if updated != 1 {
         return Err("council_task_conflict: another native settlement won this request.".into());

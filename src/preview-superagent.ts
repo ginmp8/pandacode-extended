@@ -2,7 +2,7 @@
 type Bot = { id:string; name:string; paused:boolean; projectId:string };
 type Config = { id:string; name:string; coordinatorBotId:string; workerBotId:string;
   workerBotIds:string[]; reviewerBotIds:string[]; teamVersion:number;
-  projectId:string; enabled:boolean; policyRevision:number };
+  projectId:string; enabled:boolean; policyRevision:number; councilRequired?:boolean };
 type Ticket = { id:string; orchestrationId:string; objective:string;
   state:string; revision:number; evidence:null };
 type TeamSnapshot = {
@@ -80,6 +80,14 @@ export async function invokeSuperagent<T>(
       blockedCount:(tickets.get(config.id)||[]).filter(ticket=>ticket.state==='blocked').length,
       lastActivityAt:Date.now(),
     }));break;
+    case 'superagent_roster':{
+      const c=get(args.orchestrationId);
+      value={orchestrationId:c.id,policyRevision:c.policyRevision,
+        coordinatorBotId:c.coordinatorBotId,workerBotIds:[...c.workerBotIds],
+        reviewerBotIds:[...c.reviewerBotIds],councilRequired:!!c.councilRequired,
+        executionReady:c.workerBotIds.length===1 && c.reviewerBotIds.length===0};
+      break;
+    }
     case 'superagent_tickets':value=tickets.get(args.orchestrationId)||[];break;
     case 'superagent_snapshot':
     case 'superagent_mandate':
@@ -112,7 +120,8 @@ export async function invokeSuperagent<T>(
       if(!input.name?.trim()||configName(input.name))throw Error('Invalid or duplicate orchestration.');
       const c:Config={id:crypto.randomUUID(),name:input.name,coordinatorBotId:roles.coordinator.id,
         workerBotId:b.id,workerBotIds:roles.workerBotIds,reviewerBotIds:roles.reviewerBotIds,
-        teamVersion:1,projectId:b.projectId,enabled:false,policyRevision:1};
+        teamVersion:1,projectId:b.projectId,enabled:false,policyRevision:1,
+        councilRequired:!!input.councilRequired};
       configs.set(c.id,c);value=c;break;
     }
     case 'superagent_update':{

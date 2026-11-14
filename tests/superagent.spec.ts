@@ -57,6 +57,37 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
 });
 
+test('duplicating a native Team retains its roles but never its saved runtime authority', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  const create=host.locator('form[data-sa-form="create"]');
+  await create.getByRole('textbox',{name:'Name',exact:true}).fill('Source Team');
+  await create.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption({label:'Scout'});
+  await create.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
+  await create.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(host.locator('.sa-list .sa-item')).toHaveCount(1);
+
+  await host.getByRole('button',{name:'Duplicate as new Team'}).click();
+  const prompt=host.getByRole('alertdialog',{name:'Confirm orchestration action'});
+  await expect(prompt).toContainText('Tickets, source subscriptions, permissions and approvals are not copied');
+  await prompt.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(host.locator('.sa-list .sa-item')).toHaveCount(2);
+  await expect(host.locator('.sa-list')).toContainText('Source Team copy');
+  await expect(host.getByRole('status').filter({hasText:'Disabled Team duplicated.'})).toBeVisible();
+  await expect(host.getByRole('button',{name:'Enable manual'})).toBeVisible();
+  await expect(host.locator('.sa-list .sa-counts')).toHaveText([
+    '0 tasks · 0 running · 0 blocked',
+    '0 tasks · 0 running · 0 blocked',
+  ]);
+
+  await host.getByRole('button',{name:'Load native members'}).click();
+  await expect(host.getByRole('region',{name:'Configured Team roles'}))
+    .toContainText('Scout');
+  await expect(host.getByRole('region',{name:'Configured Team roles'}))
+    .toContainText('Writer');
+});
+
 
 test('native SuperAgent manual dispatch requires opt-in and supports explicit revocation',async ({page})=>{
   test.setTimeout(60_000);

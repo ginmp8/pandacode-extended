@@ -508,7 +508,7 @@ export function createPreviewArchitect(host: PreviewHost) {
       const rootSeat = seats.find(worker => worker.council?.lens === 'Security') ?? seats[0];
       rootSeat.reviewerBinding = { reviewerBotId: 'reviewer-alpha', councilCycleId: cycleId, artifactRevision: 'preview-revision-1' };
       const finding = (id: string, findingCycle: string, round: number, seatId: string, artifactDigest: string, summary: string): NonNullable<TeamSnapshot['councilFindings']>[number] => ({
-        id, cycleId: findingCycle, roundId: `${findingCycle}:${round}`, seatId, artifactDigest, criterionId: 'security', severity: 'high', category: 'Security', summary,
+        id, cycleId: findingCycle, roundId: `${findingCycle}:${round}`, seatId, artifactDigest, criterionId: 'security', severity: 'high', category: 'Security', summary, title: 'Verified security finding', explanation: summary,
         evidenceRefs: ['src/main.ts'], locationStatus: 'verified', location: { file: 'src/main.ts', line: 42 }, suggestedFix: 'Keep the workspace read bounded.',
       });
       const usage = (id: string, childId: string | null, reviewerId: string, roundId: string, seatId: string, scope: 'root' | 'child', rootId = cycleId): NonNullable<TeamSnapshot['councilUsage']>[number] => ({

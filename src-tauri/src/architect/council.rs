@@ -484,6 +484,11 @@ pub struct CouncilFinding {
     pub severity: CouncilFindingSeverity,
     pub category: String,
     pub summary: String,
+    /// Optional structured details; old persisted records omit both.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub explanation: Option<String>,
     pub evidence_refs: Vec<String>,
     pub location_status: CouncilFindingLocationStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -802,6 +807,13 @@ impl CouncilFinding {
             &self.location,
             &self.suggested_fix,
         )).unwrap_or_default();
+        // Preserve existing finding digests byte-for-byte for historic records,
+        // while binding newly supplied title/explanation to the immutable ID.
+        let mut canonical = canonical;
+        if self.title.is_some() || self.explanation.is_some() {
+            canonical.extend(serde_json::to_vec(&(&self.title, &self.explanation))
+                .unwrap_or_default());
+        }
         format!("{:x}", Sha256::digest(canonical))
     }
 
@@ -824,6 +836,12 @@ impl CouncilFinding {
         }
         if !safe_contract_text(&self.category, 128) || !safe_contract_text(&self.summary, MAX_CRITERION_DESCRIPTION_CHARS) {
             return Err(CouncilCompositionError::InvalidFinding("category or summary is empty, unsafe, or too long"));
+        }
+        if self.title.as_ref().is_some_and(|title| !safe_contract_text(title, 128))
+            || self.explanation.as_ref().is_some_and(|explanation|
+                !safe_contract_text(explanation, MAX_CRITERION_DESCRIPTION_CHARS))
+        {
+            return Err(CouncilCompositionError::InvalidFinding("finding title or explanation is empty, unsafe, or too long"));
         }
         if self.evidence_refs.is_empty() || !unique_refs(&self.evidence_refs, MAX_RESULT_REFS) {
             return Err(CouncilCompositionError::InvalidFinding("evidenceRefs must contain at least one unique bounded verified reference"));

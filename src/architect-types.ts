@@ -48,6 +48,8 @@ export interface CouncilFindingLocation { file: string; line?: number | null }
 export interface CouncilFinding {
   id: string; cycleId: string; roundId: string; seatId: string; artifactDigest: string;
   criterionId: string; severity: CouncilFindingSeverity; category: string; summary: string;
+  /** Optional on historical findings; untrusted text, not execution authority. */
+  title?: string | null; explanation?: string | null;
   evidenceRefs: string[]; locationStatus: CouncilFindingLocationStatus;
   location?: CouncilFindingLocation | null; suggestedFix?: string | null;
 }

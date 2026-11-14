@@ -213,3 +213,12 @@ Token, request and reviewer-duration sums preserve `measured`, `provider_estimat
 Cost estimates are summed only when every attempt has bounded priced provenance in a single currency. Missing pricing or mixed currencies produce an Unknown aggregate. The UI identifies pinned source/version/calculation timestamp and does not present the estimate as a bill. Budget-consumption snapshots are not summed as if they were independent leaf attempts.
 
 Added Node cases for measured, missing, cross-currency and conflicting-duplicate records, plus a Playwright inspector aggregate assertion. No provider billing data is inferred or generated.
+
+
+## Versioned actionable finding details (C-1 / AC-33)
+
+New native `CouncilFinding` records now include optional structured `title` and `explanation` alongside the existing summary, category, criterion, artifact digest, verified file evidence, location status and lower-trust suggested fix. `pandacode_council_record_finding` accepts those two additional bounded fields and supplies conservative values from category/summary when older callers omit them. These fields are never interpreted as executable repair instructions or authorization.
+
+For historical persisted findings without details, the native digest remains identical to the previous canonical tuple and old JSON rows continue to deserialize. For newly detailed findings the content digest also commits to the title and explanation, preventing post-recording text changes from retaining a prior finding identity. Input validation rejects empty, oversized and control-character text. Both root and child shared-inspector renderers escape detail fields as inert text.
+
+Added Rust negative tests for changed detail identity, forged detail mutation, unsafe titles and historical format compatibility; Playwright verifies that markup-like reviewer text cannot generate script/image DOM nodes. Validation remains exact-SHA pending rather than declared passed.

@@ -5233,6 +5233,8 @@ fn council_finding_tool() -> Value {
         "severity":{"type":"string","enum":["critical","high","medium","low","info"]},
         "category":{"type":"string"},
         "summary":{"type":"string"},
+        "title":{"type":"string","description":"Short actionable finding title; optional for older reviewers."},
+        "explanation":{"type":"string","description":"Detailed explanation with verified evidence; untrusted advice only."},
         "evidenceFiles":{"type":"array","minItems":1,"items":{"type":"string"}},
         "location":{"type":"object","properties":{"file":{"type":"string"},"line":{"type":"integer","minimum":1}},"required":["file"]},
         "suggestedFix":{"type":"string"}
@@ -5247,6 +5249,10 @@ struct CouncilFindingInput {
     severity: council::CouncilFindingSeverity,
     category: String,
     summary: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    explanation: Option<String>,
     #[serde(default)]
     evidence_files: Vec<String>,
     #[serde(default)]
@@ -5457,6 +5463,8 @@ fn record_council_finding_state(
         return Err("reviewer_evidence_invalid: every structured finding requires at least one native file evidence reference.".into());
     }
     let cycle_id = binding.council_cycle_id.clone();
+    let title = input.title.clone().unwrap_or_else(|| input.category.clone());
+    let explanation = input.explanation.clone().unwrap_or_else(|| input.summary.clone());
     let mut finding = council::CouncilFinding {
         id: String::new(),
         content_digest: String::new(),
@@ -5473,6 +5481,8 @@ fn record_council_finding_state(
         severity: input.severity,
         category: input.category,
         summary: input.summary,
+        title: Some(title),
+        explanation: Some(explanation),
         evidence_refs: evidence.clone(),
         location_status,
         location,

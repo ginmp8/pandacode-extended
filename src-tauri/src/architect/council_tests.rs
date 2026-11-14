@@ -1690,7 +1690,7 @@ fn trigger_finding(
         severity,
         category: "security".into(),
         summary: "A verified review finding.".into(),
-        evidence_refs: vec!["finding-evidence".into()],
+        title: None, explanation: None, evidence_refs: vec!["finding-evidence".into()],
         location_status: council::CouncilFindingLocationStatus::Missing,
         location: None,
         suggested_fix: None,
@@ -2496,7 +2496,7 @@ fn finding_receipt_and_usage_contracts_validate_correlation_and_unknown_measurem
         id: "finding-1".into(), content_digest: String::new(), cycle_id: "root-cycle".into(), round_id: "round-1".into(), seat_id: "seat-1".into(),
         artifact_digest: "a".repeat(64), criterion_id: "security".into(), severity: council::CouncilFindingSeverity::High,
         category: "authorization".into(), summary: "The handler accepts an unscoped identifier.".into(),
-        evidence_refs: vec!["evidence-1".into()],
+        title: None, explanation: None, evidence_refs: vec!["evidence-1".into()],
         location_status: council::CouncilFindingLocationStatus::Verified,
         location: Some(council::CouncilFindingLocation { file: "src/security.rs".into(), line: Some(12) }),
         suggested_fix: Some("Validate the identifier against the task scope.".into()),
@@ -2564,7 +2564,7 @@ fn critical_findings_require_verified_or_current_human_disposition() {
             round_id: "root:cycle-4:2".into(), seat_id: seat.into(),
             artifact_digest: "a".repeat(64), criterion_id: "security".into(),
             severity: Severity::Critical, category: "authorization".into(),
-            summary: summary.into(), evidence_refs: vec!["file:src/auth.rs#sha256:".to_string() + &"b".repeat(64)],
+            summary: summary.into(), title: None, explanation: None, evidence_refs: vec!["file:src/auth.rs#sha256:".to_string() + &"b".repeat(64)],
             location_status: council::CouncilFindingLocationStatus::Missing, location: None,
             suggested_fix: None,
         };
@@ -2647,7 +2647,7 @@ fn every_structured_finding_requires_evidence_even_when_criterion_evidence_is_op
         seat_id: "reviewer".into(), artifact_digest: "a".repeat(64),
         criterion_id: "lens".into(), severity: council::CouncilFindingSeverity::Low,
         category: "quality".into(), summary: "The report has no supporting evidence.".into(),
-        evidence_refs: Vec::new(), location_status: council::CouncilFindingLocationStatus::Missing,
+        title: None, explanation: None, evidence_refs: Vec::new(), location_status: council::CouncilFindingLocationStatus::Missing,
         location: None, suggested_fix: None,
     };
     finding.content_digest = finding.calculated_content_digest();
@@ -2706,7 +2706,7 @@ fn content_digest_makes_changed_findings_distinct_and_keeps_legacy_rows_readable
         cycle_id: "root-cycle".into(), round_id: "root-cycle:1".into(), seat_id: "security-seat".into(),
         artifact_digest: "a".repeat(64), criterion_id: "security".into(),
         severity: council::CouncilFindingSeverity::High, category: "authorization".into(),
-        summary: "A caller can cross the task boundary.".into(), evidence_refs: vec!["file:src/auth.rs#sha256:".to_string() + &"b".repeat(64)],
+        summary: "A caller can cross the task boundary.".into(), title: None, explanation: None, evidence_refs: vec!["file:src/auth.rs#sha256:".to_string() + &"b".repeat(64)],
         location_status: council::CouncilFindingLocationStatus::Missing, location: None,
         suggested_fix: Some("Bind the caller to the task.".into()),
     };
@@ -2721,6 +2721,29 @@ fn content_digest_makes_changed_findings_distinct_and_keeps_legacy_rows_readable
     corrected.id = format!("finding-{}", corrected.content_digest);
     assert!(corrected.validate().is_ok());
     assert_ne!(corrected.id, original.id, "changed content cannot collide with its earlier finding");
+
+    let mut actionable = original.clone();
+    actionable.title = Some("Cross-task authorization".into());
+    actionable.explanation = Some("The caller can request another task's artifact.".into());
+    actionable.content_digest = actionable.calculated_content_digest();
+    actionable.id = format!("finding-{}", actionable.content_digest);
+    assert!(actionable.validate().is_ok());
+    assert_ne!(actionable.id, original.id,
+        "structured details must be part of the immutable finding identity");
+    let mut forged = actionable.clone();
+    forged.explanation = Some("An injected replacement explanation.".into());
+    assert!(!forged.has_content_identity(),
+        "modifying text after persistence must invalidate its identity");
+    forged.content_digest = forged.calculated_content_digest();
+    forged.id = format!("finding-{}", forged.content_digest);
+    assert!(forged.validate().is_ok());
+    assert_ne!(forged.id, actionable.id);
+    let mut unsafe_title = actionable.clone();
+    unsafe_title.title = Some("Bad\u{0000}title".into());
+    unsafe_title.content_digest = unsafe_title.calculated_content_digest();
+    unsafe_title.id = format!("finding-{}", unsafe_title.content_digest);
+    assert!(unsafe_title.validate().is_err(),
+        "untrusted control characters must not be accepted in finding details");
 
     let mut old_json = serde_json::to_value(&original).unwrap();
     old_json.as_object_mut().unwrap().remove("contentDigest");

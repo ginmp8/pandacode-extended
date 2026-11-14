@@ -131,6 +131,43 @@ test.describe('bot collaboration', () => {
     expect(layout.clipsName).toBe(true);
   });
 
+  test('Council report opens only for the exact native delivery cycle pin', async ({ page }) => {
+    await page.goto('/?bots=sample');
+    const state = await page.evaluate(async () => {
+      const { openSharedChannelCouncilReport } = await import('/src/bot-shared-channels.ts');
+      const prompts: string[] = [];
+      const shown: string[] = [];
+      const bindings: string[] = [];
+      const team = {
+        sessionId: 'isolated-task', councilSince: 1700000000000,
+        revision: 1, round: 1, updatedAt: 1700000000000, status: 'ready',
+        config: { council: { target: 9, maxRounds: 3, reviewers: 2 } },
+        workers: [], councilFindings: [],
+        councilStatus: { state: 'waiting', round: 0, lowest: null, target: 9, stale: false, notice: null },
+      };
+      const options = {
+        loadCouncilSnapshot: async () => team,
+        notify: (message: string) => prompts.push(message),
+        modal: (title: string, html: string) => {
+          shown.push(title);
+          const node = document.createElement('div');
+          node.innerHTML = html;
+          return node;
+        },
+        bindCouncilEvidence: (_host: HTMLElement, session: string) => bindings.push(session),
+      } as any;
+      await openSharedChannelCouncilReport('isolated-task', 'delivery-cycle-a', 'cycle:1700000000000', options);
+      await openSharedChannelCouncilReport('isolated-task', 'delivery-cycle-a', 'cycle:1700000000001', options);
+      await openSharedChannelCouncilReport('isolated-task', 'delivery-cycle-a', 'preview-revision-1', options);
+      await openSharedChannelCouncilReport('isolated-task', 'delivery-cycle-a', 'cycle:0', options);
+      await openSharedChannelCouncilReport('foreign-task', 'delivery-cycle-a', 'cycle:1700000000000', options);
+      return { shown, prompts, bindings };
+    });
+    expect(state.shown).toEqual(['Council report']);
+    expect(state.bindings).toEqual(['isolated-task']);
+    expect(state.prompts).toHaveLength(4);
+    expect(state.prompts.every(message => message.includes('unavailable'))).toBe(true);
+  });
   test('a channel Council report opens its populated nested Architect inspection', async ({ page }) => {
     test.setTimeout(120_000);
     await page.goto('/?bots=sample&council=ledger');

@@ -771,7 +771,12 @@ export async function openSharedChannelCouncilReport(sessionId: string, cycleId:
   let team: TeamSnapshot | null;
   try { team = await options.loadCouncilSnapshot(sessionId); }
   catch { options.notify('This Council delivery report is unavailable.'); return; }
-  const expectedSince = Number(artifactRevision.split(':', 1)[0]);
+  // Native delivery pins are serialized as "cycle:<councilSince>".
+  // Reject opaque/legacy revision strings instead of widening the read to
+  // any session's latest Council state.
+  const expectedSince = /^cycle:[1-9]\d*$/.test(artifactRevision)
+    ? Number(artifactRevision.slice('cycle:'.length))
+    : NaN;
   if (!team || team.sessionId !== sessionId || !cycleId || !Number.isSafeInteger(expectedSince)
       || team.councilSince !== expectedSince) {
     options.notify('This Council delivery report is unavailable.'); return;

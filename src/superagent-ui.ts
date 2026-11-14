@@ -127,8 +127,13 @@ interface RunGraph {
 }
 interface NativeWorkItem {
   key: string; title: string; acceptance: string; dependsOn: string[];
-  state: 'planned'; ready: boolean;
-  executionAdmitted: false; evidenceVerified: false;
+  state: 'planned' | 'running' | 'observed' | 'verified' | 'failed'; ready: boolean;
+  executionAdmitted: boolean; evidenceVerified: boolean;
+}
+interface WorkReviewReceipt {
+  ticketId:string;itemKey:string;assignmentId:string;
+  ticketRevision:number;remainingUnverified:number;allItemsVerified:boolean;
+  providerDispatched:false;
 }
 interface NativeWorkPlan {
   ticketId: string; ticketRevision: number; planSha256: string;
@@ -399,21 +404,29 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               ? '<p>Only the latest 50 attempts are shown.</p>' : '') :
             '<p>Graph not loaded.</p>') + '</section>' +
         '<section class="sa-work-plan" role="region" aria-label="Native work plan">' +
-         '<h5>Work item dependency plan</h5><p>Immutable native operator planning only. ' +
-         'A ready frontier is NOT an execution grant, verified test or Council approval.</p>' +
+         '<h5>Work item dependency plan</h5><p>Native work-item attempts and independent evidence decisions are persisted. ' +
+         'A ready frontier is NOT an execution grant or Council approval.</p>' +
          '<button type="button" data-sa-load-work-plan>Inspect work plan</button>' +
          (workPlanLoaded && workPlan && workPlan.ticketId === inspected.id &&
           workPlan.ticketRevision <= inspected.revision
            ? '<p>Native plan SHA-256 <code>' + safe(workPlan.planSha256) + '</code> · ' +
              workPlan.items.length + ' items · ' +
              workPlan.activeAssignments + ' running native assignments.</p>' +
+             '<p>Verified dependency frontier: ' + safe(workPlan.readyFrontier.join(', ') || 'none') + '.</p>' +
              '<ol>' + workPlan.items.map(item => '<li><strong>' + safe(item.title) +
                '</strong> · ' + safe(item.key) +
                ' · Dependencies ' + safe(item.dependsOn.join(', ') || 'none') +
-               ' · ' + (item.ready ? 'initial frontier' : 'pending dependency') +
-               ' · Not executed / not verified' +
-               '<p>Acceptance: ' + safe(item.acceptance) + '</p></li>').join('') + '</ol>'
-           : '<p>No work plan loaded for this Ticket.</p>') +
+               ' · State ' + safe(item.state) +
+               ' · ' + (item.evidenceVerified ? 'Local evidence verified' :
+                 item.executionAdmitted ? 'Native assignment observed, not verified' :
+                 item.ready ? 'Ready but not admitted' : 'Dependency gate pending') +
+               '<p>Acceptance: ' + safe(item.acceptance) + '</p>' +
+               (item.state === 'observed' && inspected.state === 'waiting_approval' &&
+                !ticketDetails.mandate.revoked && ticketDetails.finalizationGate !== 'council_required' &&
+                ticketDetails.unresolvedExternalEffects === 0
+                 ? '<button type="button" data-sa-verify-work-item="' + safe(item.key) +
+                   '">Verify native item evidence</button>' : '') +
+               '</li>').join('') + '</ol>'           : '<p>No work plan loaded for this Ticket.</p>') +
          (inspected.state === 'blocked' && !ticketDetails.mandate.revoked &&
           !ticketDetails.mandate.allowedSideEffects &&
           ticketDetails.mandate.allowedTools.length === 0
@@ -1265,6 +1278,38 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         demandObjective = objective;
         preflightObjective = objective;
         preflightMode = coordinated ? 'coordinated' : 'direct';
+      });
+      return;
+    }
+    if (target.dataset.saVerifyWorkItem) {
+      const ticketId=inspectedTicket;
+      const itemKey=target.dataset.saVerifyWorkItem;
+      const currentTicket=tickets.find(ticket=>ticket.id===ticketId);
+      const item=workPlan?.ticketId===ticketId
+        ? workPlan.items.find(entry=>entry.key===itemKey) : undefined;
+      if (!currentTicket || !item || item.state!=='observed' ||
+          currentTicket.state!=='waiting_approval' || !ticketDetails ||
+          ticketDetails.ticket.revision!==currentTicket.revision ||
+          ticketDetails.finalizationGate==='council_required' ||
+          ticketDetails.unresolvedExternalEffects!==0) return;
+      const revision=currentTicket.revision;
+      ask('Independently verify the persisted native evidence for item ' + item.title +
+        '? This does not approve the whole Ticket or grant another Worker.',async()=>{
+        const result=await call<WorkReviewReceipt>('superagent_work_item_verify',{
+          ticketId,itemKey,expectedRevision:revision,
+        });
+        if (result.ticketId!==ticketId || result.itemKey!==itemKey ||
+            result.providerDispatched || result.ticketRevision<revision) {
+          throw new Error('Native work-item review response failed its identity checks.');
+        }
+        await reload();
+        if (inspectedTicket===ticketId) {
+          workPlan=await call<NativeWorkPlan>('superagent_work_plan',{ticketId});
+          workPlanLoaded=true;
+        }
+        feedback=result.allItemsVerified
+          ? 'All work items have local evidence receipts. Final native Ticket acceptance remains required.'
+          : result.remainingUnverified + ' work items remain. Their next eligible frontier requires an independently authorized native retry.';
       });
       return;
     }

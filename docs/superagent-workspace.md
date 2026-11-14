@@ -307,3 +307,37 @@ provider admission, result settlement, watchdog expiration, and external
 effect attestation. The hard platform limit remains 30 minutes. Ticket
 history, evidence, native Council requirements, write-scope restrictions,
 and GitHub receipt reconciliation are independent mandatory gates.
+
+## Evidence-bound Work Plan progression
+
+A saved native Work Plan is a bounded, immutable DAG. Schema v56 adds
+`sa_work_item_attempts` and `sa_work_item_approvals` sidecars; existing
+plan definitions and historical Team/Ticket snapshots are not rewritten.
+
+For an explicitly admitted native manual or headless retry, the same SQLite
+transaction binds one eligible Work Plan item to the real Worker assignment.
+The Worker receives its title and acceptance conditions as task context,
+**not** as permission to expand its tool, file or external-effect scope.
+A provider callback records the result's SHA-256 digest as **observed**
+evidence, or a failed attempt. Rejected/expired/revoked assignments and
+restart recovery leave the item failed or pending review, never verified.
+
+The Ticket Inspector shows each item as planned, running, observed, failed
+or verified. Its frontier advances only when predecessor items have
+independent native verification receipts. For supported Council-Off,
+read-only mandates, the local user can review an attributed Worker result,
+check its original session/thread and approve that individual item. This
+action does **not** approve the whole Ticket or automatically dispatch an
+unverified next Worker. If more items remain, the Ticket returns to a
+blocked/retryable state under the same native authorization; a new attempt
+still passes checkout, session, policy and bounded retry guards. Once all
+items are verified, final Ticket acceptance is a separate native action.
+
+**Known limitation:** this is durable evidence-based DAG progression, not
+yet an autonomous cross-item execution scheduler, independent automated
+test oracle or nested-subagent runtime. Council-required item verification
+requires a separate task-attributed Council adapter and currently fails
+closed; provider output alone can never pass it. GitHub Auto admission,
+parallel leased Workers, real cost metering and unattended final acceptance
+remain independent implementation requirements.
+

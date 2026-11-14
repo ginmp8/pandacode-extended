@@ -122,11 +122,18 @@ pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Res
 pub fn mark_uncertain(store:&Store,ticket_id:&str,key:&str)->Result<()>{
     let n=store.db.execute(
         "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?3
-         WHERE ticket_id=?1 AND effect_key=?2 AND state IN ('pending','uncertain')",
+         WHERE ticket_id=?1 AND effect_key=?2 AND state='pending'",
         params![ticket_id,key,storage::now()]
     ).map_err(|e|e.to_string())?;
-    if n!=1{return Err("No unresolved effect receipt.".into());}
-    Ok(())
+    if n==1 { return Ok(()); }
+    // A duplicated timeout/recovery notification must not rewrite the
+    // original uncertainty timestamp or turn an applied effect uncertain.
+    let state:Option<String>=store.db.query_row(
+        "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key=?2",
+        params![ticket_id,key],|r|r.get(0),
+    ).optional().map_err(|e|e.to_string())?;
+    if state.as_deref()==Some("uncertain") { return Ok(()); }
+    Err("No unresolved effect receipt.".into())
 }
 
 /// Caller must verify the external provider result independently: this
@@ -136,11 +143,20 @@ pub fn acknowledge_applied(store:&Store,ticket_id:&str,key:&str,payload:&[u8])->
     let digest=format!("{:x}",Sha256::digest(payload));
     let n=store.db.execute(
         "UPDATE sa_effect_receipts SET state='applied',updated_at=?4
-         WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3",
+         WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3
+           AND state IN ('pending','uncertain')",
         params![ticket_id,key,digest,storage::now()]
     ).map_err(|e|e.to_string())?;
-    if n!=1{return Err("Missing receipt or mismatched payload.".into());}
-    Ok(())
+    if n==1 { return Ok(()); }
+    // Duplicate provider reconciliation is a no-op only for the same
+    // payload. Never mutate a terminal receipt or bless an unknown key.
+    let state:Option<String>=store.db.query_row(
+        "SELECT state FROM sa_effect_receipts
+         WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3",
+        params![ticket_id,key,digest],|r|r.get(0),
+    ).optional().map_err(|e|e.to_string())?;
+    if state.as_deref()==Some("applied") { return Ok(()); }
+    Err("Missing receipt or mismatched payload.".into())
 }
 
 /// A bounded, task-owned operational projection of immutable effect identities.
@@ -458,6 +474,57 @@ mod tests{
         ).unwrap();
         assert_eq!(reserve(&store,&id,"github:issue:duplicate",b"body").unwrap(),
             Reservation::Reserved);
+    }
+
+    #[test]
+    fn repeated_effect_reconciliation_is_idempotent_and_preserves_terminal_receipt() {
+        let (store, id) = fixture();
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+            [&id],
+        ).unwrap();
+        let key = "github:comment:reconcile";
+        let payload = b"approved immutable bytes";
+        assert_eq!(reserve(&store, &id, key, payload).unwrap(), Reservation::Reserved);
+        mark_uncertain(&store, &id, key).unwrap();
+        store.db.execute(
+            "UPDATE sa_effect_receipts SET updated_at=111 WHERE ticket_id=?1 AND effect_key=?2",
+            params![&id,key],
+        ).unwrap();
+        mark_uncertain(&store, &id, key).unwrap();
+        let unchanged: i64 = store.db.query_row(
+            "SELECT updated_at FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key=?2",
+            params![&id,key], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(unchanged, 111);
+        assert!(acknowledge_applied(&store, &id, key, b"changed bytes").is_err());
+        assert!(acknowledge_applied(&store, &id, "missing-key", payload).is_err());
+        acknowledge_applied(&store, &id, key, payload).unwrap();
+        assert!(mark_uncertain(&store, &id, key).is_err());
+        store.db.execute(
+            "UPDATE sa_effect_receipts SET updated_at=222 WHERE ticket_id=?1 AND effect_key=?2",
+            params![&id,key],
+        ).unwrap();
+        acknowledge_applied(&store, &id, key, payload).unwrap();
+        assert!(acknowledge_applied(&store, &id, key, b"changed bytes").is_err());
+        let applied: (String, i64) = store.db.query_row(
+            "SELECT state,updated_at FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND effect_key=?2",
+            params![&id,key], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        assert_eq!(applied, ("applied".to_string(), 222));
+        assert_eq!(unresolved_count(&store, &id).unwrap(), 0);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        acknowledge_applied(&reopened, &id, key, payload).unwrap();
+        assert!(mark_uncertain(&reopened, &id, key).is_err());
+        let persisted: (String, i64) = reopened.db.query_row(
+            "SELECT state,updated_at FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND effect_key=?2",
+            params![&id,key], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        assert_eq!(persisted, applied);
     }
 
     #[test]

@@ -382,6 +382,8 @@ fn active_scope(db: &Connection, intent: &IssueCommentIntent) -> Result<ActiveSc
 /// task-owned worker thread, admitted role and frozen model before any write.
 fn effect_worker_session_current(store: &Store, intent: &IssueCommentIntent) -> Result<bool> {
     let scope = active_scope(&store.db, intent)?;
+    let pinned=super::ticket_team_snapshot(store,&intent.ticket_id)?;
+    let attempt_timeout=pinned.policy.strategy.attempt_timeout_ms;
     // A persisted effect grant does not renew an expired provider attempt.
     // Ambiguous concurrent running assignments cannot authorize a remote write.
     let now = storage::now();
@@ -392,7 +394,7 @@ fn effect_worker_session_current(store: &Store, intent: &IssueCommentIntent) -> 
            AND (SELECT COUNT(*) FROM sa_assignments other
                 WHERE other.ticket_id=?2 AND other.state='running')=1",
         params![scope.assignment_id,intent.ticket_id,scope.session_id,
-            now,super::MAX_ASSIGNMENT_RUN_MS],
+            now,attempt_timeout],
         |row| Ok((row.get(0)?,row.get(1)?)),
     ).map_err(|e| e.to_string())?;
     let session = store.session(&scope.session_id)?;

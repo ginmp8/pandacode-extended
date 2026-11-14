@@ -14,6 +14,7 @@ pub(crate) mod council_adapter;
 pub mod effects;
 pub(crate) mod write_grants;
 pub(crate) mod headless_dispatch;
+pub(crate) mod strategy;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -55,20 +56,28 @@ fn assignment_within_budget(started_at: i64, now: i64) -> bool {
         && now.saturating_sub(started_at) < MAX_ASSIGNMENT_RUN_MS
 }
 
+/// The admitted Ticket's immutable budget may be stricter than the hard
+/// platform ceiling. Never extend an expired attempt using mutable Team data.
+fn assignment_within_policy_budget(started_at: i64, now: i64, limit_ms: i64) -> bool {
+    (60_000..=MAX_ASSIGNMENT_RUN_MS).contains(&limit_ms)
+        && started_at > 0 && now >= started_at
+        && now.saturating_sub(started_at) < limit_ms
+}
+
 /// A redacted headless lease diagnostic uses exactly the same native expiry
 /// rule as tool admission and callback settlement. This is observation only:
 /// inspecting a live database must neither reap a session nor grant a new one.
-fn headless_assignment_budget(assignment: &Assignment, now: i64) -> (bool, Option<i64>) {
+fn headless_assignment_budget(assignment: &Assignment, now: i64, limit_ms: i64) -> (bool, Option<i64>) {
     if assignment.state != "running" {
         return (false, None);
     }
     let valid_start = assignment.created_at > 0 && now >= assignment.created_at;
     let remaining = if valid_start {
-        MAX_ASSIGNMENT_RUN_MS.saturating_sub(now.saturating_sub(assignment.created_at)).max(0)
+        limit_ms.saturating_sub(now.saturating_sub(assignment.created_at)).max(0)
     } else {
         0
     };
-    (!assignment_within_budget(assignment.created_at, now), Some(remaining))
+    (!assignment_within_policy_budget(assignment.created_at, now, limit_ms), Some(remaining))
 }
 
 /// Global pause is an immediate native revocation of execution authority,
@@ -500,6 +509,9 @@ pub struct TeamPolicySnapshot {
     pub autonomy: String,
     pub max_concurrent_tasks: u8,
     pub max_attempts_per_assignment: u8,
+    /// Legacy snapshots default to a bounded, non-delegating manual strategy.
+    #[serde(default)]
+    pub strategy: strategy::StrategySettings,
     /// Reviewer memberships are descriptive only until a fresh native Council
     /// adapter is bound to the Ticket.
     pub council_enabled: bool,
@@ -683,6 +695,7 @@ fn make_team_snapshot(
             autonomy: "off".into(),
             max_concurrent_tasks: 1,
             max_attempts_per_assignment: 2,
+            strategy: strategy::StrategySettings::default(),
             council_enabled: council_required,
             council_required,
         },
@@ -734,6 +747,7 @@ fn legacy_unknown_team_snapshot(
             autonomy: "off".into(),
             max_concurrent_tasks: 1,
             max_attempts_per_assignment: 0,
+            strategy: strategy::StrategySettings::default(),
             council_enabled: false,
             council_required: false,
         },
@@ -1551,9 +1565,11 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
     let ticket = get_ticket(store, ticket_id)?;
     let native_mandate = mandate(store, ticket_id)?;
     let native_assignments = assignments(store, ticket_id, limit)?;
+    let admitted_team = ticket_team_snapshot(store, ticket_id)?;
+    let attempt_limit = admitted_team.policy.strategy.attempt_timeout_ms;
     let observed_at = storage::now();
     let attempt_insights = native_assignments.iter().map(|a| {
-        let (expired, remaining) = headless_assignment_budget(a, observed_at);
+        let (expired, remaining) = headless_assignment_budget(a, observed_at, attempt_limit);
         AssignmentInsight {
             assignment_id: a.id.clone(),
             current_assignment: ticket.state == "running" && a.state == "running"
@@ -1582,7 +1598,7 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
         finalization_gate: finalization_gate.to_owned(),
         unresolved_external_effects,
         council: council_adapter::inspect(store, &ticket)?,
-        team_snapshot: ticket_team_snapshot(store,ticket_id)?,
+        team_snapshot: admitted_team,
         ticket,
         mandate: native_mandate,
         assignments: native_assignments,
@@ -1724,7 +1740,9 @@ pub(crate) fn inspect_headless_status(
             },
             "assignments": snapshot.assignments.iter().map(|a| {
                 let (run_budget_expired, remaining_run_budget_ms) =
-                    headless_assignment_budget(a, observed_at);
+                    headless_assignment_budget(
+                        a, observed_at, snapshot.team_snapshot.policy.strategy.attempt_timeout_ms,
+                    );
                 serde_json::json!({
                     "id": &a.id, "botId": &a.bot_id, "sessionId": &a.session_id,
                     "state": &a.state, "attempt": a.attempt,
@@ -2439,7 +2457,8 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
                     CASE
                       WHEN a.created_at<=0 OR a.created_at>?1
                         THEN 'Invalid assignment clock; no replay'
-                      WHEN (?1-a.created_at)>=?2
+                      WHEN (?1-a.created_at)>=COALESCE(
+                          json_extract(pinned.snapshot_json,'$.policy.strategy.attemptTimeoutMs'),?2)
                         THEN 'Assignment exceeded its bounded run time; no replay'
                       WHEN ?3=1
                         THEN 'Bots paused; native execution authority revoked'
@@ -2475,6 +2494,7 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
              FROM sa_assignments a
              JOIN sa_tickets t ON t.id=a.ticket_id
              JOIN sa_orchestrations o ON o.id=t.orchestration_id
+             LEFT JOIN sa_ticket_team_snapshots pinned ON pinned.ticket_id=t.id
              LEFT JOIN sa_mandates m ON m.ticket_id=t.id
              LEFT JOIN bots coordinator ON coordinator.id=o.coordinator_bot_id
              LEFT JOIN bots worker ON worker.id=a.bot_id
@@ -2693,7 +2713,9 @@ fn manual_preflight(
         selected_role: if coordinate { "coordinator" } else { "worker" }.into(),
         eligible: reason.is_none(), reason,
         allowed_tools: Vec::new(), allowed_side_effects: false,
-        attempt_budget_ms: MAX_ASSIGNMENT_RUN_MS,
+        attempt_budget_ms: load_team_version_snapshot(
+            &store.db, &cfg.id, cfg.team_version,
+        )?.policy.strategy.attempt_timeout_ms,
     })
 }
 
@@ -2910,12 +2932,18 @@ fn admit_role_with_grant_inner(
     {
         return Err("Team changed during Ticket admission; reload and submit again.".into());
     }
-    let team_snapshot = make_team_snapshot(
+    let configured_snapshot = load_team_version_snapshot(&tx,&config.id,config.team_version)?;
+    let mut team_snapshot = make_team_snapshot(
         &tx,&config.id,config.team_version,&config.name,&config.project_id,
         config.policy_revision,&config.coordinator_bot_id,&config.worker_bot_ids,&config.reviewer_bot_ids,
         config.council_required,
         TeamSnapshotProvenance::Native,
     )?;
+    // Team strategy is pinned from the last immutable config version; a new
+    // Ticket must never silently reset its retry/time/resource settings.
+    team_snapshot.policy.strategy = configured_snapshot.policy.strategy;
+    team_snapshot.policy.max_concurrent_tasks = configured_snapshot.policy.max_concurrent_tasks;
+    team_snapshot.policy.max_attempts_per_assignment = configured_snapshot.policy.max_attempts_per_assignment;
     if team_snapshot.policy.council_required != config.council_required {
         return Err("Team Council policy changed during Ticket admission; reload and submit again.".into());
     }
@@ -3238,7 +3266,9 @@ pub(crate) fn read_only_policy(
         if scope.ticket_state != "running" || scope.assignment_state != "running" || scope.revoked
             || scope.expiry <= storage::now()
             || scope.mandate_version != snapshot.policy.policy_revision
-            || !assignment_within_budget(scope.started_at, storage::now())
+            || !assignment_within_policy_budget(
+                scope.started_at, storage::now(), snapshot.policy.strategy.attempt_timeout_ms,
+            )
             // The current task channel has only native read-only enforcement.
             // A persisted write/tool grant must not be silently treated as a
             // runnable permission (or as harmless metadata) until a separate
@@ -3516,7 +3546,9 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     let trimmed = text.trim().chars().take(4096).collect::<String>();
     // A stop-all transition may happen after admission but before the provider
     // callback. A stale success must not become approvable after global pause.
-    let within_budget = assignment_within_budget(started_at, storage::now());
+    let within_budget = assignment_within_policy_budget(
+        started_at, storage::now(), team_snapshot.policy.strategy.attempt_timeout_ms,
+    );
     let thread_current = assignment_thread_current(store, session_id, &task_id)?;
     let authorized = execution_permitted(
         authorized && role_current && provenance_ok && within_budget && thread_current,
@@ -3927,6 +3959,16 @@ fn change_enabled(
         return Err("Orchestration policy revision changed; reload before editing.".into());
     }
     if enabled {
+        // The current native scheduler serializes conflicting physical checkouts.
+        // A requested wider hard parallel limit or unmetered cost/token ceiling
+        // must fail closed, rather than pretending to enforce an unsupported cap.
+        let configured=load_team_version_snapshot(&store.db,orchestration_id,current.team_version)?;
+        if configured.policy.max_concurrent_tasks!=1
+            || configured.policy.strategy.token_ceiling.is_some()
+            || configured.policy.strategy.estimated_cost_ceiling_minor.is_some()
+            || configured.policy.strategy.subagent_delegation_enabled {
+            return Err("Requested Team resource strategy needs a native capability or meter unavailable for this run.".into());
+        }
         // Multi-member Teams can now be enabled for the explicit read-only
         // Demand scheduler. The ordinary manual admission remains denied for
         // a multi-member Team without a selected, frozen role.
@@ -4128,9 +4170,13 @@ fn update_configuration_roles_with_policy(
             storage::now(),expected_revision],
     ).map_err(|e| e.to_string())?;
     if changed!=1 { return Err("Orchestration changed or is no longer eligible for Team editing.".into()); }
-    let snapshot = make_team_snapshot(&tx,id,next_version,name,&project_id,next_revision,
+    let previous_snapshot = load_team_version_snapshot(&tx,id,current.team_version)?;
+    let mut snapshot = make_team_snapshot(&tx,id,next_version,name,&project_id,next_revision,
         &coordinator.id,&worker_bot_ids,&reviewer_bot_ids,council_required,
         TeamSnapshotProvenance::Native)?;
+    snapshot.policy.strategy = previous_snapshot.policy.strategy;
+    snapshot.policy.max_concurrent_tasks = previous_snapshot.policy.max_concurrent_tasks;
+    snapshot.policy.max_attempts_per_assignment = previous_snapshot.policy.max_attempts_per_assignment;
     insert_team_version(&tx,&snapshot)?;
     tx.commit().map_err(|e| e.to_string())?;
     configuration(store,id)

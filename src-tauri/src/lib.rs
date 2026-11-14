@@ -4513,6 +4513,8 @@ pub fn run() {
                 bots::bot_project_ids,
                 bots::bot_message,
                 superagent::superagent_create,
+                superagent::strategy::superagent_strategy_get,
+                superagent::strategy::superagent_strategy_update,
                 superagent::events::superagent_source_create,
                 superagent::events::superagent_source_list,
                 superagent::events::superagent_source_decisions,

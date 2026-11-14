@@ -76,6 +76,7 @@ test('duplicating a native Team retains its roles but never its saved runtime au
   await expect(host.locator('.sa-list')).toContainText('Source Team copy');
   await expect(host.getByRole('status').filter({hasText:'Disabled Team duplicated.'})).toBeVisible();
   await expect(host.getByRole('button',{name:'Enable manual'})).toBeVisible();
+  await expect(host).toContainText('Authenticated GitHub Auto is available only for an explicitly granted source');
   await expect(host.locator('.sa-list .sa-counts')).toHaveText([
     '0 tasks · 0 running · 0 blocked',
     '0 tasks · 0 running · 0 blocked',

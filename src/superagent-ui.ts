@@ -1114,7 +1114,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         (workspaceView === id ? 'page' : 'false') + '">' + label + '</button>').join('') +
       '</nav>';
     host.innerHTML = '<div class="sa-ui">' +
-      '<p class="sa-intro">A Team is a reusable SuperAgent. All Run actions below use native Ticket and Mandate records; scope-bound worker writes and task Council are native policy-gated; GitHub Auto is not yet supported.</p>' +
+      '<p class="sa-intro">A Team is a reusable SuperAgent. All Run actions below use native Ticket and Mandate records; scope-bound worker writes and task Council are native policy-gated; Authenticated GitHub Auto is available only for an explicitly granted source, actor and event class with bounded quotas; manual work remains Off by default.</p>' +
       (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
       (error ? '<p role="alert" class="sa-error">' + safe(error) + '</p>' : '') +
       (feedback ? '<p role="status" class="sa-feedback">' + safe(feedback) + '</p>' : '') +

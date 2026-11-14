@@ -484,8 +484,10 @@ fn create_snapshot_symlink(
     };
     let _ = source_root;
     #[cfg(unix)]
-    symlink(target,destination)
-        .map_err(|_| "Council workspace symbolic link could not be copied into its review snapshot.".into())
+    {
+        symlink(target,destination)
+            .map_err(|_| "Council workspace symbolic link could not be copied into its review snapshot.".into())
+    }
     #[cfg(windows)]
     {
         if fs::metadata(source).is_ok_and(|metadata| metadata.is_dir()) {
@@ -2086,8 +2088,9 @@ mod tests {
         assert!(team.workers.iter().all(|worker| worker.council.is_some() && worker.read_only));
         {
             let store=state.store.lock().unwrap();
+            let project_id=super::ticket_team_snapshot(&store,&ticket.id).unwrap().project_id;
             assert!(team.workers.iter().all(|worker| {
-                store.workspace_root(&ticket.project_id,Some(&worker.session_id)).is_ok_and(|root| root == snapshot_root)
+                store.workspace_root(&project_id,Some(&worker.session_id)).is_ok_and(|root| root == snapshot_root)
             }));
         }
 

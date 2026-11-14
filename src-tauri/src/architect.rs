@@ -2511,11 +2511,10 @@ fn dispatch_as(
                 // The request above keeps the name as sent, so a retry still matches it.
                 let shown: String = assignment.name.chars().take(NAME_CHARS).collect();
                 let selected_bot = if let Some(seat) = &seat {
-                    if check_reviewer_executables {
-                        bot_reviewers::seat_bot(&store, &team, seat.round, assignment.replaces.as_deref(), library)?
-                    } else {
-                        bot_reviewers::seat_bot_inner(&store, &team, seat.round, assignment.replaces.as_deref(), false)?
-                    }
+                    bot_reviewers::seat_bot_with_skills(
+                        &store, &team, seat.round, assignment.replaces.as_deref(),
+                        check_reviewer_executables, library,
+                    )?
                 } else { None };
                 let unchosen = assignment.profile_id.is_none() && assignment.provider.is_none() && assignment.model.is_none();
                 let profile = if let Some(bot) = &selected_bot {

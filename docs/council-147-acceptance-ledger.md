@@ -48,7 +48,7 @@
 | AC-32 | Docs with source/branch, concept screenshots and decisions | `docs/council-147-integration.md`; `docs/architect-workers.md` | Docs present; live screenshots and final verification pending |
 | AC-33 | Multiple typed findings with titles, explanations, verified refs | `src-tauri/src/architect.rs`; `src-tauri/src/architect/council.rs` | Immutable finding code and transactional writes present; real-file integration pending |
 | AC-34 | Remediation/waiver dispositions revision- and actor-bound | `src-tauri/src/architect.rs`; `src-tauri/src/architect/council_tests.rs` | Native authorization present; positive human workflow smoke pending |
-| AC-35 | Standalone task/delivery Council request and terminal client | `src-tauri/src/architect/native_council_task.rs`; `src-tauri/src/architect/tests.rs` | Public native API and negative tests present; positive end-to-end receipt pending |
+| AC-35 | Standalone task/delivery Council request and terminal client | `src-tauri/src/architect/native_council_task.rs`; `src-tauri/src/architect/tests.rs` | Native API and deterministic positive terminal CAS/evidence test added; live provider integration unrun |
 | AC-36 | Wrong-caller/request/artifact and duplicate-write denial | `src-tauri/src/architect/native_council_task.rs`; `src-tauri/src/architect/tests.rs` | Native request/CAS tests present; race/fault-injection pending |
 | AC-37 | Measured/estimated/unknown per-attempt usage | `src/council.ts`; `src-tauri/src/architect.rs`; `tests/council.test.mjs` | Native records/UI rollup present; exact-HEAD tests unrun |
 | AC-38 | Bounded strategy comparison and no invented bills | `src/council.ts`; `src/council-panel.ts`; `src-tauri/src/architect.rs` | Budget/cost guards present; provider-priced smoke pending |

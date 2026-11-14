@@ -252,3 +252,10 @@ A Rust regression proves unchanged score/identity across distinct evidence-backe
 Channel callback settlement already requires a completed task and `verified_council_pass`, but the read-only Channel Council view previously labeled any cached `passed` snapshot as Passed when the frozen message selection matched. For composed M3-M7 native reviews, its display now additionally requires completed root task status and the same independently reverified native Council grant/criterion/terminal receipt gate. Missing or stale evidence displays Inconclusive with an explicit pending-terminal notice, not an unsupported approval. Historical uncomposed M1/M2 display behavior remains unchanged.
 
 A Rust regression checks forged cached pass, cross-delivery mismatch, stale score and legacy compatibility without granting any new callback authority.
+
+
+## Deterministic positive native task terminal (AC-35/36)
+
+The standalone native task client now has a positive Rust integration regression that admits a frozen artifact before review, creates two distinct bound read-only Council reviewers, persists each native reviewer authority and typed passing review receipt, verifies the current Council gate, then uses the real `native_council_task` methods to claim exactly one terminal, replay that terminal idempotently, and read correlated evidence. A changed objective must revoke the prior terminal/evidence reads.
+
+This is a deterministic **native protocol integration test**, not a live provider or external-harness acceptance. The already existing negative tests continue to cover wrong caller/project/request/artifact, missing native score, stale policy and restart. A live harness and independent future task client remain a separate acceptance gate.

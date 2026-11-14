@@ -2130,6 +2130,112 @@ fn native_task_council_admission_is_idempotent_and_rejects_foreign_or_stale_requ
 }
 
 #[test]
+fn native_task_client_records_one_verified_terminal_and_revalidates_evidence_reads() {
+    use council::{CouncilReviewReceipt, CouncilReviewVerdict};
+    let (state, sid) = state_fixture();
+    let store = state.store.lock().unwrap();
+    let project_id = store.session(&sid).unwrap().project_id;
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    team.status = "running".into();
+    team.objective = "Review the isolated native task output.".into();
+    team.council_since = storage::now().max(1);
+    team.config.council = Some(council::CouncilConfig {
+        target: 9.0, max_rounds: 3, reviewers: 2,
+        ..council::CouncilConfig::default()
+    });
+    save(&store, &mut team).unwrap();
+    let artifact = "a".repeat(64);
+    let admitted = native_council_task::admit(
+        &store, "task-owner", &sid, &project_id, "review-task", &artifact,
+    ).unwrap();
+    team.dispatch_revision = 2;
+    for index in 0..2 {
+        let id = format!("task-reviewer-{index}");
+        let created_at = admitted.admitted_at.saturating_add(1 + index as i64);
+        let mut reviewer = worker(&id, "completed", &[], &[]);
+        reviewer.created_at = created_at;
+        reviewer.updated_at = created_at;
+        reviewer.read_only = true;
+        reviewer.result_revision = (index + 1) as u64;
+        reviewer.council = Some(CouncilSeat {
+            round: 1, lens: format!("native lens {index}"),
+            score: Some(9.6), started_at: created_at,
+            ..CouncilSeat::default()
+        });
+        let binding = reviewer_security::ReviewerBinding::native(
+            &team, &reviewer.id, created_at, &reviewer.provider, &reviewer.model,
+            reviewer.council.as_ref().unwrap(),
+        );
+        reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+        let review = CouncilReviewReceipt {
+            schema_version: 1,
+            request_id: format!(
+                "native-council-request:{}:{}:{}", binding.council_cycle_id, id, reviewer.attempt,
+            ),
+            cycle_id: binding.council_cycle_id.clone(),
+            task_id: Some(sid.clone()),
+            assignment_id: Some(id.clone()),
+            policy_fingerprint: council_policy_fingerprint(&binding).unwrap(),
+            artifact_digest: council_artifact_digest(&binding.artifact_revision),
+            verdict: CouncilReviewVerdict::Passed,
+            findings_refs: vec![],
+            evidence_refs: vec![],
+            terminal_revision: reviewer.result_revision,
+            idempotency_key: format!(
+                "native-council-terminal:{}:{}:{}", binding.council_cycle_id, id, reviewer.attempt,
+            ),
+        };
+        review.validate().unwrap();
+        persist_council_record(
+            &store, &sid, &format!("native-task-positive-review-{index}"),
+            "council_review_receipt", &review, &reviewer.id,
+        ).unwrap();
+        reviewer.reviewer_binding = Some(binding);
+        team.workers.push(reviewer);
+    }
+    team.status = "completed".into();
+    save(&store, &mut team).unwrap();
+    assert_eq!(team.council_status.as_ref().unwrap().state, "passed",
+        "two independently scored, current native seats form a passing legacy Council");
+    assert!(verified_council_pass(&store, &team),
+        "native evidence must verify the task's complete reviewer bindings and persisted receipts");
+    let terminal = native_council_task::record_terminal(
+        &store, "task-owner", &sid, &project_id, "review-task",
+        &artifact, &admitted.request_id,
+    ).unwrap();
+    assert_eq!(terminal.outcome, "passed");
+    assert_eq!(terminal.request_id, admitted.request_id);
+    assert_eq!(terminal.lowest_verified_score, 9.6);
+    assert_eq!(terminal, native_council_task::record_terminal(
+        &store, "task-owner", &sid, &project_id, "review-task",
+        &artifact, &admitted.request_id,
+    ).unwrap(), "replayed native terminal claims are idempotent");
+    assert_eq!(terminal, native_council_task::read_terminal(
+        &store, "task-owner", &sid, &project_id, "review-task",
+        &artifact, &admitted.request_id,
+    ).unwrap());
+    let evidence = native_council_task::read_evidence(
+        &store, "task-owner", &sid, &project_id, "review-task",
+        &artifact, &admitted.request_id,
+    ).unwrap();
+    assert_eq!(evidence["cycleId"], admitted.cycle_id);
+    assert!(!evidence["reviewReceipts"].as_array().unwrap().is_empty());
+
+    // Old terminal receipts cannot authorize a changed objective after approval.
+    let mut changed = load(&store, &sid).unwrap().unwrap();
+    changed.objective = "A different task after the original native Council.".into();
+    save(&store, &mut changed).unwrap();
+    assert!(native_council_task::read_terminal(
+        &store, "task-owner", &sid, &project_id, "review-task",
+        &artifact, &admitted.request_id,
+    ).is_err(), "fresh task scope is required after a changed objective");
+    assert!(native_council_task::read_evidence(
+        &store, "task-owner", &sid, &project_id, "review-task",
+        &artifact, &admitted.request_id,
+    ).is_err());
+}
+
+#[test]
 fn native_task_council_restart_preserves_request_and_new_cycle_isolation() {
     let path = std::env::temp_dir()
         .join(format!("pandacode-native-council-{}.db", storage::id()));

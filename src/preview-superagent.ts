@@ -155,6 +155,17 @@ export async function invokeSuperagent<T>(
       break;
     }
     case 'superagent_tickets':value=tickets.get(args.orchestrationId)||[];break;
+    case 'superagent_observed_child_tree':{
+      const ticket=[...tickets.values()].flat().find(t=>t.id===args.ticketId);
+      if(!ticket)throw Error('Ticket not found.');
+      const team=get(ticket.orchestrationId);
+      value={ticketId:ticket.id,teamVersion:team.teamVersion,
+        configuredWorkers:team.workerBotIds.length,councilReviewers:team.reviewerBotIds.length,
+        observedChildren:0,reportedRunning:0,reportedWaiting:0,reportedNested:0,
+        hasUnresolvedLineage:false,truncated:false,canSpawnNativeChildren:false,
+        providerStatusIsNotVerification:true,nodes:[]};
+      break;
+    }
     case 'superagent_delivery_inspect':{
       const ticket=[...tickets.values()].flat().find(t=>t.id===args.ticketId);
       if(!ticket)throw Error('Ticket not found.');

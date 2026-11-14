@@ -270,3 +270,16 @@ Historical tasks without a trustworthy checkout pin show an unavailable Git
 observation. The status `native_complete_delivery_unverified` explicitly
 means **not yet independently verified as software delivered**; test runs,
 CI and publication remain unverified until real native receipts are added.
+
+
+### Real provider-observed subagent ancestry
+
+The **Provider subagent hierarchy** panel reads bounded provider child events
+from the Ticket's actual persisted Assignment sessions. It retains the
+provider-reported parent ID, role, status and depth, detects missing/cyclic
+ancestry, and caps the list at 256. It is distinct from **native delegated
+Worker subagents**, which have separate Tickets, mandates and scoped grants.
+A provider claiming to have started or completed a child cannot create a
+native assignment, expand permissions, cast a Council vote or satisfy an
+independent WorkItem acceptance. The view contains no prompts/responses or
+provider credentials. Read-only inspection does not launch any subagents.

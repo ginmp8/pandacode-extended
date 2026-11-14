@@ -63,6 +63,20 @@ interface DeliveryObservation {
   testExecutionVerified:boolean; ciResultVerified:boolean;
   externalDeliveryVerified:boolean; checkedAt:number; readOnly:boolean;
 }
+interface ObservedChildNode {
+  id:string;parentId:string|null;rootAssignmentId:string;rootSessionId:string;
+  rootWorkerBotId:string;name:string;reportedStatus:string;depth:number;
+  missingParent:boolean;ancestryCycleOrOverflow:boolean;toolCount:number;
+  startedAt:number;updatedAt:number;independentlyVerified:false;
+  nativeChildGrantPresent:false;
+}
+interface ObservedChildTree {
+  ticketId:string;teamVersion:number;configuredWorkers:number;councilReviewers:number;
+  observedChildren:number;reportedRunning:number;reportedWaiting:number;
+  reportedNested:number;hasUnresolvedLineage:boolean;truncated:boolean;
+  canSpawnNativeChildren:false;providerStatusIsNotVerification:true;
+  nodes:ObservedChildNode[];
+}
 interface DemandPlanEvidence {
   ticketId:string; ticketRevision:number; teamVersion:number; policyRevision:number;
   planSha256:string; state:string; items:WorkItemEvidence[];
@@ -245,6 +259,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let effectReceipts: EffectReceipt[] = [], effectReceiptsLoaded = false;
   let runGraph: RunGraph | null = null, runGraphLoaded = false;
   let delivery:DeliveryObservation|null=null, deliveryLoaded=false;
+  let providerChildren:ObservedChildTree|null=null, providerChildrenLoaded=false;
   let roleRoster: TeamRoster | null = null;
   let teamStrategy: StrategyView | null = null;
   // Draft order is committed only by the native revision-guarded roster update.
@@ -465,6 +480,33 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       entry.kind==='demand_auto_plan_requested') &&
       Array.isArray(effectiveWorkerIds) && effectiveWorkerIds.length>=2 &&
       ticketDetails && ['running','queued'].includes(ticketDetails.ticket.state));
+    const providerChildPanel = '<section class="sa-pane" role="region" aria-label="Provider subagent hierarchy">' +
+      '<h5>Provider-reported subagents</h5>' +
+      '<p>Actual recorded provider child events. These are not independent native Workers, Council seats or tool permissions.</p>' +
+      '<button type="button" data-sa-load-provider-children>Inspect actual provider children</button>' +
+      (providerChildrenLoaded && providerChildren?.ticketId===inspectedTicket
+        ? '<p>Configured Workers ' + safe(providerChildren.configuredWorkers) +
+          ' · Council Reviewers ' + safe(providerChildren.councilReviewers) +
+          ' · Observed children ' + safe(providerChildren.observedChildren) +
+          ' · Running ' + safe(providerChildren.reportedRunning) +
+          ' · Waiting ' + safe(providerChildren.reportedWaiting) +
+          ' · Nested ' + safe(providerChildren.reportedNested) + '</p>' +
+          (providerChildren.hasUnresolvedLineage
+            ? '<p role="status">Provider ancestry is missing or cyclic. No native authority inferred.</p>' : '') +
+          (providerChildren.truncated ? '<p>Provider observation capped at 256 children.</p>' : '') +
+          '<ol aria-label="Observed provider subagents">' +
+          (providerChildren.nodes.map(child=>'<li>' +
+            '<strong>' + safe(child.name) + '</strong>' +
+            ' · Provider state ' + safe(child.reportedStatus) +
+            ' · Parent ' + safe(child.parentId ?? 'root') +
+            ' · Depth ' + safe(child.depth) +
+            ' · Root Worker ' + safe(botName(child.rootWorkerBotId)) +
+            ' · Reported tools ' + safe(child.toolCount) +
+            (child.missingParent ? ' · Missing parent' : '') +
+            (child.ancestryCycleOrOverflow ? ' · Invalid ancestry' : '') +
+            ' · Native grant: none · Independent verification: none</li>').join('') ||
+            '<li>No provider subagents observed.</li>') + '</ol>'
+        : '<p>Provider child events not loaded.</p>') + '</section>';
     const subagentPanel = '<section class="sa-pane" role="region" aria-label="Native Worker subagents">' +
       '<h5>Worker-created subagents</h5><p>Optional, finite read-only native child delegation. ' +
       'A local user must authorize the exact root Demand and child limits. ' +
@@ -507,7 +549,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
         '<h4>Ticket evidence</h4><p>Read-only native snapshot. Model output is not task approval.</p>' +
         renderTeamSnapshot(ticketDetails.teamSnapshot) +
-        deliveryPanel + demandPlanPanel + subagentPanel +
+        deliveryPanel + demandPlanPanel + subagentPanel + providerChildPanel +
         '<dl><dt>Ticket ID</dt><dd><code>' + safe(inspected.id) + '</code></dd>' +
         '<dt>State / revision</dt><dd>' + safe(inspected.state) + ' / ' + inspected.revision + '</dd>' +
         '<dt>Actor</dt><dd>' + safe(ticketDetails.mandate.actor) + '</dd>' +
@@ -1123,6 +1165,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     effectReceipts = []; effectReceiptsLoaded = false;
     runGraph = null; runGraphLoaded = false;
     delivery=null; deliveryLoaded=false;
+    providerChildren=null;providerChildrenLoaded=false;
     const [snapshot, links] = await Promise.all([
       call<TicketDetails>('superagent_snapshot', { ticketId:id, limit:50 }),
       call<ThreadLink[]>('superagent_source_thread_links', { ticketId:id }),
@@ -1740,6 +1783,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
+    if (target.hasAttribute('data-sa-load-provider-children')) {
+      const ticketId=inspectedTicket;
+      if(!ticketId || !ticketDetails || ticketDetails.ticket.id!==ticketId)return;
+      void work(async()=>{
+        const observed=await call<ObservedChildTree>('superagent_observed_child_tree',{ticketId});
+        const pinnedVersion=ticketDetails?.teamSnapshot?.teamVersion;
+        if(observed.ticketId!==ticketId || inspectedTicket!==ticketId ||
+            (typeof pinnedVersion==='number' && observed.teamVersion!==pinnedVersion)){
+          throw new Error('Provider child stream changed before native inspection.');
+        }
+        providerChildren=observed;providerChildrenLoaded=true;
+      });
+      return;
+    }
     if (target.hasAttribute('data-sa-inspect-delivery')) {
       const ticketId=inspectedTicket;
       if (!ticketId || !ticketDetails || ticketDetails.ticket.id!==ticketId) return;
@@ -1844,6 +1901,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       subagentTree = null; subagentTreeLoaded = false;
       workPlan = null; workPlanLoaded = false;
       delivery=null; deliveryLoaded=false;
+      providerChildren=null;providerChildrenLoaded=false;
       workWriteItemKey = ''; workWritePaths = '';
       const id = target.dataset.saInspectTicket;
       if (inspectedTicket === id) {

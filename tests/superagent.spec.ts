@@ -152,6 +152,33 @@ test('guided SuperAgent Team Builder validates five native-backed stages and sav
   await expect(host.getByRole('button',{name:'Enable manual'})).toBeVisible();
 });
 
+test('provider child hierarchy never fabricates native seats or grants',async ({page})=>{
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  const create=host.locator('form[data-sa-form="create"]');
+  await create.getByRole('textbox',{name:'Name',exact:true}).fill('Observed Children');
+  await create.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
+  await create.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
+  await create.getByRole('button',{name:'Create disabled preset'}).click();
+  await host.getByRole('button',{name:'Enable manual'}).click();
+  await host.getByRole('alertdialog',{name:'Confirm orchestration action'})
+    .getByRole('button',{name:'Confirm',exact:true}).click();
+  await host.getByRole('textbox',{name:'Task objective'}).fill('Inspect child history');
+  await host.getByRole('combobox',{name:'Dispatch'}).selectOption('direct');
+  await host.getByRole('button',{name:'Dispatch manually'}).click();
+  const ticket=host.locator('.sa-tickets li',{hasText:'Inspect child history'});
+  await expect(ticket).toContainText('running');
+  await ticket.getByRole('button',{name:'View evidence'}).click();
+  const view=host.getByRole('region',{name:'Provider subagent hierarchy'});
+  await view.getByRole('button',{name:'Inspect actual provider children'}).click();
+  await expect(view).toContainText('Configured Workers 1');
+  await expect(view).toContainText('Observed children 0');
+  await expect(view.getByRole('list',{name:'Observed provider subagents'}))
+    .toContainText('No provider subagents observed.');
+  await expect(view).toContainText('not independent native Workers');
+});
+
 test('delivery inspector distinguishes observed native work from verified software delivery',async ({page})=>{
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

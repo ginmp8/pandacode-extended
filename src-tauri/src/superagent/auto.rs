@@ -104,15 +104,15 @@ fn active_grant(
 }
 
 pub(crate) fn ticket_authorized(store:&Store,ticket_id:&str)->Result<bool> {
-    let linked:Option<(String,String)>=store.db.query_row(
-        "SELECT source_id,delivery_id FROM sa_auto_intake
+    let linked:Option<(String,String,String)>=store.db.query_row(
+        "SELECT source_id,delivery_id,ticket_id FROM sa_auto_intake
          WHERE ticket_id=?1 OR ticket_id=(
              SELECT ticket_id FROM sa_work_items WHERE child_ticket_id=?1 LIMIT 1)
            OR ticket_id=(
              SELECT root_ticket_id FROM sa_subagent_nodes WHERE child_ticket_id=?1 LIMIT 1)",
-        [ticket_id],|r|Ok((r.get(0)?,r.get(1)?)),
+        [ticket_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
     ).optional().map_err(|e|e.to_string())?;
-    let Some((source_id,delivery_id))=linked else {
+    let Some((source_id,delivery_id,root_ticket_id))=linked else {
         return Ok(true);
     };
     let src=events::source(store,&source_id)?;
@@ -121,7 +121,7 @@ pub(crate) fn ticket_authorized(store:&Store,ticket_id:&str)->Result<bool> {
         "SELECT EXISTS(SELECT 1 FROM sa_auto_intake
            WHERE source_id=?1 AND delivery_id=?2 AND ticket_id=?3
              AND state='admitted' AND source_revision=?4)",
-        params![source_id,delivery_id,ticket_id,src.policy_revision],
+        params![source_id,delivery_id,root_ticket_id,src.policy_revision],
         |r|r.get(0),
     ).map_err(|e|e.to_string())?;
     Ok(current)
@@ -382,6 +382,7 @@ mod tests {
              CREATE TABLE sa_orchestrations(id TEXT PRIMARY KEY);
              CREATE TABLE sa_tickets(id TEXT PRIMARY KEY);
              CREATE TABLE sa_work_items(ticket_id TEXT,child_ticket_id TEXT);
+             CREATE TABLE sa_subagent_nodes(child_ticket_id TEXT,root_ticket_id TEXT);
              INSERT INTO sa_orchestrations(id) VALUES('team');",
         ).unwrap();
         db.execute_batch(events::SCHEMA).unwrap();
@@ -441,6 +442,48 @@ mod tests {
         ).unwrap();
         assert_eq!(count,0,"Observe alone must never admit an Auto issue.");
         assert!(!status(&store,"source").unwrap().enabled);
+    }
+
+
+    #[test]
+    fn auto_child_and_nested_subagent_revalidate_the_original_root_grant() {
+        let (store,source)=fixture();
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_auto_source_grants(
+               source_id,source_revision,repository,actor_filter,event_kind,
+               operator_login,max_daily_tasks,authorized_at,expires_at
+             ) VALUES('source',1,'owner/repo','contributor','issues.opened',
+                'operator',2,?1,?2)",
+            params![now-10,now+60_000],
+        ).unwrap();
+        let (event,decision)=decision("root-delivery",77);
+        record(&store,&event,&decision,&source,"operator").unwrap();
+        store.db.execute_batch(
+            "INSERT INTO sa_tickets(id) VALUES('root'),('worker'),('grandchild'),('manual');
+             INSERT INTO sa_work_items(ticket_id,child_ticket_id) VALUES('root','worker');
+             INSERT INTO sa_subagent_nodes(child_ticket_id,root_ticket_id)
+             VALUES('grandchild','root');
+             UPDATE sa_auto_intake SET state='admitted',ticket_id='root'
+             WHERE source_id='source' AND delivery_id='root-delivery';",
+        ).unwrap();
+
+        for id in ["root","worker","grandchild"] {
+            assert!(ticket_authorized(&store,id).unwrap(),
+                "the descendant must use the original authorized root Ticket");
+        }
+        assert!(ticket_authorized(&store,"manual").unwrap(),
+            "unrelated manual Tickets do not need a GitHub Auto grant");
+
+        store.db.execute(
+            "UPDATE sa_auto_source_grants SET revoked_at=?1 WHERE source_id='source'",
+            [storage::now()],
+        ).unwrap();
+        for id in ["root","worker","grandchild"] {
+            assert!(!ticket_authorized(&store,id).unwrap(),
+                "revoking the root grant must revoke all descendant authority");
+        }
+        assert!(ticket_authorized(&store,"manual").unwrap());
     }
 
     #[test]

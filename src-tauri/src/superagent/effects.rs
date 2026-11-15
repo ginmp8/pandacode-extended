@@ -1080,6 +1080,63 @@ pub(crate) fn receipt_history(
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+/// Paged, task-scoped native receipts. A compound timestamp/key cursor
+/// prevents dropping receipts with identical creation timestamps.
+pub(crate) fn receipt_history_page(
+    store: &Store, ticket_id: &str, limit: i64,
+    before: Option<(i64, &str)>, unresolved_only: bool,
+) -> Result<(Vec<EffectReceiptView>, Option<(i64, String)>)> {
+    if !(1..=100).contains(&limit) {
+        return Err("Effect receipt page size must be between 1 and 100.".into());
+    }
+    if let Some((created_at, key)) = before {
+        if created_at <= 0 || key.is_empty() || key.len() > 128
+            || !key.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+        {
+            return Err("Invalid effect receipt cursor.".into());
+        }
+    }
+    let exists: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE id=?1)",
+        [ticket_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if !exists {
+        return Err("SuperAgent Ticket not found.".into());
+    }
+    let (before_at, before_key) = match before {
+        Some((created_at, key)) => (Some(created_at), Some(key)),
+        None => (None, None),
+    };
+    let mut stmt = store.db.prepare(
+        "SELECT effect_key,payload_sha256,state,created_at,updated_at
+         FROM sa_effect_receipts
+         WHERE ticket_id=?1
+           AND (?2 IS NULL OR created_at<?2 OR (created_at=?2 AND effect_key<?3))
+           AND (?4=0 OR state!='applied')
+         ORDER BY created_at DESC,effect_key DESC LIMIT ?5",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(
+        params![ticket_id,before_at,before_key,i64::from(unresolved_only),limit+1],
+        |row| Ok(EffectReceiptView {
+            effect_key: row.get(0)?,
+            payload_sha256: row.get(1)?,
+            state: row.get(2)?,
+            created_at: row.get(3)?,
+            updated_at: row.get(4)?,
+        }),
+    ).map_err(|e| e.to_string())?;
+    let mut receipts = rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    let next_cursor = if receipts.len() > limit as usize {
+        receipts.truncate(limit as usize);
+        receipts.last().map(|item| (item.created_at, item.effect_key.clone()))
+    } else {
+        None
+    };
+    Ok((receipts, next_cursor))
+}
+
+
 pub(crate) fn unresolved_count(store: &Store, ticket_id: &str) -> Result<i64> {
     store
         .db
@@ -1180,6 +1237,74 @@ mod tests {
             }]
         }))
     }
+
+    #[test]
+    fn headless_effect_pages_preserve_all_receipts_and_unresolved_recovery() {
+        let (store, id) = fixture();
+        // Tied timestamps require a composite cursor; the oldest unresolved
+        // receipt must be observable even after hundreds of applied effects.
+        for index in 0..221 {
+            let state = if index % 31 == 0 { "uncertain" } else { "applied" };
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,?4,?5,?5)",
+                params![&id, format!("effect:{index:03}"),
+                    format!("{index:064x}"), state, 10_000 + index / 3],
+            ).unwrap();
+        }
+        let path = store.path.clone();
+        drop(store);
+        let mut cursor_at = None;
+        let mut cursor_key: Option<String> = None;
+        let mut observed = Vec::new();
+        let mut pages = 0;
+        loop {
+            let response: serde_json::Value = serde_json::from_str(
+                &superagent::inspect_headless_effect_receipts_page(
+                    &path, &id, cursor_at, cursor_key.as_deref(), false,
+                ).unwrap(),
+            ).unwrap();
+            pages += 1;
+            assert!(pages <= 4, "cursor must advance");
+            assert_eq!(response["totalUnresolved"], 8);
+            assert_eq!(response["observationalOnly"], true);
+            assert_eq!(response["replayed"], false);
+            for receipt in response["receipts"].as_array().unwrap() {
+                observed.push(receipt["effect_key"].as_str().unwrap().to_owned());
+            }
+            if response["nextCursor"].is_null() { break; }
+            cursor_at = response["nextCursor"]["createdAt"].as_i64();
+            cursor_key = response["nextCursor"]["effectKey"].as_str().map(str::to_owned);
+        }
+        assert_eq!(pages, 3);
+        assert_eq!(observed.len(), 221);
+        assert_eq!(observed.first().map(String::as_str), Some("effect:220"));
+        assert_eq!(observed.last().map(String::as_str), Some("effect:000"));
+        let unique: std::collections::HashSet<_> = observed.iter().collect();
+        assert_eq!(unique.len(), 221);
+        let unresolved: serde_json::Value = serde_json::from_str(
+            &superagent::inspect_headless_effect_receipts_page(
+                &path, &id, None, None, true,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(unresolved["receipts"].as_array().unwrap().len(), 8);
+        assert!(unresolved["receipts"].as_array().unwrap().iter()
+            .all(|receipt| receipt["state"] == "uncertain"));
+        assert!(unresolved["nextCursor"].is_null());
+        assert_eq!(unresolved["filter"], "unresolved");
+        let read = Store::open_read_only(&path).unwrap();
+        assert_eq!(unresolved_count(&read, &id).unwrap(), 8);
+        assert!(receipt_history_page(&read, &id, 100, Some((0, "effect:010")), false).is_err());
+        assert!(receipt_history_page(&read, &id, 100, Some((10001, "../bad")), false).is_err());
+        assert!(receipt_history_page(&read, "another-ticket", 100, None, false).is_err());
+        let unchanged: i64 = read.db.query_row(
+            "SELECT COUNT(*) FROM sa_effect_receipts WHERE ticket_id=?1 AND state='uncertain'",
+            [&id], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(unchanged, 8);
+    }
+
 
     #[test]
     fn exact_grant_is_required_and_receipts_prevent_replay_and_mismatch() {

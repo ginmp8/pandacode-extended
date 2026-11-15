@@ -2743,10 +2743,10 @@ async fn launch_operation_admitted(
         drop(registry);
         // Persist a just-finished native Council reviewer result before its
         // SuperAgent callback inspects the native score and skill receipts.
-        if let Ok(db) = store.lock() {
-            if let Err(error) = superagent::council_adapter::finalize_after_native_run(&db,&session_id) {
-                eprintln!("SuperAgent Council finalization failed: {error}");
-            }
+        if let Err(error) =
+            superagent::council_adapter::finalize_after_native_run_from_app(&app, &session_id)
+        {
+            eprintln!("SuperAgent Council finalization failed: {error}");
         }
         // Successful bot workers have no failover path. Settle their Ticket
         // synchronously so the exact artifact is frozen before actual native

@@ -5278,15 +5278,13 @@ pub async fn superagent_accept_council(
     if crate::feature_controls::get().bots_paused {
         return Err("Bots are globally paused; SuperAgent Council acceptance is denied.".into());
     }
-    let native_session_id = {
-        let store = state.store.lock().map_err(|error| error.to_string())?;
-        council_adapter::prepare_human_accept(&store,&ticket_id,expected_revision)?
-    };
-    crate::architect::accept_superagent_review(&app,state.inner(),&native_session_id)?;
-    let accepted={
-        let store = state.store.lock().map_err(|error| error.to_string())?;
-        council_adapter::finalize_human_accept(&store,&ticket_id,expected_revision,reason)?
-    };
+    let accepted = council_adapter::accept_and_finalize_human(
+        state.inner(), &ticket_id, expected_revision, reason,
+        |native_session_id| {
+            crate::architect::accept_superagent_review(&app, state.inner(), native_session_id)
+                .map(|_| ())
+        },
+    )?;
     if let Err(error)=scheduler::advance(&app).await {
         eprintln!("SuperAgent Demand scheduler after Council acceptance: {error}");
     }

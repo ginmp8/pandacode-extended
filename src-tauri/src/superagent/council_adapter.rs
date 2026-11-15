@@ -1397,6 +1397,19 @@ fn persist_finalization(
 /// Persist a terminal pass after Architect has saved the exact reviewer seat.
 /// Incomplete work is left waiting; failed, stale, limited or stopped rounds
 /// revoke the Ticket and require an explicit retry.
+pub(crate) fn finalize_after_native_run_from_app(
+    app: &tauri::AppHandle, reviewer_session_id: &str,
+) -> Result<bool> {
+    let state = app.state::<crate::AppState>();
+    let path = state.store.lock().map_err(|error| error.to_string())?.path.clone();
+    // Match Stop and effect dispatch lock ordering: fence before the Store mutex.
+    let fence = super::effects::lock_dispatch(&path)?;
+    let store = state.store.lock().map_err(|error| error.to_string())?;
+    finalize_after_native_run_locked(&store, reviewer_session_id, &fence)
+}
+
+/// Store-only finalization remains available to native tests.
+#[cfg(test)]
 pub(crate) fn finalize_after_native_run(store: &Store, reviewer_session_id: &str) -> Result<bool> {
     let fence=super::effects::lock_dispatch(&store.path)?;
     finalize_after_native_run_locked(store, reviewer_session_id, &fence)
@@ -1482,6 +1495,28 @@ pub(super) fn prepare_human_accept(store: &Store, ticket_id: &str, expected_revi
     Ok(native_session_id.to_owned())
 }
 
+/// Hold the dispatch fence across native human acceptance and the exact
+/// Ticket finalization. Never hold the Store mutex during Architect's callback.
+pub(super) fn accept_and_finalize_human(
+    state: &crate::AppState,
+    ticket_id: &str,
+    expected_revision: i64,
+    reason: &str,
+    accept_native: impl FnOnce(&str) -> Result<()>,
+) -> Result<Ticket> {
+    let path = state.store.lock().map_err(|error| error.to_string())?.path.clone();
+    let fence = super::effects::lock_dispatch(&path)?;
+    let native_session_id = {
+        let store = state.store.lock().map_err(|error| error.to_string())?;
+        prepare_human_accept(&store, ticket_id, expected_revision)?
+    };
+    accept_native(&native_session_id)?;
+    let store = state.store.lock().map_err(|error| error.to_string())?;
+    finalize_human_accept_locked(&store, ticket_id, expected_revision, reason, &fence)
+}
+
+/// Store-only finalization remains available to native tests.
+#[cfg(test)]
 pub(super) fn finalize_human_accept(
     store: &Store, ticket_id: &str, expected_revision: i64, reason: &str,
 ) -> Result<Ticket> {
@@ -2299,6 +2334,60 @@ mod tests {
         drop(store);
         let store=state.store.lock().unwrap();
         remove_workspace_snapshot(&store,&snapshot_id).unwrap();
+    }
+
+    #[test]
+    fn human_council_acceptance_is_fenced_across_native_callback_and_settlement() {
+        let mut store = fixture();
+        let root = workspace(&store);
+        std::fs::write(root.join("reviewed.md"), "authorized bytes").unwrap();
+        let (ticket, worker_session_id, _) =
+            required_worker(&mut store, "required-fenced-human-acceptance");
+        assert!(superagent::on_run_finished(
+            &store, &worker_session_id, true, "Worker artifact"
+        ).unwrap());
+        let (state, native_session_id) = start_required_review(store, &worker_session_id);
+        complete_native_reviewers(&state, &native_session_id, "8.5");
+        let revision = {
+            let store = state.store.lock().unwrap();
+            superagent::get_ticket(&store, &ticket.id).unwrap().revision
+        };
+        let interrupted = accept_and_finalize_human(
+            &state, &ticket.id, revision, "Attributed acceptance",
+            |_| Err("Native acceptance did not commit".into()),
+        );
+        assert!(interrupted.is_err());
+        {
+            let store = state.store.lock().unwrap();
+            assert_eq!(superagent::get_ticket(&store, &ticket.id).unwrap().state, "waiting_review");
+            let count: i64 = store.db.query_row(
+                "SELECT COUNT(*) FROM sa_council_finalizations WHERE ticket_id=?1",
+                [&ticket.id], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(count, 0, "failed native acceptance must not finalize");
+        }
+        let accepted = accept_and_finalize_human(
+            &state, &ticket.id, revision, "Attributed acceptance",
+            |native| {
+                assert_eq!(native, native_session_id.as_str());
+                architect::accept_superagent_review_for_test(&state, native).map(|_| ())
+            },
+        ).unwrap();
+        assert_eq!(accepted.state, "completed");
+        let store = state.store.lock().unwrap();
+        let (actor, reason): (String, String) = store.db.query_row(
+            "SELECT actor,reason FROM sa_council_finalizations WHERE ticket_id=?1",
+            [&ticket.id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(actor, "local-user");
+        assert_eq!(reason, "Attributed acceptance");
+        drop(store);
+        let called = std::cell::Cell::new(false);
+        assert!(accept_and_finalize_human(
+            &state, &ticket.id, revision, "Duplicate acceptance",
+            |_| { called.set(true); Ok(()) },
+        ).is_err());
+        assert!(!called.get(), "stale revision must not invoke native acceptance");
     }
 
     #[test]

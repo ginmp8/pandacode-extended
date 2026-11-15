@@ -3403,7 +3403,8 @@ fn historical_prior_cycle_claims_require_native_session_link_and_unrevoked_grant
     reviewer.reviewer_binding = Some(binding.clone());
     team.workers.push(reviewer);
     store.message(&reviewer_session.id, "assistant",
-        "Council findings JSON: [{\\"severity\\":\\"high\\",\\"category\\":\\"security\\",\\"title\\":\\"Prior-cycle finding\\",\\"explanation\\":\\"Review needed\\"}]\\nCouncil score: 7/10"
+        r#"Council findings JSON: [{"severity":"high","category":"security","title":"Prior-cycle finding","explanation":"Review needed"}]
+Council score: 7/10"#
     ).unwrap();
     team.council_since = previous_since + 2;
     save(&store, &mut team).unwrap();

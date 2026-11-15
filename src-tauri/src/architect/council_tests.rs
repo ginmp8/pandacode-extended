@@ -69,6 +69,9 @@ fn native_council_finding_projection_reuses_persisted_report_and_invalidates_aft
 #[test]
 fn prior_cycle_findings_remain_unverified_and_require_the_native_parent_session_link() {
     let (state, sid) = council_state(on(9.0, 3, 2));
+    let (started, _) = start_state(&state, &sid,
+        "Inspect native findings across Council cycles", None, None).unwrap();
+    assert!(started.council_since > 0, "historical evidence requires a real native cycle");
     call(&state, &sid, "pandacode_dispatch_workers", json!({
         "assignments": [reviewer_assignment("prior-cycle", "security")]
     })).unwrap();
@@ -93,6 +96,21 @@ fn prior_cycle_findings_remain_unverified_and_require_the_native_parent_session_
     assert!(!prior.evidence_verified && !prior.location_verified);
     assert!(prior.verified_evidence_refs.is_empty());
     assert!(!inspected.verified_pass);
+
+    // A mutable historical worker must not rewrite the lens attributed to
+    // an originally authorized and independently scored native reviewer.
+    let mut relabeled = load(&store, &sid).unwrap().unwrap();
+    let original_lens = relabeled.workers[0].council.as_ref().unwrap().lens.clone();
+    relabeled.workers[0].council.as_mut().unwrap().lens = "forged-security".into();
+    save(&store, &mut relabeled).unwrap();
+    assert!(council_inspection_state(&store, &sid).unwrap().unwrap()
+        .historical_reported_findings.is_empty(),
+        "a relabeled historical seat must not expose its former scored report");
+    relabeled.workers[0].council.as_mut().unwrap().lens = original_lens;
+    save(&store, &mut relabeled).unwrap();
+    assert_eq!(council_inspection_state(&store, &sid).unwrap().unwrap()
+        .historical_reported_findings.len(), 1,
+        "restoring exact frozen native attribution restores read-only history");
 
     let project = store.session(&sid).unwrap().project_id;
     let foreign = store.create_session(&project, "codex", "", "full").unwrap();
@@ -4806,9 +4824,12 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
         assert_eq!(child[0].leaf_attempts.iter().filter(|leaf| leaf.round == 2).count(), 2);
         assert!(child[0].verified_child_receipt.is_some(),
             "first-wave receipt remains immutable and reverified");
-        assert!(child_council::verified_parent_seats(&store, &root).unwrap().is_none(),
-            "first-wave parent seat cannot approve while second child wave is pending");
-        assert!(!verified_council_pass(&store, &root));
+        assert!(child_council::verified_parent_seats(&store, &root).unwrap().is_some(),
+            "the frozen first-wave parent receipt stays available for admission");
+        assert!(child_council::verified_s2_receipts(&store, &root).unwrap().is_none(),
+            "pending second-wave leaves cannot create a terminal receipt");
+        assert!(!verified_council_pass(&store, &root),
+            "a first-wave receipt must never approve the second wave");
     }
     for _ in 0..2 {
         let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();

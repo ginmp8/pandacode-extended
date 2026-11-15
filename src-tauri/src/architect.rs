@@ -1311,6 +1311,7 @@ pub struct ArchitectReadSnapshot {
     council_review_receipts: Vec<council::CouncilReviewReceipt>,
     council_criterion_outcomes: Vec<council::CouncilCriterionOutcomeReceipt>,
     council_usage: Vec<council::CouncilUsageRecord>,
+    council_usage_aggregation: Option<council::CouncilUsageAggregation>,
 }
 
 /// Native authorized child leaf projection. A reported score is not a pass.
@@ -1396,6 +1397,7 @@ fn empty_council_ledger(team: TeamSnapshot) -> ArchitectReadSnapshot {
         council_review_receipts: Vec::new(),
         council_criterion_outcomes: Vec::new(),
         council_usage: Vec::new(),
+        council_usage_aggregation: None,
     }
 }
 
@@ -1926,6 +1928,30 @@ fn council_ledger_projection(store: &Store, team: &TeamSnapshot) -> ArchitectRea
         usage.push(record);
     }
 
+    let child_parent_rounds = nested_roots
+        .iter()
+        .filter(|(_, _, link, _)| {
+            usage.iter().any(|record| record.child_cycle_id.as_deref() == Some(link.child_council_cycle_id.as_str()))
+                || child_receipts.iter().any(|receipt| {
+                    receipt.child_cycle_id == link.child_council_cycle_id
+                        && receipt.parent_seat_id == link.root_worker_id
+                })
+        })
+        .map(|(_, _, link, _)| council::CouncilUsageParentRound {
+            root_cycle_id: link.root_council_cycle_id.clone(),
+            child_cycle_id: link.child_council_cycle_id.clone(),
+            parent_seat_id: link.root_worker_id.clone(),
+            root_round: link.root_round,
+        })
+        .collect::<Vec<_>>();
+    let usage_aggregation = council::aggregate_usage_records_with_parent_rounds(
+        &root_cycle_id,
+        &usage,
+        &child_receipts,
+        &child_parent_rounds,
+    )
+    .ok();
+
     let mut projected = empty_council_ledger(team.clone());
     projected.council_findings = findings;
     projected.council_criterion_outcomes = criterion_outcomes.clone();
@@ -1933,6 +1959,7 @@ fn council_ledger_projection(store: &Store, team: &TeamSnapshot) -> ArchitectRea
     projected.council_child_leaves = child_leaves;
     projected.council_review_receipts = review_receipts;
     projected.council_usage = usage;
+    projected.council_usage_aggregation = usage_aggregation;
     let Ok(raw_dispositions) = council_records::<council::CouncilFindingDisposition>(
         store,
         &team.session_id,

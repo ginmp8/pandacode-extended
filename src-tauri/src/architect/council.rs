@@ -8,7 +8,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 const MAX_ROUNDS: usize = 100;
 const MAX_REVIEWERS: usize = 8;
@@ -693,6 +693,85 @@ pub struct CouncilUsageRecord {
     pub cost_estimate: Option<CouncilCostEstimate>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CouncilUsageAggregateLevel { Root, Child, Round, Reviewer }
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CouncilUsageMetricTotal {
+    pub status: CouncilUsageValueStatus,
+    pub value: u64,
+    pub record_count: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CouncilUsageMetricAggregate {
+    pub totals: Vec<CouncilUsageMetricTotal>,
+    pub unknown_records: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CouncilUsageCostAggregate {
+    pub status: CouncilUsageValueStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub currency: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pricing_version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub amount_micros: Option<u64>,
+    pub record_count: usize,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub calculated_at_ms: Vec<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CouncilUsageAggregateBucket {
+    pub level: CouncilUsageAggregateLevel,
+    pub cycle_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub round_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reviewer_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_seat_id: Option<String>,
+    /// Nested parent composite metrics stay inspectable here but are excluded from root totals.
+    pub included_in_root: bool,
+    pub record_count: usize,
+    pub input_tokens: CouncilUsageMetricAggregate,
+    pub output_tokens: CouncilUsageMetricAggregate,
+    /// Request counts add across unique usage attempts, preserving each source status.
+    pub request_count: CouncilUsageMetricAggregate,
+    /// Retry values are cumulative per seat and round; the aggregate sums each assignment's peak.
+    pub retries: CouncilUsageMetricAggregate,
+    /// Escalations count unique persisted decision IDs so retries do not repeat the same trigger.
+    pub escalations: CouncilUsageMetricAggregate,
+    pub cost: Vec<CouncilUsageCostAggregate>,
+    pub queue_wait_ms: CouncilUsageMetricAggregate,
+    pub elapsed_ms: CouncilUsageMetricAggregate,
+    /// Concurrent leaves is an observed gauge; aggregate it as the maximum sample, not a sum.
+    pub concurrent_leaves: CouncilUsageMetricAggregate,
+    /// Leaf reviews is the per-root-round budget count repeated on usage rows; keep the maximum.
+    pub leaf_reviews: CouncilUsageMetricAggregate,
+    /// The start-to-finish wall span counts overlapping child work once.
+    pub wall_elapsed_ms: CouncilUsageValue<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CouncilUsageAggregation {
+    pub root_cycle_id: String,
+    pub root: CouncilUsageAggregateBucket,
+    pub children: Vec<CouncilUsageAggregateBucket>,
+    pub rounds: Vec<CouncilUsageAggregateBucket>,
+    pub reviewers: Vec<CouncilUsageAggregateBucket>,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum CouncilCompositionError {
     InvalidSchemaVersion(u8),
@@ -1029,6 +1108,382 @@ impl CouncilUsageRecord {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct CouncilUsageAggregateKey {
+    level: CouncilUsageAggregateLevel,
+    cycle_id: String,
+    round_id: Option<String>,
+    reviewer_id: Option<String>,
+    parent_seat_id: Option<String>,
+    included_in_root: bool,
+}
+
+#[derive(Default)]
+struct UsageMetricAccumulator { totals: BTreeMap<u8, (CouncilUsageValueStatus, u64, usize)>, unknown_records: usize }
+
+impl UsageMetricAccumulator {
+    fn add(&mut self, value: &CouncilUsageValue<u64>) -> std::result::Result<(), CouncilCompositionError> {
+        if value.status == CouncilUsageValueStatus::Unknown {
+            self.unknown_records = self.unknown_records.checked_add(1).ok_or(CouncilCompositionError::InvalidUsageRecord("aggregate count overflow"))?;
+            return Ok(());
+        }
+        let amount = value.value.ok_or(CouncilCompositionError::InvalidUsageRecord("known aggregate value is missing"))?;
+        let entry = self.totals.entry(usage_status_rank(value.status)).or_insert((value.status, 0, 0));
+        entry.1 = entry.1.checked_add(amount).ok_or(CouncilCompositionError::InvalidUsageRecord("aggregate metric overflow"))?;
+        entry.2 = entry.2.checked_add(1).ok_or(CouncilCompositionError::InvalidUsageRecord("aggregate count overflow"))?;
+        Ok(())
+    }
+
+    fn add_max(&mut self, value: &CouncilUsageValue<u64>) -> std::result::Result<(), CouncilCompositionError> {
+        if value.status == CouncilUsageValueStatus::Unknown {
+            self.unknown_records = self.unknown_records.checked_add(1).ok_or(CouncilCompositionError::InvalidUsageRecord("aggregate count overflow"))?;
+            return Ok(());
+        }
+        let amount = value.value.ok_or(CouncilCompositionError::InvalidUsageRecord("known aggregate value is missing"))?;
+        let entry = self.totals.entry(usage_status_rank(value.status)).or_insert((value.status, 0, 0));
+        entry.1 = entry.1.max(amount);
+        entry.2 = entry.2.checked_add(1).ok_or(CouncilCompositionError::InvalidUsageRecord("aggregate count overflow"))?;
+        Ok(())
+    }
+
+    fn finish(self) -> CouncilUsageMetricAggregate {
+        CouncilUsageMetricAggregate {
+            totals: self.totals.into_values().map(|(status, value, record_count)| CouncilUsageMetricTotal { status, value, record_count }).collect(),
+            unknown_records: self.unknown_records,
+        }
+    }
+}
+
+#[derive(Default)]
+struct UsageRetryAccumulator {
+    by_assignment: BTreeMap<(String, String, String, u8), (CouncilUsageValueStatus, u64, usize)>,
+    unknown_records: usize,
+}
+
+impl UsageRetryAccumulator {
+    fn add(&mut self, record: &CouncilUsageRecord, cycle_id: &str) -> std::result::Result<(), CouncilCompositionError> {
+        if record.retries.status == CouncilUsageValueStatus::Unknown {
+            self.unknown_records = self.unknown_records.checked_add(1).ok_or(CouncilCompositionError::InvalidUsageRecord("aggregate count overflow"))?;
+            return Ok(());
+        }
+        let value = record.retries.value.ok_or(CouncilCompositionError::InvalidUsageRecord("known aggregate value is missing"))? as u64;
+        let status = record.retries.status;
+        let key = (cycle_id.to_owned(), record.round_id.clone(), record.seat_id.clone(), usage_status_rank(status));
+        let entry = self.by_assignment.entry(key).or_insert((status, 0, 0));
+        entry.1 = entry.1.max(value);
+        entry.2 = entry.2.checked_add(1).ok_or(CouncilCompositionError::InvalidUsageRecord("aggregate count overflow"))?;
+        Ok(())
+    }
+
+    fn finish(self) -> std::result::Result<CouncilUsageMetricAggregate, CouncilCompositionError> {
+        let mut totals = BTreeMap::<u8, (CouncilUsageValueStatus, u64, usize)>::new();
+        for ((_, _, _, rank), (status, value, record_count)) in self.by_assignment {
+            let total = totals.entry(rank).or_insert((status, 0, 0));
+            total.1 = total.1.checked_add(value).ok_or(CouncilCompositionError::InvalidUsageRecord("aggregate metric overflow"))?;
+            total.2 = total.2.checked_add(record_count).ok_or(CouncilCompositionError::InvalidUsageRecord("aggregate count overflow"))?;
+        }
+        Ok(CouncilUsageMetricAggregate {
+            totals: totals.into_values().map(|(status, value, record_count)| CouncilUsageMetricTotal { status, value, record_count }).collect(),
+            unknown_records: self.unknown_records,
+        })
+    }
+}
+
+#[derive(Default)]
+struct UsageEscalationAccumulator {
+    by_status: BTreeMap<u8, (CouncilUsageValueStatus, HashSet<String>, usize)>,
+    unknown_records: usize,
+}
+
+impl UsageEscalationAccumulator {
+    fn add(&mut self, record: &CouncilUsageRecord) -> std::result::Result<(), CouncilCompositionError> {
+        if record.escalations.status == CouncilUsageValueStatus::Unknown {
+            self.unknown_records = self.unknown_records.checked_add(1).ok_or(CouncilCompositionError::InvalidUsageRecord("aggregate count overflow"))?;
+            return Ok(());
+        }
+        let status = record.escalations.status;
+        let total = self.by_status.entry(usage_status_rank(status)).or_insert((status, HashSet::new(), 0));
+        if record.phase == CouncilUsagePhase::Escalation {
+            total.1.extend(record.decision_ids.iter().cloned());
+        }
+        total.2 = total.2.checked_add(1).ok_or(CouncilCompositionError::InvalidUsageRecord("aggregate count overflow"))?;
+        Ok(())
+    }
+
+    fn finish(self) -> std::result::Result<CouncilUsageMetricAggregate, CouncilCompositionError> {
+        let totals = self.by_status.into_values().map(|(status, decision_ids, record_count)| {
+            let value = u64::try_from(decision_ids.len()).map_err(|_| CouncilCompositionError::InvalidUsageRecord("aggregate metric overflow"))?;
+            Ok(CouncilUsageMetricTotal { status, value, record_count })
+        }).collect::<std::result::Result<Vec<_>, CouncilCompositionError>>()?;
+        Ok(CouncilUsageMetricAggregate { totals, unknown_records: self.unknown_records })
+    }
+}
+
+fn usage_status_rank(status: CouncilUsageValueStatus) -> u8 {
+    match status { CouncilUsageValueStatus::Measured => 0, CouncilUsageValueStatus::ProviderEstimated => 1,
+        CouncilUsageValueStatus::CalculatedEstimated => 2, CouncilUsageValueStatus::Unknown => 3 }
+}
+
+#[derive(Default)]
+struct UsageCostAccumulator {
+    totals: BTreeMap<(u8, Option<String>, Option<String>, Option<String>), (Option<u64>, usize, HashSet<u64>)>,
+}
+
+impl UsageCostAccumulator {
+    fn add(&mut self, record: &CouncilUsageRecord) -> std::result::Result<(), CouncilCompositionError> {
+        let value = &record.budget_consumption.estimated_cost_micros;
+        let pricing = record.cost_estimate.as_ref();
+        if (value.status == CouncilUsageValueStatus::Unknown && pricing.is_some())
+            || pricing.is_some_and(|estimate| Some(estimate.amount_micros) != value.value)
+        { return Err(CouncilCompositionError::InvalidUsageRecord("cost provenance does not match its value")); }
+        let key = (usage_status_rank(value.status), pricing.map(|item| item.currency.clone()),
+            pricing.map(|item| item.pricing_source.clone()), pricing.map(|item| item.pricing_version.clone()));
+        let entry = self.totals.entry(key).or_insert(((value.status != CouncilUsageValueStatus::Unknown).then_some(0), 0, HashSet::new()));
+        if let Some(amount) = value.value {
+            let current = entry.0.ok_or(CouncilCompositionError::InvalidUsageRecord("known cost aggregate is missing"))?;
+            entry.0 = Some(current.checked_add(amount).ok_or(CouncilCompositionError::InvalidUsageRecord("aggregate cost overflow"))?);
+            if let Some(item) = pricing { entry.2.insert(item.calculated_at_ms); }
+        }
+        entry.1 = entry.1.checked_add(1).ok_or(CouncilCompositionError::InvalidUsageRecord("aggregate count overflow"))?;
+        Ok(())
+    }
+
+    fn finish(self) -> Vec<CouncilUsageCostAggregate> {
+        self.totals.into_iter().map(|((rank, currency, pricing_source, pricing_version), (amount_micros, record_count, timestamps))| {
+            let status = match rank { 0 => CouncilUsageValueStatus::Measured, 1 => CouncilUsageValueStatus::ProviderEstimated,
+                2 => CouncilUsageValueStatus::CalculatedEstimated, _ => CouncilUsageValueStatus::Unknown };
+            let mut calculated_at_ms = timestamps.into_iter().collect::<Vec<_>>();
+            calculated_at_ms.sort_unstable();
+            CouncilUsageCostAggregate { status, currency, pricing_source, pricing_version, amount_micros, record_count, calculated_at_ms }
+        }).collect()
+    }
+}
+
+#[derive(Default)]
+struct UsageBucketAccumulator {
+    record_count: usize,
+    input_tokens: UsageMetricAccumulator,
+    output_tokens: UsageMetricAccumulator,
+    request_count: UsageMetricAccumulator,
+    retries: UsageRetryAccumulator,
+    escalations: UsageEscalationAccumulator,
+    cost: UsageCostAccumulator,
+    queue_wait_ms: UsageMetricAccumulator,
+    elapsed_ms: UsageMetricAccumulator,
+    concurrent_leaves: UsageMetricAccumulator,
+    leaf_reviews: UsageMetricAccumulator,
+    timing_count: usize,
+    complete_timing_count: usize,
+    earliest_start_ms: Option<u64>,
+    latest_finish_ms: Option<u64>,
+}
+
+impl UsageBucketAccumulator {
+    fn add_timing(&mut self, record: &CouncilUsageRecord) -> std::result::Result<(), CouncilCompositionError> {
+        self.timing_count = self.timing_count.checked_add(1).ok_or(CouncilCompositionError::InvalidUsageRecord("aggregate count overflow"))?;
+        if let (Some(start), Some(finish)) = (record.started_at_ms, record.finished_at_ms) {
+            self.complete_timing_count = self.complete_timing_count.checked_add(1).ok_or(CouncilCompositionError::InvalidUsageRecord("aggregate count overflow"))?;
+            self.earliest_start_ms = Some(self.earliest_start_ms.map_or(start, |current| current.min(start)));
+            self.latest_finish_ms = Some(self.latest_finish_ms.map_or(finish, |current| current.max(finish)));
+        }
+        Ok(())
+    }
+
+    fn add_record(&mut self, record: &CouncilUsageRecord) -> std::result::Result<(), CouncilCompositionError> {
+        self.record_count = self.record_count.checked_add(1).ok_or(CouncilCompositionError::InvalidUsageRecord("aggregate count overflow"))?;
+        self.add_timing(record)?;
+        self.input_tokens.add(&record.input_tokens)?;
+        self.output_tokens.add(&record.output_tokens)?;
+        self.request_count.add(&record.request_count)?;
+        let cycle_id = record.child_cycle_id.as_deref().unwrap_or(&record.root_cycle_id);
+        self.retries.add(record, cycle_id)?;
+        self.escalations.add(record)?;
+        self.cost.add(record)?;
+        self.queue_wait_ms.add(&record.queue_wait_ms)?;
+        self.elapsed_ms.add(&record.elapsed_ms)?;
+        self.concurrent_leaves.add_max(&record.budget_consumption.concurrent_leaves)?;
+        self.leaf_reviews.add_max(&record.budget_consumption.leaf_reviews)?;
+        Ok(())
+    }
+
+    fn finish(self, key: CouncilUsageAggregateKey) -> std::result::Result<CouncilUsageAggregateBucket, CouncilCompositionError> {
+        let wall_elapsed_ms = if self.timing_count > 0 && self.complete_timing_count == self.timing_count {
+            self.earliest_start_ms.zip(self.latest_finish_ms).and_then(|(start, finish)| finish.checked_sub(start))
+                .map(|value| CouncilUsageValue { status: CouncilUsageValueStatus::CalculatedEstimated, value: Some(value) })
+                .unwrap_or(CouncilUsageValue { status: CouncilUsageValueStatus::Unknown, value: None })
+        } else { CouncilUsageValue { status: CouncilUsageValueStatus::Unknown, value: None } };
+        Ok(CouncilUsageAggregateBucket {
+            level: key.level, cycle_id: key.cycle_id, round_id: key.round_id, reviewer_id: key.reviewer_id,
+            parent_seat_id: key.parent_seat_id, included_in_root: key.included_in_root, record_count: self.record_count,
+            input_tokens: self.input_tokens.finish(), output_tokens: self.output_tokens.finish(),
+            request_count: self.request_count.finish(), retries: self.retries.finish()?, escalations: self.escalations.finish()?,
+            cost: self.cost.finish(), queue_wait_ms: self.queue_wait_ms.finish(), elapsed_ms: self.elapsed_ms.finish(),
+            concurrent_leaves: self.concurrent_leaves.finish(), leaf_reviews: self.leaf_reviews.finish(), wall_elapsed_ms,
+        })
+    }
+}
+
+fn aggregate_key(level: CouncilUsageAggregateLevel, cycle_id: &str, round_id: Option<&str>, reviewer_id: Option<&str>,
+    parent_seat_id: Option<&str>, included_in_root: bool) -> CouncilUsageAggregateKey {
+    CouncilUsageAggregateKey { level, cycle_id: cycle_id.to_owned(), round_id: round_id.map(str::to_owned),
+        reviewer_id: reviewer_id.map(str::to_owned), parent_seat_id: parent_seat_id.map(str::to_owned), included_in_root }
+}
+
+fn cycle_round_matches(cycle_id: &str, round_id: &str) -> bool {
+    round_id.strip_prefix(&format!("{cycle_id}:"))
+        .and_then(|round| round.parse::<usize>().ok().filter(|number| *number > 0 && number.to_string() == round)).is_some()
+}
+
+/// A validated persisted child link supplies the parent round that the child receipt itself does
+/// not encode. The architect projection creates these only from links that match the live root.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct CouncilUsageParentRound {
+    pub root_cycle_id: String,
+    pub child_cycle_id: String,
+    pub parent_seat_id: String,
+    pub root_round: usize,
+}
+
+/// Aggregate projected rows for one root. Duplicate replays are idempotent; conflicting IDs or
+/// child links fail closed. When child usage exists, its parent composite stays in detail but is
+/// excluded from root totals so the leaf records are counted once.
+pub fn aggregate_usage_records(root_cycle_id: &str, records: &[CouncilUsageRecord], child_receipts: &[ChildCouncilReceipt])
+    -> std::result::Result<CouncilUsageAggregation, CouncilCompositionError> {
+    aggregate_usage_records_with_parent_rounds(root_cycle_id, records, child_receipts, &[])
+}
+
+pub(super) fn aggregate_usage_records_with_parent_rounds(
+    root_cycle_id: &str,
+    records: &[CouncilUsageRecord],
+    child_receipts: &[ChildCouncilReceipt],
+    child_parent_rounds: &[CouncilUsageParentRound],
+) -> std::result::Result<CouncilUsageAggregation, CouncilCompositionError> {
+    if !contract_token(root_cycle_id, MAX_CONTRACT_ID_CHARS) {
+        return Err(CouncilCompositionError::InvalidUsageRecord("root cycle ID is invalid"));
+    }
+    let mut unique_records = BTreeMap::<String, CouncilUsageRecord>::new();
+    for record in records {
+        record.validate()?;
+        if record.root_cycle_id != root_cycle_id { return Err(CouncilCompositionError::CorrelationMismatch("rootCycleId")); }
+        let cycle_id = match &record.scope {
+            CouncilUsageScope::Root if record.child_cycle_id.is_none() => root_cycle_id,
+            CouncilUsageScope::Child => record.child_cycle_id.as_deref().ok_or(CouncilCompositionError::CorrelationMismatch("childCycleId"))?,
+            _ => return Err(CouncilCompositionError::CorrelationMismatch("scope")),
+        };
+        if !cycle_round_matches(cycle_id, &record.round_id) { return Err(CouncilCompositionError::CorrelationMismatch("roundId")); }
+        let attempt = record.attempt_id.strip_prefix(&format!("{}:", record.seat_id))
+            .and_then(|value| value.parse::<usize>().ok().filter(|number| *number > 0 && number.to_string() == value))
+            .ok_or(CouncilCompositionError::CorrelationMismatch("attemptId"))?;
+        if record.id != format!("native-council-usage:{cycle_id}:{}:{attempt}", record.seat_id) {
+            return Err(CouncilCompositionError::CorrelationMismatch("usageRecordId"));
+        }
+        if let Some(previous) = unique_records.get(&record.id) {
+            if previous != record { return Err(CouncilCompositionError::CorrelationMismatch("duplicateUsageRecordId")); }
+        } else { unique_records.insert(record.id.clone(), record.clone()); }
+    }
+    let rows = unique_records.into_values().collect::<Vec<_>>();
+    let mut attempts = HashSet::<(String, String, String, String)>::new();
+    for record in &rows {
+        let cycle_id = record.child_cycle_id.as_deref().unwrap_or(root_cycle_id);
+        if !attempts.insert((cycle_id.to_owned(), record.round_id.clone(), record.seat_id.clone(), record.attempt_id.clone())) {
+            return Err(CouncilCompositionError::CorrelationMismatch("duplicateUsageAttempt"));
+        }
+    }
+
+    let mut receipts = BTreeMap::<String, ChildCouncilReceipt>::new();
+    for receipt in child_receipts {
+        receipt.validate()?;
+        if receipt.root_cycle_id != root_cycle_id { return Err(CouncilCompositionError::CorrelationMismatch("childReceipt.rootCycleId")); }
+        if let Some(previous) = receipts.get(&receipt.child_cycle_id) {
+            if previous != receipt { return Err(CouncilCompositionError::CorrelationMismatch("duplicateChildReceipt")); }
+        } else { receipts.insert(receipt.child_cycle_id.clone(), receipt.clone()); }
+    }
+    let child_rows = rows.iter().filter(|record| record.scope == CouncilUsageScope::Child).collect::<Vec<_>>();
+    let mut explicit_parent_rounds = BTreeMap::<String, &CouncilUsageParentRound>::new();
+    for parent_round in child_parent_rounds {
+        if parent_round.root_cycle_id != root_cycle_id
+            || parent_round.root_round == 0
+            || !contract_token(&parent_round.child_cycle_id, MAX_CONTRACT_ID_CHARS)
+            || !contract_token(&parent_round.parent_seat_id, MAX_CONTRACT_ID_CHARS)
+            || explicit_parent_rounds.insert(parent_round.child_cycle_id.clone(), parent_round).is_some()
+        {
+            return Err(CouncilCompositionError::CorrelationMismatch("childUsage.parentRoundId"));
+        }
+    }
+    let mut parent_rounds = BTreeMap::<String, String>::new();
+    let mut parent_seats = BTreeMap::<String, String>::new();
+    for (child_cycle_id, link) in &explicit_parent_rounds {
+        if receipts.get(child_cycle_id).is_some_and(|receipt| receipt.parent_seat_id != link.parent_seat_id) {
+            return Err(CouncilCompositionError::CorrelationMismatch("childReceipt.parentSeatId"));
+        }
+        parent_rounds.insert(child_cycle_id.clone(), format!("{root_cycle_id}:{}", link.root_round));
+        parent_seats.insert(child_cycle_id.clone(), link.parent_seat_id.clone());
+    }
+    for receipt in receipts.values() {
+        if parent_rounds.contains_key(&receipt.child_cycle_id) { continue; }
+        let parents = rows.iter().filter(|record| record.scope == CouncilUsageScope::Root && record.seat_id == receipt.parent_seat_id).collect::<Vec<_>>();
+        if parents.is_empty() { return Err(CouncilCompositionError::CorrelationMismatch("childReceipt.parentSeatId")); }
+        let parent_rounds_for_seat = parents.iter().map(|record| record.round_id.as_str()).collect::<HashSet<_>>();
+        if parent_rounds_for_seat.len() != 1 { return Err(CouncilCompositionError::CorrelationMismatch("childReceipt.parentRoundId")); }
+        parent_rounds.insert(receipt.child_cycle_id.clone(), parents[0].round_id.clone());
+        parent_seats.insert(receipt.child_cycle_id.clone(), receipt.parent_seat_id.clone());
+    }
+    let mut child_record_counts = BTreeMap::<String, usize>::new();
+    for record in &child_rows {
+        let child = record.child_cycle_id.as_deref().unwrap_or_default();
+        if !parent_rounds.contains_key(child) { return Err(CouncilCompositionError::CorrelationMismatch("childUsage.childReceipt")); }
+        let count = child_record_counts.entry(child.to_owned()).or_default();
+        *count = count.checked_add(1).ok_or(CouncilCompositionError::InvalidUsageRecord("aggregate count overflow"))?;
+    }
+    if explicit_parent_rounds.keys().any(|child_cycle_id| {
+        !receipts.contains_key(child_cycle_id) && !child_record_counts.contains_key(child_cycle_id)
+    }) {
+        return Err(CouncilCompositionError::CorrelationMismatch("childUsage.parentRoundId"));
+    }
+    let composite_parent_rounds = child_record_counts.keys()
+        .filter_map(|child_cycle_id| parent_rounds.get(child_cycle_id).zip(parent_seats.get(child_cycle_id))
+            .map(|(round_id, parent_seat_id)| (parent_seat_id.clone(), round_id.clone())))
+        .collect::<std::collections::BTreeSet<_>>();
+
+    let root_key = aggregate_key(CouncilUsageAggregateLevel::Root, root_cycle_id, None, None, None, true);
+    let mut root = UsageBucketAccumulator::default();
+    let mut children = BTreeMap::<CouncilUsageAggregateKey, UsageBucketAccumulator>::new();
+    let mut rounds = BTreeMap::<CouncilUsageAggregateKey, UsageBucketAccumulator>::new();
+    let mut reviewers = BTreeMap::<CouncilUsageAggregateKey, UsageBucketAccumulator>::new();
+    for record in &rows {
+        let composite = record.scope == CouncilUsageScope::Root
+            && composite_parent_rounds.contains(&(record.seat_id.clone(), record.round_id.clone()));
+        if composite { root.add_timing(record)?; } else { root.add_record(record)?; }
+        let cycle_id = record.child_cycle_id.as_deref().unwrap_or(root_cycle_id);
+        let parent = record.child_cycle_id.as_deref().and_then(|child| parent_seats.get(child)).map(String::as_str);
+        if record.scope == CouncilUsageScope::Child {
+            let key = aggregate_key(CouncilUsageAggregateLevel::Child, cycle_id, None, None, parent, true);
+            children.entry(key).or_default().add_record(record)?;
+            let root_round = parent_rounds.get(cycle_id).ok_or(CouncilCompositionError::CorrelationMismatch("childUsage.parentRoundId"))?;
+            let key = aggregate_key(CouncilUsageAggregateLevel::Round, root_cycle_id, Some(root_round), None, None, true);
+            rounds.entry(key).or_default().add_record(record)?;
+            let key = aggregate_key(CouncilUsageAggregateLevel::Round, cycle_id, Some(&record.round_id), None, parent, true);
+            rounds.entry(key).or_default().add_record(record)?;
+        } else if composite {
+            let key = aggregate_key(CouncilUsageAggregateLevel::Round, cycle_id, Some(&record.round_id), None, Some(&record.seat_id), false);
+            rounds.entry(key).or_default().add_record(record)?;
+            let key = aggregate_key(CouncilUsageAggregateLevel::Round, root_cycle_id, Some(&record.round_id), None, None, true);
+            rounds.entry(key).or_default().add_timing(record)?;
+        } else {
+            let key = aggregate_key(CouncilUsageAggregateLevel::Round, cycle_id, Some(&record.round_id), None, None, true);
+            rounds.entry(key).or_default().add_record(record)?;
+        }
+        let key = aggregate_key(CouncilUsageAggregateLevel::Reviewer, cycle_id, None, Some(&record.reviewer_id),
+            if composite { Some(&record.seat_id) } else { parent }, !composite);
+        reviewers.entry(key).or_default().add_record(record)?;
+    }
+    let finish = |buckets: BTreeMap<CouncilUsageAggregateKey, UsageBucketAccumulator>| {
+        buckets.into_iter().map(|(key, bucket)| bucket.finish(key)).collect::<std::result::Result<Vec<_>, CouncilCompositionError>>()
+    };
+    Ok(CouncilUsageAggregation { root_cycle_id: root_cycle_id.into(), root: root.finish(root_key)?,
+        children: finish(children)?, rounds: finish(rounds)?, reviewers: finish(reviewers)? })
 }
 
 impl CouncilComposition {

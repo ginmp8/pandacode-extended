@@ -244,7 +244,6 @@ impl ReviewerToolPolicy {
             "pandacode_dispatch_workers",
             "pandacode_list_workers",
             "pandacode_read_worker",
-            "pandacode_cancel_worker",
             "pandacode_finish_team",
         ];
         let expected = super::catalog();
@@ -717,7 +716,7 @@ mod tests {
     async fn task_owned_child_architect_gets_only_native_read_only_review_management() {
         let configured = super::super::catalog();
         let names = ["pandacode_dispatch_workers", "pandacode_list_workers",
-            "pandacode_read_worker", "pandacode_cancel_worker", "pandacode_finish_team"];
+            "pandacode_read_worker", "pandacode_finish_team"];
         let mut supplied = configured.clone();
         // An external module cannot substitute its own schema under a known name.
         supplied.push(json!({
@@ -739,6 +738,7 @@ mod tests {
         assert_eq!(filtered.tools.len(), names.len());
         assert!(filtered.tools.iter().all(|spec| names.contains(&spec["name"].as_str().unwrap_or_default())));
         assert!(filtered.approval_tools.is_empty());
+        assert!((filtered.handler)("pandacode_cancel_worker".into(), json!({"id":"any"})).await.unwrap_err().contains("capability_not_authorized"));
         assert!((filtered.handler)("pandacode_route_models".into(), json!({})).await.is_err());
         assert_eq!(calls.load(Ordering::SeqCst), 0);
         assert!((filtered.handler)("pandacode_dispatch_workers".into(), json!({"assignments":[]})).await.is_ok());

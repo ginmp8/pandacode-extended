@@ -4401,10 +4401,10 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
         "second-wave callbacks are real, but final hierarchical S2 reconciliation remains fail-closed");
     drop(store);
     let (waiting, _) = dispatch_state(&state, &sid, started.generation,
-        "pandacode_finish_team", json!({"summary":"Keep escalated Council pending"}),
+        "pandacode_finish_team", json!({"summary":"Second native root and child waves settled"}),
         &std::sync::atomic::AtomicBool::new(false)).unwrap();
-    assert_eq!(waiting["completed"], false,
-        "a verified second child wave is still not an authenticated terminal root approval");
+    assert_eq!(waiting["completed"], true,
+        "only fresh root callbacks and independently reverified child receipts may pass S2");
     let store = state.store.lock().unwrap();
     let saved = load(&store, &sid).unwrap().unwrap();
     let inspected = child_council::inspect(&store, &saved).unwrap();
@@ -4419,8 +4419,11 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
         "second-wave reviewer identities must not reuse an earlier native grant");
     assert_eq!(first.root_cycle_id, second.root_cycle_id);
     assert_eq!(first.policy_sha256, second.policy_sha256);
-    assert!(!verified_council_pass(&store, &saved),
-        "a child receipt is evidence only; the root S2 terminal gate is still pending");
+    assert_eq!(saved.council_status.as_ref().unwrap().state, "passed");
+    assert_eq!(saved.council_status.as_ref().unwrap().round, 2);
+    assert_eq!(saved.council_status.as_ref().unwrap().lowest, Some(9.5));
+    assert!(verified_council_pass(&store, &saved),
+        "the separate root and child waves must both pass the native S2 terminal gate");
 
     let key = format!("native-council-child-s2-receipt:{}:security-child", saved.council_since);
     let original: String = store.db.query_row(
@@ -4437,6 +4440,8 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
     ).unwrap();
     assert!(child_council::inspect(&store, &saved).is_err(),
         "a forged persisted second-wave score must be rejected on native inspection");
+    assert!(!verified_council_pass(&store, &saved),
+        "tampering with a once-passed S2 receipt must revoke terminal approval");
     store.db.execute(
         "UPDATE architect_requests SET content=?3
          WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s2_receipt'",
@@ -4445,6 +4450,13 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
     assert!(child_council::inspect(&store, &saved).unwrap()[0]
         .verified_escalation_receipt.is_some(),
         "a restored exact receipt remains independently revalidated");
+    assert!(verified_council_pass(&store, &saved));
+    let mut forged_root = saved.clone();
+    forged_root.workers.iter_mut()
+        .find(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 2))
+        .unwrap().council.as_mut().unwrap().score = Some(10.0);
+    assert!(!verified_council_pass(&store, &forged_root),
+        "a forged second-wave root score must never replace the native callback");
     let second_worker = saved.config.council.as_ref().unwrap()
         .nested_bot_reviewers.first().unwrap();
     assert_eq!(second_worker.bot_id, "security-child");

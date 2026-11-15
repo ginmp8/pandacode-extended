@@ -1924,6 +1924,116 @@ pub(super) fn status_for_authenticated_children(
     })
 }
 
+/// A forced hierarchical S2 needs both complete, independent native waves.
+/// Callers must revalidate persisted reviewer grants and child receipts before
+/// invoking this structural gate. No composite score supplies a phantom vote.
+pub(super) fn status_for_authenticated_children_s2(
+    team: &TeamSnapshot,
+    children: &[super::child_council::AuthenticatedParentSeat],
+    second_children: &[super::child_council::VerifiedChildReceipt],
+) -> Option<CouncilStatus> {
+    let config = team.config.council.as_ref()?;
+    if config.strategy != CouncilExecutionStrategy::Escalated
+        || !config.force_escalation || config.nested_bot_reviewers.is_empty()
+        || accepted(team) || team.council_since <= 0
+        || latest_round(team) != 2
+        || children.len() != config.nested_bot_reviewers.len()
+        || second_children.len() != children.len()
+        || team.workers.iter().any(|w| !w.read_only && unsettled(&w.status))
+        || stale(team, 2)
+    {
+        return None;
+    }
+    let mut first = team.clone();
+    first.workers.retain(|worker|
+        worker.council.as_ref().is_none_or(|seat| seat.round == 1));
+    first.config.council.as_mut()?.force_escalation = false;
+    let first_status = status_for_authenticated_children(&first, children)?;
+    if first_status.state != "passed" || first_status.stale { return None; }
+    let mut low = first_status.lowest?;
+    let mut bots = std::collections::HashSet::new();
+    let mut leaf_ids = std::collections::HashSet::new();
+    for receipt in second_children {
+        let parent = children.iter().find(|seat| seat.bot_id == receipt.bot_id
+            && seat.child_session_id == receipt.child_session_id
+            && seat.root_cycle_id == receipt.root_cycle_id
+            && seat.objective_sha256 == receipt.objective_sha256
+            && seat.policy_sha256 == receipt.policy_sha256)?;
+        if parent.parent_worker_id.is_empty()
+            || !bots.insert(receipt.bot_id.as_str())
+            || receipt.leaf_worker_ids.len() < MIN_REVIEWERS
+            || !receipt.lowest_score.is_finite()
+            || receipt.lowest_score < config.target
+            || receipt.leaf_worker_ids.iter().any(|id|
+                id.is_empty() || !leaf_ids.insert(id.as_str()))
+        {
+            return None;
+        }
+        for criterion in config.criteria.iter().filter(|criterion| criterion.required) {
+            if criterion.evidence_required || !receipt.criterion_evidence.iter().any(|proof|
+                proof.id == criterion.id && same_lens(&proof.lens, &criterion.lens)
+                    && !proof.leaf_worker_ids.is_empty()
+                    && proof.leaf_worker_ids.iter().all(|id|
+                        receipt.leaf_worker_ids.contains(id))
+                    && proof.lowest_score.is_finite()
+                    && proof.lowest_score >= config.target.max(criterion.target))
+            {
+                return None;
+            }
+        }
+        low = low.min(receipt.lowest_score);
+    }
+    let required = config.reviewer_bot_ids.len() + config.automatic_reviewers;
+    let second = in_round(team, 2).filter(|(worker, seat)| counts(worker, seat))
+        .collect::<Vec<_>>();
+    if second.len() != required
+        || !criterion_blockers(team, config, 2).is_empty()
+        || !unverified_required_skill_checks(team, 2).is_empty()
+    {
+        return None;
+    }
+    let first_ids: std::collections::HashSet<&str> = in_round(team, 1)
+        .map(|(worker, _)| worker.id.as_str()).collect();
+    let first_sessions: std::collections::HashSet<&str> = in_round(team, 1)
+        .map(|(worker, _)| worker.session_id.as_str()).collect();
+    let mut sessions = std::collections::HashSet::new();
+    let mut direct = std::collections::HashSet::new();
+    let mut automatic = 0usize;
+    for (worker, seat) in second {
+        let score = seat.score?;
+        let binding = worker.reviewer_binding.as_ref()?;
+        if worker.status != "completed" || !worker.read_only || worker.abandoned
+            || worker.wrote_at != 0 || !worker.files.is_empty()
+            || seat.started_at <= 0 || seat.reported_severe_finding || seat.reported_conflict
+            || !score.is_finite() || score < config.target
+            || first_ids.contains(worker.id.as_str())
+            || first_sessions.contains(worker.session_id.as_str())
+            || worker.session_id.is_empty() || !sessions.insert(worker.session_id.as_str())
+            || binding.validate(team, worker).is_err()
+        {
+            return None;
+        }
+        match binding.reviewer_bot_id.as_deref() {
+            Some(bot) if config.reviewer_bot_ids.iter().any(|id| id == bot)
+                && binding.roster_bot_ids == config.reviewer_bot_ids
+                && binding.required_reviewers == Some(config.needed())
+                && direct.insert(bot) => {}
+            Some(_) => return None,
+            None => automatic += 1,
+        }
+        low = low.min(score);
+    }
+    if direct.len() != config.reviewer_bot_ids.len()
+        || automatic != config.automatic_reviewers
+    {
+        return None;
+    }
+    Some(CouncilStatus {
+        state: "passed".into(), round: 2, lowest: Some(low),
+        target: config.target, stale: false, notice: None,
+    })
+}
+
 /// The snapshot's `councilStatus`, from the same checks as the gate.
 pub(super) fn status(team: &TeamSnapshot) -> Option<CouncilStatus> {
     let config = team.config.council.as_ref()?;

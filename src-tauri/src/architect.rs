@@ -569,6 +569,26 @@ fn save(store: &Store, team: &mut TeamSnapshot) -> Result<()> {
     store.db.execute("INSERT INTO architect_teams(session_id,content) VALUES(?1,?2) ON CONFLICT(session_id) DO UPDATE SET content=excluded.content",params![team.session_id,content]).map_err(|e|e.to_string())?;
     Ok(())
 }
+/// Recompute the existing Council verdict from all current native receipts.
+/// Neither a first-wave composite nor a second-wave child receipt is approval
+/// without the independent root and child admission gates.
+fn authenticated_hierarchical_status(
+    store: &Store, team: &TeamSnapshot,
+) -> Option<CouncilStatus> {
+    let config = team.config.council.as_ref()?;
+    let children = child_council::verified_parent_seats(store, team).ok().flatten()?;
+    if config.strategy == council::CouncilExecutionStrategy::Escalated
+        && config.force_escalation
+    {
+        if !child_council::fresh_s2_root_reviewers(store, team, config) {
+            return None;
+        }
+        let second = child_council::verified_s2_receipts(store, team).ok().flatten()?;
+        council::status_for_authenticated_children_s2(team, &children, &second)
+    } else {
+        council::status_for_authenticated_children(team, &children)
+    }
+}
 /// Brings `changed_at` and `council_status` up to date. A failed read keeps the last value, so the
 /// save itself still goes ahead.
 fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
@@ -579,8 +599,7 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
     team.council_status = if team.config.council.as_ref()
         .is_some_and(|config| !config.nested_bot_reviewers.is_empty())
     {
-        child_council::verified_parent_seats(store, team).ok().flatten()
-            .and_then(|seats| council::status_for_authenticated_children(team, &seats))
+        authenticated_hierarchical_status(store, team)
             .or_else(|| council::status(team))
     } else {
         council::status(team)
@@ -610,16 +629,15 @@ fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
         }
         (rounds, config.needed())
     } else {
-        // Reuse the real root reviewer grants for a clean hierarchical S2 wave.
-        // The composite terminal gate separately rejects forced or triggered
-        // escalation, which still requires independently admitted new reviews.
-        if config.strategy != council::CouncilExecutionStrategy::Parallel
-            && !(config.strategy == council::CouncilExecutionStrategy::Escalated
-                && !config.force_escalation)
-        {
-            return false;
-        }
-        (vec![1], config.reviewer_bot_ids.len() + config.automatic_reviewers)
+        // An S2 terminal pass requires native grants in both original and
+        // independently authorized new root waves, not only their scores.
+        let rounds = match config.strategy {
+            council::CouncilExecutionStrategy::Parallel => vec![1],
+            council::CouncilExecutionStrategy::Escalated if config.force_escalation => vec![1, 2],
+            council::CouncilExecutionStrategy::Escalated => vec![1],
+            council::CouncilExecutionStrategy::TwoPhase => return false,
+        };
+        (rounds, config.reviewer_bot_ids.len() + config.automatic_reviewers)
     };
     rounds.into_iter().all(|round| {
         let eligible = team.workers.iter().filter(|worker| {
@@ -665,8 +683,7 @@ pub(crate) fn verified_council_pass(store: &Store, team: &TeamSnapshot) -> bool 
     let verified = if team.config.council.as_ref()
         .is_some_and(|config| !config.nested_bot_reviewers.is_empty())
     {
-        child_council::verified_parent_seats(store, team).ok().flatten()
-            .and_then(|seats| council::status_for_authenticated_children(team, &seats))
+        authenticated_hierarchical_status(store, team)
     } else {
         council::status(team)
     };

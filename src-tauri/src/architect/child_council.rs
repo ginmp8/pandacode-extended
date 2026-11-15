@@ -861,7 +861,13 @@ pub(super) fn verified_parent_seats(
         // A previously failed, replaced or contradictory child review is an
         // S2 trigger, not a clean first-wave success. Retain the native receipt
         // for inspection, but withhold root approval until fresh admission exists.
+        // A completed forced-S2 child must carry independently reverified
+        // second-wave evidence, not merely an expanded in-memory worker list.
+        let second_ready = config.strategy == super::council::CouncilExecutionStrategy::Escalated
+            && config.force_escalation
+            && read_escalation_receipt(store, root, &record, &child, choice)?.is_some();
         if config.strategy == super::council::CouncilExecutionStrategy::Escalated
+            && !second_ready
             && (child.workers.len() != choice.child_reviewers
                 || child.workers.iter().any(|worker| {
                     worker.abandoned || worker.status != "completed"
@@ -898,6 +904,69 @@ pub(super) fn verified_parent_seats(
         return Err("child_council_stale: unexpected or unverifiable composite seat in root cycle.".into());
     }
     Ok((ready && artifact_pinned).then_some(seats))
+}
+
+/// Reauthenticate every forced-S2 child wave from independently persisted
+/// native callbacks and grants. A sibling's score or a first-wave composite
+/// receipt cannot be counted as second-wave evidence.
+pub(super) fn verified_s2_receipts(
+    store: &Store, root: &TeamSnapshot,
+) -> Result<Option<Vec<VerifiedChildReceipt>>> {
+    let Some(config) = root.config.council.as_ref() else { return Ok(None) };
+    if config.strategy != super::council::CouncilExecutionStrategy::Escalated
+        || !config.force_escalation || config.nested_bot_reviewers.is_empty()
+        || !root_artifact_revision(store, root, false)?
+        || !super::council_evidence_is_current(store, root)
+    {
+        return Ok(None);
+    }
+    let mut worker_ids = HashSet::new();
+    let mut sessions = HashSet::new();
+    let mut receipts = Vec::with_capacity(config.nested_bot_reviewers.len());
+    for choice in &config.nested_bot_reviewers {
+        let record = read(store, root, choice)?
+            .ok_or("child_council_stale: missing S2 child reservation.")?;
+        let child = super::load(store, &record.child_session_id)?
+            .ok_or("child_council_stale: missing S2 child team.")?;
+        let Some(first) = read_verified_receipt(store, root, &record, &child)? else {
+            return Ok(None);
+        };
+        let Some(second) = read_escalation_receipt(store, root, &record, &child, choice)? else {
+            return Ok(None);
+        };
+        if first.root_cycle_id != second.root_cycle_id
+            || first.child_session_id != second.child_session_id
+            || first.bot_id != second.bot_id
+            || first.objective_sha256 != second.objective_sha256
+            || first.policy_sha256 != second.policy_sha256
+            || first.child_config_sha256 != second.child_config_sha256
+            || first.leaf_worker_ids.len() != choice.child_reviewers
+            || second.leaf_worker_ids.len() != choice.child_reviewers
+        {
+            return Err("child_council_stale: S2 child waves have conflicting frozen provenance.".into());
+        }
+        for leaf in &child.workers {
+            if leaf.council.as_ref().is_none_or(|seat| seat.round != 1 && seat.round != 2)
+                || !worker_ids.insert(leaf.id.as_str())
+                || leaf.session_id.is_empty()
+                || !sessions.insert(leaf.session_id.as_str())
+            {
+                return Err("child_council_stale: S2 child reused a reviewer identity or session.".into());
+            }
+        }
+        receipts.push(second);
+    }
+    let prefix = format!("native-council-child-s2-receipt:{}:", root.council_since);
+    let recorded: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_child_s2_receipt'
+         AND substr(key,1,length(?2))=?2",
+        params![root.session_id, prefix], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if recorded != receipts.len() as i64 {
+        return Err("child_council_stale: unexpected S2 child receipt in root cycle.".into());
+    }
+    Ok(Some(receipts))
 }
 
 /// Recount every task-owned child leaf from authenticated native reservations.
@@ -981,7 +1050,7 @@ fn issue_leaf_wave(
 /// A second child wave is never admitted from a cached verdict. It requires
 /// completed, authentically scored root reviewers from the same enabled
 /// sources, with fresh native sessions and no severe or conflicting findings.
-fn fresh_s2_root_reviewers(store: &Store, root: &TeamSnapshot, config: &CouncilConfig) -> bool {
+pub(super) fn fresh_s2_root_reviewers(store: &Store, root: &TeamSnapshot, config: &CouncilConfig) -> bool {
     let expected = config.reviewer_bot_ids.len() + config.automatic_reviewers;
     if expected == 0 { return true; }
     let first_sessions: HashSet<&str> = root.workers.iter()

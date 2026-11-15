@@ -7920,3 +7920,47 @@ fn install_two_phase_team(
     save(&store, &mut team).unwrap();
 }
 
+// Full native dispatch fixture for the imported read-only PR #152 test.
+fn council_review_assignment(
+    key: &str,
+    profile: Option<&str>,
+    bot: Option<&str>,
+    lens: &str,
+) -> Value {
+    let mut assignment = json!({
+        "key": key,
+        "name": key,
+        "prompt": "Review the frozen task independently and report real defects.",
+        "files": ["src"],
+        "readOnly": true,
+        "councilLens": lens,
+    });
+    if let Some(profile) = profile {
+        assignment["profileId"] = json!(profile);
+    }
+    if let Some(bot) = bot {
+        assignment["councilSource"] = json!("selected_bot");
+        assignment["reviewerBotId"] = json!(bot);
+    } else {
+        assignment["councilSource"] = json!("automatic");
+    }
+    assignment
+}
+
+fn dispatch_council_round(
+    state: &AppState,
+    sid: &str,
+    assignments: Vec<Value>,
+) -> Result<Vec<String>> {
+    let generation = load(&state.store.lock().unwrap(), sid)?.unwrap().generation;
+    let (result, _) = dispatch_state_runtime_test(
+        state,
+        sid,
+        generation,
+        "pandacode_dispatch_workers",
+        json!({ "assignments": assignments }),
+    )?;
+    Ok(result["workerIds"].as_array().unwrap().iter()
+        .map(|id| id.as_str().unwrap().to_string())
+        .collect())
+}

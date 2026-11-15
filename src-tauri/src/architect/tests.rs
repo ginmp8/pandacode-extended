@@ -809,6 +809,21 @@ fn composed_s2_user_acceptance_is_attributed_to_the_current_cycle() {
     mark_council_round_waiting(&state, &root_id, 1);
     settle_native_council_round(&state, &root_id, 1, "completed", Some(8.5));
 
+    {
+        let store = state.store.lock().unwrap();
+        let receipts = council_records::<council::CouncilReviewReceipt>(
+            &store,
+            &root_id,
+            "council_review_receipt",
+        )
+        .unwrap();
+        assert_eq!(receipts.len(), 2);
+        assert!(receipts.iter().all(|receipt| {
+            receipt.verdict == council::CouncilReviewVerdict::Failed
+                && receipt.task_id.as_deref() == Some(root_id.as_str())
+        }), "below-target reviewers have correctly correlated Failed terminal receipts before explicit acceptance");
+    }
+
     let accepted = council::accept(&state, &root_id).unwrap();
     let accepted_cycle = format!("{}:{}", accepted.session_id, accepted.council_since);
     assert_eq!(accepted.council_accepted, Some(accepted.council_since));
@@ -3627,6 +3642,22 @@ fn native_composed_terminal_gate_fails_closed_for_nonpassing_outcomes() {
             5,
             Some("blocked"),
         ),
+        (
+            "wrong-task-id",
+            "completed",
+            Some(9.5),
+            false,
+            5,
+            Some("blocked"),
+        ),
+        (
+            "missing-task-id",
+            "completed",
+            Some(9.5),
+            false,
+            5,
+            Some("blocked"),
+        ),
         ("missing-evidence", "completed", Some(9.6), true, 5, None),
         (
             "round-limit",
@@ -3661,7 +3692,7 @@ fn native_composed_terminal_gate_fails_closed_for_nonpassing_outcomes() {
         .unwrap_or_else(|error| panic!("{label} native Council dispatch failed: {error}"));
         mark_council_round_waiting(&state, &root_id, 1);
         settle_native_council_round(&state, &root_id, 1, worker_status, score);
-        if label == "inconclusive" {
+        if matches!(label, "inconclusive" | "wrong-task-id" | "missing-task-id") {
             {
                 let store = state.store.lock().unwrap();
                 let mut root = load(&store, &root_id).unwrap().unwrap();
@@ -3686,7 +3717,14 @@ fn native_composed_terminal_gate_fails_closed_for_nonpassing_outcomes() {
             .unwrap();
             assert_eq!(receipts.len(), 2);
             for receipt in &mut receipts {
-                receipt.verdict = council::CouncilReviewVerdict::Inconclusive;
+                match label {
+                    "inconclusive" => {
+                        receipt.verdict = council::CouncilReviewVerdict::Inconclusive;
+                    }
+                    "wrong-task-id" => receipt.task_id = Some("another-task".into()),
+                    "missing-task-id" => receipt.task_id = None,
+                    _ => unreachable!(),
+                }
                 let worker_id = receipt.assignment_id.as_deref().unwrap();
                 let changed = store
                     .db
@@ -3703,7 +3741,7 @@ fn native_composed_terminal_gate_fails_closed_for_nonpassing_outcomes() {
                     .unwrap();
                 assert_eq!(
                     changed, 1,
-                    "the explicit inconclusive terminal receipt stays on its worker"
+                    "the tampered terminal receipt stays on its worker"
                 );
             }
         }
@@ -3712,7 +3750,7 @@ fn native_composed_terminal_gate_fails_closed_for_nonpassing_outcomes() {
         let mut root = load(&store, &root_id).unwrap().unwrap();
         refresh_council(&store, &mut root);
         save(&store, &mut root).unwrap();
-        if label == "inconclusive" {
+        if matches!(label, "inconclusive" | "wrong-task-id" | "missing-task-id") {
             let required_reviewers = root.config.council.as_ref().unwrap().reviewers;
             let round_one_reviewers = root
                 .workers
@@ -3767,7 +3805,9 @@ fn native_composed_terminal_gate_fails_closed_for_nonpassing_outcomes() {
             "failed" => council::CouncilReviewVerdict::Failed,
             "stopped" => council::CouncilReviewVerdict::Stopped,
             "inconclusive" => council::CouncilReviewVerdict::Inconclusive,
-            "missing-evidence" => council::CouncilReviewVerdict::Passed,
+            "wrong-task-id" | "missing-task-id" | "missing-evidence" => {
+                council::CouncilReviewVerdict::Passed
+            }
             "round-limit" => council::CouncilReviewVerdict::Failed,
             _ => unreachable!(),
         };
@@ -3777,6 +3817,20 @@ fn native_composed_terminal_gate_fails_closed_for_nonpassing_outcomes() {
                 .all(|receipt| receipt.verdict == expected_verdict),
             "{label} retains the per-review terminal outcome"
         );
+        if label == "wrong-task-id" {
+            assert!(
+                receipts
+                    .iter()
+                    .all(|receipt| { receipt.task_id.as_deref() == Some("another-task") }),
+                "the persisted terminal receipts carry the wrong taskId"
+            );
+        }
+        if label == "missing-task-id" {
+            assert!(
+                receipts.iter().all(|receipt| receipt.task_id.is_none()),
+                "the persisted terminal receipts omit taskId"
+            );
+        }
         if label == "inconclusive" {
             let projected = council_ledger_projection(&store, &root);
             assert_eq!(projected.council_review_receipts.len(), 2);
@@ -3786,10 +3840,12 @@ fn native_composed_terminal_gate_fails_closed_for_nonpassing_outcomes() {
                 }),
                 "the native snapshot preserves the explicit inconclusive terminal result"
             );
+        }
+        if matches!(label, "inconclusive" | "wrong-task-id" | "missing-task-id") {
             assert!(
                 native_council_finish_refusal(&store, &root)
                     .is_some_and(|refusal| refusal.contains("council_terminal_receipts_invalid")),
-                "an inconclusive terminal result alone blocks an otherwise passing composed review"
+                "invalid terminal receipt data blocks an otherwise passing composed review"
             );
             assert!(
                 root.council_status
@@ -3818,12 +3874,12 @@ fn native_composed_terminal_gate_fails_closed_for_nonpassing_outcomes() {
             finish_result.is_err(),
             "{label} cannot pass the native terminal finish gate"
         );
-        if label == "inconclusive" {
+        if matches!(label, "inconclusive" | "wrong-task-id" | "missing-task-id") {
             assert!(
                 finish_result
                     .unwrap_err()
                     .contains("council_terminal_receipts_invalid"),
-                "the Inconclusive receipts alone reject pandacode_finish_team"
+                "invalid terminal receipt data rejects pandacode_finish_team"
             );
         }
     }
@@ -4203,6 +4259,67 @@ fn complete_nested_children_for_root_round(
             dispatch_child_round(state, &child_id, 2, "priced-micro", runtime,
                 &format!("{mode}-{strategy:?}-root-round-{root_round}-{parent_id}"));
             settle_native_council_round(state, &child_id, 2, "completed", Some(9.6));
+        }
+        {
+            let store = state.store.lock().unwrap();
+            let child = load(&store, &child_id).unwrap().unwrap();
+            let link = validate_council_child_link(&store, &child_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(link.root_session_id, root_id);
+            let child_cycle_id = format!("{}:{}", child.session_id, child.council_since);
+            let current_round = child.council_status.as_ref().unwrap().round;
+            let child_worker_ids = child
+                .workers
+                .iter()
+                .filter(|worker| {
+                    worker
+                        .council
+                        .as_ref()
+                        .is_some_and(|seat| seat.round == current_round)
+                })
+                .map(|worker| worker.id.clone())
+                .collect::<std::collections::HashSet<_>>();
+            let root_receipts = council_records::<council::CouncilReviewReceipt>(
+                &store,
+                &root_id,
+                "council_review_receipt",
+            )
+            .unwrap();
+            let child_receipts = root_receipts
+                .iter()
+                .filter(|receipt| {
+                    receipt.cycle_id == child_cycle_id
+                        && receipt
+                            .assignment_id
+                            .as_ref()
+                            .is_some_and(|id| child_worker_ids.contains(id))
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(child_receipts.len(), child_worker_ids.len());
+            assert!(child_receipts.iter().all(|receipt| {
+                receipt.task_id.as_deref() == Some(child.session_id.as_str())
+                    && receipt.verdict == council::CouncilReviewVerdict::Passed
+            }));
+            let local_receipts = council_records::<council::CouncilReviewReceipt>(
+                &store,
+                &child_id,
+                "council_review_receipt",
+            )
+            .unwrap();
+            assert!(
+                !local_receipts.iter().any(|receipt| {
+                    receipt.cycle_id == child_cycle_id
+                        && receipt
+                            .assignment_id
+                            .as_ref()
+                            .is_some_and(|id| child_worker_ids.contains(id))
+                }),
+                "nested leaf receipts remain owned by the root ledger"
+            );
+            assert!(native_council_status(&store, &child)
+                .is_some_and(|status| status.state == "passed"));
+            assert!(verified_council_pass(&store, &child));
         }
         let generation = load(&state.store.lock().unwrap(), &child_id).unwrap().unwrap().generation;
         dispatch_state_runtime_test(state, &child_id, generation, "pandacode_finish_team",
@@ -8362,6 +8479,7 @@ fn persisted_council_criterion_receipts_drive_the_gate_and_dispositions_project_
         let mut reviewer = worker(id, "completed", &[], &[]);
         reviewer.created_at = created_at;
         reviewer.updated_at = created_at;
+        reviewer.result_revision = index as u64 + 1;
         reviewer.read_only = true;
         reviewer.council = Some(council::CouncilSeat {
             round: 1,
@@ -8414,6 +8532,10 @@ fn persisted_council_criterion_receipts_drive_the_gate_and_dispositions_project_
         )
         .unwrap();
         inputs.push((id.to_string(), binding, finding, evidence));
+    }
+    team.dispatch_revision = inputs.len() as u64;
+    for reviewer in &team.workers {
+        persist_council_terminal_receipts(&store, &team, reviewer).unwrap();
     }
     assert_ne!(
         native_council_status(&store, &team).unwrap().state,
@@ -8496,6 +8618,21 @@ fn persisted_council_criterion_receipts_drive_the_gate_and_dispositions_project_
     }
     save(&store, &mut team).unwrap();
     assert_eq!(team.council_status.as_ref().unwrap().state, "passed");
+    let terminal_receipts = council_records::<council::CouncilReviewReceipt>(
+        &store,
+        &team.session_id,
+        "council_review_receipt",
+    )
+    .unwrap();
+    assert_eq!(terminal_receipts.len(), 2);
+    assert!(
+        terminal_receipts.iter().all(|receipt| {
+            receipt.verdict == council::CouncilReviewVerdict::Passed
+                && receipt.task_id.as_deref() == Some(team.session_id.as_str())
+        }),
+        "evidence-required composed passes carry correctly correlated terminal receipts"
+    );
+    assert!(verified_council_pass(&store, &team));
 
     let finding = &inputs[0].2;
     let disposition = council::CouncilFindingDisposition {

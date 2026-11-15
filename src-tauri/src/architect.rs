@@ -673,7 +673,7 @@ fn require_composed_terminal_receipts(
         .and_then(|config| config.composition.as_ref())
         .is_some();
     if composed
-        && matches!(status.state.as_str(), "passed" | "accepted")
+        && status.state == "passed"
         && !verify_composition_terminal_receipts(store, team, status)
     {
         status.state = "blocked".into();
@@ -990,10 +990,7 @@ fn verify_composition_terminal_receipts(
     let Some(composition) = config.composition.as_ref() else {
         return true;
     };
-    if composition.validate().is_err()
-        || !matches!(status.state.as_str(), "passed" | "accepted")
-        || status.stale
-    {
+    if composition.validate().is_err() || status.state != "passed" || status.stale {
         return false;
     }
     // Criterion outcomes may be present in the current snapshot before their
@@ -1016,20 +1013,33 @@ fn verify_composition_terminal_receipts(
     {
         return false;
     }
-    let root_cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    let child_link = match validate_council_child_link(store, &team.session_id) {
+        Ok(link) => link,
+        Err(_) => return false,
+    };
+    let task_cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    let root_cycle_id = child_link.as_ref().map_or_else(
+        || task_cycle_id.clone(),
+        |link| link.root_council_cycle_id.clone(),
+    );
+    let ledger_owner = child_link
+        .as_ref()
+        .map_or(team.session_id.as_str(), |link| {
+            link.root_session_id.as_str()
+        });
     let Ok(current_delivery) = channel_delivery_id(store, &team.session_id) else {
         return false;
     };
     let Ok(review_receipts) = council_records::<council::CouncilReviewReceipt>(
         store,
-        &team.session_id,
+        ledger_owner,
         "council_review_receipt",
     ) else {
         return false;
     };
     let Ok(child_receipts) = council_records::<council::ChildCouncilReceipt>(
         store,
-        &team.session_id,
+        ledger_owner,
         "council_child_receipt",
     ) else {
         return false;
@@ -1154,6 +1164,7 @@ fn verify_composition_terminal_receipts(
                     &idempotency_key,
                 )
                 .is_err()
+                || receipt.task_id.as_deref() != Some(team.session_id.as_str())
                 || receipt.policy_fingerprint != policy
                 || receipt.terminal_revision != worker.result_revision
                 || receipt.verdict != council::CouncilReviewVerdict::Passed
@@ -1165,18 +1176,17 @@ fn verify_composition_terminal_receipts(
     if seats == 0 {
         return false;
     }
-    let Ok(usage) = council_records::<council::CouncilUsageRecord>(
-        store,
-        &team.session_id,
-        "council_usage_record",
-    ) else {
+    let Ok(usage) =
+        council_records::<council::CouncilUsageRecord>(store, ledger_owner, "council_usage_record")
+    else {
         return false;
     };
     let mut usage_count = 0usize;
-    for item in usage
-        .iter()
-        .filter(|item| item.root_cycle_id == root_cycle_id)
-    {
+    let task_round_prefix = format!("{task_cycle_id}:");
+    for item in usage.iter().filter(|item| {
+        item.root_cycle_id == root_cycle_id
+            && (child_link.is_none() || item.round_id.starts_with(&task_round_prefix))
+    }) {
         usage_count += 1;
         if item.validate().is_err() {
             return false;

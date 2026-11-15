@@ -86,6 +86,14 @@ export interface CouncilCriterionOutcomeReceipt {
   attempt: number; artifactRevision: string;
   outcome: { criterionId: string; score: number; verifiedEvidenceRefs: string[] };
 }
+/** One native-verified numeric leaf score and its criterion outcomes for a nested child Council. */
+export interface ChildCouncilLeafScore {
+  rootCycleId: string; parentSeatId: string; childCycleId: string; childSeatId: string;
+  reviewerId: string; attempt: number; round: number; score: number;
+  criterionOutcomes: CouncilCriterionOutcome[]; artifactRevision: string;
+  /** The exact `ChildCouncilReceipt.leafScoreRefs` entry this row satisfies. */
+  receiptRef: string;
+}
 export type CouncilReviewVerdict = 'passed' | 'accepted' | 'failed' | 'limit' | 'blocked' | 'stopped' | 'inconclusive' | 'stale';
 export interface CouncilReviewReceipt {
   schemaVersion: number; requestId: string; cycleId: string; taskId?: string | null;
@@ -249,6 +257,7 @@ export interface TeamSnapshot {
   councilFindingDispositions?: CouncilFindingDisposition[];
   councilChildReceipts?: ChildCouncilReceipt[];
   councilChildLeaves?: CouncilChildLeafProjection[];
+  councilChildLeafScores?: ChildCouncilLeafScore[];
   councilCriterionOutcomes?: CouncilCriterionOutcomeReceipt[];
   councilReviewReceipts?: CouncilReviewReceipt[];
   councilUsage?: CouncilUsageRecord[];

@@ -120,6 +120,8 @@ pub struct EffectiveTeam {
     pub policy_revision:i64,
     pub enabled:bool,
     pub execution_ready:bool,
+    /// Read-only native admission diagnostics. These are not tool grants or runtime-capability proof.
+    pub manual_admission_blockers:Vec<String>,
     pub members:Vec<EffectiveMember>,
     pub grants_issued:bool,
 }
@@ -185,10 +187,50 @@ fn effective_team(
     for (position,id) in roster.reviewer_bot_ids.iter().enumerate() {
         add("reviewer",position,id)?;
     }
+    // Explain actual native manual admission blockers without issuing any
+    // authorization, contacting a provider or treating Skills as permissions.
+    let mut manual_admission_blockers=Vec::new();
+    if !config.enabled {
+        manual_admission_blockers.push(
+            "Team is disabled; explicitly enable it before admitting a Demand.".into(),
+        );
+    }
+    if !roster.execution_ready {
+        manual_admission_blockers.push(
+            "Multi-role Team requires native scoped role admission; manual dispatch is unavailable.".into(),
+        );
+    }
+    if crate::feature_controls::get().bots_paused {
+        manual_admission_blockers.push(
+            "Bots are globally paused; native manual admission is unavailable.".into(),
+        );
+    }
+    for member in &members {
+        let required_for_admission=member.role=="coordinator"
+            || (member.role=="worker" && member.position==0)
+            || (config.council_required && member.role=="reviewer");
+        if required_for_admission && member.paused {
+            manual_admission_blockers.push(format!(
+                "{} bot is paused; native manual admission is unavailable.",member.role,
+            ));
+        }
+        if member.role=="worker" && member.position==0
+            && member.project_id!=config.project_id {
+            manual_admission_blockers.push(
+                "Primary Worker project differs from the Team execution project.".into(),
+            );
+        }
+        if required_for_admission {
+            let bot=bots::get(store,&member.bot_id)?;
+            if let Some(issue)=member_execution_issue(&bot) {
+                manual_admission_blockers.push(issue.into());
+            }
+        }
+    }
     Ok(EffectiveTeam {
         orchestration_id:config.id,policy_revision:config.policy_revision,
         enabled:config.enabled,execution_ready:roster.execution_ready,
-        members,grants_issued:false,
+        manual_admission_blockers,members,grants_issued:false,
     })
 }
 
@@ -273,6 +315,8 @@ mod tests {
         }).unwrap();
         let one=effective_team(&store,&cfg.id,&HashMap::new()).unwrap();
         assert!(one.execution_ready);
+        assert!(one.manual_admission_blockers.iter().any(|reason|
+            reason.contains("Team is disabled")));
         assert_eq!(one.members.len(),2);
         assert!(!one.grants_issued);
         assert_eq!(one.members[1].skills[0].library_status,"missing");
@@ -321,6 +365,8 @@ mod tests {
             issue.contains("Paused bot")));
         assert!(!paused.grants_issued);
         assert!(!view.execution_ready);
+        assert!(view.manual_admission_blockers.iter().any(|reason|
+            reason.contains("Multi-role Team")));
         assert!(!view.grants_issued);
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0)).unwrap(),0);

@@ -3935,6 +3935,19 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     struct MigrationHistorySnapshot {
         ticket: (String, String, String, i64),
+        mandate: (String, String, String, i64, String, i64, i64, String, i64, i64),
+        session_task: (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            Option<i64>,
+        ),
         assignment: (
             String,
             String,
@@ -3956,6 +3969,52 @@ mod tests {
                 "SELECT id,objective,state,revision FROM sa_tickets WHERE id='rollback-ticket'",
                 [],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let mandate = db
+            .query_row(
+                "SELECT ticket_id,actor,authorization_id,policy_revision,project_id,
+                        expires_at,revoked,allowed_tools,allowed_side_effects,created_at
+                 FROM sa_mandates WHERE ticket_id='rollback-ticket'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let session_task = db
+            .query_row(
+                "SELECT s.id,s.project_id,s.title,s.title_origin,s.status,s.task_stage,
+                        s.task_description,s.created_at,s.updated_at,s.completed_at
+                 FROM sessions s
+                 JOIN sa_assignments a ON a.session_id=s.id
+                 WHERE a.id='rollback-assignment'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                    ))
+                },
             )
             .unwrap();
         let assignment = db
@@ -4043,6 +4102,8 @@ mod tests {
         };
         MigrationHistorySnapshot {
             ticket,
+            mandate,
+            session_task,
             assignment,
             audit,
             effects,
@@ -4054,6 +4115,13 @@ mod tests {
     fn database_user_version(db: &Connection) -> i64 {
         db.pragma_query_value(None, "user_version", |row| row.get(0))
             .unwrap()
+    }
+
+    fn assert_migration_integrity(db: &Connection, context: &str) {
+        let result: String = db
+            .pragma_query_value(None, "integrity_check", |row| row.get(0))
+            .unwrap();
+        assert_eq!(result, "ok", "{context}");
     }
 
     struct MigrationTempDir(PathBuf);
@@ -4174,14 +4242,28 @@ mod tests {
         std::fs::create_dir_all(&project_directory).unwrap();
         let path = data_directory.join("store.sqlite3");
         let backup_path = backup_directory.join("store.sqlite3");
+        let failed_attempt_path = directory.join("failed-attempt.sqlite3");
         let timestamp = now();
 
         {
             let store = Store::open(&path).unwrap();
             let project = store.add_project(&project_directory).unwrap();
-            let session = store
-                .create_session(&project.id, "claude", "sonnet", "ask")
+            let task = store
+                .create_board_task(
+                    &project.id,
+                    "claude",
+                    "sonnet",
+                    "ask",
+                    "Historical rollback task",
+                    "Completed task retained with the old rollback Ticket.",
+                )
                 .unwrap();
+            store.db.execute(
+                "UPDATE sessions
+                 SET status='idle',task_stage='completed',completed_at=?2,updated_at=?2
+                 WHERE id=?1",
+                params![task.id, timestamp],
+            ).unwrap();
             store.db.execute(
                 "INSERT INTO sa_orchestrations(id,name,coordinator_bot_id,worker_bot_id,project_id,enabled,policy_revision,created_at,updated_at)
                  VALUES('rollback-orchestration','Rollback fixture','coordinator','worker',?1,0,1,?2,?2)",
@@ -4191,6 +4273,11 @@ mod tests {
                 "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,project_id,worker_bot_id,policy_revision,state,revision,created_at,updated_at)
                  VALUES('rollback-ticket','rollback-orchestration','rollback-request','Historical rollback objective','local-user','manual',?1,'worker',1,'completed',9,?2,?2)",
                 params![project.id, timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_mandates(ticket_id,actor,authorization_id,policy_revision,project_id,expires_at,revoked,allowed_tools,allowed_side_effects,created_at)
+                 VALUES('rollback-ticket','local-user','rollback-authorization',1,?1,?2,1,'[\"read_file\",\"list_directory\"]',0,?3)",
+                params![project.id, timestamp + 86_400_000, timestamp],
             ).unwrap();
             store.db.execute(
                 "INSERT INTO sa_work_items(id,ticket_id,objective,evidence_contract,state,ordinal,created_at,updated_at)
@@ -4209,7 +4296,7 @@ mod tests {
             store.db.execute(
                 "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,result,created_at,updated_at,work_item_id)
                  VALUES('rollback-assignment','rollback-ticket','worker',?1,'finished',2,'Historical assignment result',?2,?2,'rollback-work-item-1')",
-                params![session.id, timestamp],
+                params![task.id, timestamp],
             ).unwrap();
             store
                 .db
@@ -4239,6 +4326,7 @@ mod tests {
             let backup = Connection::open(&backup_path).unwrap();
             assert_schema_52_shape(&backup);
             assert_eq!(migration_history_snapshot(&backup), expected_history);
+            assert_migration_integrity(&backup, "known-good schema 52 backup before upgrade");
         }
 
         MIGRATION_TEST_FAILURE_AFTER.with(|failure_at| failure_at.set(Some(SCHEMA_VERSION)));
@@ -4252,25 +4340,40 @@ mod tests {
         assert!(migration_error.contains(&format!(
             "injected late migration failure after schema {SCHEMA_VERSION}"
         )));
+        checkpoint_database(&path);
+        std::fs::copy(&path, &failed_attempt_path).unwrap();
         {
             let failed = Connection::open(&path).unwrap();
             assert_schema_52_shape(&failed);
             assert_eq!(migration_history_snapshot(&failed), expected_history);
+            assert_migration_integrity(&failed, "failed migration database after rollback");
+        }
+        {
+            let failed_attempt = Connection::open(&failed_attempt_path).unwrap();
+            assert_schema_52_shape(&failed_attempt);
+            assert_eq!(migration_history_snapshot(&failed_attempt), expected_history);
+            assert_migration_integrity(&failed_attempt, "separate failed-attempt copy");
         }
 
-        // Restore the separately validated, closed-file backup exactly as an
-        // operator would before reopening the app.
-        checkpoint_database(&path);
+        // Revalidate the closed-file backup immediately before restoring it.
+        {
+            let backup = Connection::open(&backup_path).unwrap();
+            assert_schema_52_shape(&backup);
+            assert_eq!(migration_history_snapshot(&backup), expected_history);
+            assert_migration_integrity(&backup, "known-good schema 52 backup before restore");
+        }
         std::fs::copy(&backup_path, &path).unwrap();
         {
             let restored = Connection::open(&path).unwrap();
             assert_schema_52_shape(&restored);
             assert_eq!(migration_history_snapshot(&restored), expected_history);
+            assert_migration_integrity(&restored, "restored schema 52 database before retry");
         }
 
         let retried = Store::open(&path).unwrap();
         assert_schema_55_shape(&retried.db);
         assert_eq!(migration_history_snapshot(&retried.db), expected_history);
+        assert_migration_integrity(&retried.db, "schema 55 database after retry");
         let expected_contracts = vec![
             (
                 "rollback-work-item-1".into(),
@@ -4293,6 +4396,7 @@ mod tests {
         assert_schema_55_shape(&reopened.db);
         assert_eq!(migration_history_snapshot(&reopened.db), expected_history);
         assert_eq!(migration_work_item_contracts(&reopened.db), expected_contracts);
+        assert_migration_integrity(&reopened.db, "schema 55 database after idempotent reopen");
         drop(reopened);
     }
 

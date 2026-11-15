@@ -769,6 +769,234 @@ fn read_escalation_receipt(
     Ok(Some(stored))
 }
 
+/// A phase-two challenge is an independent native receipt, never an alias for
+/// the phase-one parent composite or a user-accepted terminal verdict.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VerifiedChildChallengeReceipt {
+    pub root_cycle_id: String,
+    pub child_session_id: String,
+    pub bot_id: String,
+    pub phase_one_receipt_sha256: String,
+    pub phase_two: VerifiedChildReceipt,
+}
+
+fn challenge_receipt_key(root: &TeamSnapshot, bot_id: &str) -> String {
+    format!("native-council-child-s3-receipt:{}:{bot_id}", root.council_since)
+}
+
+/// Native S3 evidence may exist without terminal approval. Verify both distinct
+/// admitted phases, frozen policy and artifact, actual callbacks and read-only
+/// grants; first-phase numeric scores cannot be reused for a challenge.
+fn challenge_receipt(
+    store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
+    child: &TeamSnapshot, choice: &CouncilNestedReviewer,
+) -> Result<Option<VerifiedChildChallengeReceipt>> {
+    let Some(config) = root.config.council.as_ref() else { return Ok(None) };
+    if config.strategy != super::council::CouncilExecutionStrategy::TwoPhase
+        || config.mode() != "m4"
+        || !root_artifact_revision(store, root, false)?
+        || !super::council_evidence_is_current(store, root)
+        || !super::council_evidence_is_current(store, child)
+    {
+        return Ok(None);
+    }
+    let Some(first) = read_verified_receipt(store, root, record, child)? else {
+        return Ok(None);
+    };
+    if parent_seat(store, root, record, child, false)?.is_none() {
+        return Ok(None);
+    }
+    let previous = child.workers.iter().filter(|leaf|
+        leaf.council.as_ref().is_some_and(|seat| seat.round == 1)
+    ).collect::<Vec<_>>();
+    let challengers = child.workers.iter().filter(|leaf|
+        leaf.council.as_ref().is_some_and(|seat| seat.round == 2)
+    ).collect::<Vec<_>>();
+    if previous.len() != choice.child_reviewers
+        || challengers.len() != choice.child_reviewers
+        || child.workers.len() != previous.len() + challengers.len()
+        || first.leaf_worker_ids.len() != choice.child_reviewers
+    {
+        return Ok(None);
+    }
+    let original_ids: HashSet<&str> = first.leaf_worker_ids.iter().map(String::as_str).collect();
+    let original_sessions: HashSet<&str> = previous.iter()
+        .map(|leaf| leaf.session_id.as_str()).collect();
+    if original_ids.len() != choice.child_reviewers
+        || previous.iter().any(|leaf| !original_ids.contains(leaf.id.as_str()))
+        || original_sessions.len() != choice.child_reviewers
+    {
+        return Ok(None);
+    }
+    let mut challenge_ids = HashSet::new();
+    let mut challenge_sessions = HashSet::new();
+    let mut lowest_score = f64::INFINITY;
+    let policy = child.config.council.as_ref()
+        .ok_or("child_council_stale: S3 child criteria are missing.")?;
+    for leaf in &challengers {
+        let Some(seat) = leaf.council.as_ref() else { return Ok(None) };
+        let Some(score) = seat.score else { return Ok(None) };
+        let Some(binding) = leaf.reviewer_binding.as_ref() else { return Ok(None) };
+        if leaf.status != "completed" || !leaf.read_only || leaf.abandoned
+            || leaf.wrote_at != 0 || !leaf.files.is_empty()
+            || seat.round != 2 || seat.started_at <= 0
+            || seat.reported_severe_finding || seat.reported_conflict
+            || !score.is_finite() || score < policy.target.max(choice.child_target)
+            || original_ids.contains(leaf.id.as_str())
+            || original_sessions.contains(leaf.session_id.as_str())
+            || !challenge_ids.insert(leaf.id.as_str())
+            || !challenge_sessions.insert(leaf.session_id.as_str())
+            || super::council::latest_score(store, &leaf.session_id) != Some(score)
+            || binding.validate(child, leaf).is_err()
+            || reviewer_security::validate_recorded_authority(
+                store, &child.session_id, binding,
+            ).is_err()
+        {
+            return Ok(None);
+        }
+        lowest_score = lowest_score.min(score);
+    }
+    let mut criterion_evidence = Vec::new();
+    for criterion in policy.criteria.iter().filter(|criterion| criterion.required) {
+        // A scored review is not an independent artifact/check attestation.
+        if criterion.evidence_required { return Ok(None); }
+        let matching = challengers.iter().filter_map(|leaf| {
+            let seat = leaf.council.as_ref()?;
+            seat.lens.eq_ignore_ascii_case(&criterion.lens)
+                .then_some((leaf.id.clone(), seat.score?))
+        }).collect::<Vec<_>>();
+        if matching.is_empty() { return Ok(None); }
+        let minimum = matching.iter().map(|(_, score)| *score)
+            .fold(f64::INFINITY, f64::min);
+        if !minimum.is_finite() || minimum < policy.target.max(criterion.target) {
+            return Ok(None);
+        }
+        criterion_evidence.push(VerifiedChildCriterion {
+            id: criterion.id.clone(),
+            lens: criterion.lens.clone(),
+            lowest_score: minimum,
+            leaf_worker_ids: matching.into_iter().map(|(id, _)| id).collect(),
+        });
+    }
+    Ok(Some(VerifiedChildChallengeReceipt {
+        root_cycle_id: record.root_cycle_id.clone(),
+        child_session_id: record.child_session_id.clone(),
+        bot_id: record.bot_id.clone(),
+        phase_one_receipt_sha256: digest(&serde_json::to_vec(&first).map_err(|e| e.to_string())?),
+        phase_two: VerifiedChildReceipt {
+            root_cycle_id: record.root_cycle_id.clone(),
+            child_session_id: record.child_session_id.clone(),
+            bot_id: record.bot_id.clone(),
+            objective_sha256: record.objective_sha256.clone(),
+            policy_sha256: record.policy_sha256.clone(),
+            child_config_sha256: record.child_config_sha256.clone(),
+            lowest_score,
+            leaf_worker_ids: challengers.iter().map(|leaf| leaf.id.clone()).collect(),
+            criterion_evidence,
+        },
+    }))
+}
+
+/// Persist once per real task cycle. A later score, permission revocation or
+/// tampered payload invalidates the persisted receipt rather than upgrading it.
+fn record_challenge_receipt(
+    store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
+    child: &TeamSnapshot, choice: &CouncilNestedReviewer,
+) -> Result<bool> {
+    let key = challenge_receipt_key(root, &record.bot_id);
+    let existing: Option<String> = store.db.query_row(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s3_receipt'
+         AND worker_id=?3",
+        params![root.session_id, key, record.child_session_id],
+        |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    let candidate = challenge_receipt(store, root, record, child, choice)?;
+    if let Some(raw) = existing {
+        let stored: VerifiedChildChallengeReceipt = serde_json::from_str(&raw)
+            .map_err(|_| "child_council_stale: malformed S3 challenge receipt.")?;
+        if candidate.as_ref() != Some(&stored) {
+            return Err("child_council_stale: S3 challenge receipt no longer matches native evidence.".into());
+        }
+        return Ok(false);
+    }
+    let Some(receipt) = candidate else { return Ok(false) };
+    super::record_request(
+        store, &root.session_id, &key, "council_child_s3_receipt",
+        &serde_json::to_string(&receipt).map_err(|e| e.to_string())?,
+        &record.child_session_id,
+    )?;
+    Ok(true)
+}
+
+fn read_challenge_receipt(
+    store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
+    child: &TeamSnapshot, choice: &CouncilNestedReviewer,
+) -> Result<Option<VerifiedChildChallengeReceipt>> {
+    let key = challenge_receipt_key(root, &record.bot_id);
+    let saved: Option<String> = store.db.query_row(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s3_receipt'
+         AND worker_id=?3",
+        params![root.session_id, key, record.child_session_id],
+        |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    let Some(raw) = saved else { return Ok(None) };
+    let stored: VerifiedChildChallengeReceipt = serde_json::from_str(&raw)
+        .map_err(|_| "child_council_stale: malformed S3 challenge receipt.")?;
+    if challenge_receipt(store, root, record, child, choice)?.as_ref() != Some(&stored) {
+        return Err("child_council_stale: revoked or changed S3 challenge evidence.".into());
+    }
+    Ok(Some(stored))
+}
+
+pub(super) fn verified_s3_receipts(
+    store: &Store, root: &TeamSnapshot,
+) -> Result<Option<Vec<VerifiedChildChallengeReceipt>>> {
+    let Some(config) = root.config.council.as_ref() else { return Ok(None) };
+    if config.strategy != super::council::CouncilExecutionStrategy::TwoPhase
+        || config.mode() != "m4"
+        || !root_artifact_revision(store, root, false)?
+        || !super::council_evidence_is_current(store, root)
+    {
+        return Ok(None);
+    }
+    let mut worker_ids = HashSet::new();
+    let mut sessions = HashSet::new();
+    let mut receipts = Vec::with_capacity(config.nested_bot_reviewers.len());
+    for choice in &config.nested_bot_reviewers {
+        let record = read(store, root, choice)?
+            .ok_or("child_council_stale: missing S3 child reservation.")?;
+        let child = super::load(store, &record.child_session_id)?
+            .ok_or("child_council_stale: missing S3 child Council.")?;
+        let Some(challenge) = read_challenge_receipt(store, root, &record, &child, choice)? else {
+            return Ok(None);
+        };
+        for leaf in &child.workers {
+            if leaf.council.as_ref().is_none_or(|seat| seat.round != 1 && seat.round != 2)
+                || !worker_ids.insert(leaf.id.as_str())
+                || leaf.session_id.is_empty()
+                || !sessions.insert(leaf.session_id.as_str())
+            {
+                return Err("child_council_stale: S3 reused a reviewer identity or session.".into());
+            }
+        }
+        receipts.push(challenge);
+    }
+    let prefix = format!("native-council-child-s3-receipt:{}:", root.council_since);
+    let recorded: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_child_s3_receipt'
+         AND substr(key,1,length(?2))=?2",
+        params![root.session_id, prefix], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if recorded != receipts.len() as i64 {
+        return Err("child_council_stale: unexpected S3 challenge receipt in root cycle.".into());
+    }
+    Ok(Some(receipts))
+}
+
 /// Bind the real child receipt to one root-owned native worker identity.
 fn parent_seat(
     store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
@@ -1158,6 +1386,7 @@ pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
         if child.status == "running" {
             created |= record_verified_receipt(store, root, &record, &child)?;
             created |= record_escalation_receipt(store, root, &record, &child, choice)?;
+            created |= record_challenge_receipt(store, root, &record, &child, choice)?;
             let had_parent_seat = parent_seat(store, root, &record, &child, false)?.is_some();
             if parent_seat(store, root, &record, &child, true)?.is_some() && !had_parent_seat {
                 created = true;
@@ -1313,6 +1542,9 @@ pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
     // A completed child cannot be used while any sibling composite identity
     // or extra persisted root seat conflicts with the frozen roster.
     let _ = verified_parent_seats(store, root)?;
+    if config.strategy == super::council::CouncilExecutionStrategy::TwoPhase && config.mode() == "m4" {
+        let _ = verified_s3_receipts(store, root)?;
+    }
     Ok(created)
 }
 

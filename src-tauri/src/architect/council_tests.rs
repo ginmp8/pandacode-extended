@@ -4761,6 +4761,12 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
     let store = state.store.lock().unwrap();
     let root = load(&store, &sid).unwrap().unwrap();
     assert!(!verified_council_pass(&store, &root));
+    let challenges = child_council::verified_s3_receipts(&store, &root).unwrap().unwrap();
+    assert_eq!(challenges.len(), 2, "both native S3 child phases must have authenticated receipts");
+    assert!(challenges.iter().all(|receipt|
+        receipt.phase_one_receipt_sha256.len() == 64
+            && receipt.phase_two.leaf_worker_ids.len() == 2
+            && receipt.phase_two.lowest_score >= 9.5));
     let leaves = child_council::inspect(&store, &root).unwrap().into_iter()
         .flat_map(|child| child.leaf_attempts.into_iter().map(|leaf| leaf.worker_id))
         .collect::<Vec<_>>();

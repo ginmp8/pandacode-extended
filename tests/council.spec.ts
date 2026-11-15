@@ -1391,7 +1391,13 @@ test('the tray button is settings only: no score badge, a cue dot when asking or
   await open(page, '/?council');
   await expect(button(page).locator('b')).toHaveCount(0);
   await expect(button(page)).toHaveAccessibleName('Council: Round 2 of 10 · reviewing');
-  const dot = () => button(page).locator('.council-glyph').evaluate(node => getComputedStyle(node, '::after').content !== 'none');
+  const dot = () => button(page).locator('.council-glyph').evaluate(node => {
+    const pseudo = getComputedStyle(node, '::after');
+    // Unrendered pseudo-elements may report 'normal', not 'none', on CI browsers.
+    // The cue must also have the physical dot size to count as visible.
+    return pseudo.width === '6px' && pseudo.height === '6px'
+      && pseudo.content !== 'none' && pseudo.content !== 'normal';
+  });
   await expect.poll(dot).toBe(false);
   await open(page, '/?council=asking');
   await expect(button(page)).toHaveAccessibleName('Council needs you');

@@ -3,7 +3,7 @@
 **Repository:** `ginmp8/pandacode-extended`
 **Branch:** `feat/issue-148-pe`
 **Original snapshot SHA:** `697a93f6c2b47449caa17a396e630357d5fe385f` (short `697a93f6`)
-**Current checkpoint SHA:** `bce1a51eb23ccba97cd4b3953d36009acf12298f` (short `bce1a51e`)
+**Current checkpoint SHA:** `201f8107b47d715b37e054621e02331b9042d5f0` (short `201f8107`)
 **Ledger role:** exact-SHA drift evidence for the final acceptance gate. It does not approve a Ticket, grant authority or declare the feature complete.
 
 > **Checkpoint revision note (historical).** The body below is the `697a93f6` snapshot. Later work repaired the Council finalization dispatch-fence re-acquisition and fixture mismatch, exposed required Council in Team Builder/manifest v2, versioned future Team edits, and repaired Windows scoped writes and the effect-stop race. Only the rows named in the checkpoint delta are updated; every unlisted row still describes `697a93f6` and must not be read as executed at `bce1a51e`.
@@ -255,3 +255,23 @@ Normative source for every row: NS addendum acceptance checks. The row number eq
 **Scope.** This is a delta only; the historical snapshot rows and claims above remain unchanged. At this SHA, preview coordinated submission fails closed before creating synthetic Ticket, Coordinator Assignment or WorkItem state. Direct preview submission is unaffected, and the UI shows the submission error. This does not establish issue completion.
 
 **Evidence and provenance.** CI run `43677545775` for this exact SHA completed with 18 of 19 jobs passing. `SuperAgent Orchestrations UI (Playwright)` passed (job `132700878643`). `Rust check and tests (Linux)` failed (job `132700878705`): 2 failed, 2,935 passed and 97 ignored. The failing fixture tests violate the existing active-assignment project lease, making this a test-setup failure on `d0b6e78c`; the native fixture repair remains local and uncommitted. This run does not establish that the PR passes. The worker reported `git diff --check` and the Node adapter smoke as passing. Playwright was unavailable locally because dependencies were absent. Preview rejection still depends on adapter-synthesized in-memory `human_rejected` activity, so the adapter smoke does not establish native rejection parity or a completed rejection journey.
+
+## Checkpoint delta — 2026-11-15
+
+**Exact SHA.** `5fd82e111c29384d65ee3e3a5a95171fc0e1dd7f` (`5fd82e11`).
+
+**Scope.** This is an additive delta; the historical rows, baseline totals and prior `d0b6e78c` delta above remain unchanged. At this SHA, the native coordinator plan parser accepts bounded plans and persists WorkItems and dependency links under schema v53. The `ready_work_items` helper can compute a dependency-ready frontier internally, but it is not wired into the production scheduler or UI, so readiness is not externally reportable. This closes only the prior WorkItem-graph absence to that extent; automatic scheduling and worker fan-out remain missing. It does not establish issue completion.
+
+**Evidence and semantics.** The parser bounds the plan to 64 KiB and 32 items (`src-tauri/src/superagent.rs:46-47,1431-1442`); schema version 53 is recorded at `src-tauri/src/storage.rs:164`. `evidenceContract` is bounded, descriptive WorkItem metadata (`src-tauri/src/superagent.rs:1380-1418,1461-1472`): it does not verify evidence or alter completion semantics. The dependency-readiness test is `src-tauri/src/superagent.rs::work_item_dependencies_form_a_ready_frontier_and_reject_cycles`.
+
+**Lease fixture.** The fixture now explicitly releases the admitted fixture Assignment's project lease before arranging subsequent WorkItem state (`src-tauri/src/superagent.rs:7257-7265`). This is fixture setup consistent with the lease invariant; it is not evidence of automatic scheduling or fan-out.
+
+**CI evidence.** Run `43679394178` is associated with this exact SHA. At the latest status lookup, the run was `in_progress`: 17 of 19 jobs had completed successfully, while `Rust check and tests (Linux)` and `Council selected bot reviewers (Playwright, shard 3/3)` were still in progress. The run conclusion was null, so no final pass/fail result was available at that lookup. This checkpoint does not claim green exact-SHA CI.
+
+## Checkpoint delta — 2026-11-15
+
+**Parent checkpoint and exact pushed HEAD.** This additive delta follows checkpoint `5fd82e111c29384d65ee3e3a5a95171fc0e1dd7f` (`5fd82e11`) and records pushed HEAD `201f8107b47d715b37e054621e02331b9042d5f0` (`201f8107`). Historical rows, totals, and both prior deltas remain unchanged.
+
+**Scope and semantics.** At this SHA, the Plan / Readiness UI displays each WorkItem's `evidenceContract` with an explicit “descriptive only; not verified evidence” label and explanatory note. Preview WorkItems also carry display-only descriptions. This is informational UI/preview display, not evidence verification. Completion semantics and approval gates are unchanged; this display does not establish that an evidence contract was met or authorize a pass. Automatic scheduling and worker fan-out remain absent, and semantic evidence verification remains absent. This delta does not establish issue completion.
+
+**Exact-SHA CI evidence.** GitHub Actions run `43680773285` (run #1653) for the exact HEAD above completed successfully with all 19 of 19 jobs passing. `Rust check and tests (Linux)` and `SuperAgent Orchestrations UI (Playwright)` both passed. This records green exact-SHA CI only; it does not establish issue completion.

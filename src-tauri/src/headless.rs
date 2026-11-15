@@ -1044,7 +1044,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 let revision=args.get(index+2).ok_or("Missing expected Team policy revision.")?;
                 let file=args.get(index+3).ok_or("--configure-team-roles requires JSON file.")?;
                 command=Command::ConfigureTeamRoles {
-                    orchestration_id:id.clone(),expected_revision:parse_ticket_revision(revision)?,
+                    orchestration_id:id.clone(),expected_revision:parse_positive_revision(revision)?,
                     path:PathBuf::from(file),
                 };
                 ops+=1;index+=3;
@@ -1054,7 +1054,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 validate_orchestration_id(id)?;
                 let revision=args.get(index+2).ok_or("Missing expected Team policy revision.")?;
                 command=Command::EnableOrchestration {
-                    orchestration_id:id.clone(),expected_revision:parse_ticket_revision(revision)?,
+                    orchestration_id:id.clone(),expected_revision:parse_positive_revision(revision)?,
                 };
                 ops+=1;index+=2;
             }
@@ -1472,7 +1472,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                     .ok_or("--quarantine-detached-ticket needs a Ticket revision.")?;
                 command = Command::QuarantineDetachedTicket {
                     ticket_id: ticket_id.clone(),
-                    expected_revision: parse_ticket_revision(revision)?,
+                    expected_revision: parse_positive_revision(revision)?,
                 };
                 ops += 1;
                 index += 2;
@@ -1485,7 +1485,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                     .ok_or("--quarantine-terminal-orphan needs a Ticket revision.")?;
                 command = Command::QuarantineTerminalOrphan {
                     ticket_id: ticket_id.clone(),
-                    expected_revision: parse_ticket_revision(revision)?,
+                    expected_revision: parse_positive_revision(revision)?,
                 };
                 ops += 1;
                 index += 2;
@@ -1677,6 +1677,16 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
     Ok(revision)
 }
 
+// Team policy changes and quarantine transitions require a persisted
+// revision; ticket creation itself may legitimately begin at revision zero.
+fn parse_positive_revision(value: &str) -> Result<i64, String> {
+    let revision = parse_ticket_revision(value)?;
+    if revision == 0 {
+        return Err("This headless transition requires a positive persisted revision.".into());
+    }
+    Ok(revision)
+}
+
 fn parse_issue_number(value: &str) -> Result<i64, String> {
     let number = value.parse::<i64>()
         .map_err(|_| "Provide a positive GitHub issue number.".to_string())?;
@@ -1843,7 +1853,8 @@ mod tests {
             }));
         for invalid in ["--create-orchestration","--configure-team-roles",
             "--configure-team-roles team_1 2","--configure-team-roles ../bad 2 roles.json",
-            "--configure-team-roles team_1 nope roles.json","--enable-orchestration",
+            "--configure-team-roles team_1 nope roles.json",
+            "--configure-team-roles team_1 0 roles.json","--enable-orchestration",
             "--enable-orchestration team_1 0",
             "--enable-orchestration team_1 2 --disable-orchestration team_1 2"] {
             assert!(parsed(invalid).is_err(),"{invalid}");

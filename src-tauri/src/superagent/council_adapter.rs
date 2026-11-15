@@ -1748,10 +1748,7 @@ mod tests {
             name: format!("Council {key}"),
             coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
         }).unwrap();
-        store.db.execute(
-            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1
-             WHERE id=?1", [&cfg.id],
-        ).unwrap();
+        superagent::change_enabled(store, &cfg.id, cfg.policy_revision, true).unwrap();
         let (ticket, launched)=superagent::admit(store,&cfg.id,"Inspect safely",key,false).unwrap();
         assert!(launched);
         let session=superagent::assignment_session(store,&ticket.id).unwrap().unwrap();
@@ -1809,10 +1806,7 @@ mod tests {
             vec!["reviewer-a".into(),"reviewer-b".into()],
             true,
         ).unwrap();
-        store.db.execute(
-            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
-            [&config.id],
-        ).unwrap();
+        superagent::change_enabled(store, &config.id, config.policy_revision, true).unwrap();
         let config = superagent::configuration(store,&config.id).unwrap();
         let snapshot = superagent::make_team_snapshot(
             &store.db,&config.id,config.team_version,&config.name,&config.project_id,
@@ -1918,8 +1912,7 @@ mod tests {
             name:"Pinned native review".into(),coordinator_bot_id:"router".into(),
             worker_bot_id:"worker".into(),
         }).unwrap();
-        store.db.execute("UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
-            [&cfg.id]).unwrap();
+        superagent::change_enabled(&store, &cfg.id, cfg.policy_revision, true).unwrap();
         let (ticket, launched)=superagent::admit(&mut store,&cfg.id,"Review exact evidence","pin",false).unwrap();
         assert!(launched);
         let session=superagent::assignment_session(&store,&ticket.id).unwrap().unwrap();
@@ -2014,10 +2007,7 @@ mod tests {
             name: "Frozen review must remain required".into(),
             coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
         }).unwrap();
-        store.db.execute(
-            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1
-             WHERE id=?1", [&cfg.id],
-        ).unwrap();
+        superagent::change_enabled(&store, &cfg.id, cfg.policy_revision, true).unwrap();
         let (ticket, launched) = superagent::admit(
             &mut store, &cfg.id, "Review actual artifact", "frozen-review", false,
         ).unwrap();

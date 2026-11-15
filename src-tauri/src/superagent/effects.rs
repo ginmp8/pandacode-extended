@@ -1219,13 +1219,7 @@ mod tests {
             },
         )
         .unwrap();
-        store
-            .db
-            .execute(
-                "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
-                [&cfg.id],
-            )
-            .unwrap();
+        superagent::change_enabled(&store, &cfg.id, cfg.policy_revision, true).unwrap();
         let (ticket, started) =
             superagent::admit(&mut store, &cfg.id, "Safe work", "receipt-fixture", false).unwrap();
         assert!(started);

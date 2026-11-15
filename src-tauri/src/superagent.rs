@@ -4500,6 +4500,24 @@ fn change_enabled(
             params![orchestration_id,now],
         ).map_err(|e| e.to_string())?;
     }
+    // Enabling or disabling is a revisioned Team policy change. Append the
+    // immutable version atomically with its enabled flag; otherwise a future
+    // Ticket would bind the new mandate revision to an old Team snapshot.
+    // Historical Tickets keep their original roles, profiles and Council gate.
+    let mut next_version = load_team_version_snapshot(&tx, orchestration_id, current.team_version)?;
+    if enabled && (next_version.policy.policy_revision != current.policy_revision
+        || next_version.coordinator_bot_id != current.coordinator_bot_id
+        || next_version.worker_bot_ids != current.worker_bot_ids
+        || next_version.reviewer_bot_ids != current.reviewer_bot_ids
+        || next_version.policy.council_required != current.council_required)
+    {
+        return Err("Team policy or role bindings changed without a pinned native version.".into());
+    }
+    next_version.team_version = next_version.team_version.checked_add(1)
+        .ok_or("Team version counter overflowed.")?;
+    next_version.policy.policy_revision = current.policy_revision.checked_add(1)
+        .ok_or("Team policy revision counter overflowed.")?;
+    insert_team_version(&tx, &next_version)?;
     tx.commit().map_err(|e| e.to_string())?;
     configuration(store,orchestration_id)
 }
@@ -6263,10 +6281,7 @@ mod tests {
             name: "Second native review Team".into(),
             coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
         }).unwrap();
-        store.db.execute(
-            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
-            [&second.id],
-        ).unwrap();
+        change_enabled(&store, &second.id, second.policy_revision, true).unwrap();
         let (human, started) = admit(
             &mut store, &first.id, "Human review only", "review-inbox-human", false,
         ).unwrap();
@@ -6327,10 +6342,7 @@ mod tests {
             coordinator_bot_id: "router".into(),
             worker_bot_id: "worker".into(),
         }).unwrap();
-        store.db.execute(
-            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
-            [&second.id],
-        ).unwrap();
+        change_enabled(&store, &second.id, second.policy_revision, true).unwrap();
         let (one, started) = admit(
             &mut store, &first.id, "First demand", "first-demand", false,
         ).unwrap();
@@ -8218,10 +8230,28 @@ mod tests {
             name:"Safe manual".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
         }).unwrap();
         assert!(!cfg.enabled);
-        store.db.execute(
-            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",[&cfg.id],
-        ).unwrap();
-        configuration(store,&cfg.id).unwrap()
+        change_enabled(store, &cfg.id, cfg.policy_revision, true).unwrap()
+    }
+
+    #[test]
+    fn enabled_policy_versions_do_not_rebind_historical_ticket_authority() {
+        let mut store = fixture();
+        let cfg = create_configuration(&store, NewOrchestration {
+            name: "Versioned Team admission".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        let live = change_enabled(&store, &cfg.id, cfg.policy_revision, true).unwrap();
+        assert!(live.enabled);
+        assert_eq!(live.team_version, cfg.team_version + 1);
+        let (ticket, admitted) = admit(&mut store, &cfg.id,
+            "Pinned policy and role authority", "native-policy-version", false).unwrap();
+        assert!(admitted);
+        let before = ticket_team_snapshot(&store, &ticket.id).unwrap();
+        assert_eq!(before.policy.policy_revision, live.policy_revision);
+        let disabled = change_enabled(&store, &cfg.id, live.policy_revision, false).unwrap();
+        assert!(!disabled.enabled);
+        assert_eq!(disabled.team_version, live.team_version + 1);
+        assert_eq!(ticket_team_snapshot(&store, &ticket.id).unwrap(), before);
     }
 
 
@@ -8520,14 +8550,13 @@ mod tests {
         assert_eq!(created.team_version,1);
         assert_eq!(created.worker_bot_ids,vec!["worker","worker-2"]);
         assert_eq!(created.reviewer_bot_ids,vec!["reviewer"]);
-        store.db.execute(
-            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
-            [&created.id],
+        let active = change_enabled(&store, &created.id, created.policy_revision, true).unwrap();
+        let (ticket,launched)=admit_role_with_selected(
+            &mut store,&created.id,"Use ordered team","ordered-team",false,false,false,Some("worker"),
         ).unwrap();
-        let (ticket,launched)=admit(&mut store,&created.id,"Use ordered team","ordered-team",false).unwrap();
         assert!(launched);
         let snapshot=ticket_team_snapshot(&store,&ticket.id).unwrap();
-        assert_eq!(snapshot.team_version,1);
+        assert_eq!(snapshot.team_version,active.team_version);
         assert_eq!(snapshot.worker_bot_ids,vec!["worker","worker-2"]);
         assert_eq!(snapshot.reviewer_bot_ids,vec!["reviewer"]);
         assert_eq!(snapshot.policy.autonomy,"off");
@@ -8684,10 +8713,7 @@ mod tests {
             worker_bot_id: worker.id.clone(),
         }).unwrap();
         assert_eq!(config.project_id, worker.project_id);
-        store.db.execute(
-            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
-            [&config.id],
-        ).unwrap();
+        change_enabled(&store, &config.id, config.policy_revision, true).unwrap();
         let (ticket, ready) = admit(&mut store, &config.id, "Read-only inspection", "native-scope-1", false).unwrap();
         assert!(ready);
         let session_id = assignment_session(&store, &ticket.id).unwrap().unwrap();

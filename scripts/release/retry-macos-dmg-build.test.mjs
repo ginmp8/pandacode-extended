@@ -72,3 +72,8 @@ shellTest('persistently busy DMG fails after three attempts', () => {
   assert.notEqual(result.status, 0);
   assert.equal(result.attempts, 3);
 });
+
+test('release workflow uses the guarded retry only for macOS', () => {
+  const workflow = readFileSync(new URL('../../.github/workflows/release.yml', import.meta.url), 'utf8');
+  assert.match(workflow, /runner\.os == 'macOS' && 'bash scripts\/release\/retry-macos-dmg-build\.sh' \|\| 'node scripts\/release\/build\.mjs'/);
+});

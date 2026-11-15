@@ -3334,7 +3334,7 @@ fn prepare_automatic_next_work_item(
         settled_at,
         assignment_state,
         ticket_state,
-        Some(work_item_id),
+        Some(_),
         Some(item_state),
         result,
     )) = settled

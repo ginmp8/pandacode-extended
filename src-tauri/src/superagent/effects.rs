@@ -2220,7 +2220,7 @@ mod tests {
         git_test(&root,&["checkout","-b","feature/ticket-pr"]);
         git_test(&root,&["commit","--allow-empty","-m","pushed head"]);
         let head_sha = git_test(&root,&["rev-parse","HEAD"]);
-        store.db.execute("UPDATE projects SET path=?1 WHERE id='p'",[root.to_string_lossy().as_ref()]).unwrap();
+        store.db.execute("UPDATE projects SET path=?1 WHERE id='p'",[&*root.to_string_lossy()]).unwrap();
         (store,ticket_id,root,head_sha,base_sha)
     }
 
@@ -2257,7 +2257,7 @@ mod tests {
     ) -> impl FnMut(&Path,&[&str],Duration)->std::result::Result<crate::workspace::Capture,String> {
         let mut next_readback = 0usize;
         move |_:&Path,args:&[&str],timeout:Duration| {
-            assert!(timeout<=TIMEOUT);
+            assert!(timeout<=crate::github::TIMEOUT);
             if args.first()==Some(&"repo") && args.get(1)==Some(&"view") {
                 return Ok(capture_json(serde_json::json!({"nameWithOwner":"owner/repo"})));
             }
@@ -3142,7 +3142,7 @@ mod tests {
         let intent=make_draft_pr_intent_with_sha(&ticket_id,"feature/ticket-pr",&head_sha,"main","Target checks");
         let writes=Arc::new(AtomicUsize::new(0));
         let reads=Arc::new(AtomicUsize::new(0));
-        let mut fake_gh=fake_draft_pr_gh(intent.clone(),head_sha,base_sha,vec![],
+        let mut fake_gh=fake_draft_pr_gh(intent.clone(),head_sha.clone(),base_sha,vec![],
             writes,reads,false);
         assert_eq!(github::verify_draft_pull_request_target_with(
             &root,"owner/repo","feature/ticket-pr","main",&mut fake_gh,

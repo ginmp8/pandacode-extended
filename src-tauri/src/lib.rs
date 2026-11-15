@@ -2777,13 +2777,14 @@ async fn launch_operation_admitted(
                 }
                 if settled && structured {
                     let (advance_app, advance_session) = (app.clone(), session_id.clone());
-                    tauri::async_runtime::spawn(async move {
-                        if let Err(error) = superagent::auto_advance_after_successful_worker(
-                            &advance_app,
-                            &advance_session,
-                        )
-                        .await
-                        {
+                    // The gateway launch future is not `Send`; poll it on Tauri's runtime from a blocking worker.
+                    tauri::async_runtime::spawn_blocking(move || {
+                        if let Err(error) = tauri::async_runtime::block_on(
+                            superagent::auto_advance_after_successful_worker(
+                                &advance_app,
+                                &advance_session,
+                            ),
+                        ) {
                             eprintln!("SuperAgent WorkItem continuation failed: {error}");
                         }
                     });

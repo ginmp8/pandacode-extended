@@ -872,6 +872,13 @@ impl Store {
                 migration.execute_batch("PRAGMA user_version=52;")
                     .map_err(|e| e.to_string())?;
             }
+            // PR #151 also published a v52/v53 WorkItem layout under the
+            // same table name. Archive those original rows and their foreign
+            // keys *before* creating the unified native scheduler tables.
+            // This is idempotent for the already-authoritative item_key layout.
+            Self::archive_legacy_superagent_work_items(&migration)?;
+            migration.execute_batch(crate::superagent::scheduler::SCHEMA)
+                .map_err(|e| e.to_string())?;
             if version < 53 {
                 // Demand-first dependency plans use only the frozen Team and
                 // existing native Ticket/Mandate/Assignment authorization.
@@ -1049,6 +1056,45 @@ impl Store {
             }
             db.execute("UPDATE sessions SET last_prompt_at=?2 WHERE id=?1", params![sid,prompt_at]).map_err(|e| e.to_string())?;
         }
+        Ok(())
+    }
+
+    /// Archive the independent PR #151 WorkItem layout without deleting rows
+    /// or remapping historical assignments to a newly authorized native plan.
+    /// The caller holds the schema migration transaction.
+    fn archive_legacy_superagent_work_items(db: &Connection) -> Result<()> {
+        let exists: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+             WHERE type='table' AND name='sa_work_items')",
+            [], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !exists { return Ok(()); }
+        let (item_key,id,objective,state,ticket_id): (bool,bool,bool,bool,bool) =
+            db.query_row(
+                "SELECT
+                    EXISTS(SELECT 1 FROM pragma_table_info('sa_work_items') WHERE name='item_key'),
+                    EXISTS(SELECT 1 FROM pragma_table_info('sa_work_items') WHERE name='id'),
+                    EXISTS(SELECT 1 FROM pragma_table_info('sa_work_items') WHERE name='objective'),
+                    EXISTS(SELECT 1 FROM pragma_table_info('sa_work_items') WHERE name='state'),
+                    EXISTS(SELECT 1 FROM pragma_table_info('sa_work_items') WHERE name='ticket_id')",
+                [], |row| Ok((
+                    row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,
+                )),
+            ).map_err(|e| e.to_string())?;
+        if item_key && ticket_id { return Ok(()); }
+        if !id || !objective || !state || !ticket_id || item_key {
+            return Err("Unrecognized sa_work_items layout: refuse destructive cross-branch migration.".into());
+        }
+        let archived: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+             WHERE type='table' AND name='sa_legacy_work_items_151')",
+            [], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if archived {
+            return Err("PR #151 WorkItem archive already exists; reconcile manually before migration.".into());
+        }
+        db.execute_batch("ALTER TABLE sa_work_items RENAME TO sa_legacy_work_items_151;")
+            .map_err(|e| format!("Could not preserve PR #151 WorkItems during migration: {e}"))?;
         Ok(())
     }
 
@@ -2484,6 +2530,61 @@ mod sidebar_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_pr151_work_items_are_archived_with_original_foreign_keys() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch(r#"
+            PRAGMA foreign_keys=ON;
+            CREATE TABLE sa_tickets(id TEXT PRIMARY KEY);
+            CREATE TABLE sa_work_items (
+                id TEXT PRIMARY KEY,
+                ticket_id TEXT NOT NULL REFERENCES sa_tickets(id),
+                objective TEXT NOT NULL,state TEXT NOT NULL,ordinal INTEGER NOT NULL);
+            CREATE TABLE sa_work_item_deps(
+                item_id TEXT REFERENCES sa_work_items(id),
+                depends_on TEXT REFERENCES sa_work_items(id));
+            CREATE TABLE sa_assignments(
+                id TEXT PRIMARY KEY,work_item_id TEXT REFERENCES sa_work_items(id));
+            INSERT INTO sa_tickets VALUES('t');
+            INSERT INTO sa_work_items VALUES('original','t','Private objective','running',0);
+            INSERT INTO sa_work_items VALUES('parent','t','Dependency','completed',1);
+            INSERT INTO sa_work_item_deps VALUES('original','parent');
+            INSERT INTO sa_assignments VALUES('assignment','original');
+        "#).unwrap();
+        Store::archive_legacy_superagent_work_items(&db).unwrap();
+        db.execute_batch(crate::superagent::scheduler::SCHEMA).unwrap();
+        Store::archive_legacy_superagent_work_items(&db).unwrap();
+        let unchanged:(String,String)=db.query_row(
+            "SELECT objective,state FROM sa_legacy_work_items_151 WHERE id='original'",
+            [],|row|Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        assert_eq!(unchanged,("Private objective".into(),"running".into()));
+        for (table,column) in [("sa_assignments","work_item_id"),("sa_work_item_deps","item_id")] {
+            let statement=format!(
+                "SELECT \"table\" FROM pragma_foreign_key_list('{table}') WHERE \"from\"=?1");
+            let target:String=db.query_row(&statement,[column],|row|row.get(0)).unwrap();
+            assert_eq!(target,"sa_legacy_work_items_151");
+        }
+        assert!(db.prepare("PRAGMA foreign_key_check").unwrap()
+            .query_map([],|row|row.get::<_,String>(0)).unwrap().next().is_none());
+        let count:i64=db.query_row("SELECT COUNT(*) FROM sa_work_items",[],|row|row.get(0)).unwrap();
+        assert_eq!(count,0,"archiving is not an authorization to launch historical items");
+    }
+
+    #[test]
+    fn unknown_cross_branch_work_item_schema_fails_closed() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sa_work_items(id TEXT PRIMARY KEY);").unwrap();
+        let error=Store::archive_legacy_superagent_work_items(&db).unwrap_err();
+        assert!(error.contains("Unrecognized sa_work_items layout"),"{error}");
+        let exists:bool=db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='sa_work_items')",
+            [],|row|row.get(0),
+        ).unwrap();
+        assert!(exists);
+    }
+
 
     #[test]
     fn unified_schema_reconciles_both_v59_source_variants_without_recreating_grants() {

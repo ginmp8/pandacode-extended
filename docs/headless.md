@@ -667,6 +667,26 @@ pandacode serve --rename-orchestration <team-id> <expected-policy-revision> "New
 
 The native write is a CAS-guarded, revisioned **name-only** update through the same SuperAgent policy handler as the desktop. It does not change Coordinator, Workers, Reviewers, project, task grants, history, provider sessions or external effects. Active/reviewable Tickets, running assignments and pending/uncertain external effects reject the action. The live database is opened without startup recovery, so a concurrent server's unrelated sessions are not interrupted. A repeated command with a stale revision fails closed. This is a local operator action, not a GitHub Auto trigger.
 
+### Headless operator association of a GitHub Ticket context link
+
+The authorized local operator can add a context-only source link using the same
+native transaction as the Desktop Ticket inspector:
+
+```sh
+pandacode serve --link-source-thread <source-id> <ticket-id> issue:42
+pandacode serve --link-source-thread <source-id> <ticket-id> pull:123
+```
+
+This command validates the exact Team/Ticket/source/thread relationship and
+repository identity ownership, writes one durable audit row, and is idempotent.
+It is not evidence that GitHub linked the issue and PR; use the separate
+explicit issue-to-PR association when required. No provider or GitHub request,
+Ticket admission, authorization grant or remote effect occurs. Invalid,
+ambiguous, cross-Team, terminal or conflicting links fail before the native
+transaction commits. The bounded JSON reports `linked` and
+`authorizationIssued: false`; no private objectives or event bodies are
+returned. A concurrent healthy host is not interrupted by startup recovery.
+
 ### Headless revocation of a GitHub Ticket context link
 
 An authorized **local operator** can revoke an exact manually created source

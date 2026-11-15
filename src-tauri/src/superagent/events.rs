@@ -1605,6 +1605,19 @@ fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<Ev
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+/// Explicit one-shot local operator link, using the exact desktop native transaction.
+/// This does not authenticate GitHub content, issue a Mandate or start a provider.
+pub(crate) fn headless_link_thread(
+    path: &std::path::Path, source_id: &str, ticket_id: &str, subject_key: &str,
+) -> Result<String> {
+    let store = super::open_headless_transition_store(path)?;
+    let link = link_thread(&store, source_id, ticket_id, subject_key)?;
+    serde_json::to_string(&serde_json::json!({
+        "sourceId":link.source_id, "ticketId":link.ticket_id,
+        "subjectKey":link.subject_key, "linked":true, "authorizationIssued":false
+    })).map_err(|e| e.to_string())
+}
+
 /// Trusted local operator revocation of an exact context association without
 /// opening Store::open, running startup recovery, or touching a live provider.
 /// Desktop and headless use the same native transaction and immutable receipts.
@@ -3084,6 +3097,44 @@ mod tests {
         assert!(link_thread(&reopened,&observed.id,"ticket-one","issue:42").is_err(),
             "a terminal Ticket cannot gain a new context link");
         assert!(linked_decisions(&reopened,"ticket-one",50).unwrap().is_empty());
+    }
+
+    #[test]
+    fn headless_link_reuses_native_transaction_without_grant_or_provider_admission() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "headless-one", "orch");
+        insert_manual_ticket(&store, "headless-two", "orch");
+        let source = create_source(&store, "orch", "test/fixture",
+            "trusted-bot", "issues.opened").unwrap();
+        let observed = set_mode(&store, &source.id,
+            source.policy_revision, "observe").unwrap();
+        observe(&store, &event("headless-linked", &observed, 1)).unwrap();
+        assert!(headless_link_thread(&path, &observed.id, "missing", "issue:42").is_err());
+        assert!(headless_link_thread(&path, &observed.id, "headless-one", "issue:0").is_err());
+        let receipt: serde_json::Value = serde_json::from_str(
+            &headless_link_thread(&path, &observed.id,
+                "headless-one", "issue:42").unwrap()
+        ).unwrap();
+        assert_eq!(receipt["linked"], true);
+        assert_eq!(receipt["authorizationIssued"], false);
+        assert_eq!(receipt["ticketId"], "headless-one");
+        assert_eq!(linked_decisions(&store, "headless-one", 50).unwrap().len(), 1);
+        assert!(headless_link_thread(&path, &observed.id, "headless-two", "issue:42").is_err());
+        let repeated = headless_link_thread(&path, &observed.id,
+            "headless-one", "issue:42").unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&repeated).unwrap(), receipt);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id='headless-one'
+             AND kind='source_thread_linked'", [],
+            |r| r.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_mandates", [],
+            |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(source(&store, &observed.id).unwrap().last_sequence, 1);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(list_thread_links(&reopened, "headless-one").unwrap().len(), 1);
+        assert_eq!(linked_decisions(&reopened, "headless-one", 50).unwrap()[0].delivery_id,
+            "headless-linked");
     }
 
     #[test]

@@ -48,6 +48,7 @@ enum Command {
     InspectTicketEffects { ticket_id: String, before_created_at: Option<i64>, before_key: Option<String>, unresolved_only: bool },
     InspectTicketSource { ticket_id: String },
     InspectSourceHealth { source_id: String },
+    LinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
     UnlinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
     InspectTeamReadiness { orchestration_id: String },
     PreflightDemand { orchestration_id: String, coordinated: bool, objective_file: PathBuf },
@@ -193,6 +194,22 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(status) => { println!("{status}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent source health inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::LinkSourceThread { source_id, ticket_id, subject_key } = &command {
+                // Local context only; reuse the desktop native transaction without
+                // startup recovery, provider launch or inferred GitHub authority.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_link_thread(
+                        &dir.join("kingcode.sqlite3"), source_id, ticket_id, subject_key,
+                    ));
+                match result {
+                    Ok(receipt) => { println!("{receipt}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent thread link failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -1157,6 +1174,25 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--link-source-thread" => {
+                let source_id = args.get(index + 1)
+                    .ok_or("--link-source-thread needs source ID, Ticket ID and exact thread key.")?;
+                let ticket_id = args.get(index + 2)
+                    .ok_or("--link-source-thread needs a Ticket ID.")?;
+                let subject_key = args.get(index + 3)
+                    .ok_or("--link-source-thread needs an exact issue:123 or pull:123 key.")?;
+                validate_ticket_id(source_id).map_err(|_| "Provide a bounded source ID.".to_owned())?;
+                validate_ticket_id(ticket_id)?;
+                if !crate::superagent::events::valid_thread_key(subject_key) {
+                    return Err("Provide an exact issue:123 or pull:123 thread key.".into());
+                }
+                command = Command::LinkSourceThread {
+                    source_id:source_id.clone(),ticket_id:ticket_id.clone(),
+                    subject_key:subject_key.clone(),
+                };
+                ops += 1;
+                index += 3;
+            }
             "--unlink-source-thread" => {
                 let source_id = args.get(index + 1)
                     .ok_or("--unlink-source-thread needs source ID, Ticket ID and exact thread key.")?;
@@ -1425,7 +1461,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1496,6 +1532,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-ticket-source <id>
                           Read up to 50 verified linked source receipts without GitHub polling,
                           task execution or startup recovery; exit.
+  --link-source-thread <source-id> <ticket-id> <issue:123|pull:123>
+                          Add an exact operator-asserted source/Ticket context link through
+                          native policy; no provider, grant, GitHub call or task launch.
   --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123>
                          Revoke only this explicit Ticket/GitHub context link, retain immutable
                          receipts and audit, without starting a worker or provider; exit.
@@ -1750,6 +1789,28 @@ mod tests {
         assert!(parsed("--inspect-ticket-source").is_err());
         assert!(parsed("--inspect-ticket-source ../unsafe").is_err());
         assert!(parsed("--inspect-ticket-source ticket_123 --stop-ticket ticket_123").is_err());
+        assert_eq!(parsed("--link-source-thread source_123 ticket_123 issue:42"),
+            Ok(Command::LinkSourceThread {
+                source_id:"source_123".into(),ticket_id:"ticket_123".into(),
+                subject_key:"issue:42".into(),
+            }));
+        assert_eq!(parsed("--link-source-thread source_123 ticket_123 pull:99"),
+            Ok(Command::LinkSourceThread {
+                source_id:"source_123".into(),ticket_id:"ticket_123".into(),
+                subject_key:"pull:99".into(),
+            }));
+        for invalid in [
+            "--link-source-thread",
+            "--link-source-thread source_123",
+            "--link-source-thread source_123 ticket_123",
+            "--link-source-thread ../unsafe ticket_123 issue:42",
+            "--link-source-thread source_123 ../unsafe pull:99",
+            "--link-source-thread source_123 ticket_123 issue:01",
+            "--link-source-thread source_123 ticket_123 pull:abc",
+            "--link-source-thread source_123 ticket_123 issue:42 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert_eq!(parsed("--unlink-source-thread source_123 ticket_123 issue:42"),
             Ok(Command::UnlinkSourceThread {
                 source_id:"source_123".into(),ticket_id:"ticket_123".into(),
@@ -1951,6 +2012,7 @@ mod tests {
             "--inspect-ticket-graph",
             "--inspect-ticket-effects",
             "--inspect-ticket-source",
+            "--link-source-thread",
             "--unlink-source-thread",
             "--observe-source",
             "--observe-check-run",

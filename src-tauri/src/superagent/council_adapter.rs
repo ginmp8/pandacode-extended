@@ -2454,6 +2454,26 @@ mod tests {
         assert_eq!(finalizations,0);
     }
 
+    fn assert_required_review_blocked(store: &Store, ticket_id: &str, assignment_id: &str) {
+        let ticket=superagent::get_ticket(store,ticket_id).unwrap();
+        assert_eq!(ticket.state,"blocked");
+        let request=request_for_assignment(store,ticket_id,assignment_id).unwrap().unwrap();
+        assert_eq!(request.state,"blocked");
+        assert!(request.native_session_id.is_none());
+        let finalizations:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_council_finalizations WHERE ticket_id=?1",
+            [ticket_id],|row| row.get(0),
+        ).unwrap();
+        assert_eq!(finalizations,0);
+        let successful_requests:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_council_requests
+             WHERE ticket_id=?1 AND state IN ('passed','human_accepted')",
+            [ticket_id],|row| row.get(0),
+        ).unwrap();
+        assert_eq!(successful_requests,0);
+        assert!(prepare_human_accept(store,ticket_id,ticket.revision).is_err());
+    }
+
     #[test]
     fn unavailable_workspace_blocks_required_council_before_native_dispatch() {
         let mut store=fixture();
@@ -2464,10 +2484,70 @@ mod tests {
         let state=architect::test_app_state(store);
         assert!(!start_after_worker_completion_for_test(&state,&worker_session_id).unwrap());
         let store=state.store.lock().unwrap();
-        assert_eq!(superagent::get_ticket(&store,&ticket.id).unwrap().state,"blocked");
-        let request=request_for_assignment(&store,&ticket.id,&assignment_id).unwrap().unwrap();
-        assert_eq!(request.state,"blocked");
-        assert!(request.native_session_id.is_none());
+        assert_required_review_blocked(&store,&ticket.id,&assignment_id);
+    }
+
+    #[test]
+    fn unavailable_reviewer_provider_blocks_required_council_before_adapter_dispatch() {
+        let mut store=fixture();
+        let (ticket,worker_session_id,assignment_id)=required_worker(&mut store,"required-reviewer-provider-unavailable");
+        assert!(superagent::on_run_finished(&store,&worker_session_id,true,"Worker artifact").unwrap());
+        store.db.execute(
+            "UPDATE bots SET provider='unavailable-harness' WHERE id='reviewer-a'",[],
+        ).unwrap();
+        let snapshot=superagent::ticket_team_snapshot(&store,&ticket.id).unwrap();
+        let config=council_config(&snapshot).unwrap();
+        assert!(architect::validate_superagent_council(&store,&worker_session_id,&config).is_err());
+
+        let state=architect::test_app_state(store);
+        let mut adapter_calls=0;
+        assert!(!start_after_worker_completion_inner(&state,&worker_session_id,|_| {
+            adapter_calls+=1;
+            Ok("unexpected-native-session".into())
+        }).unwrap());
+        assert_eq!(adapter_calls,0);
+        let store=state.store.lock().unwrap();
+        assert_required_review_blocked(&store,&ticket.id,&assignment_id);
+    }
+
+    #[test]
+    fn unavailable_worker_session_blocks_required_council_before_adapter_dispatch() {
+        let mut store=fixture();
+        let (ticket,worker_session_id,assignment_id)=required_worker(&mut store,"required-worker-session-unavailable");
+        assert!(superagent::on_run_finished(&store,&worker_session_id,true,"Worker artifact").unwrap());
+        let deleted=store.db.execute("DELETE FROM sessions WHERE id=?1",[&worker_session_id]).unwrap();
+        assert_eq!(deleted,1);
+
+        let state=architect::test_app_state(store);
+        let mut adapter_calls=0;
+        assert!(!start_after_worker_completion_inner(&state,&worker_session_id,|_| {
+            adapter_calls+=1;
+            Ok("unexpected-native-session".into())
+        }).unwrap());
+        assert_eq!(adapter_calls,0);
+        let store=state.store.lock().unwrap();
+        assert_required_review_blocked(&store,&ticket.id,&assignment_id);
+    }
+
+    #[test]
+    fn unavailable_native_council_adapter_blocks_without_dispatch_or_false_success() {
+        let mut store=fixture();
+        let (ticket,worker_session_id,assignment_id)=required_worker(&mut store,"required-native-adapter-unavailable");
+        assert!(superagent::on_run_finished(&store,&worker_session_id,true,"Worker artifact").unwrap());
+
+        let state=architect::test_app_state(store);
+        let mut adapter_calls=0;
+        let result=start_after_worker_completion_inner(&state,&worker_session_id,|launch| {
+            adapter_calls+=1;
+            assert_eq!(launch.binding.ticket_id,ticket.id);
+            assert_eq!(launch.binding.worker_session_id,worker_session_id);
+            assert_eq!(launch.config.reviewer_bot_ids.len(),2);
+            Err("Native Council adapter is unavailable.".into())
+        });
+        assert!(result.is_err());
+        assert_eq!(adapter_calls,1);
+        let store=state.store.lock().unwrap();
+        assert_required_review_blocked(&store,&ticket.id,&assignment_id);
     }
 
     #[test]

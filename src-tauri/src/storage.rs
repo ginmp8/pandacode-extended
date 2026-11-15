@@ -4056,6 +4056,97 @@ mod tests {
             .unwrap()
     }
 
+    struct MigrationTempDir(PathBuf);
+
+    impl MigrationTempDir {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("pandacode-{label}-{}", id()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for MigrationTempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn migration_table_exists(db: &Connection, table: &str) -> bool {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [table],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn migration_column_exists(db: &Connection, table: &str, column: &str) -> bool {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+            params![table, column],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Test databases are seeded through the current Store schema. Remove every
+    /// object added by migrations 53–55 to make the on-disk fixture a real v52
+    /// shape before testing the forward migration.
+    fn reconstruct_schema_52(db: &Connection) {
+        db.execute_batch(
+            "DROP TABLE sa_draft_pr_effect_receipts;
+             DROP TABLE sa_draft_pr_effect_grants;
+             ALTER TABLE sa_work_items DROP COLUMN evidence_contract;
+             PRAGMA user_version=52;",
+        )
+        .unwrap();
+    }
+
+    fn assert_schema_52_shape(db: &Connection) {
+        assert_eq!(database_user_version(db), 52);
+        assert!(
+            !migration_column_exists(db, "sa_work_items", "evidence_contract"),
+            "schema 52 predates the WorkItem evidence contract"
+        );
+        assert!(!migration_table_exists(db, "sa_draft_pr_effect_grants"));
+        assert!(!migration_table_exists(db, "sa_draft_pr_effect_receipts"));
+    }
+
+    fn assert_schema_55_shape(db: &Connection) {
+        assert_eq!(database_user_version(db), SCHEMA_VERSION);
+        assert!(migration_column_exists(
+            db,
+            "sa_work_items",
+            "evidence_contract"
+        ));
+        assert!(migration_table_exists(db, "sa_draft_pr_effect_grants"));
+        assert!(migration_table_exists(db, "sa_draft_pr_effect_receipts"));
+        assert!(migration_column_exists(
+            db,
+            "sa_draft_pr_effect_grants",
+            "head_sha"
+        ));
+    }
+
+    fn migration_work_item_contracts(db: &Connection) -> Vec<(String, String)> {
+        let mut statement = db
+            .prepare(
+                "SELECT id,evidence_contract FROM sa_work_items
+                 WHERE ticket_id='rollback-ticket' ORDER BY ordinal",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
     fn checkpoint_database(path: &Path) {
         let db = Connection::open(path).unwrap();
         db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
@@ -4073,7 +4164,8 @@ mod tests {
 
     #[test]
     fn schema_52_late_migration_failure_rolls_back_and_backup_restores_history() {
-        let directory = std::env::temp_dir().join(format!("pandacode-db-rollback-{}", id()));
+        let temporary_directory = MigrationTempDir::new("db-rollback");
+        let directory = temporary_directory.path();
         let data_directory = directory.join("app-data");
         let backup_directory = directory.join("isolated-backup");
         let project_directory = directory.join("synthetic-project");
@@ -4082,7 +4174,6 @@ mod tests {
         std::fs::create_dir_all(&project_directory).unwrap();
         let path = data_directory.join("store.sqlite3");
         let backup_path = backup_directory.join("store.sqlite3");
-        let failed_attempt_path = directory.join("failed-upgrade.sqlite3");
         let timestamp = now();
 
         {
@@ -4133,28 +4224,20 @@ mod tests {
                  VALUES('rollback-ticket','rollback-effect','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','uncertain',?1,?1,'marker_not_found','missing')",
                 [timestamp],
             ).unwrap();
-            // Recreate the historical schema 52 shape from an isolated current
-            // database: WorkItem history exists, but the v53 field does not.
-            store
-                .db
-                .execute_batch(
-                    "ALTER TABLE sa_work_items DROP COLUMN evidence_contract;
-                 PRAGMA user_version=52;
-                 PRAGMA wal_checkpoint(TRUNCATE);",
-                )
-                .unwrap();
+            reconstruct_schema_52(&store.db);
         }
 
+        checkpoint_database(&path);
         std::fs::copy(&path, &backup_path).unwrap();
         let expected_history;
         {
             let source = Connection::open(&path).unwrap();
-            assert_eq!(database_user_version(&source), 52);
+            assert_schema_52_shape(&source);
             expected_history = migration_history_snapshot(&source);
         }
         {
             let backup = Connection::open(&backup_path).unwrap();
-            assert_eq!(database_user_version(&backup), 52);
+            assert_schema_52_shape(&backup);
             assert_eq!(migration_history_snapshot(&backup), expected_history);
         }
 
@@ -4166,67 +4249,57 @@ mod tests {
             }
             Err(error) => error,
         };
-        assert!(migration_error.contains("injected late migration failure after schema 54"));
+        assert!(migration_error.contains(&format!(
+            "injected late migration failure after schema {SCHEMA_VERSION}"
+        )));
         {
             let failed = Connection::open(&path).unwrap();
-            assert_eq!(database_user_version(&failed), 52);
+            assert_schema_52_shape(&failed);
             assert_eq!(migration_history_snapshot(&failed), expected_history);
-            let evidence_contract_exists: bool = failed.query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_work_items') WHERE name='evidence_contract')",
-                [], |row| row.get(0),
-            ).unwrap();
-            assert!(
-                !evidence_contract_exists,
-                "the failed transaction must roll back schema changes"
-            );
         }
 
-        // Preserve the failed attempt, then restore the isolated, closed-file
-        // backup exactly as an operator would before reopening the app.
+        // Restore the separately validated, closed-file backup exactly as an
+        // operator would before reopening the app.
         checkpoint_database(&path);
-        std::fs::copy(&path, &failed_attempt_path).unwrap();
         std::fs::copy(&backup_path, &path).unwrap();
         {
             let restored = Connection::open(&path).unwrap();
-            assert_eq!(database_user_version(&restored), 52);
+            assert_schema_52_shape(&restored);
             assert_eq!(migration_history_snapshot(&restored), expected_history);
         }
 
         let retried = Store::open(&path).unwrap();
-        assert_eq!(database_user_version(&retried.db), SCHEMA_VERSION);
+        assert_schema_55_shape(&retried.db);
         assert_eq!(migration_history_snapshot(&retried.db), expected_history);
-        let contracts: Vec<(String, String)> = {
-            let mut statement = retried.db.prepare(
-                "SELECT id,evidence_contract FROM sa_work_items WHERE ticket_id='rollback-ticket' ORDER BY ordinal",
-            ).unwrap();
-            statement
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .unwrap()
-                .collect::<rusqlite::Result<Vec<_>>>()
-                .unwrap()
-        };
+        let expected_contracts = vec![
+            (
+                "rollback-work-item-1".into(),
+                crate::superagent::LEGACY_EVIDENCE_CONTRACT.into(),
+            ),
+            (
+                "rollback-work-item-2".into(),
+                crate::superagent::LEGACY_EVIDENCE_CONTRACT.into(),
+            ),
+        ];
+        let contracts = migration_work_item_contracts(&retried.db);
         assert_eq!(
             contracts,
-            vec![
-                (
-                    "rollback-work-item-1".into(),
-                    crate::superagent::LEGACY_EVIDENCE_CONTRACT.into()
-                ),
-                (
-                    "rollback-work-item-2".into(),
-                    crate::superagent::LEGACY_EVIDENCE_CONTRACT.into()
-                ),
-            ]
+            expected_contracts,
+            "schema 53 backfills both historical WorkItems"
         );
         drop(retried);
-        std::fs::remove_dir_all(directory).unwrap();
+
+        let reopened = Store::open(&path).unwrap();
+        assert_schema_55_shape(&reopened.db);
+        assert_eq!(migration_history_snapshot(&reopened.db), expected_history);
+        assert_eq!(migration_work_item_contracts(&reopened.db), expected_contracts);
+        drop(reopened);
     }
 
     #[test]
     fn v52_work_item_evidence_contract_migration_preserves_rows_and_replays() {
-        let directory = std::env::temp_dir().join(format!("pandacode-work-item-contract-migration-{}", id()));
-        std::fs::create_dir_all(&directory).unwrap();
-        let path = directory.join("store.sqlite3");
+        let temporary_directory = MigrationTempDir::new("work-item-contract-migration");
+        let path = temporary_directory.path().join("store.sqlite3");
         let timestamp = now();
         {
             let store = Store::open(&path).unwrap();
@@ -4250,12 +4323,8 @@ mod tests {
                 "INSERT INTO sa_work_item_deps(item_id,depends_on) VALUES('legacy-contract-b','legacy-contract-a')",
                 [],
             ).unwrap();
-            // Reconstruct a populated v52 database, where the contract column
-            // did not exist. The new column's fixed default must cover both rows.
-            store.db.execute_batch(
-                "ALTER TABLE sa_work_items DROP COLUMN evidence_contract;
-                 PRAGMA user_version=52;",
-            ).unwrap();
+            // Reconstruct a populated v52 database with no v53–55 objects.
+            reconstruct_schema_52(&store.db);
         }
 
         let migrated = Store::open(&path).unwrap();
@@ -4314,7 +4383,6 @@ mod tests {
             1,
         );
         drop(replayed);
-        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]

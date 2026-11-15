@@ -3,7 +3,7 @@
 **Repository:** `ginmp8/pandacode-extended`
 **Branch:** `feat/issue-148-pe`
 **Original snapshot SHA:** `697a93f6c2b47449caa17a396e630357d5fe385f` (short `697a93f6`)
-**Current checkpoint SHA:** `3c8e673642cb59c18311549c5ac815cc90e6f303` (short `3c8e6736`)
+**Current checkpoint SHA:** `b7482a452c0e0080f42949eb1e64ed304ca799cc` (short `b7482a45`), pushed to `origin/feat/issue-148-pe`.
 **Ledger role:** exact-SHA drift evidence for the final acceptance gate. It does not approve a Ticket, grant authority or declare the feature complete.
 
 > **Checkpoint revision note (historical).** The body below is the `697a93f6` snapshot. Later work repaired the Council finalization dispatch-fence re-acquisition and fixture mismatch, exposed required Council in Team Builder/manifest v2, versioned future Team edits, and repaired Windows scoped writes and the effect-stop race. Only the rows named in the checkpoint delta are updated; every unlisted row still describes `697a93f6` and must not be read as executed at `bce1a51e`.
@@ -303,3 +303,21 @@ Normative source for every row: NS addendum acceptance checks. The row number eq
 **Local uncommitted readiness/UI changes (outside the pushed SHA and CI).** The shared checkout contains additional diffs in `src-tauri/src/superagent.rs` that add a read-only WorkItem model with native dependency/readiness fields and derive `Debug` for `RetryWorkItem`; `src-tauri/src/superagent/write_grants.rs` updates two test tuple destructures. `src/superagent-ui.ts` renders the readiness and prerequisite IDs, and `tests/superagent.spec.ts` adds corresponding UI expectations. These changes are not part of `3c8e6736` or run `43688051769`, and local execution of them is not claimed. They do not change the failed CI conclusion above.
 
 **Remaining gaps and acceptance status.** Automatic scheduling and multi-worker fan-out remain absent; manual dispatch handles one ready WorkItem. Semantic per-item evidence verification remains absent. Full UI/preview parity for dependency readiness, sequential dispatch, completion gates, and rejection correction remains incomplete. Broader #131 requirements and acceptance criteria remain outstanding for audit and verification. This checkpoint does not mark #148 complete.
+
+## Checkpoint delta — 2026-11-15
+
+**Parent checkpoint and exact pushed PR #151 HEAD.** This additive delta follows `3c8e673642cb59c18311549c5ac815cc90e6f303` (`3c8e6736`) and records pushed PR #151 HEAD `b7482a452c0e0080f42949eb1e64ed304ca799cc` (`b7482a45`) on `origin/feat/issue-148-pe`. The local branch and HEAD match GitHub's PR #151 head. Historical rows, baseline totals, and prior deltas remain unchanged.
+
+**Changes now included at the pushed HEAD.** The current tree includes the structured native WorkItem lifecycle gates and prompt framing, `RetryWorkItem`'s `Debug` derive, Windows tuple-fixture corrections, a read-only dependency/readiness model and its Plan / Readiness UI with corresponding UI expectations, and more realistic readiness fixture setup. In particular, the readiness/model/UI and fixture changes previously described as local and uncommitted are now committed and pushed at `b7482a45`; they were outside the prior `3c8e6736` run. Readiness remains informational and does not implement automatic scheduling or semantic evidence verification.
+
+**Prior failed run — exact SHA `3c8e6736`.** Actions run `43688051769` (run #1661, `CI`) completed with failure at `3c8e673642cb59c18311549c5ac815cc90e6f303`, as recorded in the preceding delta. Its Rust `Debug` derive and Windows tuple-fixture errors belong to that older SHA. That failure is evidence about `3c8e6736`, not the new pushed HEAD.
+
+**Current exact-SHA Actions status.** GitHub's PR #151 record reports head `b7482a452c0e0080f42949eb1e64ed304ca799cc`, matching this checkout. The commit-specific workflow-run lookup for this SHA returns [Actions run `43691396946`](https://github.com/ginmp8/pandacode-extended/actions/runs/43691396946) (run #1665, `CI`) as `queued`, with a null conclusion at lookup. This is pending evidence; no success or failure is claimed for `b7482a45`, and the prior `43688051769` result is not its CI result.
+
+**Local execution.** Local Playwright and Rust tests were not run: `node_modules` is absent, and the Visual Studio 18 2026 CMake toolchain is missing. The relevant `src-tauri/target` directory is absent. No local test pass is claimed.
+
+**Remaining gaps and acceptance status.** Dispatch remains manual and sequential; automatic scheduling and multi-worker fan-out remain absent. Semantic per-item evidence verification remains absent; a readiness state or `evidenceContract` does not prove that evidence meets a requirement. Broader #131 acceptance, UI/preview parity and other #148 gaps remain outstanding. Issue #148 is explicitly incomplete, and this delta does not claim completion.
+
+**Final exact-SHA CI result (subsequent status check; supersedes the queued-at-lookup status above).** GitHub reports PR #151 HEAD `b7482a452c0e0080f42949eb1e64ed304ca799cc`, matching this checkpoint. [Actions run `43691396946`](https://github.com/ginmp8/pandacode-extended/actions/runs/43691396946) (run #1665, `CI`) completed with conclusion `failure`: 11 of 19 jobs passed and 8 failed. The earlier `queued` / null-conclusion entry above records only the state at lookup and is historical; this final result supersedes it.
+- `Rust check and tests (Linux)`, `Panda Router ONNX parity (macOS)`, `Customize Skills native contract (Windows)`, and all five platform Clippy jobs (`linux-aarch64`, `darwin-aarch64`, `darwin-x86_64`, `windows-x86_64`, `windows-aarch64`) failed at Rust compilation with E0597 at `src-tauri/src/superagent.rs:1669`: `stmt` does not live long enough. The affected jobs did not pass their respective test, contract, parity, or Clippy steps.
+- This failed run does not change the acceptance status. Automatic scheduling and multi-worker fan-out remain absent; semantic per-item evidence verification remains absent; broader #131 acceptance, UI/preview parity, and other #148 gaps remain outstanding. Issue #148 is still incomplete.

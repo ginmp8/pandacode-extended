@@ -1666,11 +1666,12 @@ pub(crate) mod work_items {
                  JOIN sa_work_items prerequisite ON prerequisite.id=d.depends_on
                  WHERE d.item_id=?1 ORDER BY prerequisite.ordinal,prerequisite.id",
             ).map_err(|error| error.to_string())?;
-            stmt.query_map([&item.id], |row| {
+            let rows = stmt.query_map([&item.id], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             }).map_err(|error| error.to_string())?
                 .collect::<rusqlite::Result<Vec<_>>>()
-                .map_err(|error| error.to_string())?
+                .map_err(|error| error.to_string())?;
+            rows
         };
         let active_binding: bool = conn.query_row(
             "SELECT EXISTS(

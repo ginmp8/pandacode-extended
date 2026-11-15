@@ -2124,3 +2124,657 @@ fn project_tasks_get_their_own_bot_brief_and_skill_union() {
     let (thread, _) = thread_session(&f.store, &writer, DESKTOP, DESKTOP, "x").unwrap();
     assert!(assign_task(&f.store, &thread, Some(&reviewer.id)).is_err());
 }
+
+// Current native Shared Channel Council callback and privacy regression fixtures
+// reconciled from PR #152 without changing source branches.
+fn council_request(
+    store: &Store,
+    channel_id: &str,
+    sender: &Bot,
+    sender_session: &str,
+    recipients: &[Bot],
+    objective: &str,
+) -> (String, i64) {
+    let message_id = crate::storage::id();
+    let created_at = crate::storage::now();
+    let recipient_ids = recipients
+        .iter()
+        .map(|bot| bot.id.clone())
+        .collect::<Vec<_>>();
+    store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,author_bot_id,text,status,created_at)
+         VALUES(?1,?2,'user',?3,?4,'in_progress',?5)",
+        params![message_id,channel_id,sender.id,objective,created_at],
+    ).unwrap();
+    store.db.execute(
+        "INSERT INTO extended_channel_council_requests(message_id,council_json,executor_ids,created_at)
+         VALUES(?1,?2,?3,?4)",
+        params![message_id,serde_json::to_string(&crate::architect::CouncilConfig::default()).unwrap(),
+            serde_json::to_string(&recipient_ids).unwrap(),created_at],
+    ).unwrap();
+    store.db.execute(
+        "INSERT INTO extended_bot_channel_actions(message_id,kind,origin_bot_id,origin_session_id,
+         origin_channel_id,origin_external_id,recipients,parent_request_id,depth,route,idempotency_key,created_at)
+         VALUES(?1,'assignment',?2,?3,'desktop','desktop',?4,NULL,0,?5,?6,?7)",
+        params![message_id,sender.id,sender_session,serde_json::to_string(&recipient_ids).unwrap(),
+            json!([sender.id.clone()]).to_string(),format!("council-test:{message_id}"),created_at],
+    ).unwrap();
+    (message_id, created_at)
+}
+
+fn council_delivery(
+    store: &Store,
+    channel_id: &str,
+    message_id: &str,
+    recipient: &Bot,
+    objective: &str,
+    final_reply: &str,
+    created_at: i64,
+) -> (String, String) {
+    let delivery_id = crate::storage::id();
+    shared_channels::provision_channel_delivery(
+        store,
+        channel_id,
+        message_id,
+        &recipient.id,
+        objective,
+        shared_channels::ChannelDeliveryAdmission {
+            created_at,
+            depth: 1,
+        },
+        &delivery_id,
+    )
+    .unwrap();
+    store
+        .db
+        .execute(
+            "UPDATE bot_shared_channel_deliveries SET status='in_progress' WHERE id=?1",
+            [&delivery_id],
+        )
+        .unwrap();
+    let session_id: String = store
+        .db
+        .query_row(
+            "SELECT session_id FROM bot_shared_channel_deliveries WHERE id=?1",
+            [&delivery_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let now = crate::storage::now();
+    store
+        .db
+        .execute(
+            "INSERT INTO messages(session_id,role,content,created_at) VALUES(?1,'user',?2,?3)",
+            params![session_id, objective, now],
+        )
+        .unwrap();
+    store
+        .db
+        .execute(
+            "INSERT INTO messages(session_id,role,content,created_at) VALUES(?1,'assistant',?2,?3)",
+            params![session_id, final_reply, now + 1],
+        )
+        .unwrap();
+    (delivery_id, session_id)
+}
+
+fn set_council_root(
+    store: &Store,
+    delivery_id: &str,
+    session_id: &str,
+    root_status: &str,
+    verdict: Option<&str>,
+    council_since: i64,
+    (accepted, completed_child): (bool, bool),
+) {
+    let mut team = crate::architect::load(store, session_id).unwrap().unwrap();
+    team.status = root_status.into();
+    team.council_since = council_since;
+    team.council_accepted = accepted.then_some(council_since);
+    team.dispatch_revision = 7;
+    team.changed_at = council_since + 46;
+    team.council_status = verdict.map(|state| crate::architect::CouncilStatus {
+        state: state.into(),
+        round: 1,
+        lowest: Some(8.0),
+        target: 9.0,
+        stale: false,
+        notice: None,
+    });
+    if completed_child {
+        let child: crate::architect::Worker = serde_json::from_value(json!({
+            "id":"completed-child","sessionId":"completed-child-session","name":"Reviewer",
+            "profileId":"auto","provider":"codex","model":"gpt-5","reasoningEffort":null,
+            "status":"completed","assignment":"Review the work","summary":"Child review complete",
+            "error":null,"dependsOn":[],"files":[],"attempt":1,"createdAt":council_since,
+            "updatedAt":council_since+1,
+            "council":{"round":1,"lens":"security","score":10.0,"startedAt":council_since,
+                "closedBySelection":false}
+        }))
+        .unwrap();
+        team.workers.push(child);
+    }
+    store
+        .db
+        .execute(
+            "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+            params![session_id, serde_json::to_string(&team).unwrap()],
+        )
+        .unwrap();
+    shared_channels::bind_delivery_cycle(store, session_id, council_since).unwrap();
+    if accepted {
+        let cycle: String = store
+            .db
+            .query_row(
+                "SELECT cycle_id FROM extended_channel_council_deliveries WHERE delivery_id=?1",
+                [delivery_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        store.db.execute(
+            "INSERT INTO extended_channel_council_acceptances
+             (delivery_id,cycle_id,council_since,dispatch_revision,changed_at,actor,reason,accepted_at)
+             VALUES(?1,?2,?3,7,?4,'local_user','Reviewed and accepted',?5)",
+            params![delivery_id,cycle,council_since,council_since+46,crate::storage::now()],
+        ).unwrap();
+    }
+}
+
+#[test]
+fn council_delivery_callbacks_require_the_matching_root_and_survive_replay_and_restart_once() {
+    let f = fixture();
+    let db_path = f.root.join("council-callback-boundary.sqlite");
+    let store = Store::open(&db_path).unwrap();
+    upgrade(&store.db).unwrap();
+    let first_bot = create(&store, &input("First recipient"), &f.root).unwrap();
+    let second_bot = create(&store, &input("Second recipient"), &f.root).unwrap();
+    let channel = shared_channels::create(
+        &store, "callback-boundary", &[first_bot.id.clone(), second_bot.id.clone()],
+    ).unwrap();
+    let council = crate::architect::CouncilConfig::default();
+
+    let mut deliveries = Vec::new();
+    for (bot, objective) in [(&first_bot, "Review first response"), (&second_bot, "Review second response")] {
+        let message_id = crate::storage::id();
+        let delivery_id = crate::storage::id();
+        let created_at = crate::storage::now();
+        store.db.execute(
+            "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+             VALUES(?1,?2,'user',?3,'in_progress',?4)",
+            params![message_id,channel.id,objective,created_at],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO extended_channel_council_requests(message_id,council_json,executor_ids,created_at)
+             VALUES(?1,?2,?3,?4)",
+            params![message_id,serde_json::to_string(&council).unwrap(),
+                serde_json::to_string(&vec![bot.id.clone()]).unwrap(),created_at],
+        ).unwrap();
+        shared_channels::provision_channel_delivery(
+            &store, &channel.id, &message_id, &bot.id, objective,
+            shared_channels::ChannelDeliveryAdmission { created_at, depth: 0 }, &delivery_id,
+        ).unwrap();
+        let session_id: String = store.db.query_row(
+            "SELECT session_id FROM bot_shared_channel_deliveries WHERE id=?1",
+            [&delivery_id], |row| row.get(0),
+        ).unwrap();
+        store.db.execute(
+            "UPDATE bot_shared_channel_deliveries SET status='in_progress' WHERE id=?1",
+            [&delivery_id],
+        ).unwrap();
+        deliveries.push((delivery_id, message_id, session_id, bot.id.clone()));
+    }
+    assert_ne!(deliveries[0].2, deliveries[1].2,
+        "each recipient gets a separate Council root and response transcript");
+    let cycles: Vec<String> = {
+        let mut query = store.db.prepare(
+            "SELECT cycle_id FROM extended_channel_council_deliveries
+             WHERE delivery_id IN (?1,?2) ORDER BY delivery_id",
+        ).unwrap();
+        query.query_map(params![deliveries[0].0,deliveries[1].0], |row| row.get(0))
+            .unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    };
+    assert_ne!(cycles[0], cycles[1], "recipient deliveries never share a native review cycle");
+
+    // A completed reviewer child is not a terminal result for the channel's root assignment.
+    let (first_delivery, first_message, first_session, first_recipient) = &deliveries[0];
+    let mut first_root = crate::architect::load(&store, first_session).unwrap().unwrap();
+    first_root.status = "running".into();
+    first_root.council_since = 1234;
+    let completed_child: crate::architect::Worker = serde_json::from_value(json!({
+        "id":"completed-child","sessionId":"child-session","name":"Reviewer",
+        "profileId":"auto","provider":"codex","model":"gpt-5","reasoningEffort":null,
+        "status":"completed","assignment":"Review the work","summary":"Child review complete",
+        "error":null,"dependsOn":[],"files":[],"attempt":1,"createdAt":1235,"updatedAt":1236,
+        "council":{"round":1,"lens":"security","score":10.0,"startedAt":1235,"closedBySelection":false}
+    })).unwrap();
+    first_root.workers.push(completed_child);
+    store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![first_session,serde_json::to_string(&first_root).unwrap()],
+    ).unwrap();
+    shared_channels::bind_delivery_cycle(&store, first_session, first_root.council_since).unwrap();
+    store.db.execute(
+        "INSERT INTO messages(session_id,role,content,created_at) VALUES(?1,'assistant','Child-only response',?2)",
+        params![first_session,crate::storage::now()],
+    ).unwrap();
+    assert_eq!(channel_council_outcome(&store, first_session).unwrap(), ChannelCouncilOutcome::Waiting);
+    assert_eq!(shared_channels::settle_channel_delivery(
+        &store, first_session, (first_delivery,&channel.id,first_message,first_recipient),
+        true, &shared_channels::latest_reply(&store,first_session).unwrap(),
+    ).unwrap(), None, "a child completion must emit no channel callback");
+
+    // The same delivery's nonpassing root terminal fails closed, even though its child scored 10.
+    first_root.status = "completed".into();
+    first_root.council_status = Some(crate::architect::CouncilStatus {
+        state:"fixing".into(), round:1, lowest:Some(8.0), target:9.0, stale:false, notice:None,
+    });
+    store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![first_session,serde_json::to_string(&first_root).unwrap()],
+    ).unwrap();
+    assert!(matches!(channel_council_outcome(&store, first_session).unwrap(), ChannelCouncilOutcome::Denied(_)));
+    assert_eq!(shared_channels::settle_channel_delivery(
+        &store, first_session, (first_delivery,&channel.id,first_message,first_recipient),
+        true, &shared_channels::latest_reply(&store,first_session).unwrap(),
+    ).unwrap(), Some(false), "a nonpassing root terminal must not emit a success callback");
+    assert!(!shared_channels::council_callback_allowed(&store, first_delivery).unwrap());
+
+    // A terminal provider turn at the Council limit is still not a root approval.
+    let (second_delivery, second_message, second_session, second_recipient) = &deliveries[1];
+    let mut second_root = crate::architect::load(&store, second_session).unwrap().unwrap();
+    second_root.status = "completed".into();
+    second_root.council_since = 2234;
+    second_root.council_status = Some(crate::architect::CouncilStatus {
+        state:"limit".into(), round:1, lowest:Some(8.0), target:9.0, stale:false, notice:None,
+    });
+    store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![second_session,serde_json::to_string(&second_root).unwrap()],
+    ).unwrap();
+    shared_channels::bind_delivery_cycle(&store, second_session, second_root.council_since).unwrap();
+    store.db.execute(
+        "INSERT INTO messages(session_id,role,content,created_at) VALUES(?1,'assistant','Intermediate turn response',?2)",
+        params![second_session,crate::storage::now()],
+    ).unwrap();
+    assert_eq!(channel_council_outcome(&store, second_session).unwrap(), ChannelCouncilOutcome::Waiting);
+    assert_eq!(shared_channels::settle_channel_delivery(
+        &store, second_session, (second_delivery,&channel.id,second_message,second_recipient),
+        true, &shared_channels::latest_reply(&store,second_session).unwrap(),
+    ).unwrap(), None, "a completed turn at the Council limit must emit no callback");
+
+    // Only this delivery's matching, explicitly accepted root terminal can publish a reply.
+    second_root.council_accepted = Some(2234);
+    second_root.changed_at = 2280;
+    second_root.dispatch_revision = 7;
+    second_root.council_status = Some(crate::architect::CouncilStatus {
+        state:"accepted".into(), round:1, lowest:Some(8.0), target:9.0, stale:false, notice:None,
+    });
+    store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![second_session,serde_json::to_string(&second_root).unwrap()],
+    ).unwrap();
+    let cycle: String = store.db.query_row(
+        "SELECT cycle_id FROM extended_channel_council_deliveries WHERE delivery_id=?1",
+        [second_delivery], |row| row.get(0),
+    ).unwrap();
+    store.db.execute(
+        "INSERT INTO extended_channel_council_acceptances
+         (delivery_id,cycle_id,council_since,dispatch_revision,changed_at,actor,reason,accepted_at)
+         VALUES(?1,?2,2234,7,2280,'local_user','Accepted this delivery',?3)",
+        params![second_delivery,cycle,crate::storage::now()],
+    ).unwrap();
+    store.db.execute(
+        "INSERT INTO messages(session_id,role,content,created_at) VALUES(?1,'user','Continue the accepted review',?2)",
+        params![second_session,crate::storage::now()],
+    ).unwrap();
+    store.db.execute(
+        "INSERT INTO messages(session_id,role,content,created_at) VALUES(?1,'assistant','Approved second response',?2)",
+        params![second_session,crate::storage::now()],
+    ).unwrap();
+    assert_eq!(channel_council_outcome(&store, second_session).unwrap(), ChannelCouncilOutcome::Approved);
+    let callback = shared_channels::settle_channel_delivery(
+        &store, second_session, (second_delivery,&channel.id,second_message,second_recipient),
+        true, &shared_channels::latest_reply(&store,second_session).unwrap(),
+    ).unwrap();
+    assert_eq!(callback, Some(true));
+    assert_eq!(shared_channels::settle_channel_delivery(
+        &store, second_session, (second_delivery,&channel.id,second_message,second_recipient),
+        true, "Replayed response must not publish",
+    ).unwrap(), None, "a terminal delivery can be claimed only once");
+
+    drop(store);
+    let reopened = Store::open(&db_path).unwrap();
+    upgrade(&reopened.db).unwrap();
+    for _ in 0..2 { shared_channels::reconcile_in_progress(&reopened).unwrap(); }
+    let replies: Vec<(String,String)> = {
+        let mut query = reopened.db.prepare(
+            "SELECT author_bot_id,text FROM bot_shared_channel_messages
+             WHERE channel_id=?1 AND kind='reply' ORDER BY created_at,id",
+        ).unwrap();
+        query.query_map([&channel.id], |row| Ok((row.get(0)?,row.get(1)?)))
+            .unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    };
+    assert_eq!(replies, vec![(second_recipient.clone(),"Approved second response".into())],
+        "restart/replay preserves exactly the approved recipient's response");
+    let statuses: Vec<String> = {
+        let mut query = reopened.db.prepare(
+            "SELECT status FROM bot_shared_channel_deliveries WHERE id IN (?1,?2) ORDER BY id",
+        ).unwrap();
+        query.query_map(params![first_delivery,second_delivery], |row| row.get(0))
+            .unwrap().collect::<rusqlite::Result<_>>().unwrap()
+    };
+    assert_eq!(statuses.iter().filter(|status| status.as_str()=="completed").count(),1);
+    assert_eq!(statuses.iter().filter(|status| status.as_str()=="failed").count(),1);
+}
+
+#[test]
+fn channel_council_fanout_and_repeat_messages_keep_cycles_transcripts_and_approval_scoped() {
+    let f = fixture();
+    upgrade(&f.store.db).unwrap();
+    let parent = bot(&f);
+    let first = create(&f.store, &input("First recipient"), &f.root).unwrap();
+    let second = create(&f.store, &input("Second recipient"), &f.root).unwrap();
+    let channel = shared_channels::create(
+        &f.store,
+        "council-scope",
+        &[parent.id.clone(), first.id.clone(), second.id.clone()],
+    )
+    .unwrap();
+    let parent_session = thread_session(&f.store, &parent, DESKTOP, DESKTOP, "Scout · You")
+        .unwrap()
+        .0;
+
+    let fanout_recipients = [first.clone(), second.clone()];
+    let (fanout_message, fanout_at) = council_request(
+        &f.store,
+        &channel.id,
+        &parent,
+        &parent_session,
+        &fanout_recipients,
+        "Fan out to both reviewers",
+    );
+    let (fanout_first, fanout_first_session) = council_delivery(
+        &f.store,
+        &channel.id,
+        &fanout_message,
+        &first,
+        "Fan out to both reviewers",
+        "First reviewer final response",
+        fanout_at,
+    );
+    let (fanout_second, fanout_second_session) = council_delivery(
+        &f.store,
+        &channel.id,
+        &fanout_message,
+        &second,
+        "Fan out to both reviewers",
+        "Second reviewer private response",
+        fanout_at,
+    );
+    let (same_bot_message_one, one_at) = council_request(
+        &f.store,
+        &channel.id,
+        &parent,
+        &parent_session,
+        std::slice::from_ref(&first),
+        "First request to same bot",
+    );
+    let (same_bot_one, same_bot_one_session) = council_delivery(
+        &f.store,
+        &channel.id,
+        &same_bot_message_one,
+        &first,
+        "First request to same bot",
+        "First request final response",
+        one_at,
+    );
+    let (same_bot_message_two, two_at) = council_request(
+        &f.store,
+        &channel.id,
+        &parent,
+        &parent_session,
+        std::slice::from_ref(&first),
+        "Second request to same bot",
+    );
+    let (same_bot_two, same_bot_two_session) = council_delivery(
+        &f.store,
+        &channel.id,
+        &same_bot_message_two,
+        &first,
+        "Second request to same bot",
+        "Second request private response",
+        two_at,
+    );
+
+    let base = crate::storage::now() + 2000;
+    set_council_root(
+        &f.store,
+        &fanout_first,
+        &fanout_first_session,
+        "completed",
+        Some("accepted"),
+        base,
+        (true, false),
+    );
+    set_council_root(
+        &f.store,
+        &fanout_second,
+        &fanout_second_session,
+        "completed",
+        Some("accepted"),
+        base + 100,
+        (false, false),
+    );
+    set_council_root(
+        &f.store,
+        &same_bot_one,
+        &same_bot_one_session,
+        "completed",
+        Some("accepted"),
+        base + 200,
+        (true, false),
+    );
+    set_council_root(
+        &f.store,
+        &same_bot_two,
+        &same_bot_two_session,
+        "completed",
+        Some("accepted"),
+        base + 300,
+        (false, false),
+    );
+
+    let cycles: Vec<String> = {
+        let mut query = f
+            .store
+            .db
+            .prepare(
+                "SELECT cycle_id FROM extended_channel_council_deliveries
+             WHERE delivery_id IN (?1,?2,?3,?4) ORDER BY delivery_id",
+            )
+            .unwrap();
+        query
+            .query_map(
+                params![fanout_first, fanout_second, same_bot_one, same_bot_two],
+                |row| row.get(0),
+            )
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    assert_eq!(
+        cycles
+            .iter()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        4,
+        "fanout recipients and separate messages to one bot each keep their own Council cycle"
+    );
+    assert_ne!(fanout_first_session, fanout_second_session);
+    assert_ne!(same_bot_one_session, same_bot_two_session);
+    assert_ne!(same_bot_message_one, same_bot_message_two);
+    assert_eq!(
+        channel_council_outcome(&f.store, &fanout_first_session).unwrap(),
+        ChannelCouncilOutcome::Approved
+    );
+    assert_eq!(
+        channel_council_outcome(&f.store, &same_bot_one_session).unwrap(),
+        ChannelCouncilOutcome::Approved
+    );
+    assert_eq!(
+        channel_council_outcome(&f.store, &fanout_second_session).unwrap(),
+        ChannelCouncilOutcome::Waiting,
+        "one fanout recipient cannot borrow its sibling's approval"
+    );
+    assert_eq!(
+        channel_council_outcome(&f.store, &same_bot_two_session).unwrap(),
+        ChannelCouncilOutcome::Waiting,
+        "a later message to the same bot cannot borrow an earlier approval"
+    );
+
+    let expected_transcripts = [
+        (
+            &fanout_first_session,
+            "Fan out to both reviewers",
+            "First reviewer final response",
+        ),
+        (
+            &fanout_second_session,
+            "Fan out to both reviewers",
+            "Second reviewer private response",
+        ),
+        (
+            &same_bot_one_session,
+            "First request to same bot",
+            "First request final response",
+        ),
+        (
+            &same_bot_two_session,
+            "Second request to same bot",
+            "Second request private response",
+        ),
+    ];
+    for (session_id, objective, reply) in expected_transcripts {
+        let transcript: Vec<(String, String)> = {
+            let mut query = f
+                .store
+                .db
+                .prepare("SELECT role,content FROM messages WHERE session_id=?1 ORDER BY id")
+                .unwrap();
+            query
+                .query_map([session_id], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+        assert_eq!(
+            transcript,
+            vec![
+                ("user".into(), objective.into()),
+                ("assistant".into(), reply.into())
+            ],
+            "each delivery reads only its own private prompt and final response"
+        );
+    }
+
+    for (delivery_id, message_id, recipient, session_id) in [
+        (
+            &fanout_first,
+            &fanout_message,
+            &first,
+            &fanout_first_session,
+        ),
+        (
+            &same_bot_one,
+            &same_bot_message_one,
+            &first,
+            &same_bot_one_session,
+        ),
+    ] {
+        assert_eq!(
+            shared_channels::settle_channel_delivery(
+                &f.store,
+                session_id,
+                (delivery_id, &channel.id, message_id, &recipient.id),
+                true,
+                &shared_channels::latest_reply(&f.store, session_id).unwrap(),
+            )
+            .unwrap(),
+            Some(true)
+        );
+    }
+    for (delivery_id, message_id, recipient, session_id) in [
+        (
+            &fanout_second,
+            &fanout_message,
+            &second,
+            &fanout_second_session,
+        ),
+        (
+            &same_bot_two,
+            &same_bot_message_two,
+            &first,
+            &same_bot_two_session,
+        ),
+    ] {
+        assert_eq!(
+            shared_channels::settle_channel_delivery(
+                &f.store,
+                session_id,
+                (delivery_id, &channel.id, message_id, &recipient.id),
+                true,
+                &shared_channels::latest_reply(&f.store, session_id).unwrap(),
+            )
+            .unwrap(),
+            None,
+            "an unrelated persisted approval cannot settle this delivery"
+        );
+    }
+    assert!(shared_channels::council_callback_allowed(&f.store, &fanout_first).unwrap());
+    assert!(shared_channels::council_callback_allowed(&f.store, &same_bot_one).unwrap());
+    assert!(!shared_channels::council_callback_allowed(&f.store, &fanout_second).unwrap());
+    assert!(!shared_channels::council_callback_allowed(&f.store, &same_bot_two).unwrap());
+    let approvals: Vec<String> =
+        {
+            let mut query = f.store.db.prepare(
+            "SELECT delivery_id FROM extended_channel_council_acceptances ORDER BY delivery_id",
+        ).unwrap();
+            query
+                .query_map([], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        };
+    let mut expected_approvals = vec![fanout_first.clone(), same_bot_one.clone()];
+    expected_approvals.sort();
+    assert_eq!(
+        approvals, expected_approvals,
+        "human approval proof remains delivery-scoped"
+    );
+    let replies: Vec<(String, String)> = {
+        let mut query = f
+            .store
+            .db
+            .prepare(
+                "SELECT author_bot_id,text FROM bot_shared_channel_messages
+             WHERE channel_id=?1 AND kind='reply' ORDER BY text",
+            )
+            .unwrap();
+        query
+            .query_map([&channel.id], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<_>>()
+            .unwrap()
+    };
+    assert_eq!(
+        replies,
+        vec![
+            (first.id.clone(), "First request final response".into()),
+            (first.id.clone(), "First reviewer final response".into()),
+        ],
+        "only each approved delivery's own final response reaches channel history"
+    );
+    assert!(!replies
+        .iter()
+        .any(|(_, text)| text.contains("private response")));
+}

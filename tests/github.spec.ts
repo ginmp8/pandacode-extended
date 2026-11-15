@@ -13,10 +13,12 @@ async function probe(page: Page, hook = ''): Promise<void> {
     const source = await response.text();
     const marker = /switch\s*\(command\)\s*\{/;
     const cloudStartMarker = /if \(command === ["']cloud_agent_start["']\) \{/;
+    const remoteStartMarker = /if \(command === ["']remote_start_task["']\) \{/;
     expect(source).toMatch(marker);
     expect(source).toMatch(cloudStartMarker);
-    const instrumented = source.replace(cloudStartMarker, match => `${match}
-      (window.__githubCalls ??= []).push({ command, args: structuredClone(args) });`);
+    expect(source).toMatch(remoteStartMarker);
+    let instrumented = source.replace(cloudStartMarker, match => `${match}\r\n      (window.__githubCalls ??= []).push({ command, args: structuredClone(args) });`);
+    instrumented = instrumented.replace(remoteStartMarker, match => `${match}\r\n      (window.__githubCalls ??= []).push({ command, args: structuredClone(args) });`);
     await route.fulfill({ response, body: previewBody(instrumented.replace(marker, `
       (window.__githubCalls ??= []).push({ command, args: structuredClone(args) });
       if (command === 'send_message') return;

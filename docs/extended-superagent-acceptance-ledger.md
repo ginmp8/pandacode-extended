@@ -127,7 +127,7 @@ Normative source for every row: original #131 AC matrix, with the #148 minimum-p
 
 ### AC-25 operator rollback steps
 
-For a failed database upgrade, stop PandaCode and any process that can write to its app-data database. Preserve the failed database separately, then copy the complete SQLite database file set (`store.sqlite3` and any `-wal`/`-shm` sidecars) to an isolated backup location. With PandaCode still stopped, restore the saved database file set as one unit; retain the failed copy for diagnosis. Reopen PandaCode and verify that it starts at the current schema and that expected tasks, Tickets, assignments, audit/effect receipts and WorkItems remain present. This is a manual operator procedure; no runtime database backup or restore feature is added by this slice.
+Before attempting an upgrade, fully stop PandaCode and every process that can write to its app-data database. Copy the complete SQLite file set (`store.sqlite3` and any `-wal`/`-shm` sidecars) to a named, isolated backup location, then validate that copy read-only with `PRAGMA integrity_check` and representative expected records. Keep this known-good pre-upgrade backup untouched. If the upgrade fails, stop every database writer, preserve the failed upgraded file set separately for diagnosis, and restore the known-good pre-upgrade file set as one unit; the failed copy is not a restore source. Reopen PandaCode and verify that it starts at the current schema and that expected tasks, Tickets, assignments, audit/effect receipts and WorkItems remain present. This is a manual operator procedure; no runtime database backup or restore feature is added by this slice.
 
 ## Mandatory UX acceptance
 

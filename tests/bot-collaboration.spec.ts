@@ -156,16 +156,17 @@ test.describe('bot collaboration', () => {
         },
         bindCouncilEvidence: (_host: HTMLElement, session: string) => bindings.push(session),
       } as any;
+      await openSharedChannelCouncilReport('isolated-task', 'isolated-task:1700000000000', 'cycle:1700000000000', options);
+      await openSharedChannelCouncilReport('isolated-task', 'isolated-task:1700000000000', 'cycle:1700000000001', options);
+      await openSharedChannelCouncilReport('isolated-task', 'isolated-task:1700000000000', 'preview-revision-1', options);
+      await openSharedChannelCouncilReport('isolated-task', 'isolated-task:1700000000000', 'cycle:0', options);
+      await openSharedChannelCouncilReport('foreign-task', 'isolated-task:1700000000000', 'cycle:1700000000000', options);
       await openSharedChannelCouncilReport('isolated-task', 'delivery-cycle-a', 'cycle:1700000000000', options);
-      await openSharedChannelCouncilReport('isolated-task', 'delivery-cycle-a', 'cycle:1700000000001', options);
-      await openSharedChannelCouncilReport('isolated-task', 'delivery-cycle-a', 'preview-revision-1', options);
-      await openSharedChannelCouncilReport('isolated-task', 'delivery-cycle-a', 'cycle:0', options);
-      await openSharedChannelCouncilReport('foreign-task', 'delivery-cycle-a', 'cycle:1700000000000', options);
       return { shown, prompts, bindings };
     });
     expect(state.shown).toEqual(['Council report']);
     expect(state.bindings).toEqual(['isolated-task']);
-    expect(state.prompts).toHaveLength(4);
+    expect(state.prompts).toHaveLength(5);
     expect(state.prompts.every(message => message.includes('unavailable'))).toBe(true);
   });
   test('a channel Council report opens its populated nested Architect inspection', async ({ page }) => {

@@ -84,6 +84,25 @@ The existing `--inspect-ticket` and `--inspect-ticket-effects` commands show
 redacted state without touching live sessions. Per-effect dispatch and full
 headless admission/retry still require explicit user-authorized native grants.
 
+### Quarantine a running Ticket's detached native session
+
+When recovery inspection reports one running native Assignment whose `sessions`
+record is missing, a local operator can explicitly quarantine that anomaly at
+the current Ticket revision:
+
+```sh
+pandacode serve --list-recovery-inbox
+pandacode serve --quarantine-detached-ticket <ticket-id> <expected-revision>
+```
+
+The transaction requires exactly one linked running Assignment with a missing
+session record. It revokes its Mandate, interrupts the Ticket and Assignment,
+marks pending external effects `uncertain`, increments the Ticket revision
+and records an audit. Healthy sessions, multiple attempts, stale revisions
+and audit failures abort without a partial transition. The CLI does **not**
+stop a live external provider, launch work, acknowledge a remote effect or
+allow automatic replay. Uncertain effects need independent reconciliation.
+
 ### Quarantine a terminal Ticket's orphaned assignment
 
 The read-only recovery inbox may find a terminal Ticket with a stranded native

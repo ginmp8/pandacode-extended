@@ -1462,6 +1462,78 @@ pub(crate) fn headless_stop_ticket(database_path: &std::path::Path, ticket_id: &
     headless_ticket_status(&ticket)
 }
 
+/// Quarantine an explicit, revisioned running Ticket whose single active native
+/// Assignment has no SQLite provider session. The detached process never
+/// claims a provider was stopped, replays a remote effect or grants a retry.
+pub(crate) fn headless_quarantine_detached_ticket(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let (state, revision, active): (String, i64, Option<String>) = tx.query_row(
+        "SELECT state,revision,active_assignment_id FROM sa_tickets WHERE id=?1",
+        [ticket_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("SuperAgent Ticket not found.")?;
+    if revision != expected_revision {
+        return Err("SuperAgent Ticket revision changed before quarantine.".into());
+    }
+    if state != "running" {
+        return Err("Only a running Ticket with a detached session may be quarantined.".into());
+    }
+    let active = active.ok_or("Missing active Assignment; inspect recovery state first.")?;
+    let (running, linked, missing): (i64,i64,i64) = tx.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN a.id=?2 THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN a.id=?2 AND s.id IS NULL THEN 1 ELSE 0 END),0)
+         FROM sa_assignments a LEFT JOIN sessions s ON s.id=a.session_id
+         WHERE a.ticket_id=?1 AND a.state='running'",
+        params![ticket_id,&active],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).map_err(|e| e.to_string())?;
+    if running != 1 || linked != 1 || missing != 1 {
+        return Err("Expected exactly one linked running Assignment with a missing native session.".into());
+    }
+    let now=storage::now();
+    if tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[ticket_id])
+        .map_err(|e| e.to_string())? != 1 {
+        return Err("SuperAgent Mandate missing; quarantine aborted.".into());
+    }
+    if tx.execute(
+        "UPDATE sa_tickets SET state='interrupted',active_assignment_id=NULL,
+         revision=revision+1,updated_at=?3
+         WHERE id=?1 AND revision=?2 AND state='running' AND active_assignment_id=?4",
+        params![ticket_id,expected_revision,now,&active],
+    ).map_err(|e| e.to_string())? != 1 {
+        return Err("Ticket changed before detached quarantine.".into());
+    }
+    if tx.execute(
+        "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+         WHERE ticket_id=?1 AND id=?3 AND state='running'",
+        params![ticket_id,now,&active],
+    ).map_err(|e| e.to_string())? != 1 {
+        return Err("Assignment changed before detached quarantine.".into());
+    }
+    let uncertain=tx.execute(
+        "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+         WHERE ticket_id=?1 AND state='pending'",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'headless_detached_quarantined',
+           'Missing native session; revoked without provider or effect replay',?2)",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId":ticket_id,"state":"interrupted","revision":revision+1,
+        "quarantinedAssignments":1,"pendingEffectsMarkedUncertain":uncertain,
+        "providerStoppedByCommand":false,"liveProviderState":"unknown",
+        "externalEffectReplayAllowed":false
+    })).map_err(|e| e.to_string())
+}
+
 /// Explicitly quarantine an orphaned provider attempt on a terminal Ticket.
 /// A detached headless process never replays effects or claims to stop the provider.
 pub(crate) fn headless_quarantine_terminal_orphan(
@@ -3812,6 +3884,64 @@ mod tests {
         ).unwrap();
         assert_eq!(again["items"].as_array().unwrap().len(), 2);
         assert_eq!(again["items"][0]["ticketId"], running.id);
+    }
+
+    #[test]
+    fn headless_detached_quarantine_is_revisioned_atomic_and_restart_safe() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (ticket,launched)=admit(&mut store,&cfg.id,"Private detached objective",
+            "headless-detached-quarantine",false).unwrap();
+        assert!(launched);
+        let session=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        let revision=get_ticket(&store,&ticket.id).unwrap().revision;
+        assert!(headless_quarantine_detached_ticket(&store.path,&ticket.id,revision).is_err());
+        store.db.execute(
+            "UPDATE sa_assignments SET session_id='missing-native-session'
+             WHERE ticket_id=?1 AND state='running'",[&ticket.id],
+        ).unwrap();
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'detached-write','private-digest','pending',?2,?2)",
+            params![&ticket.id,now],
+        ).unwrap();
+        assert!(headless_quarantine_detached_ticket(&store.path,&ticket.id,revision+1).is_err());
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_detached_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='headless_detached_quarantined'
+             BEGIN SELECT RAISE(ABORT,'injected audit failure'); END;",
+        ).unwrap();
+        assert!(headless_quarantine_detached_ticket(&store.path,&ticket.id,revision).is_err());
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"running");
+        assert!(!mandate(&store,&ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&store,&ticket.id,10).unwrap()[0].state,"running");
+        store.db.execute_batch("DROP TRIGGER deny_detached_audit").unwrap();
+        let output:serde_json::Value=serde_json::from_str(
+            &headless_quarantine_detached_ticket(&store.path,&ticket.id,revision).unwrap(),
+        ).unwrap();
+        assert_eq!(output["state"],"interrupted");
+        assert_eq!(output["pendingEffectsMarkedUncertain"],1);
+        assert_eq!(output["providerStoppedByCommand"],false);
+        assert_eq!(output["externalEffectReplayAllowed"],false);
+        assert!(headless_quarantine_detached_ticket(&store.path,&ticket.id,revision).is_err());
+        assert!(!on_run_finished(&store,&session,true,"Late evidence").unwrap());
+        assert_eq!(history(&store,&ticket.id,20).unwrap().iter()
+            .filter(|a|a.kind=="headless_detached_quarantined").count(),1);
+        let path=store.path.clone();
+        drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        let state=get_ticket(&reopened,&ticket.id).unwrap();
+        assert_eq!(state.state,"interrupted");
+        assert!(state.active_assignment_id.is_none());
+        assert!(mandate(&reopened,&ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&reopened,&ticket.id,10).unwrap()[0].state,"interrupted");
+        assert_eq!(reopened.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
+            [&ticket.id],|r|r.get::<_,String>(0),
+        ).unwrap(),"uncertain");
+        assert!(!list_headless_recovery_inbox(&path).unwrap().contains("Private detached objective"));
     }
 
     #[test]

@@ -3310,3 +3310,46 @@ fn composition_rejects_optional_mandatory_evidence_and_invalid_two_phase_child_r
     nested.selected[0].nested.as_mut().unwrap().max_rounds = 2;
     assert!(nested.validate().is_ok(), "two child rounds permit independent challenge");
 }
+
+#[test]
+fn scored_report_claims_become_unverified_history_without_mutating_native_approval() {
+    let (state, sid) = council_state(on(9.0, 3, 2));
+    let store = state.store.lock().unwrap();
+    let root = store.session(&sid).unwrap();
+    let review = store.create_session(&root.project_id, "codex", "", "full").unwrap();
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    let mut reviewer = seat("history-reviewer", 1, Some(6.0), team.council_since + 1);
+    reviewer.session_id = review.id.clone();
+    team.workers.push(reviewer);
+    save(&store, &mut team).unwrap();
+
+    let report = "Council findings JSON: [{\"severity\":\"high\",\"category\":\"security\",\"title\":\"Missing route guard\",\"explanation\":\"Reported authorization gap\"}]\nCouncil score: 6/10";
+    store.message(&review.id, "assistant", report).unwrap();
+    let current = council_read_snapshot(&store, &team);
+    assert_eq!(current.council_reported_findings.len(), 1);
+    assert!(current.council_historical_reported_findings.is_empty());
+    let claim = &current.council_reported_findings[0];
+    assert_eq!(claim.worker_id, "history-reviewer");
+    assert!(!claim.evidence_verified);
+    assert!(!claim.location_verified);
+    assert!(claim.verified_evidence_refs.is_empty());
+    let stable_claim_id = claim.id.clone();
+    assert_eq!(council_read_snapshot(&store, &team).council_reported_findings[0].id, stable_claim_id);
+
+    store.message(&review.id, "coordination", "A newer review turn began.").unwrap();
+    let historical = council_read_snapshot(&store, &team);
+    assert!(historical.council_reported_findings.is_empty());
+    assert_eq!(historical.council_historical_reported_findings.len(), 1);
+    assert_eq!(historical.council_historical_reported_findings[0].id, stable_claim_id);
+    assert!(!historical.council_historical_reported_findings[0].evidence_verified);
+
+    // An untrusted later assistant message cannot rewrite a frozen scored
+    // reviewer result or assert that an earlier finding was verified.
+    store.message(&review.id, "assistant",
+        "Council findings JSON: [{\"severity\":\"high\",\"category\":\"security\",\"title\":\"Invented fix\",\"explanation\":\"Model self-report\"}]\nCouncil score: 10/10"
+    ).unwrap();
+    let spoofed = council_read_snapshot(&store, &team);
+    assert!(spoofed.council_reported_findings.is_empty());
+    assert!(spoofed.council_historical_reported_findings.is_empty());
+    assert_eq!(team.workers[0].council.as_ref().unwrap().score, Some(6.0));
+}

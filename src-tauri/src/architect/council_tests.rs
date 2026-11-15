@@ -4132,6 +4132,12 @@ fn production_dispatch_preflight_rejections_preserve_native_state_and_staged_art
         vec![direct_reviewer("bot-a"), direct_reviewer("bot-b")],
     ));
     selected_roster.validate().unwrap();
+    let valid_selected_roster = config_for_composition(composition(
+        false,
+        council::AutomaticReviewerCount::Fixed(0),
+        vec![direct_reviewer("bot-a"), direct_reviewer("bot-b")],
+    ));
+    valid_selected_roster.validate().unwrap();
     let cases = [
         (
             "selected-roster",
@@ -4143,10 +4149,11 @@ fn production_dispatch_preflight_rejections_preserve_native_state_and_staged_art
                 "files": []
             }),
             "reviewer_unavailable: selected bot bot-a was removed.".to_owned(),
+            false,
         ),
         (
             "model",
-            on(9.0, 10, 2),
+            valid_selected_roster,
             json!({
                 "key": "invalid-model",
                 "profileId": "missing-profile",
@@ -4155,6 +4162,7 @@ fn production_dispatch_preflight_rejections_preserve_native_state_and_staged_art
                 "files": []
             }),
             "Unknown worker profile.".to_owned(),
+            true,
         ),
     ];
 
@@ -4246,7 +4254,42 @@ fn production_dispatch_preflight_rejections_preserve_native_state_and_staged_art
         (session, sessions, team, workers, requests)
     };
 
-    for (case, council_config, assignment, expected_error) in cases {
+    for (case, council_config, assignment, expected_error, test_reviewer_execution) in cases {
+        if case == "model" {
+            let store = state.store.lock().unwrap();
+            let project_id = store.session(&sid).unwrap().project_id;
+            for id in ["bot-a", "bot-b"] {
+                store
+                    .db
+                    .execute(
+                        "INSERT INTO bots(id,name,role,project_id,provider,model,mode,created_at,updated_at) \
+                         VALUES(?1,?1,'QA',?2,'codex','gpt-5-nano','full',1,1)",
+                        rusqlite::params![id, project_id],
+                    )
+                    .unwrap();
+            }
+            drop(store);
+
+            let mut team = saved(&state, &sid);
+            team.config.council = Some(council_config.clone());
+            store_team(&state, &mut team);
+            let store = state.store.lock().unwrap();
+            for bot_id in &council_config.reviewer_bot_ids {
+                let reviewer = bot_reviewers::seat_bot_inner_for_assignment(
+                    &store,
+                    &team,
+                    1,
+                    None,
+                    Some(CouncilAssignmentSource::SelectedBot),
+                    Some(bot_id),
+                    false,
+                )
+                .unwrap()
+                .expect("the valid selected roster must resolve each bot");
+                assert_eq!(reviewer.id, *bot_id);
+            }
+        }
+
         let mut team = saved(&state, &sid);
         team.config.council = Some(council_config);
         store_team(&state, &mut team);
@@ -4255,17 +4298,36 @@ fn production_dispatch_preflight_rejections_preserve_native_state_and_staged_art
         let before_state = persisted_state(&state, &sid);
         let args = json!({"assignments": [assignment]});
         let routes = routing::AutoRoutes::default();
-        let result = dispatch_as(
-            &state,
-            &sid,
-            before.generation,
-            None,
-            "pandacode_dispatch_workers",
-            args,
-            &AtomicBool::new(false),
-            &routes,
-            Some(&library),
-        );
+        let result = if test_reviewer_execution {
+            // Avoid depending on an installed provider executable. The runtime-test
+            // admission path still validates Council composition before model admission.
+            dispatch_as_inner(
+                &state,
+                &sid,
+                before.generation,
+                None,
+                "pandacode_dispatch_workers",
+                args,
+                &AtomicBool::new(false),
+                &routes,
+                Some(&library),
+                true,
+            )
+            .map(|result| result.0)
+        } else {
+            dispatch_as(
+                &state,
+                &sid,
+                before.generation,
+                None,
+                "pandacode_dispatch_workers",
+                args,
+                &AtomicBool::new(false),
+                &routes,
+                Some(&library),
+            )
+            .map(|result| result.0)
+        };
         let error = result.expect_err("preflight must reject invalid selected-bot and model input");
         assert_eq!(error, expected_error, "unexpected {case} rejection");
         assert!(staged_file.is_file(), "{case} rejection removed staged files");

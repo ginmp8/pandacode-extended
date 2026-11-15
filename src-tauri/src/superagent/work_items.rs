@@ -236,8 +236,8 @@ fn create(store: &Store, input: &WorkPlanInput) -> Result<WorkPlanView> {
         return Err("A work plan requires the current explicitly blocked local-user Ticket.".into());
     }
     let mandate=super::mandate(store,&ticket.id)?;
-    if mandate.actor != "local-user" || mandate.revoked
-        || mandate.expires_at <= storage::now()
+    if mandate.actor != "local-user" || mandate.authorization_id.trim().is_empty()
+        || mandate.revoked || mandate.expires_at <= storage::now()
         || mandate.allowed_side_effects || !mandate.allowed_tools.is_empty() {
         return Err("Work planning requires an active read-only native Ticket mandate.".into());
     }

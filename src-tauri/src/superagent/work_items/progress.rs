@@ -254,6 +254,7 @@ fn verify(
     }
     let mandate=super::super::mandate(store,ticket_id)?;
     if mandate.revoked || mandate.expires_at<=storage::now()
+        || mandate.actor!=ticket.actor || mandate.authorization_id.trim().is_empty()
         || mandate.policy_revision!=snapshot.policy.policy_revision
         || mandate.allowed_side_effects || !mandate.allowed_tools.is_empty()
         || mandate.project_id!=snapshot.project_id {

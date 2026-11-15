@@ -3760,6 +3760,23 @@ fn fail_launch(store: &Store, ticket_id: &str, reason: &str) -> Result<()> {
     tx.commit().map_err(|e| e.to_string())
 }
 
+/// Identify only a live native WorkItem assignment before early shared
+/// desktop/headless completion. A plan alone never starts or settles a worker.
+pub(crate) fn active_structured_worker_session(store: &Store, session_id: &str) -> Result<bool> {
+    store.db.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM sa_work_item_attempts item
+            JOIN sa_assignments assignment ON assignment.id=item.assignment_id
+              AND assignment.ticket_id=item.ticket_id
+            JOIN sa_tickets ticket ON ticket.id=assignment.ticket_id
+              AND ticket.active_assignment_id=assignment.id
+            WHERE assignment.session_id=?1 AND assignment.state='running'
+              AND ticket.state='running' AND item.state='running'
+        )",
+        [session_id], |row| row.get(0),
+    ).map_err(|error| error.to_string())
+}
+
 /// A provider turn is evidence for a task, not its approval. The only successful
 /// transition here is running -> waiting_approval; native human acceptance is separate.
 pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool, text: &str) -> Result<bool> {
@@ -5584,6 +5601,42 @@ mod tests {
             "Bot edits may not silently alter a live Ticket permission boundary");
         assert!(on_run_finished(&store,&session_id,true,"Stale apparent success").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+    }
+
+    #[test]
+    fn structured_worker_session_is_native_assignment_bound_and_requires_verified_items() {
+        let mut store=fixture();
+        let team=enabled(&store);
+        let (ticket,launched)=admit(&mut store,&team.id,
+            "Verify one WorkItem","structured-native-completion",false).unwrap();
+        assert!(launched);
+        let worker_session=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        assert!(!active_structured_worker_session(&store,&worker_session).unwrap());
+        assert!(!active_structured_worker_session(&store,"unrelated-session").unwrap());
+        let assignment=get_ticket(&store,&ticket.id).unwrap().active_assignment_id.unwrap();
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_work_plans(ticket_id,ticket_revision,plan_sha256,source,created_at)
+             VALUES(?1,?2,
+               'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+               'local-user',?3)",
+            params![ticket.id,ticket.revision,now],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_work_items(ticket_id,item_key,ordinal,title,acceptance,created_at)
+             VALUES(?1,'verify',0,'Verify output','Independent evidence',?2)",
+            params![ticket.id,now],
+        ).unwrap();
+        assert_eq!(work_items::progress::attach(&store.db,&ticket.id,&assignment)
+            .unwrap(),Some("verify".into()));
+        assert!(active_structured_worker_session(&store,&worker_session).unwrap());
+        assert!(on_run_finished(&store,&worker_session,true,"Provider observation").unwrap());
+        assert!(!active_structured_worker_session(&store,&worker_session).unwrap());
+        assert_eq!(work_items::progress::unverified_count(&store,&ticket.id).unwrap(),1);
+        let waiting=get_ticket(&store,&ticket.id).unwrap();
+        assert_eq!(waiting.state,"waiting_approval");
+        assert!(accept_with_pause(&store,&ticket.id,waiting.revision,false)
+            .unwrap_err().contains("unverified items"));
     }
 
     #[test]

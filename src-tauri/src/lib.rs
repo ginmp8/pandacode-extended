@@ -2742,14 +2742,17 @@ async fn launch_operation_admitted(
         if let Err(error) = superagent::council_adapter::finalize_after_native_run_from_app(&app,&session_id) {
             eprintln!("SuperAgent Council finalization failed: {error}");
         }
-        // Successful bot workers have no failover path. Settle their Ticket
-        // synchronously so the exact artifact is frozen before actual native
-        // reviewers are dispatched; the later gateway callback is idempotent.
+        // The exact native WorkItem attempt and required Council Worker are
+        // settled synchronously on the shared desktop/serve completion path.
+        // The later bot gateway callback is idempotent; no model text approves
+        // a WorkItem or authorizes automatic continuation.
         if successful && !was_stopped {
-            let required = store.lock().ok().and_then(|db| {
-                superagent::council_adapter::required_worker_session(&db,&session_id).ok()
-            }).unwrap_or(false);
-            if required {
+            let completion = store.lock().ok().and_then(|db| {
+                let structured = superagent::active_structured_worker_session(&db,&session_id).ok()?;
+                let required = superagent::council_adapter::required_worker_session(&db,&session_id).ok()?;
+                (structured || required).then_some(required)
+            });
+            if let Some(required) = completion {
                 let reply = store.lock().ok().and_then(|db| db.db.query_row(
                     "SELECT content FROM messages WHERE session_id=?1 AND role='assistant' ORDER BY id DESC LIMIT 1",
                     [&session_id],|row| row.get::<_,String>(0),
@@ -2757,7 +2760,7 @@ async fn launch_operation_admitted(
                 let settled = store.lock().ok().and_then(|db| {
                     superagent::on_run_finished(&db,&session_id,true,&reply).ok()
                 }).unwrap_or(false);
-                if settled {
+                if settled && required {
                     if let Err(error) = superagent::council_adapter::start_after_worker_completion(&app,&session_id) {
                         eprintln!("SuperAgent Council dispatch failed: {error}");
                     }

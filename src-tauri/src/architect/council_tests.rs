@@ -4773,6 +4773,30 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
     assert_eq!(leaves.len(), 8);
     assert_eq!(leaves.iter().collect::<std::collections::HashSet<_>>().len(), 8,
         "S3 native reviewer identities must remain distinct across two children and two phases");
+    // Persisted challenge receipts must match the original native callbacks,
+    // including after an untrusted record is modified and later restored.
+    let key = format!("native-council-child-s3-receipt:{}:security-child", root.council_since);
+    let recorded: String = store.db.query_row(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s3_receipt'",
+        rusqlite::params![sid, key], |row| row.get(0),
+    ).unwrap();
+    let mut forged: serde_json::Value = serde_json::from_str(&recorded).unwrap();
+    forged["phaseTwo"]["lowestScore"] = json!(10.0);
+    store.db.execute(
+        "UPDATE architect_requests SET content=?3
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s3_receipt'",
+        rusqlite::params![sid, key, forged.to_string()],
+    ).unwrap();
+    assert!(child_council::verified_s3_receipts(&store, &root).is_err(),
+        "a forged phase-two receipt must fail native challenge verification");
+    store.db.execute(
+        "UPDATE architect_requests SET content=?3
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s3_receipt'",
+        rusqlite::params![sid, key, recorded],
+    ).unwrap();
+    assert_eq!(child_council::verified_s3_receipts(&store, &root).unwrap().unwrap().len(), 2,
+        "restoring the exact native receipt must restore read-only verification");
 }
 
 #[test]

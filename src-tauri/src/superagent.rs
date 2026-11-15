@@ -3456,13 +3456,14 @@ pub(crate) fn read_only_policy(
         mandate_project: String,
         mandate_actor: String,
         ticket_actor: String,
+        mandate_authorization_id: String,
         attempt: i64,
     }
     let scope: Option<AssignmentPolicyScope> = store.db.query_row(
         "SELECT t.state,a.state,m.expires_at,m.revoked,m.policy_revision,o.enabled,
                 a.bot_id,t.project_id,t.id,a.created_at,
                 m.allowed_side_effects,m.allowed_tools,m.project_id,m.actor,t.actor,a.attempt,
-                t.policy_revision,o.project_id
+                t.policy_revision,o.project_id,m.authorization_id
          FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id
          JOIN sa_mandates m ON m.ticket_id=t.id
@@ -3476,7 +3477,8 @@ pub(crate) fn read_only_policy(
             bot_id: r.get(6)?, project_id: r.get(7)?, ticket_id: r.get(8)?,
             started_at: r.get(9)?, side_effects: r.get::<_, i64>(10)? != 0,
             tools_json: r.get(11)?, mandate_project: r.get(12)?,
-            mandate_actor: r.get(13)?, ticket_actor: r.get(14)?, attempt: r.get(15)?,
+            mandate_actor: r.get(13)?, ticket_actor: r.get(14)?,
+            attempt: r.get(15)?, mandate_authorization_id: r.get(18)?,
         }),
     ).optional().map_err(|e| e.to_string())?;
     if let Some(scope) = scope {
@@ -3499,6 +3501,7 @@ pub(crate) fn read_only_policy(
             || scope.side_effects || scope.tools_json != "[]"
             || scope.mandate_project != scope.project_id
             || scope.mandate_actor != scope.ticket_actor
+            || scope.mandate_authorization_id.trim().is_empty()
             || !execution_permitted(scope.enabled, crate::feature_controls::get().bots_paused)
         {
             return Err("policy_unsupported: SuperAgent mandate is inactive or stale.".into());
@@ -3960,6 +3963,7 @@ fn accept_with_pause(
             WHERE m.ticket_id=sa_tickets.id AND m.revoked=0 AND m.expires_at>?3
               AND m.allowed_side_effects=0 AND m.allowed_tools='[]'
               AND m.project_id=sa_tickets.project_id AND m.actor=sa_tickets.actor
+              AND length(trim(m.authorization_id))>0
               AND m.policy_revision=?4 AND o.enabled=1
               AND EXISTS (
                 SELECT 1 FROM bots worker JOIN bots coordinator
@@ -6817,6 +6821,62 @@ mod tests {
         assert!(!checkout_paths_equivalent(
             &relative.to_string_lossy(), &unrelated.to_string_lossy(),
         ));
+    }
+
+    #[test]
+    fn mandate_issuer_drift_denies_provider_admission_and_callback() {
+        for fault in ["missing-issuer", "blank-issuer", "wrong-actor"] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &cfg.id, "Private test evidence",
+                &format!("issuer-callback-{fault}"), false,
+            ).unwrap();
+            assert!(launched);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(read_only_policy(&store, &session).unwrap().is_some());
+            let mutation = match fault {
+                "missing-issuer" => "UPDATE sa_mandates SET authorization_id='' WHERE ticket_id=?1",
+                "blank-issuer" => "UPDATE sa_mandates SET authorization_id='  ' WHERE ticket_id=?1",
+                "wrong-actor" => "UPDATE sa_mandates SET actor='untrusted' WHERE ticket_id=?1",
+                _ => unreachable!(),
+            };
+            store.db.execute(mutation, [&ticket.id]).unwrap();
+            assert!(read_only_policy(&store, &session).is_err(), "{fault}");
+            assert!(on_run_finished(&store, &session, true, "Untrusted result").unwrap());
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked", "{fault}");
+            assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "failed");
+            assert!(history(&store, &ticket.id, 10).unwrap().iter()
+                .any(|entry| entry.kind == "callback_rejected"));
+        }
+    }
+
+    #[test]
+    fn mandate_issuer_drift_blocks_human_acceptance_of_existing_evidence() {
+        for fault in ["missing-issuer", "blank-issuer", "wrong-actor"] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &cfg.id, "Original private task",
+                &format!("issuer-approval-{fault}"), false,
+            ).unwrap();
+            assert!(launched);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(on_run_finished(&store, &session, true, "Native worker evidence").unwrap());
+            let waiting = get_ticket(&store, &ticket.id).unwrap();
+            assert_eq!(waiting.state, "waiting_approval");
+            let mutation = match fault {
+                "missing-issuer" => "UPDATE sa_mandates SET authorization_id='' WHERE ticket_id=?1",
+                "blank-issuer" => "UPDATE sa_mandates SET authorization_id='  ' WHERE ticket_id=?1",
+                "wrong-actor" => "UPDATE sa_mandates SET actor='untrusted' WHERE ticket_id=?1",
+                _ => unreachable!(),
+            };
+            store.db.execute(mutation, [&ticket.id]).unwrap();
+            assert!(accept(&store, &ticket.id, waiting.revision).is_err(), "{fault}");
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "waiting_approval");
+            assert!(!history(&store, &ticket.id, 10).unwrap().iter()
+                .any(|entry| entry.kind == "human_accepted"));
+        }
     }
 
     #[test]

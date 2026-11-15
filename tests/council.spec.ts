@@ -21,7 +21,7 @@ async function open(page: Page, url = '/', refuse: Record<string, string> = {}, 
       if (command === 'architect_council_accept') (window.__councilAccepts ??= []).push(args.sessionId);
       if (command === 'architect_set_council' && ${delay} && (!${JSON.stringify(delaySession)} || args.sessionId === ${JSON.stringify(delaySession)})) await new Promise(done => setTimeout(done, ${delay}));
       if (${JSON.stringify(slow)}[command]) await new Promise(done => setTimeout(done, ${JSON.stringify(slow)}[command]));
-      if (window.__hold?.[command]) await window.__hold[command];
+      if (window.__hold?.[command]) { window.__heldCommand = command; await window.__hold[command]; }
       if (${JSON.stringify(refuse)}[command]) throw new Error(${JSON.stringify(refuse)}[command]);
       if (command === 'architect_get' && ${Boolean(reviewers)}) {
         const team = architect.get(args.sessionId);
@@ -940,13 +940,19 @@ test('with Classic team setup, a first send starts no automatic team for Council
 
 test('a second Enter while Council turns on for the first send sends nothing more', async ({ page }) => {
   await open(page);
+  const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });
+  // New task creates its thread asynchronously. Typing before it opens would send to the previous thread.
+  const previous = await prompt.getAttribute('data-session-id');
   await newThreadsOn(page);
+  await expect.poll(() => prompt.getAttribute('data-session-id')).not.toBe(previous);
+  await composerSettled(page);
   // The team's start waits on a request the test holds, then releases: no timers.
   await page.evaluate(() => { (window as any).__hold = { architect_profiles: new Promise(done => { (window as any).__release = done; }) }; });
-  const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });
   await prompt.fill('Add a search box');
   await prompt.press('Enter');
   await prompt.press('Enter');
+  // Release only once the app is actually held in the request, so the first send waits on the hold.
+  await expect.poll(() => page.evaluate(() => (window as any).__heldCommand)).toBe('architect_profiles');
   await page.evaluate(() => (window as any).__release());
   await expect.poll(() => page.evaluate(() => (window as any).__councilStarts ?? [])).toEqual(['Add a search box']);
   expect(await calls(page)).toHaveLength(1);
@@ -1047,6 +1053,9 @@ test('Auto is explained, the off note is plain, and the button is busy while a s
 });
 
 test('Tab and Shift+Tab stay inside the panel through every control, from any of them (WebKit too)', async ({ page }) => {
+  // Two focus round trips per stop over the whole editor; WebKit in CI is slow enough to hit the suite's 60 s
+  // ceiling mid-walk, so budget extra headroom instead of dropping any edge assertion.
+  test.setTimeout(180_000);
   await open(page, '/?council=composition');
   await button(page).click();
   await expect(toggle(page)).toBeFocused();

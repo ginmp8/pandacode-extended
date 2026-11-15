@@ -3261,3 +3261,52 @@ fn council_usage_aggregation_correlates_a_stable_nested_seat_across_root_rounds(
     assert_eq!(usage_total(&without_terminal_receipts.root.input_tokens, Status::Measured), Some(12));
 }
 
+
+#[test]
+fn composition_rejects_optional_mandatory_evidence_and_invalid_two_phase_child_rounds() {
+    use council::{
+        AutomaticReviewerCount as Count, CouncilCompositionError as Error,
+        CouncilCriterionOrigin as Origin, CouncilCriteriaSource as Source,
+        CouncilStrategy as Strategy,
+    };
+
+    // PR #149: required native evidence cannot be made optional by the criterion flag.
+    let mut with_evidence = composition(true, Count::Fixed(2), vec![]);
+    with_evidence.criteria_source = Source::Architect;
+    with_evidence.criteria.push(council::CouncilCriterion {
+        id: "evidence-required".into(),
+        lens: "Evidence quality".into(),
+        description: "Inspect native receipts".into(),
+        required: false,
+        target: 9.0,
+        evidence_required: true,
+        source: Origin::Architect,
+    });
+    assert!(matches!(
+        with_evidence.validate(),
+        Err(Error::InvalidCriteria("required evidence cannot be assigned to an optional criterion"))
+    ));
+    with_evidence.criteria[0].required = true;
+    assert!(with_evidence.validate().is_ok());
+
+    // PR #152: S3 needs a fresh child challenge round, never only one child round.
+    let mut nested = composition(
+        false,
+        Count::Fixed(0),
+        vec![nested_reviewer("nested-a"), nested_reviewer("nested-b")],
+    );
+    nested.selected[0].nested.as_mut().unwrap().max_rounds = 1;
+    nested.strategy = Strategy::TwoPhase;
+    assert!(matches!(
+        nested.validate(),
+        Err(Error::InvalidNestedConfig {
+            bot_id,
+            reason: "maxRounds (at least 2 for inherited TwoPhase strategy)",
+        }) if bot_id == "nested-a"
+    ));
+    nested.strategy = Strategy::Parallel;
+    assert!(nested.validate().is_ok(), "single-round child remains valid outside S3");
+    nested.strategy = Strategy::TwoPhase;
+    nested.selected[0].nested.as_mut().unwrap().max_rounds = 2;
+    assert!(nested.validate().is_ok(), "two child rounds permit independent challenge");
+}

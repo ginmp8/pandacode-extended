@@ -1542,6 +1542,12 @@ impl CouncilComposition {
                     if !(1..=MAX_ROUNDS).contains(&nested.max_rounds) {
                         return Err(CouncilCompositionError::InvalidNestedConfig { bot_id: reviewer.bot_id.clone(), reason: "maxRounds (1..=100)" });
                     }
+                    if self.strategy == CouncilStrategy::TwoPhase && nested.max_rounds < 2 {
+                        return Err(CouncilCompositionError::InvalidNestedConfig {
+                            bot_id: reviewer.bot_id.clone(),
+                            reason: "maxRounds (at least 2 for inherited TwoPhase strategy)",
+                        });
+                    }
                 }
             }
         }
@@ -1607,6 +1613,11 @@ impl CouncilComposition {
             }
             if criterion.description.trim().is_empty() || criterion.description.chars().count() > MAX_CRITERION_DESCRIPTION_CHARS {
                 return Err(CouncilCompositionError::InvalidCriteria("criterion description must be 1..=4096 characters"));
+            }
+            if criterion.evidence_required && !criterion.required {
+                return Err(CouncilCompositionError::InvalidCriteria(
+                    "required evidence cannot be assigned to an optional criterion",
+                ));
             }
             if !criterion.target.is_finite() || !(1.0..=10.0).contains(&criterion.target) {
                 return Err(CouncilCompositionError::InvalidCriteria("criterion target must be between 1 and 10"));

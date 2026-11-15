@@ -288,3 +288,13 @@ Added Rust contract tests for native evidence and isolated child tool allowlists
 Claude warm-process eligibility is now restricted to ordinary tasks with no reviewer boundary, reviewer policy or native host token. Native evidence reviewers and task-owned child coordinator sessions never reuse a prelaunched or previously active warm harness. This avoids carrying a previous root/child cycle context or tool-host grant into the next admission even when advertised tool schemas are identical.
 
 The optimization for ordinary non-reviewer tasks remains unchanged. A Rust regression asserts that read-only reviewers, both native reviewer host kinds and orphaned host tokens cannot enter the warm pool.
+
+## November 15, 2026: bounded origin delta reconciliation
+
+Source heads frozen read-only: [PR #149](https://github.com/ginmp8/pandacode-extended/pull/149) `d251f128f0bca08fab8c8d540342380095038aa6` (22 source commits after the previously reviewed `66a0e5b341ebac7992a5e60e3d80b83353396604`); [PR #152](https://github.com/ginmp8/pandacode-extended/pull/152) `22af3bdee9af5337b6101d6cf7e28cc24614cf46` (4 commits after `7e9a51b31ac231c84f5e80218124d6beae5774e7`). The unified destination before this reconciliation was `6ef33bfefc3765a3f3074395dadef2f4dd050c20`.
+
+- Adapted #149's mandatory-evidence invariant to the unified typed criterion schema: `evidenceRequired` cannot be set on an optional criterion. Added a native negative/positive regression.
+- Adapted #152's nested TwoPhase invariant: child Councils in S3 require at least two child rounds. S1 still allows a single child round. Added a native regression for both boundaries.
+- #152 usage accumulator type aliases had already been independently integrated under equivalent names, so no duplicate aliases were added.
+- **Partial semantic integration only.** Do not claim parity with the 22 #149 changes or the remaining #152 terminal-receipt, recovery and executable acceptance work. Both contain substantially changed native orchestration and test paths, including competing child-Council models. The target retains its existing single authoritative Council engine.
+- No GitHub source/base branch refs were modified. No merge commit, rebase, force update, release or PR approval. These new tests are source-only and were **not compiled or executed** in this connector-only run. Exact-HEAD Rust, Node, browser, supported-harness, S2/S3 terminal and AC-01..40 evidence remain outstanding. Keep PR #155 draft.

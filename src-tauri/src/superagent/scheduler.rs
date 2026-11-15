@@ -222,6 +222,25 @@ fn inspect(store:&Store,ticket_id:&str) -> Result<Option<DemandPlan>> {
         policy_revision,plan_sha256,state,items}))
 }
 
+/// A model-created plan cannot use a manual Ticket whose locally issued
+/// Mandate is blank, foreign-owned, revoked, expired or broader than read-only.
+fn manual_demand_mandate_current(
+    store:&Store,ticket_id:&str,policy_revision:i64,project_id:&str,
+)->Result<bool> {
+    store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_mandates m
+         JOIN sa_tickets t ON t.id=m.ticket_id
+         WHERE t.id=?1 AND t.actor='local-user' AND t.source='manual'
+         AND m.actor=t.actor AND length(trim(m.authorization_id))>0
+         AND m.revoked=0 AND m.expires_at>?2 AND m.policy_revision=?3
+         AND m.project_id=?4 AND m.allowed_tools='[]' AND m.allowed_side_effects=0
+         AND EXISTS(SELECT 1 FROM sa_audit a WHERE a.ticket_id=t.id
+           AND a.kind='admitted' AND a.detail='manual readonly coordinator reserved'))",
+        params![ticket_id,storage::now(),policy_revision,project_id],
+        |row|row.get(0),
+    ).map_err(|error|error.to_string())
+}
+
 /// Creating this plan is an explicit trusted local-user act. Coordinator text
 /// is input context, not delegated authority. Only the pinned Workers can be
 /// named, every item remains initially read-only, and admission still rechecks
@@ -256,17 +275,9 @@ fn create_plan(store:&Store,ticket_id:&str,revision:i64,items:&[WorkItemInput])-
     if !coordinator_plan_current(store,ticket_id,&coordinator.id,&coordinator.project_id)? {
         return Err("Original Coordinator plan session is missing or stale.".into());
     }
-    let authorized:bool=store.db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sa_mandates m
-         JOIN sa_tickets t ON t.id=m.ticket_id
-         WHERE t.id=?1 AND t.actor='local-user' AND t.source='manual'
-         AND m.revoked=0 AND m.expires_at>?2 AND m.policy_revision=?3
-         AND m.project_id=?4 AND m.allowed_tools='[]' AND m.allowed_side_effects=0
-         AND EXISTS(SELECT 1 FROM sa_audit a WHERE a.ticket_id=t.id
-           AND a.kind='admitted' AND a.detail='manual readonly coordinator reserved'))",
-        params![ticket_id,storage::now(),snapshot.policy.policy_revision,snapshot.project_id],
-        |row|row.get(0),
-    ).map_err(|error|error.to_string())?;
+    let authorized=manual_demand_mandate_current(
+        store,ticket_id,snapshot.policy.policy_revision,&snapshot.project_id,
+    )?;
     if !authorized {
         return Err("No current local-user read-only Demand authorization.".into());
     }
@@ -785,6 +796,37 @@ mod tests {
         assert!(commit_work_item_write_scope(
             &store,"root","item","implement",r#"["src/other.rs"]"#,2,
         ).is_err(),"a replay cannot broaden the confirmed scope");
+    }
+
+    #[test]
+    fn planned_work_rejects_missing_or_foreign_mandate_issuer() {
+        let db=rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(r#"
+            CREATE TABLE sa_tickets(id TEXT PRIMARY KEY,actor TEXT,source TEXT);
+            CREATE TABLE sa_mandates(
+                ticket_id TEXT,actor TEXT,authorization_id TEXT,revoked INTEGER,
+                expires_at INTEGER,policy_revision INTEGER,project_id TEXT,
+                allowed_tools TEXT,allowed_side_effects INTEGER);
+            CREATE TABLE sa_audit(ticket_id TEXT,kind TEXT,detail TEXT);
+            INSERT INTO sa_tickets VALUES('ticket','local-user','manual');
+            INSERT INTO sa_mandates VALUES(
+                'ticket','local-user','native-issued',0,99999999999999,3,'project','[]',0);
+            INSERT INTO sa_audit VALUES('ticket','admitted','manual readonly coordinator reserved');
+        "#).unwrap();
+        let store=Store{db,path:std::path::PathBuf::from(":memory:")};
+        let current=||manual_demand_mandate_current(&store,"ticket",3,"project").unwrap();
+        assert!(current());
+        store.db.execute("UPDATE sa_mandates SET actor='foreign'",[]).unwrap();
+        assert!(!current(),"foreign issuer cannot authorize WorkItems");
+        store.db.execute("UPDATE sa_mandates SET actor='local-user', authorization_id='  '",[]).unwrap();
+        assert!(!current(),"blank issuance identity cannot grant WorkItems");
+        store.db.execute("UPDATE sa_mandates SET authorization_id='native-issued',revoked=1",[]).unwrap();
+        assert!(!current(),"revoked authority cannot schedule children");
+        store.db.execute("UPDATE sa_mandates SET revoked=0,allowed_tools='[\"shell\"]'",[]).unwrap();
+        assert!(!current(),"an expanded mandate cannot bypass read-only planning");
+        store.db.execute("UPDATE sa_mandates SET allowed_tools='[]'",[]).unwrap();
+        store.db.execute("DELETE FROM sa_audit",[]).unwrap();
+        assert!(!current(),"a mandate requires its native admission receipt");
     }
 
     #[test]

@@ -6662,19 +6662,13 @@ impl NativeReviewerAccess {
 /// Reuse the existing exact-schema reviewer and child-coordinator filters.
 /// A frozen role is never allowed to inherit ambient Architect, bot, shell or
 /// external MCP tools, and every exposed tool call rechecks its live authority.
-pub(crate) fn native_reviewer_host(
-    app: tauri::AppHandle,
-    session_id: String,
-    stopped: Arc<AtomicBool>,
-    admission: &Admission,
+/// Exact host filtering and per-invocation authorization are shared by
+/// production reviewer runs and native, CLI-independent regression fixtures.
+fn native_reviewer_host_from_resolver(
+    resolve: Arc<dyn Fn() -> Result<NativeReviewerAccess> + Send + Sync>,
+    raw: ToolHost,
 ) -> Result<(Option<ToolHost>, bool)> {
-    let access = {
-        let state = app.state::<AppState>();
-        let store = state.store.lock().map_err(|error| error.to_string())?;
-        NativeReviewerAccess::resolve(&store, &session_id, admission)?
-    };
-    let raw = host(app.clone(), session_id.clone(), stopped, admission)
-        .ok_or("policy_unsupported: native reviewer host is unavailable.")?;
+    let access = resolve()?;
     let policy = reviewer_security::ReviewerToolPolicy::NativeReadOnly;
     let filtered = if access.coordinator {
         policy.restrict_child_coordinator_host(Some(raw))?
@@ -6687,18 +6681,12 @@ pub(crate) fn native_reviewer_host(
         .collect::<HashSet<_>>();
     let handler = filtered.handler.clone();
     let frozen = access.clone();
-    let admission = admission.clone();
     Ok((Some(ToolHost {
         tools: filtered.tools,
         approval_tools: HashSet::new(),
         handler: Arc::new(move |name, args| {
             let validation = if allowed.contains(&name) {
-                let state = app.state::<AppState>();
-                let store = state.store.lock().map_err(|error| error.to_string());
-                store.and_then(|store| {
-                    let current = NativeReviewerAccess::resolve(
-                        &store, &session_id, &admission,
-                    )?;
+                resolve().and_then(|current| {
                     if current == frozen {
                         Ok(())
                     } else {
@@ -6712,6 +6700,25 @@ pub(crate) fn native_reviewer_host(
             Box::pin(async move { validation?; (handler)(name, args).await })
         }),
     }), access.coordinator))
+}
+
+/// The production path resolves the same frozen native identity at creation
+/// and again before every native Council reviewer or coordinator tool call.
+pub(crate) fn native_reviewer_host(
+    app: tauri::AppHandle,
+    session_id: String,
+    stopped: Arc<AtomicBool>,
+    admission: &Admission,
+) -> Result<(Option<ToolHost>, bool)> {
+    let raw = host(app.clone(), session_id.clone(), stopped, admission)
+        .ok_or("policy_unsupported: native reviewer host is unavailable.")?;
+    let admission = admission.clone();
+    let resolver = Arc::new(move || {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().map_err(|error| error.to_string())?;
+        NativeReviewerAccess::resolve(&store, &session_id, &admission)
+    });
+    native_reviewer_host_from_resolver(resolver, raw)
 }
 
 #[derive(Serialize, Deserialize)]

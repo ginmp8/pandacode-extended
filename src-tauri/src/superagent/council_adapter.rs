@@ -1142,7 +1142,6 @@ fn start_after_worker_completion_inner(
         return Ok(false);
     }
     drop(store);
-    drop(_dispatch_fence);
     let store = state.store.lock().map_err(|error| error.to_string())?;
     if let Some(team) = architect::load(&store,&native_session_id)? {
         let settled_sessions = team.workers.iter()
@@ -2222,7 +2221,7 @@ mod tests {
         let team=architect::load(&store,&native_session_id).unwrap().unwrap();
         assert_eq!(team.council_status.as_ref().unwrap().state,"passed");
         let reviewer=team.workers.iter().find(|w|w.council.is_some()).unwrap();
-        let fence=super::effects::lock_dispatch(&store.path).unwrap();
+        let fence=crate::superagent::effects::lock_dispatch(&store.path).unwrap();
         assert!(finalize_after_native_run_locked(&store,&reviewer.session_id,&fence).unwrap());
         assert_eq!(superagent::get_ticket(&store,&ticket.id).unwrap().state,"completed");
         let recorded:i64=store.db.query_row(

@@ -20,6 +20,19 @@ async function openOrchestrationWorkspace(page: Page) {
 }
 
 
+test('SuperAgent Team search preserves focus and text selection through rerenders', async ({page}) => {
+  test.setTimeout(45_000);
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  await host.getByRole('button',{name:'Teams',exact:true}).click();
+  const search=host.getByRole('searchbox',{name:'Search Teams'});
+  await search.fill('S');
+  await expect(search).toBeFocused();
+  await search.press('c');
+  await expect(search).toHaveValue('Sc');
+  await expect(search).toBeFocused();
+});
+
 test('new multi-role Team draft survives workspace redraw and submits exact native roster', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

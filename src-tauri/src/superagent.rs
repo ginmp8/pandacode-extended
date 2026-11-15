@@ -5022,11 +5022,11 @@ mod tests {
         assert!(launched);
         assert_eq!(ticket.actor,"github-auto");
         assert!(events::auto_intake::ticket_authorized(&store,&ticket.id).unwrap());
-        let origin=events::auto_intake::ticket_origin(&store,&ticket.id)
+        let admitted_origin=events::auto_intake::ticket_origin(&store,&ticket.id)
             .unwrap().unwrap();
-        assert_eq!(origin.receipt_state,"admitted");
-        assert_eq!(origin.event_kind.as_deref(),Some("issues.opened"));
-        assert!(origin.currently_authorized);
+        assert_eq!(admitted_origin.receipt_state,"admitted");
+        assert_eq!(admitted_origin.event_kind.as_deref(),Some("issues.opened"));
+        assert!(admitted_origin.currently_authorized);
         assert!(guard_gateway_inbound(&store,"worker",&ticket.id,"github-auto",true).is_ok());
         assert!(guard_gateway_inbound(&store,"worker",&ticket.id,"local-user",true).is_err(),
             "An Auto Ticket cannot enter via manual-user sender identity.");

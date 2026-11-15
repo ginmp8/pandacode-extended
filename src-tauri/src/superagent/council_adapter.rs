@@ -1850,7 +1850,7 @@ mod tests {
         ).unwrap();
         tx.execute(
             "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-             VALUES(?1,'admitted','manual worker with scoped write authorization reserved',?2)",
+             VALUES(?1,'admitted','manual readonly worker reserved',?2)",
             params![ticket_id,now],
         ).unwrap();
         let (reviewer_policy_json,reviewer_policy_sha256)=frozen_reviewer_policy(&snapshot).unwrap();

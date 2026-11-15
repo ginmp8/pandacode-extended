@@ -3405,7 +3405,7 @@ fn native_current_and_same_cycle_history_never_read_foreign_reviewer_sessions() 
     let original_report = "Council findings JSON: [{\"severity\":\"high\",\"category\":\"security\",\"title\":\"Linked finding\",\"explanation\":\"Review needed\"}]\nCouncil score: 7/10";
     let foreign_report = "Council findings JSON: [{\"severity\":\"critical\",\"category\":\"privacy\",\"title\":\"Foreign finding\",\"explanation\":\"Do not reveal\"}]\nCouncil score: 7/10";
     assert_eq!(parse_score(original_report), Some(7.0));
-    assert_eq!(parse_reported_findings(foreign_report).len(), 1);
+    assert_eq!(council::parse_reported_findings(foreign_report).len(), 1);
     store.message(&reviewer_session.id, "assistant", original_report).unwrap();
     store.message(&foreign.id, "assistant", foreign_report).unwrap();
     store.db.execute(

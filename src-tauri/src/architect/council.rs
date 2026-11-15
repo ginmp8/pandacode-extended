@@ -1657,7 +1657,7 @@ fn independent_scored_sessions(team: &TeamSnapshot, round: usize) -> bool {
         })
 }
 
-fn same_lens(a: &str, b: &str) -> bool {
+pub(super) fn same_lens(a: &str, b: &str) -> bool {
     a.trim().to_lowercase() == b.trim().to_lowercase()
 }
 /// Seats that have settled with a score.
@@ -2418,7 +2418,7 @@ pub(super) fn s2_escalation_signals(
     signals
 }
 
-fn reviewer_identity(worker: &Worker) -> String {
+pub(super) fn reviewer_identity(worker: &Worker) -> String {
     worker.reviewer_binding.as_ref().map_or_else(
         || format!("{}:{}", worker.provider, worker.model),
         |binding| binding.reviewer_bot_id.clone().unwrap_or_else(|| {
@@ -2765,7 +2765,7 @@ pub(super) fn reviewer_access(
     let artifact = worker.reviewer_binding.as_ref()
         .map(|binding| binding.artifact_revision.as_str())
         .unwrap_or("unavailable");
-    format!("{base} This is a fresh phase-2 challenge against the frozen phase-1 artifact revision {artifact}. Independently check the artifact and each phase-1 finding below for contradictions, omissions, and missing evidence. Do not rewrite, close, or approve a phase-1 finding on behalf of its author; report your own evidence and score. Your reviewer identity must differ from the author of every challenged report. Phase-1 findings: {}", serde_json::to_string(&phase1).unwrap_or_else(|_| "[]".into()))
+    format!("{base} This is a fresh phase-2 challenge against the frozen phase-1 artifact revision {artifact}. Independently check the artifact and each phase-1 finding below for contradictions, omissions, and missing evidence. Do not rewrite, close, or approve a phase-1 finding on behalf of its author; report your own evidence and score. Your reviewer identity must differ from the phase-1 author of the lens you challenge. Phase-1 findings: {}", serde_json::to_string(&phase1).unwrap_or_else(|_| "[]".into()))
 }
 
 /// A live or stopped run's edits may have landed until now. A run that ended was marked when it did.

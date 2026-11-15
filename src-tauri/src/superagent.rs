@@ -3563,6 +3563,7 @@ pub(crate) fn read_only_policy(
         side_effects: bool,
         tools_json: String,
         mandate_project: String,
+        team_project: String,
         mandate_actor: String,
         ticket_actor: String,
         attempt: i64,
@@ -3586,7 +3587,7 @@ pub(crate) fn read_only_policy(
             bot_id: r.get(6)?, project_id: r.get(7)?, ticket_id: r.get(8)?,
             started_at: r.get(9)?, side_effects: r.get::<_, i64>(10)? != 0,
             tools_json: r.get(11)?, mandate_project: r.get(12)?,
-            mandate_actor: r.get(13)?, ticket_actor: r.get(14)?, attempt: r.get(15)?,
+            team_project: r.get(17)?, mandate_actor: r.get(13)?, ticket_actor: r.get(14)?, attempt: r.get(15)?,
              authorization_id: r.get(18)?,
         }),
     ).optional().map_err(|e| e.to_string())?;
@@ -3609,6 +3610,7 @@ pub(crate) fn read_only_policy(
             // user-issued, provider-enforced write adapter is implemented.
             || scope.side_effects || scope.tools_json != "[]"
             || scope.mandate_project != scope.project_id
+            || scope.team_project != scope.project_id
             || scope.mandate_actor != scope.ticket_actor
             || scope.authorization_id.trim().is_empty()
             || !execution_permitted(scope.enabled, crate::feature_controls::get().bots_paused)

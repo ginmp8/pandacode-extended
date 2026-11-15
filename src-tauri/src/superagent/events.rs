@@ -796,7 +796,18 @@ fn github_page_complete(
             anchored = true;
         }
     }
-    Ok(events.len() < GITHUB_PAGE_SIZE || anchored)
+    if anchored { return Ok(true); }
+    if events.len() < GITHUB_PAGE_SIZE {
+        // A short (or empty) page does not prove continuity with a durable
+        // cursor: GitHub's finite Events retention may have discarded the
+        // missing interval. Never advance over a gap just because pagination
+        // reached the provider's last available page.
+        if cursor > 0 {
+            return Err("GitHub Events ended before the durable source cursor was observed; reconcile source history before polling.".into());
+        }
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Validate the entire bounded set before any database receipt/cursor write.
@@ -2022,6 +2033,17 @@ mod tests {
         assert_eq!(with_anchor.as_array().unwrap().len(),200);
         let short = combine_github_pages(&[github_page(20,2)],0,0).unwrap();
         assert_eq!(short.as_array().unwrap().len(),2);
+        // A source with a persisted cursor cannot declare a short page
+        // complete when GitHub retained only newer events. No missing
+        // delivery may be silently skipped, including an empty response.
+        for missing in [github_page(1200,2),serde_json::json!([])] {
+            assert!(combine_github_pages(&[missing],0,850).is_err());
+        }
+        let anchored_short = combine_github_pages(&[github_page(851,2)],0,850).unwrap();
+        assert_eq!(anchored_short.as_array().unwrap().len(),2);
+        // The initial poll has no durable cursor and can legitimately end
+        // on an empty or short repository feed.
+        assert!(combine_github_pages(&[serde_json::json!([])],0,0).is_ok());
         let mut replayed = github_page(900,100);
         replayed[0]["id"] = serde_json::json!("1000");
         assert!(combine_github_pages(&[first.clone(),replayed],0,850).is_err());

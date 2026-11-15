@@ -2225,7 +2225,7 @@ mod historical_reported_claim_tests {
     }
 }
 
-fn parse_score(report: &str) -> Option<f64> {
+pub(super) fn parse_score(report: &str) -> Option<f64> {
     const LABEL: &str = "council score";
     let rest = report.lines().rev().find_map(|line| {
         let line = line.trim_start_matches(|c: char| c.is_whitespace() || "*#_>-`~".contains(c));

@@ -3711,6 +3711,7 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
 fn native_composed_terminal_gate_fails_closed_for_nonpassing_outcomes() {
     let cases = [
         ("failed", "failed", None, false, 5, None),
+        ("blocked", "blocked", None, false, 5, Some("blocked")),
         ("stopped", "stopped", None, false, 5, None),
         (
             "inconclusive",
@@ -3881,6 +3882,7 @@ fn native_composed_terminal_gate_fails_closed_for_nonpassing_outcomes() {
         );
         let expected_verdict = match label {
             "failed" => council::CouncilReviewVerdict::Failed,
+            "blocked" => council::CouncilReviewVerdict::Failed,
             "stopped" => council::CouncilReviewVerdict::Stopped,
             "inconclusive" => council::CouncilReviewVerdict::Inconclusive,
             "wrong-task-id" | "missing-task-id" | "missing-evidence" => {
@@ -3952,6 +3954,13 @@ fn native_composed_terminal_gate_fails_closed_for_nonpassing_outcomes() {
             finish_result.is_err(),
             "{label} cannot pass the native terminal finish gate"
         );
+        if label == "blocked" {
+            assert_eq!(
+                finish_result.unwrap_err(),
+                "Every worker must complete or be explicitly abandoned before finishing. Follow up or cancel failed work with a reason.",
+                "the finish entrypoint refuses blocked workers before consulting the Council gate"
+            );
+        }
         if matches!(label, "inconclusive" | "wrong-task-id" | "missing-task-id") {
             assert!(
                 finish_result

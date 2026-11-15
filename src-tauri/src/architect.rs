@@ -1342,6 +1342,7 @@ pub struct ArchitectReadSnapshot {
     #[serde(flatten)]
     team: TeamSnapshot,
     council_findings: Vec<council::CouncilFinding>,
+    council_historical_reported_findings: Vec<council::CouncilHistoricalReportedFinding>,
     council_finding_dispositions: Vec<council::CouncilFindingDisposition>,
     council_child_receipts: Vec<council::ChildCouncilReceipt>,
     council_child_leaves: Vec<CouncilChildLeafProjection>,
@@ -1428,6 +1429,7 @@ fn empty_council_ledger(team: TeamSnapshot) -> ArchitectReadSnapshot {
     ArchitectReadSnapshot {
         team,
         council_findings: Vec::new(),
+        council_historical_reported_findings: Vec::new(),
         council_finding_dispositions: Vec::new(),
         council_child_receipts: Vec::new(),
         council_child_leaves: Vec::new(),
@@ -2042,8 +2044,16 @@ fn event_payload(team: &TeamSnapshot) -> TeamSnapshot {
     }
     lean
 }
-fn event_read_payload(store: &Store, team: &TeamSnapshot) -> ArchitectReadSnapshot {
+fn council_read_snapshot(store: &Store, team: &TeamSnapshot) -> ArchitectReadSnapshot {
     let mut payload = council_ledger_projection(store, team);
+    // Historical claims belong exclusively to read-only presentation.
+    // They must never feed native escalation, evidence or approval gates.
+    payload.council_historical_reported_findings =
+        council::historical_reported_findings(store, team);
+    payload
+}
+fn event_read_payload(store: &Store, team: &TeamSnapshot) -> ArchitectReadSnapshot {
+    let mut payload = council_read_snapshot(store, team);
     payload.team.config.catalog = Vec::new();
     payload.team.objective.clear();
     payload.team.pending_turn = None;
@@ -4487,7 +4497,7 @@ pub async fn architect_get(
         return Ok(None);
     };
     refresh_council(&store, &mut team);
-    Ok(Some(council_ledger_projection(&store, &team)))
+    Ok(Some(council_read_snapshot(&store, &team)))
 }
 #[tauri::command]
 pub async fn architect_configure(
@@ -4516,7 +4526,7 @@ pub async fn architect_configure(
     }
     let Some(team) = changed else { return Ok(None) };
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    Ok(Some(council_ledger_projection(&store, &team)))
+    Ok(Some(council_read_snapshot(&store, &team)))
 }
 /// Native source of truth for Council bot eligibility. No changes to bot state.
 #[tauri::command]
@@ -4540,7 +4550,7 @@ pub async fn architect_set_council(
     emit(&app, &team);
     wake(app);
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    Ok(Some(council_ledger_projection(&store, &team)))
+    Ok(Some(council_read_snapshot(&store, &team)))
 }
 /// Accepts this cycle's Council scores: the lead may finish now, and Council stays on.
 #[tauri::command]
@@ -4558,7 +4568,7 @@ pub async fn architect_council_accept(
     emit(&app, &team);
     wake(app);
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    Ok(council_ledger_projection(&store, &team))
+    Ok(council_read_snapshot(&store, &team))
 }
 /// Complete an explicitly reasoned Shared Channel acceptance through the same
 /// native Council state transition used by direct tasks.

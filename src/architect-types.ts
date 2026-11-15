@@ -43,6 +43,15 @@ export interface CouncilComposition {
 }
 export type CouncilFindingSeverity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 export type CouncilFindingLocationStatus = 'verified' | 'missing' | 'unverified';
+/** Unverified older report text, never a native Council finding or approval. */
+export interface CouncilHistoricalReportedFinding {
+  schemaVersion: number; id: string; cycleId: string; round: number;
+  workerId: string; reportMessageId: number; lens: string;
+  severity: 'critical' | 'high' | 'medium' | 'low' | 'info';
+  category: string; title: string; explanation: string;
+  artifactRevision: string | null;
+  verifiedEvidenceRefs: string[]; evidenceVerified: boolean; locationVerified: boolean;
+}
 export interface CouncilFindingLocation { file: string; line?: number | null }
 /** Native verified record; suggestedFix is untrusted display text. */
 export interface CouncilFinding {
@@ -235,6 +244,7 @@ export interface TeamSnapshot {
   councilStatus?: CouncilStatus | null;
   /** Native's read-only projection for the live Council cycle. Older hosts may omit these fields. */
   councilFindings?: CouncilFinding[];
+  councilHistoricalReportedFindings?: CouncilHistoricalReportedFinding[];
   councilFindingDispositions?: CouncilFindingDisposition[];
   councilChildReceipts?: ChildCouncilReceipt[];
   councilChildLeaves?: CouncilChildLeafProjection[];

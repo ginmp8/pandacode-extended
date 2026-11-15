@@ -2068,7 +2068,125 @@ pub(super) fn accept(state: &AppState, session_id: &str) -> Result<TeamSnapshot>
 
 /// The score in a report: the last line that starts (past markdown) with "council score", read as
 /// the number after it, optionally `/10`. A last line that does not read as 0..=10 is no score.
-pub(super) fn parse_score(report: &str) -> Option<f64> {
+pub(super) #[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CouncilHistoricalReportedFinding {
+    pub schema_version: u8,
+    pub id: String,
+    pub cycle_id: String,
+    pub round: usize,
+    pub worker_id: String,
+    pub report_message_id: i64,
+    pub lens: String,
+    pub severity: String,
+    pub category: String,
+    pub title: String,
+    pub explanation: String,
+    /// Internal frozen reviewer revision is not a content digest.
+    pub artifact_revision: Option<String>,
+    /// No independent native check receipt is currently attached to a report claim.
+    pub verified_evidence_refs: Vec<String>,
+    pub evidence_verified: bool,
+    pub location_verified: bool,
+}
+
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(super) struct ReportedFindingDraft {
+    severity: String,
+    category: String,
+    title: String,
+    explanation: String,
+}
+
+/// Parse only bounded structured claims. Never parse instructions, locations, IDs,
+/// evidence authorization, scores or external effects out of model-authored JSON.
+pub(super) fn parse_reported_findings(report: &str) -> Vec<ReportedFindingDraft> {
+    const PREFIX: &str = "Council findings JSON:";
+    let Some(raw) = report.lines().rev().find_map(|line| line.trim().strip_prefix(PREFIX)) else {
+        return Vec::new();
+    };
+    if raw.len() > 8192 { return Vec::new(); }
+    let Ok(items) = serde_json::from_str::<Vec<ReportedFindingDraft>>(raw.trim()) else {
+        return Vec::new();
+    };
+    if items.len() > 16 { return Vec::new(); }
+    let valid = |value: &str, cap: usize| !value.trim().is_empty()
+        && value.chars().count() <= cap && !value.chars().any(char::is_control);
+    if items.iter().any(|f| !matches!(f.severity.as_str(), "critical" | "high" | "medium" | "low" | "info")
+        || !valid(&f.category, 80) || !valid(&f.title, 160) || !valid(&f.explanation, 2000))
+    {
+        return Vec::new();
+    }
+    items
+}
+
+
+pub(super) fn historical_reported_findings(
+    store: &storage::Store, team: &TeamSnapshot,
+) -> Vec<CouncilHistoricalReportedFinding> {
+    let mut history = Vec::new();
+    for (worker, seat) in seats(team) {
+        if worker.status != "completed" || !counts(worker, seat) || seat.score.is_none() {
+            continue;
+        }
+        let latest = store.db.query_row(
+            "SELECT m.id, substr(m.content,-8192),
+                    EXISTS(SELECT 1 FROM messages newer
+                           WHERE newer.session_id=m.session_id AND newer.id>m.id
+                             AND newer.role IN ('user','coordination'))
+             FROM messages m WHERE m.session_id=?1 AND m.role='assistant'
+             ORDER BY m.id DESC LIMIT 1",
+            params![worker.session_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)),
+        ).optional().ok().flatten();
+        let Some((message_id, report, has_newer_turn)) = latest else { continue };
+        if has_newer_turn == 0 || parse_score(&report) != seat.score { continue; }
+        for (index, draft) in parse_reported_findings(&report).into_iter().enumerate() {
+            history.push(CouncilHistoricalReportedFinding {
+                schema_version: 1,
+                id: format!("{}:{}:{}:{message_id}:{index}", team.session_id, team.council_since, worker.id),
+                cycle_id: format!("{}:{}", team.session_id, team.council_since),
+                round: seat.round,
+                worker_id: worker.id.clone(),
+                report_message_id: message_id,
+                lens: seat.lens.clone(),
+                severity: draft.severity,
+                category: draft.category,
+                title: draft.title,
+                explanation: draft.explanation,
+                artifact_revision: worker.reviewer_binding.as_ref().map(|binding| binding.artifact_revision.clone()),
+                verified_evidence_refs: Vec::new(),
+                evidence_verified: false,
+                location_verified: false,
+            });
+        }
+    }
+    let excess = history.len().saturating_sub(32);
+    if excess > 0 { history.drain(..excess); }
+    history
+}
+
+
+
+#[cfg(test)]
+mod historical_reported_claim_tests {
+    use super::parse_reported_findings;
+
+    #[test]
+    fn reported_claims_are_bounded_and_cannot_assert_native_evidence() {
+        let valid = "Council findings JSON: [{\"severity\":\"high\",\"category\":\"auth\",\"title\":\"Missing guard\",\"explanation\":\"Requires an independent check\"}]\nCouncil score: 9/10";
+        let claims = parse_reported_findings(valid);
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].title, "Missing guard");
+        assert!(parse_reported_findings("Council score: 9/10").is_empty());
+        assert!(parse_reported_findings("Council findings JSON: [{\"severity\":\"critical\",\"category\":\"test\",\"title\":\"forged\",\"explanation\":\"X\",\"evidenceVerified\":true}]").is_empty());
+        assert!(parse_reported_findings("Council findings JSON: [{\"severity\":\"unknown\",\"category\":\"test\",\"title\":\"claim\",\"explanation\":\"X\"}]").is_empty());
+    }
+}
+
+fn parse_score(report: &str) -> Option<f64> {
     const LABEL: &str = "council score";
     let rest = report.lines().rev().find_map(|line| {
         let line = line.trim_start_matches(|c: char| c.is_whitespace() || "*#_>-`~".contains(c));

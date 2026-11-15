@@ -12,8 +12,11 @@ async function probe(page: Page, hook = ''): Promise<void> {
     const response = await route.fetch();
     const source = await response.text();
     const marker = /switch\s*\(command\)\s*\{/;
+    const cloudStartMarker = /if \(command === ["']cloud_agent_start["']\) \{/;
     expect(source).toMatch(marker);
-    await route.fulfill({ response, body: previewBody(source.replace(marker, `
+    expect(source).toMatch(cloudStartMarker);
+    const instrumented = source.replace(cloudStartMarker, match => `${match}\n      (window.__githubCalls ??= []).push({ command, args: structuredClone(args) });`);
+    await route.fulfill({ response, body: previewBody(instrumented.replace(marker, `
       (window.__githubCalls ??= []).push({ command, args: structuredClone(args) });
       if (command === 'send_message') return;
       ${hook}
@@ -152,6 +155,10 @@ test('an adversarial issue body stays pending as data in Ask mode without starti
   const dialog = page.getByRole('dialog', { name: 'Import from GitHub', exact: true });
   await expect(dialog.locator('.github-issue')).toHaveCount(1);
   await dialog.locator('.github-issue input[name="issue"]').check();
+  const effectCommands = ['start_task', 'send_message', 'remote_start_task', 'cloud_agent_start', 'git_stage', 'git_commit', 'git_push'];
+  const effectsBeforeImport: Record<string, number> = Object.fromEntries(await Promise.all(
+    effectCommands.map(async command => [command, (await calls(page, command)).length] as const),
+  ));
   await dialog.getByRole('button', { name: 'Import', exact: true }).click();
   await expect(dialog).toBeHidden();
 
@@ -161,8 +168,8 @@ test('an adversarial issue body stays pending as data in Ask mode without starti
   expect(created).toHaveLength(1);
   expect(created[0].args).toMatchObject({ projectId: 'project-1', mode: 'ask', title: 'Urgent automation request' });
   expect(created[0].args.description).toBe(`${body}\n\nGitHub issue: ${issueUrl}`);
-  for (const command of ['start_task', 'send_message', 'remote_start_task', 'cloud_start_task', 'git_push', 'git_commit']) {
-    expect(await calls(page, command), `${command} must require a separate local action`).toHaveLength(0);
+  for (const command of effectCommands) {
+    expect(await calls(page, command), `${command} must require a separate local action`).toHaveLength(effectsBeforeImport[command]);
   }
 });
 

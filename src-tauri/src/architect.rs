@@ -3249,24 +3249,14 @@ fn persist_council_terminal_receipts(
             })
         })
         .unwrap_or(council::CouncilStrategy::Parallel);
+    // This budget is shared by the root and all child reviewers for the
+    // root round. Usage rows must report the same count as native admission.
     let leaf_reviews = if let Some(link) = &nested_link {
-        nested_leaf_total(
-            store,
-            &link.root_session_id,
-            &link.root_council_cycle_id,
-            link.root_round,
-        )?
+        let root = load(store, &link.root_session_id)?
+            .ok_or("reviewer_session_mismatch: nested Council root is missing from usage accounting.")?;
+        council_leaf_review_total(store, &root, team, &root_cycle_id, link.root_round)?
     } else {
-        team.workers
-            .iter()
-            .filter(|candidate| {
-                candidate.council.is_some()
-                    && candidate
-                        .council
-                        .as_ref()
-                        .is_some_and(|candidate_seat| candidate_seat.round == seat.round)
-            })
-            .count()
+        council_leaf_review_total(store, team, team, &root_cycle_id, seat.round)?
     };
     let s2_estimate = s2_estimate_receipt(store, team, worker)?;
     if (strategy == council::CouncilStrategy::Escalated || council_cost_cap_scope(store, team)?.is_some()) && s2_estimate.is_none() {
@@ -3609,27 +3599,6 @@ fn composed_child_attempt_total(
     Ok(attempts)
 }
 
-fn nested_leaf_total(
-    store: &Store,
-    root_session_id: &str,
-    cycle_id: &str,
-    root_round: usize,
-) -> Result<usize> {
-    let mut total = 0usize;
-    for link in council_child_links_for_root(store, root_session_id, cycle_id, root_round)? {
-        let child = load(store, &link.child_session_id)?
-            .ok_or("reviewer_session_mismatch: nested Council task is missing.")?;
-        total = total.saturating_add(
-            child
-                .workers
-                .iter()
-                .filter(|worker| worker.council.is_some())
-                .count(),
-        );
-    }
-    Ok(total)
-}
-
 fn council_leaf_review_total(
     store: &Store,
     root: &TeamSnapshot,
@@ -3738,11 +3707,18 @@ fn validate_council_child_link(
         });
     let child = load(store, child_session_id)?
         .ok_or("reviewer_session_mismatch: nested Council task has no native Architect state.")?;
+    // Skill open/verify receipts are native observations recorded after
+    // admission, not changes to the frozen reviewer authority. Compare every
+    // immutable field while excluding only those evolving observations.
+    let mut issued_binding = link.binding.clone();
+    issued_binding.skill_evidence.clear();
+    let mut current_binding = binding.clone();
+    current_binding.skill_evidence.clear();
     let root_session = store.session(&root.session_id)?;
     let child_session = store.session(child_session_id)?;
     if binding.composition_mode.as_deref() != Some("nested")
         || !nested_selected
-        || binding != &link.binding
+        || current_binding != issued_binding
         || worker.council.as_ref().map(|seat| seat.round) != Some(link.root_round)
         || link.root_council_cycle_id != binding.council_cycle_id
         || link.root_artifact_revision != binding.artifact_revision

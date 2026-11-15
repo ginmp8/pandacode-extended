@@ -215,3 +215,8 @@ result exists. Required native work-plan items must also carry independent,
 verified evidence receipts before either Council or Council-Off finalization.
 These checks are performed under the existing cross-process dispatch fence;
 already finalized historical receipts remain immutable.
+
+
+## Pinned repository identity for native Observe
+
+An authenticated GitHub observation now records the immutable numeric repository ID as a separate, durable source attestation. Source receipts, linked Ticket context and Check Run verification must match that pinned identity before advancing the cursor or accepting later observations. Reuse of an `owner/name` after deletion or transfer cannot silently rebind the source. Existing pre-attestation receipts do not gain a fabricated repository ID during schema migration. The local `pandacode serve --link-source-thread <source-id> <ticket-id> <issue:123|pull:123>` command associates context only after native source/Ticket validation; it neither authenticates remote content nor grants tools, starts a worker or authorizes Auto.

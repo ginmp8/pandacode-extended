@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 58;
+pub const SCHEMA_VERSION: i64 = 59;
 pub(crate) const COUNCIL_REVIEW_SNAPSHOT_DIRECTORY: &str = "council-review-snapshots";
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
@@ -924,6 +924,16 @@ impl Store {
                 migration.execute_batch(crate::superagent::coordinated_auto::SCHEMA)
                     .map_err(|e| e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=58;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 59 {
+                // Source #150 pins the authenticated numeric GitHub repository ID.
+                // Keep the #153 Team-version and Auto migrations unchanged.
+                // Existing receipts remain unverified until a trusted poll binds
+                // the stable repository identity; never infer it from owner/name.
+                migration.execute_batch(crate::superagent::events::REPOSITORY_ID_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=59;")
                     .map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;

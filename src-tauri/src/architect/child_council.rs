@@ -947,9 +947,9 @@ pub(super) fn verified_s2_receipts(
         }
         for leaf in &child.workers {
             if leaf.council.as_ref().is_none_or(|seat| seat.round != 1 && seat.round != 2)
-                || !worker_ids.insert(leaf.id.as_str())
+                || !worker_ids.insert(leaf.id.clone())
                 || leaf.session_id.is_empty()
-                || !sessions.insert(leaf.session_id.as_str())
+                || !sessions.insert(leaf.session_id.clone())
             {
                 return Err("child_council_stale: S2 child reused a reviewer identity or session.".into());
             }

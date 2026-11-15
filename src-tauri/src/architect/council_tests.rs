@@ -4557,6 +4557,13 @@ fn nested_m4_forced_s2_passes_only_after_two_authenticated_child_waves() {
     assert_eq!(inspection.usage.unique_attempts, 0,
         "composite children are not synthetic independent root workers");
     assert_eq!(inspection.composed_usage.unwrap().unique_attempts, 8);
+    let sibling_leaf_ids = child_council::inspect(&store, &saved).unwrap()
+        .into_iter()
+        .flat_map(|child| child.leaf_attempts.into_iter().map(|leaf| leaf.worker_id))
+        .collect::<Vec<_>>();
+    assert_eq!(sibling_leaf_ids.len(), 8, "two children must have eight native S2 leaf attempts");
+    assert_eq!(sibling_leaf_ids.iter().collect::<std::collections::HashSet<_>>().len(), 8,
+        "leaf identities must be distinct across both child Councils and both S2 waves");
     assert!(child_council::verified_s2_receipts(&store, &saved).unwrap().is_some());
     let key = format!("native-council-child-s2-receipt:{}:security-child", saved.council_since);
     store.db.execute(

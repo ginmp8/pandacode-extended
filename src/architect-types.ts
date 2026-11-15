@@ -121,6 +121,8 @@ export interface CouncilUsageRecord {
   outputTokens: CouncilUsageValue<number>; requestCount: CouncilUsageValue<number>;
   terminalStatus: CouncilReviewVerdict; budgetConsumption: CouncilResourceBudgetConsumption;
   costEstimate?: CouncilCostEstimate | null;
+  /** Current native S2/S3 decision IDs, not standalone approval receipts. */
+  decisionIds?: string[];
 }
 export interface CouncilCriterionOutcome { criterionId: string; score: number; verifiedEvidenceRefs: string[] }
 export interface CouncilConfig {

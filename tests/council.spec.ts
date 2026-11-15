@@ -1688,3 +1688,50 @@ test('nested child leaf scores render verified numbers and criterion outcomes, w
   await expect(child).not.toContainText('stale-leaf');
   await expect(child).not.toContainText('older-leaf');
 });
+
+test('S2 and S3 ledger decision references remain non-approving and cycle-scoped', async ({ page }) => {
+  await open(page, '/?council=composition');
+  const html = await page.evaluate(async () => {
+    const { councilReadOnlyPresenterHtml } = await import('/src/council-panel.ts');
+    const item = (phase: string, strategy: string, rootCycleId: string, id: string) => ({
+      id: 'usage-' + id, rootCycleId, childCycleId: null,
+      attemptId: 'reviewer:1', reviewerId: 'reviewer', roundId: rootCycleId + ':2',
+      seatId: 'reviewer', scope: 'root', phase, strategy,
+      terminalStatus: 'passed', decisionIds: [id],
+      queueWaitMs: { status: 'unknown' }, elapsedMs: { status: 'unknown' },
+      retries: { status: 'measured', value: 0 }, escalations: { status: 'measured', value: 0 },
+      inputTokens: { status: 'unknown' }, outputTokens: { status: 'unknown' },
+      requestCount: { status: 'unknown' },
+      budgetConsumption: {
+        concurrentLeaves: { status: 'unknown' },
+        leafReviews: { status: 'unknown' },
+        estimatedCostMicros: { status: 'unknown' },
+      },
+    });
+    return councilReadOnlyPresenterHtml({
+      cycleId: 'root:1',
+      status: { state: 'reviewing', round: 2, lowest: null, target: 9, stale: false },
+      usage: [
+        item('escalation', 'escalated', 'root:1', 'native-s2-decision'),
+        item('challenge', 'two_phase', 'root:1', 'native-s3-decision'),
+        item('challenge', 'two_phase', 'foreign:1', 'foreign-decision'),
+        item('review', 'parallel', 'root:1', 'not-a-decision'),
+      ],
+    } as any);
+  });
+  await page.evaluate(markup => {
+    const holder = document.createElement('section');
+    holder.id = 'native-strategy-decisions-test';
+    holder.innerHTML = markup;
+    document.body.append(holder);
+  }, html);
+  const inspector = page.locator('#native-strategy-decisions-test .council-ledger');
+  const decisions = inspector.locator('.council-ledger-strategy-decisions');
+  await expect(decisions).toContainText('S2/S3 native decision references · 2');
+  await expect(decisions).toContainText('native-s2-decision');
+  await expect(decisions).toContainText('native-s3-decision');
+  await expect(decisions).toContainText('not proof that the Council');
+  await expect(decisions).not.toContainText('foreign-decision');
+  await expect(decisions).not.toContainText('not-a-decision');
+  await expect(inspector).not.toContainText('Council · passed');
+});

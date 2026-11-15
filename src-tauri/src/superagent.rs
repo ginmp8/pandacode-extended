@@ -6824,6 +6824,187 @@ mod tests {
     }
 
     #[test]
+    fn headless_activity_is_paginated_private_and_read_only_across_reopen() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private activity objective",
+            "activity-page-main", false,
+        ).unwrap();
+        assert!(launched);
+        for index in 0..205 {
+            store.db.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES(?1,'activity_test',?2,?3)",
+                params![&ticket.id, format!("private-marker-{index}"), storage::now()],
+            ).unwrap();
+        }
+        let (other, _) = admit(
+            &mut store, &cfg.id, "Other private objective",
+            "activity-page-other", true,
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'unrelated', 'cross-ticket-marker',?2)",
+            params![&other.id, storage::now()],
+        ).unwrap();
+        let audit_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let mut cursor = None;
+        let mut previous = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let raw = list_headless_ticket_activity(&store.path, &ticket.id, cursor).unwrap();
+            assert!(!raw.contains("private-marker"));
+            assert!(!raw.contains("Private activity objective"));
+            assert!(!raw.contains("cross-ticket-marker"));
+            let page: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(page["ticketId"], ticket.id);
+            assert_eq!(page["pageLimit"], 100);
+            assert_eq!(page["redacted"], true);
+            assert_eq!(page["observationalOnly"], true);
+            assert_eq!(page["recoveryPerformed"], false);
+            let entries = page["items"].as_array().unwrap();
+            assert!(entries.len() <= 100);
+            for entry in entries {
+                let id = entry["id"].as_i64().unwrap();
+                assert!(previous.is_none_or(|last| id < last));
+                assert!(seen.insert(id), "audit row replayed across pages");
+                assert!(entry.get("detail").is_none());
+                previous = Some(id);
+            }
+            if page["hasMore"] == false {
+                assert!(page["nextCursor"].is_null());
+                break;
+            }
+            cursor = Some(page["nextCursor"].as_i64().unwrap());
+        }
+        assert_eq!(seen.len() as i64, audit_count);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), audit_count);
+        assert!(list_headless_ticket_activity(&store.path, &ticket.id, Some(0)).is_err());
+        assert!(list_headless_ticket_activity(&store.path, "missing-ticket", None).is_err());
+        let path = store.path.clone();
+        drop(store);
+        let restarted: serde_json::Value = serde_json::from_str(
+            &list_headless_ticket_activity(&path, &ticket.id, None).unwrap(),
+        ).unwrap();
+        assert_eq!(restarted["items"].as_array().unwrap().len(), 100);
+    }
+
+    #[test]
+    fn headless_exact_demand_preflight_is_read_only_and_revision_bound() {
+        let store = fixture();
+        let cfg = create_configuration(&store, NewOrchestration {
+            name: "Scoped headless preflight".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let objective = "Private scope: inspect only repository paths";
+        let disabled: serde_json::Value = serde_json::from_str(
+            &inspect_headless_demand_preflight(&store.path, &cfg.id, objective, false).unwrap()
+        ).unwrap();
+        assert_eq!(disabled["eligibleAtSnapshot"], false);
+        assert_eq!(disabled["mandateIssued"], false);
+        assert_eq!(disabled["providerDispatched"], false);
+        assert_eq!(disabled["allowedTools"], serde_json::json!([]));
+        assert!(!disabled.to_string().contains(objective));
+        let enabled = change_enabled(&store, &cfg.id, cfg.policy_revision, true).unwrap();
+        let direct: serde_json::Value = serde_json::from_str(
+            &inspect_headless_demand_preflight(&store.path, &cfg.id, objective, false).unwrap()
+        ).unwrap();
+        let coordinated: serde_json::Value = serde_json::from_str(
+            &inspect_headless_demand_preflight(&store.path, &cfg.id, objective, true).unwrap()
+        ).unwrap();
+        assert_eq!(direct["selectedRole"], "worker");
+        assert_eq!(direct["selectedBotId"], "worker");
+        assert_eq!(coordinated["selectedRole"], "coordinator");
+        assert_eq!(coordinated["selectedBotId"], "router");
+        assert_eq!(direct["policyRevision"], enabled.policy_revision);
+        assert_eq!(direct["eligibleAtSnapshot"], true);
+        assert_eq!(coordinated["eligibleAtSnapshot"], true);
+        assert_eq!(direct["requiresLiveAdmissionRecheck"], true);
+        assert_eq!(direct["objectiveBytes"], objective.len());
+        assert!(inspect_headless_demand_preflight(&store.path, &cfg.id, "  ", false).is_err());
+        assert!(inspect_headless_demand_preflight(&store.path, "missing", objective, true).is_err());
+        assert!(inspect_headless_demand_preflight(
+            &store.path, &cfg.id, &"x".repeat(MAX_OBJECTIVE_BYTES + 1), false
+        ).is_err());
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        let paused: serde_json::Value = serde_json::from_str(
+            &inspect_headless_demand_preflight(&store.path, &cfg.id, objective, false).unwrap()
+        ).unwrap();
+        assert_eq!(paused["eligibleAtSnapshot"], false);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0)
+        ).unwrap(), 0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get::<_, i64>(0)
+        ).unwrap(), 0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get::<_, i64>(0)
+        ).unwrap(), 0);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments", [], |row| row.get::<_, i64>(0)
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn ordinary_running_session_blocks_same_project_manual_team_admission() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let ordinary = store.create_session("project", "codex", "default", "ask").unwrap();
+        let active = vec![ordinary.id.clone()];
+        assert!(active_manual_conflict(&store, &active, "worker", "project").unwrap());
+        assert!(!manual_preflight(&store, &cfg.id, "Inspect the checkout", false,
+            active_manual_conflict(&store, &active, "worker", "project").unwrap())
+            .unwrap().eligible);
+        let (blocked, launched) = admit(&mut store, &cfg.id, "Inspect the checkout",
+            "occupied-by-direct-chat", true).unwrap();
+        assert!(!launched);
+        assert_eq!(blocked.state, "blocked");
+        assert!(assignment_session(&store, &blocked.id).unwrap().is_none());
+        store.db.execute(
+            "INSERT INTO projects(id,name,path)
+             VALUES('other-project','Other','/tmp/disposable-superagent-other')", [],
+        ).unwrap();
+        let unrelated = store.create_session("other-project", "codex", "default", "ask").unwrap();
+        assert!(!active_manual_conflict(&store, &[unrelated.id], "worker", "project").unwrap(),
+            "Unrelated projects must remain independently executable");
+        assert!(active_manual_conflict(&store, &["missing-live-session".to_owned()],
+            "worker", "project").is_err(), "Missing live metadata must fail closed");
+    }
+
+    #[test]
+    fn native_demand_query_accepts_camel_case_and_rejects_execution_fields() {
+        let query: DemandQuery = serde_json::from_value(serde_json::json!({
+            "limit": 25, "beforeUpdatedAt": 2000, "beforeId": "ticket-5",
+            "orchestrationId": "team-1", "stateFilter": "blocked",
+            "searchQuery": "literal %_needle",
+        })).unwrap();
+        assert_eq!(query.limit, Some(25));
+        assert_eq!(query.before_updated_at, Some(2000));
+        assert_eq!(query.before_id.as_deref(), Some("ticket-5"));
+        assert_eq!(query.orchestration_id.as_deref(), Some("team-1"));
+        assert_eq!(query.state_filter.as_deref(), Some("blocked"));
+        assert_eq!(query.search_query.as_deref(), Some("literal %_needle"));
+        let empty: DemandQuery = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(empty.limit, None);
+        assert_eq!(empty.search_query, None);
+        assert!(serde_json::from_value::<DemandQuery>(serde_json::json!({
+            "limit": 200, "allowedTools": ["write_file"]
+        })).is_err());
+    }
+
+    #[test]
     fn mandate_issuer_drift_denies_provider_admission_and_callback() {
         for fault in ["missing-issuer", "blank-issuer", "wrong-actor"] {
             let mut store = fixture();

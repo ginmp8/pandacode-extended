@@ -77,12 +77,15 @@ test('duplicating a native Team retains its roles but never its saved runtime au
   await expect(host.locator('.sa-list .sa-item')).toHaveCount(2);
   await expect(host.locator('.sa-list')).toContainText('Source Team copy');
   await expect(host.getByRole('status').filter({hasText:'Disabled Team duplicated.'})).toBeVisible();
+  await expect(host.getByRole('region',{name:'Team overview'})).toBeVisible();
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(host.getByRole('button',{name:'Enable manual'})).toBeVisible();
   await expect(host.locator('.sa-list .sa-counts')).toHaveText([
     '0 tasks · 0 running · 0 blocked',
     '0 tasks · 0 running · 0 blocked',
   ]);
 
+  await host.getByRole('button',{name:'Teams',exact:true}).click();
   await host.getByRole('button',{name:'Load native members'}).click();
   await expect(host.getByRole('region',{name:'Configured Team roles'}))
     .toContainText('Scout');
@@ -99,6 +102,7 @@ test('versioned Team strategies keep unsupported budgets visible and prevent sil
   await create.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption({label:'Scout'});
   await create.getByRole('combobox',{name:'Worker',exact:true}).selectOption({label:'Writer'});
   await create.getByRole('button',{name:'Create disabled preset'}).click();
+  await host.getByRole('button',{name:'Teams',exact:true}).click();
   const strategy=host.getByRole('region',{name:'Team runtime strategy'});
   await strategy.getByRole('button',{name:'Inspect native policy'}).click();
   await expect(strategy).toContainText('Native executable parallel Workers: 1');
@@ -115,6 +119,7 @@ test('versioned Team strategies keep unsupported budgets visible and prevent sil
   await expect(strategy).toContainText('Parallel worker execution has no admitted isolated scheduler yet.');
   await expect(form.getByRole('combobox',{name:'Optimization priority'})).toHaveValue('cost');
   await expect(form.getByRole('spinbutton',{name:'Maximum attempts per Worker (1–8)'})).toHaveValue('3');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
   await host.getByRole('button',{name:'Enable manual'}).click();
   await host.getByRole('alertdialog',{name:'Confirm orchestration action'})
     .getByRole('button',{name:'Confirm',exact:true}).click();
@@ -262,8 +267,8 @@ test('guided Team Builder scopes Workers to the primary checkout without restric
   await builder.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
   await builder.getByRole('combobox',{name:'Primary Worker'}).selectOption('worker-one');
   const workers=builder.locator('select[name="builderWorkers"]');
-  await expect(workers.locator('option[value="foreign-worker"]')).toBeDisabled();
-  await expect(workers.locator('option[value="worker-two"]')).toBeEnabled();
+  await expect(workers.locator('option[value="foreign-worker"]')).toHaveAttribute('disabled', '');
+  await expect(workers.locator('option[value="worker-two"]')).not.toHaveAttribute('disabled', '');
   const reviewers=builder.locator('select[name="builderReviewers"]');
   await expect(reviewers.locator('option[value="independent-reviewer"]')).toBeEnabled();
   await expect(builder.getByRole('combobox',{name:'Coordinator'})).toHaveValue('coordinator');
@@ -304,7 +309,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await expect(details).toContainText('No side effects allowed');
   await expect(details).toContainText('Attempt 1');
   await expect(details).toContainText('admitted');
-  await expect(details.getByRole('heading',{name:'Native activity',exact:true}).locator('xpath=following-sibling::ol[1] li').first()).toContainText(' · admitted · ');
+  await expect(details.getByRole('heading',{name:'Native activity',exact:true}).locator('xpath=following-sibling::ol[1]/li').first()).toContainText(' · admitted · ');
   await row.getByRole('button',{name:'Stop'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(row).toContainText('stopped');
@@ -559,7 +564,7 @@ test('Off and Observe source controls expose durable native receipts without Aut
   });
   const host=page.locator('#sa-source-test');
   await host.getByRole('button',{name:'Sources',exact:true}).click();
-  await expect(host.getByText('Authenticated GitHub Events polling is bounded',{exact:false})).toBeVisible();
+  await expect(host.getByText(/Authenticated polling is not gap-free/)).toBeVisible();
   await host.getByRole('button',{name:'Load sources'}).click();
   await expect(host.getByText('No event sources configured.')).toBeVisible();
   // These actions are surfaced by the native GitHub Events adapter, not

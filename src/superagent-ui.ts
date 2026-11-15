@@ -583,7 +583,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             safe(ticketDetails.council.nativeStatus) + ' · Round ' +
             safe(ticketDetails.council.nativeRound) +
             (ticketDetails.council.nativeStale ? ' · stale' : '') +
-            '. Council evidence is authoritative only for an exact Ticket, artifact and verified native cycle; unbound or stale results cannot approve a task.</p></section>'
+            '. Council evidence is authoritative only for an exact Ticket, artifact and verified native cycle; unbound or stale results cannot approve a task and cannot authorize SuperAgent completion.</p></section>'
           : '') +
         (canComment
           ? '<section class="sa-effect-editor" aria-label="Explicit GitHub effect"><h5>GitHub issue comment</h5>' +
@@ -744,12 +744,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           state.split('_').join(' ') + '</option>').join('') +
       '</select></label>' +
       '<form data-sa-form="demand-search" role="search" aria-label="Search native Demands">' +
-      '<label>Search objectives<input type="search" name="searchQuery" data-sa-demand-search maxlength="128" ' +
+      '<label>Search objectives<input type="search" name="searchQuery" aria-label="Search Demands by objective" data-sa-demand-search maxlength="128" ' +
       'placeholder="Literal objective fragment" value="' + safe(demandSearchDraft) + '"></label>' +
       '<button type="submit">Search Demands</button></form>' +
       '<p>Native Tickets ' + (demandTeamFilter ? 'for this Team' : 'across Teams') +
       (demandStateFilter ? ' in state ' + safe(demandStateFilter) : '') +
-      (demandSearch ? ' matching ' + safe(demandSearch) : '') +
+      (demandSearch ? ' matching objective "' + safe(demandSearch) + '"' : '') +
       ', loaded 200 at a time in newest-first order. Board counts cover ' +
       'only loaded pages, not all saved Demands. Open a Demand to act within its Team.</p>' +
       (!allDemandsLoaded ? '<p role="status">Load Demands for the selected Team scope.</p>' :

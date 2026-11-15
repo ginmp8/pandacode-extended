@@ -1339,6 +1339,12 @@ fn persist_finalization(
         return Ok(false);
     }
     if !binding_valid || !verdict_valid { return Ok(false); }
+    // A structured plan must have every planned WorkItem completed before the
+    // Ticket may be finalized by a native verdict or attributed human
+    // acceptance; otherwise an unfinished plan could be marked done.
+    if !super::work_items::all_work_items_completed(store, &request.ticket_id)? {
+        return Ok(false);
+    }
     let database_path = store.path.clone();
     let tx = store.db.unchecked_transaction().map_err(|error| error.to_string())?;
     let now = storage::now();
@@ -2245,6 +2251,36 @@ mod tests {
             [&ticket.id],|row| row.get(0),
         ).unwrap();
         assert_eq!(passed,1);
+    }
+
+    #[test]
+    fn council_finalization_cannot_complete_a_ticket_with_unfinished_work_items() {
+        let mut store = fixture();
+        let workspace = workspace(&store);
+        std::fs::write(workspace.join("authorized-worker-write.md"), "reviewed bytes").unwrap();
+        let (ticket, worker_session_id, _assignment_id) = required_worker(&mut store, "required-unfinished-plan");
+        assert!(superagent::on_run_finished(&store, &worker_session_id, true, "Worker artifact").unwrap());
+        assert_eq!(superagent::get_ticket(&store, &ticket.id).unwrap().state, "waiting_review");
+
+        // A structured plan that still has an unfinished planned item must not
+        // be finalized, even by a verified native Council pass.
+        superagent::work_items::create_work_item(&store, &ticket.id, "Unfinished planned item", 0).unwrap();
+        assert!(!superagent::work_items::all_work_items_completed(&store, &ticket.id).unwrap());
+
+        let (state, native_session_id) = start_required_review(store, &worker_session_id);
+        complete_native_reviewers(&state, &native_session_id, "9.5");
+        let store = state.store.lock().unwrap();
+        let team = architect::load(&store, &native_session_id).unwrap().unwrap();
+        assert_eq!(team.council_status.as_ref().unwrap().state, "passed");
+        let reviewer = team.workers.iter().find(|worker| worker.council.is_some()).unwrap();
+        assert!(!finalize_after_native_run(&store, &reviewer.session_id).unwrap());
+        let final_state = superagent::get_ticket(&store, &ticket.id).unwrap().state;
+        assert_ne!(final_state, "completed");
+        let finalizations: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_council_finalizations WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(finalizations, 0);
     }
 
     #[test]

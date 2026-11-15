@@ -750,7 +750,14 @@ pub(super) fn parse_reported_findings(report: &str) -> Vec<ReportedFindingDraft>
 fn current_finding_origin_is_authorized(
     store: &storage::Store, team: &TeamSnapshot, worker: &Worker,
 ) -> bool {
-    let Some(binding) = worker.reviewer_binding.as_ref() else { return true };
+    // Only the original automatic M1 Council retains its historical unbound
+    // reviewer projection. Every composed/selected-bot mode requires a real
+    // task-issued reviewer binding before accessing any session's report text.
+    // A forged unbound M3-M7 worker must never read another bot or channel.
+    let Some(binding) = worker.reviewer_binding.as_ref() else {
+        return team.config.council.as_ref()
+            .is_some_and(|config| config.mode() == "m1");
+    };
     if !worker.read_only
         || binding.validate(team, worker).is_err()
         || super::reviewer_security::validate_issued_authority(

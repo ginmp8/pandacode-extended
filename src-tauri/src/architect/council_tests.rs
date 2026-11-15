@@ -67,6 +67,47 @@ fn native_council_finding_projection_reuses_persisted_report_and_invalidates_aft
 
 
 #[test]
+fn unbound_selected_and_composed_reviewers_cannot_expose_foreign_session_findings() {
+    let (state, sid) = state_fixture();
+    let store = state.store.lock().unwrap();
+    let root = store.session(&sid).unwrap();
+    let foreign = store.create_session(&root.project_id, "codex", "", "full").unwrap();
+    store.message(&foreign.id, "assistant",
+        "Council findings JSON: [{\"severity\":\"high\",\"category\":\"security\",\"title\":\"Foreign finding\",\"explanation\":\"Unrelated session report\"}]\nCouncil score: 9.5/10").unwrap();
+
+    let mut teams = Vec::new();
+    for (mode, direct, nested, automatic) in [
+        ("m2", 2, 0, 0), ("m3", 1, 0, 1), ("m4", 0, 2, 0),
+        ("m5", 0, 1, 1), ("m6", 1, 1, 0), ("m7", 1, 1, 1),
+    ] {
+        let mut config = on(9.0, 3, 0);
+        config.reviewer_bot_ids = (0..direct).map(|i| format!("direct-{i}")).collect();
+        config.nested_bot_reviewers = (0..nested).map(|i| council::CouncilNestedReviewer {
+            bot_id: format!("child-{i}"), child_reviewers: 2,
+            child_target: 9.0, child_max_rounds: 2,
+        }).collect();
+        config.automatic_reviewers = automatic;
+        assert_eq!(config.mode(), mode);
+        config.validate().unwrap();
+        let mut team = team_with(config, Vec::new());
+        team.session_id = sid.clone();
+        let mut injected = seat("unbound-foreign-session", 1, Some(9.5), SINCE + 1);
+        injected.session_id = foreign.id.clone();
+        team.workers.push(injected);
+        assert!(council::reported_findings(&store, &team).is_empty(),
+            "{mode} must not expose a foreign review without an issued native binding");
+        teams.push(team);
+    }
+    // After the foreign session advances, the same denial must hold for the
+    // history path, not merely for the live result projection.
+    store.message(&foreign.id, "coordination", "Unrelated session continued").unwrap();
+    for team in teams {
+        assert!(council::historical_reported_findings(&store, &team).is_empty(),
+            "unbound composed reviewers cannot replay foreign findings as history");
+    }
+}
+
+#[test]
 fn prior_cycle_findings_remain_unverified_and_require_the_native_parent_session_link() {
     let (state, sid) = council_state(on(9.0, 3, 2));
     // state_fixture starts an active task; a second start must be explicitly

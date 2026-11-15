@@ -241,6 +241,43 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   const safe = (value: unknown) => escape(String(value ?? ''));
   const fetchDemandPage = (query: DemandQuery) =>
     call<DemandIndex[]>('superagent_all_demands', { query });
+  function captureFocusedControl(): {
+    selector: string; index: number; selectionStart: number | null;
+    selectionEnd: number | null; selectionDirection: 'forward' | 'backward' | 'none' | null;
+  } | null {
+    const focused = document.activeElement;
+    if (!(focused instanceof HTMLElement) || !host.contains(focused)) return null;
+    const dataAttributes = Array.from(focused.attributes)
+      .filter(attribute => attribute.name.startsWith('data-sa-'));
+    const selector = focused.id
+      ? '#' + CSS.escape(focused.id)
+      : focused.tagName.toLowerCase() + dataAttributes
+        .map(attribute => '[' + attribute.name + '="' + CSS.escape(attribute.value) + '"]').join('');
+    if (!focused.id && !dataAttributes.length) return null;
+    const index = Array.from(host.querySelectorAll<HTMLElement>(selector)).indexOf(focused);
+    if (index < 0) return null;
+    let selectionStart: number | null = null, selectionEnd: number | null = null;
+    let selectionDirection: 'forward' | 'backward' | 'none' | null = null;
+    if (focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement) {
+      try {
+        selectionStart = focused.selectionStart;
+        selectionEnd = focused.selectionEnd;
+        selectionDirection = focused.selectionDirection;
+      } catch { /* Some input types do not expose text selection. */ }
+    }
+    return { selector, index, selectionStart, selectionEnd, selectionDirection };
+  }
+  function restoreFocusedControl(snapshot: ReturnType<typeof captureFocusedControl>): void {
+    if (!snapshot) return;
+    const focused = host.querySelectorAll<HTMLElement>(snapshot.selector)[snapshot.index];
+    if (!focused) return;
+    focused.focus({ preventScroll:true });
+    if (snapshot.selectionStart !== null && snapshot.selectionEnd !== null &&
+        (focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement)) {
+      try { focused.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd, snapshot.selectionDirection ?? undefined); }
+      catch { /* A changing control may no longer support a selection range. */ }
+    }
+  }
   const current = () => presets.find(item => item.id === selected);
   const botName = (id: string) => bots.find(bot => bot.id === id)?.name ?? 'Missing bot';
   const activityTime = (timestamp?: number): string => typeof timestamp === 'number' &&
@@ -300,6 +337,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   }
   function render(): void {
     if (!host.isConnected) return;
+    const focusedControl = captureFocusedControl();
     const roleSummary = (item:Config): string =>
       typeof item.workerCount === 'number' && typeof item.reviewerCount === 'number' &&
       Number.isInteger(item.workerCount) && Number.isInteger(item.reviewerCount) &&
@@ -1079,6 +1117,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '</section>' : '') +
       '</div></div></div>';
     host.setAttribute('aria-busy', String(busy));
+    restoreFocusedControl(focusedControl);
   }
   async function refreshTicketDetails(): Promise<void> {
     const id = inspectedTicket;

@@ -89,8 +89,9 @@ WantedBy=multi-user.target
   answer noninteractive reads). Set `PANDACODE_SECRETS_FILE=0` to use a keyring anyway.
   Log in each CLI/provider once; a keyring's old values are not migrated.
 - **NTP required.** Connect refuses requests whose timestamp is more than a minute off.
-- One instance per data dir. Don't run serve and the desktop app on the same data dir:
-  serve skips the single-instance guard.
+- One runtime per data dir. Desktop and headless startup share an OS ownership lock acquired
+  in `setup_common` before `Store::open`; a second runtime fails closed before startup
+  recovery can touch the database. `serve` still skips the desktop single-instance plugin.
 - Status lines go to stdout (journald): signed-in account, hosting, relay connection,
   online devices — printed only when they change.
 
@@ -231,8 +232,39 @@ new preset is inserted, commits native SQLite changes transactionally, and
 leaves every imported preset **Off**. No task starts, no credential or live
 Ticket is imported, and no remote unauthenticated management endpoint is
 opened. Repeating the same import is idempotent; headless errors produce a
-non-zero exit code. This is configuration administration, **not** headless
-task dispatch/approval parity; that remains a separate implementation gate.
+non-zero exit code.
+
+### Explicit local manual dispatch
+
+An operator can submit one bounded direct-worker Ticket to the preset's
+configured primary worker:
+
+```sh
+pandacode serve --submit-ticket <preset-id> <request-key> "Review the local project"
+```
+
+The preset must be enabled. Objective text is trimmed and limited to 16 KiB;
+the stable request key is limited to 128 ASCII letters, digits, `.`, `_` or
+`-`. Repeating a key with the same normalized objective returns the original
+Ticket without dispatching again; reusing it for another objective fails.
+The command refuses paused or out-of-scope bots, global bot pause, and a busy
+worker or project lease before it creates a Ticket. Admission still creates
+the normal native mandate, snapshot, audit, assignment and WorkItem, then
+delivers through the internal SuperAgent bot gateway. The Ticket itself is
+not sent to an external bot channel.
+
+This command starts the local headless runtime and stays running so its
+worker can finish. It does not require Connect sign-in, create a remote
+management endpoint, or accept Council review. Stop it with Ctrl-C after the
+worker finishes. The shared `setup_common` startup acquires an exclusive
+ownership lock in the app data directory before `Store::open`. Desktop and
+headless runtimes use this same lock, so submit fails closed if another current
+PandaCode runtime owns that directory; it does not connect to or dispatch into
+that process. Read-only inspection and the direct Ticket review/stop commands
+remain available while a host is running because they bypass startup recovery.
+
+This bounded local submit path does not provide general headless task,
+approval, Council or remote dispatch parity.
 
 ### Read-only task inspection (local CLI)
 

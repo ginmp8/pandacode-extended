@@ -35,7 +35,7 @@ pub(crate) const CHANNEL: &str = "superagent";
 /// The existing bot gateway accepts at most 32 KiB of inbound text. Reserve
 /// headroom for native task metadata, read-only instructions and coordinator
 /// evidence; never persist an objective that is silently truncated at dispatch.
-const MAX_OBJECTIVE_BYTES: usize = 16 * 1024;
+pub(crate) const MAX_OBJECTIVE_BYTES: usize = 16 * 1024;
 /// Compatibility contract for legacy v1 plans, existing v52 WorkItems, and
 /// manual items that do not yet carry specific acceptance evidence.
 pub(crate) const LEGACY_EVIDENCE_CONTRACT: &str =
@@ -2415,17 +2415,7 @@ fn record(store: &Store, id: &str, kind: &str, detail: &str) -> Result<()> {
 
 /// Native manual request with a stable dedup key. A blocked request remains
 /// auditable and must be explicitly retried; no background inference or launch.
-fn admit(store: &mut Store, config_id: &str, objective: &str, request_key: &str, busy: bool) -> Result<(Ticket, bool)> {
-    admit_role(store, config_id, objective, request_key, busy, false)
-}
-
-/// A coordinated manual request first reserves a native, read-only session for
-/// the existing coordinator bot. Its output is advice, not a grant or a task
-/// completion; the selected worker is admitted only by a separate native action.
-fn admit_role(
-    store: &mut Store, config_id: &str, objective: &str,
-    request_key: &str, busy: bool, coordinate: bool,
-) -> Result<(Ticket, bool)> {
+pub(crate) fn validate_manual_request_fields(objective: &str, request_key: &str) -> Result<()> {
     let objective = objective.trim();
     if objective.is_empty() || objective.len() > MAX_OBJECTIVE_BYTES || objective.chars().any(|c| c == '\0') {
         return Err("A nonempty, bounded objective is required.".into());
@@ -2435,6 +2425,38 @@ fn admit_role(
     {
         return Err("Provide a stable alphanumeric manual-request key.".into());
     }
+    Ok(())
+}
+
+fn admit(store: &mut Store, config_id: &str, objective: &str, request_key: &str, busy: bool) -> Result<(Ticket, bool)> {
+    admit_role(store, config_id, objective, request_key, busy, false)
+}
+
+/// The explicit local headless submit path refuses a busy worker instead of
+/// creating a blocked Ticket. Ordinary desktop admission retains its existing
+/// queued/blocked behavior.
+fn admit_manual_refusing_busy(
+    store: &mut Store, config_id: &str, objective: &str, request_key: &str, busy: bool,
+) -> Result<(Ticket, bool)> {
+    admit_role_with_busy_policy(store, config_id, objective, request_key, busy, false, true)
+}
+
+/// A coordinated manual request first reserves a native, read-only session for
+/// the existing coordinator bot. Its output is advice, not a grant or a task
+/// completion; the selected worker is admitted only by a separate native action.
+fn admit_role(
+    store: &mut Store, config_id: &str, objective: &str,
+    request_key: &str, busy: bool, coordinate: bool,
+) -> Result<(Ticket, bool)> {
+    admit_role_with_busy_policy(store, config_id, objective, request_key, busy, coordinate, false)
+}
+
+fn admit_role_with_busy_policy(
+    store: &mut Store, config_id: &str, objective: &str,
+    request_key: &str, busy: bool, coordinate: bool, refuse_busy: bool,
+) -> Result<(Ticket, bool)> {
+    let objective = objective.trim();
+    validate_manual_request_fields(objective, request_key)?;
     ensure_active_assignment_session_delete_guard(&store.db)?;
     if let Some(existing) = store.db.query_row(
         "SELECT id FROM sa_tickets WHERE orchestration_id=?1 AND request_key=?2",
@@ -2486,6 +2508,9 @@ fn admit_role(
          )",
         params![candidate.id,config.project_id,candidate.project_id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
+    if refuse_busy && (busy || occupied) {
+        return Err("Worker is occupied; no Ticket was created.".into());
+    }
     // Do not create a coordinated ticket without an admitted coordinator.
     // Otherwise a worker retry could bypass missing coordinator evidence.
     if coordinate && (busy || occupied) {
@@ -4115,6 +4140,35 @@ pub async fn superagent_submit(window: tauri::WebviewWindow,
     orchestration_id: String, objective: String, request_key: String,
 ) -> Result<Ticket> {
     require_main_window(&window)?;
+    submit_manual_ticket(&app, &state, &orchestration_id, &objective, &request_key, false).await
+}
+
+/// Local CLI entrypoint. It runs inside the process that owns AppState, never
+/// by reopening the database alongside a live host. The preset, Ticket,
+/// mandate, worker lease and internal gateway checks are shared with desktop
+/// admission; only the explicit CLI's busy-worker policy rejects instead of
+/// recording a blocked Ticket.
+pub(crate) async fn headless_submit_ticket(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    orchestration_id: &str,
+    objective: &str,
+    request_key: &str,
+) -> Result<String> {
+    let ticket = submit_manual_ticket(
+        app, state, orchestration_id, objective, request_key, true,
+    ).await?;
+    headless_ticket_status(&ticket)
+}
+
+async fn submit_manual_ticket(
+    app: &tauri::AppHandle,
+    state: &AppState,
+    orchestration_id: &str,
+    objective: &str,
+    request_key: &str,
+    refuse_busy: bool,
+) -> Result<Ticket> {
     if crate::feature_controls::get().bots_paused {
         return Err("Bots are paused; no SuperAgent dispatch is allowed.".into());
     }
@@ -4122,15 +4176,19 @@ pub async fn superagent_submit(window: tauri::WebviewWindow,
         let active: Vec<String> = state.agents.lock().map_err(|e|e.to_string())?
             .keys().cloned().collect();
         let mut store=state.store.lock().map_err(|e|e.to_string())?;
-        let cfg=configuration(&store,&orchestration_id)?;
+        let cfg=configuration(&store,orchestration_id)?;
         let busy=active.iter().any(|sid| bots::owner_of(&store,sid).ok().flatten()
             .is_some_and(|(bot,_)|bot.id==cfg.worker_bot_id));
-        let (ticket,launch)=admit(&mut store,&orchestration_id,&objective,&request_key,busy)?;
+        let (ticket,launch)=if refuse_busy {
+            admit_manual_refusing_busy(&mut store,orchestration_id,objective,request_key,busy)?
+        } else {
+            admit(&mut store,orchestration_id,objective,request_key,busy)?
+        };
         (ticket,launch,cfg.worker_bot_id)
     };
     if !launch { return Ok(ticket); }
     let delivered=bots::gateway::deliver(
-        &app,
+        app,
         bots::gateway::Inbound {
             bot_id: worker_id,
             channel_id: CHANNEL.into(),
@@ -4839,6 +4897,73 @@ mod tests {
         assert!(!listed.contains("Private task objective"));
         assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, before.revision);
         assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+    }
+
+    #[test]
+    fn explicit_headless_submit_reuses_admission_and_refuses_invalid_or_busy_workers() {
+        let mut store = fixture();
+        let disabled = create_configuration(&store, NewOrchestration {
+            name: "Disabled local preset".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        assert!(admit_manual_refusing_busy(
+            &mut store, &disabled.id, "Inspect this project", "disabled-submit", false,
+        ).unwrap_err().contains("disabled"));
+
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('other-project','Other','/tmp/other-superagent')",
+            [],
+        ).unwrap();
+        let config = enabled(&store);
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        assert!(admit_manual_refusing_busy(
+            &mut store, &config.id, "Inspect this project", "paused-submit", false,
+        ).unwrap_err().contains("paused"));
+        store.db.execute("UPDATE bots SET paused=0 WHERE id='worker'", []).unwrap();
+        store.db.execute(
+            "UPDATE bots SET project_id='other-project' WHERE id='worker'", [],
+        ).unwrap();
+        assert!(admit_manual_refusing_busy(
+            &mut store, &config.id, "Inspect this project", "out-of-scope-submit", false,
+        ).unwrap_err().contains("outside the worker project scope"));
+        store.db.execute("UPDATE bots SET project_id='project' WHERE id='worker'", []).unwrap();
+
+        let objective = "  Inspect this project  ";
+        let (ticket, launch) = admit_manual_refusing_busy(
+            &mut store, &config.id, objective, "stable-submit-key", false,
+        ).unwrap();
+        assert!(launch);
+        assert_eq!(ticket.objective, "Inspect this project");
+
+        // The same key and normalized objective answer from the original
+        // admission even while its worker is busy, without another assignment.
+        let (replay, replay_launch) = admit_manual_refusing_busy(
+            &mut store, &config.id, "Inspect this project", "stable-submit-key", true,
+        ).unwrap();
+        assert_eq!(replay.id, ticket.id);
+        assert!(!replay_launch);
+        assert!(admit_manual_refusing_busy(
+            &mut store, &config.id, "Different work", "stable-submit-key", false,
+        ).is_err());
+
+        let explicit_busy = admit_manual_refusing_busy(
+            &mut store, &config.id, "Another task", "active-worker-submit", true,
+        ).unwrap_err();
+        assert!(explicit_busy.contains("Worker is occupied"));
+        let lease_busy = admit_manual_refusing_busy(
+            &mut store, &config.id, "Another task", "leased-project-submit", false,
+        ).unwrap_err();
+        assert!(lease_busy.contains("Worker is occupied"));
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets WHERE orchestration_id=?1",
+            [&config.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1, "refused submits must not leave blocked Tickets");
+        let assignment_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1", [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(assignment_count, 1, "idempotent replay must not dispatch twice");
     }
 
     #[test]

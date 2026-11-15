@@ -6,6 +6,8 @@
 
 use crate::{message_queue, AppState};
 use std::collections::BTreeSet;
+use std::fs::OpenOptions;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
@@ -35,6 +37,11 @@ enum Command {
     AcceptTicket { ticket_id: String, expected_revision: i64 },
     RejectTicket { ticket_id: String, expected_revision: i64, reason: String },
     StopTicket { ticket_id: String },
+    SubmitTicket {
+        orchestration_id: String,
+        request_key: String,
+        objective: String,
+    },
     IssueComment {
         ticket_id: String,
         expected_revision: i64,
@@ -294,7 +301,51 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
             }
             start_services(app.clone());
         }
+        Command::SubmitTicket { orchestration_id, request_key, objective } => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<AppState>();
+                match crate::superagent::headless_submit_ticket(
+                    &app, &state, &orchestration_id, &objective, &request_key,
+                ).await {
+                    Ok(status) => {
+                        println!("{status}");
+                        // This process owns the Store and the running worker. Keep
+                        // it alive just like `serve`; a short-lived CLI could stop
+                        // the provider call immediately after successful admission.
+                        start_services(app);
+                    }
+                    Err(error) => {
+                        eprintln!("SuperAgent submit failed: {error}");
+                        app.exit(1);
+                    }
+                }
+            });
+        }
     }
+}
+
+/// Keeps exactly one current PandaCode runtime on a data directory. Desktop
+/// and headless startup share this lock; Tauri's managed state holds it through
+/// shutdown, before setup_common can open a Store and run restart recovery.
+pub(crate) struct StoreOwnerLock {
+    _file: std::fs::File,
+}
+
+pub(crate) fn acquire_store_owner(data_dir: &Path) -> Result<StoreOwnerLock, String> {
+    std::fs::create_dir_all(data_dir).map_err(|error| error.to_string())?;
+    let path = data_dir.join(".headless-serve.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| format!("could not open the local serve ownership lock: {error}"))?;
+    file.try_lock().map_err(|error| format!(
+        "exclusive ownership of this data directory could not be established ({error}); an existing host may still be active"
+    ))?;
+    Ok(StoreOwnerLock { _file: file })
 }
 
 /// The serve-only services: Ctrl-C/SIGTERM, one status line for journald, native limit
@@ -596,6 +647,23 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--submit-ticket" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--submit-ticket needs a preset ID.\n\n{}", help()))?;
+                validate_preset_id(orchestration_id)?;
+                let request_key = args.get(index + 2)
+                    .ok_or_else(|| format!("--submit-ticket needs a stable request key.\n\n{}", help()))?;
+                let objective = args.get(index + 3)
+                    .ok_or_else(|| format!("--submit-ticket needs an objective.\n\n{}", help()))?;
+                crate::superagent::validate_manual_request_fields(objective, request_key)?;
+                command = Command::SubmitTicket {
+                    orchestration_id: orchestration_id.clone(),
+                    request_key: request_key.clone(),
+                    objective: objective.clone(),
+                };
+                ops += 1;
+                index += 3;
+            }
             "--issue-comment" => {
                 let ticket_id = args.get(index + 1)
                     .ok_or_else(|| format!("--issue-comment needs a Ticket ID.\n\n{}", help()))?;
@@ -701,6 +769,15 @@ fn validate_ticket_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_preset_id(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 128
+        || !value.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+    {
+        return Err("Provide a bounded alphanumeric SuperAgent preset ID.".into());
+    }
+    Ok(())
+}
+
 fn parse_ticket_revision(value: &str) -> Result<i64, String> {
     let revision = value.parse::<i64>()
         .map_err(|_| "Provide a nonnegative expected Ticket revision.".to_string())?;
@@ -729,7 +806,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host
 
-Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-ticket <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-ticket <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --submit-ticket <preset-id> <request-key> <objective> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -762,6 +839,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --reject-ticket <id> <revision> <reason>
                          Reject current worker evidence with a required reason; quote it if it has spaces.
   --stop-ticket <id>    Revoke a Ticket mandate and stop the Ticket; exit.
+  --submit-ticket <preset-id> <request-key> <objective>
+                         Admit and dispatch one bounded local manual Ticket for an enabled
+                         preset. This process owns the local runtime and stays open.
   --issue-comment <id> <revision> <owner/name> <issue> <key> <body>
                          Authorize and post one exact GitHub issue comment. The first
                          invocation prints the required confirmation SHA-256; rerun with
@@ -831,6 +911,20 @@ mod tests {
         assert_eq!(parsed("--stop-ticket ticket_123"), Ok(Command::StopTicket {
             ticket_id: "ticket_123".into(),
         }));
+        assert_eq!(
+            parse(&["--submit-ticket".into(), "preset_123".into(), "manual-key.1".into(), "  Inspect this project  ".into()]),
+            Ok((Command::SubmitTicket {
+                orchestration_id: "preset_123".into(),
+                request_key: "manual-key.1".into(),
+                objective: "  Inspect this project  ".into(),
+            }, None))
+        );
+        assert!(parsed("--submit-ticket").is_err());
+        assert!(parsed("--submit-ticket preset key").is_err());
+        assert!(parsed("--submit-ticket preset bad/key objective").is_err());
+        let overlong = "x".repeat(crate::superagent::MAX_OBJECTIVE_BYTES + 1);
+        assert!(parse(&["--submit-ticket".into(), "preset".into(), "key".into(), overlong]).is_err());
+        assert!(parsed("--submit-ticket preset key objective --list-tickets").is_err());
         let confirmation = "a".repeat(64);
         assert_eq!(
             parse(&[
@@ -881,6 +975,17 @@ mod tests {
         assert!(parsed("--sync-bots").is_err());
         assert!(parsed("--sync-bots sources.json --import-bots bots.json").is_err());
         assert!(parsed("--sync-bots sources.json --sign-in").is_err());
+    }
+
+    #[test]
+    fn shared_runtime_store_lock_rejects_a_second_owner_until_shutdown() {
+        let dir = std::env::temp_dir().join(format!("pandacode-headless-owner-{}", crate::storage::id()));
+        let first = acquire_store_owner(&dir).unwrap();
+        assert!(acquire_store_owner(&dir).is_err());
+        drop(first);
+        let second = acquire_store_owner(&dir).unwrap();
+        drop(second);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

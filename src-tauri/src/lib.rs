@@ -4122,6 +4122,14 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     }
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // All runtime paths that open the Store (desktop and headless) share this
+    // owner lock. Take it before Store::open can run restart recovery, and keep
+    // it in managed state until this process shuts down. SQL-only/read-only
+    // headless CLI operations intentionally bypass setup_common and this lock.
+    let owner = headless::acquire_store_owner(&dir)?;
+    if !app.manage(owner) {
+        return Err("Could not retain ownership of the PandaCode data directory.".into());
+    }
     secret_store::setup(&dir);
     feature_controls::setup();
     providers::sweep_cline_mcp_settings(&dir);

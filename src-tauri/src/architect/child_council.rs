@@ -309,8 +309,10 @@ fn validate_admitted(
             || (team.workers.len() == choice.child_reviewers * 2
                 && choice.child_max_rounds >= 2
                 && root.config.council.as_ref().is_some_and(|policy|
-                    policy.strategy == super::council::CouncilExecutionStrategy::Escalated
-                        && policy.force_escalation)))
+                    (policy.strategy == super::council::CouncilExecutionStrategy::Escalated
+                        && policy.force_escalation)
+                        || (policy.strategy == super::council::CouncilExecutionStrategy::TwoPhase
+                            && policy.mode() == "m4"))))
         || team.pending_turn.is_some() || team.pending_setup.is_some()
         || team.summary.is_some() || team.council_accepted.is_some()
     {

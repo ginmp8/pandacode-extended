@@ -326,6 +326,7 @@ test('read-only inspector renders supplied findings, receipts, usage, stale stat
       findingDispositions: [{ findingId: 'finding-1', disposition: 'waived_by_authorized_human', actorId: 'user-17', rationale: 'Accepted the documented exception.', timestampMs: 1000, artifactLinks: ['artifact:revision-2'] }],
       childReceipts: [{ rootCycleId: 'root:1', parentSeatId: 'seat-2', childCycleId: 'child:3', botId: 'reviewer-a', artifactRevision: 'rev-3', policyFingerprint: 'policy-hash', status: 'passed', minScore: 9.2, leafScoreRefs: ['child-seat:1'], findingsRefs: ['finding-1'], evidenceRefs: ['file:src/security.ts'], snapshotFingerprint: 'snapshot-hash' }],
       childLeaves: [{ rootCycleId: 'root:1', parentSeatId: 'seat-2', childCycleId: 'child:3', roundId: 'child:3:1', seatId: 'child-seat', reviewerId: 'child-reviewer', attempt: 1, status: 'completed', score: 9.2 }],
+      councilChildLeafScores: [{ rootCycleId: 'root:1', parentSeatId: 'seat-2', childCycleId: 'child:3', childSeatId: 'child-seat', reviewerId: 'child-reviewer', attempt: 1, round: 1, score: 9.2, criterionOutcomes: [{ criterionId: 'security', score: 9.2, verifiedEvidenceRefs: ['file:src/security.ts'] }], artifactRevision: 'rev-3', receiptRef: 'child-seat:1' }],
       criterionOutcomes: [{ schemaVersion: 1, rootCycleId: 'root:1', taskId: 'child', taskCycleId: 'child:3', childCycleId: 'child:3', round: 1, seatId: 'child-seat', parentSeatId: 'seat-2', attempt: 1, artifactRevision: 'rev-3', outcome: { criterionId: 'security', score: 9.2, verifiedEvidenceRefs: ['file:src/security.ts'] } }],
       reviewReceipts: [{ schemaVersion: 1, requestId: 'request-1', cycleId: 'root:1', taskId: 'task-1', assignmentId: 'seat-1', policyFingerprint: 'policy-hash', artifactDigest: 'digest-1', verdict: 'passed', findingsRefs: ['finding-1'], evidenceRefs: ['file:src/security.ts'], terminalRevision: 4, idempotencyKey: 'terminal-1' }],
       workers: [{ id: 'seat-1', name: 'Security reviewer', council: { round: 1, lens: 'Security' }, reviewerBinding: { reviewerBotId: 'reviewer-a' } }],
@@ -416,11 +417,12 @@ test('verified nested leaf scores require current complete child receipt referen
         { ...validLeaf, seatId: 'stale-leaf', reviewerId: 'stale', score: 9.9 },
       ],
       criterionOutcomes: [outcome],
+      councilChildLeafScores: [{ rootCycleId: 'root:2', parentSeatId: 'seat-2', childCycleId: 'child:4', childSeatId: 'leaf-a', reviewerId: 'leaf-reviewer', attempt: 1, round: 1, score: 9.4, criterionOutcomes: [{ criterionId: 'security', score: 9.4, verifiedEvidenceRefs: ['src/a.ts'] }], artifactRevision: 'rev-4', receiptRef: 'leaf-a:1' }],
     };
     return {
       verified: councilReadOnlyPresenterHtml(fields as any),
       duplicate: councilReadOnlyPresenterHtml({
-        ...fields, childLeaves: [...fields.childLeaves, { ...validLeaf, reviewerId: 'duplicate' }],
+        ...fields, councilChildLeafScores: [...fields.councilChildLeafScores, { ...fields.councilChildLeafScores[0], reviewerId: 'duplicate' }],
       } as any),
       stale: councilReadOnlyPresenterHtml({
         ...fields, childReceipts: [{ ...receipt, status: 'stale' }],

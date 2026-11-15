@@ -158,21 +158,25 @@ function childCouncilHierarchyHtml(value: CouncilLedgerView, receipt: NonNullabl
   // child cycle, artifact epoch and leafScoreRefs entry all match. Stale,
   // foreign, duplicate or reference-mismatched rows stay out.
   const claimedRefs = new Set<string>();
+  let duplicateScoreRef = false;
   const candidateScores = receipt.status === 'passed'
     ? (value.councilChildLeafScores ?? []).filter(row => {
       if (row.rootCycleId !== value.cycleId
         || row.childCycleId !== cycleId
         || row.parentSeatId !== receipt.parentSeatId
         || row.artifactRevision !== receipt.artifactRevision
-        || !receipt.leafScoreRefs.includes(row.receiptRef)
-        || claimedRefs.has(row.receiptRef)) return false;
+        || !receipt.leafScoreRefs.includes(row.receiptRef)) return false;
+      if (claimedRefs.has(row.receiptRef)) {
+        duplicateScoreRef = true;
+        return false;
+      }
       claimedRefs.add(row.receiptRef);
       return true;
     })
     : [];
   // A receipt is a whole-child proof: an absent, duplicate or mismatched
   // leaf reference never produces a partial verified numeric result.
-  const leafScores = receipt.leafScoreRefs.length > 0
+  const leafScores = !duplicateScoreRef && receipt.leafScoreRefs.length > 0
     && candidateScores.length === receipt.leafScoreRefs.length
     && new Set(receipt.leafScoreRefs).size === receipt.leafScoreRefs.length
     && candidateScores.every(item => item.receiptRef === `${item.childSeatId}:${item.attempt}`

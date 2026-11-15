@@ -345,15 +345,22 @@ test('seat verdicts: at target everywhere, and only a complete round\'s lowest w
   // The target is native's when it has one.
   assert.equal(seatVerdict(team([mid], { target: 9.5, maxRounds: 10, reviewers: 0 }, { councilStatus: { ...status('fixing', 1), target: 8.5 } }), mid).tone, 'at');
 });
-test('old reviewer claims are projected only for the current root Council cycle', () => {
+test('historical reviewer claims keep authenticated prior same-task cycles without leaking cross-task or forged history', () => {
+  const unverified = { evidenceVerified: false, locationVerified: false, verifiedEvidenceRefs: [] };
   const team = {
     sessionId: 'review-root', councilSince: 47,
     councilHistoricalReportedFindings: [
-      { cycleId: 'review-root:47', id: 'old-claim', title: '<img src=x>' },
-      { cycleId: 'foreign-root:47', id: 'foreign-claim', title: 'Foreign' },
+      { cycleId: 'review-root:47', id: 'same-cycle', title: '<img src=x>' },
+      { cycleId: 'review-root:46', id: 'prior-cycle', title: 'Unverified', ...unverified },
+      { cycleId: 'foreign-root:46', id: 'foreign-claim', title: 'Foreign', ...unverified },
+      { cycleId: 'review-root:48', id: 'future-claim', title: 'Future', ...unverified },
+      { cycleId: 'review-root:045', id: 'malformed-claim', title: 'Noncanonical', ...unverified },
+      { cycleId: 'review-root:45', id: 'fake-verified', title: 'Forged evidence', ...unverified, evidenceVerified: true },
+      { cycleId: 'review-root:44', id: 'fake-ref', title: 'Forged ref', ...unverified, verifiedEvidenceRefs: ['untrusted'] },
     ],
   };
-  assert.deepEqual(councilLedgerForCurrentCycle(team).historicalReportedFindings?.map(item => item.id), ['old-claim']);
+  assert.deepEqual(councilLedgerForCurrentCycle(team).historicalReportedFindings?.map(item => item.id),
+    ['same-cycle', 'prior-cycle']);
 });
 test('current unverified reviewer reports do not leak across task cycles', () => {
   const team = {

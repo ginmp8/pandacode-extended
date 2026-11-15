@@ -3,7 +3,7 @@ import { reducedMotion, springKeyframes, trackSegment } from './motion';
 import { hidePopover, showPopover } from './popover-motion';
 import { teamActive, type ChildCouncilLeafScore, type CouncilComposition, type CouncilConfig, type CouncilStrategy, type NestedCouncilConfig, type SelectedCouncilReviewer, type TeamSnapshot, type TeamWorker } from './architect-types';
 import type { ProviderId } from './types';
-import { COUNCIL_COMPOSITION_MODES, COUNCIL_REVIEWERS, COUNCIL_ROUNDS, COUNCIL_TARGETS, councilCompositionMode, councilCompositionValidationIssues, councilDefaults, councilForNewThreads, councilLedgerForCurrentCycle, criterionSourceFor, newCouncilComposition, setCouncilForNewThreads, validateCouncilComposition, withCouncilComposition, councilAsking, councilNotice, councilProgress, councilStateText, firstAndFinal, finishedBelow, formatScore, outOfTen, provisional, saveCouncilDefaults, seatScore, summarizeCouncilUsage, type CouncilLedgerProjection, type CouncilProgress, type CouncilRound, type CouncilSeatWorker } from './council';
+import { COUNCIL_COMPOSITION_MODES, COUNCIL_REVIEWERS, COUNCIL_ROUNDS, COUNCIL_TARGETS, councilCompositionMode, councilCompositionValidationIssues, councilDefaults, councilForNewThreads, councilLedgerForCurrentCycle, councilHistoryCycleAllowed, criterionSourceFor, newCouncilComposition, setCouncilForNewThreads, validateCouncilComposition, withCouncilComposition, councilAsking, councilNotice, councilProgress, councilStateText, firstAndFinal, finishedBelow, formatScore, outOfTen, provisional, saveCouncilDefaults, seatScore, summarizeCouncilUsage, type CouncilLedgerProjection, type CouncilProgress, type CouncilRound, type CouncilSeatWorker } from './council';
 
 /* Council in the composer: the tray's settings button and panel, and one compact strip inside the prompt box (its state,
  * the reviewers on demand, and what to do next). The Agents flyout shows the same state line and rows. */
@@ -332,12 +332,12 @@ export function councilReadOnlyPresenterHtml(value: CouncilLedgerView): string {
     ? '<section class="council-reported-claims" aria-label="Current reviewer-reported findings"><h4>Current reviewer reports — unverified claims</h4><p>Claims from scored reviewer messages are not independently verified checks, native findings or a Council pass.</p><ul>' + reportedMarkup + '</ul></section>'
     : '';
   const historicalMarkup = history.filter(claim =>
-    claim.cycleId === value.cycleId && claim.evidenceVerified === false
+    councilHistoryCycleAllowed(value.cycleId, claim.cycleId) && claim.evidenceVerified === false
     && claim.locationVerified === false && claim.verifiedEvidenceRefs.length === 0
   ).slice(-32).map(claim =>
     '<li><strong>' + escape(claim.severity) + ' · ' + escape(claim.title) + '</strong><p>' +
     escape(claim.category) + ' · ' + escape(claim.lens) + ' · ' + escape(claim.explanation) +
-    '</p><small>Unverified older reviewer report · Round ' + escape(String(claim.round)) +
+    '</p><small>Unverified older reviewer report · Cycle ' + escape(claim.cycleId) + ' · Round ' + escape(String(claim.round)) +
     ' · ' + escape(claim.workerId) + ' · Finding ID ' + escape(claim.id) +
     ' · Artifact revision ' + escape(claim.artifactRevision ?? 'Unknown') + '</small></li>'
   ).join('');

@@ -146,6 +146,20 @@ export const supportedCouncilStrategy = (strategy: CouncilStrategy): boolean =>
 /** Native pins a root Council cycle to `<sessionId>:<councilSince>`; mirror that identity at the view boundary. */
 export const councilCycleId = (team: Pick<TeamSnapshot, 'sessionId' | 'councilSince'>): string => `${team.sessionId}:${team.councilSince ?? 0}`;
 
+/** Historical reports are inert, native-authenticated same-task records, never live approvals.
+ * Reject future cycles, foreign tasks, noncanonical timestamps and imprecise IDs. */
+export function councilHistoryCycleAllowed(current: string, candidate: string): boolean {
+  if (candidate === current) return true;
+  const separator = current.lastIndexOf(':');
+  if (separator <= 0 || !candidate.startsWith(current.slice(0, separator + 1))) return false;
+  const now = current.slice(separator + 1);
+  const before = candidate.slice(separator + 1);
+  if (!/^[1-9][0-9]*$/.test(now) || !/^[1-9][0-9]*$/.test(before)) return false;
+  const currentSince = Number(now), previousSince = Number(before);
+  return Number.isSafeInteger(currentSince) && Number.isSafeInteger(previousSince) && previousSince < currentSince;
+}
+
+
 /** Reject a snapshot from another task, an earlier cycle, or an older revision. Equal revisions in the same cycle
  *  are allowed because projection arrays can be refreshed without changing visible worker state. */
 export function acceptsCouncilSnapshot(candidate: TeamSnapshot, current: TeamSnapshot | null, sessionId: string): boolean {
@@ -183,8 +197,15 @@ export function councilLedgerForCurrentCycle(
   ]);
   const allowedCycleIds = new Set([cycleId, ...childCycleIds]);
   const findings = team.councilFindings?.filter(finding => allowedCycleIds.has(finding.cycleId));
+  // Native has already reauthenticated any prior-cycle claims against its
+  // persisted reviewer grant and root/session link. The UI keeps those claims
+  // unverified and excludes foreign, future or malformed cycle identities.
   const historicalReportedFindings = team.councilHistoricalReportedFindings
-    ?.filter(claim => claim.cycleId === cycleId).slice(-32);
+    ?.filter(claim => claim.cycleId === cycleId || (
+      councilHistoryCycleAllowed(cycleId, claim.cycleId)
+      && claim.evidenceVerified === false && claim.locationVerified === false
+      && claim.verifiedEvidenceRefs?.length === 0
+    )).slice(-32);
   const reportedFindings = team.councilReportedFindings
     ?.filter(claim => claim.cycleId === cycleId).slice(-32);
   const findingIds = new Set((findings ?? []).map(finding => finding.id));

@@ -7,9 +7,10 @@ bounded, deduplicated decision metadata for the exact repository, actor, kind,
 and issue/PR subject. It does not admit a Ticket, launch a Worker, request a
 native Council verdict, post a comment or approve a review.
 
-Supported GitHub REST Events actions include issue opening/editing, issue/PR
-comments, PR opening/closing/reopening, review creation/update/dismissal and
-PR diff review-comment creation. For backward compatibility the internal source
+Supported GitHub REST Events actions include issue opening/editing,
+assignment/unassignment and labeling/unlabeling; issue/PR comments; PR
+opening/closing/reopening/merging and assignment/label changes; review
+creation/update/dismissal and PR diff review-comment creation. For backward compatibility the internal source
 kind `pull_request_review.submitted` represents a GitHub REST
 `PullRequestReviewEvent` with `payload.action=created`. GitHub webhooks use
 a different review action name (`submitted`); webhook payloads are **not**

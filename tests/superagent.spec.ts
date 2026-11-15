@@ -631,6 +631,14 @@ test('Off and Observe source controls expose durable native receipts without Aut
   // These actions are surfaced by the native GitHub Events adapter, not
   // inferred from issue/review text or mistaken for Council acceptance.
   const kinds = host.getByRole('combobox',{name:'Event class'});
+  // Native authenticated triage events are selectable without enabling Auto.
+  for (const kind of [
+    'issues.assigned','issues.unassigned','issues.labeled','issues.unlabeled',
+    'pull_request.merged','pull_request.assigned','pull_request.unassigned',
+    'pull_request.labeled','pull_request.unlabeled',
+  ]) {
+    await expect(kinds.locator('option[value="' + kind + '"]')).toHaveCount(1);
+  }
   await expect(kinds.locator('option[value="pull_request.closed"]')).toHaveCount(1);
   await expect(kinds.locator('option[value="pull_request_review.submitted"]')).toHaveCount(1);
   await expect(kinds.locator('option[value="pull_request_review_comment.created"]')).toHaveCount(1);

@@ -1681,7 +1681,8 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
         for (worker, _) in in_round(team, round)
             .filter(|(worker, seat)| counts(worker, seat) && !unsettled(&worker.status) && seat.score.is_some())
         {
-            if !seen.insert(worker.id.as_str()) || worker.session_id.is_empty()
+            if !worker.read_only || worker.status != "completed" || worker.abandoned || worker.wrote_at != 0
+                || !seen.insert(worker.id.as_str()) || worker.session_id.is_empty()
                 || !seen_sessions.insert(worker.session_id.as_str())
             {
                 return false;
@@ -1699,6 +1700,15 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
 fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> bool {
     if config.strategy != CouncilExecutionStrategy::Escalated || config.force_escalation {
         return true;
+    }
+    // Even when no escalation was triggered, a writable, abandoned or
+    // subsequently modified reviewer cannot supply native S2 approval.
+    if !view.complete(view.latest) || !in_round(team, view.latest)
+        .filter(|(worker, seat)| counts(worker, seat) && seat.score.is_some())
+        .all(|(worker, _)| worker.read_only && worker.status == "completed"
+            && !worker.abandoned && worker.wrote_at == 0)
+    {
+        return false;
     }
     let last_trigger = (1..=view.latest).rev().find(|&round| {
         in_round(team, round).any(|(worker, seat)| counts(worker, seat)
@@ -1912,7 +1922,8 @@ fn two_phase_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view: &Round
             return false;
         }
         for (worker, seat) in in_round(team, round).filter(|(worker, seat)| counts(worker, seat)) {
-            if !worker.read_only || worker.status != "completed" || seat.score.is_none()
+            if !worker.read_only || worker.status != "completed" || worker.abandoned
+                || worker.wrote_at != 0 || seat.score.is_none()
                 || !reviewer_ids.insert(worker.id.as_str())
                 || worker.session_id.is_empty()
                 || !session_ids.insert(worker.session_id.as_str())

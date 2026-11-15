@@ -819,6 +819,14 @@ fn forced_s2_cannot_approve_uncorrected_high_severity_or_count_severe_rounds() {
     team.changed_at = SINCE + 3;
     assert_eq!(council::status(&team).unwrap().state, "passed");
     assert!(finish_refusal(&team).is_none());
+    let mut wrote_during_review = team.clone();
+    wrote_during_review.workers[2].wrote_at = SINCE + 4;
+    assert_ne!(council::status(&wrote_during_review).unwrap().state, "passed",
+        "S2 cannot count a scored reviewer that wrote to the artifact");
+    let mut abandoned_score = team.clone();
+    abandoned_score.workers[3].abandoned = true;
+    assert_ne!(council::status(&abandoned_score).unwrap().state, "passed",
+        "S2 cannot recycle an abandoned review with a persisted score");
     // A severe finding in the second round is again unresolved; high numeric
     // scores, even in round three, cannot approve without another correction.
     team.workers[2].council.as_mut().unwrap().reported_severe_finding = true;
@@ -836,6 +844,10 @@ fn native_s2_score_trigger_requires_a_fresh_independent_review_from_the_enabled_
     ]);
     // S2 does not require a second round without a deterministic trigger.
     assert_eq!(council::status(&team).unwrap().state, "passed");
+    let mut no_trigger_writer = team.clone();
+    no_trigger_writer.workers[0].wrote_at = SINCE + 2;
+    assert_ne!(council::status(&no_trigger_writer).unwrap().state, "passed",
+        "even no-trigger S2 must reject a reviewer that modified the artifact");
     team.workers[0].council.as_mut().unwrap().score = Some(8.0);
     assert_eq!(council::status(&team).unwrap().state, "fixing");
     team.changed_at = SINCE + 3; // Work was corrected after the low score.
@@ -846,6 +858,16 @@ fn native_s2_score_trigger_requires_a_fresh_independent_review_from_the_enabled_
     team.workers.extend([first, second]);
     assert_eq!(council::status(&team).unwrap().state, "passed");
     assert!(finish_refusal(&team).is_none());
+    for changed in ["wrote", "abandoned", "writable"] {
+        let mut invalid = team.clone();
+        match changed {
+            "wrote" => invalid.workers[2].wrote_at = SINCE + 4,
+            "abandoned" => invalid.workers[3].abandoned = true,
+            _ => invalid.workers[2].read_only = false,
+        }
+        assert_ne!(council::status(&invalid).unwrap().state, "passed",
+            "S2 fresh reviewer authority cannot be bypassed by a persisted score");
+    }
     let mut replay = team.clone();
     replay.workers[2].id = "original-a".into();
     assert_ne!(council::status(&replay).unwrap().state, "passed");
@@ -1101,6 +1123,16 @@ fn native_s3_uses_fresh_read_only_challengers_and_never_passes_phase_one_alone()
     team.workers.extend([second_a, second_b]);
     assert_eq!(council::status(&team).unwrap().state, "passed");
     assert!(finish_refusal(&team).is_none());
+    for index in [0, 3] {
+        let mut tampered = team.clone();
+        tampered.workers[index].wrote_at = SINCE + 4;
+        assert_ne!(council::status(&tampered).unwrap().state, "passed",
+            "either S3 phase must reject a reviewer that wrote to the artifact");
+    }
+    let mut abandoned_challenger = team.clone();
+    abandoned_challenger.workers[2].abandoned = true;
+    assert_ne!(council::status(&abandoned_challenger).unwrap().state, "passed",
+        "an abandoned S3 challenge is not an independent completed review");
     assert!(council::round_for(&team, &config, None).unwrap_err().contains("challenge allocation"));
 
     // Either phase can report an unresolved contradiction; a numeric score

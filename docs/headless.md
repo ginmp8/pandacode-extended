@@ -806,3 +806,15 @@ observed native eligibility, selected role, policy revision and execution
 limits. This snapshot does not create a Ticket or grant authority; the actual
 admission must independently recheck state, checkout and provider availability.
 Malformed inputs fail before any admission or external effect.
+
+
+### Revision-bound Stop for headless operators
+
+`pandacode serve --stop-ticket-at-revision <ticket-id> <expected-revision>`
+acquires the native effect dispatch fence before comparing the Ticket revision
+and revoking the Mandate. A stale revision changes neither native authority
+nor audit history. On a match, every running task-owned Assignment becomes
+stopped, pending external effects become uncertain, and one Stop event is
+committed atomically. The command never claims to terminate detached provider
+processes or replays uncertain effects. Emergency `--stop-ticket` remains
+available for unconditional operator revocation.

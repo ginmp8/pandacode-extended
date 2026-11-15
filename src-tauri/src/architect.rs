@@ -7796,12 +7796,14 @@ fn dispatch_as_inner(
                         }
                         if let Some(bot) = &selected_bot {
                             binding.reviewer_bot_id = Some(bot.id.clone());
-                            // A hybrid plan can legitimately have one selected bot and one or
-                            // more automatic seats. ReviewerBinding's legacy roster contract
-                            // requires a 2–8 bot roster, so leave that optional legacy pin empty
-                            // for the single-bot hybrid; the composition and frozen round record
-                            // remain the source of truth for the combined quorum.
-                            if bot.roster_bot_ids.len() >= 2 {
+                            // A composed Council freezes all selected identities separately
+                            // from its combined automatic + direct + nested root-seat quorum.
+                            // Legacy selected-only Council keeps the original roster count.
+                            if team.config.council.as_ref()
+                                .is_some_and(|config| config.composition.is_some())
+                            {
+                                binding.roster_bot_ids = bot.roster_bot_ids.clone();
+                            } else if bot.roster_bot_ids.len() >= 2 {
                                 binding.roster_bot_ids = bot.roster_bot_ids.clone();
                                 binding.required_reviewers = Some(bot.roster_bot_ids.len());
                             }

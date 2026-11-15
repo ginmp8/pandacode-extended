@@ -4106,6 +4106,11 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     }
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // Single-writer ownership precedes database migration and restart recovery.
+    let owner = headless::acquire_store_owner(&dir)?;
+    if !app.manage(owner) {
+        return Err("Could not retain ownership of the PandaCode data directory.".into());
+    }
     secret_store::setup(&dir);
     feature_controls::setup();
     providers::sweep_cline_mcp_settings(&dir);

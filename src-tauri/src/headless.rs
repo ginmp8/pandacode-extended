@@ -6,6 +6,8 @@
 
 use crate::{message_queue, AppState};
 use std::collections::BTreeSet;
+use std::fs::OpenOptions;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
@@ -774,6 +776,29 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
             start_services(app.clone());
         }
     }
+}
+
+/// Keeps exactly one current PandaCode runtime on a data directory. Desktop
+/// and headless startup share this lock; Tauri's managed state holds it through
+/// shutdown, before setup_common can open a Store and run restart recovery.
+pub(crate) struct StoreOwnerLock {
+    _file: std::fs::File,
+}
+
+pub(crate) fn acquire_store_owner(data_dir: &Path) -> Result<StoreOwnerLock, String> {
+    std::fs::create_dir_all(data_dir).map_err(|error| error.to_string())?;
+    let path = data_dir.join(".headless-serve.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| format!("could not open the local serve ownership lock: {error}"))?;
+    file.try_lock().map_err(|error| format!(
+        "exclusive ownership of this data directory could not be established ({error}); an existing host may still be active"
+    ))?;
+    Ok(StoreOwnerLock { _file: file })
 }
 
 /// The serve-only services: Ctrl-C/SIGTERM, one status line for journald, native limit
@@ -2336,6 +2361,75 @@ mod tests {
         assert!(parsed("--sync-bots").is_err());
         assert!(parsed("--sync-bots sources.json --import-bots bots.json").is_err());
         assert!(parsed("--sync-bots sources.json --sign-in").is_err());
+    }
+
+    #[test]
+    fn shared_runtime_store_lock_rejects_a_second_process_until_shutdown() {
+        let dir = StoreOwnerTestDir::new();
+        let first = acquire_store_owner(dir.path()).unwrap();
+        assert_child_lock_result(dir.path(), false);
+        drop(first);
+        assert_child_lock_result(dir.path(), true);
+    }
+
+    struct StoreOwnerTestDir(PathBuf);
+
+    impl StoreOwnerTestDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("pandacode-headless-owner-{}", crate::storage::id()));
+            let dir = Self(path);
+            std::fs::create_dir_all(dir.path()).unwrap();
+            dir
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for StoreOwnerTestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn assert_child_lock_result(dir: &std::path::Path, expected_success: bool) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("headless::tests::store_owner_lock_child_probe")
+            .arg("--nocapture")
+            .env("PANDACODE_STORE_LOCK_PROBE_DIR", dir)
+            .env(
+                "PANDACODE_STORE_LOCK_PROBE_EXPECT_SUCCESS",
+                expected_success.to_string(),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child lock probe failed (expected acquisition: {expected_success}):\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("headless::tests::store_owner_lock_child_probe ... ok"),
+            "child lock probe did not run successfully:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+        );
+    }
+
+    #[test]
+    fn store_owner_lock_child_probe() {
+        let Ok(dir) = std::env::var("PANDACODE_STORE_LOCK_PROBE_DIR") else {
+            return;
+        };
+        let expected_success =
+            std::env::var("PANDACODE_STORE_LOCK_PROBE_EXPECT_SUCCESS").unwrap() == "true";
+        let acquired = acquire_store_owner(std::path::Path::new(&dir));
+        assert_eq!(acquired.is_ok(), expected_success);
+        drop(acquired);
     }
 
     #[test]

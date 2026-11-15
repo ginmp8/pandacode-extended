@@ -1065,6 +1065,84 @@ fn configured_cost_cap_admits_every_strategy_before_allocating_a_session() {
 }
 
 #[test]
+fn invalid_nested_two_phase_dispatch_leaves_persisted_state_unchanged() {
+    use council::SelectedReviewerMode as Mode;
+
+    let (state, root_id) = state_fixture();
+    install_two_phase_team(&state, &root_id, 0, &[
+        ("nested-a", Mode::Nested),
+        ("nested-b", Mode::Nested),
+    ]);
+    {
+        let store = state.store.lock().unwrap();
+        let mut root = load(&store, &root_id).unwrap().unwrap();
+        for reviewer in &mut root
+            .config
+            .council
+            .as_mut()
+            .unwrap()
+            .composition
+            .as_mut()
+            .unwrap()
+            .selected
+        {
+            reviewer.nested.as_mut().unwrap().max_rounds = 1;
+        }
+        save(&store, &mut root).unwrap();
+    }
+
+    let persisted_snapshot = |store: &storage::Store| {
+        let root = load(store, &root_id).unwrap().unwrap();
+        let team = serde_json::to_value(root).unwrap();
+        let counts = ["sessions", "architect_teams", "architect_workers", "architect_requests"]
+            .into_iter()
+            .map(|table| {
+                let sql = format!("SELECT COUNT(*) FROM {table}");
+                let count = store
+                    .db
+                    .query_row(&sql, [], |row| row.get::<_, i64>(0))
+                    .unwrap();
+                (table, count)
+            })
+            .collect::<Vec<_>>();
+        let mut statement = store
+            .db
+            .prepare("SELECT parent_session_id, key, kind, content, worker_id FROM architect_requests ORDER BY parent_session_id, key")
+            .unwrap();
+        let requests = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                ))
+            })
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap();
+        (team, counts, requests)
+    };
+    let before = persisted_snapshot(&state.store.lock().unwrap());
+    let error = dispatch_council_round(
+        &state,
+        &root_id,
+        vec![
+            council_review_assignment("invalid-two-phase-a", None, Some("nested-a"), "security"),
+            council_review_assignment("invalid-two-phase-b", None, Some("nested-b"), "quality"),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        "Council configuration is invalid: Nested Council reviewer \"nested-a\" has invalid maxRounds (at least 2 for inherited TwoPhase strategy)."
+    );
+    let after = persisted_snapshot(&state.store.lock().unwrap());
+    assert_eq!(after, before, "rejected dispatch must not change team, sessions, workers, or requests");
+}
+
+#[test]
 fn composed_pass_blocks_when_a_configured_cost_cap_has_no_receipt_proof() {
     use council::{AutomaticReviewerCount as Count, CouncilCriterionOrigin as Origin, CouncilCriteriaSource as Source};
     let (store, mut team) = fixture();

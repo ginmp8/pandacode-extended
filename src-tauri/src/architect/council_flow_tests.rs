@@ -1332,18 +1332,18 @@ fn native_concurrent_roots_dispatch_and_settle_the_same_bot_without_state_leakag
     let policy_identity =
         |binding: &reviewer_security::ReviewerBinding| match &binding.snapshot.tool_policy {
             reviewer_security::ReviewerToolPolicy::Scoped(policy) => Some((
-                policy.authorization_id.as_str(),
-                policy.grants[0].resource.as_str(),
+                policy.authorization_id.clone(),
+                policy.grants[0].resource.clone(),
             )),
             reviewer_security::ReviewerToolPolicy::NativeReadOnly => None,
         };
     assert_eq!(
         policy_identity(&task_a.binding),
-        Some(("ac22-grant-a", "src/root-a.rs"))
+        Some(("ac22-grant-a".to_owned(), "src/root-a.rs".to_owned()))
     );
     assert_eq!(
         policy_identity(&task_b.binding),
-        Some(("ac22-grant-b", "src/root-b.rs"))
+        Some(("ac22-grant-b".to_owned(), "src/root-b.rs".to_owned()))
     );
     let skills_a = task_a.binding.snapshot.skills.as_ref().unwrap();
     let skills_b = task_b.binding.snapshot.skills.as_ref().unwrap();

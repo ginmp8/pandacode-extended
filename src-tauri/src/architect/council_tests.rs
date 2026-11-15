@@ -3876,6 +3876,74 @@ fn dispatch_validation_fails_closed_for_self_review_and_unsupported_capabilities
 }
 
 #[test]
+fn dispatch_validation_rejects_nested_one_round_inherited_two_phase_plan() {
+    use council::{AutomaticReviewerCount as Count, CouncilCompositionError as Error};
+
+    let config_for = |strategy, child_rounds| {
+        let mut composition = composition(
+            false,
+            Count::Fixed(0),
+            vec![nested_reviewer("nested-a"), nested_reviewer("nested-b")],
+        );
+        composition.strategy = strategy;
+        for reviewer in &mut composition.selected {
+            reviewer.nested.as_mut().unwrap().max_rounds = child_rounds;
+        }
+        config_for_composition(composition)
+    };
+    let capabilities_for = |config: &council::CouncilConfig| {
+        council::CouncilCompositionCapabilities {
+            automatic_reviewers: true,
+            supported_strategies: vec![
+                council::CouncilStrategy::Parallel,
+                council::CouncilStrategy::Escalated,
+                council::CouncilStrategy::TwoPhase,
+            ],
+            reviewers: config
+                .composition
+                .as_ref()
+                .unwrap()
+                .selected
+                .iter()
+                .map(|reviewer| council::CouncilReviewerCapability {
+                    bot_id: reviewer.bot_id.clone(),
+                    direct: true,
+                    nested: true,
+                })
+                .collect(),
+        }
+    };
+
+    let invalid = config_for(council::CouncilStrategy::TwoPhase, 1);
+    let error = invalid
+        .validate_for_dispatch(None, &capabilities_for(&invalid))
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "Council configuration is invalid: Nested Council reviewer \"nested-a\" has invalid maxRounds (at least 2 for inherited TwoPhase strategy)."
+    );
+    assert!(matches!(
+        error,
+        Error::InvalidCouncilConfig(reason)
+            if reason == "Nested Council reviewer \"nested-a\" has invalid maxRounds (at least 2 for inherited TwoPhase strategy)."
+    ));
+
+    for (strategy, child_rounds) in [
+        (council::CouncilStrategy::Parallel, 1),
+        (council::CouncilStrategy::Escalated, 1),
+        (council::CouncilStrategy::TwoPhase, 2),
+    ] {
+        let valid = config_for(strategy, child_rounds);
+        assert!(
+            valid
+                .validate_for_dispatch(None, &capabilities_for(&valid))
+                .is_ok(),
+            "{strategy:?} with {child_rounds} child round(s) remains valid"
+        );
+    }
+}
+
+#[test]
 fn required_criteria_and_verified_evidence_are_frozen_and_gate_by_the_stricter_target() {
     use council::{
         AutomaticReviewerCount as Count, CouncilCriteriaSource as Source,

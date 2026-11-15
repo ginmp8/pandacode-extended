@@ -1483,6 +1483,12 @@ impl CouncilComposition {
                     if !(1..=MAX_ROUNDS).contains(&nested.max_rounds) {
                         return Err(CouncilCompositionError::InvalidNestedConfig { bot_id: reviewer.bot_id.clone(), reason: "maxRounds (1..=100)" });
                     }
+                    if self.strategy == CouncilStrategy::TwoPhase && nested.max_rounds < 2 {
+                        return Err(CouncilCompositionError::InvalidNestedConfig {
+                            bot_id: reviewer.bot_id.clone(),
+                            reason: "maxRounds (at least 2 for inherited TwoPhase strategy)",
+                        });
+                    }
                 }
             }
         }

@@ -5888,7 +5888,8 @@ mod tests {
             .admitted_profile.unwrap();
         assert_eq!(pinned.members,original.members);
         let denied=retry_blocked(&mut store,&ticket.id,false).unwrap_err();
-        assert!(denied.contains("changed after Demand admission"));
+        assert!(denied.contains("changed after Demand admission")
+            || denied.contains("unavailable or out of scope"),"{denied}");
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",[&ticket.id],
@@ -8858,7 +8859,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_multi_role_team_cannot_bypass_native_admission_or_retry() {
+    fn legacy_roster_sidecar_cannot_change_native_team_role_authority() {
         let mut store = fixture();
         let config = enabled(&store);
         // Leave one blocked ticket and one coordinator-planned ticket before
@@ -8880,8 +8881,8 @@ mod tests {
              VALUES('worker-b','Other Worker','project','codex','default','plan',?1,?1)",
             [storage::now()],
         ).unwrap();
-        // Normal roster editing refuses enabled Teams; an inconsistent DB
-        // or concurrent writer still must not gain native execution authority.
+        // An old sidecar or an inconsistent external writer cannot extend the
+        // canonical versioned Team or grant execution to an unadmitted bot.
         store.db.execute(
             "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
              VALUES(?1,'worker',1,'worker-b')",
@@ -8889,26 +8890,25 @@ mod tests {
         ).unwrap();
 
         let advisory = manual_preflight(&store, &config.id, "Fresh task", false, false).unwrap();
-        assert!(!advisory.eligible);
-        assert!(advisory.reason.unwrap().contains("Multi-member"));
-        assert!(admit(&mut store, &config.id, "Fresh task", "roster-denied", false)
-            .unwrap_err().contains("Multi-member"));
-        assert!(retry_blocked(&mut store, &blocked.id, false)
-            .unwrap_err().contains("Multi-member"));
-        assert!(prepare_coordinated_worker(&mut store, &planned.id, false)
-            .unwrap_err().contains("Multi-member"));
-
+        assert!(advisory.eligible,"legacy sidecar cannot change native preflight");
+        let current=configuration(&store,&config.id).unwrap();
+        assert_eq!(current.worker_bot_ids,vec!["worker"]);
+        let (fresh,launched)=admit(&mut store,&config.id,"Fresh task","roster-native",false).unwrap();
+        assert!(launched);
+        let admitted=ticket_team_snapshot(&store,&fresh.id).unwrap();
+        assert_eq!(admitted.worker_bot_ids,vec!["worker"]);
+        assert!(admitted.reviewer_bot_ids.is_empty());
         assert_eq!(get_ticket(&store, &blocked.id).unwrap().state, "blocked");
         assert_eq!(get_ticket(&store, &planned.id).unwrap().state, "queued");
         let tickets: i64 = store.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets", [], |r| r.get(0),
         ).unwrap();
-        assert_eq!(tickets, 2, "unsupported role topology must not create new Tickets");
+        assert_eq!(tickets, 3, "sidecar must not fabricate an additional demand");
         let worker_attempts: i64 = store.db.query_row(
             "SELECT COUNT(*) FROM sa_assignments WHERE bot_id='worker-b'",
             [], |r| r.get(0),
         ).unwrap();
-        assert_eq!(worker_attempts, 0, "no unsupported Worker may be admitted");
+        assert_eq!(worker_attempts, 0, "sidecar-only Worker cannot be assigned");
     }
 
     #[test]

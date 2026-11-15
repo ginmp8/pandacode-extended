@@ -1096,9 +1096,12 @@ impl UsageMetricAccumulator {
     }
 }
 
+type UsageRetryAssignmentKey = (String, String, String, u8);
+type UsageRetryAggregate = (CouncilUsageValueStatus, u64, usize);
+
 #[derive(Default)]
 struct UsageRetryAccumulator {
-    by_assignment: BTreeMap<(String, String, String, u8), (CouncilUsageValueStatus, u64, usize)>,
+    by_assignment: BTreeMap<UsageRetryAssignmentKey, UsageRetryAggregate>,
     unknown_records: usize,
 }
 
@@ -1166,9 +1169,12 @@ fn usage_status_rank(status: CouncilUsageValueStatus) -> u8 {
         CouncilUsageValueStatus::CalculatedEstimated => 2, CouncilUsageValueStatus::Unknown => 3 }
 }
 
+type UsageCostAggregateKey = (u8, Option<String>, Option<String>, Option<String>);
+type UsageCostAggregate = (Option<u64>, usize, HashSet<u64>);
+
 #[derive(Default)]
 struct UsageCostAccumulator {
-    totals: BTreeMap<(u8, Option<String>, Option<String>, Option<String>), (Option<u64>, usize, HashSet<u64>)>,
+    totals: BTreeMap<UsageCostAggregateKey, UsageCostAggregate>,
 }
 
 impl UsageCostAccumulator {
@@ -1286,11 +1292,13 @@ pub(super) struct CouncilUsageParentRound {
     pub root_round: usize,
 }
 
-/// Aggregate projected rows for one root. Duplicate replays are idempotent; conflicting IDs or
-/// child links fail closed. When child usage exists, its parent composite stays in detail but is
-/// excluded from root totals so the leaf records are counted once.
-pub fn aggregate_usage_records(root_cycle_id: &str, records: &[CouncilUsageRecord], child_receipts: &[ChildCouncilReceipt])
-    -> std::result::Result<CouncilUsageAggregation, CouncilCompositionError> {
+/// Aggregate projected rows for one root in tests that do not need parent-round links.
+#[cfg(test)]
+pub fn aggregate_usage_records(
+    root_cycle_id: &str,
+    records: &[CouncilUsageRecord],
+    child_receipts: &[ChildCouncilReceipt],
+) -> std::result::Result<CouncilUsageAggregation, CouncilCompositionError> {
     aggregate_usage_records_with_parent_rounds(root_cycle_id, records, child_receipts, &[])
 }
 

@@ -653,6 +653,32 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
             status.notice = Some("council_cost_cap_unproven: the configured estimated-cost cap cannot be verified from current native estimate and usage receipts.".into());
         }
     }
+    if let Some(mut status) = team.council_status.take() {
+        require_composed_terminal_receipts(store, team, &mut status);
+        team.council_status = Some(status);
+    }
+}
+
+const COMPOSED_TERMINAL_RECEIPTS_INVALID: &str = "council_terminal_receipts_invalid: every required terminal Council seat needs a correctly correlated persisted Pass receipt.";
+
+fn require_composed_terminal_receipts(
+    store: &Store,
+    team: &TeamSnapshot,
+    status: &mut CouncilStatus,
+) {
+    let composed = team
+        .config
+        .council
+        .as_ref()
+        .and_then(|config| config.composition.as_ref())
+        .is_some();
+    if composed
+        && matches!(status.state.as_str(), "passed" | "accepted")
+        && !verify_composition_terminal_receipts(store, team, status)
+    {
+        status.state = "blocked".into();
+        status.notice = Some(COMPOSED_TERMINAL_RECEIPTS_INVALID.into());
+    }
 }
 
 fn native_council_status(store: &Store, team: &TeamSnapshot) -> Option<CouncilStatus> {
@@ -678,6 +704,7 @@ fn native_council_status(store: &Store, team: &TeamSnapshot) -> Option<CouncilSt
         status.state = "blocked".into();
         status.notice = Some("council_cost_cap_unproven: the configured estimated-cost cap cannot be verified from current native estimate and usage receipts.".into());
     }
+    require_composed_terminal_receipts(store, team, &mut status);
     Some(status)
 }
 
@@ -722,6 +749,19 @@ fn native_council_finish_refusal(store: &Store, team: &TeamSnapshot) -> Option<S
         && !s3_phase2_decisions_proven(store, team, team.council_status.as_ref().map_or(0, |status| status.round))
     {
         return Some("council_phase2_decision_missing: every S3 challenge must have a persisted independent challenge receipt.".into());
+    }
+    if refusal.is_none()
+        && team
+            .config
+            .council
+            .as_ref()
+            .is_some_and(|config| config.composition.is_some())
+    {
+        if let Some(status) = native_council_status(store, team) {
+            if status.notice.as_deref() == Some(COMPOSED_TERMINAL_RECEIPTS_INVALID) {
+                return status.notice;
+            }
+        }
     }
     refusal
 }
@@ -950,7 +990,10 @@ fn verify_composition_terminal_receipts(
     let Some(composition) = config.composition.as_ref() else {
         return true;
     };
-    if composition.validate().is_err() || status.state != "passed" || status.stale {
+    if composition.validate().is_err()
+        || !matches!(status.state.as_str(), "passed" | "accepted")
+        || status.stale
+    {
         return false;
     }
     // Criterion outcomes may be present in the current snapshot before their
@@ -964,7 +1007,7 @@ fn verify_composition_terminal_receipts(
     ) else {
         return false;
     };
-    if persisted_status.state != "passed"
+    if persisted_status.state != status.state
         || persisted_status.stale
         || unresolved_critical_finding_notice(store, team, &persisted_ledger).is_some()
         || persisted_status.round != status.round
@@ -3022,25 +3065,21 @@ fn persist_council_terminal_receipts(
             })
         })
         .unwrap_or(council::CouncilStrategy::Parallel);
-    let leaf_reviews = if let Some(link) = &nested_link {
-        nested_leaf_total(
-            store,
-            &link.root_session_id,
-            &link.root_council_cycle_id,
-            link.root_round,
-        )?
+    let root = if let Some(link) = &nested_link {
+        if link.root_session_id == team.session_id {
+            team.clone()
+        } else {
+            load(store, &link.root_session_id)?.ok_or(
+                "reviewer_session_mismatch: Council root disappeared during usage accounting.",
+            )?
+        }
     } else {
-        team.workers
-            .iter()
-            .filter(|candidate| {
-                candidate.council.is_some()
-                    && candidate
-                        .council
-                        .as_ref()
-                        .is_some_and(|candidate_seat| candidate_seat.round == seat.round)
-            })
-            .count()
+        team.clone()
     };
+    let root_round = nested_link
+        .as_ref()
+        .map_or(seat.round, |link| link.root_round);
+    let leaf_reviews = council_leaf_review_total(store, &root, team, &root_cycle_id, root_round)?;
     let s2_estimate = s2_estimate_receipt(store, team, worker)?;
     if (strategy == council::CouncilStrategy::Escalated || council_cost_cap_scope(store, team)?.is_some()) && s2_estimate.is_none() {
         return Err("council_cost_cap_unproven: the completed seat has no persisted local cost estimate.".into());
@@ -3346,27 +3385,6 @@ fn council_child_links_for_root_cycle(
             Err(error) => Some(Err(error)),
         })
         .collect()
-}
-
-fn nested_leaf_total(
-    store: &Store,
-    root_session_id: &str,
-    cycle_id: &str,
-    root_round: usize,
-) -> Result<usize> {
-    let mut total = 0usize;
-    for link in council_child_links_for_root(store, root_session_id, cycle_id, root_round)? {
-        let child = load(store, &link.child_session_id)?
-            .ok_or("reviewer_session_mismatch: nested Council task is missing.")?;
-        total = total.saturating_add(
-            child
-                .workers
-                .iter()
-                .filter(|worker| worker.council.is_some())
-                .count(),
-        );
-    }
-    Ok(total)
 }
 
 fn council_leaf_review_total(

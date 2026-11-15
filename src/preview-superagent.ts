@@ -43,7 +43,7 @@ export async function invokeSuperagent<T>(
 ):Promise<T> {
   // Pure listing must not race the preview's first bots_list seed. Only
   // commands that actually resolve portable bot identities may load bots.
-  const needsBots=['superagent_create','superagent_update',
+  const needsBots=['superagent_create','superagent_duplicate','superagent_update',
     'superagent_manifest_export','superagent_manifest_preview','superagent_manifest_import'].includes(command);
   const bots=needsBots?await listBots():[];
   const find=(id:string)=>{ const b=bots.find(b=>b.id===id); if(!b)throw Error('Bot no longer exists.'); return b; };
@@ -210,6 +210,35 @@ export async function invokeSuperagent<T>(
     // Ticket orchestration ownership and rejects conflicting thread reuse.
     case 'superagent_source_link_thread':
       throw Error('Source linking requires a native trusted event source.');
+    case 'superagent_duplicate': {
+      const original=get(args.sourceId);
+      if(original.policyRevision!==args.expectedRevision)
+        throw Error('Source Team policy revision changed; reload before duplicating.');
+      const name=String(args.name??'').trim();
+      if(!name||new TextEncoder().encode(name).length>120||configName(name))
+        throw Error('Choose a unique Team name before duplicating.');
+      const roles=resolveRoles({
+        coordinatorBotId:original.coordinatorBotId,
+        workerBotId:original.workerBotId,
+        workerBotIds:[...original.workerBotIds],
+        reviewerBotIds:[...original.reviewerBotIds],
+        councilRequired:original.councilRequired===true,
+      });
+      const created:Config={
+        id:crypto.randomUUID(),name,
+        coordinatorBotId:roles.coordinator.id,
+        workerBotId:roles.workerBotIds[0],
+        workerBotIds:[...roles.workerBotIds],
+        reviewerBotIds:[...roles.reviewerBotIds],
+        projectId:roles.workers[0].projectId,
+        teamVersion:1,enabled:false,policyRevision:1,
+        councilRequired:original.councilRequired===true,
+      };
+      configs.set(created.id,created);
+      teamStrategies.set(created.id,defaultStrategy());
+      value=created;
+      break;
+    }
     case 'superagent_create':{
       const input=args.input,roles=resolveRoles(input),b=roles.workers[0];
       if(!input.name?.trim()||configName(input.name))throw Error('Invalid or duplicate orchestration.');

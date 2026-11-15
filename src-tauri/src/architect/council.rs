@@ -2068,9 +2068,9 @@ pub(super) fn accept(state: &AppState, session_id: &str) -> Result<TeamSnapshot>
 
 /// The score in a report: the last line that starts (past markdown) with "council score", read as
 /// the number after it, optionally `/10`. A last line that does not read as 0..=10 is no score.
-pub(super) #[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CouncilHistoricalReportedFinding {
+pub(super) struct CouncilHistoricalReportedFinding {
     pub schema_version: u8,
     pub id: String,
     pub cycle_id: String,

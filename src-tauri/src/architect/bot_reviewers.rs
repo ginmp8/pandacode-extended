@@ -293,7 +293,7 @@ fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_execu
             return Err("reviewer_skill_unavailable: central Skills Library could not be opened.".into());
         } else { None };
         reviewers.push(SelectedReviewer {
-            id: id.clone(), roster_bot_ids: roster.iter().map(|(id, _, _)| id.clone()).collect(),
+            id: id.to_string(), roster_bot_ids: roster.iter().map(|(id, _, _)| id.to_string()).collect(),
             composition_mode: *mode, nested_config: nested.clone(), profile: profile(&bot),
             context: super::reviewer_security::ReviewerBotContext::from_bot(&bot), tool_policy, skills,
         });

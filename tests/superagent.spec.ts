@@ -339,7 +339,8 @@ test('Preview coordinated submission fails closed and preserves direct preview',
   expect(result.assignmentsBefore[0]).toMatchObject({botId:'worker',attempt:1,state:'running'});
   expect(result.assignmentsAfter).toEqual(result.assignmentsBefore);
   expect(result.workItemsBefore).toHaveLength(1);
-  expect(result.workItemsBefore[0]).toMatchObject({objective:'Keep direct preview available',state:'running'});
+  expect(result.workItemsBefore[0]).toMatchObject({objective:'Keep direct preview available',state:'running',
+    evidenceContract:'Preview-only informational description: record the observable result for "Keep direct preview available".'});
   expect(result.workItemsAfter).toEqual(result.workItemsBefore);
 });
 
@@ -391,6 +392,7 @@ test('Preview retry creates a fresh correction item after human rejection',async
     const {preparePreviewRetryState}=await import('/src/preview-superagent.ts');
     const objective='Correct the recorded preview result';
     const originalItem={id:'original-item',ticketId:'ticket-rejected',objective,
+      evidenceContract:'Check and report the corrected observable result.',
       state:'completed',ordinal:0,createdAt:1,updatedAt:2};
     const originalAssignment={id:'original-assignment',botId:'worker',sessionId:'worker-session',
       attempt:1,state:'finished'};
@@ -414,7 +416,9 @@ test('Preview retry creates a fresh correction item after human rejection',async
   expect(result.transition.workItems).toHaveLength(2);
   expect(result.transition.workItems[0]).toEqual(result.originalItem);
   expect(result.transition.workItems[1]).toMatchObject({ticketId:'ticket-rejected',
-    objective:'Correct the recorded preview result',state:'running',ordinal:1,createdAt:4,updatedAt:4});
+    objective:'Correct the recorded preview result',
+    evidenceContract:'Check and report the corrected observable result.',
+    state:'running',ordinal:1,createdAt:4,updatedAt:4});
   expect(result.transition.workItems[1].id).not.toBe(result.originalItem.id);
   expect(result.transition.assignment).toMatchObject({botId:'worker',sessionId:'preview-session-ticket-rejected-attempt-2',
     attempt:2,state:'running'});
@@ -1470,8 +1474,10 @@ test('Ticket Plan and Readiness shows native WorkItems with loading, empty and e
         // section still renders ordinal 0 before ordinal 1.
         const rows=[
           {id:'item-second',ticketId:'ticket-work-items',objective:'Second bounded slice',
+            evidenceContract:'Record the completed second slice and its output.',
             state:'completed',ordinal:1,createdAt:1,updatedAt:2},
           {id:'item-first',ticketId:'ticket-work-items',objective:'First bounded slice',
+            evidenceContract:'Show the first slice has produced its expected result.',
             state:'running',ordinal:0,createdAt:1,updatedAt:2},
         ];
         if(state.waitForItems)return await new Promise(resolve=>{
@@ -1510,13 +1516,16 @@ test('Ticket Plan and Readiness shows native WorkItems with loading, empty and e
   });
   await expect(workItems.getByRole('heading',{name:'WorkItem List',exact:true})).toBeVisible();
   await expect(workItems).toContainText('This list does not authorize or dispatch work.');
+  await expect(workItems).toContainText('Evidence contracts are informational descriptions, not proof that work is complete.');
   await expect(workItems).toContainText('does not report dependency edges, overall readiness, design-review findings, drift, or Council approval.');
   const rows=workItems.locator('.sa-work-items-list .sa-item');
   await expect(rows).toHaveCount(2);
   await expect(rows.nth(0)).toContainText('First bounded slice');
   await expect(rows.nth(0)).toContainText('Ordinal 0 · State running');
+  await expect(rows.nth(0)).toContainText('Evidence contract (descriptive only; not verified evidence): Show the first slice has produced its expected result.');
   await expect(rows.nth(1)).toContainText('Second bounded slice');
   await expect(rows.nth(1)).toContainText('Ordinal 1 · State completed');
+  await expect(rows.nth(1)).toContainText('Evidence contract (descriptive only; not verified evidence): Record the completed second slice and its output.');
   await expect(workItems).not.toContainText('Depends on');
   await expect(workItems.getByRole('button')).toHaveCount(0);
 

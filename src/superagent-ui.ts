@@ -15,7 +15,8 @@ interface Config {
 }
 interface Ticket { id: string; objective: string; state: string; revision: number; evidence: string | null }
 interface WorkItem {
-  id: string; ticketId: string; objective: string; state: string; ordinal: number;
+  id: string; ticketId: string; objective: string; evidenceContract?: string;
+  state: string; ordinal: number;
   createdAt: number; updatedAt: number;
 }
 interface TeamSnapshot {
@@ -304,10 +305,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '. Verified native pass: ' + verified + '.</p><p>' + meaning + '</p></section>';
   }
   function renderWorkItems(): string {
-    const rows = workItems.map(item =>
-      '<li class="sa-item" data-sa-work-item="' + safe(item.id) + '"><div><strong>' +
+    const rows = workItems.map(item => {
+      const evidenceContract = typeof item.evidenceContract === 'string' && item.evidenceContract.trim()
+        ? item.evidenceContract : 'Unavailable';
+      return '<li class="sa-item" data-sa-work-item="' + safe(item.id) + '"><div><strong>' +
       safe(item.objective) + '</strong><small>Ordinal ' + safe(item.ordinal) + ' · State ' +
-      safe(item.state) + '</small></div></li>').join('');
+      safe(item.state) + '</small><small>Evidence contract (descriptive only; not verified evidence): ' +
+      safe(evidenceContract) + '</small></div></li>';
+    }).join('');
     const body = workItemsLoading
       ? '<p class="sa-empty" role="status" aria-live="polite" data-sa-work-items-loading>Loading WorkItems for this Ticket…</p>'
       : workItemsError
@@ -320,6 +325,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       (planReadinessExpanded ? ' open' : '') + '><summary>Plan / Readiness</summary>' +
       '<div class="sa-plan-readiness-body" data-sa-plan-body><p class="sa-plan-readiness-note">' +
       'Read-only native WorkItem objectives and states, in ordinal order. This list does not authorize or dispatch work. ' +
+      'Evidence contracts are informational descriptions, not proof that work is complete. ' +
       'The WorkItem response does not report dependency edges, overall readiness, design-review findings, drift, or Council approval.</p>' +
       '<h5>WorkItem List</h5>' + body + '</div></details>';
   }

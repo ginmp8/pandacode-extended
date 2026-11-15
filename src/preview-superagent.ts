@@ -6,7 +6,7 @@ type Config = { id:string; name:string; coordinatorBotId:string; workerBotId:str
 type Ticket = { id:string; orchestrationId:string; objective:string;
   state:string; revision:number; evidence:null };
 type WorkItem = { id:string; ticketId:string; objective:string; state:string;
-  ordinal:number; createdAt:number; updatedAt:number };
+  evidenceContract:string; ordinal:number; createdAt:number; updatedAt:number };
 type TeamSnapshot = {
   snapshotVersion:number; provenance:string; orchestrationId:string; teamVersion:number;
   name:string; projectId:string; coordinatorBotId:string; workerBotIds:string[];
@@ -53,7 +53,9 @@ export function preparePreviewRetryState(input:{ticketId:string;objective:string
     botId:workerBotId,sessionId:`preview-session-${ticketId}-attempt-${attempt}`,attempt,state:'running'};
   const workItems=correctionRetry
     ? [...items,{id:`preview-work-item-${ticketId}-correction-${attempt}`,ticketId,
-        objective,state:'running',ordinal:Math.max(-1,...items.map(workItem=>workItem.ordinal))+1,
+        objective,evidenceContract:item?.evidenceContract ||
+          `Preview-only informational description: record the observable result for "${objective}".`,
+        state:'running',ordinal:Math.max(-1,...items.map(workItem=>workItem.ordinal))+1,
         createdAt:now,updatedAt:now}]
     : items.map(workItem=>({...workItem,state:'running',updatedAt:now}));
   return {assignment,workItems};
@@ -256,7 +258,9 @@ export async function invokeSuperagent<T>(
         sessionId:'preview-session-'+t.id,attempt:1,state:'running'}]);
       const now=Date.now();
       workItems.set(t.id,[{id:'preview-work-item-'+t.id,ticketId:t.id,
-        objective:t.objective,state:'running',ordinal:0,createdAt:now,updatedAt:now}]);
+        objective:t.objective,
+        evidenceContract:`Preview-only informational description: record the observable result for "${t.objective}".`,
+        state:'running',ordinal:0,createdAt:now,updatedAt:now}]);
       activity.set(t.id,[{id:1,kind:'admitted',detail:'Manual read-only preview assignment',at:now}]);
       value=t;break;
     }

@@ -123,3 +123,8 @@ backward compatibility; the **live authenticated adapter** does not. This is
 a read-only extra repository-metadata request after explicit Observe opt-in,
 not a durable GitHub subscription or Auto authorization. Source configuration
 still defaults Off, and no Ticket, Worker, Council or external write is created.
+
+
+## Pinned authenticated repository identity
+
+Native Observe pins the first authenticated numeric GitHub repository ID separately from its owner/name. GitHub Events, Check Runs and source-linked Ticket context must preserve that attestation across later polls and restarts. Deleting and recreating an owner/name cannot silently authorize the new repository as the old source. Existing historical receipts have no invented repository IDs; reinspection is required where the current identity is uncertain.

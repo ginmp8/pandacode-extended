@@ -73,6 +73,16 @@ CREATE TABLE IF NOT EXISTS sa_check_run_results (
 );
 "#;
 
+/// Source ownership is bound to the immutable GitHub repository identity, not
+/// just an owner/name which may later be deleted and reused by another repo.
+pub(crate) const REPOSITORY_ID_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS sa_source_repository_identity (
+  source_id TEXT PRIMARY KEY REFERENCES sa_event_sources(id) ON DELETE RESTRICT,
+  repository_id INTEGER NOT NULL CHECK(repository_id > 0),
+  attested_at INTEGER NOT NULL CHECK(attested_at > 0)
+);
+"#;
+
 const MAX_LINKS_PER_TICKET: i64 = 16;
 const MAX_SOURCES: i64 = 64;
 const MAX_RECEIPTS: i64 = 10_000;
@@ -80,8 +90,11 @@ const GITHUB_PAGE_SIZE: usize = 100;
 const GITHUB_MAX_PAGES: usize = 3;
 const EVENT_KINDS: &[&str] = &[
     "issues.opened", "issues.edited", "issues.closed", "issues.reopened",
+    "issues.assigned", "issues.unassigned", "issues.labeled", "issues.unlabeled",
     "issue_comment.created",
     "pull_request.opened", "pull_request.closed", "pull_request.reopened",
+    "pull_request.merged", "pull_request.assigned", "pull_request.unassigned",
+    "pull_request.labeled", "pull_request.unlabeled",
     "pull_request_review.submitted", "pull_request_review.updated",
     "pull_request_review.dismissed", "pull_request_review_comment.created",
     "check_run.completed",
@@ -230,8 +243,17 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
         "SELECT l.ticket_id FROM sa_source_thread_links l
          JOIN sa_event_sources linked ON linked.id=l.source_id
          WHERE linked.orchestration_id=?1 AND linked.repository=?2 COLLATE NOCASE
-           AND l.subject_key=?3 AND l.ticket_id<>?4 LIMIT 1",
-        params![&ticket.orchestration_id, &src.repository, subject_key, ticket_id],
+           AND l.subject_key=?3 AND l.ticket_id<>?4
+           -- Different attested GitHub repository IDs are distinct even when
+           -- a deleted repository name is later reused. Unknown stays fenced.
+           AND NOT EXISTS (
+             SELECT 1 FROM sa_source_repository_identity previous_id
+             JOIN sa_source_repository_identity candidate_id
+               ON candidate_id.source_id=?5
+             WHERE previous_id.source_id=linked.id
+               AND previous_id.repository_id<>candidate_id.repository_id
+           ) LIMIT 1",
+        params![&ticket.orchestration_id, &src.repository, subject_key, ticket_id, source_id],
         |row| row.get(0),
     ).optional().map_err(|e| e.to_string())?;
     if conflicting.is_some() {
@@ -287,7 +309,14 @@ fn link_issue_to_pull(store: &Store, source_id: &str, ticket_id: &str,
          WHERE l.ticket_id=?2 AND l.subject_key=?3
            AND initial.orchestration_id=t.orchestration_id
            AND target.orchestration_id=t.orchestration_id
-           AND initial.repository=target.repository COLLATE NOCASE LIMIT 1",
+           AND initial.repository=target.repository COLLATE NOCASE
+           -- A reused GitHub owner/name must not join independently attested
+           -- repositories. Both missing IDs preserve legacy-only references.
+           AND (SELECT repository_id FROM sa_source_repository_identity
+                WHERE source_id=initial.id)
+               IS (SELECT repository_id FROM sa_source_repository_identity
+                   WHERE source_id=target.id)
+           LIMIT 1",
         params![source_id,ticket_id,issue_key], |r| r.get(0),
     ).optional().map_err(|e| e.to_string())?;
     if issue_linked.is_none() {
@@ -310,8 +339,15 @@ fn link_issue_to_pull(store: &Store, source_id: &str, ticket_id: &str,
         "SELECT l.ticket_id FROM sa_source_thread_links l
          JOIN sa_event_sources s ON s.id=l.source_id
          WHERE s.orchestration_id=?1 AND s.repository=?2 COLLATE NOCASE
-           AND l.subject_key=?3 AND l.ticket_id<>?4 LIMIT 1",
-        params![&ticket.orchestration_id,&src.repository,pull_key,ticket_id],
+           AND l.subject_key=?3 AND l.ticket_id<>?4
+           AND NOT EXISTS (
+             SELECT 1 FROM sa_source_repository_identity previous_id
+             JOIN sa_source_repository_identity candidate_id
+               ON candidate_id.source_id=?5
+             WHERE previous_id.source_id=s.id
+               AND previous_id.repository_id<>candidate_id.repository_id
+           ) LIMIT 1",
+        params![&ticket.orchestration_id,&src.repository,pull_key,ticket_id,source_id],
         |r|r.get(0),
     ).optional().map_err(|e|e.to_string())?;
     if conflicting.is_some() || previous.as_deref().is_some_and(|id|id!=ticket_id) {
@@ -420,6 +456,7 @@ fn list_sources(store: &Store, orchestration_id: &str) -> Result<Vec<EventSource
 pub struct SourceIntegrity {
     pub source_id: String,
     pub repository: String,
+    pub repository_id: Option<i64>,
     pub mode: String,
     pub policy_revision: i64,
     pub cursor_kind: &'static str,
@@ -435,6 +472,10 @@ pub struct SourceIntegrity {
 
 fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceIntegrity> {
     let selected = source(store, source_id)?;
+    let repository_id: Option<i64> = store.db.query_row(
+        "SELECT repository_id FROM sa_source_repository_identity WHERE source_id=?1",
+        [source_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
     let (receipt_count, permitted_receipt_count, max_receipt_sequence):
         (i64, i64, i64) = store.db.query_row(
         "SELECT COUNT(*),
@@ -453,7 +494,7 @@ fn inspect_source_integrity(store: &Store, source_id: &str) -> Result<SourceInte
         "source_off_no_poll"
     } else { "explicit_observe_available" };
     Ok(SourceIntegrity {
-        source_id:selected.id, repository:selected.repository, mode:selected.mode,
+        source_id:selected.id, repository:selected.repository, repository_id, mode:selected.mode,
         policy_revision:selected.policy_revision,
         cursor_kind:if selected.event_kind == "check_run.completed" {
             "local_check_run_observation_count"
@@ -718,6 +759,36 @@ fn authenticated_repository_id(raw: &serde_json::Value, requested: &str) -> Resu
         .ok_or_else(|| "Authenticated GitHub repository ID is missing or invalid.".into())
 }
 
+/// Keep the first independently authenticated repository ID for the entire
+/// source lifetime. Re-enabling Observe never rebinds a source to a deleted,
+/// renamed or recreated repository. The insert is in the same transaction as
+/// receipt and cursor updates; a failed observation cannot leave a false pin.
+fn pin_authenticated_repository_identity(
+    tx: &rusqlite::Transaction<'_>, source_id: &str, repository_id: u64,
+) -> Result<()> {
+    let id = i64::try_from(repository_id)
+        .map_err(|_| "Authenticated GitHub repository identity is out of range.")?;
+    if id <= 0 {
+        return Err("Authenticated GitHub repository identity is invalid.".into());
+    }
+    let existing: Option<i64> = tx.query_row(
+        "SELECT repository_id FROM sa_source_repository_identity WHERE source_id=?1",
+        [source_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if let Some(previous) = existing {
+        if previous != id {
+            return Err("GitHub repository identity changed since source attestation; cursor unchanged.".into());
+        }
+    } else {
+        tx.execute(
+            "INSERT INTO sa_source_repository_identity(source_id,repository_id,attested_at)
+             VALUES(?1,?2,?3)",
+            params![source_id,id,storage::now()],
+        ).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// A GitHub Events window must belong to the exact ID resolved from the
 /// signed-in repository API on this request, not merely share its display
 /// name. Reject the entire window before any receipt or cursor transaction.
@@ -731,11 +802,11 @@ fn require_authenticated_feed_repository(raw: &serde_json::Value, repository_id:
     Ok(())
 }
 
-/// Verify the feed's descending GitHub event identities while collecting a
-/// finite pagination window. A short page, an older persisted identity, or
-/// a pre-activation timestamp anchors the historical boundary. Without an
-/// anchor, fail *before* recording newer events: no silent cursor leap over
-/// an unvisited page. This does not assert that GitHub retained every event.
+/// Verify descending GitHub event identities within a finite pagination window.
+/// The first poll may use a short page or a pre-activation timestamp as its
+/// boundary. Once a cursor is persisted, the exact prior event identity must
+/// be present; an older ID or timestamp is not proof of continuity. This does
+/// not assert that GitHub retained every event.
 fn github_page_complete(
     raw: &serde_json::Value, since: i64, cursor: i64, previous_id: &mut Option<i64>,
 ) -> Result<bool> {
@@ -761,11 +832,31 @@ fn github_page_complete(
         let at = chrono::DateTime::parse_from_rfc3339(stamp)
             .map_err(|_| "Authenticated GitHub Event timestamp is invalid.")?
             .timestamp_millis();
-        if sequence <= cursor || at < since {
+        // GitHub event IDs are sparse: an older ID proves ordering but not
+        // that the persisted cursor itself was still within the fetched feed.
+        // Once crossed, later pages cannot recover that exact identity.
+        if cursor > 0 {
+            if sequence == cursor {
+                anchored = true;
+            } else if sequence < cursor && !anchored {
+                return Err("GitHub Events passed the durable source cursor without its exact identity; reconcile source history before polling.".into());
+            }
+        } else if at < since {
             anchored = true;
         }
     }
-    Ok(events.len() < GITHUB_PAGE_SIZE || anchored)
+    if anchored { return Ok(true); }
+    if events.len() < GITHUB_PAGE_SIZE {
+        // A short (or empty) page does not prove continuity with a durable
+        // cursor: GitHub's finite Events retention may have discarded the
+        // missing interval. Never advance over a gap just because pagination
+        // reached the provider's last available page.
+        if cursor > 0 {
+            return Err("GitHub Events ended before the durable source cursor was observed; reconcile source history before polling.".into());
+        }
+        return Ok(true);
+    }
+    Ok(false)
 }
 
 /// Validate the entire bounded set before any database receipt/cursor write.
@@ -852,10 +943,21 @@ fn github_kind(value: &serde_json::Value) -> Option<&'static str> {
         ("IssuesEvent", "edited") => Some("issues.edited"),
         ("IssuesEvent", "closed") => Some("issues.closed"),
         ("IssuesEvent", "reopened") => Some("issues.reopened"),
+        // Only exact GitHub REST Events actions are supported. These
+        // provenance-only triage events never alter Ticket authorization.
+        ("IssuesEvent", "assigned") => Some("issues.assigned"),
+        ("IssuesEvent", "unassigned") => Some("issues.unassigned"),
+        ("IssuesEvent", "labeled") => Some("issues.labeled"),
+        ("IssuesEvent", "unlabeled") => Some("issues.unlabeled"),
         ("IssueCommentEvent", "created") => Some("issue_comment.created"),
         ("PullRequestEvent", "opened") => Some("pull_request.opened"),
         ("PullRequestEvent", "closed") => Some("pull_request.closed"),
         ("PullRequestEvent", "reopened") => Some("pull_request.reopened"),
+        ("PullRequestEvent", "merged") => Some("pull_request.merged"),
+        ("PullRequestEvent", "assigned") => Some("pull_request.assigned"),
+        ("PullRequestEvent", "unassigned") => Some("pull_request.unassigned"),
+        ("PullRequestEvent", "labeled") => Some("pull_request.labeled"),
+        ("PullRequestEvent", "unlabeled") => Some("pull_request.unlabeled"),
         // GitHub's REST Events feed calls a new review "created", unlike
         // the webhook action "submitted". Preserve the original normalized
         // source kind for existing persisted review subscriptions.
@@ -939,9 +1041,10 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
     Ok(Some((event,at)))
 }
 
-pub(super) fn poll_authenticated_events_with_identity(
+pub(super) fn poll_authenticated_events_with_repository_id(
     store: &Store, expected: &EventSource, since: i64,
     raw: &serde_json::Value, signed_in: &str, pages_fetched: usize,
+    repository_id: u64,
 ) -> Result<AuthenticatedPoll>
 {
     if !token_ok(signed_in, 80) || !(1..=GITHUB_MAX_PAGES).contains(&pages_fetched) {
@@ -981,6 +1084,7 @@ pub(super) fn poll_authenticated_events_with_identity(
         return Err("Source mode/revision changed during GitHub request; no event recorded.".into());
     }
     require_source_cursor_integrity(&tx, &current_policy)?;
+    pin_authenticated_repository_identity(&tx, &current_policy.id, repository_id)?;
     let mut recorded = 0;
     let mut duplicates = 0;
     let mut self_ignored = 0;
@@ -1026,6 +1130,16 @@ pub(super) fn poll_authenticated_events_with_identity(
 }
 
 #[cfg(test)]
+fn poll_authenticated_events_with_identity(
+    store: &Store, expected: &EventSource, since: i64,
+    raw: &serde_json::Value, signed_in: &str, pages_fetched: usize,
+) -> Result<AuthenticatedPoll> {
+    poll_authenticated_events_with_repository_id(
+        store, expected, since, raw, signed_in, pages_fetched, 1,
+    )
+}
+
+#[cfg(test)]
 fn poll_authenticated_events(store: &Store, expected: &EventSource, since: i64,
     raw: &serde_json::Value) -> Result<AuthenticatedPoll>
 {
@@ -1037,7 +1151,7 @@ fn poll_authenticated_events(store: &Store, expected: &EventSource, since: i64,
 /// revalidated by the existing transactional decision adapter.
 pub(super) fn fetch_authenticated_github_window(
     repo: &str, since: i64, prior_cursor: i64,
-) -> Result<(String, serde_json::Value, usize)> {
+) -> Result<(String, serde_json::Value, usize, u64)> {
     let root = std::env::temp_dir();
     let user = crate::github::run_gh(
         &root, &["api", "user"], crate::github::TIMEOUT,
@@ -1064,7 +1178,7 @@ pub(super) fn fetch_authenticated_github_window(
     }
     let response = combine_github_pages(&pages, since, prior_cursor)?;
     require_authenticated_feed_repository(&response, repository_id)?;
-    Ok((signed_in, response, pages.len()))
+    Ok((signed_in, response, pages.len(), repository_id))
 }
 
 /// One explicitly operator-requested, authenticated Observe poll from a
@@ -1086,11 +1200,11 @@ pub(crate) fn headless_observe_source(
         "SELECT updated_at FROM sa_event_sources WHERE id=?1",
         [source_id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
-    let (signed_in, response, pages_fetched) = fetch_authenticated_github_window(
+    let (signed_in, response, pages_fetched, repository_id) = fetch_authenticated_github_window(
         &snapshot.repository, since, snapshot.last_sequence,
     )?;
-    let receipt = poll_authenticated_events_with_identity(
-        &store, &snapshot, since, &response, &signed_in, pages_fetched,
+    let receipt = poll_authenticated_events_with_repository_id(
+        &store, &snapshot, since, &response, &signed_in, pages_fetched, repository_id,
     )?;
     serde_json::to_string_pretty(&receipt).map_err(|e| e.to_string())
 }
@@ -1121,12 +1235,12 @@ pub async fn superagent_source_poll_authenticated(
     // Authenticate the operator independently of untrusted Event payloads.
     // Fetch the complete bounded window before storing even one decision.
     // Any failed page, authentication change or unstable order denies the poll.
-    let (signed_in, response, pages_fetched) = tokio::task::spawn_blocking(move || {
+    let (signed_in, response, pages_fetched, repository_id) = tokio::task::spawn_blocking(move || {
         fetch_authenticated_github_window(&repo, since, prior_cursor)
     }).await.map_err(|e| e.to_string())??;
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    poll_authenticated_events_with_identity(
-        &store, &snapshot, since, &response, &signed_in, pages_fetched,
+    poll_authenticated_events_with_repository_id(
+        &store, &snapshot, since, &response, &signed_in, pages_fetched, repository_id,
     )
 }
 
@@ -1379,9 +1493,9 @@ fn authenticated_check_run(
 /// ordering. The cursor here is a local monotonic observation count, not a
 /// claim of gap-free provider delivery. Out-of-order explicit lookups remain
 /// observable and replay by the same ID is immutable and idempotent.
-fn observe_authenticated_check_run(
+fn observe_authenticated_check_run_with_repository_id(
     store: &Store, expected: &EventSource, requested_id: i64,
-    raw: &serde_json::Value, signed_in: &str,
+    raw: &serde_json::Value, signed_in: &str, repository_id: u64,
 ) -> Result<EventDecision> {
     if !token_ok(signed_in, 80) || requested_id <= 0 {
         return Err("Checks API observation requires a verified operator and positive run ID.".into());
@@ -1408,6 +1522,7 @@ fn observe_authenticated_check_run(
         return Err("Checks API source changed before receipt commit.".into());
     }
     require_source_cursor_integrity(&tx, &current)?;
+    pin_authenticated_repository_identity(&tx, &current.id, repository_id)?;
     let delivery_id = format!("checkrun_{requested_id}");
     let previously_recorded: Option<i64> = tx.query_row(
         "SELECT sequence FROM sa_event_decisions WHERE source_id=?1 AND delivery_id=?2",
@@ -1452,6 +1567,16 @@ fn observe_authenticated_check_run(
     Ok(receipt)
 }
 
+#[cfg(test)]
+fn observe_authenticated_check_run(
+    store: &Store, expected: &EventSource, requested_id: i64,
+    raw: &serde_json::Value, signed_in: &str,
+) -> Result<EventDecision> {
+    observe_authenticated_check_run_with_repository_id(
+        store, expected, requested_id, raw, signed_in, 1,
+    )
+}
+
 /// One operator-requested, authenticated Check Run lookup; no webhook, source
 /// subscription, inferred task, privilege grant, external write or Council pass.
 /// A missing/ambiguous PR association fails closed (including fork checks).
@@ -1459,13 +1584,20 @@ fn observe_authenticated_check_run(
 /// operator. This never uses model-supplied credentials, payloads or actions.
 fn fetch_authenticated_check_run(
     repository: &str, check_run_id: i64,
-) -> Result<(String, serde_json::Value)> {
+) -> Result<(String, serde_json::Value, u64)> {
     let root = std::env::temp_dir();
     let user = crate::github::run_gh(&root, &["api", "user"], crate::github::TIMEOUT)?;
     let signed_in = authenticated_login(&crate::github::json(&user)?)?;
+    let metadata_endpoint = format!("repos/{repository}");
+    let metadata = crate::github::run_gh(
+        &root, &["api", &metadata_endpoint], crate::github::TIMEOUT,
+    )?;
+    let repository_id = authenticated_repository_id(
+        &crate::github::json(&metadata)?, repository,
+    )?;
     let endpoint = format!("repos/{repository}/check-runs/{check_run_id}");
     let output = crate::github::run_gh(&root, &["api", &endpoint], crate::github::TIMEOUT)?;
-    Ok((signed_in, crate::github::json(&output)?))
+    Ok((signed_in, crate::github::json(&output)?, repository_id))
 }
 
 /// Explicit one-shot Checks API observation without a desktop Webview. The
@@ -1483,9 +1615,9 @@ pub(crate) fn headless_observe_check_run(
     if selected.mode != "observe" || selected.event_kind != "check_run.completed" {
         return Err("Source is Off or is not configured for Check Runs.".into());
     }
-    let (signed_in, raw) = fetch_authenticated_check_run(&selected.repository, check_run_id)?;
-    let receipt = observe_authenticated_check_run(
-        &store, &selected, check_run_id, &raw, &signed_in,
+    let (signed_in, raw, repository_id) = fetch_authenticated_check_run(&selected.repository, check_run_id)?;
+    let receipt = observe_authenticated_check_run_with_repository_id(
+        &store, &selected, check_run_id, &raw, &signed_in, repository_id,
     )?;
     serde_json::to_string_pretty(&receipt).map_err(|e| e.to_string())
 }
@@ -1512,7 +1644,9 @@ pub async fn superagent_source_observe_check_run(
         fetch_authenticated_check_run(&repository, check_run_id)
     }).await.map_err(|e| e.to_string())??;
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    observe_authenticated_check_run(&store, &selected, check_run_id, &response.1, &response.0)
+    observe_authenticated_check_run_with_repository_id(
+        &store, &selected, check_run_id, &response.1, &response.0, response.2,
+    )
 }
 
 #[tauri::command]
@@ -1656,6 +1790,12 @@ fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<Ev
              WHERE l.ticket_id=?1 AND l.subject_key=d.subject_key
                AND linked.repository=observed.repository COLLATE NOCASE
                AND linked.orchestration_id=observed.orchestration_id
+               -- Do not correlate source classes from two real repositories
+               -- merely because their display owner/name is identical.
+               AND (SELECT repository_id FROM sa_source_repository_identity
+                    WHERE source_id=linked.id)
+                   IS (SELECT repository_id FROM sa_source_repository_identity
+                       WHERE source_id=observed.id)
            )
          ORDER BY d.at DESC,d.source_id DESC,d.delivery_id DESC LIMIT ?3",
     ).map_err(|e| e.to_string())?;
@@ -1669,6 +1809,19 @@ fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<Ev
         })
     }).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+}
+
+/// Explicit one-shot local operator link, using the exact desktop native transaction.
+/// This does not authenticate GitHub content, issue a Mandate or start a provider.
+pub(crate) fn headless_link_thread(
+    path: &std::path::Path, source_id: &str, ticket_id: &str, subject_key: &str,
+) -> Result<String> {
+    let store = super::open_headless_transition_store(path)?;
+    let link = link_thread(&store, source_id, ticket_id, subject_key)?;
+    serde_json::to_string(&serde_json::json!({
+        "sourceId":link.source_id, "ticketId":link.ticket_id,
+        "subjectKey":link.subject_key, "linked":true, "authorizationIssued":false
+    })).map_err(|e| e.to_string())
 }
 
 /// Trusted local operator revocation of an exact context association without
@@ -1716,6 +1869,197 @@ pub async fn superagent_source_thread_links(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+
+    #[test]
+    fn authenticated_github_source_pins_repository_identity_across_restart_and_policy_changes() {
+        let (store, path) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "issues.opened").unwrap();
+        let observed = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let event = |id: &str, repo_id: u64| serde_json::json!([{
+            "id": id, "created_at": "2026-11-12T09:00:00Z",
+            "type": "IssuesEvent", "repo": {"name": "owner/repo", "id": repo_id},
+            "actor": {"login": "trusted-bot"},
+            "payload": {"action": "opened", "issue": {"number": 42}}
+        }]);
+        let first = event("5000070001", 73);
+        let initial = poll_authenticated_events_with_repository_id(
+            &store, &observed, 0, &first, "operator", 1, 73,
+        ).unwrap();
+        assert_eq!(initial.recorded, 1);
+        assert_eq!(inspect_source_integrity(&store, &observed.id).unwrap().repository_id, Some(73));
+        let mismatched = event("5000070002", 74);
+        assert!(poll_authenticated_events_with_repository_id(
+            &store, &observed, 0, &mismatched, "operator", 1, 74,
+        ).is_err());
+        assert_eq!(source(&store, &observed.id).unwrap().last_sequence, 5_000_070_001);
+        assert_eq!(list_decisions(&store, &observed.id, 10).unwrap().len(), 1);
+        let disabled = set_mode(&store, &observed.id, observed.policy_revision, "off").unwrap();
+        let reenabled = set_mode(&store, &disabled.id, disabled.policy_revision, "observe").unwrap();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(inspect_source_integrity(&reopened, &reenabled.id).unwrap().repository_id, Some(73));
+        assert!(poll_authenticated_events_with_repository_id(
+            &reopened, &reenabled, 0, &mismatched, "operator", 1, 74,
+        ).is_err());
+        assert_eq!(list_decisions(&reopened, &reenabled.id, 10).unwrap().len(), 1);
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &reopened, &reenabled, 0, &first, "operator", 1, 73,
+        ).unwrap().duplicates, 1);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn failed_observe_receipt_rolls_back_first_repository_identity_pin() {
+        let (store, _) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "issues.opened").unwrap();
+        let observed = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER reject_source_receipt BEFORE INSERT ON sa_event_decisions
+             BEGIN SELECT RAISE(ABORT,'simulated receipt failure'); END;"
+        ).unwrap();
+        let raw = serde_json::json!([{
+            "id":"5000071001","created_at":"2026-11-12T09:00:00Z",
+            "type":"IssuesEvent","repo":{"name":"owner/repo","id":73},
+            "actor":{"login":"trusted-bot"},
+            "payload":{"action":"opened","issue":{"number":42}}
+        }]);
+        assert!(poll_authenticated_events_with_repository_id(
+            &store, &observed, 0, &raw, "operator", 1, 73,
+        ).is_err());
+        assert_eq!(inspect_source_integrity(&store, &observed.id).unwrap().repository_id, None);
+        assert_eq!(source(&store, &observed.id).unwrap().last_sequence, 0);
+        store.db.execute_batch("DROP TRIGGER reject_source_receipt").unwrap();
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &observed, 0, &raw, "operator", 1, 73,
+        ).unwrap().recorded, 1);
+    }
+
+    #[test]
+    fn authenticated_check_run_source_cannot_rebind_to_recreated_repository() {
+        let (store, path) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "check_run.completed").unwrap();
+        let observed = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let sha = "0123456789012345678901234567890123456789";
+        let mut raw = serde_json::json!({
+            "id": 701, "status":"completed", "conclusion":"success",
+            "head_sha":sha, "completed_at":chrono::Utc::now().to_rfc3339(),
+            "app":{"slug":"trusted-bot"},
+            "pull_requests":[{"number":42,"head":{"sha":sha},
+                "base":{"repo":{"url":"https://api.github.com/repos/owner/repo"}}}]
+        });
+        assert!(observe_authenticated_check_run_with_repository_id(
+            &store, &observed, 701, &raw, "operator", 73,
+        ).is_ok());
+        raw["id"] = serde_json::json!(702);
+        assert!(observe_authenticated_check_run_with_repository_id(
+            &store, &observed, 702, &raw, "operator", 74,
+        ).is_err());
+        assert_eq!(source(&store, &observed.id).unwrap().last_sequence, 1);
+        assert_eq!(list_decisions(&store, &observed.id, 10).unwrap().len(), 1);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(inspect_source_integrity(&reopened, &observed.id).unwrap().repository_id, Some(73));
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn schema_47_upgrade_preserves_legacy_observe_receipts_without_fabricated_repository_id() {
+        let (store, path) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "issues.opened").unwrap();
+        let observed = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let envelope = EventEnvelope {
+            source_id: observed.id.clone(), delivery_id: "5000072001".into(),
+            repository: "owner/repo".into(), actor: "trusted-bot".into(),
+            event_kind: "issues.opened".into(), subject_key: "issue:42".into(),
+            sequence: 5_000_072_001,
+        };
+        let tx = store.db.unchecked_transaction().unwrap();
+        observe_authenticated_in_tx(&tx, &observed, &envelope, "operator").unwrap();
+        tx.commit().unwrap();
+        store.db.execute_batch(
+            "DROP TABLE sa_source_repository_identity; PRAGMA user_version=47;"
+        ).unwrap();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(inspect_source_integrity(&reopened, &observed.id).unwrap().repository_id, None);
+        assert_eq!(list_decisions(&reopened, &observed.id, 10).unwrap().len(), 1);
+        assert_eq!(source(&reopened, &observed.id).unwrap().last_sequence, 5_000_072_001);
+    }
+
+    #[test]
+    fn authenticated_issue_and_pr_triage_actions_are_observe_only_and_restart_durable() {
+        let (store, path) = fixture();
+        let actions = [
+            ("IssuesEvent", "assigned", "issues.assigned", "issue:41"),
+            ("IssuesEvent", "unassigned", "issues.unassigned", "issue:41"),
+            ("IssuesEvent", "labeled", "issues.labeled", "issue:41"),
+            ("IssuesEvent", "unlabeled", "issues.unlabeled", "issue:41"),
+            ("PullRequestEvent", "merged", "pull_request.merged", "pull:71"),
+            ("PullRequestEvent", "assigned", "pull_request.assigned", "pull:71"),
+            ("PullRequestEvent", "unassigned", "pull_request.unassigned", "pull:71"),
+            ("PullRequestEvent", "labeled", "pull_request.labeled", "pull:71"),
+            ("PullRequestEvent", "unlabeled", "pull_request.unlabeled", "pull:71"),
+        ];
+        let mut source_ids = Vec::new();
+        for (index, (event_type, action, kind, thread)) in actions.iter().enumerate() {
+            let off = create_source(&store, "orch", "owner/repo", "trusted-bot", kind).unwrap();
+            assert_eq!(off.mode, "off");
+            let active = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+            let raw = serde_json::json!([{
+                "id": (5_000_040_001_i64 + index as i64).to_string(),
+                "created_at": "2026-11-12T09:00:00Z",
+                "type": event_type,
+                "repo": {"name": "owner/repo"},
+                "actor": {"login": "trusted-bot"},
+                // Both objects exist deliberately. Only the trusted event type
+                // determines which exact thread is correlated.
+                "payload": {"action": action,
+                    "issue": {"number": 41},
+                    "pull_request": {"number": 71},
+                    "label": {"name": "untrusted-content"}}
+            }]);
+            let first = poll_authenticated_events(&store, &active, 0, &raw).unwrap();
+            assert_eq!(first.recorded, 1, "{kind}");
+            assert_eq!(first.duplicates, 0, "{kind}");
+            let receipt = list_decisions(&store, &active.id, 10).unwrap();
+            assert_eq!(receipt.len(), 1);
+            assert_eq!(receipt[0].event_kind, *kind);
+            assert_eq!(receipt[0].subject_key, *thread);
+            assert_eq!(receipt[0].decision, "observed_permitted");
+            assert_eq!(poll_authenticated_events(&store, &active, 0, &raw)
+                .unwrap().duplicates, 1, "{kind}");
+            source_ids.push(active.id);
+        }
+        // Non-Events webhook actions and unsupported comment edits must not
+        // be guessed from untrusted payload fields.
+        for (event_type, action) in [
+            ("IssueCommentEvent", "edited"),
+            ("IssuesEvent", "transferred"),
+            ("PullRequestEvent", "synchronize"),
+        ] {
+            let raw = serde_json::json!({
+                "type": event_type, "payload": {"action": action}
+            });
+            assert_eq!(github_kind(&raw), None);
+        }
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |r| r.get::<_, i64>(0)).unwrap(), 0);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        for id in source_ids {
+            assert_eq!(list_decisions(&reopened, &id, 10).unwrap().len(), 1);
+            assert!(source(&reopened, &id).unwrap().last_sequence > 0);
+        }
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
 
     #[test]
     fn source_cursor_mismatch_denies_authenticated_replay_and_survives_restart() {
@@ -1933,6 +2277,17 @@ mod tests {
         assert_eq!(with_anchor.as_array().unwrap().len(),200);
         let short = combine_github_pages(&[github_page(20,2)],0,0).unwrap();
         assert_eq!(short.as_array().unwrap().len(),2);
+        // A source with a persisted cursor cannot declare a short page
+        // complete when GitHub retained only newer events. No missing
+        // delivery may be silently skipped, including an empty response.
+        for missing in [github_page(1200,2),serde_json::json!([])] {
+            assert!(combine_github_pages(&[missing],0,850).is_err());
+        }
+        let anchored_short = combine_github_pages(&[github_page(851,2)],0,850).unwrap();
+        assert_eq!(anchored_short.as_array().unwrap().len(),2);
+        // The initial poll has no durable cursor and can legitimately end
+        // on an empty or short repository feed.
+        assert!(combine_github_pages(&[serde_json::json!([])],0,0).is_ok());
         let mut replayed = github_page(900,100);
         replayed[0]["id"] = serde_json::json!("1000");
         assert!(combine_github_pages(&[first.clone(),replayed],0,850).is_err());
@@ -1945,6 +2300,60 @@ mod tests {
         assert!(list_decisions(&store,&on.id,10).unwrap().is_empty());
     }
 
+
+    #[test]
+    fn persisted_github_cursor_requires_exact_identity_before_advancing_after_restart() {
+        let (store, path) = fixture();
+        let off = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.opened",
+        ).unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let event = |id: &str, number: i64| serde_json::json!({
+            "id": id, "type": "IssuesEvent",
+            "created_at": "2026-11-12T08:59:00Z",
+            "repo": {"name": "owner/repo"}, "actor": {"login": "trusted-bot"},
+            "payload": {"action": "opened", "issue": {"number": number}}
+        });
+        let cursor = 5_000_000_600;
+        let first = combine_github_pages(
+            &[serde_json::json!([event("5000000600", 1)])], 0, 0,
+        ).unwrap();
+        assert_eq!(poll_authenticated_events(&store, &on, 0, &first).unwrap().recorded, 1);
+        assert_eq!(source(&store, &on.id).unwrap().last_sequence, cursor);
+
+        // Both the older ID and pre-activation timestamps used to complete
+        // pagination without seeing the persisted cursor. Neither proves
+        // that the omitted interval was actually observed.
+        for gap in [
+            serde_json::json!([event("5000000602", 2), event("5000000599", 3)]),
+            serde_json::json!([event("5000000602", 2)]),
+        ] {
+            assert!(combine_github_pages(&[gap], i64::MAX, cursor).is_err());
+        }
+        assert_eq!(source(&store, &on.id).unwrap().last_sequence, cursor);
+        assert_eq!(list_decisions(&store, &on.id, 10).unwrap().len(), 1);
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(source(&reopened, &on.id).unwrap().last_sequence, cursor);
+        // A subsequent valid window containing the *exact* stored ID may
+        // advance, with its existing receipt deduplicated after restart.
+        let complete = combine_github_pages(
+            &[serde_json::json!([
+                event("5000000602", 2), event("5000000600", 1),
+                {"id": "5000000599", "type": "WatchEvent",
+                 "created_at": "2026-11-12T08:59:00Z",
+                 "repo": {"name": "owner/repo"}}
+            ])], i64::MAX, cursor,
+        ).unwrap();
+        let accepted = poll_authenticated_events(&reopened, &on, 0, &complete).unwrap();
+        assert_eq!((accepted.recorded, accepted.duplicates), (1, 1));
+        assert_eq!(source(&reopened, &on.id).unwrap().last_sequence, 5_000_000_602);
+        assert_eq!(list_decisions(&reopened, &on.id, 10).unwrap().len(), 2);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+    }
 
     #[test]
     fn live_observe_repository_metadata_pins_every_event_to_authenticated_id() {
@@ -3167,6 +3576,44 @@ mod tests {
     }
 
     #[test]
+    fn headless_link_reuses_native_transaction_without_grant_or_provider_admission() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "headless-one", "orch");
+        insert_manual_ticket(&store, "headless-two", "orch");
+        let source_config = create_source(&store, "orch", "test/fixture",
+            "trusted-bot", "issues.opened").unwrap();
+        let observed = set_mode(&store, &source_config.id,
+            source_config.policy_revision, "observe").unwrap();
+        observe(&store, &event("headless-linked", &observed, 1)).unwrap();
+        assert!(headless_link_thread(&path, &observed.id, "missing", "issue:42").is_err());
+        assert!(headless_link_thread(&path, &observed.id, "headless-one", "issue:0").is_err());
+        let receipt: serde_json::Value = serde_json::from_str(
+            &headless_link_thread(&path, &observed.id,
+                "headless-one", "issue:42").unwrap()
+        ).unwrap();
+        assert_eq!(receipt["linked"], true);
+        assert_eq!(receipt["authorizationIssued"], false);
+        assert_eq!(receipt["ticketId"], "headless-one");
+        assert_eq!(linked_decisions(&store, "headless-one", 50).unwrap().len(), 1);
+        assert!(headless_link_thread(&path, &observed.id, "headless-two", "issue:42").is_err());
+        let repeated = headless_link_thread(&path, &observed.id,
+            "headless-one", "issue:42").unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&repeated).unwrap(), receipt);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id='headless-one'
+             AND kind='source_thread_linked'", [],
+            |r| r.get::<_, i64>(0)).unwrap(), 1);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_mandates", [],
+            |r| r.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(source(&store, &observed.id).unwrap().last_sequence, 1);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(list_thread_links(&reopened, "headless-one").unwrap().len(), 1);
+        assert_eq!(linked_decisions(&reopened, "headless-one", 50).unwrap()[0].delivery_id,
+            "headless-linked");
+    }
+
+    #[test]
     fn headless_unlink_reuses_live_native_transaction_without_recovery_or_receipt_loss() {
         let (store,path)=fixture();
         insert_manual_ticket(&store,"headless-one","orch");
@@ -3378,6 +3825,151 @@ mod tests {
         assert_eq!(headless_linked_activity(&path, "ticket-two", 50).unwrap(), "[]");
         assert!(headless_linked_activity(&path, "ticket-one", 101).is_err());
         assert!(headless_linked_activity(&path, "unknown-ticket", 50).is_err());
+    }
+
+    #[test]
+    fn pinned_repository_ids_fence_cross_source_ticket_activity_and_pr_links() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "identity-ticket", "orch");
+        let issue = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let pull = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request.opened").unwrap();
+        let matching_review = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request_review.submitted").unwrap();
+        let foreign_review = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request_review.updated").unwrap();
+        let issue = set_mode(&store, &issue.id, issue.policy_revision, "observe").unwrap();
+        let matching_review = set_mode(&store, &matching_review.id,
+            matching_review.policy_revision, "observe").unwrap();
+        let foreign_review = set_mode(&store, &foreign_review.id,
+            foreign_review.policy_revision, "observe").unwrap();
+        let make = |source: &EventSource, delivery: &str, subject: &str| EventEnvelope {
+            source_id: source.id.clone(), delivery_id: delivery.into(),
+            repository: source.repository.clone(), actor: "trusted-bot".into(),
+            event_kind: source.event_kind.clone(), subject_key: subject.into(),
+            sequence: 1,
+        };
+        observe(&store, &make(&issue, "original-issue", "issue:42")).unwrap();
+        observe(&store, &make(&matching_review, "same-repo-review", "pull:88")).unwrap();
+        observe(&store, &make(&foreign_review, "reused-name-review", "pull:88")).unwrap();
+        link_thread(&store, &issue.id, "identity-ticket", "issue:42").unwrap();
+        let attested_at = storage::now();
+        for (id, repository_id) in [
+            (&issue.id, 101_i64), (&foreign_review.id, 202_i64),
+        ] {
+            store.db.execute(
+                "INSERT INTO sa_source_repository_identity
+                 (source_id,repository_id,attested_at) VALUES(?1,?2,?3)",
+                params![id, repository_id, attested_at],
+            ).unwrap();
+        }
+        // A known source and an unknown source cannot be assumed to be the
+        // same GitHub repository for an issue-to-PR operator association.
+        assert!(link_issue_to_pull(&store, &pull.id, "identity-ticket",
+            "issue:42", "pull:88").is_err());
+        let links: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_source_thread_links WHERE ticket_id='identity-ticket'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(links, 1, "Denied association must not write a PR link");
+        store.db.execute(
+            "INSERT INTO sa_source_repository_identity
+             (source_id,repository_id,attested_at) VALUES(?1,101,?2)",
+            params![&pull.id, attested_at],
+        ).unwrap();
+        link_issue_to_pull(&store, &pull.id, "identity-ticket", "issue:42", "pull:88").unwrap();
+
+        let only_issue = linked_decisions(&store, "identity-ticket", 50).unwrap();
+        assert_eq!(only_issue.len(), 1, "Unknown and mismatched IDs must stay private");
+        assert_eq!(only_issue[0].delivery_id, "original-issue");
+
+        store.db.execute(
+            "INSERT INTO sa_source_repository_identity
+             (source_id,repository_id,attested_at) VALUES(?1,101,?2)",
+            params![&matching_review.id, attested_at],
+        ).unwrap();
+        let correlated = linked_decisions(&store, "identity-ticket", 50).unwrap();
+        assert_eq!(correlated.len(), 2, "Only the matching attested repository can join");
+        assert!(correlated.iter().any(|row| row.delivery_id == "same-repo-review"));
+        assert!(correlated.iter().all(|row| row.delivery_id != "reused-name-review"));
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(linked_decisions(&reopened, "identity-ticket", 50).unwrap().len(), 2);
+        let headless: serde_json::Value = serde_json::from_str(
+            &headless_linked_activity(&path, "identity-ticket", 50).unwrap()
+        ).unwrap();
+        assert!(headless.as_array().unwrap().iter().all(|row|
+            row["deliveryId"] != "reused-name-review"));
+        let tasks: i64 = reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(tasks, 1, "Observation and correlation never admit work");
+    }
+
+
+    #[test]
+    fn reused_repository_name_keeps_distinct_attested_ticket_threads_isolated() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "old-ticket", "orch");
+        insert_manual_ticket(&store, "new-ticket", "orch");
+        let old_issue = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let new_issue = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.closed").unwrap();
+        let old_pull = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request.opened").unwrap();
+        let new_pull = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request.closed").unwrap();
+        let unknown = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.reopened").unwrap();
+        let same_id = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.edited").unwrap();
+        for (src, repository_id) in [
+            (&old_issue, 101_i64), (&old_pull, 101_i64),
+            (&same_id, 101_i64), (&new_issue, 202_i64), (&new_pull, 202_i64),
+        ] {
+            store.db.execute(
+                "INSERT INTO sa_source_repository_identity
+                 (source_id,repository_id,attested_at) VALUES(?1,?2,?3)",
+                params![&src.id, repository_id, storage::now()],
+            ).unwrap();
+        }
+        let old_observed = set_mode(&store, &old_issue.id,
+            old_issue.policy_revision, "observe").unwrap();
+        let new_observed = set_mode(&store, &new_issue.id,
+            new_issue.policy_revision, "observe").unwrap();
+        observe(&store, &event("old-repo-issue", &old_observed, 1)).unwrap();
+        let mut newer = event("new-repo-issue", &new_observed, 1);
+        newer.event_kind = "issues.closed".into();
+        observe(&store, &newer).unwrap();
+
+        link_thread(&store, &old_issue.id, "old-ticket", "issue:42").unwrap();
+        link_thread(&store, &new_issue.id, "new-ticket", "issue:42").unwrap();
+        assert!(link_thread(&store, &same_id.id, "new-ticket", "issue:42").is_err(),
+            "Same attested ID cannot reassign the existing thread");
+        assert!(link_thread(&store, &unknown.id, "new-ticket", "issue:42").is_err(),
+            "Missing attestation must not bypass a known owner");
+        link_issue_to_pull(&store, &old_pull.id, "old-ticket", "issue:42", "pull:99").unwrap();
+        link_issue_to_pull(&store, &new_pull.id, "new-ticket", "issue:42", "pull:99").unwrap();
+
+        let old_activity = linked_decisions(&store, "old-ticket", 50).unwrap();
+        let new_activity = linked_decisions(&store, "new-ticket", 50).unwrap();
+        assert_eq!(old_activity.len(), 1);
+        assert_eq!(old_activity[0].delivery_id, "old-repo-issue");
+        assert_eq!(new_activity.len(), 1);
+        assert_eq!(new_activity[0].delivery_id, "new-repo-issue");
+        assert_eq!(list_thread_links(&store, "old-ticket").unwrap().len(), 2);
+        assert_eq!(list_thread_links(&store, "new-ticket").unwrap().len(), 2);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_mandates", [],
+            |r| r.get::<_, i64>(0)).unwrap(), 0);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(linked_decisions(&reopened, "old-ticket", 50).unwrap()[0].delivery_id,
+            "old-repo-issue");
+        assert_eq!(linked_decisions(&reopened, "new-ticket", 50).unwrap()[0].delivery_id,
+            "new-repo-issue");
     }
 
     #[test]

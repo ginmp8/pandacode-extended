@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 59;
+pub const SCHEMA_VERSION: i64 = 60;
 pub(crate) const COUNCIL_REVIEW_SNAPSHOT_DIRECTORY: &str = "council-review-snapshots";
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
@@ -943,6 +943,20 @@ impl Store {
                 migration.execute_batch(crate::superagent::scheduler::evidence::SCHEMA)
                     .map_err(|e|e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=59;")
+                    .map_err(|e|e.to_string())?;
+            }
+            if version < 60 {
+                // Bind authenticated GitHub Observe to immutable numeric
+                // repository IDs without inventing identity for old receipts.
+                // An owner/name may be deleted and reused by a different repo.
+                // Different source branches previously used schema v59 for
+                // different additive tables. Reconcile both idempotently so
+                // an installed user can move between those builds safely.
+                migration.execute_batch(crate::superagent::scheduler::evidence::SCHEMA)
+                    .map_err(|e|e.to_string())?;
+                migration.execute_batch(crate::superagent::events::REPOSITORY_ID_SCHEMA)
+                    .map_err(|e|e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=60;")
                     .map_err(|e|e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
@@ -2470,6 +2484,48 @@ mod sidebar_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unified_schema_reconciles_both_v59_source_variants_without_recreating_grants() {
+        for variant in ["scheduler-evidence", "github-identity"] {
+            let path=std::env::temp_dir().join(format!(
+                "sa-unified-v59-{variant}-{}.sqlite3",uuid::Uuid::new_v4(),
+            ));
+            {
+                let store=Store::open(&path).unwrap();
+                match variant {
+                    "scheduler-evidence" => store.db.execute_batch(
+                        "DROP TRIGGER IF EXISTS sa_work_item_evidence_immutable;
+                         DROP TRIGGER IF EXISTS sa_work_item_evidence_no_delete;
+                         DROP TABLE sa_work_item_evidence_receipts;
+                         PRAGMA user_version=59;"
+                    ).unwrap(),
+                    _ => store.db.execute_batch(
+                        "DROP TABLE sa_source_repository_identity;
+                         PRAGMA user_version=59;"
+                    ).unwrap(),
+                }
+            }
+            let reopened=Store::open(&path).unwrap();
+            let version:i64=reopened.db.query_row(
+                "PRAGMA user_version",[],|row|row.get(0),
+            ).unwrap();
+            assert_eq!(version,SCHEMA_VERSION);
+            for table in ["sa_work_item_evidence_receipts","sa_source_repository_identity"] {
+                let exists:bool=reopened.db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                    [table],|row|row.get(0),
+                ).unwrap();
+                assert!(exists,"v59 {variant} upgrade is missing {table}");
+            }
+            let new_mandates:i64=reopened.db.query_row(
+                "SELECT COUNT(*) FROM sa_mandates",[],|row|row.get(0),
+            ).unwrap();
+            assert_eq!(new_mandates,0,"Schema reconciliation must not mint authorization");
+            drop(reopened);
+            let _=std::fs::remove_file(path);
+        }
+    }
 
     #[test]
     fn unified_schema_recovers_alternate_v51_council_installation() {

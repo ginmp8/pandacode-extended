@@ -81,7 +81,7 @@ async fn poll_source(app:&tauri::AppHandle,candidate:EligibleSource)->Result<()>
     let repo=candidate.src.repository.clone();
     let since=candidate.since;
     let cursor=candidate.src.last_sequence;
-    let (operator,data,page_count)=tokio::task::spawn_blocking(move||
+    let (operator,data,page_count,repository_id)=tokio::task::spawn_blocking(move||
         events::fetch_authenticated_github_window(&repo,since,cursor)
     ).await.map_err(|e|e.to_string())??;
     if !candidate.pinned_operator.eq_ignore_ascii_case(&operator) {
@@ -98,8 +98,8 @@ async fn poll_source(app:&tauri::AppHandle,candidate:EligibleSource)->Result<()>
     }
     // This adapter atomically persists verified event decisions and the
     // narrowly permitted Auto intake outbox; no loose Webview envelope.
-    events::poll_authenticated_events_with_identity(
-        &store,&candidate.src,since,&data,&operator,page_count,
+    events::poll_authenticated_events_with_repository_id(
+        &store,&candidate.src,since,&data,&operator,page_count,repository_id,
     )?;
     Ok(())
 }

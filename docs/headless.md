@@ -600,6 +600,16 @@ exception remain unimplemented; Council-Off Tickets retain normal manual
 acceptance.
 
 
+### Native GitHub source-thread context link
+
+`pandacode serve --link-source-thread <source-id> <ticket-id> <issue:123|pull:123>`
+associates an exact GitHub issue or PR thread as **context only** after checking
+the native source, Ticket, repository identity and policy. It does not fetch
+remote content, authenticate the thread body, grant tools, create a Ticket or
+launch a Worker. The previous `--unlink-source-thread` remains available.
+A reused repository name cannot silently join two distinct attested repository
+IDs. No historical source is assigned a guessed numeric repository ID.
+
 ### Read-only native Demand preflight
 
 `pandacode serve --preflight-demand <team-id> <direct|coordinated> <objective-file>`

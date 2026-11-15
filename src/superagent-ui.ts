@@ -232,6 +232,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let childTree: ObservedChildTree | null = null, childTreeLoaded = false;
   let workPlan: NativeWorkPlan | null = null, workPlanLoaded = false;
   let workPlanDraft = '', workPlanError = '', workPlanDraftTicket = '';
+  let workPlanFormat: 'native' | 'coordinator-v1' = 'native';
   let roleRoster: TeamRoster | null = null;
   let teamStrategy: StrategyView | null = null;
   // Draft order is committed only by the native revision-guarded roster update.
@@ -571,6 +572,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           !ticketDetails.mandate.allowedSideEffects &&
           ticketDetails.mandate.allowedTools.length === 0
            ? '<form data-sa-form="work-plan">' +
+             '<label>Plan JSON format<select name="workPlanFormat" aria-label="Plan JSON format">' +
+             '<option value="native"' + (workPlanFormat==='native'?' selected':'') +
+             '>Native WorkPlan items</option>' +
+             '<option value="coordinator-v1"' + (workPlanFormat==='coordinator-v1'?' selected':'') +
+             '>Coordinator v1 proposal (review before saving)</option></select></label>' +
              '<label>Work plan JSON (items and dependencies)' +
              '<textarea name="workPlanJson" rows="7" spellcheck="false" maxlength="65536" ' +
              'placeholder="Enter JSON with bounded items">' +
@@ -1266,6 +1272,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       } else if (target.name === 'reviewers') {
         draftReviewerBotIds = [...target.selectedOptions].map(option => option.value);
       } else return;
+      render();
+      return;
+    }
+    if (target instanceof HTMLSelectElement && target.name === 'workPlanFormat' &&
+        target.closest('form[data-sa-form="work-plan"]')) {
+      if (target.value !== 'native' && target.value !== 'coordinator-v1') return;
+      workPlanFormat=target.value;
       render();
       return;
     }
@@ -2095,25 +2108,36 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (!nativeTicket || nativeTicket.id !== inspectedTicket ||
           nativeTicket.state !== 'blocked' || ticketDetails?.mandate.revoked) return;
       workPlanDraft = String(data.get('workPlanJson') ?? '');
-      let parsed: unknown;
-      try { parsed = JSON.parse(workPlanDraft); }
-      catch { workPlanError = 'Enter valid JSON with an items array.'; render(); return; }
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed) ||
-          !Array.isArray((parsed as Record<string, unknown>).items)) {
-        workPlanError = 'Provide an object with a bounded items array.';
+      let items: unknown[]=[];
+      if (new TextEncoder().encode(workPlanDraft).length > 64*1024) {
+        workPlanError='Plan JSON must stay within 64 KiB.';
         render(); return;
       }
-      const {items} = parsed as {items:unknown[]};
-      if (items.length === 0 || items.length > 64 ||
-          new TextEncoder().encode(workPlanDraft).length > 64*1024) {
-        workPlanError = 'Provide 1–64 work items within 64 KiB.';
-        render(); return;
+      if (workPlanFormat === 'native') {
+        let parsed: unknown;
+        try { parsed=JSON.parse(workPlanDraft); }
+        catch { workPlanError='Enter valid JSON with an items array.'; render(); return; }
+        if (!parsed || typeof parsed!=='object' || Array.isArray(parsed) ||
+            !Array.isArray((parsed as Record<string, unknown>).items)) {
+          workPlanError='Provide an object with a bounded items array.';
+          render();return;
+        }
+        items=(parsed as {items:unknown[]}).items;
+        if (items.length===0 || items.length>64) {
+          workPlanError='Provide 1–64 native work items.';
+          render();return;
+        }
       }
       workPlanError = '';
       void work(async () => {
-        const saved = await call<NativeWorkPlan>('superagent_work_plan_create', {
-          input:{ ticketId:nativeTicket.id,expectedRevision:nativeTicket.revision,items },
-        });
+        // A model proposal is only parsed here; this explicit operator action
+        // separately invokes native plan creation with all mandate checks.
+        const input=workPlanFormat==='coordinator-v1'
+          ? await call<Record<string,unknown>>('superagent_work_plan_preview', {
+              ticketId:nativeTicket.id,expectedRevision:nativeTicket.revision,text:workPlanDraft,
+            })
+          : {ticketId:nativeTicket.id,expectedRevision:nativeTicket.revision,items};
+        const saved=await call<NativeWorkPlan>('superagent_work_plan_create',{input});
         if (inspectedTicket !== nativeTicket.id) return;
         workPlan = saved; workPlanLoaded = true;
         feedback = 'Native work-plan DAG saved without dispatch or acceptance.';

@@ -102,6 +102,86 @@ fn valid_key(key: &str) -> bool {
         ch.is_ascii_alphanumeric() || matches!(ch,b'-'|b'_'))
 }
 
+/// Source #151 Coordinator JSON is untrusted model output. This adapter
+/// converts it into the unified, bounded WorkPlanInput for operator review;
+/// parsing never writes a row, grants a tool, or launches a Worker.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+struct CoordinatorPlanDocumentV1 {
+    version: u8,
+    work_items: Vec<CoordinatorProposalItem>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+struct CoordinatorProposalItem {
+    ordinal: i64,
+    objective: String,
+    #[serde(default="legacy_coordinator_evidence_contract")]
+    evidence_contract: String,
+    depends_on: Vec<i64>,
+}
+
+fn legacy_coordinator_evidence_contract() -> String {
+    "Verify the objective is complete with concrete evidence and report any remaining gaps.".into()
+}
+
+fn preview_coordinator_plan(
+    ticket_id: &str, expected_revision: i64, text: &str,
+) -> Result<WorkPlanInput> {
+    if text.trim().is_empty() || text.len() > 64*1024 {
+        return Err("Coordinator proposal is empty or exceeds 64 KiB.".into());
+    }
+    let document: CoordinatorPlanDocumentV1=serde_json::from_str(text)
+        .map_err(|_|"Coordinator plan must be exactly one strict v1 JSON document.")?;
+    if document.version!=1 || !(1..=32).contains(&document.work_items.len()) {
+        return Err("Coordinator plan must have version 1 and 1–32 bounded items.".into());
+    }
+    let count=document.work_items.len();
+    let mut ordered:Vec<Option<CoordinatorProposalItem>>=
+        std::iter::repeat_with(||None).take(count).collect();
+    for mut item in document.work_items {
+        let ordinal=usize::try_from(item.ordinal)
+            .map_err(|_|"Coordinator ordinals must be contiguous from zero.")?;
+        if ordinal>=count || ordered[ordinal].is_some() {
+            return Err("Coordinator ordinals must be unique and contiguous from zero.".into());
+        }
+        item.objective=item.objective.trim().to_owned();
+        item.evidence_contract=item.evidence_contract.trim().to_owned();
+        if item.objective.is_empty() || item.objective.len()>MAX_TITLE
+            || item.objective.chars().any(char::is_control)
+            || item.evidence_contract.is_empty()
+            || item.evidence_contract.len()>MAX_ACCEPTANCE
+            || item.evidence_contract.chars().any(char::is_control) {
+            return Err("Coordinator objectives or evidence contracts exceed unified WorkPlan limits.".into());
+        }
+        ordered[ordinal]=Some(item);
+    }
+    let mut items=Vec::with_capacity(count);
+    for (ordinal,entry) in ordered.into_iter().enumerate() {
+        let item=entry.ok_or("Coordinator plan contains an ordinal gap.")?;
+        let mut predecessors=Vec::with_capacity(item.depends_on.len());
+        let mut seen=HashSet::new();
+        for dependency in item.depends_on {
+            let previous=usize::try_from(dependency)
+                .map_err(|_|"Coordinator dependency must name an item in the plan.")?;
+            if previous>=count || previous==ordinal || !seen.insert(previous) {
+                return Err("Coordinator dependencies must be distinct in-plan ordinals, not self-edges.".into());
+            }
+            predecessors.push(format!("w{previous}"));
+        }
+        items.push(WorkItemInput {
+            key:format!("w{ordinal}"),
+            title:item.objective,
+            acceptance:item.evidence_contract,
+            depends_on:predecessors,
+        });
+    }
+    let input=WorkPlanInput {ticket_id:ticket_id.into(),expected_revision,items};
+    validate_plan(&input)?;
+    Ok(input)
+}
+
 fn validate_plan(input: &WorkPlanInput) -> Result<String> {
     if !valid_key(&input.ticket_id) || input.expected_revision < 0
         || input.items.is_empty() || input.items.len() > MAX_ITEMS {
@@ -310,6 +390,15 @@ pub(crate) fn headless_inspect(database_path:&Path,ticket_id:&str)->Result<Strin
 }
 
 #[tauri::command]
+pub async fn superagent_work_plan_preview(
+    window:tauri::WebviewWindow,
+    ticket_id:String,expected_revision:i64,text:String,
+)->Result<WorkPlanInput> {
+    require_main_window(&window)?;
+    preview_coordinator_plan(&ticket_id,expected_revision,&text)
+}
+
+#[tauri::command]
 pub async fn superagent_work_plan_create(
     window:tauri::WebviewWindow,
     state:State<'_,AppState>,
@@ -334,6 +423,34 @@ pub async fn superagent_work_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn strict_coordinator_v1_plan_converts_to_reviewable_unified_dag_without_authority() {
+        let text=r#"{"version":1,"workItems":[{"ordinal":1,"objective":"Implement",
+            "evidenceContract":"Executed tests","dependsOn":[0]},
+            {"ordinal":0,"objective":"Plan","dependsOn":[]}]}"#;
+        let plan=preview_coordinator_plan("ticket_01",5,text).unwrap();
+        assert_eq!(plan.expected_revision,5);
+        assert_eq!(plan.ticket_id,"ticket_01");
+        assert_eq!(plan.items.len(),2);
+        assert_eq!(plan.items[0].key,"w0");
+        assert_eq!(plan.items[0].title,"Plan");
+        assert!(plan.items[0].acceptance.contains("concrete evidence"));
+        assert_eq!(plan.items[1].depends_on,vec!["w0"]);
+        assert_eq!(validate_plan(&plan).unwrap().len(),64);
+        for invalid in [
+            r#"{"version":1,"workItems":[{"ordinal":0,"objective":"A","dependsOn":[0]}]}"#,
+            r#"{"version":1,"workItems":[{"ordinal":0,"objective":"A","dependsOn":[1]},{"ordinal":1,"objective":"B","dependsOn":[0]}]}"#,
+            r#"{"version":1,"workItems":[{"ordinal":1,"objective":"A","dependsOn":[]}]}"#,
+            r#"{"version":2,"workItems":[{"ordinal":0,"objective":"A","dependsOn":[]}]}"#,
+            r#"{"version":1,"workItems":[{"ordinal":0,"objective":"A","evidenceContract":null,"dependsOn":[]}]}"#,
+            r#"{"version":1,"workItems":[{"ordinal":0,"objective":"A","dependsOn":[],"providerAuthority":true}]}"#,
+            "```json\n{}\n```",
+        ] {
+            assert!(preview_coordinator_plan("ticket_01",5,invalid).is_err(),"{invalid}");
+        }
+        assert!(preview_coordinator_plan("ticket_01",5,&"x".repeat(65537)).is_err());
+    }
+
     #[test]
     fn bounded_dag_rejects_duplicate_unknown_and_cyclic_dependencies() {
         let good=WorkPlanInput{

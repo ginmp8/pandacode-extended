@@ -4485,6 +4485,7 @@ pub fn run() {
                 superagent::superagent_duplicate,
                 superagent::strategy::superagent_strategy_get,
                 superagent::strategy::superagent_strategy_update,
+                superagent::work_items::superagent_work_plan_preview,
                 superagent::work_items::superagent_work_plan_create,
                 superagent::work_items::superagent_work_plan,
                 superagent::work_items::progress::superagent_work_item_verify,

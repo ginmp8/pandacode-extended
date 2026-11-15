@@ -2246,8 +2246,9 @@ fn two_phase_allows_shared_challenger_model_across_independent_lenses() {
     );
 
     // The same identity may not challenge a report it authored for that lens.
-    team.workers[2].model = team.workers[0].model.clone();
-    team.workers[2].reviewer_binding.as_mut().unwrap().snapshot.model = team.workers[2].model.clone();
+    let author_model = team.workers[0].model.clone();
+    team.workers[2].model = author_model.clone();
+    team.workers[2].reviewer_binding.as_mut().unwrap().snapshot.model = author_model;
     assert_ne!(
         council::status_with_criterion_outcomes(&team, &receipts).unwrap().state,
         "passed",

@@ -3315,15 +3315,13 @@ fn create_child_council_receipt(
     let mut findings_refs = Vec::new();
     let mut evidence_refs = Vec::new();
     for worker in &leaf_workers {
-        let receipt = terminal_receipts
-            .iter()
-            .find(|receipt| {
+        let receipt = unique_council_receipt(&terminal_receipts, |receipt| {
                 receipt.cycle_id == link.child_council_cycle_id
                     && receipt.assignment_id.as_deref() == Some(worker.id.as_str())
                     && receipt.terminal_revision == worker.result_revision
             })
             .ok_or(
-                "reviewer_session_mismatch: child leaf is missing its correlated terminal receipt.",
+                "reviewer_session_mismatch: child leaf has missing or ambiguous correlated terminal receipts.",
             )?;
         receipt.validate().map_err(|error| error.to_string())?;
         findings_refs.extend(receipt.findings_refs.iter().cloned());

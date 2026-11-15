@@ -1129,13 +1129,22 @@ fn seven_native_source_combinations_have_distinct_modes_without_unsafe_child_dis
                     None, None,
                 );
                 match (mode, strategy) {
-                    ("m5", council::CouncilExecutionStrategy::Parallel | council::CouncilExecutionStrategy::Escalated) =>
+                    ("m5", council::CouncilExecutionStrategy::Parallel | council::CouncilExecutionStrategy::Escalated | council::CouncilExecutionStrategy::TwoPhase) =>
                         assert_eq!(source.unwrap(), council::CouncilReviewerSource::Automatic),
-                    ("m6", council::CouncilExecutionStrategy::Parallel | council::CouncilExecutionStrategy::Escalated) =>
+                    ("m6", council::CouncilExecutionStrategy::Parallel | council::CouncilExecutionStrategy::Escalated | council::CouncilExecutionStrategy::TwoPhase) =>
                         assert_eq!(source.unwrap(), council::CouncilReviewerSource::DirectBot),
-                    ("m7", council::CouncilExecutionStrategy::Parallel | council::CouncilExecutionStrategy::Escalated) =>
+                    ("m7", council::CouncilExecutionStrategy::Parallel | council::CouncilExecutionStrategy::Escalated | council::CouncilExecutionStrategy::TwoPhase) =>
                         assert!(source.unwrap_err().contains("councilReviewerSource")),
                     _ => assert!(source.unwrap_err().contains("child_council_unavailable")),
+                }
+                if strategy == council::CouncilExecutionStrategy::TwoPhase {
+                    let challenge = council::reviewer_source_for(
+                        &team,
+                        &CouncilSeat { round: 2, lens: "Security".into(), score: None, started_at: 0, closed_by_selection: false, reported_severe_finding: false, reported_conflict: false },
+                        None, None,
+                    );
+                    assert!(challenge.unwrap_err().contains("child_council_unavailable"),
+                        "{mode}/S3 must not dispatch unimplemented native root or child challengers");
                 }
                 if strategy == council::CouncilExecutionStrategy::Escalated {
                     let second_wave = council::reviewer_source_for(
@@ -4139,6 +4148,83 @@ fn assert_nested_m5_root_and_child_callbacks(strategy: council::CouncilExecution
         .find(|worker| worker.id == root_worker.id).unwrap()
         .council.as_mut().unwrap().score = Some(10.0);
     assert!(!verified_council_pass(&store, &forged));
+}
+
+/// S3's first phase is real independent native root/child work, not a
+/// successful Council verdict or permission to create an unimplemented phase
+/// two. In particular a selected nested bot cannot auto-add a new root source.
+#[test]
+fn nested_m5_s3_admits_native_first_phase_but_denies_premature_approval() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('security-child','security-child',?1,'codex','default','plan',?2,?2)",
+            rusqlite::params![project, storage::now()],
+        ).unwrap();
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.strategy = council::CouncilExecutionStrategy::TwoPhase;
+        config.automatic_reviewers = 1;
+        config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+            bot_id: "security-child".into(), child_reviewers: 2,
+            child_target: 9.5, child_max_rounds: 2,
+        });
+        assert_eq!(config.mode(), "m5");
+        config.validate().unwrap();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid,
+        "Review the unchanged artifact using both S3 phases", None, None).unwrap();
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [reviewer_assignment("s3-first-automatic", "correctness")]
+    })).unwrap();
+    let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (first_root, _) = claim(&state, launch);
+    assert!(first_root.config.reviewer_boundary);
+    finish(&state, &first_root, "Independent S3 phase one root review.\nCouncil score: 9.7/10", true);
+    let (pending, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Await first phase child callbacks"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(pending["completed"], false);
+    for _ in 0..2 {
+        let leaf = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&leaf.sid, "assistant",
+                "Independent S3 child phase one.\nCouncil score: 9.5/10").unwrap();
+        }
+        completed_state(&state, &leaf.sid, Some(&leaf.admission), true, false, &mut |_| {});
+    }
+    let (pending, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"First phase settled; challenge not issued"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(pending["completed"], false,
+        "S3 cannot pass using only first-phase native root and child callbacks");
+    let store = state.store.lock().unwrap();
+    let saved = load(&store, &sid).unwrap().unwrap();
+    let children = child_council::inspect(&store, &saved).unwrap();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0].leaf_attempts.len(), 2);
+    assert!(children[0].verified_child_receipt.is_some(),
+        "S3 first-wave children must carry authentic native callback evidence");
+    assert!(children[0].verified_escalation_receipt.is_none(),
+        "an S3 first-wave receipt is never a second-phase challenge receipt");
+    assert!(council::status_for_authenticated_children(
+        &saved, &child_council::verified_parent_seats(&store, &saved).unwrap().unwrap()
+    ).is_none(), "S3 must not reuse the S1 single-phase terminal gate");
+    assert!(!verified_council_pass(&store, &saved));
+    let second = CouncilSeat { round: 2, lens: "correctness".into(), score: None,
+        started_at: 0, closed_by_selection: false, reported_severe_finding: false,
+        reported_conflict: false };
+    assert!(council::reviewer_source_for(&saved, &second, None, None)
+        .unwrap_err().contains("child_council_unavailable"),
+        "unimplemented nested phase-two challenger admission stays denied");
 }
 
 #[test]

@@ -1145,10 +1145,11 @@ pub(super) fn reviewer_source_for(
 ) -> Result<CouncilReviewerSource> {
     let config = team.config.council.as_ref().ok_or("Council is off.")?;
     let nested = !config.nested_bot_reviewers.is_empty();
-    // S2 may admit only enabled first-wave root sources. A fully clean,
-    // always-nested first wave can pass; forced or triggered escalation must
-    // await an independently admitted second child/root wave. S3 remains closed.
-    if nested && config.strategy == CouncilExecutionStrategy::TwoPhase {
+    // A nested S3 may issue its independent first-phase root seats from
+    // explicitly enabled sources. Its second phase remains closed until
+    // fresh native child and root challenges can be admitted and verified;
+    // no first-phase composite may authorize terminal success.
+    if nested && config.strategy == CouncilExecutionStrategy::TwoPhase && seat.round != 1 {
         return Err("child_council_unavailable: nested S3 needs native independent challenge admission.".into());
     }
     if nested && config.strategy == CouncilExecutionStrategy::Escalated && seat.round > 1

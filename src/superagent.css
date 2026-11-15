@@ -40,3 +40,12 @@
 .sa-event-sources h4,.sa-event-sources h5{margin:0}
 .sa-event-sources ol{padding-left:22px;overflow-wrap:anywhere;font-size:var(--ds-text-sub)}
 .sa-source-list small{overflow-wrap:anywhere;white-space:normal}
+
+.sa-plan-readiness{min-width:0;padding:10px 12px;border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner);background:var(--ds-card-inner)}
+.sa-plan-readiness>summary{cursor:pointer;color:var(--text);font-size:var(--ds-text-sub);font-weight:600}
+.sa-plan-readiness-body{display:flex;flex-direction:column;gap:8px;min-width:0;margin-top:10px}
+.sa-plan-readiness .sa-plan-readiness-note{margin:0;font-size:var(--ds-text-meta);line-height:1.5;overflow-wrap:anywhere}
+.sa-plan-readiness h5{margin:0;font-size:var(--ds-text-sub)}
+.sa-work-items-list{display:block;list-style:decimal;margin:0;padding-left:24px}
+.sa-work-items-list .sa-item{display:list-item;padding:8px 0 8px 4px}
+.sa-work-items-list .sa-item strong{overflow:visible;text-overflow:clip;white-space:normal;overflow-wrap:anywhere}

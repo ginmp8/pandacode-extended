@@ -5,6 +5,8 @@ type Config = { id:string; name:string; coordinatorBotId:string; workerBotId:str
   projectId:string; enabled:boolean; policyRevision:number; councilRequired:boolean };
 type Ticket = { id:string; orchestrationId:string; objective:string;
   state:string; revision:number; evidence:null };
+type WorkItem = { id:string; ticketId:string; objective:string; state:string;
+  ordinal:number; createdAt:number; updatedAt:number };
 type TeamSnapshot = {
   snapshotVersion:number; provenance:string; orchestrationId:string; teamVersion:number;
   name:string; projectId:string; coordinatorBotId:string; workerBotIds:string[];
@@ -26,6 +28,7 @@ const threadLinks = new Map<string,Array<{sourceId:string;ticketId:string;reposi
   actorFilter:string;eventKind:string;mode:'off'|'observe';createdAt:number}>>();
 const configs = new Map<string,Config>(), tickets = new Map<string,Ticket[]>();
 const teamSnapshots = new Map<string,TeamSnapshot>();
+const workItems = new Map<string,WorkItem[]>();
 const get = (id:string):Config => { const c=configs.get(id); if(!c)throw Error('Orchestration not found.'); return c; };
 export async function invokeSuperagent<T>(
   command:string,args:Record<string,any>,listBots:()=>Promise<Bot[]>,
@@ -142,6 +145,14 @@ export async function invokeSuperagent<T>(
       lastActivityAt:Date.now(),
     }));break;
     case 'superagent_tickets':value=tickets.get(args.orchestrationId)||[];break;
+    case 'superagent_work_items':{
+      const ticketId=typeof args.ticketId==='string'?args.ticketId.trim():'';
+      if(!ticketId)throw Error('A Ticket id is required.');
+      const ticket=[...tickets.values()].flat().find(item=>item.id===ticketId);
+      if(!ticket)throw Error('Ticket not found.');
+      value=[...(workItems.get(ticketId)||[])].sort((left,right)=>left.ordinal-right.ordinal||left.id.localeCompare(right.id));
+      break;
+    }
     case 'superagent_snapshot':
     case 'superagent_mandate':
     case 'superagent_assignments':
@@ -205,13 +216,30 @@ export async function invokeSuperagent<T>(
     case 'superagent_submit':
     case 'superagent_submit_coordinated':{
       const c=get(args.orchestrationId);if(!c.enabled)throw Error('Orchestration disabled.');
+      const coordinated=command==='superagent_submit_coordinated';
       const t:Ticket={id:crypto.randomUUID(),orchestrationId:c.id,objective:args.objective,
-        state:'running',revision:0,evidence:null};
+        state:coordinated?'queued':'running',revision:0,evidence:null};
       teamSnapshots.set(t.id,makeTeamSnapshot(c));
       tickets.set(c.id,[...(tickets.get(c.id)||[]),t]);
-      assignments.set(t.id,[{id:'preview-assignment-'+t.id,botId:c.workerBotId,
-        sessionId:'preview-session-'+t.id,attempt:1,state:'running'}]);
-      activity.set(t.id,[{id:1,kind:'admitted',detail:'Manual read-only preview assignment',at:Date.now()}]);
+      assignments.set(t.id,coordinated
+        ? [{id:'preview-coordinator-assignment-'+t.id,botId:c.coordinatorBotId,
+            sessionId:'preview-coordinator-session-'+t.id,attempt:1,state:'completed'}]
+        : [{id:'preview-assignment-'+t.id,botId:c.workerBotId,
+            sessionId:'preview-session-'+t.id,attempt:1,state:'running'}]);
+      // A direct worker owns the objective immediately. Coordinated preview
+      // completes the Coordinator stage immediately to expose the queued state,
+      // but records no coordinator plan or result.
+      if(command==='superagent_submit'){
+        const now=Date.now();
+        workItems.set(t.id,[{id:'preview-work-item-'+t.id,ticketId:t.id,
+          objective:t.objective,state:'running',ordinal:0,createdAt:now,updatedAt:now}]);
+      }
+      activity.set(t.id,[{id:1,
+        kind:coordinated?'coordinator_preview_completed':'admitted',
+        detail:coordinated
+          ? 'Preview-only Coordinator completion; no structured plan data was generated. Worker admission remains manual.'
+          : 'Manual read-only preview assignment',
+        at:Date.now()}]);
       value=t;break;
     }
     case 'superagent_stop':
@@ -226,10 +254,46 @@ export async function invokeSuperagent<T>(
         t.state='stopped';
       }else if(command==='superagent_dispatch_worker') {
         if(t.state!=='queued')throw Error('No coordinator plan.');
+        const snapshot=teamSnapshots.get(t.id),history=assignments.get(t.id)||[];
+        const coordinatorAssignment=history[0];
+        const workerBotId=snapshot?.workerBotIds[0];
+        if(!snapshot||history.length!==1||!coordinatorAssignment||
+          coordinatorAssignment.botId!==snapshot.coordinatorBotId||
+          coordinatorAssignment.attempt!==1||coordinatorAssignment.state!=='completed'||!workerBotId)
+          throw Error('Preview Coordinator assignment is unavailable.');
+        if((workItems.get(t.id)||[]).length!==0)
+          throw Error('Preview worker admission already has a WorkItem.');
+        const attempt=Math.max(0,...history.map(entry=>entry.attempt))+1;
+        history.push({id:`preview-assignment-${t.id}-attempt-${attempt}`,botId:workerBotId,
+          sessionId:`preview-session-${t.id}-attempt-${attempt}`,attempt,state:'running'});
+        assignments.set(t.id,history);
         t.state='running';
+        const now=Date.now();
+        workItems.set(t.id,[{id:'preview-work-item-'+t.id,ticketId:t.id,
+          objective:t.objective,state:'running',ordinal:0,createdAt:now,updatedAt:now}]);
       }else if(command==='superagent_retry') {
-        if(t.state!=='blocked')throw Error('Ticket is not blocked.');
+        if(t.state!=='blocked')throw Error('Only a blocked SuperAgent ticket can be retried manually.');
+        const items=workItems.get(t.id)||[];
+        if(items.length!==1)throw Error('Preview retry requires exactly one blocked or failed WorkItem.');
+        const item=items[0];
+        if(!item||item.ticketId!==t.id||!['blocked','failed'].includes(item.state))
+          throw Error('Preview retry requires exactly one blocked or failed WorkItem.');
+        const config=get(t.orchestrationId),snapshot=teamSnapshots.get(t.id);
+        const workerBotId=snapshot?.workerBotIds[0];
+        if(!config.enabled)throw Error('Orchestration disabled.');
+        if(!snapshot||!workerBotId)throw Error('Saved preview worker is unavailable.');
+        const history=assignments.get(t.id)||[];
+        const workerAttempts=history.filter(entry=>entry.botId===workerBotId).length;
+        if(workerAttempts>=snapshot.policy.maxAttemptsPerAssignment)
+          throw Error('Manual worker retry limit reached; create a new authorized ticket.');
+        const attempt=Math.max(0,...history.map(entry=>entry.attempt))+1;
+        const now=Date.now();
+        history.push({id:`preview-assignment-${t.id}-attempt-${attempt}`,botId:workerBotId,
+          sessionId:`preview-session-${t.id}-attempt-${attempt}`,attempt,state:'running'});
+        assignments.set(t.id,history);
+        workItems.set(t.id,items.map(workItem=>({...workItem,state:'running',updatedAt:now})));
         t.state='running';
+        t.evidence=null;
       }else {
         if(t.state!=='waiting_approval'||t.revision!==args.expectedRevision)throw Error('Stale worker evidence.');
         t.state=command==='superagent_accept'?'completed':'blocked';
@@ -237,6 +301,8 @@ export async function invokeSuperagent<T>(
       t.revision++;
       if(command==='superagent_stop'){
         for(const entry of assignments.get(t.id)||[])if(entry.state==='running')entry.state='stopped';
+        workItems.set(t.id,(workItems.get(t.id)||[]).map(item=>item.state==='running'
+          ? {...item,state:'blocked',updatedAt:Date.now()} : item));
       }
       const events=activity.get(t.id)||[];
       events.unshift({id:events.length+1,kind:command.slice('superagent_'.length),

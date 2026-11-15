@@ -36,6 +36,10 @@ pub(crate) const CHANNEL: &str = "superagent";
 /// headroom for native task metadata, read-only instructions and coordinator
 /// evidence; never persist an objective that is silently truncated at dispatch.
 const MAX_OBJECTIVE_BYTES: usize = 16 * 1024;
+/// Coordinators return one compact JSON plan; validate its full serialized
+/// representation before the legacy callback evidence truncation is applied.
+const MAX_COORDINATOR_PLAN_BYTES: usize = 64 * 1024;
+const MAX_COORDINATOR_PLAN_ITEMS: usize = 32;
 pub(crate) const MAX_WORKERS_PER_TEAM: usize = 16;
 pub(crate) const MAX_REVIEWERS_PER_TEAM: usize = 8;
 const TEAM_SNAPSHOT_VERSION: u32 = 3;
@@ -1346,16 +1350,17 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
     Ok(result)
 }
 
-/// Scheduler groundwork: ordered WorkItems for one Ticket. These helpers are
-/// consumed by the WorkItem scheduler slice and its tests; they do not dispatch,
-/// grant authority, or change the existing Ticket/assignment state machine.
+/// Native ordered WorkItems and strict Coordinator-plan ingestion. These helpers
+/// persist advisory structure only; they do not dispatch or grant authority.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod work_items {
-    use super::{get_ticket_on, MAX_OBJECTIVE_BYTES};
+    use super::{get_ticket_on, MAX_COORDINATOR_PLAN_BYTES, MAX_COORDINATOR_PLAN_ITEMS,
+        MAX_OBJECTIVE_BYTES};
     use crate::storage::{self, Store};
     use crate::Result;
     use rusqlite::{params, Connection, OptionalExtension};
-    use serde::Serialize;
+    use serde::{Deserialize, Serialize};
+    use std::collections::HashSet;
 
     /// Every state admitted by the `sa_work_items.state` CHECK constraint.
     pub(crate) const STATES: [&str; 7] =
@@ -1371,6 +1376,146 @@ pub(crate) mod work_items {
         pub ordinal: i64,
         pub created_at: i64,
         pub updated_at: i64,
+    }
+
+    /// The one item a native retry may safely bind in its admission transaction.
+    pub(super) struct RetryWorkItem {
+        pub(super) id: String,
+        pub(super) objective: String,
+        pub(super) requeue: bool,
+    }
+
+    /// Versioned, untrusted Coordinator output after all native plan checks.
+    #[derive(Debug, Clone)]
+    pub(super) struct CoordinatorPlan {
+        work_items: Vec<CoordinatorPlanItem>,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct CoordinatorPlanDocument {
+        version: u8,
+        work_items: Vec<CoordinatorPlanItem>,
+    }
+
+    #[derive(Debug, Clone, Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct CoordinatorPlanItem {
+        ordinal: i64,
+        objective: String,
+        depends_on: Vec<i64>,
+    }
+
+    impl CoordinatorPlan {
+        pub(super) fn item_count(&self) -> usize {
+            self.work_items.len()
+        }
+    }
+
+    /// Parse a complete versioned JSON document. Unknown fields, Markdown
+    /// fences, trailing prose, oversized payloads and malformed dependencies
+    /// are rejected before any database row is written.
+    pub(super) fn parse_coordinator_plan(text: &str) -> Result<CoordinatorPlan> {
+        let text = text.trim();
+        if text.is_empty() || text.len() > MAX_COORDINATOR_PLAN_BYTES {
+            return Err("Coordinator plan is empty or exceeds its size limit.".into());
+        }
+        let document: CoordinatorPlanDocument = serde_json::from_str(text)
+            .map_err(|_| "Coordinator plan must be one strict version 1 JSON document.")?;
+        if document.version != 1 {
+            return Err("Coordinator plan version is not supported.".into());
+        }
+        let count = document.work_items.len();
+        if !(1..=MAX_COORDINATOR_PLAN_ITEMS).contains(&count) {
+            return Err("Coordinator plan must contain between 1 and 32 WorkItems.".into());
+        }
+
+        // Ordinals are the durable order and must cover exactly 0..count.
+        let mut ordered: Vec<Option<CoordinatorPlanItem>> = vec![None; count];
+        for mut item in document.work_items {
+            let ordinal = usize::try_from(item.ordinal)
+                .map_err(|_| "Coordinator plan ordinals must be contiguous from zero.")?;
+            if ordinal >= count {
+                return Err("Coordinator plan ordinals must be contiguous from zero.".into());
+            }
+            let objective = item.objective.trim();
+            if objective.is_empty()
+                || objective.len() > MAX_OBJECTIVE_BYTES
+                || objective.chars().any(|character| character == '\0')
+            {
+                return Err("Coordinator WorkItem objectives must be nonempty and bounded.".into());
+            }
+            if ordered[ordinal].is_some() {
+                return Err("Coordinator plan contains a duplicate WorkItem ordinal.".into());
+            }
+            item.objective = objective.to_owned();
+            ordered[ordinal] = Some(item);
+        }
+        let work_items = ordered.into_iter().map(|item| {
+            item.ok_or_else(|| "Coordinator plan ordinals must be contiguous from zero.".into())
+        }).collect::<Result<Vec<_>>>()?;
+
+        for (ordinal, item) in work_items.iter().enumerate() {
+            let mut seen = HashSet::new();
+            for dependency in &item.depends_on {
+                let dependency_ordinal = usize::try_from(*dependency)
+                    .map_err(|_| "Coordinator dependency must name a WorkItem in this plan.")?;
+                if dependency_ordinal >= count {
+                    return Err("Coordinator dependency must name a WorkItem in this plan.".into());
+                }
+                if dependency_ordinal == ordinal {
+                    return Err("A WorkItem cannot depend on itself.".into());
+                }
+                if !seen.insert(*dependency) {
+                    return Err("Coordinator plan contains a duplicate dependency.".into());
+                }
+            }
+        }
+
+        fn has_cycle(ordinal: usize, items: &[CoordinatorPlanItem], marks: &mut [u8]) -> bool {
+            if marks[ordinal] == 1 { return true; }
+            if marks[ordinal] == 2 { return false; }
+            marks[ordinal] = 1;
+            for dependency in &items[ordinal].depends_on {
+                if has_cycle(*dependency as usize, items, marks) { return true; }
+            }
+            marks[ordinal] = 2;
+            false
+        }
+        let mut marks = vec![0; count];
+        if (0..count).any(|ordinal| has_cycle(ordinal, &work_items, &mut marks)) {
+            return Err("Coordinator WorkItem dependencies contain a cycle.".into());
+        }
+        Ok(CoordinatorPlan { work_items })
+    }
+
+    /// Persist every node and edge on the caller's transaction. The caller
+    /// commits only after the Ticket/result transition also succeeds.
+    pub(super) fn persist_coordinator_plan_in(
+        conn: &Connection, ticket_id: &str, plan: &CoordinatorPlan,
+    ) -> Result<()> {
+        let ticket = get_ticket_on(conn, ticket_id)?;
+        let existing: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_work_items WHERE ticket_id=?1)",
+            [&ticket.id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if existing {
+            return Err("Coordinator plan cannot replace existing Ticket WorkItems.".into());
+        }
+
+        let mut ids = vec![String::new(); plan.work_items.len()];
+        for item in &plan.work_items {
+            let work_item = create_work_item_in(conn, &ticket.id, &item.objective, item.ordinal)?;
+            ids[item.ordinal as usize] = work_item.id;
+        }
+        for item in &plan.work_items {
+            for dependency in &item.depends_on {
+                add_work_item_dependency_in(
+                    conn, &ids[item.ordinal as usize], &ids[*dependency as usize],
+                )?;
+            }
+        }
+        Ok(())
     }
 
     fn work_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItem> {
@@ -1390,8 +1535,8 @@ pub(crate) mod work_items {
     fn transition_allowed(from: &str, to: &str) -> bool {
         matches!(
             (from, to),
-            ("queued", "ready" | "running" | "blocked" | "failed")
-                | ("ready", "running" | "blocked" | "failed")
+            ("queued", "ready" | "blocked" | "failed")
+                | ("ready", "blocked" | "failed")
                 | ("running", "waiting_review" | "completed" | "failed" | "blocked")
                 | ("waiting_review", "completed" | "failed" | "blocked")
                 | ("failed", "queued" | "blocked")
@@ -1473,28 +1618,137 @@ pub(crate) mod work_items {
         create_work_item_in(&store.db, ticket_id, objective, ordinal)
     }
 
+    /// Identify a retry from the last Worker Assignment's durable WorkItem
+    /// binding. A structured plan with no such binding is ambiguous and cannot
+    /// be retried as if its entire Ticket were one stale single-objective item.
+    pub(super) fn prepare_retry_work_item_in(
+        conn: &Connection, ticket_id: &str, worker_id: &str, ticket_objective: &str,
+    ) -> Result<RetryWorkItem> {
+        let ticket = get_ticket_on(conn, ticket_id)?;
+        let item_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM sa_work_items WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if item_count == 0 {
+            let structured_plan: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sa_audit
+                 WHERE ticket_id=?1 AND kind='coordinator_plan_ingested')",
+                [&ticket.id], |row| row.get(0),
+            ).map_err(|error| error.to_string())?;
+            if structured_plan {
+                return Err("Structured plan WorkItems are missing; retry cannot identify a failed item.".into());
+            }
+            // Older and initially busy manual Tickets had no WorkItem. With no
+            // structured plan to conflict, preserve that path as one explicit,
+            // newly bound objective under the original Ticket mandate.
+            let item = create_work_item_in(conn, &ticket.id, ticket_objective, 0)?;
+            return Ok(RetryWorkItem {
+                id: item.id,
+                objective: item.objective,
+                requeue: false,
+            });
+        }
+
+        let previous: Option<(String,String,Option<String>)> = conn.query_row(
+            "SELECT id,state,work_item_id FROM sa_assignments
+             WHERE ticket_id=?1 AND bot_id=?2 ORDER BY attempt DESC,id DESC LIMIT 1",
+            params![ticket.id,worker_id],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).optional().map_err(|error| error.to_string())?;
+        let Some((_, assignment_state, Some(work_item_id))) = previous else {
+            return Err(if item_count > 1 {
+                "Structured multi-item plan has no scheduler-identifiable failed WorkItem; retry denied.".into()
+            } else {
+                "Retry cannot identify a WorkItem bound to the latest Worker attempt.".into()
+            });
+        };
+        let item = get_work_item_on(conn, &work_item_id)?;
+        if item.ticket_id != ticket.id {
+            return Err("Retry WorkItem does not belong to this Ticket.".into());
+        }
+
+        if assignment_state == "failed" && matches!(item.state.as_str(),"failed"|"blocked") {
+            let prerequisites_pending: bool = conn.query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM sa_work_item_deps d
+                   JOIN sa_work_items prerequisite ON prerequisite.id=d.depends_on
+                   WHERE d.item_id=?1 AND prerequisite.state<>'completed')",
+                [&item.id], |row| row.get(0),
+            ).map_err(|error| error.to_string())?;
+            if prerequisites_pending {
+                return Err("Retry WorkItem still has incomplete prerequisites.".into());
+            }
+            return Ok(RetryWorkItem {
+                id: item.id,
+                objective: item.objective,
+                requeue: true,
+            });
+        }
+
+        let latest_audit: Option<String> = conn.query_row(
+            "SELECT kind FROM sa_audit WHERE ticket_id=?1 ORDER BY id DESC LIMIT 1",
+            [&ticket.id], |row| row.get(0),
+        ).optional().map_err(|error| error.to_string())?;
+        if assignment_state == "finished"
+            && item.state == "completed"
+            && item_count == 1
+            && item.objective == ticket_objective.trim()
+            && latest_audit.as_deref() == Some("human_rejected")
+        {
+            // The completed item remains terminal. An explicitly rejected,
+            // single-objective legacy run gets a distinct correction item.
+            let last_ordinal: i64 = conn.query_row(
+                "SELECT COALESCE(MAX(ordinal),-1) FROM sa_work_items WHERE ticket_id=?1",
+                [&ticket.id], |row| row.get(0),
+            ).map_err(|error| error.to_string())?;
+            let ordinal = last_ordinal.checked_add(1)
+                .ok_or("Retry WorkItem ordinal is exhausted.")?;
+            let correction = create_work_item_in(conn, &ticket.id, ticket_objective, ordinal)?;
+            add_work_item_dependency_in(conn, &correction.id, &item.id)?;
+            return Ok(RetryWorkItem {
+                id: correction.id,
+                objective: correction.objective,
+                requeue: false,
+            });
+        }
+
+        if item.state == "completed" {
+            return Err("Completed WorkItems are terminal and cannot be retried.".into());
+        }
+        if item_count > 1 {
+            return Err("Structured multi-item plan has no scheduler-identifiable failed WorkItem; retry denied.".into());
+        }
+        Err("Latest Worker attempt has no recoverable failed or blocked WorkItem.".into())
+    }
+
     /// Record `item_id` -> `depends_on`. Both items must belong to the same
     /// Ticket. A recursive walk of the existing edges rejects transitive cycles,
     /// not only direct self-dependencies.
     pub(crate) fn add_work_item_dependency(
         store: &Store, item_id: &str, depends_on: &str,
     ) -> Result<()> {
+        add_work_item_dependency_in(&store.db, item_id, depends_on)
+    }
+
+    pub(super) fn add_work_item_dependency_in(
+        conn: &Connection, item_id: &str, depends_on: &str,
+    ) -> Result<()> {
         if item_id == depends_on {
             return Err("A WorkItem cannot depend on itself.".into());
         }
-        let item = get_work_item(store, item_id)?;
-        let dependency = get_work_item(store, depends_on)?;
+        let item = get_work_item_on(conn, item_id)?;
+        let dependency = get_work_item_on(conn, depends_on)?;
         if item.ticket_id != dependency.ticket_id {
             return Err("A WorkItem dependency must belong to the same Ticket.".into());
         }
-        let duplicate: bool = store.db.query_row(
+        let duplicate: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sa_work_item_deps WHERE item_id=?1 AND depends_on=?2)",
             params![item.id, dependency.id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
         if duplicate {
             return Err("This WorkItem dependency is already recorded.".into());
         }
-        let cycle: bool = store.db.query_row(
+        let cycle: bool = conn.query_row(
             "WITH RECURSIVE chain(id) AS (
                SELECT ?2
                UNION
@@ -1506,7 +1760,7 @@ pub(crate) mod work_items {
         if cycle {
             return Err("This WorkItem dependency would create a cycle.".into());
         }
-        store.db.execute(
+        conn.execute(
             "INSERT INTO sa_work_item_deps(item_id,depends_on) VALUES(?1,?2)",
             params![item.id, dependency.id],
         ).map_err(|e| e.to_string())?;
@@ -1535,11 +1789,21 @@ pub(crate) mod work_items {
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
     }
 
-    /// Bind one active assignment to one queued/ready WorkItem of the same
-    /// Ticket, then compare-and-swap the WorkItem to running. A second bind of
-    /// either side is rejected instead of replaying the first binding. Admission
-    /// calls the `_in` form inside its own transaction so Ticket, assignment and
-    /// WorkItem binding commit or roll back together.
+    fn has_incomplete_dependencies_in(conn: &Connection, work_item_id: &str) -> Result<bool> {
+        conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM sa_work_item_deps d
+               JOIN sa_work_items prerequisite ON prerequisite.id=d.depends_on
+               WHERE d.item_id=?1 AND prerequisite.state<>'completed')",
+            [work_item_id], |row| row.get(0),
+        ).map_err(|error| error.to_string())
+    }
+
+    /// Bind the Ticket's active running assignment to one runnable WorkItem,
+    /// then compare-and-swap the WorkItem to running. A second bind of either
+    /// side is rejected instead of replaying the first binding. Callers use the
+    /// `_in` form in the admission transaction so Ticket, assignment and item
+    /// binding commit or roll back together.
     pub(crate) fn bind_work_item_in(
         conn: &Connection, assignment_id: &str, work_item_id: &str,
     ) -> Result<WorkItem> {
@@ -1559,8 +1823,18 @@ pub(crate) mod work_items {
         if item.ticket_id != ticket_id {
             return Err("A WorkItem binding must stay on the same Ticket.".into());
         }
+        let (ticket_state, active_assignment_id): (String, Option<String>) = conn.query_row(
+            "SELECT state,active_assignment_id FROM sa_tickets WHERE id=?1",
+            [&ticket_id], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).map_err(|error| error.to_string())?;
+        if ticket_state != "running" || active_assignment_id.as_deref() != Some(assignment_id) {
+            return Err("Only the Ticket's exact active running assignment can bind a WorkItem.".into());
+        }
         if !matches!(item.state.as_str(), "queued" | "ready") {
             return Err("Only a queued or ready WorkItem can start.".into());
+        }
+        if has_incomplete_dependencies_in(conn, &item.id)? {
+            return Err("A WorkItem cannot start before all dependencies are completed.".into());
         }
         let busy: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sa_assignments
@@ -1606,11 +1880,17 @@ pub(crate) mod work_items {
         if !valid_state(next_state) {
             return Err("Unknown WorkItem state.".into());
         }
+        if next_state == "running" {
+            return Err("A WorkItem can enter running only through active assignment binding.".into());
+        }
         if !transition_allowed(&item.state, next_state) {
             return Err(format!(
                 "WorkItem cannot move from {} to {}.",
                 item.state, next_state
             ));
+        }
+        if next_state == "ready" && has_incomplete_dependencies_in(conn, &item.id)? {
+            return Err("A WorkItem cannot become ready before all dependencies are completed.".into());
         }
         let moved = conn.execute(
             "UPDATE sa_work_items SET state=?2,updated_at=?3 WHERE id=?1 AND state=?4",
@@ -2538,6 +2818,11 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         authorized && role_current && provenance_ok && within_budget && thread_current,
         crate::feature_controls::get().bots_paused,
     );
+    let coordinator_plan = if coordinator && authorized && successful && !trimmed.is_empty() {
+        Some(work_items::parse_coordinator_plan(text))
+    } else {
+        None
+    };
     let next = if !authorized { "blocked" }
         else if !successful { "failed" }
         else if trimmed.is_empty() { "inconclusive" }
@@ -2561,9 +2846,9 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         params![task_id,next,trimmed,now,assignment_id],
     ).map_err(|e| e.to_string())?;
     if updated != 1 { return Err("SuperAgent ticket changed before settlement.".into()); }
-    // The bound WorkItem describes the worker run, not the later human or
-    // Council decision. A coordinator's successful plan is not completion of
-    // the objective; the worker admission owns the item instead.
+    // The coordinator's WorkItems remain queued planning output. Only an
+    // explicitly bound worker item settles here; human and Council decisions
+    // still happen in their existing native paths.
     if !coordinator {
         let item_state = match next {
             "waiting_approval" | "waiting_review" => Some("completed"),
@@ -2601,6 +2886,32 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         }
     } else if next == "waiting_approval" {
         council_adapter::bind_finished(store, &task_id, &assignment_id, session_id)?;
+    }
+    if coordinator && next == "queued" {
+        if let Some(plan) = coordinator_plan {
+            match plan {
+                Ok(plan) => {
+                    work_items::persist_coordinator_plan_in(&tx, &task_id, &plan)?;
+                    let detail = serde_json::json!({
+                        "version": 1,
+                        "workItemCount": plan.item_count(),
+                    }).to_string();
+                    tx.execute(
+                        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                         VALUES(?1,'coordinator_plan_ingested',?2,?3)",
+                        params![task_id,detail,now],
+                    ).map_err(|e| e.to_string())?;
+                }
+                Err(error) => {
+                    let detail = error.to_string().chars().take(500).collect::<String>();
+                    tx.execute(
+                        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                         VALUES(?1,'coordinator_plan_rejected',?2,?3)",
+                        params![task_id,detail,now],
+                    ).map_err(|e| e.to_string())?;
+                }
+            }
+        }
     }
     if team_snapshot.policy.council_required && !matches!(next,"queued" | "waiting_review") {
         let invalidated = tx.execute(
@@ -3221,7 +3532,7 @@ pub async fn superagent_snapshot(
 /// must not bypass the gateway's maximum inbound-message size.
 fn initial_manual_packet(ticket: &Ticket, coordinated: bool) -> String {
     let instructions = if coordinated {
-        "Read-only coordinator: recommend the assigned worker's approach and evidence. Your response cannot grant tools, change the worker or approve completion."
+        "Read-only coordinator: decompose the authorized objective into at most 32 bounded WorkItems. Return exactly one JSON object, with no Markdown or surrounding text, matching this shape: {\"version\":1,\"workItems\":[{\"ordinal\":0,\"objective\":\"...\",\"dependsOn\":[]}]}. Use each ordinal once, contiguously from zero. Each dependsOn entry must name another ordinal in this plan; the graph must be acyclic. The plan is advisory only: do not grant tools, choose workers, change the mandate, dispatch work, or approve completion."
     } else {
         "Read-only assignment. Report evidence and remaining gaps; do not claim task approval."
     };
@@ -3276,7 +3587,7 @@ pub async fn superagent_submit(window: tauri::WebviewWindow,
 /// attempt never becomes evidence for a successor.
 fn retry_blocked(
     store: &mut Store, ticket_id: &str, busy: bool,
-) -> Result<(Ticket, String, String)> {
+) -> Result<(Ticket, String, String, String)> {
     let ticket = get_ticket(store,ticket_id)?;
     if ticket.state != "blocked" {
         return Err("Only a blocked SuperAgent ticket can be retried manually.".into());
@@ -3336,6 +3647,9 @@ fn retry_blocked(
     let assignment_id=storage::id();
     let _dispatch_fence=effects::lock_dispatch(&store.path)?;
     let tx=store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let retry_item = work_items::prepare_retry_work_item_in(
+        &tx, ticket_id, &worker.id, &ticket.objective,
+    )?;
     let session_id=bots::thread_session(store,&worker,CHANNEL,&thread,"SuperAgent · Manual retry")?.0;
     let now=storage::now();
     tx.execute(
@@ -3343,6 +3657,9 @@ fn retry_blocked(
          VALUES(?1,?2,?3,?4,'running',?5,?6,?6)",
         params![assignment_id,ticket_id,worker.id,session_id,attempt,now],
     ).map_err(|e| e.to_string())?;
+    if retry_item.requeue {
+        work_items::transition_work_item_in(&tx, &retry_item.id, "queued")?;
+    }
     let changed=tx.execute(
         "UPDATE sa_tickets SET state='running',active_assignment_id=?2,evidence=NULL,
          revision=revision+1,updated_at=?3
@@ -3350,6 +3667,7 @@ fn retry_blocked(
         params![ticket_id,assignment_id,now,ticket.revision],
     ).map_err(|e| e.to_string())?;
     if changed != 1 { return Err("Ticket changed before native retry admission.".into()); }
+    work_items::bind_work_item_in(&tx, &assignment_id, &retry_item.id)?;
     council_adapter::admit_required(
         store,&tx,ticket_id,&assignment_id,&session_id,ticket.revision.saturating_add(1),&snapshot,
     )?;
@@ -3359,7 +3677,7 @@ fn retry_blocked(
         params![ticket_id,now],
     ).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
-    Ok((get_ticket(store,ticket_id)?,thread,worker.id))
+    Ok((get_ticket(store,ticket_id)?,thread,worker.id,retry_item.objective))
 }
 
 fn ticket_worker(store: &Store, ticket_id: &str) -> Result<String> {
@@ -3488,19 +3806,27 @@ fn prepare_coordinated_worker_inner(
          VALUES(?1,?2,?3,?4,'running',?5,?6,?6)",
         params![assignment_id,ticket_id,worker.id,session_id,next_attempt,now],
     ).map_err(|e| e.to_string())?;
-    // The coordinator's earlier admission is planning, not execution of the
-    // objective. The coordinated worker owns ordinal 0 and starts it in the
-    // same transaction that grants this assignment.
-    let work_item = work_items::create_work_item_in(
-        &tx, ticket_id, &ticket.objective, 0,
-    )?;
-    work_items::bind_work_item_in(&tx, &assignment_id, &work_item.id)?;
+    // Structured Coordinator plans already own the Ticket's WorkItem ordinals.
+    // This legacy manual dispatch still runs the whole Ticket objective; until
+    // the scheduler can select one planned item, do not overwrite or falsely
+    // bind that run to a synthetic placeholder. Keep the old single-objective
+    // fallback for legacy/free-text Coordinator output.
+    let has_planned_items: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_work_items WHERE ticket_id=?1)",
+        [ticket_id], |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
     let moved = tx.execute(
         "UPDATE sa_tickets SET state='running',active_assignment_id=?2,evidence=NULL,revision=revision+1,updated_at=?3
          WHERE id=?1 AND state='queued' AND revision=?4",
         params![ticket_id,assignment_id,now,ticket.revision],
     ).map_err(|e| e.to_string())?;
     if moved != 1 { return Err("Coordinator plan was invalidated before worker admission.".into()); }
+    if !has_planned_items {
+        let work_item = work_items::create_work_item_in(
+            &tx, ticket_id, &ticket.objective, 0,
+        )?;
+        work_items::bind_work_item_in(&tx, &assignment_id, &work_item.id)?;
+    }
     council_adapter::admit_required(
         store,&tx,ticket_id,&assignment_id,&session_id,ticket.revision.saturating_add(1),&snapshot,
     )?;
@@ -3680,7 +4006,7 @@ pub async fn superagent_retry(window: tauri::WebviewWindow,
     app: tauri::AppHandle, state: State<'_,AppState>, ticket_id: String,
 ) -> Result<Ticket> {
     require_main_window(&window)?;
-    let (ticket,thread,worker_id)={
+    let (ticket,thread,worker_id,retry_objective)={
         let active: Vec<String> = state.agents.lock().map_err(|e|e.to_string())?
             .keys().cloned().collect();
         let mut store=state.store.lock().map_err(|e|e.to_string())?;
@@ -3695,7 +4021,7 @@ pub async fn superagent_retry(window: tauri::WebviewWindow,
         thread,
         sender_id: "local-user".into(),
         sender_name: "Manual retry".into(),
-        text: format!("SuperAgent ticket {} (manual retry)\n\n{}\n\nRead-only assignment. Report evidence and remaining gaps; do not claim approval.",ticket.id,ticket.objective),
+        text: format!("SuperAgent ticket {} (manual retry)\n\nRetry objective: {}\n\nTicket objective (context): {}\n\nRead-only assignment. Report evidence and remaining gaps; do not claim approval.",ticket.id,retry_objective,ticket.objective),
         trusted: true,
         image_ids: None,
         moodboard_ids: None,
@@ -4319,7 +4645,7 @@ mod tests {
         let waiting = get_ticket(&store, &ticket.id).unwrap();
         reject(&store, &ticket.id, waiting.revision, "Requires a new attempt").unwrap();
 
-        let (_, retry_thread, bot_id) = retry_blocked(&mut store, &ticket.id, false).unwrap();
+        let (_, retry_thread, bot_id, _) = retry_blocked(&mut store, &ticket.id, false).unwrap();
         assert_eq!(bot_id, "worker");
         assert!(retry_thread.ends_with(":attempt:2"));
         assert!(guard_gateway_inbound(
@@ -5139,8 +5465,13 @@ mod tests {
         let rejected = reject(&store, &ticket.id, first.revision, "Needs corrections").unwrap();
         assert_eq!(rejected.state, "blocked");
 
-        let (running, _, _) = retry_blocked(&mut store, &ticket.id, false).unwrap();
+        let (running, _, _, retry_objective) = retry_blocked(&mut store, &ticket.id, false).unwrap();
         assert_eq!(running.state, "running");
+        assert_eq!(retry_objective, ticket.objective);
+        let retry_items = work_items::list_work_items(&store, &ticket.id, 10).unwrap();
+        assert_eq!(retry_items.len(), 2);
+        assert_eq!(retry_items[0].state, "completed");
+        assert_eq!(retry_items[1].state, "running");
         let second_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
         assert_ne!(first_session, second_session);
         assert!(on_run_finished(&store, &second_session, true, "Second worker result").unwrap());
@@ -5343,9 +5674,14 @@ mod tests {
         assert_eq!(history(&store, &ticket.id, 20).unwrap().iter()
             .filter(|entry| entry.kind == "human_rejected").count(), 1);
 
-        let (retry, _, _) = retry_blocked(&mut store, &ticket.id, false).unwrap();
+        let (retry, _, _, retry_objective) = retry_blocked(&mut store, &ticket.id, false).unwrap();
         assert_eq!(retry.state, "running");
         assert_eq!(retry.evidence, None, "rejected evidence must not follow a new worker");
+        assert_eq!(retry_objective, ticket.objective);
+        let retry_items = work_items::list_work_items(&store, &ticket.id, 10).unwrap();
+        assert_eq!(retry_items.len(), 2);
+        assert_eq!(retry_items[0].state, "completed", "completed WorkItems stay terminal");
+        assert_eq!(retry_items[1].state, "running");
         let fresh_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
         assert_ne!(fresh_session, original_session);
         assert!(!on_run_finished(&store, &original_session, true, "Late old result").unwrap());
@@ -5366,10 +5702,20 @@ mod tests {
         assert!(retry_blocked(&mut store,&second.id,false).is_err());
         let session_a=assignment_session(&store,&first.id).unwrap().unwrap();
         assert!(on_run_finished(&store,&session_a,true,"A evidence").unwrap());
-        let (retried,thread,worker)=retry_blocked(&mut store,&second.id,false).unwrap();
+        let (retried,thread,worker,retry_objective)=retry_blocked(&mut store,&second.id,false).unwrap();
         assert_eq!(retried.state,"running");
         assert_eq!(worker,"worker");
         assert_eq!(thread,format!("{}:attempt:1",second.id));
+        assert_eq!(retry_objective, "B");
+        let retry_items=work_items::list_work_items(&store,&second.id,10).unwrap();
+        assert_eq!(retry_items.len(),1);
+        assert_eq!(retry_items[0].objective,"B");
+        assert_eq!(retry_items[0].state,"running");
+        let retry_binding: Option<String> = store.db.query_row(
+            "SELECT work_item_id FROM sa_assignments WHERE ticket_id=?1 AND state='running'",
+            [&second.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(retry_binding.as_deref(), Some(retry_items[0].id.as_str()));
         let session_b=assignment_session(&store,&retried.id).unwrap().unwrap();
         assert_ne!(session_a,session_b);
         assert!(!on_run_finished(&store,&session_a,true,"late A").unwrap());
@@ -5411,7 +5757,7 @@ mod tests {
         let cfg=enabled(&store);
         let (first,_)=admit(&mut store,&cfg.id,"Recover once","recover-1",false).unwrap();
         fail_launch(&store,&first.id,"provider unavailable").unwrap();
-        let (retried,_,_)=retry_blocked(&mut store,&first.id,false).unwrap();
+        let (retried,_,_,_)=retry_blocked(&mut store,&first.id,false).unwrap();
         assert_eq!(retried.state,"running");
         let sid=assignment_session(&store,&first.id).unwrap().unwrap();
         assert!(read_only_policy(&store,&sid).unwrap().is_some());
@@ -5422,6 +5768,119 @@ mod tests {
             [&first.id],|r|r.get(0),
         ).unwrap();
         assert_eq!(allowed,0);
+    }
+
+    #[test]
+    fn retry_rebinds_failed_work_item_and_settlement_replay_is_idempotent() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Retry one exact objective", "retry-work-item-rebind", false,
+        ).unwrap();
+        assert!(launched);
+        let item = work_items::list_work_items(&store, &ticket.id, 10).unwrap().remove(0);
+        let first_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+
+        fail_launch(&store, &ticket.id, "Temporary launch failure").unwrap();
+        assert_eq!(work_items::get_work_item(&store, &item.id).unwrap().state, "blocked");
+        let (retried, _, worker, retry_objective) =
+            retry_blocked(&mut store, &ticket.id, false).unwrap();
+        assert_eq!(retried.state, "running");
+        assert_eq!(worker, "worker");
+        assert_eq!(retry_objective, item.objective);
+        assert_ne!(assignment_session(&store, &ticket.id).unwrap(), Some(first_session));
+        assert_eq!(work_items::get_work_item(&store, &item.id).unwrap().state, "running");
+
+        let retry_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let retry_binding: Option<String> = store.db.query_row(
+            "SELECT work_item_id FROM sa_assignments WHERE session_id=?1",
+            [&retry_session], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(retry_binding.as_deref(), Some(item.id.as_str()));
+        assert!(on_run_finished(&store, &retry_session, true, "Fresh retry result").unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "waiting_approval");
+        assert_eq!(work_items::get_work_item(&store, &item.id).unwrap().state, "completed");
+
+        let evidence = get_ticket(&store, &ticket.id).unwrap().evidence;
+        assert!(!on_run_finished(&store, &retry_session, true, "Duplicate retry result").unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().evidence, evidence);
+        assert_eq!(work_items::get_work_item(&store, &item.id).unwrap().state, "completed");
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn retry_fails_closed_for_unbound_structured_multi_item_work() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit_role(
+            &mut store, &config.id, "Recover a multi-step plan", "retry-multi-plan-ambiguous", false, true,
+        ).unwrap();
+        assert!(launched);
+        let coordinator_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let plan = serde_json::json!({
+            "version": 1,
+            "workItems": [
+                {"ordinal": 0, "objective": "Inspect the change", "dependsOn": []},
+                {"ordinal": 1, "objective": "Verify the change", "dependsOn": [0]},
+            ],
+        }).to_string();
+        assert!(on_run_finished(&store, &coordinator_session, true, &plan).unwrap());
+
+        // The legacy manual Worker dispatch runs the Ticket as a whole and is
+        // intentionally unbound while no scheduler can identify one plan node.
+        let (running, _, _, _) =
+            prepare_coordinated_worker(&mut store, &ticket.id, false).unwrap();
+        let worker_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        fail_launch(&store, &ticket.id, "Worker launch failed").unwrap();
+        let before_ticket = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(before_ticket.state, "blocked");
+        assert_eq!(running.id, ticket.id);
+        let before_items = work_items::list_work_items(&store, &ticket.id, 10).unwrap();
+        assert_eq!(before_items.len(), 2);
+        assert!(before_items.iter().all(|item| item.state == "queued"));
+        assert!(assignment_session(&store, &ticket.id).unwrap().is_none());
+        let before_assignments = assignments(&store, &ticket.id, 10).unwrap();
+
+        let error = retry_blocked(&mut store, &ticket.id, false).unwrap_err();
+        assert!(error.contains("scheduler-identifiable failed WorkItem"), "{error}");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, before_ticket.revision);
+        assert_eq!(work_items::list_work_items(&store, &ticket.id, 10).unwrap(), before_items);
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap().len(), before_assignments.len());
+        assert!(!on_run_finished(&store, &worker_session, true, "Late failed launch result").unwrap());
+    }
+
+    #[test]
+    fn retry_fails_closed_when_failed_assignment_has_unsupported_work_item_state() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Retry only a recoverable item", "retry-unsupported-item-state", false,
+        ).unwrap();
+        assert!(launched);
+        let item = work_items::list_work_items(&store, &ticket.id, 10).unwrap().remove(0);
+        fail_launch(&store, &ticket.id, "Temporary launch failure").unwrap();
+
+        // A queued node after its bound assignment failed is inconsistent with
+        // the retry transition table. Do not silently treat it as a fresh item.
+        store.db.execute(
+            "UPDATE sa_work_items SET state='queued' WHERE id=?1 AND state='blocked'",
+            [&item.id],
+        ).unwrap();
+        let before_ticket = get_ticket(&store, &ticket.id).unwrap();
+        let before_assignments = assignments(&store, &ticket.id, 10).unwrap();
+        let before_sessions: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sessions", [], |row| row.get(0),
+        ).unwrap();
+
+        let error = retry_blocked(&mut store, &ticket.id, false).unwrap_err();
+        assert!(error.contains("no recoverable failed or blocked WorkItem"), "{error}");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, before_ticket.revision);
+        assert_eq!(work_items::get_work_item(&store, &item.id).unwrap().state, "queued");
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap().len(), before_assignments.len());
+        let after_sessions: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sessions", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(after_sessions, before_sessions, "unsupported retry must not create a session");
     }
 
     #[test]
@@ -5544,7 +6003,7 @@ mod tests {
             [&ticket.id], |r| r.get(0),
         ).unwrap();
         assert_eq!(failures, 1);
-        let (retried, _, _) = retry_blocked(&mut store, &ticket.id, false).unwrap();
+        let (retried, _, _, _) = retry_blocked(&mut store, &ticket.id, false).unwrap();
         assert_eq!(retried.state, "running");
         assert_ne!(assignment_session(&store, &ticket.id).unwrap(), Some(session));
     }
@@ -5590,7 +6049,7 @@ mod tests {
         assert!(launched);
         let first_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
         fail_launch(&store, &ticket.id, "provider unavailable").unwrap();
-        let (_, _, _) = retry_blocked(&mut store, &ticket.id, false).unwrap();
+        let (_, _, _, _) = retry_blocked(&mut store, &ticket.id, false).unwrap();
         let second_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
         assert_ne!(first_session, second_session);
         let attempts = assignments(&store, &ticket.id, 100).unwrap();
@@ -5778,7 +6237,7 @@ mod tests {
         assert!(blocked.is_err());
         let sid=assignment_session(&store,&first.id).unwrap().unwrap();
         assert!(on_run_finished(&store,&sid,true,"Evidence").unwrap());
-        let (resumed,_,worker)=retry_blocked(&mut store,&second.id,false).unwrap();
+        let (resumed,_,worker,_)=retry_blocked(&mut store,&second.id,false).unwrap();
         assert_eq!(resumed.state,"running");
         assert_eq!(worker,"other-worker");
         assert_ne!(assignment_session(&store,&second.id).unwrap(),Some(sid));
@@ -6068,7 +6527,7 @@ mod tests {
         );
         assert!(bypass.is_err());
         fail_launch(&store, &coordinated.id, "coordinator stopped").unwrap();
-        let (retried, _, worker) = retry_blocked(&mut store, &blocked.id, false).unwrap();
+        let (retried, _, worker, _) = retry_blocked(&mut store, &blocked.id, false).unwrap();
         assert_eq!(retried.state, "running");
         assert_eq!(worker, "other-worker");
     }
@@ -6422,6 +6881,193 @@ mod tests {
     }
 
     #[test]
+    fn coordinator_plan_is_ingested_in_order_without_dispatching_or_overwriting_manual_work() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit_role(
+            &mut store, &config.id, "Split this demand", "coordinator-plan-ingest", false, true,
+        ).unwrap();
+        assert!(launched);
+        let coordinator_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let plan = serde_json::json!({
+            "version": 1,
+            "workItems": [
+                {"ordinal": 2, "objective": "  Verify the result  ", "dependsOn": [1]},
+                {"ordinal": 0, "objective": "Inspect the existing behavior", "dependsOn": []},
+                {"ordinal": 1, "objective": "Implement the bounded change", "dependsOn": [0]},
+            ],
+        }).to_string();
+
+        assert!(on_run_finished(&store, &coordinator_session, true, &plan).unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "queued");
+        let items = work_items::list_work_items(&store, &ticket.id, 10).unwrap();
+        assert_eq!(
+            items.iter().map(|item| (item.ordinal, item.objective.as_str(), item.state.as_str()))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "Inspect the existing behavior", "queued"),
+                (1, "Implement the bounded change", "queued"),
+                (2, "Verify the result", "queued"),
+            ],
+        );
+        let edges = {
+            let mut statement = store.db.prepare(
+                "SELECT item.ordinal, prerequisite.ordinal
+                 FROM sa_work_item_deps d
+                 JOIN sa_work_items item ON item.id=d.item_id
+                 JOIN sa_work_items prerequisite ON prerequisite.id=d.depends_on
+                 WHERE item.ticket_id=?1 ORDER BY item.ordinal,prerequisite.ordinal",
+            ).unwrap();
+            statement.query_map([&ticket.id], |row| Ok((row.get(0)?,row.get(1)?)))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert_eq!(edges, vec![(1,0),(2,1)]);
+        let cross_ticket_edges: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_work_item_deps d
+             JOIN sa_work_items item ON item.id=d.item_id
+             JOIN sa_work_items prerequisite ON prerequisite.id=d.depends_on
+             WHERE item.ticket_id<>prerequisite.ticket_id",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(cross_ticket_edges, 0);
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap().len(), 1,
+            "Coordinator planning must not dispatch a child Worker");
+        assert!(history(&store, &ticket.id, 10).unwrap().iter()
+            .any(|entry| entry.kind == "coordinator_plan_ingested"));
+
+        // The existing explicit, whole-ticket manual Worker path remains
+        // available. It neither synthesizes a conflicting ordinal-zero item
+        // nor misbinds that whole-ticket run to one planned slice.
+        let (running, _, worker_id, _) =
+            prepare_coordinated_worker(&mut store, &ticket.id, false).unwrap();
+        assert_eq!(worker_id, "worker");
+        assert_eq!(running.state, "running");
+        let binding: Option<String> = store.db.query_row(
+            "SELECT work_item_id FROM sa_assignments
+             WHERE ticket_id=?1 AND bot_id='worker' ORDER BY attempt DESC LIMIT 1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert!(binding.is_none());
+        assert_eq!(work_items::list_work_items(&store, &ticket.id, 10).unwrap(), items);
+
+        // Dependencies cannot cross Ticket boundaries, even for callers that
+        // use the existing manual WorkItem helper.
+        let (other, other_launched) = admit(
+            &mut store, &config.id, "Other demand", "coordinator-plan-other", false,
+        ).unwrap();
+        assert!(!other_launched);
+        let foreign = work_items::create_work_item(&store, &other.id, "Foreign item", 0).unwrap();
+        assert!(work_items::add_work_item_dependency(&store, &items[0].id, &foreign.id).is_err());
+    }
+
+    #[test]
+    fn coordinator_plan_rejects_malformed_and_unbounded_documents() {
+        let document = |work_items: serde_json::Value| serde_json::json!({
+            "version": 1,
+            "workItems": work_items,
+        }).to_string();
+        let too_many = serde_json::Value::Array((0..=MAX_COORDINATOR_PLAN_ITEMS)
+            .map(|ordinal| serde_json::json!({
+                "ordinal": ordinal,
+                "objective": "Small bounded objective",
+                "dependsOn": [],
+            }))
+            .collect());
+        let oversized_objective = document(serde_json::json!([{
+            "ordinal": 0,
+            "objective": "x".repeat(MAX_OBJECTIVE_BYTES + 1),
+            "dependsOn": [],
+        }]));
+        let oversized_document = document(serde_json::json!([{
+            "ordinal": 0,
+            "objective": "x".repeat(MAX_COORDINATOR_PLAN_BYTES),
+            "dependsOn": [],
+        }]));
+        let invalid = [
+            ("free text", "not a JSON plan".to_string()),
+            ("unknown field", r#"{"version":1,"workItems":[{"ordinal":0,"objective":"x","dependsOn":[],"worker":"worker"}]}"#.into()),
+            ("unsupported version", r#"{"version":2,"workItems":[{"ordinal":0,"objective":"x","dependsOn":[]}]}"#.into()),
+            ("empty plan", document(serde_json::json!([]))),
+            ("too many items", document(too_many)),
+            ("oversized objective", oversized_objective),
+            ("oversized document", oversized_document),
+            ("ordinal gap", document(serde_json::json!([
+                {"ordinal": 0, "objective": "first", "dependsOn": []},
+                {"ordinal": 2, "objective": "third", "dependsOn": []},
+            ]))),
+            ("duplicate ordinal", document(serde_json::json!([
+                {"ordinal": 0, "objective": "first", "dependsOn": []},
+                {"ordinal": 0, "objective": "second", "dependsOn": []},
+            ]))),
+            ("unknown dependency", document(serde_json::json!([
+                {"ordinal": 0, "objective": "first", "dependsOn": [1]},
+            ]))),
+            ("duplicate dependency", document(serde_json::json!([
+                {"ordinal": 0, "objective": "first", "dependsOn": []},
+                {"ordinal": 1, "objective": "second", "dependsOn": [0,0]},
+            ]))),
+            ("self dependency", document(serde_json::json!([
+                {"ordinal": 0, "objective": "first", "dependsOn": [0]},
+            ]))),
+            ("dependency cycle", document(serde_json::json!([
+                {"ordinal": 0, "objective": "first", "dependsOn": [1]},
+                {"ordinal": 1, "objective": "second", "dependsOn": [0]},
+            ]))),
+        ];
+
+        for (name, plan) in invalid {
+            assert!(work_items::parse_coordinator_plan(&plan).is_err(),
+                "accepted invalid Coordinator plan: {name}");
+        }
+    }
+
+    #[test]
+    fn cyclic_coordinator_plan_is_rejected_without_a_partial_ticket_dag() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit_role(
+            &mut store, &config.id, "Reject a cyclic plan", "coordinator-plan-cycle", false, true,
+        ).unwrap();
+        assert!(launched);
+        let coordinator_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let cycle = r#"{"version":1,"workItems":[{"ordinal":0,"objective":"first","dependsOn":[1]},{"ordinal":1,"objective":"second","dependsOn":[0]}]}"#;
+
+        assert!(on_run_finished(&store, &coordinator_session, true, cycle).unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "queued");
+        assert!(work_items::list_work_items(&store, &ticket.id, 10).unwrap().is_empty());
+        assert!(history(&store, &ticket.id, 10).unwrap().iter()
+            .any(|entry| entry.kind == "coordinator_plan_rejected"));
+    }
+
+    #[test]
+    fn coordinator_plan_persistence_rolls_back_nodes_when_an_edge_insert_fails() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit_role(
+            &mut store, &config.id, "Roll back failed plan storage", "coordinator-plan-atomic", false, true,
+        ).unwrap();
+        assert!(launched);
+        let plan = work_items::parse_coordinator_plan(
+            r#"{"version":1,"workItems":[{"ordinal":0,"objective":"first","dependsOn":[]},{"ordinal":1,"objective":"second","dependsOn":[0]}]}"#,
+        ).unwrap();
+        store.db.execute_batch(
+            "CREATE TRIGGER reject_test_plan_edge BEFORE INSERT ON sa_work_item_deps
+             BEGIN SELECT RAISE(ABORT,'injected edge failure'); END;",
+        ).unwrap();
+
+        let tx = store.db.unchecked_transaction().unwrap();
+        assert!(work_items::persist_coordinator_plan_in(&tx, &ticket.id, &plan).is_err());
+        drop(tx);
+        let (item_count, edge_count): (i64, i64) = store.db.query_row(
+            "SELECT (SELECT COUNT(*) FROM sa_work_items WHERE ticket_id=?1),
+                    (SELECT COUNT(*) FROM sa_work_item_deps d
+                     JOIN sa_work_items item ON item.id=d.item_id WHERE item.ticket_id=?1)",
+            [&ticket.id], |row| Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        assert_eq!((item_count, edge_count), (0,0));
+    }
+
+    #[test]
     fn work_item_dependencies_form_a_ready_frontier_and_reject_cycles() {
         let mut store = fixture();
         let config = enabled(&store);
@@ -6459,39 +7105,29 @@ mod tests {
             work_items::transition_work_item(&store, &first.id, "ready").unwrap().state,
             "ready",
         );
-        assert_eq!(
-            work_items::transition_work_item(&store, &first.id, "running").unwrap().state,
-            "running",
-        );
-        assert_eq!(
-            work_items::transition_work_item(&store, &first.id, "completed").unwrap().state,
-            "completed",
-        );
+        assert!(work_items::transition_work_item(&store, &first.id, "running").is_err());
+        // Simulate native settlement to move the dependency frontier; this
+        // test covers graph readiness, while binding is exercised below.
+        store.db.execute(
+            "UPDATE sa_work_items SET state='completed' WHERE id=?1 AND state='ready'",
+            [&first.id],
+        ).unwrap();
         assert!(work_items::transition_work_item(&store, &first.id, "queued").is_err());
         assert_eq!(
             work_items::ready_work_items(&store, &ticket.id).unwrap(),
             vec![second.clone()],
         );
 
-        for state in ["ready","running","completed"] {
-            work_items::transition_work_item(&store, &second.id, state).unwrap();
-        }
+        work_items::transition_work_item(&store, &second.id, "ready").unwrap();
+        assert!(work_items::transition_work_item(&store, &second.id, "running").is_err());
+        store.db.execute(
+            "UPDATE sa_work_items SET state='completed' WHERE id=?1 AND state='ready'",
+            [&second.id],
+        ).unwrap();
         assert_eq!(
             work_items::ready_work_items(&store, &ticket.id).unwrap(),
             vec![third.clone()],
         );
-
-        // The frontier excludes a queued item that still has a running assignment.
-        let assignment = assignments(&store, &ticket.id, 10).unwrap().remove(0);
-        store.db.execute(
-            "UPDATE sa_assignments SET work_item_id=NULL WHERE id=?1", [&assignment.id],
-        ).unwrap();
-        work_items::bind_work_item(&store, &assignment.id, &third.id).unwrap();
-        assert!(work_items::ready_work_items(&store, &ticket.id).unwrap().is_empty());
-        store.db.execute(
-            "UPDATE sa_work_items SET state='queued' WHERE id=?1", [&third.id],
-        ).unwrap();
-        assert!(work_items::ready_work_items(&store, &ticket.id).unwrap().is_empty());
     }
 
     #[test]
@@ -6513,9 +7149,51 @@ mod tests {
         let finished = work_items::create_work_item(
             &store, &ticket.id, "Already done", 2,
         ).unwrap();
-        for state in ["ready","running","completed"] {
-            work_items::transition_work_item(&store, &finished.id, state).unwrap();
-        }
+        store.db.execute(
+            "UPDATE sa_work_items SET state='completed' WHERE id=?1",
+            [&finished.id],
+        ).unwrap();
+
+        // A finished Assignment is never allowed to bind, even while the
+        // Ticket still points at its ID and remains running.
+        let tx = store.db.unchecked_transaction().unwrap();
+        let changed = tx.execute(
+            "UPDATE sa_assignments SET state='finished' WHERE id=?1 AND state='running'",
+            [&assignment.id],
+        ).unwrap();
+        assert_eq!(changed, 1);
+        assert!(work_items::bind_work_item_in(&tx, &assignment.id, &item.id).is_err());
+        drop(tx);
+
+        let wrong_assignment_id = storage::id();
+        let wrong_session_id = storage::id();
+        let now = storage::now();
+        let tx = store.db.unchecked_transaction().unwrap();
+        tx.execute(
+            "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
+             VALUES(?1,?2,'router',?3,'running',2,?4,?4)",
+            params![wrong_assignment_id,ticket.id,wrong_session_id,now],
+        ).unwrap();
+        assert!(work_items::bind_work_item_in(&tx, &wrong_assignment_id, &item.id).is_err());
+        drop(tx);
+
+        // A Ticket that ceased to be active cannot bind, even if its assignment
+        // row still says running. Dropping the failed transaction restores the
+        // exact active Ticket snapshot for the valid bind below.
+        let tx = store.db.unchecked_transaction().unwrap();
+        let changed = tx.execute(
+            "UPDATE sa_tickets SET state='waiting_approval',active_assignment_id=NULL,revision=revision+1
+             WHERE id=?1 AND state='running' AND revision=?2",
+            params![ticket.id,ticket.revision],
+        ).unwrap();
+        assert_eq!(changed, 1);
+        assert!(work_items::bind_work_item_in(&tx, &assignment.id, &item.id).is_err());
+        drop(tx);
+        let restored_ticket = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(restored_ticket.state, "running");
+        assert_eq!(restored_ticket.revision, ticket.revision);
+        assert_eq!(restored_ticket.active_assignment_id.as_deref(), Some(assignment.id.as_str()));
+        assert_eq!(work_items::get_work_item(&store, &item.id).unwrap().state, "queued");
 
         let (other, _) = admit(
             &mut store, &config.id, "Other ticket", "work-item-bind-other", false,
@@ -6542,6 +7220,131 @@ mod tests {
         assert_eq!(active.state, "running");
         assert_eq!(active.revision, ticket.revision);
         assert_eq!(active.active_assignment_id.as_deref(), Some(assignment.id.as_str()));
+        assert!(work_items::ready_work_items(&store, &ticket.id).unwrap().is_empty());
+        // Even a stale queued row cannot re-enter the frontier while a running
+        // Assignment still owns its binding.
+        store.db.execute(
+            "UPDATE sa_work_items SET state='queued' WHERE id=?1", [&item.id],
+        ).unwrap();
+        assert!(work_items::ready_work_items(&store, &ticket.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn work_item_readiness_and_binding_require_completed_dependencies() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Run dependency gated items", "work-item-dependency-gate", false,
+        ).unwrap();
+        assert!(launched);
+        let assignment = assignments(&store, &ticket.id, 10).unwrap().remove(0);
+        let admitted_item = work_items::list_work_items(&store, &ticket.id, 10).unwrap().remove(0);
+        let prerequisite = work_items::create_work_item(
+            &store, &ticket.id, "Complete prerequisite", 1,
+        ).unwrap();
+        let dependent = work_items::create_work_item(
+            &store, &ticket.id, "Run dependent", 2,
+        ).unwrap();
+        work_items::add_work_item_dependency(&store, &dependent.id, &prerequisite.id).unwrap();
+
+        assert!(work_items::transition_work_item(&store, &dependent.id, "ready").is_err());
+        assert_eq!(work_items::get_work_item(&store, &dependent.id).unwrap().state, "queued");
+        store.db.execute(
+            "UPDATE sa_assignments SET work_item_id=NULL WHERE id=?1", [&assignment.id],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_work_items SET state='queued' WHERE id=?1 AND state='running'",
+            [&admitted_item.id],
+        ).unwrap();
+        assert!(work_items::bind_work_item(&store, &assignment.id, &dependent.id).is_err());
+        assert_eq!(work_items::get_work_item(&store, &dependent.id).unwrap().state, "queued");
+        let binding: Option<String> = store.db.query_row(
+            "SELECT work_item_id FROM sa_assignments WHERE id=?1",
+            [&assignment.id], |row| row.get(0),
+        ).unwrap();
+        assert!(binding.is_none());
+
+        assert_eq!(
+            work_items::bind_work_item(&store, &assignment.id, &prerequisite.id).unwrap().state,
+            "running",
+        );
+        work_items::transition_work_item(&store, &prerequisite.id, "completed").unwrap();
+        store.db.execute(
+            "UPDATE sa_assignments SET work_item_id=NULL WHERE id=?1", [&assignment.id],
+        ).unwrap();
+        assert_eq!(
+            work_items::transition_work_item(&store, &dependent.id, "ready").unwrap().state,
+            "ready",
+        );
+        assert_eq!(
+            work_items::bind_work_item(&store, &assignment.id, &dependent.id).unwrap().state,
+            "running",
+        );
+    }
+
+    #[test]
+    fn work_item_binding_and_ticket_cas_failures_roll_back_atomically() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Keep binding atomic", "work-item-bind-cas-rollback", false,
+        ).unwrap();
+        assert!(launched);
+        let active = assignments(&store, &ticket.id, 10).unwrap().remove(0);
+        let prerequisite = work_items::list_work_items(&store, &ticket.id, 10).unwrap().remove(0);
+        let dependent = work_items::create_work_item(
+            &store, &ticket.id, "Blocked until prerequisite completes", 1,
+        ).unwrap();
+        work_items::add_work_item_dependency(&store, &dependent.id, &prerequisite.id).unwrap();
+
+        // A stale Ticket CAS after staging a new Assignment persists neither.
+        let stale_assignment_id = storage::id();
+        let stale_session_id = storage::id();
+        let now = storage::now();
+        let tx = store.db.unchecked_transaction().unwrap();
+        tx.execute(
+            "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
+             VALUES(?1,?2,'router',?3,'running',2,?4,?4)",
+            params![stale_assignment_id,ticket.id,stale_session_id,now],
+        ).unwrap();
+        let changed = tx.execute(
+            "UPDATE sa_tickets SET state='running',active_assignment_id=?2,revision=revision+1
+             WHERE id=?1 AND state='running' AND revision=?3",
+            params![ticket.id,stale_assignment_id,ticket.revision.saturating_add(1)],
+        ).unwrap();
+        assert_eq!(changed, 0);
+        drop(tx);
+
+        // A successful active-assignment CAS followed by a rejected dependency
+        // bind also rolls back the Assignment and Ticket pointer together.
+        let retry_assignment_id = storage::id();
+        let retry_session_id = storage::id();
+        let tx = store.db.unchecked_transaction().unwrap();
+        tx.execute(
+            "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
+             VALUES(?1,?2,'router',?3,'running',2,?4,?4)",
+            params![retry_assignment_id,ticket.id,retry_session_id,now],
+        ).unwrap();
+        let changed = tx.execute(
+            "UPDATE sa_tickets SET state='running',active_assignment_id=?2,revision=revision+1
+             WHERE id=?1 AND state='running' AND revision=?3",
+            params![ticket.id,retry_assignment_id,ticket.revision],
+        ).unwrap();
+        assert_eq!(changed, 1);
+        assert!(work_items::bind_work_item_in(&tx, &retry_assignment_id, &dependent.id).is_err());
+        drop(tx);
+
+        let restored = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(restored.state, "running");
+        assert_eq!(restored.revision, ticket.revision);
+        assert_eq!(restored.active_assignment_id.as_deref(), Some(active.id.as_str()));
+        assert_eq!(work_items::get_work_item(&store, &dependent.id).unwrap().state, "queued");
+        for id in [stale_assignment_id, retry_assignment_id] {
+            let count: i64 = store.db.query_row(
+                "SELECT COUNT(*) FROM sa_assignments WHERE id=?1", [&id], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(count, 0, "rolled-back retry Assignment must not persist");
+        }
     }
 
     #[test]

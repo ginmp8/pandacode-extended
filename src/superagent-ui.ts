@@ -115,9 +115,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   // Persist the user's editable preset draft across asynchronous list refreshes.
   let rejectingTicket = '', inspectedTicket = '';
   let ticketDetails: TicketDetails | null = null;
+  let ticketDetailsLoading = false, ticketDetailsError = '';
   // Ordered read-only scheduler rows for the inspected Ticket, loaded with the
   // other details. A failed read is local to this section, never approval data.
-  let workItems: WorkItem[] = [], workItemsError = '';
+  let workItems: WorkItem[] = [], workItemsError = '', workItemsLoading = false;
+  let planReadinessExpanded = true;
   let draftPresetName = '', draftPresetTemplate = '', draftCoordinatorBotId = '';
   let draftWorkerBotIds = [''], draftReviewerBotIds: string[] = [];
   let draftCouncilRequired = false, draftCouncilError = '';
@@ -304,18 +306,27 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   function renderWorkItems(): string {
     const rows = workItems.map(item =>
       '<li class="sa-item" data-sa-work-item="' + safe(item.id) + '"><div><strong>' +
-      safe(item.objective) + '</strong><small>Ordinal ' + safe(item.ordinal) + ' · ' +
+      safe(item.objective) + '</strong><small>Ordinal ' + safe(item.ordinal) + ' · State ' +
       safe(item.state) + '</small></div></li>').join('');
-    return '<section class="sa-work-items" aria-label="Work items"><h5>Work items</h5>' +
-      (workItemsError
+    const body = workItemsLoading
+      ? '<p class="sa-empty" role="status" aria-live="polite" data-sa-work-items-loading>Loading WorkItems for this Ticket…</p>'
+      : workItemsError
         ? '<p class="sa-error" role="alert" data-sa-work-items-error>Work items unavailable: ' +
           safe(workItemsError) + '</p>'
-        : '<ul class="sa-list sa-work-items-list">' +
+        : '<ol class="sa-list sa-work-items-list">' +
           (rows || '<li class="sa-empty" data-sa-work-items-empty>No WorkItems recorded for this Ticket.</li>') +
-          '</ul>') + '</section>';
+          '</ol>';
+    return '<details class="sa-plan-readiness" role="region" aria-label="Plan / Readiness" data-sa-plan-readiness' +
+      (planReadinessExpanded ? ' open' : '') + '><summary>Plan / Readiness</summary>' +
+      '<div class="sa-plan-readiness-body" data-sa-plan-body><p class="sa-plan-readiness-note">' +
+      'Read-only native WorkItem objectives and states, in ordinal order. This list does not authorize or dispatch work. ' +
+      'The WorkItem response does not report dependency edges, overall readiness, design-review findings, drift, or Council approval.</p>' +
+      '<h5>WorkItem List</h5>' + body + '</div></details>';
   }
   function render(): void {
     if (!host.isConnected) return;
+    const previousPlanReadiness = host.querySelector<HTMLDetailsElement>('[data-sa-plan-readiness]');
+    if (previousPlanReadiness) planReadinessExpanded = previousPlanReadiness.open;
     const list = presets.map(item =>
       {
       const workerIds = item.workerBotIds?.length ? item.workerBotIds : [item.workerBotId];
@@ -393,7 +404,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     const commentStatus = issueCommentStatus && inspected &&
       issueCommentStatus.ticketId === inspected.id &&
       issueCommentStatus.ticketRevision === inspected.revision ? issueCommentStatus : null;
-    const details = inspected && ticketDetails
+    const details = inspected && !ticketDetails
+      ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
+        '<h4>Ticket evidence</h4>' +
+        (ticketDetailsLoading
+          ? '<p role="status" data-sa-ticket-details-loading>Loading Ticket evidence…</p>'
+          : '<p class="sa-error" role="alert">Ticket evidence unavailable: ' +
+            safe(ticketDetailsError || 'The native Ticket snapshot could not be loaded.') + '</p>') +
+        renderWorkItems() + '<button type="button" data-sa-close-details>Close evidence</button></section>'
+      : inspected && ticketDetails
       ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
         '<h4>Ticket evidence</h4><p>Read-only native snapshot. Model output is not task approval.</p>' +
         renderTeamSnapshot(ticketDetails.teamSnapshot) +
@@ -582,8 +601,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     const id = inspectedTicket;
     if (!id || !tickets.some(ticket => ticket.id === id)) {
       inspectedTicket = ''; ticketDetails = null; threadLinks = []; issueCommentStatus = null;
-      workItems = []; workItemsError = ''; return;
+      ticketDetailsLoading = false; ticketDetailsError = '';
+      workItems = []; workItemsError = ''; workItemsLoading = false; return;
     }
+    ticketDetailsLoading = true; ticketDetailsError = '';
+    workItemsLoading = true; workItemsError = '';
     const previousRevision = ticketDetails?.ticket.id === id ? ticketDetails.ticket.revision : null;
     // Use existing native read endpoints, not model-generated summaries. A
     // revision change refreshes the snapshot before a later human decision.
@@ -594,21 +616,33 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       .catch(cause => ({
         rows: [] as WorkItem[], error: cause instanceof Error ? cause.message : String(cause),
       }));
-    const [snapshot, links, workItemResult] = await Promise.all([
-      call<TicketDetails>('superagent_snapshot', { ticketId:id, limit:50 }),
-      call<ThreadLink[]>('superagent_source_thread_links', { ticketId:id }),
+    const snapshotRead = call<TicketDetails>('superagent_snapshot', { ticketId:id, limit:50 })
+      .then(snapshot => ({ snapshot, error: '' }))
+      .catch(cause => ({ snapshot: null, error: cause instanceof Error ? cause.message : String(cause) }));
+    const linkRead = call<ThreadLink[]>('superagent_source_thread_links', { ticketId:id })
+      .then(links => ({ links, error: '' }))
+      .catch(cause => ({ links: null, error: cause instanceof Error ? cause.message : String(cause) }));
+    const [snapshotResult, linkResult, workItemResult] = await Promise.all([
+      snapshotRead,
+      linkRead,
       workItemRead,
     ]);
     if (inspectedTicket === id) {
-      if (previousRevision !== null && previousRevision !== snapshot.ticket.revision) issueCommentStatus = null;
+      const snapshot = snapshotResult.snapshot;
+      if (snapshot && previousRevision !== null && previousRevision !== snapshot.ticket.revision) issueCommentStatus = null;
       ticketDetails = snapshot;
-      threadLinks = links;
-      workItems = workItemResult.rows.sort((left, right) => left.ordinal - right.ordinal);
+      threadLinks = linkResult.links ?? [];
+      workItems = workItemResult.rows.sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id));
       workItemsError = workItemResult.error;
+      workItemsLoading = false;
+      ticketDetailsError = snapshotResult.error || linkResult.error;
+      ticketDetailsLoading = false;
       // Keep the ticket row and its grant/history pinned to one native revision.
       const index = tickets.findIndex(ticket => ticket.id === id);
-      if (index >= 0) tickets[index] = snapshot.ticket;
+      if (index >= 0 && snapshot) tickets[index] = snapshot.ticket;
     }
+    if (snapshotResult.error) throw new Error(snapshotResult.error);
+    if (linkResult.error) throw new Error(linkResult.error);
   }
   async function reload(): Promise<void> {
     loading = true;
@@ -620,13 +654,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       bots = known; presets = configs;
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
-        inspectedTicket = ''; threadLinks = []; workItems = []; workItemsError = '';
+        inspectedTicket = ''; ticketDetailsLoading = false; ticketDetailsError = '';
+        threadLinks = []; workItems = []; workItemsError = ''; workItemsLoading = false;
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       }
       // A failed native read must not leave old ticket approval controls
       // visible underneath a newly selected or reloaded preset.
       tickets = [];
-      ticketDetails = null; workItems = []; workItemsError = '';
+      ticketDetails = null; ticketDetailsLoading = false; ticketDetailsError = '';
+      workItems = []; workItemsError = ''; workItemsLoading = false;
       tickets = selected ? await call<Ticket[]>('superagent_tickets',{ orchestrationId:selected, limit:50 }) : [];
       await refreshTicketDetails();
       if (sourcesLoaded && selected) {
@@ -764,7 +800,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       selected = next;
       tickets = [];
       writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = ''; writePathsError = '';
-      inspectedTicket = ''; ticketDetails = null; threadLinks = []; workItems = []; workItemsError = '';
+      inspectedTicket = ''; ticketDetails = null; ticketDetailsLoading = false; ticketDetailsError = '';
+      threadLinks = []; workItems = []; workItemsError = ''; workItemsLoading = false;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 });
@@ -783,8 +820,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       });
       if (selected !== team.id) {
         selected = team.id;
-        tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
-        workItems = []; workItemsError = '';
+        tickets = []; inspectedTicket = ''; ticketDetails = null;
+        ticketDetailsLoading = false; ticketDetailsError = ''; threadLinks = [];
+        workItems = []; workItemsError = ''; workItemsLoading = false;
         writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = ''; writePathsError = '';
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
         void work(async () => {
@@ -866,18 +904,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     }
     if (target.hasAttribute('data-sa-refresh')) { void work(reload); return; }
     if (target.hasAttribute('data-sa-close-details')) {
-      inspectedTicket = ''; ticketDetails = null; issueCommentStatus = null;
-      workItems = []; workItemsError = ''; render(); return;
+      inspectedTicket = ''; ticketDetails = null; ticketDetailsLoading = false; ticketDetailsError = '';
+      issueCommentStatus = null; workItems = []; workItemsError = ''; workItemsLoading = false;
+      render(); return;
     }
     if (target.dataset.saInspectTicket) {
       const id = target.dataset.saInspectTicket;
       if (inspectedTicket === id) {
-        inspectedTicket = ''; ticketDetails = null; issueCommentStatus = null;
-        workItems = []; workItemsError = ''; render();
+        inspectedTicket = ''; ticketDetails = null; ticketDetailsLoading = false; ticketDetailsError = '';
+        issueCommentStatus = null; workItems = []; workItemsError = ''; workItemsLoading = false; render();
       } else {
-        inspectedTicket = id; ticketDetails = null; issueCommentStatus = null;
-        workItems = []; workItemsError = '';
+        inspectedTicket = id; ticketDetails = null; ticketDetailsLoading = true; ticketDetailsError = '';
+        issueCommentStatus = null; workItems = []; workItemsError = ''; workItemsLoading = true;
         commentRepository = ''; commentIssueNumber = ''; commentDraft = ''; issueCommentError = '';
+        render();
         void work(refreshTicketDetails);
       }
       return;

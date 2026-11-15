@@ -146,6 +146,9 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await expect(details).toContainText('No side effects allowed');
   await expect(details.locator('form[data-sa-form="issue-comment"]')).toHaveCount(0);
   await expect(details).toContainText('Attempt 1');
+  const plan=details.getByRole('region',{name:'Plan / Readiness'});
+  await expect(plan.locator('.sa-work-items-list .sa-item')).toContainText('Inspect a disposable fixture');
+  await expect(plan.locator('.sa-work-items-list .sa-item')).toContainText('Ordinal 0 · State running');
   await expect(details).toContainText('admitted');
   await expect(details.getByRole('heading',{name:'Native activity',exact:true}).locator('xpath=following-sibling::ol[1]/li').first()).toContainText(' · admitted · ');
   await row.getByRole('button',{name:'Stop'}).click();
@@ -154,6 +157,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await expect(workspace.locator('.sa-list .sa-counts')).toHaveText('1 tasks · 0 running · 0 blocked');
   await expect(details).toContainText('Revoked');
   await expect(details).toContainText('stopped');
+  await expect(plan.locator('.sa-work-items-list .sa-item')).toContainText('Ordinal 0 · State blocked');
   await expect(row.getByRole('button',{name:'Accept evidence'})).toHaveCount(0);
 });
 
@@ -221,6 +225,136 @@ test('SuperAgent scoped-write request validates paths and reports native error a
   }).saWriteCalls);
   expect(calls).toHaveLength(2);
   expect(calls[1].args).not.toHaveProperty('user_confirmed');
+});
+
+test('Preview retry keeps a stopped Ticket terminal and its WorkItem blocked',async ({page})=>{
+  await page.goto('/?bots=sample');
+  const result=await page.evaluate(async()=>{
+    const {invokeSuperagent}=await import('/src/preview-superagent.ts');
+    const listBots=async()=>[
+      {id:'coordinator',name:'Coordinator',paused:false,projectId:'preview-project'},
+      {id:'worker',name:'Worker',paused:false,projectId:'preview-project'},
+      {id:'reviewer-one',name:'Reviewer One',paused:false,projectId:'preview-project'},
+      {id:'reviewer-two',name:'Reviewer Two',paused:false,projectId:'preview-project'},
+    ];
+    const config=await invokeSuperagent<{id:string;policyRevision:number}>(
+      'superagent_create',{input:{name:'Preview retry',coordinatorBotId:'coordinator',workerBotId:'worker',
+        workerBotIds:['worker'],reviewerBotIds:['reviewer-one','reviewer-two'],councilRequired:true}},listBots);
+    await invokeSuperagent('superagent_set_enabled',{
+      orchestrationId:config.id,expectedRevision:config.policyRevision,enabled:true,
+    },listBots);
+    const ticket=await invokeSuperagent<{id:string;revision:number}>(
+      'superagent_submit',{orchestrationId:config.id,objective:'Retry one recorded objective'},listBots);
+    const initialItems=await invokeSuperagent<Array<Record<string,any>>>(
+      'superagent_work_items',{ticketId:ticket.id},listBots);
+    const stopped=await invokeSuperagent<{state:string;revision:number}>(
+      'superagent_stop',{ticketId:ticket.id},listBots);
+    const stoppedItems=await invokeSuperagent<Array<Record<string,any>>>(
+      'superagent_work_items',{ticketId:ticket.id},listBots);
+    const assignmentsBeforeRetry=(await invokeSuperagent<Array<Record<string,any>>>(
+      'superagent_assignments',{ticketId:ticket.id},listBots)).map(assignment=>({...assignment}));
+    let retryError='';
+    try { await invokeSuperagent('superagent_retry',{ticketId:ticket.id},listBots); }
+    catch(cause) { retryError=cause instanceof Error?cause.message:String(cause); }
+    const ticketsAfterRetry=await invokeSuperagent<Array<{id:string;state:string;revision:number}>>(
+      'superagent_tickets',{orchestrationId:config.id},listBots);
+    const workItemsAfterRetry=await invokeSuperagent<Array<Record<string,any>>>(
+      'superagent_work_items',{ticketId:ticket.id},listBots);
+    const assignmentsAfterRetry=(await invokeSuperagent<Array<Record<string,any>>>(
+      'superagent_assignments',{ticketId:ticket.id},listBots)).map(assignment=>({...assignment}));
+    const snapshot=await invokeSuperagent<Record<string,any>>(
+      'superagent_snapshot',{ticketId:ticket.id},listBots);
+    return {ticketId:ticket.id,initialItems,stoppedState:stopped.state,
+      stoppedRevision:stopped.revision,stoppedItems,retryError,
+      stateAfterRetry:ticketsAfterRetry.find(item=>item.id===ticket.id)?.state,
+      revisionAfterRetry:ticketsAfterRetry.find(item=>item.id===ticket.id)?.revision,
+      workItemsAfterRetry,assignmentsBeforeRetry,assignmentsAfterRetry,
+      snapshotHasCouncil:'council' in snapshot};
+  });
+
+  expect(result.initialItems).toHaveLength(1);
+  expect(result.initialItems[0]).toMatchObject({ticketId:result.ticketId,
+    objective:'Retry one recorded objective',state:'running',ordinal:0});
+  expect(result.stoppedState).toBe('stopped');
+  expect(result.retryError).toBe('Only a blocked SuperAgent ticket can be retried manually.');
+  expect(result.stoppedItems[0]).toMatchObject({id:result.initialItems[0].id,state:'blocked'});
+  expect(result.stateAfterRetry).toBe('stopped');
+  expect(result.revisionAfterRetry).toBe(result.stoppedRevision);
+  expect(result.workItemsAfterRetry).toHaveLength(1);
+  expect(result.workItemsAfterRetry[0]).toMatchObject({id:result.initialItems[0].id,
+    objective:'Retry one recorded objective',state:'blocked',ordinal:0});
+  expect(result.workItemsAfterRetry[0]).not.toHaveProperty('dependsOn');
+  expect(result.workItemsAfterRetry[0]).not.toHaveProperty('council');
+  expect(result.assignmentsBeforeRetry).toHaveLength(1);
+  expect(result.assignmentsAfterRetry).toEqual(result.assignmentsBeforeRetry);
+  expect(result.assignmentsAfterRetry[0]).toMatchObject({attempt:1,state:'stopped'});
+  expect(result.snapshotHasCouncil).toBe(false);
+});
+
+test('Preview coordinated admission records Coordinator before manual Worker admission',async ({page})=>{
+  await page.goto('/?bots=sample');
+  const result=await page.evaluate(async()=>{
+    const {invokeSuperagent}=await import('/src/preview-superagent.ts');
+    const listBots=async()=>[
+      {id:'coordinator',name:'Coordinator',paused:false,projectId:'preview-project'},
+      {id:'worker',name:'Worker',paused:false,projectId:'preview-project'},
+    ];
+    const config=await invokeSuperagent<{id:string;policyRevision:number}>(
+      'superagent_create',{input:{name:'Preview coordinated admission',
+        coordinatorBotId:'coordinator',workerBotId:'worker'}},listBots);
+    await invokeSuperagent('superagent_set_enabled',{
+      orchestrationId:config.id,expectedRevision:config.policyRevision,enabled:true,
+    },listBots);
+    const ticket=await invokeSuperagent<{id:string;state:string}>(
+      'superagent_submit_coordinated',{
+        orchestrationId:config.id,objective:'Plan a bounded preview task',
+      },listBots);
+    const ticketStateBeforeWorker=ticket.state;
+    const assignmentsBeforeWorker=(await invokeSuperagent<Array<Record<string,any>>>(
+      'superagent_assignments',{ticketId:ticket.id},listBots)).map(assignment=>({...assignment}));
+    const workItemsBeforeWorker=await invokeSuperagent<Array<Record<string,any>>>(
+      'superagent_work_items',{ticketId:ticket.id},listBots);
+    const coordinatorActivity=(await invokeSuperagent<Array<Record<string,any>>>(
+      'superagent_activity',{ticketId:ticket.id},listBots)).map(event=>({...event}));
+
+    const dispatched=await invokeSuperagent<{state:string}>(
+      'superagent_dispatch_worker',{ticketId:ticket.id},listBots);
+    const assignmentsAfterWorker=(await invokeSuperagent<Array<Record<string,any>>>(
+      'superagent_assignments',{ticketId:ticket.id},listBots)).map(assignment=>({...assignment}));
+    const workItemsAfterWorker=await invokeSuperagent<Array<Record<string,any>>>(
+      'superagent_work_items',{ticketId:ticket.id},listBots);
+    return {ticketId:ticket.id,ticketStateBeforeWorker,
+      assignmentsBeforeWorker,workItemsBeforeWorker,coordinatorActivity,
+      ticketStateAfterWorker:dispatched.state,assignmentsAfterWorker,workItemsAfterWorker};
+  });
+
+  expect(result.ticketStateBeforeWorker).toBe('queued');
+  expect(result.assignmentsBeforeWorker).toHaveLength(1);
+  expect(result.assignmentsBeforeWorker[0]).toMatchObject({
+    id:`preview-coordinator-assignment-${result.ticketId}`,
+    botId:'coordinator',sessionId:`preview-coordinator-session-${result.ticketId}`,
+    attempt:1,state:'completed',
+  });
+  expect(result.workItemsBeforeWorker).toEqual([]);
+  expect(result.coordinatorActivity[0]).toMatchObject({kind:'coordinator_preview_completed'});
+  expect(result.coordinatorActivity[0].detail).toContain('Preview-only Coordinator completion');
+  expect(result.coordinatorActivity[0].detail).toContain('no structured plan data was generated');
+  expect(result.coordinatorActivity[0]).not.toHaveProperty('plan');
+  expect(result.coordinatorActivity[0]).not.toHaveProperty('result');
+
+  expect(result.ticketStateAfterWorker).toBe('running');
+  expect(result.assignmentsAfterWorker).toHaveLength(2);
+  expect(result.assignmentsAfterWorker[0]).toEqual(result.assignmentsBeforeWorker[0]);
+  expect(result.assignmentsAfterWorker[1]).toMatchObject({
+    id:`preview-assignment-${result.ticketId}-attempt-2`,
+    botId:'worker',sessionId:`preview-session-${result.ticketId}-attempt-2`,
+    attempt:2,state:'running',
+  });
+  expect(result.workItemsAfterWorker).toHaveLength(1);
+  expect(result.workItemsAfterWorker[0]).toMatchObject({ticketId:result.ticketId,
+    objective:'Plan a bounded preview task',state:'running',ordinal:0});
+  expect(result.workItemsAfterWorker[0]).not.toHaveProperty('dependsOn');
+  expect(result.workItemsAfterWorker[0]).not.toHaveProperty('council');
 });
 
 test('Preview scoped-write adapter is deterministic and creates no grant',async ({page})=>{
@@ -896,7 +1030,9 @@ test('Team Builder sends required Council policy with create and update and show
 });
 
 test('Team Builder field-validates required Council with fewer than two reviewers before create or update', async ({page}) => {
-  test.setTimeout(60_000);
+  // This regression covers three live invalid-form cycles. CI exhausted the
+  // whole-test deadline during the final edit toggle after the locator resolved.
+  test.setTimeout(120_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
   await page.evaluate(async () => {
@@ -1240,14 +1376,15 @@ test('Preview Ticket evidence labels null profile and hash fields as unavailable
 });
 
 
-test('Ticket evidence reads Work items in ordinal order with explicit empty and error states', async ({page}) => {
+test('Ticket Plan and Readiness shows native WorkItems with loading, empty and error states', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {
     const {mountSuperagent}=await import('/src/superagent-ui.ts');
     const host=document.createElement('div');host.id='sa-work-items-test';document.body.appendChild(host);
     const ticket={id:'ticket-work-items',objective:'Render ordered WorkItems',state:'queued',revision:1,evidence:null};
-    const state:{mode:'items'|'empty'|'error';calls:Array<Record<string,unknown>>}={mode:'items',calls:[]};
+    const state:{mode:'items'|'empty'|'error';calls:Array<Record<string,unknown>>;
+      waitForItems:boolean;releaseItems?:()=>void}={mode:'items',calls:[],waitForItems:true};
     mountSuperagent(host,async (command,args)=>{
       if(command==='bots_list')return [
         {id:'coordinator',name:'Coordinator',paused:false},
@@ -1267,12 +1404,16 @@ test('Ticket evidence reads Work items in ordinal order with explicit empty and 
         if(state.mode==='empty')return [] as never;
         // Deliberately reversed: the native order is authoritative and the
         // section still renders ordinal 0 before ordinal 1.
-        return [
+        const rows=[
           {id:'item-second',ticketId:'ticket-work-items',objective:'Second bounded slice',
             state:'completed',ordinal:1,createdAt:1,updatedAt:2},
           {id:'item-first',ticketId:'ticket-work-items',objective:'First bounded slice',
             state:'running',ordinal:0,createdAt:1,updatedAt:2},
-        ] as never;
+        ];
+        if(state.waitForItems)return await new Promise(resolve=>{
+          state.releaseItems=()=>resolve(rows as never);
+        }) as never;
+        return rows as never;
       }
       throw new Error('Unexpected WorkItem evidence command: '+command);
     });
@@ -1281,7 +1422,8 @@ test('Ticket evidence reads Work items in ordinal order with explicit empty and 
 
   const host=page.locator('#sa-work-items-test');
   const setMode=(mode:'items'|'empty'|'error')=>page.evaluate(mode=>{
-    (window as unknown as {saWorkItemsState:{mode:string}}).saWorkItemsState.mode=mode;
+    const state=(window as unknown as {saWorkItemsState:{mode:string;waitForItems:boolean}}).saWorkItemsState;
+    state.mode=mode;state.waitForItems=false;
   },mode);
   const readCalls=()=>page.evaluate(()=>(window as unknown as {
     saWorkItemsState:{calls:Array<Record<string,unknown>>}
@@ -1289,22 +1431,36 @@ test('Ticket evidence reads Work items in ordinal order with explicit empty and 
 
   await host.getByRole('button',{name:'View evidence'}).click();
   const details=host.getByRole('region',{name:'Ticket evidence'});
-  const workItems=details.getByRole('region',{name:'Work items'});
-  await expect(workItems.getByRole('heading',{name:'Work items',exact:true})).toBeVisible();
+  const workItems=details.getByRole('region',{name:'Plan / Readiness'});
+  await expect(workItems.locator('[data-sa-work-items-loading]'))
+    .toHaveText('Loading WorkItems for this Ticket…');
+  await expect(workItems.locator('[data-sa-plan-body]')).toBeVisible();
+  await workItems.locator('summary').click();
+  await expect(workItems.locator('[data-sa-plan-body]')).toBeHidden();
+  await workItems.locator('summary').click();
+  await expect(workItems.locator('[data-sa-plan-body]')).toBeVisible();
+  expect(await readCalls()).toEqual([{ticketId:'ticket-work-items'}]);
+  await page.evaluate(()=>{
+    const state=(window as unknown as {saWorkItemsState:{waitForItems:boolean;releaseItems?:()=>void}}).saWorkItemsState;
+    state.waitForItems=false;state.releaseItems?.();
+  });
+  await expect(workItems.getByRole('heading',{name:'WorkItem List',exact:true})).toBeVisible();
+  await expect(workItems).toContainText('This list does not authorize or dispatch work.');
+  await expect(workItems).toContainText('does not report dependency edges, overall readiness, design-review findings, drift, or Council approval.');
   const rows=workItems.locator('.sa-work-items-list .sa-item');
   await expect(rows).toHaveCount(2);
   await expect(rows.nth(0)).toContainText('First bounded slice');
-  await expect(rows.nth(0)).toContainText('Ordinal 0 · running');
+  await expect(rows.nth(0)).toContainText('Ordinal 0 · State running');
   await expect(rows.nth(1)).toContainText('Second bounded slice');
-  await expect(rows.nth(1)).toContainText('Ordinal 1 · completed');
+  await expect(rows.nth(1)).toContainText('Ordinal 1 · State completed');
+  await expect(workItems).not.toContainText('Depends on');
   await expect(workItems.getByRole('button')).toHaveCount(0);
-  expect(await readCalls()).toEqual([{ticketId:'ticket-work-items'}]);
 
   await details.getByRole('button',{name:'Close evidence'}).click();
   await setMode('error');
   await host.getByRole('button',{name:'View evidence'}).click();
   const errorDetails=host.getByRole('region',{name:'Ticket evidence'});
-  await expect(errorDetails.getByRole('region',{name:'Work items'}).getByRole('alert'))
+  await expect(errorDetails.getByRole('region',{name:'Plan / Readiness'}).getByRole('alert'))
     .toHaveText('Work items unavailable: Native WorkItem read failed.');
   await expect(errorDetails.locator('.sa-work-items-list')).toHaveCount(0);
   await expect(errorDetails).toContainText('Ticket ID');
@@ -1313,7 +1469,7 @@ test('Ticket evidence reads Work items in ordinal order with explicit empty and 
   await setMode('empty');
   await host.getByRole('button',{name:'View evidence'}).click();
   const emptyDetails=host.getByRole('region',{name:'Ticket evidence'});
-  const emptyItems=emptyDetails.getByRole('region',{name:'Work items'});
+  const emptyItems=emptyDetails.getByRole('region',{name:'Plan / Readiness'});
   await expect(emptyItems.getByText('No WorkItems recorded for this Ticket.',{exact:true})).toBeVisible();
   await expect(emptyItems.getByRole('alert')).toHaveCount(0);
   await expect(emptyItems.locator('.sa-item')).toHaveCount(0);

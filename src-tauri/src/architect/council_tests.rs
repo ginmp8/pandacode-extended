@@ -65,6 +65,53 @@ fn native_council_finding_projection_reuses_persisted_report_and_invalidates_aft
     assert!(!forged.verified_pass);
 }
 
+
+#[test]
+fn prior_cycle_findings_remain_unverified_and_require_the_native_parent_session_link() {
+    let (state, sid) = council_state(on(9.0, 3, 2));
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [reviewer_assignment("prior-cycle", "security")]
+    })).unwrap();
+    let store = state.store.lock().unwrap();
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    let reviewer = &team.workers[0];
+    let prior_cycle = reviewer.reviewer_binding.as_ref().unwrap().council_cycle_id.clone();
+    let reviewer_session = reviewer.session_id.clone();
+    let reviewer_created_at = reviewer.created_at;
+    store.message(&reviewer_session, "assistant",
+        "Council findings JSON: [{\"severity\":\"high\",\"category\":\"authorization\",\"title\":\"Prior finding\",\"explanation\":\"Requires review\"}]\nCouncil score: 7/10").unwrap();
+    team.workers[0].status = "completed".into();
+    team.workers[0].council.as_mut().unwrap().score = Some(7.0);
+    team.council_since = reviewer_created_at + 1;
+    save(&store, &mut team).unwrap();
+    let inspected = council_inspection_state(&store, &sid).unwrap().unwrap();
+    assert!(inspected.reported_findings.is_empty());
+    assert_eq!(inspected.historical_reported_findings.len(), 1);
+    let prior = &inspected.historical_reported_findings[0];
+    assert_eq!(prior.cycle_id, prior_cycle);
+    assert_eq!(prior.title, "Prior finding");
+    assert!(!prior.evidence_verified && !prior.location_verified);
+    assert!(prior.verified_evidence_refs.is_empty());
+    assert!(!inspected.verified_pass);
+
+    let project = store.session(&sid).unwrap().project_id;
+    let foreign = store.create_session(&project, "codex", "", "full").unwrap();
+    store.message(&foreign.id, "assistant",
+        "Council findings JSON: [{\"severity\":\"critical\",\"category\":\"secrets\",\"title\":\"Foreign data\",\"explanation\":\"Private\"}]\nCouncil score: 7/10").unwrap();
+    let mut tampered = load(&store, &sid).unwrap().unwrap();
+    let mut injected = tampered.workers[0].clone();
+    injected.id = "foreign-injected-worker".into();
+    injected.session_id = foreign.id;
+    injected.reviewer_binding.as_mut().unwrap().seat_id = injected.id.clone();
+    tampered.workers.push(injected);
+    save(&store, &mut tampered).unwrap();
+    let inspected = council_inspection_state(&store, &sid).unwrap().unwrap();
+    assert_eq!(inspected.historical_reported_findings.len(), 1,
+        "unlinked cross-session messages must never be included in historical inspection");
+    assert_eq!(inspected.historical_reported_findings[0].cycle_id, prior_cycle);
+    assert!(!inspected.verified_pass);
+}
+
 #[test]
 fn council_inspection_is_cycle_scoped_and_never_invents_usage_or_pass() {
     let old = seat("old", 1, Some(10.0), SINCE - 1);
@@ -4672,6 +4719,9 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
     });
     let early = call(&state, &sid, "pandacode_dispatch_workers", second_request.clone()).unwrap_err();
     assert!(early.contains("first-wave root and child receipts"), "{early}");
+    assert_eq!(saved(&state, &sid).workers.iter()
+        .filter(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 2)).count(), 0,
+        "rejected early S2 admission must not create a reviewer session");
     let (pending, _) = dispatch_state(&state, &sid, started.generation,
         "pandacode_finish_team", json!({"summary":"Await real child callbacks"}),
         &std::sync::atomic::AtomicBool::new(false)).unwrap();

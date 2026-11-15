@@ -2518,7 +2518,14 @@ fn dispatch_as(
                     && !eligible_hierarchical_s2_root_escalation(&store, &team)
                     && !eligible_hierarchical_s3_root_challenge(&store, &team)
                 {
-                    return Err("child_council_unavailable: a second root wave requires complete, authenticated first-phase root and child receipts.".into());
+                    let denial = if team.config.council.as_ref()
+                        .is_some_and(|config| config.strategy == council::CouncilExecutionStrategy::Escalated)
+                    {
+                        "child_council_unavailable: a second root wave requires complete, authenticated first-wave root and child receipts."
+                    } else {
+                        "child_council_unavailable: a second root wave requires complete, authenticated first-phase root and child receipts."
+                    };
+                    return Err(denial.into());
                 }
                 if seat.is_some() {
                     // The budget covers actual new admissions, not duplicated keys;

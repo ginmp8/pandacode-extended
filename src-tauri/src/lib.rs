@@ -2567,21 +2567,24 @@ async fn launch_operation_admitted(
                 config.reviewer_policy.as_ref(),
                 Some(architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly)
             ) {
-                // Read-only reviewers still need the two task-scoped, native skill
-                // retrieval/verification tools. Never expose Architect or bot tools.
-                let host = team.as_ref().and_then(|admission| {
-                    architect::reviewer_skill_host(
+                // Revalidate task-owned native reviewer authority on each tool
+                // call. Child coordinators receive only their isolated Architect
+                // dispatch/finish tools; reviewer leaves receive only evidence.
+                let built = team.as_ref().map(|admission| {
+                    architect::native_reviewer_host(
                         app.clone(), session_id.clone(), stopped.clone(), admission,
                     )
-                });
-                let filtered = config.reviewer_policy.as_ref()
-                    .ok_or_else(|| "policy_unsupported: native reviewer policy is missing.".to_string())
-                    .and_then(|policy| policy.restrict_host(host));
-                match filtered {
-                    Ok(filtered) => {
-                        let kind = filtered.as_ref().map(|_| providers::NativeReviewerHostKind::Evidence);
-                        (filtered, false, None, kind)
+                }).transpose();
+                match built {
+                    Ok(Some((host, coordinator))) => {
+                        let kind = host.as_ref().map(|_| if coordinator {
+                            providers::NativeReviewerHostKind::ChildCoordinator
+                        } else {
+                            providers::NativeReviewerHostKind::Evidence
+                        });
+                        (host, false, None, kind)
                     }
+                    Ok(None) => (None, false, None, None),
                     Err(error) => (None, false, Some(error), None),
                 }
             } else {

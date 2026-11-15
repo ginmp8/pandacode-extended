@@ -6586,15 +6586,110 @@ pub fn host(
     })
 }
 
-/// Build a strictly allowlisted native host for read-only selected reviewers.
-/// Skills never enable the Architect dispatcher or other bot/MCP commands.
-pub(crate) fn reviewer_skill_host(
+/// Immutable native reviewer authority observed at host creation and revalidated
+/// for every tool invocation, including hidden or replayed transport calls.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NativeReviewerAccess {
+    coordinator: bool,
+    binding: Option<reviewer_security::ReviewerBinding>,
+    attempt: usize,
+    root_generation: Option<u64>,
+    cycle_id: String,
+}
+
+impl NativeReviewerAccess {
+    fn resolve(store: &Store, sid: &str, admission: &Admission) -> Result<Self> {
+        let team = load(store, &admission.parent)?
+            .ok_or("reviewer_session_mismatch: reviewer team is missing.")?;
+        if team.generation != admission.generation || !active(&team.status) {
+            return Err("reviewer_session_mismatch: reviewer generation is no longer active.".into());
+        }
+        if reviewer_policy(store, sid, Some(admission))?
+            != Some(reviewer_security::ReviewerToolPolicy::NativeReadOnly)
+        {
+            return Err("capability_not_authorized: a native read-only reviewer policy is required.".into());
+        }
+        let (coordinator, binding, attempt, root_generation) = if sid == admission.parent {
+            let link = validate_council_child_link(store, sid)?
+                .ok_or("reviewer_session_mismatch: coordinator has no current native child link.")?;
+            let root = load(store, &link.root_session_id)?
+                .ok_or("reviewer_session_mismatch: Council parent task is missing.")?;
+            let worker = root.workers.iter()
+                .find(|worker| worker.id == link.root_worker_id && !worker.abandoned)
+                .ok_or("reviewer_session_mismatch: Council parent seat is unavailable.")?;
+            (true, Some(link.binding), worker.attempt, Some(root.generation))
+        } else {
+            let worker = team.workers.iter().find(|worker| {
+                worker.session_id == sid && active(&worker.status)
+                    && !worker.abandoned && worker.council.is_some()
+            }).ok_or("reviewer_session_mismatch: native reviewer seat is no longer active.")?;
+            (false, worker.reviewer_binding.clone(), worker.attempt, None)
+        };
+        let mut binding = binding
+            .ok_or("reviewer_session_mismatch: reviewer has no frozen native authority.")?;
+        // Skill open/check observations change during a turn; granted authority,
+        // roster, policy, artifact and attempt must remain immutable.
+        binding.skill_evidence.clear();
+        Ok(Self {
+            coordinator, binding: Some(binding), attempt, root_generation,
+            cycle_id: format!("{}:{}", team.session_id, team.council_since),
+        })
+    }
+}
+
+/// Reuse the existing exact-schema reviewer and child-coordinator filters.
+/// A frozen role is never allowed to inherit ambient Architect, bot, shell or
+/// external MCP tools, and every exposed tool call rechecks its live authority.
+pub(crate) fn native_reviewer_host(
     app: tauri::AppHandle,
     session_id: String,
     stopped: Arc<AtomicBool>,
     admission: &Admission,
-) -> Option<ToolHost> {
-    reviewer_skill_evidence::readonly_host(host(app, session_id, stopped, admission)?)
+) -> Result<(Option<ToolHost>, bool)> {
+    let access = {
+        let state = app.state::<AppState>();
+        let store = state.store.lock().map_err(|error| error.to_string())?;
+        NativeReviewerAccess::resolve(&store, &session_id, admission)?
+    };
+    let raw = host(app.clone(), session_id.clone(), stopped, admission)
+        .ok_or("policy_unsupported: native reviewer host is unavailable.")?;
+    let policy = reviewer_security::ReviewerToolPolicy::NativeReadOnly;
+    let filtered = if access.coordinator {
+        policy.restrict_child_coordinator_host(Some(raw))?
+    } else {
+        policy.restrict_host(Some(raw))?
+    };
+    let Some(filtered) = filtered else { return Ok((None, access.coordinator)) };
+    let allowed = filtered.tools.iter()
+        .filter_map(|spec| spec["name"].as_str().map(str::to_owned))
+        .collect::<HashSet<_>>();
+    let handler = filtered.handler.clone();
+    let frozen = access.clone();
+    let admission = admission.clone();
+    Ok((Some(ToolHost {
+        tools: filtered.tools,
+        approval_tools: HashSet::new(),
+        handler: Arc::new(move |name, args| {
+            let validation = if allowed.contains(&name) {
+                let state = app.state::<AppState>();
+                let store = state.store.lock().map_err(|error| error.to_string());
+                store.and_then(|store| {
+                    let current = NativeReviewerAccess::resolve(
+                        &store, &session_id, &admission,
+                    )?;
+                    if current == frozen {
+                        Ok(())
+                    } else {
+                        Err("reviewer_session_mismatch: native reviewer authority changed during this turn.".into())
+                    }
+                })
+            } else {
+                Err("capability_not_authorized: tool is outside the frozen reviewer role.".into())
+            };
+            let handler = handler.clone();
+            Box::pin(async move { validation?; (handler)(name, args).await })
+        }),
+    }), access.coordinator))
 }
 
 #[derive(Serialize, Deserialize)]

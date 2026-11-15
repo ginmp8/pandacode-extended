@@ -9674,3 +9674,26 @@ fn native_council_inspection_pins_cycle_revision_and_never_promotes_an_unverifie
     save(&store, &mut disabled).unwrap();
     assert!(council_inspection_select_state(&store, &session_id, None, None).unwrap().is_none());
 }
+
+#[test]
+fn native_reviewer_host_identity_freezes_cycle_attempt_and_child_generation() {
+    let root = NativeReviewerAccess {
+        coordinator: true,
+        binding: None,
+        attempt: 1,
+        root_generation: Some(10),
+        cycle_id: "child:42".into(),
+    };
+    let mut next = root.clone();
+    next.cycle_id = "child:43".into();
+    assert_ne!(root, next, "a different child cycle cannot reuse the prior tool host");
+    let mut next = root.clone();
+    next.root_generation = Some(11);
+    assert_ne!(root, next, "a newer root generation invalidates child coordinator authority");
+    let mut next = root.clone();
+    next.coordinator = false;
+    assert_ne!(root, next, "leaf and child-coordinator roles must not share a host");
+    let mut next = root.clone();
+    next.attempt += 1;
+    assert_ne!(root, next, "a retried reviewer attempt needs new authority");
+}

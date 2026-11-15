@@ -61,6 +61,26 @@ pub(crate) fn read(store: &Store, id: &str) -> Result<TeamRoster> {
         reviewer_bot_ids: config.reviewer_bot_ids,
     })
 }
+/// Native eligibility shared by persisted Team creation, activation and
+/// admission. Stored bot rows may predate editor validation or be modified by
+/// migrations; a runtime must never infer support from a saved identity.
+pub(super) fn member_execution_issue(bot: &bots::Bot) -> Option<&'static str> {
+    if !bots::known_provider(&bot.provider) {
+        Some("Bot harness is not supported by PandaCode.")
+    } else if !storage::valid_permission_mode(&bot.mode) {
+        Some("Bot permission mode is not supported by PandaCode.")
+    } else if bot.model.len() > 200 {
+        Some("Bot model configuration exceeds the native limit.")
+    } else if bot.reasoning_effort.len() > 40
+        || bot.reasoning_effort.chars()
+            .any(|c| !(c.is_ascii_alphanumeric() || c=='-' || c=='_'))
+    {
+        Some("Bot reasoning effort is invalid.")
+    } else {
+        None
+    }
+}
+
 /// Data from the already installed Skills Library. Trust is not provider eligibility.
 #[derive(Debug,Clone,Copy)]
 struct LibraryStatus {
@@ -128,6 +148,9 @@ fn effective_team(
         let mut configuration_issues=Vec::new();
         if bot.paused {
             configuration_issues.push("Paused bot: resume it in Bots before admission.".into());
+        }
+        if let Some(issue) = member_execution_issue(&bot) {
+            configuration_issues.push(issue.into());
         }
         // Worker project drift can occur after configuring a reusable Team.
         // Coordinator projects may differ; Workers own the execution scope.

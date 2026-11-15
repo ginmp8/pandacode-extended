@@ -1162,6 +1162,11 @@ fn create_configuration_roles_with_policy(
     let coordinator = bots::get(store, &input.coordinator_bot_id)?;
     let workers = worker_bot_ids.iter().map(|id| bots::get(store,id)).collect::<Result<Vec<_>>>()?;
     let reviewers = reviewer_bot_ids.iter().map(|id| bots::get(store,id)).collect::<Result<Vec<_>>>()?;
+    for bot in std::iter::once(&coordinator).chain(workers.iter()).chain(reviewers.iter()) {
+        if let Some(issue) = roster::member_execution_issue(bot) {
+            return Err(issue.into());
+        }
+    }
     // Every native bot owns its own project/workspace. A coordinator is a separate
     // existing bot, not a second profile inside the worker's checkout. Ordered
     // workers share one execution project; Council reviewers are independent
@@ -2665,6 +2670,9 @@ fn manual_preflight(
         Some("Team is disabled or bots are globally paused.".to_owned())
     } else if coordinator.paused || worker.paused || worker.project_id != cfg.project_id {
         Some("Selected bot is paused or outside the Team project.".to_owned())
+    } else if let Some(issue) = roster::member_execution_issue(&coordinator)
+        .or_else(|| roster::member_execution_issue(&worker)) {
+        Some(issue.to_owned())
     } else if roster::has_additional_members(store, config_id)? {
         Some("Multi-member execution requires native scoped role admission; manual runner is single-worker.".to_owned())
     } else if busy || manual_candidate_occupied(store, &candidate.id, &cfg.project_id, &candidate.project_id)? {
@@ -2811,6 +2819,11 @@ fn admit_role_with_provenance(
     }
     let coordinator = bots::get(store, &config.coordinator_bot_id)?;
     let worker = bots::get(store, &config.worker_bot_id)?;
+    for bot in [&coordinator,&worker] {
+        if let Some(issue) = roster::member_execution_issue(bot) {
+            return Err(issue.into());
+        }
+    }
     if config.team_version <= 0 || coordinator.paused || worker.paused
         || worker.project_id != config.project_id
     {
@@ -3988,7 +4001,15 @@ fn change_enabled(
         let coordinator=bots::get(store,&current.coordinator_bot_id)?;
         let workers=current.worker_bot_ids.iter().map(|id| bots::get(store,id))
             .collect::<Result<Vec<_>>>()?;
-        if coordinator.paused || workers.iter().any(|worker| worker.paused
+        let reviewers=current.reviewer_bot_ids.iter().map(|id| bots::get(store,id))
+            .collect::<Result<Vec<_>>>()?;
+        for bot in std::iter::once(&coordinator).chain(workers.iter()).chain(reviewers.iter()) {
+            if let Some(issue) = roster::member_execution_issue(bot) {
+                return Err(issue.into());
+            }
+        }
+        if coordinator.paused || reviewers.iter().any(|reviewer| reviewer.paused)
+            || workers.iter().any(|worker| worker.paused
             || worker.project_id != current.project_id)
             || crate::feature_controls::get().bots_paused
         {
@@ -4137,6 +4158,11 @@ fn update_configuration_roles_with_policy(
     let coordinator = bots::get(store, &input.coordinator_bot_id)?;
     let workers = worker_bot_ids.iter().map(|bot_id| bots::get(store,bot_id)).collect::<Result<Vec<_>>>()?;
     let reviewers = reviewer_bot_ids.iter().map(|bot_id| bots::get(store,bot_id)).collect::<Result<Vec<_>>>()?;
+    for bot in std::iter::once(&coordinator).chain(workers.iter()).chain(reviewers.iter()) {
+        if let Some(issue) = roster::member_execution_issue(bot) {
+            return Err(issue.into());
+        }
+    }
     let project_id = workers.first().ok_or("A Team needs at least one worker.")?.project_id.clone();
     if coordinator.paused || workers.iter().any(|bot| bot.paused || bot.project_id != project_id)
         || reviewers.iter().any(|bot| bot.paused)
@@ -7587,6 +7613,46 @@ mod tests {
             [],|row|row.get(0),
         ).unwrap();
         assert_eq!(copies,1,"rejected duplicates must leave no orphan Team rows");
+    }
+
+    #[test]
+    fn unsupported_persisted_team_harness_fails_closed_before_create_enable_or_admit() {
+        let mut store = fixture();
+        let input = || NewOrchestration {
+            name: "Native eligibility gate".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        };
+        store.db.execute(
+            "UPDATE bots SET provider='unsupported-test-harness' WHERE id='router'",[],
+        ).unwrap();
+        let rejected = create_configuration(&store,input()).unwrap_err();
+        assert!(rejected.contains("harness"), "{rejected}");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations",[],|row|row.get::<_,i64>(0),
+        ).unwrap(),0,"a failed Team creation must not leave orphan configuration");
+        store.db.execute("UPDATE bots SET provider='codex' WHERE id='router'",[]).unwrap();
+        let team=create_configuration(&store,input()).unwrap();
+        store.db.execute(
+            "UPDATE bots SET mode='unsupported-test-mode' WHERE id='worker'",[],
+        ).unwrap();
+        let blocked=change_enabled(&store,&team.id,team.policy_revision,true).unwrap_err();
+        assert!(blocked.contains("permission mode"), "{blocked}");
+        assert!(!configuration(&store,&team.id).unwrap().enabled);
+        store.db.execute("UPDATE bots SET mode='plan' WHERE id='worker'",[]).unwrap();
+        let active=change_enabled(&store,&team.id,team.policy_revision,true).unwrap();
+        assert!(active.enabled);
+        store.db.execute(
+            "UPDATE bots SET provider='unsupported-test-harness' WHERE id='worker'",[],
+        ).unwrap();
+        let preflight=manual_preflight(&store,&team.id,"Observe safely",false,false).unwrap();
+        assert!(preflight.reason.unwrap_or_default().contains("harness"));
+        let denied=admit(&mut store,&team.id,"Observe safely","unsupported-harness",false)
+            .unwrap_err();
+        assert!(denied.contains("harness"), "{denied}");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|row|row.get::<_,i64>(0),
+        ).unwrap(),0,"admission must not create a Ticket for unsupported providers");
     }
 
     #[test]

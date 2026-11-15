@@ -436,7 +436,7 @@ fn validate(input: &BotInput) -> Result<BotInput> {
 
 const MAX_BACKUPS: usize = 4;
 
-fn known_provider(provider: &str) -> bool {
+pub(crate) fn known_provider(provider: &str) -> bool {
     matches!(
         provider,
         "claude"

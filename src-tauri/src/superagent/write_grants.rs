@@ -584,10 +584,9 @@ mod tests {
                 name:name.into(),coordinator_bot_id:coordinator.into(),worker_bot_id:worker.into(),
             }).unwrap();
             assert_eq!(config.project_id,project);
-            store.db.execute(
-                "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
-                [&config.id],
-            ).unwrap();
+            let enabled = super::change_enabled(store, &config.id, config.policy_revision, true)
+                .unwrap();
+            assert!(enabled.enabled);
             config.id
         }
 

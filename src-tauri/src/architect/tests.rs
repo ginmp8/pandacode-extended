@@ -10243,10 +10243,13 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
                     },
                 )
                 .unwrap();
-                assert_eq!(
-                    host.tools,
-                    vec![council_finding_tool(), council_finding_verification_tool()]
-                );
+                let mut expected_tools = reviewer_skill_evidence::tools();
+                expected_tools.extend([
+                    council_criterion_tool(), council_finding_tool(),
+                    council_finding_verification_tool(),
+                ]);
+                assert_eq!(host.tools, expected_tools,
+                    "native reviewers receive only the built-in evidence and skill tools");
                 runtime.block_on(assert_native_reviewer_host_denials(&host, false));
             }
             if automatic_count == 1 && selected_specs.len() == 1 {
@@ -10408,10 +10411,13 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
                         },
                     )
                     .unwrap();
-                    assert_eq!(
-                        host.tools,
-                        vec![council_finding_tool(), council_finding_verification_tool()]
-                    );
+                    let mut expected_tools = reviewer_skill_evidence::tools();
+                    expected_tools.extend([
+                        council_criterion_tool(), council_finding_tool(),
+                        council_finding_verification_tool(),
+                    ]);
+                    assert_eq!(host.tools, expected_tools,
+                        "native reviewers receive only the built-in evidence and skill tools");
                     runtime.block_on(assert_native_reviewer_host_denials(&host, false));
                 }
             }
@@ -10920,7 +10926,12 @@ fn native_reviewer_test_host_bypasses_only_the_frozen_executable_probe() {
 
     let host = native_reviewer_test_host(state, session.id, admission)
         .expect("the test host must not require an installed provider CLI");
-    assert_eq!(host.tools, vec![council_criterion_tool(), council_finding_tool(), council_finding_verification_tool()]);
+    let mut expected_tools = reviewer_skill_evidence::tools();
+    expected_tools.extend([
+        council_criterion_tool(), council_finding_tool(), council_finding_verification_tool(),
+    ]);
+    assert_eq!(host.tools, expected_tools,
+        "executable bypass must not change the native read-only tool catalog");
 }
 
 #[tokio::test]

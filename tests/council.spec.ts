@@ -17,7 +17,10 @@ async function open(page: Page, url = '/', refuse: Record<string, string> = {}, 
     const response = await route.fetch();
     const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/, `
       if (command === 'architect_set_council') (window.__councilCalls ??= []).push(structuredClone(args.council));
-      if (command === 'architect_start') (window.__councilStarts ??= []).push(args.text);
+      if (command === 'architect_start') {
+        (window.__councilStarts ??= []).push(args.text);
+        (window.__councilStartSessionIds ??= []).push(args.sessionId);
+      }
       if (command === 'architect_council_accept') (window.__councilAccepts ??= []).push(args.sessionId);
       if (command === 'architect_set_council' && ${delay} && (!${JSON.stringify(delaySession)} || args.sessionId === ${JSON.stringify(delaySession)})) await new Promise(done => setTimeout(done, ${delay}));
       if (${JSON.stringify(slow)}[command]) await new Promise(done => setTimeout(done, ${JSON.stringify(slow)}[command]));
@@ -871,12 +874,18 @@ test('"Turn on for new threads" starts Council with the first send of a new thre
   await panel(page).getByLabel('Start new threads with Council on').check();
   expect(JSON.parse(await page.evaluate(() => localStorage.getItem('pandacode.council') ?? '{}')).newThreads).toBe(true);
   await page.keyboard.press('Escape');
+  const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });
+  const previousSession = await prompt.getAttribute('data-session-id');
   await page.locator('.new-task-button').click();
-  await composerSettled(page);
-  await page.getByRole('textbox', { name: 'Message your coding agent' }).fill('Add a search box');
-  await page.getByRole('textbox', { name: 'Message your coding agent' }).press('Enter');
+  await expect.poll(() => prompt.getAttribute('data-session-id')).not.toBe(previousSession);
+  await composerReady(page);
+  const newSessionId = await prompt.getAttribute('data-session-id');
+  expect(newSessionId).toBeTruthy();
+  await prompt.fill('Add a search box');
+  await prompt.press('Enter');
   await expect.poll(() => calls(page)).toEqual([{ target: 9, maxRounds: 10, reviewers: 0 }]);
   await expect.poll(() => page.evaluate(() => (window as any).__councilStarts ?? [])).toEqual(['Add a search box']);
+  await expect.poll(() => page.evaluate(() => (window as any).__councilStartSessionIds ?? [])).toEqual([newSessionId]);
 });
 
 test('with Classic team setup, enabling Council on a thread with no team opens that setup', async ({ page }) => {
@@ -912,19 +921,18 @@ test('panel hierarchy: one description, labels in text ink, a footer checkbox fo
   expect(await panel(page).evaluate(node => node.scrollHeight <= node.clientHeight)).toBe(true);
 });
 
-/** A new thread draws its composer twice (at once, then when its page loads); a draft typed in between is lost. Waits
- *  until the prompt stays the same element across two polls. */
-const composerSettled = (page: Page) => page.waitForFunction(() => {
-  const seen = window as any, now = document.querySelector('#prompt'), same = Boolean(now) && seen.__prompt === now;
-  seen.__prompt = now; return same;
-}, undefined, { polling: 300 });
+/** Enabled means the messages-loading/error lock has cleared. */
+const composerReady = (page: Page) => expect(page.getByRole('textbox', { name: 'Message your coding agent' })).toBeEnabled();
 
 async function newThreadsOn(page: Page): Promise<void> {
   await button(page).click();
   await panel(page).getByLabel('Start new threads with Council on').check();
   await page.keyboard.press('Escape');
+  const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });
+  const previousSession = await prompt.getAttribute('data-session-id');
   await page.locator('.new-task-button').click();
-  await composerSettled(page);
+  await expect.poll(() => prompt.getAttribute('data-session-id')).not.toBe(previousSession);
+  await composerReady(page);
 }
 
 test('with Classic team setup, a first send starts no automatic team for Council', async ({ page }) => {
@@ -944,8 +952,7 @@ test('a second Enter while Council turns on for the first send sends nothing mor
   // New task creates its thread asynchronously. Typing before it opens would send to the previous thread.
   const previous = await prompt.getAttribute('data-session-id');
   await newThreadsOn(page);
-  await expect.poll(() => prompt.getAttribute('data-session-id')).not.toBe(previous);
-  await composerSettled(page);
+  expect(await prompt.getAttribute('data-session-id')).not.toBe(previous);
   // The team's start waits on a request the test holds, then releases: no timers.
   await page.evaluate(() => { (window as any).__hold = { architect_profiles: new Promise(done => { (window as any).__release = done; }) }; });
   await prompt.fill('Add a search box');
@@ -1106,7 +1113,7 @@ test('Tab and Shift+Tab stay inside the panel through every control, from any of
 test('at 900×420 the composer panel stays in the viewport and scrolls its full settings', async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 420 });
   await open(page, '/?council');
-  await composerSettled(page);
+  await composerReady(page);
   await button(page).click();
   await expect(panel(page)).toBeVisible();
   const bounds = await panel(page).evaluate(node => ({
@@ -1309,7 +1316,7 @@ test('at the minimum target there is no empty Lower target picker and acceptance
     await route.fulfill({ response, body: (await response.text()).replace('target: 9.5, maxRounds:', 'target: 7, maxRounds:') });
   });
   await open(page, '/?council=asking');
-  await composerSettled(page);
+  await composerReady(page);
   await expect(strip(page).getByRole('button', { name: 'Lower target' })).toHaveCount(0);
   await expect(strip(page).getByRole('button', { name: 'Keep fixing' })).toBeEnabled();
   await strip(page).getByRole('button', { name: 'Accept and finish' }).click();
@@ -1319,7 +1326,7 @@ test('at the minimum target there is no empty Lower target picker and acceptance
 
 for (const used of [25, 30]) test(`at ${used} used rounds there is no empty Raise max rounds picker`, async ({ page }) => {
   await open(page, '/?council=limit');
-  await composerSettled(page);
+  await composerReady(page);
   await page.evaluate(used => (window as any).__councilSeat({ round: 2, lens: 'Correctness', score: 8.7, council: { state: 'limit', round: used } }), used);
   await expect(strip(page).getByRole('button', { name: 'Raise max rounds' })).toHaveCount(0);
   await disclosure(page).focus();

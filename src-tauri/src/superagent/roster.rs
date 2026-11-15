@@ -512,7 +512,7 @@ mod tests {
     }
 
     #[test]
-    fn roster_is_persistent_revision_guarded_role_scoped_and_execution_stays_disabled() {
+    fn roster_is_persistent_revision_guarded_and_manual_multi_worker_admission_stays_unavailable() {
         let path=std::env::temp_dir().join(format!("sa-roster-{}.sqlite3",storage::id()));
         let store=Store::open(&path).unwrap();
         store.db.execute(
@@ -535,7 +535,9 @@ mod tests {
         assert_eq!(saved.worker_bot_ids,input.worker_bot_ids);
         assert_eq!(saved.reviewer_bot_ids,input.reviewer_bot_ids);
         assert!(!saved.execution_ready);
-        assert!(super::super::change_enabled(&store,&config.id,saved.policy_revision,true).is_err());
+        // Multiple configured Workers may be enabled for the native scheduler,
+        // but the legacy manual single-Worker admission remains unavailable.
+        assert!(!saved.execution_ready);
         assert!(set(&store,&config.id,config.policy_revision,&input).is_err());
         let duplicate=RosterInput {worker_bot_ids:vec!["worker-a".into(),"worker-b".into()],
             reviewer_bot_ids:vec!["worker-b".into()], council_required:None };
@@ -547,11 +549,16 @@ mod tests {
         let reset=set(&store,&config.id,saved.policy_revision,&clear).unwrap();
         assert!(reset.execution_ready);
         assert_eq!(reset.worker_bot_ids,vec!["worker-a"]);
-        assert!(super::super::change_enabled(&store,&config.id,reset.policy_revision,true)
-            .unwrap().enabled);
+        let enabled=super::super::change_enabled(&store,&config.id,reset.policy_revision,true).unwrap();
+        assert!(enabled.enabled);
+        let expanded=set(&store,&config.id,enabled.policy_revision,&input).unwrap();
+        assert!(!expanded.execution_ready);
+        assert!(super::super::configuration(&store,&config.id).unwrap().enabled);
+        assert!(!super::super::manual_preflight(&store,&config.id,"Manual task",false,false)
+            .unwrap().eligible);
     }
     #[test]
-    fn settled_ticket_history_allows_versioned_team_edits_but_live_work_and_effects_block() {
+    fn historical_tickets_remain_immutable_across_active_and_unresolved_future_team_edits() {
         let path=std::env::temp_dir().join(format!("sa-roster-history-{}.sqlite3",storage::id()));
         let store=Store::open(&path).unwrap();
         store.db.execute(
@@ -595,12 +602,17 @@ mod tests {
             "Original immutable intent".into()));
         let reset=RosterInput {worker_bot_ids:vec!["history-worker".into()],reviewer_bot_ids:vec![], council_required:None };
 
-        // A nonterminal review gate must not be invalidated by a roster edit.
+        // Future-only Team edits are permitted, including during review. They
+        // cannot rewrite the admitted Ticket's original policy or intent.
         store.db.execute("UPDATE sa_tickets SET state='waiting_review' WHERE id='prior-demand'",[])
             .unwrap();
-        assert!(set(&store,&config.id,revision.policy_revision,&reset).unwrap_err()
-            .contains("Active Tickets"));
-        assert_eq!(read(&store,&config.id).unwrap().policy_revision,revision.policy_revision);
+        let future=set(&store,&config.id,revision.policy_revision,&reset).unwrap();
+        assert_eq!(future.policy_revision,revision.policy_revision+1);
+        let in_review:(i64,String)=store.db.query_row(
+            "SELECT policy_revision,state FROM sa_tickets WHERE id='prior-demand'",[],
+            |r|Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        assert_eq!(in_review,(config.policy_revision,"waiting_review".into()));
         store.db.execute("UPDATE sa_tickets SET state='completed' WHERE id='prior-demand'",[])
             .unwrap();
 
@@ -611,14 +623,19 @@ mod tests {
              ) VALUES('prior-demand','external-reply','fixture-digest','uncertain',?1,?1)",
             [now],
         ).unwrap();
-        assert!(set(&store,&config.id,revision.policy_revision,&reset).unwrap_err()
-            .contains("unresolved effects"));
-        assert_eq!(read(&store,&config.id).unwrap().worker_bot_ids,expanded.worker_bot_ids);
+        // An unresolved external receipt remains unresolved even as new Team
+        // versions are configured; edits neither replay nor clear the effect.
+        let next=set(&store,&config.id,future.policy_revision,&expanded).unwrap();
+        assert_eq!(next.worker_bot_ids,expanded.worker_bot_ids);
+        assert_eq!(store.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id='prior-demand'",[],
+            |r|r.get::<_,String>(0),
+        ).unwrap(),"uncertain");
         store.db.execute(
             "UPDATE sa_effect_receipts SET state='applied' WHERE ticket_id='prior-demand'",[],
         ).unwrap();
-        let restored=set(&store,&config.id,revision.policy_revision,&reset).unwrap();
-        assert_eq!(restored.policy_revision,revision.policy_revision+1);
+        let restored=set(&store,&config.id,next.policy_revision,&reset).unwrap();
+        assert_eq!(restored.policy_revision,next.policy_revision+1);
         assert!(restored.execution_ready);
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets WHERE orchestration_id=?1",[&config.id],

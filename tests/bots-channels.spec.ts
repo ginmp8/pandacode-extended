@@ -293,6 +293,64 @@ test.describe('shared bot channels', () => {
     await expect(composer).toHaveAttribute('aria-busy', 'false');
   });
 
+  test('shared Channel preserves multiple distinct user criteria through refresh and rejects duplicates', async ({ page }) => {
+    test.setTimeout(120_000);
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    let composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: off' }).click();
+    let panel = composer.getByRole('dialog', { name: 'Council' });
+    await panel.getByRole('switch', { name: 'Council' }).check();
+    await panel.getByRole('checkbox', { name: 'Use a schema v1 composition plan' }).check();
+    await panel.getByRole('combobox', { name: 'Criteria source' }).selectOption('hybrid');
+
+    let criteria = panel.locator('[data-bc-criterion]');
+    await criteria.first().locator('[data-bc-criterion-field="id"]').fill('security');
+    await criteria.first().locator('[data-bc-criterion-field="lens"]').fill('Authorization boundary');
+    await criteria.first().locator('[data-bc-criterion-field="description"]').fill('Verify access boundaries.');
+    await panel.getByRole('button', { name: 'Add user criterion' }).click();
+    await expect(criteria).toHaveCount(2);
+    const second = criteria.nth(1);
+    const secondId = second.locator('[data-bc-criterion-field="id"]');
+    await secondId.fill('security');
+    await second.locator('[data-bc-criterion-field="lens"]').fill('Data integrity');
+    await second.locator('[data-bc-criterion-field="description"]').fill('Verify stored data.');
+    await second.locator('[data-bc-criterion-field="evidenceRequired"]').uncheck();
+
+    await composer.getByRole('textbox', { name: 'Message channel' }).fill('Check two required review criteria');
+    await composer.locator('button[type="submit"]').click();
+    await expect(secondId).toHaveAttribute('aria-invalid', 'true');
+    expect(await page.evaluate(() => (window as any).__previewSharedChannelPosts ?? [])).toHaveLength(0);
+
+    await secondId.fill('data_integrity');
+    await expect(secondId).not.toHaveAttribute('aria-invalid', 'true');
+    await page.keyboard.press('Escape');
+    const previous = await composer.elementHandle();
+    await page.evaluate(() => (window as any).__previewEmit('bot-shared-channel-changed', {}));
+    await expect.poll(async () => page.evaluate(old => document.querySelector('#shared-channel-composer') !== old, previous)).toBe(true);
+    composer = page.locator('#shared-channel-composer');
+    await composer.getByRole('button', { name: 'Council: on' }).click();
+    panel = composer.getByRole('dialog', { name: 'Council' });
+    criteria = panel.locator('[data-bc-criterion]');
+    await expect(criteria).toHaveCount(2);
+    await expect(panel.getByRole('combobox', { name: 'Criteria source' })).toHaveValue('hybrid');
+    await expect(criteria.nth(0).locator('[data-bc-criterion-field="id"]')).toHaveValue('security');
+    await expect(criteria.nth(1).locator('[data-bc-criterion-field="id"]')).toHaveValue('data_integrity');
+    await expect(criteria.nth(0).locator('[data-bc-criterion-field="evidenceRequired"]')).toBeChecked();
+    await expect(criteria.nth(1).locator('[data-bc-criterion-field="evidenceRequired"]')).not.toBeChecked();
+
+    await composer.getByRole('textbox', { name: 'Message channel' }).fill('Check two required review criteria');
+    await composer.locator('button[type="submit"]').click();
+    const posts = () => page.evaluate(() => (window as any).__previewSharedChannelPosts ?? []);
+    await expect.poll(async () => (await posts()).length).toBe(1);
+    const council = (await posts())[0].council;
+    expect(council.composition.criteriaSource).toBe('hybrid');
+    expect(council.composition.criteria).toEqual([
+      { id: 'security', lens: 'Authorization boundary', description: 'Verify access boundaries.', required: true, target: 8.5, evidenceRequired: true, source: 'user' },
+      { id: 'data_integrity', lens: 'Data integrity', description: 'Verify stored data.', required: true, target: 8.5, evidenceRequired: false, source: 'user' },
+    ]);
+  });
+
   test('shared channel legacy Council submission omits absent composition', async ({ page }) => {
     test.setTimeout(120_000);
     await showBots(page);

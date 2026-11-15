@@ -502,18 +502,27 @@ fn list_all_demands_page_searched(
     orchestration_id: Option<&str>, state_filter: Option<&str>, search_query: Option<&str>,
 ) -> Result<Vec<DemandIndex>> {
     list_all_demands_page_for_project(
-        store, limit, before_updated_at, before_id, orchestration_id,
-        state_filter, search_query, None,
+        store, limit, before_updated_at, before_id, DemandPageFilters {
+            orchestration_id, state_filter, search_query, project_id: None,
+        },
     )
+}
+
+/// Keep native index filters together when the read-only board gains dimensions.
+struct DemandPageFilters<'a> {
+    orchestration_id: Option<&'a str>,
+    state_filter: Option<&'a str>,
+    search_query: Option<&'a str>,
+    project_id: Option<&'a str>,
 }
 
 /// Native project scope is evaluated against each Ticket's immutable admitted
 /// project, not a Team's current configuration or the loaded page.
 fn list_all_demands_page_for_project(
     store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
-    orchestration_id: Option<&str>, state_filter: Option<&str>, search_query: Option<&str>,
-    project_id: Option<&str>,
+    filters: DemandPageFilters<'_>,
 ) -> Result<Vec<DemandIndex>> {
+    let DemandPageFilters { orchestration_id, state_filter, search_query, project_id } = filters;
     if let Some(id) = project_id {
         if id.is_empty() || id.len() > 128
             || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()
@@ -581,16 +590,33 @@ fn list_all_demands(store: &Store, limit: i64) -> Result<Vec<DemandIndex>> {
 /// Demand backlog. Only native states are represented; waiting_review is NOT
 /// human-approvable until an actual task-bound Council verdict is available.
 fn list_review_inbox(store: &Store, limit: i64) -> Result<Vec<DemandIndex>> {
+    list_review_inbox_page(store, limit, None, None)
+}
+
+/// Keyset pagination keeps pending reviews with equal timestamps reachable.
+fn list_review_inbox_page(
+    store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
+) -> Result<Vec<DemandIndex>> {
     if !(1..=200).contains(&limit) {
         return Err("Review inbox page size must be between 1 and 200.".into());
+    }
+    if before_updated_at.is_some() != before_id.is_some()
+        || before_updated_at.is_some_and(|value| value <= 0)
+        || before_id.is_some_and(|id| id.is_empty() || id.len() > 128
+            || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_')))
+    {
+        return Err("Review cursor needs a positive timestamp and bounded Ticket ID.".into());
     }
     let mut stmt = store.db.prepare(
         "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at
          FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
          WHERE t.state IN ('waiting_approval','waiting_review')
+           AND (?2 IS NULL OR t.updated_at < ?2
+                OR (t.updated_at=?2 AND t.id < ?3))
          ORDER BY t.updated_at DESC,t.id DESC LIMIT ?1",
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([limit], |row| Ok(DemandIndex {
+    let rows = stmt.query_map(params![limit,before_updated_at,before_id], |row| Ok(DemandIndex {
         id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
         state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
     })).map_err(|e| e.to_string())?;
@@ -601,9 +627,25 @@ fn list_review_inbox(store: &Store, limit: i64) -> Result<Vec<DemandIndex>> {
 /// states as the desktop. A state is not evidence of Council approval or
 /// permission to accept; a separate, current native revision check is required.
 pub(crate) fn list_headless_review_inbox(database_path: &std::path::Path) -> Result<String> {
+    list_headless_review_inbox_page(database_path, None, None)
+}
+
+pub(crate) fn list_headless_review_inbox_page(
+    database_path: &std::path::Path, before_updated_at: Option<i64>, before_id: Option<&str>,
+) -> Result<String> {
     let store = Store::open_read_only(database_path)?;
-    let items = list_review_inbox(&store, 200)?;
-    let may_have_more = items.len() == 200;
+    let items = list_review_inbox_page(&store, 200, before_updated_at, before_id)?;
+    let cursor = items.last().map(|item| (item.updated_at, item.id.clone()));
+    // Check an actual following row; a full page alone does not prove more.
+    let may_have_more = match cursor.as_ref() {
+        Some((time, id)) => !list_review_inbox_page(&store, 1, Some(*time), Some(id))?.is_empty(),
+        None => false,
+    };
+    let next_cursor = if may_have_more {
+        cursor.map(|(updated_at, ticket_id)| serde_json::json!({
+            "updatedAt": updated_at, "ticketId": ticket_id,
+        }))
+    } else { None };
     let entries = items.into_iter().map(|item| {
         let next_action = if item.state == "waiting_review" {
             "await_fresh_task_bound_native_council"
@@ -625,6 +667,7 @@ pub(crate) fn list_headless_review_inbox(database_path: &std::path::Path) -> Res
         "tickets": entries,
         "limit": 200,
         "mayHaveMore": may_have_more,
+        "nextCursor": next_cursor,
         "observationalOnly": true,
         "startupRecoveryPerformed": false
     })).map_err(|e| e.to_string())
@@ -3261,9 +3304,12 @@ pub async fn superagent_all_demands(
     let store = state.store.lock().map_err(|e| e.to_string())?;
     list_all_demands_page_for_project(
         &store, query.limit.unwrap_or(200), query.before_updated_at,
-        query.before_id.as_deref(), query.orchestration_id.as_deref(),
-        query.state_filter.as_deref(), query.search_query.as_deref(),
-        query.project_id.as_deref(),
+        query.before_id.as_deref(), DemandPageFilters {
+            orchestration_id: query.orchestration_id.as_deref(),
+            state_filter: query.state_filter.as_deref(),
+            search_query: query.search_query.as_deref(),
+            project_id: query.project_id.as_deref(),
+        },
     )
 }
 
@@ -3758,8 +3804,10 @@ mod tests {
         let page = |store: &Store, before_at: Option<i64>, before_id: Option<&str>,
                     project: Option<&str>| {
             list_all_demands_page_for_project(
-                store, 200, before_at, before_id, Some(&team.id),
-                Some("blocked"), None, project,
+                store, 200, before_at, before_id, DemandPageFilters {
+                    orchestration_id: Some(&team.id), state_filter: Some("blocked"),
+                    search_query: None, project_id: project,
+                },
             )
         };
         let first = page(&store, None, None, Some(&team.project_id)).unwrap();
@@ -5035,6 +5083,56 @@ mod tests {
         assert!(list_headless_review_inbox(
             &std::env::temp_dir().join(format!("absent-sa-review-{}.db",storage::id()))
         ).is_err());
+    }
+
+    #[test]
+    fn headless_review_inbox_pages_tied_timestamps_after_restart_without_grants() {
+        let store = fixture();
+        let team = enabled(&store);
+        for index in 0..205_i64 {
+            let state = if index % 2 == 0 { "waiting_approval" } else { "waiting_review" };
+            store.db.execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,
+                         source,project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'PRIVATE review objective','local-user','manual',?4,
+                        'worker',?5,?6,100000,100000)",
+                params![format!("review-page-{index:03}"), team.id,
+                    format!("review-request-{index:03}"), team.project_id,
+                    team.policy_revision, state],
+            ).unwrap();
+        }
+        store.db.execute(
+            "UPDATE sa_tickets SET state='blocked' WHERE id='review-page-204'", [],
+        ).unwrap();
+        let first: serde_json::Value = serde_json::from_str(
+            &list_headless_review_inbox(&store.path).unwrap()
+        ).unwrap();
+        assert_eq!(first["tickets"].as_array().unwrap().len(), 200);
+        assert_eq!(first["mayHaveMore"], true);
+        let at = first["nextCursor"]["updatedAt"].as_i64().unwrap();
+        let id = first["nextCursor"]["ticketId"].as_str().unwrap().to_string();
+        let path = store.path.clone();
+        drop(store);
+        let later_text = list_headless_review_inbox_page(&path, Some(at), Some(&id)).unwrap();
+        let later: serde_json::Value = serde_json::from_str(&later_text).unwrap();
+        assert_eq!(later["tickets"].as_array().unwrap().len(), 4);
+        assert_eq!(later["mayHaveMore"], false);
+        assert!(later["nextCursor"].is_null());
+        let mut ids = std::collections::HashSet::new();
+        for page in [&first, &later] {
+            for item in page["tickets"].as_array().unwrap() {
+                assert!(ids.insert(item["ticketId"].as_str().unwrap()));
+                assert!(item["state"] == "waiting_approval" || item["state"] == "waiting_review");
+                assert_eq!(item["nativeCouncilPassVerifiedByThisCommand"], false);
+                assert_eq!(item["acceptanceAuthorizedByThisCommand"], false);
+            }
+        }
+        assert_eq!(ids.len(), 204);
+        assert!(!later_text.contains("PRIVATE review objective"));
+        assert!(list_headless_review_inbox_page(&path, Some(at), None).is_err());
+        assert!(list_headless_review_inbox_page(&path, None, Some(&id)).is_err());
+        assert!(list_headless_review_inbox_page(&path, Some(at), Some("../bad")).is_err());
+        assert!(list_headless_review_inbox_page(&path, Some(0), Some(&id)).is_err());
     }
 
     #[test]

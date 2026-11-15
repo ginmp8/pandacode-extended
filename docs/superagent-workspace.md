@@ -6,6 +6,9 @@ each independent Demand is a durable Ticket bound to exactly one Team.
 
 ## Native-backed surfaces
 
+The global Demands workspace can filter by the exact native project ID already associated with existing Teams. The filter runs in SQLite **before** cursor pagination against each Ticket's immutable admitted project, not the Team's current name or a client-side page. It does not infer a GitHub repository, read private worker evidence or grant access. If a historical project is no longer present in any Team, the operator can still inspect its Ticket by ID through existing native recovery endpoints; the drop-down deliberately does not fabricate a stale Team/project mapping.
+
+
 - **Duplicate Team:** the native `superagent_duplicate` command checks the source
   Team's exact policy revision and clones its ordered Worker/Reviewer roles
   within one SQLite transaction. A stale source, invalid roster or paused bot

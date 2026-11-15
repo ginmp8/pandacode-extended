@@ -7,7 +7,7 @@ type Call = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 interface Bot { id: string; name: string; paused: boolean }
 interface Config {
   id: string; name: string; coordinatorBotId: string; workerBotId: string;
-  enabled: boolean; policyRevision: number;
+  projectId?: string; enabled: boolean; policyRevision: number;
   ticketCount?: number; runningCount?: number; blockedCount?: number; lastActivityAt?: number;
   workerCount?: number; reviewerCount?: number;
 }
@@ -30,7 +30,7 @@ interface Ticket { id: string; orchestrationId: string; objective: string; state
 interface DemandIndex { id: string; orchestrationId: string; objective: string;
   state: string; revision: number; updatedAt: number }
 interface DemandQuery { limit?: number; beforeUpdatedAt?: number; beforeId?: string;
-  orchestrationId?: string; stateFilter?: string; searchQuery?: string }
+  orchestrationId?: string; stateFilter?: string; searchQuery?: string; projectId?: string }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
 interface ImportResult { created: string[]; unchanged: string[]; backupPath?: string }
 interface Mandate {
@@ -97,7 +97,7 @@ interface SourceIntegrity {
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
-  let demandTeamFilter = '', demandStateFilter = '', demandSearch = '', demandSearchDraft = '';
+  let demandTeamFilter = '', demandProjectFilter = '', demandStateFilter = '', demandSearch = '', demandSearchDraft = '';
   let teamSearch = '', teamStatusFilter: 'all' | 'enabled' | 'disabled' = 'all';
   let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false;
   let globalDemandLayout: 'board' | 'list' = 'board';
@@ -155,6 +155,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       item.workerCount >= 1 && item.reviewerCount >= 0
         ? '1 Coordinator · ' + item.workerCount + ' Workers · ' + item.reviewerCount + ' Reviewers'
         : 'Member counts unavailable';
+    const projectChoices = [...new Set(presets.map(item => item.projectId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0))].sort();
     const visibleTeams = presets.filter(item =>
       item.name.toLowerCase().includes(teamSearch.trim().toLowerCase()) &&
       (teamStatusFilter === 'all' || item.enabled === (teamStatusFilter === 'enabled')));
@@ -452,6 +454,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       presets.map(item => '<option value="' + safe(item.id) + '"' +
         (demandTeamFilter === item.id ? ' selected' : '') + '>' + safe(item.name) + '</option>').join('') +
       '</select></label>' +
+      '<label class="sa-demand-project-filter">Filter by Project<select aria-label="Filter Demands by Project" data-sa-demand-project-filter>' +
+      '<option value="">All Projects</option>' +
+      projectChoices.map(id => '<option value="' + safe(id) + '"' +
+        (demandProjectFilter === id ? ' selected' : '') + '>' + safe(id) + '</option>').join('') +
+      '</select></label>' +
       '<label class="sa-demand-state-filter">Filter by State<select aria-label="Filter Demands by State" data-sa-demand-state-filter>' +
       '<option value="">All States</option>' +
       (['queued','running','waiting_approval','waiting_review','blocked','completed',
@@ -466,6 +473,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       safe(demandSearchDraft) + '"></label>' +
       '<button type="submit">Search Demands</button></form>' +
       '<p>Native Tickets ' + (demandTeamFilter ? 'for this Team' : 'across Teams') +
+      (demandProjectFilter ? ' in native project ' + safe(demandProjectFilter) : '') +
       (demandStateFilter ? ' in state ' + safe(demandStateFilter) : '') +
       (demandSearch ? ' matching objective "' + safe(demandSearch) + '"' : '') +
       ', loaded 200 at a time in newest-first order. Search filters native records ' +
@@ -801,6 +809,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (demandTeamFilter && !presets.some(config => config.id === demandTeamFilter)) {
         demandTeamFilter = '';
       }
+      if (demandProjectFilter && !presets.some(config => config.projectId === demandProjectFilter)) {
+        demandProjectFilter = '';
+      }
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
         inspectedTicket = ''; threadLinks = [];
@@ -915,6 +926,28 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           limit:200, orchestrationId:filter || undefined,
           stateFilter:demandStateFilter || undefined,
           searchQuery:demandSearch || undefined,
+          projectId:demandProjectFilter || undefined,
+        });
+        allDemands = loaded; allDemandsHasMore = loaded.length === 200;
+        allDemandsLoaded = true;
+      });
+      return;
+    }
+    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-demand-project-filter')) {
+      if (busy) { target.value = demandProjectFilter; return; }
+      const filter = target.value;
+      if (filter && !presets.some(item => item.projectId === filter)) {
+        target.value = demandProjectFilter; return;
+      }
+      demandProjectFilter = filter;
+      allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
+      render();
+      void work(async () => {
+        const loaded = await fetchDemandPage({
+          limit:200, orchestrationId:demandTeamFilter || undefined,
+          stateFilter:demandStateFilter || undefined,
+          searchQuery:demandSearch || undefined,
+          projectId:filter || undefined,
         });
         allDemands = loaded; allDemandsHasMore = loaded.length === 200;
         allDemandsLoaded = true;
@@ -937,6 +970,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           limit:200, orchestrationId:demandTeamFilter || undefined,
           stateFilter:filter || undefined,
           searchQuery:demandSearch || undefined,
+          projectId:demandProjectFilter || undefined,
         });
         allDemands = loaded; allDemandsHasMore = loaded.length === 200;
         allDemandsLoaded = true;
@@ -1137,6 +1171,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           limit:200, orchestrationId:demandTeamFilter || undefined,
           stateFilter:demandStateFilter || undefined,
           searchQuery:demandSearch || undefined,
+          projectId:demandProjectFilter || undefined,
         });
         allDemands = loaded;
         allDemandsHasMore = loaded.length === 200;
@@ -1153,6 +1188,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           orchestrationId:demandTeamFilter || undefined,
           stateFilter:demandStateFilter || undefined,
           searchQuery:demandSearch || undefined,
+          projectId:demandProjectFilter || undefined,
         });
         const seen = new Set(allDemands.map(item => item.id));
         allDemands = [...allDemands, ...loaded.filter(item => !seen.has(item.id))];
@@ -1447,6 +1483,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           limit:200, orchestrationId:demandTeamFilter || undefined,
           stateFilter:demandStateFilter || undefined,
           searchQuery:demandSearch || undefined,
+          projectId:demandProjectFilter || undefined,
         });
         allDemands = loaded; allDemandsHasMore = loaded.length === 200;
         allDemandsLoaded = true;

@@ -457,6 +457,7 @@ pub struct DemandQuery {
     orchestration_id: Option<String>,
     state_filter: Option<String>,
     search_query: Option<String>,
+    project_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -500,6 +501,26 @@ fn list_all_demands_page_searched(
     store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
     orchestration_id: Option<&str>, state_filter: Option<&str>, search_query: Option<&str>,
 ) -> Result<Vec<DemandIndex>> {
+    list_all_demands_page_for_project(
+        store, limit, before_updated_at, before_id, orchestration_id,
+        state_filter, search_query, None,
+    )
+}
+
+/// Native project scope is evaluated against each Ticket's immutable admitted
+/// project, not a Team's current configuration or the loaded page.
+fn list_all_demands_page_for_project(
+    store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
+    orchestration_id: Option<&str>, state_filter: Option<&str>, search_query: Option<&str>,
+    project_id: Option<&str>,
+) -> Result<Vec<DemandIndex>> {
+    if let Some(id) = project_id {
+        if id.is_empty() || id.len() > 128
+            || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_')) {
+            return Err("Demand project filter requires a bounded native project ID.".into());
+        }
+    }
     let search_query = search_query.map(str::trim);
     if search_query.is_some_and(|query| query.is_empty() || query.len() > 128
         || query.chars().any(char::is_control)) {
@@ -540,9 +561,10 @@ fn list_all_demands_page_searched(
            AND (?4 IS NULL OR t.orchestration_id=?4)
            AND (?5 IS NULL OR t.state=?5)
            AND (?6 IS NULL OR instr(lower(t.objective),lower(?6)) > 0)
+           AND (?7 IS NULL OR t.project_id=?7)
          ORDER BY t.updated_at DESC,t.id DESC LIMIT ?1",
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id,state_filter,search_query], |row| Ok(DemandIndex {
+    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id,state_filter,search_query,project_id], |row| Ok(DemandIndex {
         id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
         state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
     })).map_err(|e| e.to_string())?;
@@ -3237,10 +3259,11 @@ pub async fn superagent_all_demands(
 ) -> Result<Vec<DemandIndex>> {
     require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    list_all_demands_page_searched(
+    list_all_demands_page_for_project(
         &store, query.limit.unwrap_or(200), query.before_updated_at,
         query.before_id.as_deref(), query.orchestration_id.as_deref(),
         query.state_filter.as_deref(), query.search_query.as_deref(),
+        query.project_id.as_deref(),
     )
 }
 
@@ -3693,7 +3716,7 @@ mod tests {
         let query: DemandQuery = serde_json::from_value(serde_json::json!({
             "limit": 25, "beforeUpdatedAt": 2000, "beforeId": "ticket-5",
             "orchestrationId": "team-1", "stateFilter": "blocked",
-            "searchQuery": "literal %_needle",
+            "searchQuery": "literal %_needle", "projectId": "project-a",
         })).unwrap();
         assert_eq!(query.limit, Some(25));
         assert_eq!(query.before_updated_at, Some(2000));
@@ -3701,12 +3724,64 @@ mod tests {
         assert_eq!(query.orchestration_id.as_deref(), Some("team-1"));
         assert_eq!(query.state_filter.as_deref(), Some("blocked"));
         assert_eq!(query.search_query.as_deref(), Some("literal %_needle"));
+        assert_eq!(query.project_id.as_deref(), Some("project-a"));
         let empty: DemandQuery = serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(empty.limit, None);
         assert_eq!(empty.search_query, None);
         assert!(serde_json::from_value::<DemandQuery>(serde_json::json!({
             "limit": 200, "allowedTools": ["write_file"]
         })).is_err());
+    }
+
+    #[test]
+    fn native_demand_project_filter_precedes_paging_and_survives_restart() {
+        let store = fixture();
+        let team = enabled(&store);
+        for index in 0..205_i64 {
+            let project = if index == 204 {
+                "other-native-project"
+            } else {
+                team.project_id.as_str()
+            };
+            store.db.execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,
+                        source,project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,?4,'local-user','manual',?5,'worker',?6,'blocked',?7,?7)",
+                params![
+                    format!("native-project-{index:03}"), team.id,
+                    format!("native-project-request-{index:03}"),
+                    format!("Native project demand {index}"), project,
+                    team.policy_revision, 1_000 + index,
+                ],
+            ).unwrap();
+        }
+        let page = |store: &Store, before_at, before_id, project| {
+            list_all_demands_page_for_project(
+                store, 200, before_at, before_id, Some(&team.id),
+                Some("blocked"), None, project,
+            )
+        };
+        let first = page(&store, None, None, Some(&team.project_id)).unwrap();
+        assert_eq!(first.len(), 200);
+        assert!(!first.iter().any(|entry| entry.id == "native-project-204"));
+        let last = first.last().unwrap();
+        let second = page(&store, Some(last.updated_at), Some(&last.id),
+            Some(&team.project_id)).unwrap();
+        assert_eq!(second.len(), 4);
+        let ids: std::collections::HashSet<_> = first.iter().chain(second.iter())
+            .map(|entry| entry.id.as_str()).collect();
+        assert_eq!(ids.len(), 204, "Filtering before paging must not lose Tickets");
+        let foreign = page(&store, None, None, Some("other-native-project")).unwrap();
+        assert_eq!(foreign.len(), 1);
+        assert_eq!(foreign[0].id, "native-project-204");
+        for invalid in ["", "../escape", "project%secret", " spaces "] {
+            assert!(page(&store, None, None, Some(invalid)).is_err());
+        }
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(page(&reopened, None, None, Some(&team.project_id)).unwrap().len(), 200);
+        assert_eq!(page(&reopened, None, None, Some("other-native-project")).unwrap().len(), 1);
     }
 
     #[test]

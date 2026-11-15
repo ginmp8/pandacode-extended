@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 52;
+pub const SCHEMA_VERSION: i64 = 53;
 pub(crate) const COUNCIL_REVIEW_SNAPSHOT_DIRECTORY: &str = "council-review-snapshots";
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
@@ -843,6 +843,28 @@ impl Store {
                        ON sa_assignments(work_item_id) WHERE work_item_id IS NOT NULL;
                      PRAGMA user_version=52;",
                 ).map_err(|e| e.to_string())?;
+            }
+            if version < 53 {
+                // S5 WorkItems gain a durable evidence contract. Existing v52
+                // rows receive an explicit compatibility contract through the
+                // column default; no item, edge, or assignment is rewritten.
+                let has_evidence_contract: bool = migration.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_work_items') WHERE name='evidence_contract')",
+                    [], |row| row.get(0),
+                ).map_err(|e| e.to_string())?;
+                if !has_evidence_contract {
+                    let fallback = crate::superagent::LEGACY_EVIDENCE_CONTRACT
+                        .replace('\'', "''");
+                    migration.execute_batch(&format!(
+                        "ALTER TABLE sa_work_items ADD COLUMN evidence_contract TEXT NOT NULL
+                         DEFAULT '{fallback}'
+                         CHECK(length(CAST(evidence_contract AS BLOB)) BETWEEN 1 AND 16384
+                           AND length(trim(evidence_contract))>0
+                           AND instr(evidence_contract,char(0))=0);"
+                    )).map_err(|e| e.to_string())?;
+                }
+                migration.execute_batch("PRAGMA user_version=53;")
+                    .map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
         }
@@ -3863,6 +3885,101 @@ mod tests {
             .max()
             .unwrap();
         assert_eq!(newest, SCHEMA_VERSION, "bump SCHEMA_VERSION with every new migration step");
+    }
+
+    #[test]
+    fn v52_work_item_evidence_contract_migration_preserves_rows_and_replays() {
+        let directory = std::env::temp_dir().join(format!("pandacode-work-item-contract-migration-{}", id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.sqlite3");
+        let timestamp = now();
+        {
+            let store = Store::open(&path).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_orchestrations(id,name,coordinator_bot_id,worker_bot_id,project_id,enabled,policy_revision,created_at,updated_at)
+                 VALUES('legacy-contract-orchestration','Legacy','coordinator','worker','project',0,1,?1,?1)",
+                [timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,project_id,worker_bot_id,policy_revision,state,revision,created_at,updated_at)
+                 VALUES('legacy-contract-ticket','legacy-contract-orchestration','legacy-key','Legacy objective','local-user','manual','project','worker',1,'completed',2,?1,?1)",
+                [timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_work_items(id,ticket_id,objective,evidence_contract,state,ordinal,created_at,updated_at)
+                 VALUES('legacy-contract-a','legacy-contract-ticket','Inspect old behavior','temporary v53 value','completed',0,?1,?1),
+                       ('legacy-contract-b','legacy-contract-ticket','Verify old behavior','temporary v53 value','queued',1,?1,?1)",
+                [timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_work_item_deps(item_id,depends_on) VALUES('legacy-contract-b','legacy-contract-a')",
+                [],
+            ).unwrap();
+            // Reconstruct a populated v52 database, where the contract column
+            // did not exist. The new column's fixed default must cover both rows.
+            store.db.execute_batch(
+                "ALTER TABLE sa_work_items DROP COLUMN evidence_contract;
+                 PRAGMA user_version=52;",
+            ).unwrap();
+        }
+
+        let migrated = Store::open(&path).unwrap();
+        assert_eq!(
+            migrated.db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION,
+        );
+        let items: Vec<(String,String,String,i64,String)> = {
+            let mut statement = migrated.db.prepare(
+                "SELECT id,objective,state,ordinal,evidence_contract
+                 FROM sa_work_items WHERE ticket_id='legacy-contract-ticket' ORDER BY ordinal",
+            ).unwrap();
+            statement.query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        let fallback = crate::superagent::LEGACY_EVIDENCE_CONTRACT.to_owned();
+        assert_eq!(items, vec![
+            ("legacy-contract-a".into(),"Inspect old behavior".into(),"completed".into(),0,fallback.clone()),
+            ("legacy-contract-b".into(),"Verify old behavior".into(),"queued".into(),1,fallback),
+        ]);
+        let dependency_count: i64 = migrated.db.query_row(
+            "SELECT COUNT(*) FROM sa_work_item_deps WHERE item_id='legacy-contract-b' AND depends_on='legacy-contract-a'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(dependency_count, 1);
+
+        migrated.db.execute(
+            "UPDATE sa_work_items SET evidence_contract='Keep this explicit contract.' WHERE id='legacy-contract-a'",
+            [],
+        ).unwrap();
+        migrated.db.execute_batch("PRAGMA user_version=52;").unwrap();
+        drop(migrated);
+
+        let replayed = Store::open(&path).unwrap();
+        assert_eq!(
+            replayed.db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION,
+        );
+        let replayed_items: Vec<(String,String)> = {
+            let mut statement = replayed.db.prepare(
+                "SELECT id,evidence_contract FROM sa_work_items
+                 WHERE ticket_id='legacy-contract-ticket' ORDER BY ordinal",
+            ).unwrap();
+            statement.query_map([], |row| Ok((row.get(0)?,row.get(1)?)))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert_eq!(replayed_items, vec![
+            ("legacy-contract-a".into(),"Keep this explicit contract.".into()),
+            ("legacy-contract-b".into(),crate::superagent::LEGACY_EVIDENCE_CONTRACT.into()),
+        ]);
+        assert_eq!(
+            replayed.db.query_row(
+                "SELECT COUNT(*) FROM sa_work_item_deps WHERE item_id='legacy-contract-b' AND depends_on='legacy-contract-a'",
+                [], |row| row.get::<_, i64>(0),
+            ).unwrap(),
+            1,
+        );
+        drop(replayed);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]

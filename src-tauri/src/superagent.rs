@@ -36,6 +36,11 @@ pub(crate) const CHANNEL: &str = "superagent";
 /// headroom for native task metadata, read-only instructions and coordinator
 /// evidence; never persist an objective that is silently truncated at dispatch.
 const MAX_OBJECTIVE_BYTES: usize = 16 * 1024;
+/// Compatibility contract for legacy v1 plans, existing v52 WorkItems, and
+/// manual items that do not yet carry specific acceptance evidence.
+pub(crate) const LEGACY_EVIDENCE_CONTRACT: &str =
+    "Verify the objective is complete with concrete evidence and report any remaining gaps.";
+const MAX_EVIDENCE_CONTRACT_BYTES: usize = 16 * 1024;
 /// Coordinators return one compact JSON plan; validate its full serialized
 /// representation before the legacy callback evidence truncation is applied.
 const MAX_COORDINATOR_PLAN_BYTES: usize = 64 * 1024;
@@ -1355,7 +1360,7 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod work_items {
     use super::{get_ticket_on, MAX_COORDINATOR_PLAN_BYTES, MAX_COORDINATOR_PLAN_ITEMS,
-        MAX_OBJECTIVE_BYTES};
+        LEGACY_EVIDENCE_CONTRACT, MAX_EVIDENCE_CONTRACT_BYTES, MAX_OBJECTIVE_BYTES};
     use crate::storage::{self, Store};
     use crate::Result;
     use rusqlite::{params, Connection, OptionalExtension};
@@ -1372,6 +1377,7 @@ pub(crate) mod work_items {
         pub id: String,
         pub ticket_id: String,
         pub objective: String,
+        pub evidence_contract: String,
         pub state: String,
         pub ordinal: i64,
         pub created_at: i64,
@@ -1403,7 +1409,14 @@ pub(crate) mod work_items {
     struct CoordinatorPlanItem {
         ordinal: i64,
         objective: String,
+        /// Missing in legacy v1 output; explicit null or invalid text is rejected.
+        #[serde(default = "legacy_evidence_contract")]
+        evidence_contract: String,
         depends_on: Vec<i64>,
+    }
+
+    fn legacy_evidence_contract() -> String {
+        LEGACY_EVIDENCE_CONTRACT.to_owned()
     }
 
     impl CoordinatorPlan {
@@ -1445,10 +1458,18 @@ pub(crate) mod work_items {
             {
                 return Err("Coordinator WorkItem objectives must be nonempty and bounded.".into());
             }
+            let evidence_contract = item.evidence_contract.trim();
+            if evidence_contract.is_empty()
+                || evidence_contract.len() > MAX_EVIDENCE_CONTRACT_BYTES
+                || evidence_contract.chars().any(|character| character == '\0')
+            {
+                return Err("Coordinator WorkItem evidence contracts must be nonempty and bounded.".into());
+            }
             if ordered[ordinal].is_some() {
                 return Err("Coordinator plan contains a duplicate WorkItem ordinal.".into());
             }
             item.objective = objective.to_owned();
+            item.evidence_contract = evidence_contract.to_owned();
             ordered[ordinal] = Some(item);
         }
         let work_items = ordered.into_iter().map(|item| {
@@ -1505,7 +1526,9 @@ pub(crate) mod work_items {
 
         let mut ids = vec![String::new(); plan.work_items.len()];
         for item in &plan.work_items {
-            let work_item = create_work_item_in(conn, &ticket.id, &item.objective, item.ordinal)?;
+            let work_item = create_work_item_with_contract_in(
+                conn, &ticket.id, &item.objective, &item.evidence_contract, item.ordinal,
+            )?;
             ids[item.ordinal as usize] = work_item.id;
         }
         for item in &plan.work_items {
@@ -1521,8 +1544,8 @@ pub(crate) mod work_items {
     fn work_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItem> {
         Ok(WorkItem {
             id: row.get(0)?, ticket_id: row.get(1)?, objective: row.get(2)?,
-            state: row.get(3)?, ordinal: row.get(4)?, created_at: row.get(5)?,
-            updated_at: row.get(6)?,
+            evidence_contract: row.get(3)?, state: row.get(4)?, ordinal: row.get(5)?,
+            created_at: row.get(6)?, updated_at: row.get(7)?,
         })
     }
 
@@ -1555,9 +1578,20 @@ pub(crate) mod work_items {
         Ok(objective)
     }
 
+    fn bounded_evidence_contract(evidence_contract: &str) -> Result<&str> {
+        let evidence_contract = evidence_contract.trim();
+        if evidence_contract.is_empty()
+            || evidence_contract.len() > MAX_EVIDENCE_CONTRACT_BYTES
+            || evidence_contract.chars().any(|c| c == '\0')
+        {
+            return Err("A nonempty, bounded WorkItem evidence contract is required.".into());
+        }
+        Ok(evidence_contract)
+    }
+
     fn get_work_item_on(conn: &Connection, id: &str) -> Result<WorkItem> {
         conn.query_row(
-            "SELECT id,ticket_id,objective,state,ordinal,created_at,updated_at
+            "SELECT id,ticket_id,objective,evidence_contract,state,ordinal,created_at,updated_at
              FROM sa_work_items WHERE id=?1",
             [id], work_item_row,
         ).optional().map_err(|e| e.to_string())?
@@ -1576,7 +1610,7 @@ pub(crate) mod work_items {
         }
         super::get_ticket(store, ticket_id)?;
         let mut stmt = store.db.prepare(
-            "SELECT id,ticket_id,objective,state,ordinal,created_at,updated_at
+            "SELECT id,ticket_id,objective,evidence_contract,state,ordinal,created_at,updated_at
              FROM sa_work_items WHERE ticket_id=?1 ORDER BY ordinal,id LIMIT ?2",
         ).map_err(|e| e.to_string())?;
         let rows = stmt.query_map(params![ticket_id, limit], work_item_row)
@@ -1590,7 +1624,17 @@ pub(crate) mod work_items {
     pub(crate) fn create_work_item_in(
         conn: &Connection, ticket_id: &str, objective: &str, ordinal: i64,
     ) -> Result<WorkItem> {
+        create_work_item_with_contract_in(
+            conn, ticket_id, objective, LEGACY_EVIDENCE_CONTRACT, ordinal,
+        )
+    }
+
+    fn create_work_item_with_contract_in(
+        conn: &Connection, ticket_id: &str, objective: &str,
+        evidence_contract: &str, ordinal: i64,
+    ) -> Result<WorkItem> {
         let objective = bounded_objective(objective)?;
+        let evidence_contract = bounded_evidence_contract(evidence_contract)?;
         if ordinal < 0 {
             return Err("A WorkItem ordinal must be zero or greater.".into());
         }
@@ -1605,9 +1649,9 @@ pub(crate) mod work_items {
         let id = storage::id();
         let now = storage::now();
         conn.execute(
-            "INSERT INTO sa_work_items(id,ticket_id,objective,state,ordinal,created_at,updated_at)
-             VALUES(?1,?2,?3,'queued',?4,?5,?5)",
-            params![id, ticket.id, objective, ordinal, now],
+            "INSERT INTO sa_work_items(id,ticket_id,objective,evidence_contract,state,ordinal,created_at,updated_at)
+             VALUES(?1,?2,?3,?4,'queued',?5,?6,?6)",
+            params![id, ticket.id, objective, evidence_contract, ordinal, now],
         ).map_err(|e| e.to_string())?;
         get_work_item_on(conn, &id)
     }
@@ -1767,14 +1811,14 @@ pub(crate) mod work_items {
         Ok(())
     }
 
-    /// Queued items whose prerequisites are all completed and which have no
-    /// active assignment, in deterministic ordinal order.
+    /// Queued or ready items whose prerequisites are all completed and which
+    /// have no active assignment, in deterministic ordinal order.
     pub(crate) fn ready_work_items(store: &Store, ticket_id: &str) -> Result<Vec<WorkItem>> {
         super::get_ticket(store, ticket_id)?;
         let mut stmt = store.db.prepare(
-            "SELECT w.id,w.ticket_id,w.objective,w.state,w.ordinal,w.created_at,w.updated_at
+            "SELECT w.id,w.ticket_id,w.objective,w.evidence_contract,w.state,w.ordinal,w.created_at,w.updated_at
              FROM sa_work_items w
-             WHERE w.ticket_id=?1 AND w.state='queued'
+             WHERE w.ticket_id=?1 AND w.state IN ('queued','ready')
                AND NOT EXISTS(
                  SELECT 1 FROM sa_work_item_deps d
                  JOIN sa_work_items prerequisite ON prerequisite.id=d.depends_on
@@ -3532,7 +3576,7 @@ pub async fn superagent_snapshot(
 /// must not bypass the gateway's maximum inbound-message size.
 fn initial_manual_packet(ticket: &Ticket, coordinated: bool) -> String {
     let instructions = if coordinated {
-        "Read-only coordinator: decompose the authorized objective into at most 32 bounded WorkItems. Return exactly one JSON object, with no Markdown or surrounding text, matching this shape: {\"version\":1,\"workItems\":[{\"ordinal\":0,\"objective\":\"...\",\"dependsOn\":[]}]}. Use each ordinal once, contiguously from zero. Each dependsOn entry must name another ordinal in this plan; the graph must be acyclic. The plan is advisory only: do not grant tools, choose workers, change the mandate, dispatch work, or approve completion."
+        "Read-only coordinator: decompose the authorized objective into at most 32 bounded WorkItems. Return exactly one JSON object, with no Markdown or surrounding text, matching this shape: {\"version\":1,\"workItems\":[{\"ordinal\":0,\"objective\":\"...\",\"evidenceContract\":\"observable evidence that demonstrates completion\",\"dependsOn\":[]}]}. Use each ordinal once, contiguously from zero. Give every item a concise, concrete evidenceContract that states what observable result or check demonstrates its objective is complete. Each dependsOn entry must name another ordinal in this plan; the graph must be acyclic. The plan is advisory only: do not grant tools, choose workers, change the mandate, dispatch work, or approve completion."
     } else {
         "Read-only assignment. Report evidence and remaining gaps; do not claim task approval."
     };
@@ -6795,7 +6839,6 @@ mod tests {
         let migrated = Store::open(&path).unwrap();
         let version: i64 = migrated.db
             .pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
-        assert_eq!(version, 52);
         assert_eq!(version, storage::SCHEMA_VERSION);
         let retained: (String,String) = migrated.db.query_row(
             "SELECT objective,state FROM sa_tickets WHERE id='legacy-ticket'",
@@ -6816,7 +6859,7 @@ mod tests {
         ).unwrap();
         assert_eq!(schema_objects, 3);
 
-        // A row created under v52 survives a replay of the same migration step.
+        // A row survives replaying both WorkItem schema steps from a v51 marker.
         migrated.db.execute(
             "INSERT INTO sa_work_items(id,ticket_id,objective,state,ordinal,created_at,updated_at)
              VALUES('replay-item','legacy-ticket','Replay objective','queued',0,?1,?1)",
@@ -6892,9 +6935,9 @@ mod tests {
         let plan = serde_json::json!({
             "version": 1,
             "workItems": [
-                {"ordinal": 2, "objective": "  Verify the result  ", "dependsOn": [1]},
-                {"ordinal": 0, "objective": "Inspect the existing behavior", "dependsOn": []},
-                {"ordinal": 1, "objective": "Implement the bounded change", "dependsOn": [0]},
+                {"ordinal": 2, "objective": "  Verify the result  ", "evidenceContract": "  Report the test command, exit status, and any remaining failure.  ", "dependsOn": [1]},
+                {"ordinal": 0, "objective": "Inspect the existing behavior", "evidenceContract": "Record the relevant current behavior and source or test evidence.", "dependsOn": []},
+                {"ordinal": 1, "objective": "Implement the bounded change", "evidenceContract": "Show the changed behavior with a focused check and identify changed files.", "dependsOn": [0]},
             ],
         }).to_string();
 
@@ -6902,14 +6945,18 @@ mod tests {
         assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "queued");
         let items = work_items::list_work_items(&store, &ticket.id, 10).unwrap();
         assert_eq!(
-            items.iter().map(|item| (item.ordinal, item.objective.as_str(), item.state.as_str()))
+            items.iter().map(|item| (item.ordinal, item.objective.as_str(), item.evidence_contract.as_str(), item.state.as_str()))
                 .collect::<Vec<_>>(),
             vec![
-                (0, "Inspect the existing behavior", "queued"),
-                (1, "Implement the bounded change", "queued"),
-                (2, "Verify the result", "queued"),
+                (0, "Inspect the existing behavior", "Record the relevant current behavior and source or test evidence.", "queued"),
+                (1, "Implement the bounded change", "Show the changed behavior with a focused check and identify changed files.", "queued"),
+                (2, "Verify the result", "Report the test command, exit status, and any remaining failure.", "queued"),
             ],
         );
+        let api_items = ticket_work_items(&store, &ticket.id).unwrap();
+        assert_eq!(api_items, items);
+        let api_item = serde_json::to_value(&api_items[0]).unwrap();
+        assert_eq!(api_item["evidenceContract"], "Record the relevant current behavior and source or test evidence.");
         let edges = {
             let mut statement = store.db.prepare(
                 "SELECT item.ordinal, prerequisite.ordinal
@@ -6961,6 +7008,29 @@ mod tests {
     }
 
     #[test]
+    fn legacy_v1_plan_without_evidence_contract_gets_bounded_durable_fallback() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit_role(
+            &mut store, &config.id, "Keep old v1 plan output compatible", "legacy-plan-contract", false, true,
+        ).unwrap();
+        assert!(launched);
+        let coordinator_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let plan = r#"{"version":1,"workItems":[{"ordinal":0,"objective":"Keep the parser compatible","dependsOn":[]}] }"#;
+
+        assert!(on_run_finished(&store, &coordinator_session, true, plan).unwrap());
+        let items = ticket_work_items(&store, &ticket.id).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].evidence_contract, LEGACY_EVIDENCE_CONTRACT);
+        assert!(!items[0].evidence_contract.trim().is_empty());
+        assert!(items[0].evidence_contract.len() <= MAX_EVIDENCE_CONTRACT_BYTES);
+        assert_eq!(
+            serde_json::to_value(&items[0]).unwrap()["evidenceContract"],
+            LEGACY_EVIDENCE_CONTRACT,
+        );
+    }
+
+    #[test]
     fn coordinator_plan_rejects_malformed_and_unbounded_documents() {
         let document = |work_items: serde_json::Value| serde_json::json!({
             "version": 1,
@@ -6978,6 +7048,12 @@ mod tests {
             "objective": "x".repeat(MAX_OBJECTIVE_BYTES + 1),
             "dependsOn": [],
         }]));
+        let oversized_evidence_contract = document(serde_json::json!([{
+            "ordinal": 0,
+            "objective": "bounded objective",
+            "evidenceContract": "é".repeat(MAX_EVIDENCE_CONTRACT_BYTES / 2 + 1),
+            "dependsOn": [],
+        }]));
         let oversized_document = document(serde_json::json!([{
             "ordinal": 0,
             "objective": "x".repeat(MAX_COORDINATOR_PLAN_BYTES),
@@ -6986,10 +7062,15 @@ mod tests {
         let invalid = [
             ("free text", "not a JSON plan".to_string()),
             ("unknown field", r#"{"version":1,"workItems":[{"ordinal":0,"objective":"x","dependsOn":[],"worker":"worker"}]}"#.into()),
+            ("unknown field beside evidence contract", r#"{"version":1,"workItems":[{"ordinal":0,"objective":"x","evidenceContract":"check x","dependsOn":[],"evidence_contract":"check y"}]}"#.into()),
             ("unsupported version", r#"{"version":2,"workItems":[{"ordinal":0,"objective":"x","dependsOn":[]}]}"#.into()),
             ("empty plan", document(serde_json::json!([]))),
             ("too many items", document(too_many)),
             ("oversized objective", oversized_objective),
+            ("oversized evidence contract", oversized_evidence_contract),
+            ("empty evidence contract", r#"{"version":1,"workItems":[{"ordinal":0,"objective":"x","evidenceContract":"   ","dependsOn":[]}]}"#.into()),
+            ("null evidence contract", r#"{"version":1,"workItems":[{"ordinal":0,"objective":"x","evidenceContract":null,"dependsOn":[]}]}"#.into()),
+            ("NUL evidence contract", serde_json::json!({"version":1,"workItems":[{"ordinal":0,"objective":"x","evidenceContract":"bad\0contract","dependsOn":[]}]}).to_string()),
             ("oversized document", oversized_document),
             ("ordinal gap", document(serde_json::json!([
                 {"ordinal": 0, "objective": "first", "dependsOn": []},
@@ -7118,7 +7199,11 @@ mod tests {
             vec![second.clone()],
         );
 
-        work_items::transition_work_item(&store, &second.id, "ready").unwrap();
+        let second_ready = work_items::transition_work_item(&store, &second.id, "ready").unwrap();
+        assert_eq!(
+            work_items::ready_work_items(&store, &ticket.id).unwrap(),
+            vec![second_ready],
+        );
         assert!(work_items::transition_work_item(&store, &second.id, "running").is_err());
         store.db.execute(
             "UPDATE sa_work_items SET state='completed' WHERE id=?1 AND state='ready'",
@@ -7169,11 +7254,32 @@ mod tests {
         let wrong_session_id = storage::id();
         let now = storage::now();
         let tx = store.db.unchecked_transaction().unwrap();
+        // Release the admitted fixture Assignment's project lease inside this
+        // rollback-only setup, then leave the Ticket pointing at that different
+        // Assignment so the binding check exercises its exact-pointer guard.
+        let released = tx.execute(
+            "UPDATE sa_assignments SET state='finished',updated_at=?2
+             WHERE id=?1 AND state='running'",
+            params![assignment.id,now],
+        ).unwrap();
+        assert_eq!(released, 1);
+        let cleared = tx.execute(
+            "UPDATE sa_tickets SET active_assignment_id=NULL
+             WHERE id=?1 AND state='running' AND revision=?2 AND active_assignment_id=?3",
+            params![ticket.id,ticket.revision,assignment.id],
+        ).unwrap();
+        assert_eq!(cleared, 1);
         tx.execute(
             "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
              VALUES(?1,?2,'router',?3,'running',2,?4,?4)",
             params![wrong_assignment_id,ticket.id,wrong_session_id,now],
         ).unwrap();
+        let pointed = tx.execute(
+            "UPDATE sa_tickets SET active_assignment_id=?2
+             WHERE id=?1 AND state='running' AND revision=?3 AND active_assignment_id IS NULL",
+            params![ticket.id,assignment.id,ticket.revision],
+        ).unwrap();
+        assert_eq!(pointed, 1);
         assert!(work_items::bind_work_item_in(&tx, &wrong_assignment_id, &item.id).is_err());
         drop(tx);
 
@@ -7302,6 +7408,18 @@ mod tests {
         let stale_session_id = storage::id();
         let now = storage::now();
         let tx = store.db.unchecked_transaction().unwrap();
+        let released = tx.execute(
+            "UPDATE sa_assignments SET state='finished',updated_at=?2
+             WHERE id=?1 AND state='running'",
+            params![active.id,now],
+        ).unwrap();
+        assert_eq!(released, 1);
+        let cleared = tx.execute(
+            "UPDATE sa_tickets SET active_assignment_id=NULL
+             WHERE id=?1 AND state='running' AND revision=?2 AND active_assignment_id=?3",
+            params![ticket.id,ticket.revision,active.id],
+        ).unwrap();
+        assert_eq!(cleared, 1);
         tx.execute(
             "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
              VALUES(?1,?2,'router',?3,'running',2,?4,?4)",
@@ -7320,6 +7438,18 @@ mod tests {
         let retry_assignment_id = storage::id();
         let retry_session_id = storage::id();
         let tx = store.db.unchecked_transaction().unwrap();
+        let released = tx.execute(
+            "UPDATE sa_assignments SET state='finished',updated_at=?2
+             WHERE id=?1 AND state='running'",
+            params![active.id,now],
+        ).unwrap();
+        assert_eq!(released, 1);
+        let cleared = tx.execute(
+            "UPDATE sa_tickets SET active_assignment_id=NULL
+             WHERE id=?1 AND state='running' AND revision=?2 AND active_assignment_id=?3",
+            params![ticket.id,ticket.revision,active.id],
+        ).unwrap();
+        assert_eq!(cleared, 1);
         tx.execute(
             "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
              VALUES(?1,?2,'router',?3,'running',2,?4,?4)",

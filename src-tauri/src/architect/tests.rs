@@ -9466,3 +9466,179 @@ fn automatic_only_two_phase_council_keeps_s3_coexistence() {
     assert!(round2.iter().all(|worker| s3_challenge_receipt_for_worker(&store, &team, worker)
         .unwrap().is_some()));
 }
+
+#[test]
+fn council_usage_leaf_reviews_project_the_current_root_round_total_for_root_and_child_seats() {
+    use council::CouncilUsageValueStatus::CalculatedEstimated;
+
+    let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();
+    let store = state.store.lock().unwrap();
+    let mut root = load(&store, &root_id).unwrap().unwrap();
+    let root_cycle_id = format!("{}:{}", root.session_id, root.council_since);
+
+    let mut root_review = worker("root-direct-review", "completed", &["src"], &[]);
+    root_review.profile_id = "other-bot".into();
+    root_review.model = "gpt-5-nano".into();
+    root_review.read_only = true;
+    root_review.created_at = root.council_since + 1;
+    root_review.updated_at = root.council_since + 4;
+    root_review.council = Some(CouncilSeat {
+        round: 1,
+        lens: "security".into(),
+        score: Some(9.2),
+        started_at: root.council_since + 2,
+        ..CouncilSeat::default()
+    });
+    let root_seat = root_review.council.as_ref().unwrap().clone();
+    let mut root_binding = reviewer_security::ReviewerBinding::native(
+        &root,
+        &root_review.id,
+        root_review.created_at,
+        &root_review.provider,
+        &root_review.model,
+        &root_seat,
+    );
+    root_binding.composition_mode = Some("direct".into());
+    root_binding.reviewer_bot_id = Some("other-bot".into());
+    root_binding.roster_bot_ids = vec!["reviewer-bot".into(), "other-bot".into()];
+    root_binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+        name: "Other reviewer".into(),
+        role: "Reviewer".into(),
+        instructions: "Review only the assigned task.".into(),
+        goals: String::new(),
+        soul: String::new(),
+        reasoning_effort: String::new(),
+        skill_ids: Vec::new(),
+    });
+    reviewer_security::record_native_authority(&store, &root_id, &root_binding).unwrap();
+    root_review.reviewer_binding = Some(root_binding);
+    root.workers.push(root_review);
+
+    let mut prior_root_review = worker("prior-root-cycle-review", "completed", &[], &[]);
+    prior_root_review.created_at = root.council_since - 1;
+    prior_root_review.council = Some(CouncilSeat {
+        round: 1,
+        lens: "prior cycle".into(),
+        ..CouncilSeat::default()
+    });
+    root.workers.push(prior_root_review);
+    save(&store, &mut root).unwrap();
+    let root = load(&store, &root_id).unwrap().unwrap();
+
+    let mut child = load(&store, &child_id).unwrap().unwrap();
+    let mut child_reviews = Vec::new();
+    for (index, id) in ["leaf-a", "leaf-b"].into_iter().enumerate() {
+        let created_at = child.council_since + 1 + index as i64;
+        let mut review = worker(id, "completed", &["src"], &[]);
+        review.session_id = format!("{child_id}:{id}");
+        review.profile_id = format!("reviewer-{id}");
+        review.model = "gpt-5-nano".into();
+        review.read_only = true;
+        review.created_at = created_at;
+        review.updated_at = created_at + 3;
+        review.result_revision = index as u64 + 2;
+        review.council = Some(CouncilSeat {
+            round: 1,
+            lens: format!("child-{id}"),
+            score: Some(9.1),
+            started_at: created_at + 1,
+            ..CouncilSeat::default()
+        });
+        let seat = review.council.as_ref().unwrap().clone();
+        let mut binding = reviewer_security::ReviewerBinding::native(
+            &child,
+            &review.id,
+            review.created_at,
+            &review.provider,
+            &review.model,
+            &seat,
+        );
+        binding.composition_mode = Some("direct".into());
+        reviewer_security::record_native_authority(&store, &child_id, &binding).unwrap();
+        review.reviewer_binding = Some(binding);
+        child_reviews.push(review);
+    }
+    let mut prior_child_review = worker("prior-child-cycle-review", "completed", &[], &[]);
+    prior_child_review.created_at = child.council_since - 1;
+    prior_child_review.council = Some(CouncilSeat {
+        round: 1,
+        lens: "prior cycle".into(),
+        ..CouncilSeat::default()
+    });
+    child_reviews.push(prior_child_review);
+    child.workers = child_reviews;
+    save(&store, &mut child).unwrap();
+    let child = load(&store, &child_id).unwrap().unwrap();
+
+    for (team, worker_id) in [
+        (&root, "root-direct-review"),
+        (&child, "leaf-a"),
+        (&child, "leaf-b"),
+    ] {
+        let review = team
+            .workers
+            .iter()
+            .find(|worker| worker.id == worker_id)
+            .unwrap();
+        let prompt = s2_review_prompt_for_worker(team, review);
+        let estimate =
+            crate::usage_ledger::estimate_council_review_cost(&review.model, &prompt).unwrap();
+        persist_s2_estimate(&store, &root_id, &root_cycle_id, team, review, &estimate).unwrap();
+        persist_council_terminal_receipts(&store, team, review).unwrap();
+    }
+
+    let projected = council_ledger_projection(&store, &root);
+    assert_eq!(projected.council_usage.len(), 3);
+    let root_usage = projected
+        .council_usage
+        .iter()
+        .find(|record| record.seat_id == "root-direct-review")
+        .unwrap();
+    assert_eq!(root_usage.scope, council::CouncilUsageScope::Root);
+    assert_eq!(
+        root_usage.terminal_status,
+        council::CouncilReviewVerdict::Passed
+    );
+    let child_usage = projected
+        .council_usage
+        .iter()
+        .find(|record| record.seat_id == "leaf-a")
+        .unwrap();
+    let child_cycle_id = format!("{}:{}", child.session_id, child.council_since);
+    assert_eq!(child_usage.scope, council::CouncilUsageScope::Child);
+    assert_eq!(
+        child_usage.child_cycle_id.as_deref(),
+        Some(child_cycle_id.as_str())
+    );
+    assert_eq!(
+        child_usage.terminal_status,
+        council::CouncilReviewVerdict::Passed
+    );
+    for record in &projected.council_usage {
+        assert_eq!(
+            record.budget_consumption.leaf_reviews.status,
+            CalculatedEstimated
+        );
+        assert_eq!(record.budget_consumption.leaf_reviews.value, Some(4));
+    }
+    let aggregation = projected.council_usage_aggregation.as_ref().unwrap();
+    let root_max = aggregation
+        .root
+        .leaf_reviews
+        .totals
+        .iter()
+        .find(|total| total.status == CalculatedEstimated)
+        .unwrap();
+    assert_eq!(root_max.value, 4);
+    let child_max = aggregation
+        .children
+        .iter()
+        .find(|bucket| bucket.cycle_id == child_cycle_id)
+        .unwrap()
+        .leaf_reviews
+        .totals
+        .iter()
+        .find(|total| total.status == CalculatedEstimated)
+        .unwrap();
+    assert_eq!(child_max.value, 4);
+}

@@ -2441,33 +2441,37 @@ fn two_phase_independent(team: &TeamSnapshot, phase1: usize, phase2: usize) -> b
     let later: Vec<_> = in_round(team, phase2)
         .filter(|(worker, seat)| counts(worker, seat))
         .collect();
+    let frozen_artifact = later.iter().all(|(challenger, _)| {
+        earlier.iter().all(|(author, _)| {
+            author.reviewer_binding.as_ref().zip(challenger.reviewer_binding.as_ref())
+                .is_some_and(|(author, challenger)| {
+                    // Reviewer authority revisions are seat-specific. Shared root cycle,
+                    // delivery and unchanged artifact establish the same challenge target.
+                    author.council_cycle_id == challenger.council_cycle_id
+                        && author.delivery_id == challenger.delivery_id
+                        && same_artifact_revision(&author.artifact_revision, &challenger.artifact_revision)
+                })
+        })
+    });
+    let independent_per_lens = later.iter().all(|(challenger, challenge_seat)| {
+        let mut challenged = false;
+        let independent = earlier.iter()
+            .filter(|(_, author_seat)| same_lens(&author_seat.lens, &challenge_seat.lens))
+            .all(|(author, _)| {
+                challenged = true;
+                reviewer_identity(author) != reviewer_identity(challenger)
+            });
+        challenged && independent
+    });
     !earlier.is_empty()
         && later.len() == earlier.len()
         && !stale(team, phase1)
         && !stale(team, phase2)
-        && independent_scored_sessions(team, phase1)
-        && independent_scored_sessions(team, phase2)
         && later.iter().enumerate().all(|(index, (challenger, _))| {
             later.iter().skip(index + 1).all(|(other, _)| reviewer_identity(challenger) != reviewer_identity(other))
         })
-        && later.iter().all(|(challenger, challenge_seat)| {
-            earlier.iter().all(|(author, _)| {
-                author.id != challenger.id
-                    && author.session_id != challenger.session_id
-                    && reviewer_identity(author) != reviewer_identity(challenger)
-            })
-                && earlier.iter().any(|(author, author_seat)| {
-                    same_lens(&author_seat.lens, &challenge_seat.lens)
-                        && author.reviewer_binding.as_ref().zip(challenger.reviewer_binding.as_ref())
-                            .is_some_and(|(author, challenger)| {
-                                // Reviewer authority revisions are seat-specific. Shared root cycle,
-                                // delivery and unchanged artifact establish the same challenge target.
-                                author.council_cycle_id == challenger.council_cycle_id
-                                    && author.delivery_id == challenger.delivery_id
-                                    && same_artifact_revision(&author.artifact_revision, &challenger.artifact_revision)
-                            })
-                })
-        })
+        && frozen_artifact
+        && independent_per_lens
 }
 
 fn two_phase_phase1_passes(

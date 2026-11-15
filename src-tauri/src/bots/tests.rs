@@ -1919,7 +1919,7 @@ async fn run_finished_council_fanout_and_repeat_deliveries_keep_parent_callback_
     for (_, session_id, _) in deliveries {
         super::run_finished(app.handle(), session_id, true);
     }
-    for (delivery_id, session_id, approved) in deliveries {
+    for (delivery_id, _, approved) in deliveries {
         let (expected_status, expected_callback) = if approved {
             ("completed", Some("sent"))
         } else {

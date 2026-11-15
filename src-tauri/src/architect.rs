@@ -674,7 +674,11 @@ pub(crate) fn superagent_council_human_acceptance_ready(
 ) -> bool {
     team.superagent_review.is_some()
         && council_evidence_is_current(store,team)
-        && team.council_status.as_ref().is_some_and(|status| status.state == "fixing" && !status.stale)
+        // The Council may be resting on its own below-target refusal ("asking").
+        // This is eligible only with the same complete, verified, below-target
+        // reviewer round as the normal "fixing" state.
+        && team.council_status.as_ref().is_some_and(|status|
+            matches!(status.state.as_str(), "fixing" | "asking") && !status.stale)
         && superagent_review_round_integrity(store,team,"fixing")
 }
 
@@ -683,8 +687,14 @@ fn superagent_review_round_integrity(store: &Store, team: &TeamSnapshot, expecte
     let Some(stored) = team.council_status.as_ref() else { return false };
     let Some(verified) = council::status(team) else { return false };
     let required = config.reviewer_bot_ids.len();
-    if !(2..=8).contains(&required) || stored.state != expected_state
-        || verified.state != expected_state || stored.stale || verified.stale
+    let state_matches = if expected_state == "fixing" {
+        matches!(stored.state.as_str(), "fixing" | "asking")
+            && stored.state == verified.state
+    } else {
+        stored.state == expected_state && verified.state == expected_state
+    };
+    if !(2..=8).contains(&required) || !state_matches
+        || stored.stale || verified.stale
         || stored.round == 0 || stored.round >= config.max_rounds
         || stored.round != verified.round || stored.lowest != verified.lowest
         || stored.target != verified.target || stored.lowest.is_none_or(|score| score >= config.target)

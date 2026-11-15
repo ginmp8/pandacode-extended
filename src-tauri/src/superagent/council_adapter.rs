@@ -506,6 +506,7 @@ fn create_snapshot_symlink(
     }
 }
 
+#[expect(clippy::too_many_arguments, reason = "Keep the recursive snapshot-copy context stable across source and destination trees.")]
 fn copy_workspace_directory(
     source_root: &Path, source_directory: &Path, destination_root: &Path,
     destination_directory: &Path, source_hasher: &mut Sha256,
@@ -723,9 +724,10 @@ fn council_config(snapshot: &super::TeamSnapshot) -> Result<architect::CouncilCo
     {
         return Err("Ticket is not pinned to a valid required native Council roster.".into());
     }
-    let mut config = architect::CouncilConfig::default();
-    config.reviewer_bot_ids = snapshot.reviewer_bot_ids.clone();
-    Ok(config)
+    Ok(architect::CouncilConfig {
+        reviewer_bot_ids: snapshot.reviewer_bot_ids.clone(),
+        ..Default::default()
+    })
 }
 
 fn frozen_reviewer_policy(snapshot: &super::TeamSnapshot) -> Result<(String, String)> {
@@ -828,7 +830,7 @@ pub(super) fn bind_required_finished(
         .ok_or("Council-required worker assignment has no frozen review request.")?;
     if !matches!(request.state.as_str(),"admitted")
         || request.worker_session_id != worker_session_id
-        || request.policy_revision != ticket_policy_revision(&store, &ticket.id)?
+        || request.policy_revision != ticket_policy_revision(store, &ticket.id)?
         || ticket.state != "waiting_review"
         || ticket.revision != request.admitted_ticket_revision.saturating_add(1)
         || ticket.evidence.as_deref().is_none_or(str::is_empty)
@@ -905,8 +907,7 @@ pub(crate) fn recover_starting(app: &tauri::AppHandle) {
     let request_ids: rusqlite::Result<Vec<String>> = (|| {
         let mut statement = store.db.prepare("SELECT id FROM sa_council_requests WHERE state='starting'")?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-        let collected = rows.collect();
-        collected
+        rows.collect()
     })();
     let request_ids = match request_ids {
         Ok(ids) => ids,
@@ -1255,7 +1256,7 @@ fn current_binding_valid(
     Ok(request.state == "dispatched"
         && ticket.id == request.ticket_id && ticket.state == "waiting_review"
         && ticket.revision == request.ticket_revision
-        && ticket_policy_revision(&store, &ticket.id)? == request.policy_revision
+        && ticket_policy_revision(store, &ticket.id)? == request.policy_revision
         && request.cycle_started_at > 0 && request.generation > 0
         && sha256(evidence.as_bytes()) == artifact
         && sha256(request.reviewer_policy_json.as_bytes()) == request.reviewer_policy_sha256
@@ -2142,7 +2143,7 @@ mod tests {
         assert_eq!(binding.workspace_snapshot_sha256,snapshot_sha);
         let snapshot_root=resolve_workspace_snapshot(&state.store.lock().unwrap(),snapshot_id).unwrap();
         assert_eq!(workspace_snapshot_sha256(&snapshot_root).unwrap(),snapshot_sha);
-        assert!(std::fs::metadata(&snapshot_root.join("authorized-worker-write.md")).unwrap().permissions().readonly());
+        assert!(std::fs::metadata(snapshot_root.join("authorized-worker-write.md")).unwrap().permissions().readonly());
         assert_eq!(team.workers.len(),2);
         assert!(team.workers.iter().all(|worker| worker.council.is_some() && worker.read_only));
         {

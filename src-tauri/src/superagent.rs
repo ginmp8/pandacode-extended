@@ -459,8 +459,10 @@ pub struct OrchestrationInput {
     pub council_required: Option<bool>,
 }
 
+type OrchestrationParts = (NewOrchestration, Vec<String>, Vec<String>, Option<bool>);
+
 impl OrchestrationInput {
-    fn into_parts(self) -> Result<(NewOrchestration, Vec<String>, Vec<String>, Option<bool>)> {
+    fn into_parts(self) -> Result<OrchestrationParts> {
         let worker_bot_ids = self.worker_bot_ids
             .unwrap_or_else(|| vec![self.worker_bot_id.clone()]);
         let reviewer_bot_ids = self.reviewer_bot_ids.unwrap_or_default();
@@ -476,16 +478,13 @@ impl OrchestrationInput {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum TeamSnapshotProvenance {
     Native,
     LegacyCurrent,
+    #[default]
     LegacyUnknown,
-}
-
-impl Default for TeamSnapshotProvenance {
-    fn default() -> Self { Self::LegacyUnknown }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -664,6 +663,7 @@ fn effective_role_snapshot(
     })
 }
 
+#[expect(clippy::too_many_arguments, reason = "Preserve the immutable Team snapshot inputs while continuing to lint its implementation.")]
 fn make_team_snapshot(
     db: &Connection,
     orchestration_id: &str,
@@ -1167,11 +1167,13 @@ fn configuration(store: &Store, id: &str) -> Result<Orchestration> {
     hydrate_orchestration(store,config)
 }
 
+#[cfg(test)]
 fn create_configuration(store: &Store, input: NewOrchestration) -> Result<Orchestration> {
     let worker_bot_ids = vec![input.worker_bot_id.clone()];
     create_configuration_roles(store,input,worker_bot_ids,vec![])
 }
 
+#[cfg(test)]
 fn create_configuration_roles(
     store: &Store,
     input: NewOrchestration,
@@ -1964,6 +1966,7 @@ pub(crate) fn inspect_headless_effect_receipts(
 /// state-filtered page; no migration, startup recovery, provider session,
 /// inferred task, authorization or external effect. Operational metadata
 /// excludes objectives, results, mandates and private transcripts.
+#[cfg(test)]
 pub(crate) fn list_headless_team_demands(
     database_path: &std::path::Path, orchestration_id: &str, state: &str,
     before_updated_at: Option<i64>, before_id: Option<&str>,
@@ -2358,6 +2361,7 @@ pub(crate) fn headless_quarantine_terminal_orphan(
     })).map_err(|e| e.to_string())
 }
 
+#[expect(clippy::too_many_arguments, reason = "Keep the existing CLI argument contract and explicit issue-comment authorization fields.")]
 pub(crate) fn headless_issue_comment(
     database_path: &std::path::Path,
     ticket_id: &str,
@@ -2381,6 +2385,7 @@ pub(crate) fn headless_issue_comment(
     )
 }
 
+#[expect(clippy::too_many_arguments, reason = "Keep the same validated CLI parameters and testable dispatch boundary.")]
 pub(crate) fn headless_issue_comment_with_dispatch(
     database_path: &std::path::Path,
     ticket_id: &str,
@@ -2788,6 +2793,7 @@ fn admit_role_with_staging(
 /// The trusted native demand scheduler may select any Worker in the immutable
 /// admitted Team. This does not make the legacy single-Worker manual API
 /// permissive, and grants no tool or GitHub write authority.
+#[expect(clippy::too_many_arguments, reason = "Preserve the exact native admission flags and worker selection contract.")]
 fn admit_role_with_selected(
     store: &mut Store, config_id: &str, objective: &str,
     request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
@@ -2826,6 +2832,7 @@ fn admit_role_with_auto_intake(
 /// App-managed exact-file writes are available only with a separately
 /// confirmed immutable WorkItem scope. No coordinator or legacy call
 /// acquires a write capability by choosing a different Worker.
+#[expect(clippy::too_many_arguments, reason = "Preserve native admission flags and exact path-grant parameters.")]
 fn admit_role_with_grant(
     store: &mut Store, config_id: &str, objective: &str,
     request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
@@ -2839,6 +2846,7 @@ fn admit_role_with_grant(
 /// Native DAG admission reuses the same one-transaction Ticket/session/mandate
 /// writer as manual and authenticated-source admission. The WorkItem link
 /// is committed before the provider can receive the resulting child session.
+#[expect(clippy::too_many_arguments, reason = "Keep the WorkItem parent and child identities explicit at admission.")]
 fn admit_role_with_work_item(
     store: &mut Store, config_id: &str, objective: &str,
     request_key: &str, selected_worker: &str, authorized_paths: Option<&[String]>,
@@ -2851,6 +2859,7 @@ fn admit_role_with_work_item(
     )
 }
 
+#[expect(clippy::too_many_arguments, reason = "Keep transaction admission controls explicit for effects and WorkItems.")]
 fn admit_role_with_grant_inner(
     store: &mut Store, config_id: &str, objective: &str,
     request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
@@ -4349,6 +4358,7 @@ pub async fn superagent_tickets(window: tauri::WebviewWindow,
 }
 
 #[tauri::command]
+#[expect(clippy::too_many_arguments, reason = "Preserve the backward-compatible Tauri command parameter contract.")]
 pub async fn superagent_all_demands(
     window: tauri::WebviewWindow, state: State<'_, AppState>, limit: Option<i64>,
     before_updated_at: Option<i64>, before_id: Option<String>,
@@ -5016,6 +5026,7 @@ async fn confirm_issue_comment(
 }
 
 #[tauri::command]
+#[expect(clippy::too_many_arguments, reason = "Preserve the existing Tauri command and explicit issue-comment input contract.")]
 pub async fn superagent_issue_comment(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,
@@ -7866,7 +7877,7 @@ mod tests {
         assert_eq!(snapshot.reviewer_bot_ids,vec!["reviewer"]);
         assert_eq!(snapshot.policy.autonomy,"off");
         assert_eq!(snapshot.policy.max_concurrent_tasks,1);
-        assert_eq!(snapshot.policy.council_enabled,false);
+        assert!(!snapshot.policy.council_enabled);
         assert_eq!(snapshot.roles.iter().map(|role|role.role.as_str()).collect::<Vec<_>>(),
             vec!["coordinator","worker","worker","reviewer"]);
         assert!(snapshot.roles.iter().all(|role|role.effective_config.is_some()));

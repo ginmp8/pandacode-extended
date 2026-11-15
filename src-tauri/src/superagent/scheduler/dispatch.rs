@@ -81,11 +81,8 @@ pub(crate) fn revoke_descendants(tx:&Connection,root:&str,now:i64)->Result<()> {
     ).map_err(|e|e.to_string())?;
     let members="(SELECT child_ticket_id FROM sa_work_items WHERE ticket_id=?1
                    AND child_ticket_id IS NOT NULL)";
-    for sql in [
-        format!("UPDATE sa_mandates SET revoked=1 WHERE ticket_id IN {members}"),
-    ] {
-        tx.execute(&sql,[root]).map_err(|e|e.to_string())?;
-    }
+    let sql = format!("UPDATE sa_mandates SET revoked=1 WHERE ticket_id IN {members}");
+    tx.execute(&sql,[root]).map_err(|e|e.to_string())?;
     for sql in [
         format!("UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2 WHERE state='pending' AND ticket_id IN {members}"),
         format!("UPDATE sa_assignments SET state='stopped',updated_at=?2 WHERE state='running' AND ticket_id IN {members}"),

@@ -1769,7 +1769,8 @@ test('Demand WorkItem inspector explains native dependency blockers without laun
   await expect(plan.getByText('Pending native Worker admission and checkout availability checks.')).toBeVisible();
   await expect(plan.getByText('Waiting for native review; dependencies cannot advance.')).toBeVisible();
   await expect(plan.getByText('Blocked: native recovery required.')).toBeVisible();
-  await expect(plan.getByText('Completed: native child Ticket settled.')).toBeVisible();
+  await expect(plan.getByText('Native approval receipt missing; predecessor cannot unlock dependencies.')).toBeVisible();
+  await expect(plan.getByText('Approval receipt unavailable; dependencies remain gated')).toBeVisible();
   const calls=await page.evaluate(()=>
     (window as unknown as {workItemReadCalls:()=>string[]}).workItemReadCalls());
   expect(calls.filter(c=>c==='superagent_demand_plan')).toHaveLength(1);

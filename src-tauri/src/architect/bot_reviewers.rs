@@ -227,11 +227,6 @@ fn round_reviewers(store: &Store, team: &TeamSnapshot, round: usize, check_execu
     Ok(reviewers)
 }
 
-/// Resolve a frozen selected reviewer. Live deletion, pause, executor identity and frozen-model
-/// availability are still checked, without substituting a newly edited profile or another bot.
-pub(super) fn seat_bot(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, library: Option<&crate::skills::Library>) -> Result<Option<SelectedReviewer>> {
-    seat_bot_with_skills(store, team, round, replaces, true, library)
-}
 #[cfg(test)]
 pub(super) fn seat_bot_inner(store: &Store, team: &TeamSnapshot, round: usize, replaces: Option<&str>, check_executable: bool) -> Result<Option<SelectedReviewer>> {
     seat_bot_with_skills(store, team, round, replaces, check_executable, None)

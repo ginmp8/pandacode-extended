@@ -616,7 +616,7 @@ mod tests {
             let queued = self.queued_ticket(config_id,request_key);
             let (ticket,session_id,grant) = {
                 let mut store = self.store();
-                let (ticket,_,_,_,_) = super::prepare_coordinated_worker_with_write_grant(
+                let (ticket,_,_,_) = super::prepare_coordinated_worker_with_write_grant(
                     &mut store,&queued.id,false,queued.revision,paths,
                 ).unwrap();
                 let session_id = super::assignment_session(&store,&ticket.id).unwrap().unwrap();
@@ -715,7 +715,7 @@ mod tests {
         let (worker_ticket,session_id,grant_before,old_snapshot,old_authority) = {
             let mut store=fixture.store();
             let old_snapshot=super::super::ticket_team_snapshot(&store,&old_ticket.id).unwrap();
-            let (running,_,_,_,_)=super::super::prepare_coordinated_worker_inner(
+            let (running,_,_,_)=super::super::prepare_coordinated_worker_inner(
                 &mut store,&old_ticket.id,false,None,Some(&paths),
             ).unwrap();
             let session_id=super::super::assignment_session(&store,&running.id).unwrap().unwrap();

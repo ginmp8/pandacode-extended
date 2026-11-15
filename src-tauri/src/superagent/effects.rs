@@ -140,6 +140,7 @@ pub(crate) fn lock_dispatch_before_wait(
     let lock_path = database_path.with_extension("superagent-effect-dispatch.lock");
     let file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(lock_path)
@@ -1008,8 +1009,10 @@ fn post_issue_comment_with(
     }
 }
 
+type EffectReceiptEvidence = (String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>);
+
 fn status(store: &Store, intent: &IssueCommentIntent, reconciliation: &str) -> Result<EffectStatus> {
-    let evidence: Option<(String, Option<String>, Option<String>, Option<String>, Option<String>, Option<String>)> = store.db
+    let evidence: Option<EffectReceiptEvidence> = store.db
         .query_row(
             "SELECT state,uncertainty_reason,readback_state,remote_comment_id,
                     remote_comment_url,remote_author_login
@@ -1164,7 +1167,7 @@ mod tests {
     }
 
     fn is_issue_comment_write(args: &[&str]) -> bool {
-        args.get(0) == Some(&"issue") && args.get(1) == Some(&"comment")
+        args.first() == Some(&"issue") && args.get(1) == Some(&"comment")
     }
 
     fn exact_readback(intent: &IssueCommentIntent) -> crate::workspace::Capture {
@@ -1665,6 +1668,7 @@ mod tests {
         let excluded = ready
             && OpenOptions::new()
                 .create(true)
+                .truncate(false)
                 .read(true)
                 .write(true)
                 .open(lock_path)

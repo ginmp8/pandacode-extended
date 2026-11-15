@@ -153,8 +153,25 @@ function childCouncilHierarchyHtml(value: CouncilLedgerView, receipt: NonNullabl
   const findings = (value.findings ?? []).filter(item => item.cycleId === cycleId);
   const usage = (value.usage ?? []).filter(item => item.childCycleId === cycleId);
   const reviews = (value.reviewReceipts ?? []).filter(item => item.cycleId === cycleId);
-  const leaves = (value.childLeaves ?? []).filter(item => item.childCycleId === cycleId && item.parentSeatId === receipt.parentSeatId);
-  const outcomes = (value.criterionOutcomes ?? []).filter(item => item.taskCycleId === cycleId && item.parentSeatId === receipt.parentSeatId);
+  const leaves = (value.childLeaves ?? []).filter(item => item.rootCycleId === value.cycleId && item.childCycleId === cycleId && item.parentSeatId === receipt.parentSeatId);
+  const outcomes = (value.criterionOutcomes ?? []).filter(item => item.rootCycleId === value.cycleId && item.taskCycleId === cycleId && item.parentSeatId === receipt.parentSeatId);
+  // Native projects each leaf from an authorized frozen binding. A numeric score
+  // becomes verified only if every current child receipt reference resolves to
+  // exactly one completed, in-range leaf from this root cycle.
+  const referencedLeaves = receipt.status === 'passed' && receipt.rootCycleId === value.cycleId
+    ? receipt.leafScoreRefs.map(ref => {
+      const candidates = leaves.filter(item => `${item.seatId}:${item.attempt}` === ref
+        && item.status === 'completed' && typeof item.score === 'number'
+        && Number.isFinite(item.score) && item.score >= 0 && item.score <= 10);
+      return candidates.length === 1 ? candidates[0] : null;
+    })
+    : [];
+  const verifiedLeafRefs = referencedLeaves.length > 0
+    && referencedLeaves.length === receipt.leafScoreRefs.length
+    && referencedLeaves.every(Boolean)
+    && new Set(receipt.leafScoreRefs).size === receipt.leafScoreRefs.length
+    ? new Set(receipt.leafScoreRefs)
+    : new Set<string>();
   const rounds = new Map<string, { findings: typeof findings; usage: typeof usage; reviews: typeof reviews; leaves: typeof leaves; outcomes: typeof outcomes }>();
   const round = (id: string) => {
     let entry = rounds.get(id);
@@ -195,26 +212,27 @@ function childCouncilHierarchyHtml(value: CouncilLedgerView, receipt: NonNullabl
         ...records.reviews.flatMap(item => item.evidenceRefs),
       ])];
       const verdicts = [...new Set([...records.usage.map(item => item.terminalStatus), ...records.reviews.map(item => item.verdict)])];
-      const scored = records.leaves.find(item => typeof item.score === 'number' && Number.isFinite(item.score));
-      const scoreText = scored ? `Reported score ${formatScore(scored.score!)} / 10` : 'Score Unknown';
+      const scored = records.leaves.find(item => verifiedLeafRefs.has(`${item.seatId}:${item.attempt}`));
+      const scoreText = scored ? `Verified score ${formatScore(scored.score!)} / 10` : 'Score Unknown';
       const leafStatus = [...new Set(records.leaves.map(item => item.status))].join(', ');
-      const criteriaMarkup = records.outcomes.length
-        ? `<ul class="council-inspector-criteria">${records.outcomes.map(item => `<li><strong>Criterion ${escape(item.outcome.criterionId)} · ${formatScore(item.outcome.score)} / 10</strong><span>Verified evidence: ${item.outcome.verifiedEvidenceRefs.length}</span>${evidenceDetails(item.outcome.verifiedEvidenceRefs, true)}</li>`).join('')}</ul>`
+      const verifiedOutcomes = scored ? records.outcomes.filter(item => item.seatId === scored.seatId && item.attempt === scored.attempt && item.artifactRevision === receipt.artifactRevision) : [];
+      const criteriaMarkup = verifiedOutcomes.length
+        ? `<ul class="council-inspector-criteria">${verifiedOutcomes.map(item => `<li><strong>Criterion ${escape(item.outcome.criterionId)} · ${formatScore(item.outcome.score)} / 10</strong><span>Verified evidence: ${item.outcome.verifiedEvidenceRefs.length}</span>${evidenceDetails(item.outcome.verifiedEvidenceRefs, true)}</li>`).join('')}</ul>`
         : '<p class="council-ledger-empty">Criterion coverage not available for this reviewer.</p>';
       const findingsMarkup = records.findings.length
         ? `<ul class="council-inspector-findings">${records.findings.map(item => `<li><strong>${escape(item.title ?? item.category)} · ${escape(item.severity)}</strong><span>${escape(item.summary)}</span>${item.explanation && item.explanation !== item.summary ? `<p>${escape(item.explanation)}</p>` : ''}</li>`).join('')}</ul>`
         : '<p class="council-ledger-empty">No finding details were projected for this reviewer.</p>';
       const evidenceKnown = records.findings.length > 0 || records.reviews.length > 0 || value.findings !== undefined || value.reviewReceipts !== undefined;
-      return `<details class="council-inspector-node" data-level="reviewer"><summary>Reviewer ${escape(label)} · ${escape(scoreText)}${verdicts.length ? ` · ${escape(verdicts.join(', '))}` : ' · status Unknown'}</summary><dl><div><dt>Reviewer seat</dt><dd>${escape(seatId)}</dd></div><div><dt>Score</dt><dd>${scored ? escape(scoreText) + ' · native approval is separate' : 'Unknown · no completed native reviewer score'}</dd></div><div><dt>Verdict</dt><dd>${escape(verdicts.join(', ') || leafStatus || 'Unknown')}</dd></div><div><dt>Evidence</dt><dd>${evidence.length ? `${evidence.length} reference${evidence.length === 1 ? '' : 's'}` : records.findings.length || records.reviews.length ? 'No references recorded' : 'Unknown'}</dd></div></dl>${criteriaMarkup}${findingsMarkup}${evidenceDetails(evidence, evidenceKnown)}</details>`;
+      return `<details class="council-inspector-node" data-level="reviewer" data-score-verified="${Boolean(scored)}"><summary>Reviewer ${escape(label)} · ${escape(scoreText)}${verdicts.length ? ` · ${escape(verdicts.join(', '))}` : ' · status Unknown'}</summary><dl><div><dt>Reviewer seat</dt><dd>${escape(seatId)}</dd></div><div><dt>Score</dt><dd>${scored ? escape(scoreText) + ' · native approval is separate' : 'Unknown · no completed native reviewer score'}</dd></div><div><dt>Verdict</dt><dd>${escape(verdicts.join(', ') || leafStatus || 'Unknown')}</dd></div><div><dt>Evidence</dt><dd>${evidence.length ? `${evidence.length} reference${evidence.length === 1 ? '' : 's'}` : records.findings.length || records.reviews.length ? 'No references recorded' : 'Unknown'}</dd></div></dl>${criteriaMarkup}${findingsMarkup}${evidenceDetails(evidence, evidenceKnown)}</details>`;
     }).join('');
     return `<details class="council-inspector-node" data-level="round"${roundId ? '' : ' data-round-unknown="true"'}><summary>${escape(roundName(roundId))}${roundId ? ` · ${escape(roundId)}` : ' · round identity unknown'}</summary>${reviewerMarkup || '<p class="council-ledger-empty">Reviewer rows are not available for this round.</p>'}</details>`;
   }).join('');
   const minScore = receipt.minScore == null ? 'Unknown' : `${formatScore(receipt.minScore)} / 10`;
   const evidence = [...new Set(receipt.evidenceRefs)];
   const scoreRefs = receipt.leafScoreRefs.length
-    ? `<p class="council-inspector-score-refs">Leaf score references: ${receipt.leafScoreRefs.map(escape).join(', ')}. Reported scores appear per reviewer when authorized native rows are available.</p>`
+    ? `<p class="council-inspector-score-refs">Leaf score references: ${receipt.leafScoreRefs.map(escape).join(', ')}. ${verifiedLeafRefs.size ? 'Verified numeric scores and criterion outcomes are shown per reviewer.' : 'No matching complete native score receipt was verified.'}</p>`
     : '<p class="council-ledger-empty">No leaf score references were projected.</p>';
-  return `<details class="council-inspector-node" data-level="child-council" data-child-cycle="${escape(cycleId)}" data-stale="${receipt.status === 'stale'}"><summary>Child Council · ${escape(receipt.status)} · minimum score ${minScore}</summary><dl><div><dt>Bot</dt><dd>${escape(receipt.botId)}</dd></div><div><dt>Cycle</dt><dd>${escape(cycleId)}</dd></div><div><dt>Artifact revision</dt><dd>${escape(receipt.artifactRevision)}</dd></div><div><dt>Policy</dt><dd>${escape(receipt.policyFingerprint)}</dd></div><div><dt>Snapshot</dt><dd>${escape(receipt.snapshotFingerprint)}</dd></div></dl>${scoreRefs}${evidenceDetails(evidence, true)}<div class="council-inspector-children">${roundMarkup || '<p class="council-ledger-unavailable">Round details are unknown; the child receipt does not include reviewer round rows.</p>'}</div></details>`;
+  return `<details class="council-inspector-node" data-level="child-council" data-child-cycle="${escape(cycleId)}" data-stale="${receipt.status === 'stale'}" data-leaf-scores="${verifiedLeafRefs.size}"><summary>Child Council · ${escape(receipt.status)} · minimum score ${minScore}</summary><dl><div><dt>Bot</dt><dd>${escape(receipt.botId)}</dd></div><div><dt>Cycle</dt><dd>${escape(cycleId)}</dd></div><div><dt>Artifact revision</dt><dd>${escape(receipt.artifactRevision)}</dd></div><div><dt>Policy</dt><dd>${escape(receipt.policyFingerprint)}</dd></div><div><dt>Snapshot</dt><dd>${escape(receipt.snapshotFingerprint)}</dd></div></dl>${scoreRefs}${evidenceDetails(evidence, true)}<div class="council-inspector-children">${roundMarkup || '<p class="council-ledger-unavailable">Round details are unknown; the child receipt does not include reviewer round rows.</p>'}</div></details>`;
 }
 
 /** A child can be inspected while working, without synthesizing a passing receipt. */

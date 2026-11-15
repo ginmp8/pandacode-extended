@@ -387,6 +387,65 @@ test('child reviewer reported scores remain pending until the native child termi
   await expect(ledger).toContainText('root approval is not yet available');
   await expect(ledger).not.toContainText('Child Council · passed');
 });
+test('verified nested leaf scores require current complete child receipt references', async ({ page }) => {
+  await open(page, '/?council=composition');
+  const result = await page.evaluate(async () => {
+    const { councilReadOnlyPresenterHtml } = await import('/src/council-panel.ts');
+    const receipt = {
+      rootCycleId: 'root:2', parentSeatId: 'seat-2', childCycleId: 'child:4',
+      botId: 'nested-reviewer', artifactRevision: 'rev-4', policyFingerprint: 'policy',
+      status: 'passed', minScore: 9.4, leafScoreRefs: ['leaf-a:1'],
+      findingsRefs: [], evidenceRefs: [], snapshotFingerprint: 'snapshot',
+    };
+    const validLeaf = {
+      rootCycleId: 'root:2', parentSeatId: 'seat-2', childCycleId: 'child:4',
+      roundId: 'child:4:1', seatId: 'leaf-a', reviewerId: 'leaf-reviewer',
+      attempt: 1, status: 'completed', score: 9.4,
+    };
+    const outcome = {
+      schemaVersion: 1, rootCycleId: 'root:2', taskId: 'child',
+      taskCycleId: 'child:4', childCycleId: 'child:4', parentSeatId: 'seat-2',
+      round: 1, seatId: 'leaf-a', attempt: 1, artifactRevision: 'rev-4',
+      outcome: { criterionId: 'security', score: 9.4, verifiedEvidenceRefs: ['src/a.ts'] },
+    };
+    const fields = {
+      cycleId: 'root:2', childReceipts: [receipt],
+      childLeaves: [
+        validLeaf,
+        { ...validLeaf, rootCycleId: 'old:1', seatId: 'foreign-leaf', reviewerId: 'foreign' },
+        { ...validLeaf, seatId: 'stale-leaf', reviewerId: 'stale', score: 9.9 },
+      ],
+      criterionOutcomes: [outcome],
+    };
+    return {
+      verified: councilReadOnlyPresenterHtml(fields as any),
+      duplicate: councilReadOnlyPresenterHtml({
+        ...fields, childLeaves: [...fields.childLeaves, { ...validLeaf, reviewerId: 'duplicate' }],
+      } as any),
+      stale: councilReadOnlyPresenterHtml({
+        ...fields, childReceipts: [{ ...receipt, status: 'stale' }],
+      } as any),
+    };
+  });
+  await page.evaluate(value => {
+    for (const [name, markup] of Object.entries(value)) {
+      const host = document.createElement('section');
+      host.id = `nested-leaf-${name}`; host.innerHTML = markup; document.body.append(host);
+    }
+  }, result);
+  const verified = page.locator('#nested-leaf-verified [data-level="child-council"]');
+  await expect(verified).toHaveAttribute('data-leaf-scores', '1');
+  const reviewer = verified.locator('[data-level="reviewer"][data-score-verified="true"]');
+  await expect(reviewer).toHaveCount(1);
+  await expect(reviewer.locator(':scope > summary')).toContainText('Verified score 9.4 / 10');
+  await expect(reviewer.locator('.council-inspector-criteria')).toContainText('security');
+  await expect(reviewer.locator('.council-inspector-criteria')).toContainText('9.4 / 10');
+  await expect(verified).not.toContainText('foreign-leaf');
+  await expect(verified.locator('[data-level="reviewer"][data-score-verified="true"]')).toHaveCount(1);
+  await expect(page.locator('#nested-leaf-duplicate [data-level="child-council"]')).toHaveAttribute('data-leaf-scores', '0');
+  await expect(page.locator('#nested-leaf-stale [data-level="child-council"]')).toHaveAttribute('data-leaf-scores', '0');
+});
+
 test('current-cycle projected records hide stale cycles and open evidence only through the workspace file view', async ({ page }) => {
   await open(page, '/?council=ledger');
   await page.locator('#agents-toggle').click();

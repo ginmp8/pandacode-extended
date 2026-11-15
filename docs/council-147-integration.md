@@ -317,3 +317,11 @@ Origin PR #152 `22af3bdee9af5337b6101d6cf7e28cc24614cf46`, original unified dest
 ## November 15: native concurrency test compiler compatibility
 
 GitHub Actions identified E0425 (missing native settlement fixture) and E0609 (the imported tests referenced `council_child_leaf_scores` instead of the unified `council_child_leaves`). Import the source fixture and use the canonical typed `Option<f64>` projection in the tests; retain the precise Some-score comparisons and all acceptance assertions. Source: frozen PR #152 at `22af3bdee9af5337b6101d6cf7e28cc24614cf46`; source refs read-only.
+
+
+## November 15: scoped reviewer escalation-denial regressions (PR #152)
+
+- Frozen source PR #149: `d251f128f0bca08fab8c8d540342380095038aa6`; source PR #152: `4dc49efb8f201059ae4281b490f563561f0d1112`; original destination PR #155: `d48dafa845bc00c55791240dc5b8b25ac3a8c9cb`; read-only base `extended/development`: `f9efb3a1c7558dcf7d5688bb1687cfff9253f967`.
+- Ported #152's expanded native Scoped reviewer-host regression for forbidden tool names, cross-repository actions, shell/filesystem/skill-hook/failover/write attempts. Every denied call now asserts `capability_not_authorized` and zero underlying handler invocations; an exact user-authorized call still reaches the handler once. The existing native allowlist and Council engine are unchanged.
+- CI baseline: [run 43735852285](https://github.com/ginmp8/pandacode-extended/actions/runs/43735852285) at `d48dafa845bc00c55791240dc5b8b25ac3a8c9cb` was still running/queued at source review. Preceding [run 43735419917](https://github.com/ginmp8/pandacode-extended/actions/runs/43735419917) at `838e50863bb2abbf42b3acdbdfee35dd36959b5a` failed Rust Clippy with E0609/E0425 test-fixture compilation errors; the intervening `d48dafa845bc` checkpoint adapted the leaf projection and supplied the missing native settlement fixture. No claim of exact-HEAD passing checks follows from those earlier runs.
+- Remaining: source #149 native S2/S3 child terminal semantics and inspector must be compared behavior-by-behavior with the unified implementation; full 21 real native terminal mode/strategy cases, restart/callback concurrency and AC-01..40 exact-SHA verification are still not proven. No duplicate #149 runtime/inspector has been copied, and no source/base refs should be written.

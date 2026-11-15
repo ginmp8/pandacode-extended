@@ -780,7 +780,7 @@ mod tests {
         assert!(ReviewerToolPolicy::from_user_grants(ReviewerPhase::Review, "user-1", std::slice::from_ref(&grant), std::slice::from_ref(&grant)).is_ok());
     }
     #[tokio::test]
-    async fn scoped_host_checks_tool_action_and_exact_resource_at_dispatch() {
+    async fn scoped_host_rejects_escalation_calls_before_handler() {
         let grant = issue_grant();
         let policy = ReviewerToolPolicy::from_user_grants(ReviewerPhase::Review, "user-1", std::slice::from_ref(&grant), std::slice::from_ref(&grant)).unwrap();
         let executed = Arc::new(AtomicUsize::new(0));
@@ -796,14 +796,20 @@ mod tests {
         };
         let host = policy.restrict_host(Some(host)).unwrap().unwrap();
         assert_eq!(host.tools.len(), 1);
-        for args in [
-            json!({"action":"delete","repository":"owner/repo"}),
-            json!({"action":"create","repository":"someone/else"}),
-            json!({"action":"create"}),
+        for (tool, args) in [
+            ("pandacode_github_issue", json!({"action":"delete","repository":"owner/repo"})),
+            ("pandacode_github_issue", json!({"action":"create","repository":"someone/else"})),
+            ("pandacode_github_issue", json!({"action":"create"})),
+            ("pandacode_other", json!({"action":"create","repository":"owner/repo"})),
+            ("mcp__filesystem__write_file", json!({"path":"reviewed.txt","content":"tampered"})),
+            ("pandacode_run_shell", json!({"command":"touch reviewed.txt"})),
+            ("pandacode_skill_hook", json!({"hook":"postToolUse","command":"touch reviewed.txt"})),
+            ("pandacode_reviewer_failover", json!({"provider":"claude","model":"other-model"})),
+            ("pandacode_write_file", json!({"path":"reviewed.txt","content":"tampered"})),
         ] {
-            assert!((host.handler)("pandacode_github_issue".into(), args).await.is_err());
+            let error = (host.handler)(tool.into(), args).await.unwrap_err();
+            assert!(error.contains("capability_not_authorized"), "{tool}: {error}");
         }
-        assert!((host.handler)("pandacode_other".into(), json!({"action":"create","repository":"owner/repo"})).await.is_err());
         assert_eq!(executed.load(Ordering::SeqCst), 0);
         assert!((host.handler)("pandacode_github_issue".into(), json!({"action":"create","repository":"owner/repo"})).await.is_ok());
         assert_eq!(executed.load(Ordering::SeqCst), 1);

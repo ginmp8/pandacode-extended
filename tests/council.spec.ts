@@ -56,6 +56,7 @@ test('schema v1 derives all seven modes and keeps each bot branch draft when mod
     { id: 'reviewer-b', name: 'Reviewer B', role: 'Reviewer', provider: 'claude', model: 'sonnet', paused: false, available: true },
   ] };
   await open(page, '/?council=composition', {}, 0, '', {}, reviewers);
+  await settle(page);
   await button(page).click();
   await expect(panel(page).getByRole('checkbox', { name: 'Use a schema v1 composition plan' })).toBeChecked();
   await expect(panel(page).locator('.council-composition-bot').first()).toBeVisible();

@@ -1896,6 +1896,24 @@ mod tests {
             let team = architect::load(&store,native_session_id).unwrap().unwrap();
             (team.generation,team.workers.into_iter().map(|worker| worker.session_id).collect::<Vec<_>>())
         };
+        // Native dispatch records the Council seat's start time and reserves its
+        // authority. Completing a queued seat directly would bypass that boundary.
+        let mut started = Vec::new();
+        for _ in 0..reviewers.len() {
+            started.push(architect::launch_next_native_reviewer_for_test(state).unwrap()
+                .expect("each selected Council reviewer must be launched by the scheduler"));
+        }
+        let mut expected = reviewers.clone();
+        expected.sort();
+        started.sort();
+        assert_eq!(started,expected,"native scheduler must launch the exact selected reviewers");
+        {
+            let store = state.store.lock().unwrap();
+            let team = architect::load(&store,native_session_id).unwrap().unwrap();
+            assert!(team.workers.iter().all(|worker|
+                worker.council.as_ref().is_some_and(|seat| seat.started_at >= team.council_since)
+            ),"the native reviewer's frozen start must precede score settlement");
+        }
         for reviewer_session_id in reviewers {
             state.store.lock().unwrap().message(
                 &reviewer_session_id,"assistant",&format!("Review complete.\nCouncil score: {score}/10"),
@@ -1905,28 +1923,6 @@ mod tests {
                 Some(&architect::Admission { parent: native_session_id.to_owned(), generation }),
                 true,false,&mut |_| {},
             );
-        }
-        if score == "8.5" {
-            let store = state.store.lock().unwrap();
-            let team = architect::load(&store,native_session_id).unwrap().unwrap();
-            let status = team.council_status.as_ref().unwrap();
-            let config = team.config.council.as_ref().unwrap();
-            let request = request_for_native(&store,native_session_id).unwrap().unwrap();
-            let ticket = superagent::get_ticket(&store,&request.ticket_id).unwrap();
-            eprintln!("COUNCIL_ACCEPT_DIAG state={} round={} lowest={:?} target={} max_rounds={} team_status={} team_error={:?} fresh={} binding={:?} ready={}",
-                status.state,status.round,status.lowest,config.target,config.max_rounds,
-                team.status,team.error,architect::council_evidence_is_current(&store,&team),
-                current_binding_valid(&store,&request,&ticket,&team),
-                architect::superagent_council_human_acceptance_ready(&store,&team));
-            for worker in team.workers.iter().filter(|w| w.council.is_some()) {
-                let binding = worker.reviewer_binding.as_ref();
-                eprintln!("COUNCIL_ACCEPT_DIAG seat status={} abandoned={} score={:?} started={:?} created={} council_since={} binding={:?} authority={:?} skills={:?}",
-                    worker.status,worker.abandoned,worker.council.as_ref().unwrap().score,
-                    worker.council.as_ref().unwrap().started_at,worker.created_at,team.council_since,
-                    binding.map(|b| b.validate(&team,worker)),
-                    binding.map(|b| architect::reviewer_security::validate_issued_authority(&store,&team.session_id,b)),
-                    binding.and_then(|b| b.snapshot.skills.as_ref()).map(|s| s.pins.len()));
-            }
         }
     }
 

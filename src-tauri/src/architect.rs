@@ -1343,6 +1343,7 @@ pub struct ArchitectReadSnapshot {
     team: TeamSnapshot,
     council_findings: Vec<council::CouncilFinding>,
     council_historical_reported_findings: Vec<council::CouncilHistoricalReportedFinding>,
+    council_reported_findings: Vec<council::CouncilHistoricalReportedFinding>,
     council_finding_dispositions: Vec<council::CouncilFindingDisposition>,
     council_child_receipts: Vec<council::ChildCouncilReceipt>,
     council_child_leaves: Vec<CouncilChildLeafProjection>,
@@ -1430,6 +1431,7 @@ fn empty_council_ledger(team: TeamSnapshot) -> ArchitectReadSnapshot {
         team,
         council_findings: Vec::new(),
         council_historical_reported_findings: Vec::new(),
+        council_reported_findings: Vec::new(),
         council_finding_dispositions: Vec::new(),
         council_child_receipts: Vec::new(),
         council_child_leaves: Vec::new(),
@@ -2050,6 +2052,7 @@ fn council_read_snapshot(store: &Store, team: &TeamSnapshot) -> ArchitectReadSna
     // They must never feed native escalation, evidence or approval gates.
     payload.council_historical_reported_findings =
         council::historical_reported_findings(store, team);
+    payload.council_reported_findings = council::reported_findings(store, team);
     payload
 }
 fn event_read_payload(store: &Store, team: &TeamSnapshot) -> ArchitectReadSnapshot {

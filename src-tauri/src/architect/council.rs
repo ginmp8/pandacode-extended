@@ -2123,6 +2123,45 @@ pub(super) fn parse_reported_findings(report: &str) -> Vec<ReportedFindingDraft>
 }
 
 
+// Current scored model reports remain unverified claims, separate from native findings.
+pub(super) fn reported_findings(store: &storage::Store, team: &TeamSnapshot) -> Vec<CouncilHistoricalReportedFinding> {
+    let mut findings = Vec::new();
+    for (worker, seat) in seats(team) {
+        if worker.status != "completed" || !counts(worker, seat) || seat.score.is_none() {
+            continue;
+        }
+        let latest = store.db.query_row(
+            "SELECT id, substr(content,-8192) FROM messages WHERE session_id=?1 AND role='assistant' AND id>(SELECT COALESCE(MAX(id),0) FROM messages WHERE session_id=?1 AND role IN ('user','coordination')) ORDER BY id DESC LIMIT 1",
+            params![worker.session_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        ).optional().ok().flatten();
+        let Some((message_id, report)) = latest else { continue };
+        if parse_score(&report) != seat.score { continue; }
+        for (index, draft) in parse_reported_findings(&report).into_iter().enumerate() {
+            findings.push(CouncilHistoricalReportedFinding {
+                schema_version: 1,
+                id: format!("{}:{}:{}:{message_id}:{index}", team.session_id, team.council_since, worker.id),
+                cycle_id: format!("{}:{}", team.session_id, team.council_since),
+                round: seat.round,
+                worker_id: worker.id.clone(),
+                report_message_id: message_id,
+                lens: seat.lens.clone(),
+                severity: draft.severity,
+                category: draft.category,
+                title: draft.title,
+                explanation: draft.explanation,
+                artifact_revision: worker.reviewer_binding.as_ref().map(|binding| binding.artifact_revision.clone()),
+                verified_evidence_refs: Vec::new(),
+                evidence_verified: false,
+                location_verified: false,
+            });
+        }
+    }
+    let excess = findings.len().saturating_sub(32);
+    if excess > 0 { findings.drain(..excess); }
+    findings
+}
+
 pub(super) fn historical_reported_findings(
     store: &storage::Store, team: &TeamSnapshot,
 ) -> Vec<CouncilHistoricalReportedFinding> {

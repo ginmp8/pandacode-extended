@@ -245,6 +245,7 @@ export interface TeamSnapshot {
   /** Native's read-only projection for the live Council cycle. Older hosts may omit these fields. */
   councilFindings?: CouncilFinding[];
   councilHistoricalReportedFindings?: CouncilHistoricalReportedFinding[];
+  councilReportedFindings?: CouncilHistoricalReportedFinding[];
   councilFindingDispositions?: CouncilFindingDisposition[];
   councilChildReceipts?: ChildCouncilReceipt[];
   councilChildLeaves?: CouncilChildLeafProjection[];

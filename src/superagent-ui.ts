@@ -2388,9 +2388,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         name:String(data.get('name') ?? '').trim(),
         coordinatorBotId:String(data.get('coordinatorBotId') ?? ''),
         workerBotId:String(data.get('workerBotId') ?? ''),
-        workerBotIds:[...existing.workerBotIds],
-        reviewerBotIds:[...existing.reviewerBotIds],
-        councilRequired:existing.councilRequired,
+        workerBotIds:[
+          String(data.get('workerBotId') ?? ''),
+          ...(existing.workerBotIds ?? [existing.workerBotId]).slice(1)
+            .filter(id => id !== String(data.get('workerBotId') ?? '')),
+        ],
+        reviewerBotIds:[...(existing.reviewerBotIds ?? [])],
+        councilRequired:existing.councilRequired === true,
       };
       void work(async () => {
         await call('superagent_update',{ orchestrationId:existing.id, expectedRevision:existing.policyRevision, input });

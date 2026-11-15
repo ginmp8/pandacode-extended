@@ -722,3 +722,22 @@ dynamic subagent hierarchy. The response sets
 `councilVerdictIncluded: false`; a pending-review node is **not** a Council
 pass. Native authorization, live state and independent review still require
 the corresponding guarded operations.
+
+
+### Preflight an exact headless Demand without admission
+
+```sh
+pandacode serve --preflight-demand <team-id> direct /path/to/objective.txt
+pandacode serve --preflight-demand <team-id> coordinated /path/to/objective.txt
+```
+
+This operation reads the bounded (maximum 16 KiB) UTF-8 objective and calls the
+existing native manual policy preflight for the selected Worker or Coordinator.
+It returns policy revision, selected role, eligibility at the database snapshot,
+a bounded attempt budget and a reason when blocked. It **does not print the
+objective**, issue a Mandate, reserve a session/checkout, dispatch a provider,
+or modify Ticket history. A separate headless process cannot attest currently
+running in-memory sessions; `eligibleAtSnapshot` is **not** permission or a
+reservation. Explicit native admission must independently check live provider
+occupancy, permissions, revision and leases. The existing `--queue-demand`
+continues to create a blocked manual Ticket without automatically executing it.

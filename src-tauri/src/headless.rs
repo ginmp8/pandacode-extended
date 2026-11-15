@@ -50,6 +50,7 @@ enum Command {
     InspectSourceHealth { source_id: String },
     UnlinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
     InspectTeamReadiness { orchestration_id: String },
+    PreflightDemand { orchestration_id: String, coordinated: bool, objective_file: PathBuf },
     InspectTeamRoster { orchestration_id: String },
     ObserveSource { source_id: String },
     ObserveCheckRun { source_id: String, check_run_id: i64 },
@@ -62,6 +63,21 @@ enum Command {
     QuarantineTerminalOrphan { ticket_id: String, expected_revision: i64 },
     DisableOrchestration { orchestration_id: String, expected_revision: i64 },
     RenameOrchestration { orchestration_id: String, expected_revision: i64, name: String },
+}
+
+fn read_bounded_objective(path: &std::path::Path) -> Result<String, String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("Cannot read objective file: {e}"))?;
+    let mut bytes = Vec::new();
+    file.take(16 * 1024 + 1).read_to_end(&mut bytes)
+        .map_err(|e| format!("Cannot read bounded objective: {e}"))?;
+    if bytes.len() > 16 * 1024 {
+        return Err("Objective exceeds the native 16 KiB limit.".into());
+    }
+    let objective = std::str::from_utf8(&bytes)
+        .map_err(|_| "Objective file must contain UTF-8 text.")?;
+    Ok(objective.to_owned())
 }
 
 /// `pandacode serve …`: true when the argument was handled; the process then serves until
@@ -193,6 +209,25 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(receipt) => { println!("{receipt}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent thread unlink failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::PreflightDemand { orchestration_id, coordinated, objective_file } = &command {
+                // An exact objective preflight cannot issue a Mandate or run a provider.
+                // The detached CLI cannot attest live session occupancy; actual
+                // admission must repeat the entire native policy and lease check.
+                let result = (|| -> Result<String, String> {
+                    let objective = read_bounded_objective(objective_file)?;
+                    let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+                    crate::superagent::inspect_headless_demand_preflight(
+                        &dir.join("kingcode.sqlite3"), orchestration_id, &objective, *coordinated,
+                    )
+                })();
+                match result {
+                    Ok(preflight) => { println!("{preflight}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Demand preflight failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -380,20 +415,10 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 // The objective is a bounded local file, never a command-line
                 // argument or console payload. This command stages but does not run.
                 let result = (|| -> Result<String, String> {
-                    use std::io::Read;
-                    let file = std::fs::File::open(objective_file)
-                        .map_err(|e| format!("Cannot read objective file: {e}"))?;
-                    let mut bytes = Vec::new();
-                    file.take(16 * 1024 + 1).read_to_end(&mut bytes)
-                        .map_err(|e| format!("Cannot read bounded objective: {e}"))?;
-                    if bytes.len() > 16 * 1024 {
-                        return Err("Objective exceeds the native 16 KiB limit.".into());
-                    }
-                    let objective = std::str::from_utf8(&bytes)
-                        .map_err(|_| "Objective file must contain UTF-8 text.")?;
+                    let objective = read_bounded_objective(objective_file)?;
                     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
                     crate::superagent::headless_queue_demand(
-                        &dir.join("kingcode.sqlite3"), orchestration_id, objective, request_key,
+                        &dir.join("kingcode.sqlite3"), orchestration_id, &objective, request_key,
                     )
                 })();
                 match result {
@@ -478,6 +503,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
+        | Command::PreflightDemand { .. }
         | Command::InspectTicketEffects { .. }
         | Command::InspectTicketSource { .. } | Command::InspectSourceHealth { .. }
         | Command::UnlinkSourceThread { .. }
@@ -1039,6 +1065,29 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops+=1;
                 index+=1;
             }
+            "--preflight-demand" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or("--preflight-demand needs a Team ID, mode and objective file.")?;
+                validate_orchestration_id(orchestration_id)?;
+                let mode = args.get(index + 2)
+                    .ok_or("--preflight-demand needs direct or coordinated mode.")?;
+                let coordinated = match mode.as_str() {
+                    "direct" => false,
+                    "coordinated" => true,
+                    _ => return Err("Choose direct or coordinated native Demand preflight mode.".into()),
+                };
+                let path = args.get(index + 3)
+                    .ok_or("--preflight-demand needs a local UTF-8 objective file.")?;
+                if path.is_empty() || path.starts_with("--") {
+                    return Err("Provide an objective file path, not another command.".into());
+                }
+                command = Command::PreflightDemand {
+                    orchestration_id: orchestration_id.clone(), coordinated,
+                    objective_file: PathBuf::from(path),
+                };
+                ops += 1;
+                index += 3;
+            }
             "--inspect-team-readiness" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--inspect-team-readiness needs a Team ID.\n\n{}", help()))?;
@@ -1376,7 +1425,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1422,6 +1471,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-team-readiness <id>
                          Inspect a Team's read-only native manual admission preflight;
                          live sessions and policy must be rechecked on actual admission.
+  --preflight-demand <team-id> <direct|coordinated> <objective-file>
+                         Validate the exact bounded UTF-8 objective against native manual policy.
+                         Prints no objective, issues no Mandate, creates no Ticket, launches no provider.
+                         Detached occupancy is unknown; actual admission must recheck.
   --inspect-source-health <id>
                          Inspect native source cursor, stored receipts and policy without
                          GitHub access, writes or restart recovery; exit.
@@ -1643,6 +1696,40 @@ mod tests {
         ] {
             assert!(parsed(invalid).is_err(), "{invalid}");
         }
+        assert_eq!(
+            parsed("--preflight-demand team_123 direct /tmp/objective.txt"),
+            Ok(Command::PreflightDemand {
+                orchestration_id:"team_123".into(), coordinated:false,
+                objective_file:PathBuf::from("/tmp/objective.txt"),
+            })
+        );
+        assert_eq!(
+            parsed("--preflight-demand team_123 coordinated /tmp/objective.txt"),
+            Ok(Command::PreflightDemand {
+                orchestration_id:"team_123".into(), coordinated:true,
+                objective_file:PathBuf::from("/tmp/objective.txt"),
+            })
+        );
+        for invalid in [
+            "--preflight-demand", "--preflight-demand team_123",
+            "--preflight-demand team_123 direct",
+            "--preflight-demand ../other direct /tmp/objective.txt",
+            "--preflight-demand team_123 auto /tmp/objective.txt",
+            "--preflight-demand team_123 direct --stop-ticket",
+            "--preflight-demand team_123 direct /tmp/objective.txt --stop-ticket ticket_1",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        let filename = std::env::temp_dir().join(format!(
+            "sa-preflight-objective-{}", crate::storage::id(),
+        ));
+        std::fs::write(&filename, "Scope-only objective").unwrap();
+        assert_eq!(read_bounded_objective(&filename).unwrap(), "Scope-only objective");
+        std::fs::write(&filename, vec![b'x'; 16 * 1024 + 1]).unwrap();
+        assert!(read_bounded_objective(&filename).is_err());
+        std::fs::write(&filename, [0xff, 0xfe]).unwrap();
+        assert!(read_bounded_objective(&filename).is_err());
+        std::fs::remove_file(&filename).unwrap();
         assert_eq!(parsed("--queue-demand team_123 request.1 /tmp/objective.txt"),
             Ok(Command::QueueDemand {
                 orchestration_id:"team_123".into(), request_key:"request.1".into(),

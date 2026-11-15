@@ -1027,6 +1027,34 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
     }))
 }
 
+/// Preflight an exact headless Demand objective against the same native
+/// manual policy used by the desktop. This reads an existing database without
+/// startup recovery or provider admission; live process occupancy is unknown.
+pub(crate) fn inspect_headless_demand_preflight(
+    database_path: &std::path::Path, orchestration_id: &str,
+    objective: &str, coordinated: bool,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let status = manual_preflight(&store, orchestration_id, objective, coordinated, false)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": status.orchestration_id,
+        "policyRevision": status.policy_revision,
+        "projectId": status.project_id,
+        "selectedRole": status.selected_role,
+        "selectedBotId": status.selected_bot_id,
+        "eligibleAtSnapshot": status.eligible,
+        "reason": status.reason,
+        "objectiveBytes": objective.trim().len(),
+        "allowedTools": status.allowed_tools,
+        "allowedSideEffects": status.allowed_side_effects,
+        "attemptBudgetMs": status.attempt_budget_ms,
+        "requiresLiveAdmissionRecheck": true,
+        "mandateIssued": false,
+        "providerDispatched": false,
+        "observationalOnly": true
+    })).map_err(|e| e.to_string())
+}
+
 /// Observe native Team readiness beside a live headless process without
 /// running migration or startup recovery. This shares the desktop's native
 /// manual role/checkout checks, but a detached CLI cannot attest live in-memory
@@ -3853,6 +3881,66 @@ mod tests {
             "SELECT COUNT(*) FROM sa_mandates",[],|r|r.get::<_,i64>(0)).unwrap(),0);
         assert!(inspect_headless_team_roster(&path,"not-a-team").is_err());
     }
+    #[test]
+    fn headless_exact_demand_preflight_is_read_only_and_revision_bound() {
+        let store = fixture();
+        let cfg = create_configuration(&store, NewOrchestration {
+            name: "Scoped headless preflight".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let objective = "Private scope: inspect only repository paths";
+        let disabled: serde_json::Value = serde_json::from_str(
+            &inspect_headless_demand_preflight(&store.path, &cfg.id, objective, false).unwrap()
+        ).unwrap();
+        assert_eq!(disabled["eligibleAtSnapshot"], false);
+        assert_eq!(disabled["mandateIssued"], false);
+        assert_eq!(disabled["providerDispatched"], false);
+        assert_eq!(disabled["allowedTools"], serde_json::json!([]));
+        assert!(!disabled.to_string().contains(objective));
+        let enabled = change_enabled(&store, &cfg.id, cfg.policy_revision, true).unwrap();
+        let direct: serde_json::Value = serde_json::from_str(
+            &inspect_headless_demand_preflight(&store.path, &cfg.id, objective, false).unwrap()
+        ).unwrap();
+        let coordinated: serde_json::Value = serde_json::from_str(
+            &inspect_headless_demand_preflight(&store.path, &cfg.id, objective, true).unwrap()
+        ).unwrap();
+        assert_eq!(direct["selectedRole"], "worker");
+        assert_eq!(direct["selectedBotId"], "worker");
+        assert_eq!(coordinated["selectedRole"], "coordinator");
+        assert_eq!(coordinated["selectedBotId"], "router");
+        assert_eq!(direct["policyRevision"], enabled.policy_revision);
+        assert_eq!(direct["eligibleAtSnapshot"], true);
+        assert_eq!(coordinated["eligibleAtSnapshot"], true);
+        assert_eq!(direct["requiresLiveAdmissionRecheck"], true);
+        assert_eq!(direct["objectiveBytes"], objective.len());
+        assert!(inspect_headless_demand_preflight(&store.path, &cfg.id, "  ", false).is_err());
+        assert!(inspect_headless_demand_preflight(&store.path, "missing", objective, true).is_err());
+        assert!(inspect_headless_demand_preflight(
+            &store.path, &cfg.id, &"x".repeat(MAX_OBJECTIVE_BYTES + 1), false
+        ).is_err());
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        let paused: serde_json::Value = serde_json::from_str(
+            &inspect_headless_demand_preflight(&store.path, &cfg.id, objective, false).unwrap()
+        ).unwrap();
+        assert_eq!(paused["eligibleAtSnapshot"], false);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0)
+        ).unwrap(), 0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |row| row.get::<_, i64>(0)
+        ).unwrap(), 0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit", [], |row| row.get::<_, i64>(0)
+        ).unwrap(), 0);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments", [], |row| row.get::<_, i64>(0)
+        ).unwrap(), 0);
+    }
+
     #[test]
     fn headless_team_readiness_is_redacted_nonmutating_and_never_admits() {
         let store = fixture();

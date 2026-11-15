@@ -49,6 +49,10 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();
+  // Native creation and its list refresh are asynchronous. Assert the same
+  // disabled dispatch gate only after the new preset has been rendered.
+  await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Issue Resolution');
+  await expect(dialog.locator('#superagent-host')).toHaveAttribute('aria-busy','false');
   await expect(dialog.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await dialog.getByRole('button',{name:'Enable manual'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();

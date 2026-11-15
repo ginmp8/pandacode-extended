@@ -297,8 +297,10 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();
-  // Wait for the native create ACK and the Runs view, not the click itself.
-  // The CI host can complete a native reload after the usual 5s assertion window.
+  // The native create ACK includes an asynchronous Team/Ticket reload. Do not
+  // assert the directory projection before that operation has settled.
+  await expect(dialog.locator('#superagent-host')).toHaveAttribute('aria-busy','false', {timeout:30_000});
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
   await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Issue Resolution', {timeout:15_000});
   await expect(dialog.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await dialog.getByRole('button',{name:'Enable manual'}).click();
@@ -1866,6 +1868,7 @@ test('SuperAgent issue comments use a stable receipt and report uncertain state 
 
 
 test('Demand WorkItem inspector explains native dependency blockers without launching tasks',async ({page})=>{
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   await page.evaluate(async()=>{
     const {mountSuperagent}=await import('/src/superagent-ui.ts');
@@ -1916,6 +1919,9 @@ test('Demand WorkItem inspector explains native dependency blockers without laun
   const host=page.locator('#sa-workitem-blockers-test');
   await host.getByRole('button',{name:'Demands / Runs'}).click();
   await host.getByRole('button',{name:'View evidence'}).click();
+  // Snapshot and source-link reads finish before the inspector may issue its
+  // own native read. Preserve the busy guard instead of racing a disabled button.
+  await expect(host).toHaveAttribute('aria-busy','false', {timeout:30_000});
   const plan=host.getByRole('region',{name:'Demand WorkItems'});
   await plan.getByRole('button',{name:'Inspect WorkItems'}).click();
   await expect(plan.getByText('Waiting for prerequisite Tickets: verify (pending)')).toBeVisible();

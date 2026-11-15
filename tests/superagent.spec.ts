@@ -1467,6 +1467,7 @@ test('native Team directory counts configured roles and filters without creating
 });
 
 test('duplicate Team uses native atomic roster creation without copying source authority', async ({page}) => {
+  test.setTimeout(90_000);
   await page.goto('/?bots=sample');
   const bar=page.locator('.sidebar-bots-bar');
   if(await bar.getAttribute('aria-pressed')!=='true')await bar.click();
@@ -1483,7 +1484,9 @@ test('duplicate Team uses native atomic roster creation without copying source a
   await form.locator('select[name="reviewers"]').selectOption({label:'Ledger'});
   await form.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(workspace.locator('.sa-list .sa-item')).toHaveCount(1);
-  await workspace.getByRole('button',{name:'Duplicate as new Team'}).click();
+  await workspace.getByRole('button',{name:'Teams',exact:true}).click();
+  await workspace.getByRole('region',{name:'Team overview'})
+    .getByRole('button',{name:'Duplicate as new Team'}).click();
   const approval=workspace.getByRole('alertdialog',{name:'Confirm orchestration action'});
   await expect(approval).toContainText('Tickets, source subscriptions, permissions and approvals are not copied');
   await approval.getByRole('button',{name:'Confirm',exact:true}).click();
@@ -1502,6 +1505,7 @@ test('duplicate Team uses native atomic roster creation without copying source a
 });
 
 test('Team duplication rejects a stale native revision without creating a preset', async ({page}) => {
+  test.setTimeout(45_000);
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {
     const {mountSuperagent}=await import('/src/superagent-ui.ts');

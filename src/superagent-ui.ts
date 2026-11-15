@@ -630,7 +630,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<dt>Worker</dt><dd>' + safe(botName(chosen.workerBotId)) + '</dd>' +
         '<dt>Configured members</dt><dd>' + safe(roleSummary(chosen)) + '</dd>' +
         '<dt>Current native support</dt><dd>One worker, manual dispatch; scoped writes and automatic GitHub intake unsupported.</dd></dl>' +
-        '<button type="button" data-sa-open-runs>Assign demand / Open runs</button></section>'
+        '<div class="sa-actions"><button type="button" data-sa-open-runs>Assign demand / Open runs</button>' +
+        '<button type="button" data-sa-duplicate="' + safe(chosen.id) +
+        '">Duplicate as new Team</button></div></section>'
       : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
     const globalReviewPanel = '<section class="sa-pane sa-cross-team-review" ' +
       'role="region" aria-label="Cross-Team native review inbox"><header>' +

@@ -308,3 +308,9 @@ Read-only PR #152 source: `22af3bdee9af5337b6101d6cf7e28cc24614cf46`. Previous t
 - Terminal review receipts must explicitly match the task session ID. Child usage records must match the child's own cycle and round prefix, never another child's shared-root ledger rows.
 - Ported #152's persisted-state regression for invalid one-round S3 child dispatch. This does not imply all source tests or AC-01..40 passed.
 - Source refs and base branch are read-only. Exact-HEAD Rust/desktop/browser validation must be reported by its actual CI result. PR remains draft.
+## November 15: composed task binding and cross-root isolation
+
+Origin PR #152 `22af3bdee9af5337b6101d6cf7e28cc24614cf46`, original unified destination `f757b01fbd9ba6e353df39027887868e6fc7eecb`.
+- Reconciled immutable task-binding checks for native composed M3/M5/M7 source seats and nested child review evidence; preserved the target's stricter recorded reviewer authority and M1/M2 behavior.
+- Imported 3 adapter terminal evidence/restart/replay regressions with their existing fixture helpers and 2 root-concurrency regressions testing separate Council cycles, tools, skills and assignments for the same bot.
+- This is real source code and tests, **not** full semantic parity with PR #149's alternate pipeline. Do not claim tests pass without the exact-head CI run. Source/base refs were not written.

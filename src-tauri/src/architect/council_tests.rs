@@ -289,6 +289,12 @@ fn user_and_hybrid_criteria_are_versioned_and_reject_invalid_anchors() {
     config.criteria[1].target = 11.0;
     assert!(config.validate().unwrap_err().contains("between 1 and 10"));
     config.criteria[1].target = 9.5;
+    config.criteria[1].required = false;
+    config.criteria[1].evidence_required = true;
+    assert!(config.validate().unwrap_err().contains("required evidence"),
+        "a mandatory native evidence gate cannot be hidden in an optional criterion");
+    config.criteria[1].evidence_required = false;
+    assert!(config.validate().is_ok(), "optional criteria without mandatory evidence remain valid");
     config.criteria_source = council::CouncilCriteriaSource::Architect;
     assert!(config.validate().unwrap_err().contains("criteria source"));
 }
@@ -4618,6 +4624,20 @@ fn nested_m4_forced_s2_passes_only_after_two_authenticated_child_waves() {
                 && child.verified_child_receipt.is_some()
                 && child.verified_escalation_receipt.is_none()));
         assert!(!verified_council_pass(&store, &root));
+    }
+    // A repeated finish request while S2 leaves are pending is idempotent:
+    // no new native sessions, grants or votes may be created.
+    let (replayed, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Still awaiting S2 child callbacks"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(replayed["completed"], false);
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let children = child_council::inspect(&store, &root).unwrap();
+        assert!(children.iter().all(|child|
+            child.leaf_attempts.len() == 4
+                && child.leaf_attempts.iter().filter(|leaf| leaf.round == 2).count() == 2));
     }
     for _ in 0..4 {
         let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();

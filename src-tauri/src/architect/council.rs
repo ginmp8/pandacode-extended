@@ -225,6 +225,9 @@ impl CouncilConfig {
             {
                 return Err("Council criteria need unique valid IDs and distinct plain lenses.".into());
             }
+            if criterion.evidence_required && !criterion.required {
+                return Err("Council required evidence cannot be assigned to an optional criterion.".into());
+            }
             if !criterion.target.is_finite() || !(1.0..=10.0).contains(&criterion.target) {
                 return Err("Each Council criterion target must be between 1 and 10.".into());
             }

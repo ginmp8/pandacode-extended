@@ -1148,13 +1148,49 @@ pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
                 .ok_or("child_council_stale: expected child reservation for S2 escalation.")?;
             let mut child = super::load(store, &record.child_session_id)?
                 .ok_or("child_council_stale: S2 child Architect is missing.")?;
-            if child.status != "running" || child.workers.len() != choice.child_reviewers {
-                return Err("child_council_stale: S2 child first-wave roster changed.".into());
+            if child.status != "running" {
+                return Err("child_council_stale: S2 child is no longer running.".into());
+            }
+            let first_wave = child.workers.iter().filter(|leaf|
+                leaf.council.as_ref().is_some_and(|seat| seat.round == 1)
+            ).count();
+            let second_wave = child.workers.iter().filter(|leaf|
+                leaf.council.as_ref().is_some_and(|seat| seat.round == 2)
+            ).count();
+            if first_wave != choice.child_reviewers
+                || child.workers.len() != first_wave + second_wave
+                || (second_wave != 0 && second_wave != choice.child_reviewers)
+            {
+                return Err("child_council_stale: S2 child wave roster changed.".into());
             }
             if read_verified_receipt(store, root, &record, &child)?.is_none()
                 || parent_seat(store, root, &record, &child, false)?.is_none()
             {
                 return Err("child_council_denied: S2 requires authenticated first-wave child evidence.".into());
+            }
+            // Reentrant finish_team calls must not dispatch the same S2 wave twice.
+            // Reauthenticate every already issued leaf, including queued ones,
+            // rather than trusting a worker count or a stored completion claim.
+            if second_wave == choice.child_reviewers {
+                let mut worker_ids = HashSet::new();
+                let mut session_ids = HashSet::new();
+                for leaf in &child.workers {
+                    let binding = leaf.reviewer_binding.as_ref()
+                        .ok_or("child_council_stale: S2 child leaf has no native grant.")?;
+                    if leaf.id.is_empty() || leaf.session_id.is_empty()
+                        || !worker_ids.insert(leaf.id.as_str())
+                        || !session_ids.insert(leaf.session_id.as_str())
+                        || !leaf.read_only || leaf.abandoned || leaf.wrote_at != 0
+                        || !leaf.files.is_empty()
+                        || binding.validate(&child, leaf).is_err()
+                        || reviewer_security::validate_recorded_authority(
+                            store, &child.session_id, binding,
+                        ).is_err()
+                    {
+                        return Err("child_council_stale: S2 child leaf authority or identity changed.".into());
+                    }
+                }
+                continue;
             }
             require_total_attempt_capacity(store, root, choice.child_reviewers)?;
             issue_leaf_wave(store, root, choice, &record, &mut child, 2)?;

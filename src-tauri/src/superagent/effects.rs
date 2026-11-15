@@ -914,27 +914,35 @@ fn reconcile_unresolved(
     let observed = capture
         .and_then(|capture| github::json(&capture))
         .and_then(|value| readback_state(&value, intent));
-    match observed {
-        Ok(Readback::Exact(evidence)) => {
-            if let Err(error) = settle_applied(store, intent, &evidence) {
-                let _ = mark_uncertain(store, intent, "readback_settlement_failed", "exact");
-                return Err(error);
+    // Stop waits on this fence before it starts its read-then-write transition.
+    // Taking the same fence around the settlement write means Stop either sees
+    // the settled receipt before its read snapshot or settles first; it can no
+    // longer lose its write to a newer WAL snapshot committed in between.
+    let reconciliation = {
+        let _settlement_fence = lock_dispatch(&store.path)?;
+        match observed {
+            Ok(Readback::Exact(evidence)) => {
+                if let Err(error) = settle_applied(store, intent, &evidence) {
+                    let _ = mark_uncertain(store, intent, "readback_settlement_failed", "exact");
+                    return Err(error);
+                }
+                "exact-readback"
             }
-            status(store, intent, "exact-readback")
+            Ok(Readback::Missing) => {
+                mark_uncertain(store, intent, "marker_not_found", "missing")?;
+                "marker-not-found"
+            }
+            Ok(Readback::Conflict) => {
+                mark_uncertain(store, intent, "marker_conflict", "conflict")?;
+                "marker-conflict"
+            }
+            Err(_) => {
+                mark_uncertain(store, intent, "readback_unavailable", "unavailable")?;
+                "readback-unavailable"
+            }
         }
-        Ok(Readback::Missing) => {
-            mark_uncertain(store, intent, "marker_not_found", "missing")?;
-            status(store, intent, "marker-not-found")
-        }
-        Ok(Readback::Conflict) => {
-            mark_uncertain(store, intent, "marker_conflict", "conflict")?;
-            status(store, intent, "marker-conflict")
-        }
-        Err(_) => {
-            mark_uncertain(store, intent, "readback_unavailable", "unavailable")?;
-            status(store, intent, "readback-unavailable")
-        }
-    }
+    };
+    status(store, intent, reconciliation)
 }
 
 pub(crate) fn post_issue_comment(
@@ -976,26 +984,44 @@ fn post_issue_comment_with(
             let issue = intent.issue_number.to_string();
             let repo_flag = github::flag("repo", &intent.repository);
             let body_flag = github::flag("body", &intent.comment_body);
+            let mut attempted = false;
             let dispatch = (|| -> Result<std::result::Result<crate::workspace::Capture, String>> {
                 let _fence = lock_dispatch(database_path)?;
                 let scope = validate_pending_dispatch(&store, intent)?;
                 let root = store.workspace_root(&scope.project_id, Some(&scope.session_id))?;
-                Ok(run_gh(
+                attempted = true;
+                let remote_result = run_gh(
                     &root,
                     &["issue", "comment", &issue, &repo_flag, &body_flag],
                     github::TIMEOUT,
-                ))
+                );
+                // The adapter may have timed out after GitHub accepted the
+                // request. Persist uncertainty before releasing the fence and
+                // before any readback, so a waiting Stop observes the
+                // uncertain receipt instead of racing this write with its own
+                // read-then-write transaction.
+                mark_uncertain(&store, intent, "write_result_unverified", "not_attempted")?;
+                Ok(remote_result)
             })();
             match dispatch {
                 Err(error) => {
-                    let _ = mark_uncertain(&store, intent, "dispatch_not_started", "not_attempted");
+                    // A failed settlement after the provider call must not be
+                    // overwritten by "dispatch_not_started". Retry under the
+                    // fence when possible so Stop cannot interleave a commit.
+                    let reason = if attempted {
+                        "write_result_unverified"
+                    } else {
+                        "dispatch_not_started"
+                    };
+                    // Best-effort settlement, fenced when the lock is
+                    // available so Stop cannot interleave. This also retries
+                    // an uncertainty write that failed after the provider
+                    // call, rather than leaving a pending receipt behind.
+                    let _fence = lock_dispatch(database_path).ok();
+                    let _ = mark_uncertain(&store, intent, reason, "not_attempted");
                     Err(error)
                 }
                 Ok(_remote_result) => {
-                    // The adapter may have timed out after GitHub accepted the
-                    // request. Persist uncertainty before any readback and
-                    // never replay the write, regardless of its exit status.
-                    mark_uncertain(&store, intent, "write_result_unverified", "not_attempted")?;
                     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
                     let session_id = active_scope_if_current(&tx, intent)?
                         .filter(|scope| scope.project_id == project_id)

@@ -366,6 +366,25 @@ CREATE TRIGGER IF NOT EXISTS sa_project_lease_update
  BEGIN SELECT RAISE(ABORT,'SuperAgent project already has an active assignment'); END;
 "#;
 
+/// Keep an active native assignment from becoming an ownerless Ticket when a
+/// task is deleted in the short interval between native admission and agent
+/// registration. Bot reset/removal revokes the assignment first, so its
+/// intentional session cleanup still passes this database guard.
+const ACTIVE_ASSIGNMENT_SESSION_DELETE_GUARD: &str = r#"
+CREATE TRIGGER IF NOT EXISTS sa_active_assignment_session_delete_guard
+ BEFORE DELETE ON sessions
+ WHEN EXISTS (
+   SELECT 1 FROM sa_assignments
+   WHERE session_id=OLD.id AND state='running'
+ )
+ BEGIN SELECT RAISE(ABORT,'Cannot delete a session owned by an active SuperAgent assignment'); END;
+"#;
+
+fn ensure_active_assignment_session_delete_guard(db: &Connection) -> Result<()> {
+    db.execute_batch(ACTIVE_ASSIGNMENT_SESSION_DELETE_GUARD)
+        .map_err(|e| e.to_string())
+}
+
 /// An active harness is not resumed automatically after process restart.
 pub(crate) const RECOVER: &str = "
 -- A crash or legacy partial write may leave a running assignment on a
@@ -2721,6 +2740,36 @@ fn checkout_path(store:&Store,project_id:&str)->Result<String> {
     Ok(path)
 }
 
+fn canonical_checkout_intent(path: &str) -> Option<std::path::PathBuf> {
+    let source = std::path::Path::new(path);
+    let absolute = if source.is_absolute() {
+        source.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(source)
+    };
+    let mut cursor = absolute.as_path();
+    let mut unresolved = Vec::new();
+    loop {
+        match std::fs::canonicalize(cursor) {
+            Ok(mut resolved) => {
+                for segment in unresolved.into_iter().rev() {
+                    resolved.push(segment);
+                }
+                return Some(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A dangling symlink is not a safe ordinary missing directory.
+                if std::fs::symlink_metadata(cursor).is_ok() {
+                    return None;
+                }
+                unresolved.push(cursor.file_name()?.to_os_string());
+                cursor = cursor.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
 fn checkout_paths_equivalent(left: &str, right: &str) -> bool {
     if left == right { return true; }
     if std::path::Path::new(left)
@@ -2732,7 +2781,7 @@ fn checkout_paths_equivalent(left: &str, right: &str) -> bool {
     {
         return true;
     }
-    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+    match (canonical_checkout_intent(left), canonical_checkout_intent(right)) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
     }
@@ -2999,6 +3048,7 @@ fn admit_role_with_grant_inner(
     {
         return Err("Provide a stable alphanumeric manual-request key.".into());
     }
+    ensure_active_assignment_session_delete_guard(&store.db)?;
     if let Some(existing) = store.db.query_row(
         "SELECT id FROM sa_tickets WHERE orchestration_id=?1 AND request_key=?2",
         params![config_id,request_key], |row| row.get::<_, String>(0),
@@ -4065,6 +4115,8 @@ pub(crate) fn invalidate_bot(
     removed: bool,
     _dispatch_fence: &effects::DispatchFence,
 ) -> Result<()> {
+    ensure_active_assignment_session_delete_guard(&store.db)?;
+
     // Resetting either selected bot invalidates every nonterminal mandate:
     // coordinator sessions are just as ephemeral as worker sessions, and a
     // previously finished plan must not authorize a worker after reset.
@@ -4723,6 +4775,8 @@ pub async fn superagent_submit(window: tauri::WebviewWindow,
 fn retry_blocked(
     store: &mut Store, ticket_id: &str, busy: bool,
 ) -> Result<(Ticket, String, String)> {
+    ensure_active_assignment_session_delete_guard(&store.db)?;
+
     let ticket = get_ticket(store,ticket_id)?;
     if ticket.state != "blocked" {
         return Err("Only a blocked SuperAgent ticket can be retried manually.".into());
@@ -4846,6 +4900,8 @@ fn prepare_coordinated_worker_inner(
     expected_revision: Option<i64>,
     allowed_paths: Option<&[String]>,
 ) -> Result<(Ticket, String, String, String)> {
+    ensure_active_assignment_session_delete_guard(&store.db)?;
+
     let ticket = get_ticket(store, ticket_id)?;
     if expected_revision.is_some_and(|revision| revision != ticket.revision) {
         return Err("Ticket revision changed before worker authorization.".into());
@@ -5305,6 +5361,50 @@ pub async fn superagent_revoke_worker_write_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
+    #[test]
+    fn missing_checkout_paths_compare_real_parents_not_symlink_spellings() {
+        use std::os::unix::fs::symlink;
+        let root=std::env::temp_dir().join(format!(
+            "pandacode-checkout-intent-{}",uuid::Uuid::new_v4(),
+        ));
+        std::fs::create_dir_all(root.join("real")).unwrap();
+        symlink(root.join("real"),root.join("alias")).unwrap();
+        let actual=root.join("real").join("not-yet-created");
+        let alias=root.join("alias").join("not-yet-created");
+        assert!(checkout_paths_equivalent(
+            actual.to_str().unwrap(),alias.to_str().unwrap(),
+        ));
+        symlink(root.join("missing-parent"),root.join("dangling")).unwrap();
+        assert!(!checkout_paths_equivalent(
+            root.join("dangling").join("child").to_str().unwrap(),
+            actual.to_str().unwrap(),
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn an_active_assignment_cannot_lose_its_owning_session() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (ticket,launched)=admit(
+            &mut store,&cfg.id,"Keep native owner","owner-delete-fence",false,
+        ).unwrap();
+        assert!(launched);
+        let session=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        let deleted=store.db.execute(
+            "DELETE FROM sessions WHERE id=?1",[&session],
+        );
+        assert!(deleted.is_err(),"running native assignment must block orphan deletion");
+        assert!(store.session(&session).is_ok());
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"running");
+        assert!(!mandate(&store,&ticket.id).unwrap().revoked);
+        stop(&store,&ticket.id).unwrap();
+        assert!(store.db.execute(
+            "DELETE FROM sessions WHERE id=?1",[&session],
+        ).is_ok(),"revocation must release the native ownership guard");
+    }
+
 
     #[test]
     fn headless_queue_demand_is_durable_idempotent_and_never_dispatches() {

@@ -4386,7 +4386,7 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
         {
             let store = state.store.lock().unwrap();
             store.message(&action.sid, "assistant",
-                "Fresh independent child S2 review.\\nCouncil score: 9.6/10").unwrap();
+                "Fresh independent child S2 review.\nCouncil score: 9.6/10").unwrap();
         }
         completed_state(&state, &action.sid, Some(&action.admission), true, false, &mut |_| {});
     }
@@ -4397,6 +4397,12 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
         leaf.round == 2 && leaf.status == "completed" && leaf.score == Some(9.6)).count(), 2);
     assert!(!verified_council_pass(&store, &root),
         "second-wave callbacks are real, but final hierarchical S2 reconciliation remains fail-closed");
+    drop(store);
+    let (waiting, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Keep escalated Council pending"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(waiting["completed"], false,
+        "completed phase-two child scores cannot be counted without a separate verified terminal receipt");
 }
 
 #[test]

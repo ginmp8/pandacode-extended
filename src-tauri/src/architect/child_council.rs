@@ -760,7 +760,7 @@ fn issue_leaf_wave(
     super::validate_worker_role(&session.provider, true)?;
     let lenses: Vec<String> = config.criteria.iter().map(|criterion| criterion.lens.clone()).collect();
     for index in 0..choice.child_reviewers {
-            let lens = lenses.get(index).cloned().unwrap_or_else(|| format!("Child review {}", index + 1));
+        let lens = lenses.get(index).cloned().unwrap_or_else(|| format!("Child review {}", index + 1));
         let mut assignment = format!(
                 "Review the frozen task artifact independently for the {lens} criterion. \
                  You are a task-scoped Council leaf, never the coordinating bot. \
@@ -789,7 +789,7 @@ fn issue_leaf_wave(
                 round, lens, score: None, started_at: 0,
                 closed_by_selection: false, reported_severe_finding: false, reported_conflict: false,
             };
-            let binding = ReviewerBinding::native(&child, &id, now, &session.provider, &session.model, &seat);
+            let binding = ReviewerBinding::native(child, &id, now, &session.provider, &session.model, &seat);
             reviewer_security::record_native_authority(store, &record.child_session_id, &binding)?;
             child.workers.push(Worker {
                 id, session_id: leaf.id, name: format!("Child reviewer {}", index + 1),
@@ -883,8 +883,6 @@ pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
             return Err("child_council_stale: child review is not eligible for admission.".into());
         }
         require_total_attempt_capacity(store, root, choice.child_reviewers)?;
-        let session = store.session(&record.child_session_id)?;
-        super::validate_worker_role(&session.provider, true)?;
         child.status = "running".into();
         child.generation = root.generation;
         child.objective = root.objective.clone();

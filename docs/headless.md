@@ -423,6 +423,7 @@ pandacode serve --list-team-demands <team-id> blocked
 pandacode serve --accept-ticket <ticket-id> <expected-revision>
 pandacode serve --reject-ticket <ticket-id> <expected-revision> "Needs changes"
 pandacode serve --stop-ticket <ticket-id>
+pandacode serve --stop-ticket-at-revision <ticket-id> <expected-revision>
 ```
 
 The Ticket activity command pages a durable audit stream in descending event-ID order
@@ -433,7 +434,10 @@ provider output, secrets and evidence are excluded. It neither authorizes
 execution nor runs startup recovery beside another live host.
 
 Accept and reject use the current Ticket revision; reject also requires a
-nonempty reason. Stop revokes the Ticket mandate in the shared database. A
+nonempty reason. Use the revision reported by `--inspect-ticket` or the recovery
+inbox for `--stop-ticket-at-revision`; a stale observation fails without state,
+mandate or audit changes. Unconditional `--stop-ticket` remains available for
+emergency revocation. Stop revokes the Ticket mandate in the shared database. A
 provider call already held in memory by a running serve process is not forcibly
 terminated; its late completion is denied by the native state and mandate
 checks. These commands do not create, retry, or resume tasks, and authenticated
@@ -616,7 +620,8 @@ acceptance.
 
 ### Cross-process Stop propagation to the serve-owned provider
 
-`pandacode serve --stop-ticket <ticket-id>` is a separate one-shot CLI
+`pandacode serve --stop-ticket <ticket-id>` (or
+`--stop-ticket-at-revision <ticket-id> <expected-revision>`) is a separate one-shot CLI
 process. It atomically revokes the native mandate and marks the Ticket stopped
 in the shared SQLite database; the CLI cannot directly access a running
 `serve` process's in-memory provider handle. The serve-owned native watchdog

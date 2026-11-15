@@ -1462,6 +1462,17 @@ pub(crate) fn headless_stop_ticket(database_path: &std::path::Path, ticket_id: &
     headless_ticket_status(&ticket)
 }
 
+/// Revision-bound headless Stop prevents a stale observation from revoking
+/// a Ticket changed by another operator. Emergency Stop remains unconditional.
+pub(crate) fn headless_stop_ticket_at_revision(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let (ticket, _session) =
+        stop_with_expected_revision(&store, ticket_id, Some(expected_revision))?;
+    headless_ticket_status(&ticket)
+}
+
 /// Quarantine an explicit, revisioned running Ticket whose single active native
 /// Assignment has no SQLite provider session. The detached process never
 /// claims a provider was stopped, replays a remote effect or grants a retry.
@@ -2760,8 +2771,17 @@ fn reject(store: &Store, ticket_id: &str, expected_revision: i64, reason: &str) 
 }
 
 fn stop(store: &Store, ticket_id: &str) -> Result<(Ticket,Option<String>)> {
+    stop_with_expected_revision(store, ticket_id, None)
+}
+
+fn stop_with_expected_revision(
+    store: &Store, ticket_id: &str, expected_revision: Option<i64>,
+) -> Result<(Ticket,Option<String>)> {
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let ticket = get_ticket(store,ticket_id)?;
+    if expected_revision.is_some_and(|revision| revision != ticket.revision) {
+        return Err("SuperAgent Ticket revision changed before Stop; inspect the current Ticket.".into());
+    }
     if matches!(ticket.state.as_str(),"completed"|"failed"|"stopped"|"interrupted"|"inconclusive") {
         return Err("Task is already terminal.".into());
     }
@@ -4603,6 +4623,40 @@ mod tests {
         assert!(capped.truncated_attempts);
         assert_eq!(capped.nodes[1].attempt, Some(2));
         assert_eq!(capped.nodes[50].attempt, Some(51));
+    }
+
+    #[test]
+    fn headless_revision_bound_stop_denies_stale_observation_without_revocation() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, admitted) = admit(
+            &mut store, &cfg.id, "Revision-safe operator Stop", "headless-stop-cas", false,
+        ).unwrap();
+        assert!(admitted);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let audit_before = history(&store, &ticket.id, 20).unwrap().len();
+        assert!(headless_stop_ticket_at_revision(
+            &store.path, &ticket.id, ticket.revision + 1,
+        ).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().len(), audit_before);
+        let result: serde_json::Value = serde_json::from_str(
+            &headless_stop_ticket_at_revision(&store.path, &ticket.id, ticket.revision).unwrap(),
+        ).unwrap();
+        assert_eq!(result["state"], "stopped");
+        assert_eq!(result["revision"], ticket.revision + 1);
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().len(), audit_before + 1);
+        assert!(headless_stop_ticket_at_revision(
+            &store.path, &ticket.id, ticket.revision,
+        ).is_err(), "a stale command may not repeat or revive Stop");
+        assert!(!on_run_finished(&store, &session, true, "Late provider result").unwrap());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "stopped");
+        assert!(mandate(&reopened, &ticket.id).unwrap().revoked);
     }
 
     #[test]

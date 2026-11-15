@@ -293,6 +293,30 @@ CREATE TRIGGER IF NOT EXISTS sa_council_finalization_no_delete
  BEGIN SELECT RAISE(ABORT,'SuperAgent Council finalizations are durable'); END;
 "#;
 
+/// Ordered native WorkItems for one Ticket and their prerequisite edges.
+/// A WorkItem is scheduler groundwork: it neither grants execution nor changes
+/// the existing Ticket, mandate or assignment authority.
+pub(crate) const WORK_ITEM_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS sa_work_items (
+  id TEXT PRIMARY KEY,
+  ticket_id TEXT NOT NULL REFERENCES sa_tickets(id) ON DELETE CASCADE,
+  objective TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('queued','ready','running','waiting_review','completed','failed','blocked')),
+  ordinal INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(ticket_id,ordinal)
+);
+CREATE INDEX IF NOT EXISTS sa_work_item_frontier
+  ON sa_work_items(ticket_id,state,ordinal);
+CREATE TABLE IF NOT EXISTS sa_work_item_deps (
+  item_id TEXT NOT NULL REFERENCES sa_work_items(id) ON DELETE CASCADE,
+  depends_on TEXT NOT NULL REFERENCES sa_work_items(id) ON DELETE CASCADE,
+  PRIMARY KEY(item_id,depends_on),
+  CHECK(item_id<>depends_on)
+);
+"#;
+
 /// Cross-bot resource admission is a database invariant, not only an
 /// optimistic application check. Every active assignment with the same ticket
 /// project shares an exclusive lease; ordinary bots keep their existing behavior.
@@ -1310,6 +1334,266 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
     };
     tx.commit().map_err(|e| e.to_string())?;
     Ok(result)
+}
+
+/// Scheduler groundwork: ordered WorkItems for one Ticket. These helpers are
+/// consumed by the WorkItem scheduler slice and its tests; they do not dispatch,
+/// grant authority, or change the existing Ticket/assignment state machine.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) mod work_items {
+    use super::{get_ticket, MAX_OBJECTIVE_BYTES};
+    use crate::storage::{self, Store};
+    use crate::Result;
+    use rusqlite::{params, OptionalExtension};
+    use serde::Serialize;
+
+    /// Every state admitted by the `sa_work_items.state` CHECK constraint.
+    pub(crate) const STATES: [&str; 7] =
+        ["queued", "ready", "running", "waiting_review", "completed", "failed", "blocked"];
+
+    #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+    #[serde(rename_all = "camelCase")]
+    pub(crate) struct WorkItem {
+        pub id: String,
+        pub ticket_id: String,
+        pub objective: String,
+        pub state: String,
+        pub ordinal: i64,
+        pub created_at: i64,
+        pub updated_at: i64,
+    }
+
+    fn work_item_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkItem> {
+        Ok(WorkItem {
+            id: row.get(0)?, ticket_id: row.get(1)?, objective: row.get(2)?,
+            state: row.get(3)?, ordinal: row.get(4)?, created_at: row.get(5)?,
+            updated_at: row.get(6)?,
+        })
+    }
+
+    fn valid_state(state: &str) -> bool {
+        STATES.contains(&state)
+    }
+
+    /// The fixed transition table. `completed` is terminal: there is no
+    /// cancellation state outside the schema's CHECK list.
+    fn transition_allowed(from: &str, to: &str) -> bool {
+        matches!(
+            (from, to),
+            ("queued", "ready" | "running" | "blocked" | "failed")
+                | ("ready", "running" | "blocked" | "failed")
+                | ("running", "waiting_review" | "completed" | "failed" | "blocked")
+                | ("waiting_review", "completed" | "failed" | "blocked")
+                | ("failed", "queued" | "blocked")
+                | ("blocked", "queued" | "failed")
+        )
+    }
+
+    fn bounded_objective(objective: &str) -> Result<&str> {
+        let objective = objective.trim();
+        if objective.is_empty()
+            || objective.len() > MAX_OBJECTIVE_BYTES
+            || objective.chars().any(|c| c == '\0')
+        {
+            return Err("A nonempty, bounded WorkItem objective is required.".into());
+        }
+        Ok(objective)
+    }
+
+    pub(crate) fn get_work_item(store: &Store, id: &str) -> Result<WorkItem> {
+        store.db.query_row(
+            "SELECT id,ticket_id,objective,state,ordinal,created_at,updated_at
+             FROM sa_work_items WHERE id=?1",
+            [id], work_item_row,
+        ).optional().map_err(|e| e.to_string())?
+            .ok_or_else(|| "SuperAgent WorkItem not found.".into())
+    }
+
+    pub(crate) fn list_work_items(
+        store: &Store, ticket_id: &str, limit: i64,
+    ) -> Result<Vec<WorkItem>> {
+        if !(1..=200).contains(&limit) {
+            return Err("WorkItem page size must be between 1 and 200.".into());
+        }
+        get_ticket(store, ticket_id)?;
+        let mut stmt = store.db.prepare(
+            "SELECT id,ticket_id,objective,state,ordinal,created_at,updated_at
+             FROM sa_work_items WHERE ticket_id=?1 ORDER BY ordinal,id LIMIT ?2",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(params![ticket_id, limit], work_item_row)
+            .map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+    }
+
+    pub(crate) fn create_work_item(
+        store: &Store, ticket_id: &str, objective: &str, ordinal: i64,
+    ) -> Result<WorkItem> {
+        let objective = bounded_objective(objective)?;
+        if ordinal < 0 {
+            return Err("A WorkItem ordinal must be zero or greater.".into());
+        }
+        let ticket = get_ticket(store, ticket_id)?;
+        let duplicate: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_work_items WHERE ticket_id=?1 AND ordinal=?2)",
+            params![ticket.id, ordinal], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if duplicate {
+            return Err("A WorkItem already uses this ordinal on the Ticket.".into());
+        }
+        let id = storage::id();
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_work_items(id,ticket_id,objective,state,ordinal,created_at,updated_at)
+             VALUES(?1,?2,?3,'queued',?4,?5,?5)",
+            params![id, ticket.id, objective, ordinal, now],
+        ).map_err(|e| e.to_string())?;
+        get_work_item(store, &id)
+    }
+
+    /// Record `item_id` -> `depends_on`. Both items must belong to the same
+    /// Ticket. A recursive walk of the existing edges rejects transitive cycles,
+    /// not only direct self-dependencies.
+    pub(crate) fn add_work_item_dependency(
+        store: &Store, item_id: &str, depends_on: &str,
+    ) -> Result<()> {
+        if item_id == depends_on {
+            return Err("A WorkItem cannot depend on itself.".into());
+        }
+        let item = get_work_item(store, item_id)?;
+        let dependency = get_work_item(store, depends_on)?;
+        if item.ticket_id != dependency.ticket_id {
+            return Err("A WorkItem dependency must belong to the same Ticket.".into());
+        }
+        let duplicate: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_work_item_deps WHERE item_id=?1 AND depends_on=?2)",
+            params![item.id, dependency.id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if duplicate {
+            return Err("This WorkItem dependency is already recorded.".into());
+        }
+        let cycle: bool = store.db.query_row(
+            "WITH RECURSIVE chain(id) AS (
+               SELECT ?2
+               UNION
+               SELECT d.depends_on FROM sa_work_item_deps d JOIN chain c ON d.item_id=c.id
+             )
+             SELECT EXISTS(SELECT 1 FROM chain WHERE id=?1)",
+            params![item.id, dependency.id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if cycle {
+            return Err("This WorkItem dependency would create a cycle.".into());
+        }
+        store.db.execute(
+            "INSERT INTO sa_work_item_deps(item_id,depends_on) VALUES(?1,?2)",
+            params![item.id, dependency.id],
+        ).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// Queued items whose prerequisites are all completed and which have no
+    /// active assignment, in deterministic ordinal order.
+    pub(crate) fn ready_work_items(store: &Store, ticket_id: &str) -> Result<Vec<WorkItem>> {
+        get_ticket(store, ticket_id)?;
+        let mut stmt = store.db.prepare(
+            "SELECT w.id,w.ticket_id,w.objective,w.state,w.ordinal,w.created_at,w.updated_at
+             FROM sa_work_items w
+             WHERE w.ticket_id=?1 AND w.state='queued'
+               AND NOT EXISTS(
+                 SELECT 1 FROM sa_work_item_deps d
+                 JOIN sa_work_items prerequisite ON prerequisite.id=d.depends_on
+                 WHERE d.item_id=w.id AND prerequisite.state<>'completed')
+               AND NOT EXISTS(
+                 SELECT 1 FROM sa_assignments a
+                 WHERE a.work_item_id=w.id AND a.state='running')
+             ORDER BY w.ordinal,w.id",
+        ).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([ticket_id], work_item_row)
+            .map_err(|e| e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+    }
+
+    /// Bind one active assignment to one queued/ready WorkItem of the same
+    /// Ticket, then compare-and-swap the WorkItem to running. A second bind of
+    /// either side is rejected instead of replaying the first binding.
+    pub(crate) fn bind_work_item(
+        store: &Store, assignment_id: &str, work_item_id: &str,
+    ) -> Result<WorkItem> {
+        let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+        let assignment: Option<(String, String, Option<String>)> = tx.query_row(
+            "SELECT ticket_id,state,work_item_id FROM sa_assignments WHERE id=?1",
+            [assignment_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        ).optional().map_err(|e| e.to_string())?;
+        let (ticket_id, assignment_state, bound_item) = assignment
+            .ok_or("SuperAgent assignment not found.")?;
+        if bound_item.is_some() {
+            return Err("This assignment is already bound to a WorkItem.".into());
+        }
+        if assignment_state != "running" {
+            return Err("Only a running assignment can bind a WorkItem.".into());
+        }
+        let item: WorkItem = tx.query_row(
+            "SELECT id,ticket_id,objective,state,ordinal,created_at,updated_at
+             FROM sa_work_items WHERE id=?1",
+            [work_item_id], work_item_row,
+        ).optional().map_err(|e| e.to_string())?
+            .ok_or("SuperAgent WorkItem not found.")?;
+        if item.ticket_id != ticket_id {
+            return Err("A WorkItem binding must stay on the same Ticket.".into());
+        }
+        if !matches!(item.state.as_str(), "queued" | "ready") {
+            return Err("Only a queued or ready WorkItem can start.".into());
+        }
+        let busy: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_assignments
+             WHERE work_item_id=?1 AND state='running' AND id<>?2)",
+            params![item.id, assignment_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if busy {
+            return Err("This WorkItem already has an active assignment.".into());
+        }
+        let now = storage::now();
+        let moved = tx.execute(
+            "UPDATE sa_work_items SET state='running',updated_at=?2 WHERE id=?1 AND state=?3",
+            params![item.id, now, item.state],
+        ).map_err(|e| e.to_string())?;
+        if moved != 1 {
+            return Err("The WorkItem changed while binding; reload and try again.".into());
+        }
+        let bound = tx.execute(
+            "UPDATE sa_assignments SET work_item_id=?2 WHERE id=?1 AND work_item_id IS NULL",
+            params![assignment_id, item.id],
+        ).map_err(|e| e.to_string())?;
+        if bound != 1 {
+            return Err("The assignment changed while binding; reload and try again.".into());
+        }
+        tx.commit().map_err(|e| e.to_string())?;
+        get_work_item(store, work_item_id)
+    }
+
+    /// Move one WorkItem along the fixed transition table. The update is a CAS
+    /// on the state that was read, so a concurrent transition cannot be lost.
+    pub(crate) fn transition_work_item(
+        store: &Store, work_item_id: &str, next_state: &str,
+    ) -> Result<WorkItem> {
+        let item = get_work_item(store, work_item_id)?;
+        if !valid_state(next_state) {
+            return Err("Unknown WorkItem state.".into());
+        }
+        if !transition_allowed(&item.state, next_state) {
+            return Err(format!(
+                "WorkItem cannot move from {} to {}.",
+                item.state, next_state
+            ));
+        }
+        let moved = store.db.execute(
+            "UPDATE sa_work_items SET state=?2,updated_at=?3 WHERE id=?1 AND state=?4",
+            params![item.id, next_state, storage::now(), item.state],
+        ).map_err(|e| e.to_string())?;
+        if moved != 1 {
+            return Err("The WorkItem changed; reload and transition again.".into());
+        }
+        get_work_item(store, work_item_id)
+    }
 }
 
 /// A one-shot local CLI inspector is deliberately read-only: it must not run
@@ -5865,5 +6149,271 @@ mod tests {
         assert!(read_only_policy(&store,&sid).unwrap().is_some());
         assert!(on_run_finished(&store,&sid,true,"Current result").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"waiting_approval");
+    }
+
+    #[test]
+    fn v52_work_item_migration_preserves_existing_tickets_and_assignments_and_replays() {
+        let directory = std::env::temp_dir().join(format!(
+            "pandacode-work-item-migration-{}", storage::id(),
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.sqlite3");
+        let now = storage::now();
+        {
+            let store = Store::open(&path).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_orchestrations(id,name,coordinator_bot_id,worker_bot_id,project_id,enabled,policy_revision,created_at,updated_at)
+                 VALUES('legacy-orchestration','Legacy','coordinator','worker','project',0,1,?1,?1)",
+                [now],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,project_id,worker_bot_id,policy_revision,state,revision,created_at,updated_at)
+                 VALUES('legacy-ticket','legacy-orchestration','legacy-key','Legacy objective','local-user','manual','project','worker',1,'completed',2,?1,?1)",
+                [now],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,result,created_at,updated_at)
+                 VALUES('legacy-assignment','legacy-ticket','worker','legacy-session','finished',1,'done',?1,?1)",
+                [now],
+            ).unwrap();
+            // Rebuild the exact v51 shape: WorkItems and the nullable assignment
+            // link did not exist before v52.
+            store.db.execute_batch(
+                "DROP INDEX IF EXISTS sa_assignment_work_item;
+                 ALTER TABLE sa_assignments DROP COLUMN work_item_id;
+                 DROP TABLE sa_work_item_deps;
+                 DROP TABLE sa_work_items;
+                 PRAGMA user_version=51;",
+            ).unwrap();
+        }
+        let migrated = Store::open(&path).unwrap();
+        let version: i64 = migrated.db
+            .pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(version, 52);
+        assert_eq!(version, storage::SCHEMA_VERSION);
+        let retained: (String,String) = migrated.db.query_row(
+            "SELECT objective,state FROM sa_tickets WHERE id='legacy-ticket'",
+            [], |row| Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        assert_eq!(retained, ("Legacy objective".into(),"completed".into()));
+        let assignment: (String,String,Option<String>) = migrated.db.query_row(
+            "SELECT session_id,state,work_item_id FROM sa_assignments WHERE id='legacy-assignment'",
+            [], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        assert_eq!(assignment, ("legacy-session".into(),"finished".into(),None));
+        let schema_objects: i64 = migrated.db.query_row(
+            "SELECT (SELECT COUNT(*) FROM sqlite_master WHERE type='table'
+                       AND name IN ('sa_work_items','sa_work_item_deps'))
+                  + (SELECT COUNT(*) FROM sqlite_master WHERE type='index'
+                       AND name='sa_assignment_work_item')",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(schema_objects, 3);
+
+        // A row created under v52 survives a replay of the same migration step.
+        migrated.db.execute(
+            "INSERT INTO sa_work_items(id,ticket_id,objective,state,ordinal,created_at,updated_at)
+             VALUES('replay-item','legacy-ticket','Replay objective','queued',0,?1,?1)",
+            [now],
+        ).unwrap();
+        migrated.db.execute_batch("PRAGMA user_version=51;").unwrap();
+        drop(migrated);
+        let replayed = Store::open(&path).unwrap();
+        let version: i64 = replayed.db
+            .pragma_query_value(None, "user_version", |row| row.get(0)).unwrap();
+        assert_eq!(version, storage::SCHEMA_VERSION);
+        let retained: (String,String) = replayed.db.query_row(
+            "SELECT objective,state FROM sa_tickets WHERE id='legacy-ticket'",
+            [], |row| Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        assert_eq!(retained, ("Legacy objective".into(),"completed".into()));
+        let item: (String,String) = replayed.db.query_row(
+            "SELECT objective,state FROM sa_work_items WHERE id='replay-item'",
+            [], |row| Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        assert_eq!(item, ("Replay objective".into(),"queued".into()));
+        drop(replayed);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn work_items_are_bounded_ordered_and_unique_per_ticket() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Slice the work", "work-item-create", false,
+        ).unwrap();
+        assert!(launched);
+
+        let first = work_items::create_work_item(
+            &store, &ticket.id, "  Inspect storage  ", 0,
+        ).unwrap();
+        assert_eq!(first.objective, "Inspect storage");
+        assert_eq!(first.state, "queued");
+        assert_eq!(first.ordinal, 0);
+        assert_eq!(first.ticket_id, ticket.id);
+        let second = work_items::create_work_item(
+            &store, &ticket.id, "Add scheduler", 2,
+        ).unwrap();
+        assert_eq!(work_items::get_work_item(&store, &second.id).unwrap(), second);
+
+        let listed = work_items::list_work_items(&store, &ticket.id, 10).unwrap();
+        assert_eq!(
+            listed.iter().map(|item| item.ordinal).collect::<Vec<_>>(),
+            vec![0, 2],
+        );
+        assert!(work_items::create_work_item(&store, &ticket.id, "Duplicate", 0).is_err());
+        assert!(work_items::create_work_item(&store, &ticket.id, "   ", 3).is_err());
+        assert!(work_items::create_work_item(
+            &store, &ticket.id, &"x".repeat(MAX_OBJECTIVE_BYTES + 1), 3,
+        ).is_err());
+        assert!(work_items::create_work_item(&store, &ticket.id, "Negative", -1).is_err());
+        assert!(work_items::create_work_item(&store, "missing-ticket", "Orphan", 0).is_err());
+        assert!(work_items::list_work_items(&store, &ticket.id, 0).is_err());
+        assert!(work_items::get_work_item(&store, "missing-item").is_err());
+    }
+
+    #[test]
+    fn work_item_dependencies_form_a_ready_frontier_and_reject_cycles() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Ordered slices", "work-item-frontier", false,
+        ).unwrap();
+        assert!(launched);
+        let first = work_items::create_work_item(&store, &ticket.id, "First", 0).unwrap();
+        let second = work_items::create_work_item(&store, &ticket.id, "Second", 1).unwrap();
+        let third = work_items::create_work_item(&store, &ticket.id, "Third", 2).unwrap();
+
+        work_items::add_work_item_dependency(&store, &second.id, &first.id).unwrap();
+        work_items::add_work_item_dependency(&store, &third.id, &second.id).unwrap();
+        assert_eq!(
+            work_items::ready_work_items(&store, &ticket.id).unwrap(),
+            vec![first.clone()],
+        );
+
+        assert!(work_items::add_work_item_dependency(&store, &first.id, &first.id).is_err());
+        assert!(work_items::add_work_item_dependency(&store, &second.id, &first.id).is_err());
+        assert!(work_items::add_work_item_dependency(&store, &first.id, &third.id).is_err());
+        assert!(work_items::add_work_item_dependency(&store, "missing-item", &first.id).is_err());
+        let (other, _) = admit(
+            &mut store, &config.id, "Another ticket", "work-item-frontier-other", false,
+        ).unwrap();
+        let foreign = work_items::create_work_item(&store, &other.id, "Foreign", 0).unwrap();
+        assert!(work_items::add_work_item_dependency(&store, &first.id, &foreign.id).is_err());
+
+        assert!(work_items::transition_work_item(&store, &first.id, "completed").is_err());
+        assert!(work_items::transition_work_item(&store, &first.id, "cancelled").is_err());
+        assert_eq!(
+            work_items::transition_work_item(&store, &first.id, "ready").unwrap().state,
+            "ready",
+        );
+        assert_eq!(
+            work_items::transition_work_item(&store, &first.id, "running").unwrap().state,
+            "running",
+        );
+        assert_eq!(
+            work_items::transition_work_item(&store, &first.id, "completed").unwrap().state,
+            "completed",
+        );
+        assert!(work_items::transition_work_item(&store, &first.id, "queued").is_err());
+        assert_eq!(
+            work_items::ready_work_items(&store, &ticket.id).unwrap(),
+            vec![second.clone()],
+        );
+
+        for state in ["ready","running","completed"] {
+            work_items::transition_work_item(&store, &second.id, state).unwrap();
+        }
+        assert_eq!(
+            work_items::ready_work_items(&store, &ticket.id).unwrap(),
+            vec![third.clone()],
+        );
+
+        // The frontier excludes a queued item that still has a running assignment.
+        let assignment = assignments(&store, &ticket.id, 10).unwrap().remove(0);
+        work_items::bind_work_item(&store, &assignment.id, &third.id).unwrap();
+        assert!(work_items::ready_work_items(&store, &ticket.id).unwrap().is_empty());
+        store.db.execute(
+            "UPDATE sa_work_items SET state='queued' WHERE id=?1", [&third.id],
+        ).unwrap();
+        assert!(work_items::ready_work_items(&store, &ticket.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn work_item_binding_is_ticket_scoped_single_use_and_rejects_non_runnable_items() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Bind exact work", "work-item-bind", false,
+        ).unwrap();
+        assert!(launched);
+        let assignment = assignments(&store, &ticket.id, 10).unwrap().remove(0);
+        let item = work_items::create_work_item(&store, &ticket.id, "Runnable", 0).unwrap();
+        let finished = work_items::create_work_item(
+            &store, &ticket.id, "Already done", 1,
+        ).unwrap();
+        for state in ["ready","running","completed"] {
+            work_items::transition_work_item(&store, &finished.id, state).unwrap();
+        }
+
+        let (other, _) = admit(
+            &mut store, &config.id, "Other ticket", "work-item-bind-other", false,
+        ).unwrap();
+        let foreign = work_items::create_work_item(&store, &other.id, "Foreign", 0).unwrap();
+        assert!(work_items::bind_work_item(&store, &assignment.id, &foreign.id).is_err());
+        assert!(work_items::bind_work_item(&store, &assignment.id, &finished.id).is_err());
+        let unbound: Option<String> = store.db.query_row(
+            "SELECT work_item_id FROM sa_assignments WHERE id=?1",
+            [&assignment.id], |row| row.get(0),
+        ).unwrap();
+        assert!(unbound.is_none());
+
+        let bound = work_items::bind_work_item(&store, &assignment.id, &item.id).unwrap();
+        assert_eq!(bound.state, "running");
+        let linked: Option<String> = store.db.query_row(
+            "SELECT work_item_id FROM sa_assignments WHERE id=?1",
+            [&assignment.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(linked.as_deref(), Some(item.id.as_str()));
+        // Replaying the same bind must not relink or restart the item.
+        assert!(work_items::bind_work_item(&store, &assignment.id, &item.id).is_err());
+        let active = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(active.state, "running");
+        assert_eq!(active.revision, ticket.revision);
+        assert_eq!(active.active_assignment_id.as_deref(), Some(assignment.id.as_str()));
+    }
+
+    #[test]
+    fn work_item_binding_preserves_the_active_ticket_snapshot_and_read_only_grant() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Keep authority fixed", "work-item-snapshot", false,
+        ).unwrap();
+        assert!(launched);
+        let assignment = assignments(&store, &ticket.id, 10).unwrap().remove(0);
+        let snapshot_before =
+            serde_json::to_value(ticket_snapshot(&store, &ticket.id, 20).unwrap()).unwrap();
+        assert!(read_only_policy(&store, &assignment.session_id).unwrap().is_some());
+
+        let item = work_items::create_work_item(&store, &ticket.id, "First slice", 0).unwrap();
+        assert_eq!(
+            work_items::bind_work_item(&store, &assignment.id, &item.id).unwrap().state,
+            "running",
+        );
+        let snapshot_after =
+            serde_json::to_value(ticket_snapshot(&store, &ticket.id, 20).unwrap()).unwrap();
+        assert_eq!(snapshot_after, snapshot_before);
+        assert_eq!(
+            assignments(&store, &ticket.id, 10).unwrap().remove(0).state, "running",
+        );
+        assert!(read_only_policy(&store, &assignment.session_id).unwrap().is_some());
+        assert!(on_run_finished(
+            &store, &assignment.session_id, true, "Exact worker result",
+        ).unwrap());
+        let waiting = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(waiting.state, "waiting_approval");
+        assert!(waiting.active_assignment_id.is_none());
     }
 }

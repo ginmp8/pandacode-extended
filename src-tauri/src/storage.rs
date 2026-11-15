@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 51;
+pub const SCHEMA_VERSION: i64 = 52;
 pub(crate) const COUNCIL_REVIEW_SNAPSHOT_DIRECTORY: &str = "council-review-snapshots";
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
@@ -822,6 +822,27 @@ impl Store {
                     .map_err(|e| e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=51;")
                     .map_err(|e| e.to_string())?;
+            }
+            if version < 52 {
+                // S5 WorkItems are ordered per-Ticket units with prerequisite
+                // edges. The assignment link is nullable, so every existing
+                // attempt keeps its exact history and authority.
+                migration.execute_batch(crate::superagent::WORK_ITEM_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                let has_work_item: bool = migration.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_assignments') WHERE name='work_item_id')",
+                    [], |row| row.get(0),
+                ).map_err(|e| e.to_string())?;
+                if !has_work_item {
+                    migration.execute_batch(
+                        "ALTER TABLE sa_assignments ADD COLUMN work_item_id TEXT REFERENCES sa_work_items(id) ON DELETE SET NULL;",
+                    ).map_err(|e| e.to_string())?;
+                }
+                migration.execute_batch(
+                    "CREATE INDEX IF NOT EXISTS sa_assignment_work_item
+                       ON sa_assignments(work_item_id) WHERE work_item_id IS NOT NULL;
+                     PRAGMA user_version=52;",
+                ).map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
         }

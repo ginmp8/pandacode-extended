@@ -1832,6 +1832,25 @@ pub(crate) fn headless_link_thread(
     })).map_err(|e| e.to_string())
 }
 
+/// Headless operator association of an Issue with an existing PR source.
+///
+/// The existing native transaction checks the Ticket, source, repository
+/// identity and original Issue link. This does not authenticate the GitHub
+/// relationship or issue provider permissions.
+pub(crate) fn headless_link_issue_pull(
+    path: &std::path::Path, source_id: &str, ticket_id: &str,
+    issue_key: &str, pull_key: &str,
+) -> Result<String> {
+    let store = super::open_headless_transition_store(path)?;
+    let link = link_issue_to_pull(&store, source_id, ticket_id, issue_key, pull_key)?;
+    serde_json::to_string(&serde_json::json!({
+        "sourceId": link.source_id, "ticketId": link.ticket_id,
+        "issueKey": issue_key, "pullKey": link.subject_key,
+        "linked": true, "operatorAsserted": true,
+        "authenticatedRelationship": false, "authorizationIssued": false
+    })).map_err(|error| error.to_string())
+}
+
 /// Trusted local operator revocation of an exact context association without
 /// opening Store::open, running startup recovery, or touching a live provider.
 /// Desktop and headless use the same native transaction and immutable receipts.

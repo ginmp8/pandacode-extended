@@ -3957,6 +3957,88 @@ fn composition_rejects_bad_identity_quorum_child_settings_and_root_limits() {
 }
 
 #[test]
+fn composition_validation_rejects_counts_outside_council_limits() {
+    use council::{AutomaticReviewerCount as Count, CouncilCompositionError as Error};
+
+    for invalid_count in [0, 9] {
+        let plan = composition(true, Count::Fixed(invalid_count), vec![]);
+        assert!(matches!(plan.validate(), Err(Error::InvalidAutomaticCount)));
+    }
+
+    let too_many_selected = composition(
+        false,
+        Count::Fixed(0),
+        (0..9)
+            .map(|n| direct_reviewer(&format!("direct-{n}")))
+            .collect(),
+    );
+    assert!(matches!(
+        too_many_selected.validate(),
+        Err(Error::RootSeatLimit {
+            actual: 9,
+            maximum: 8
+        })
+    ));
+
+    let mut child_over_limit = composition(
+        false,
+        Count::Fixed(0),
+        vec![nested_reviewer("nested-a"), nested_reviewer("nested-b")],
+    );
+    child_over_limit.selected[0]
+        .nested
+        .as_mut()
+        .unwrap()
+        .child_reviewer_count = 9;
+    assert!(matches!(
+        child_over_limit.validate(),
+        Err(Error::InvalidNestedConfig { .. })
+    ));
+}
+
+#[test]
+fn composition_validation_rejects_duplicate_criterion_ids_and_lenses() {
+    use council::{AutomaticReviewerCount as Count, CouncilCompositionError as Error};
+
+    let criterion = |id: &str, lens: &str| council::CouncilCriterion {
+        id: id.into(),
+        lens: lens.into(),
+        description: format!("Evaluate {lens} evidence."),
+        required: true,
+        target: 9.0,
+        evidence_required: true,
+        source: council::CouncilCriterionOrigin::Architect,
+    };
+    let composition_with_criteria = |criteria| {
+        let mut plan = composition(
+            false,
+            Count::Fixed(0),
+            vec![direct_reviewer("reviewer-a"), direct_reviewer("reviewer-b")],
+        );
+        plan.criteria = criteria;
+        plan
+    };
+
+    let duplicate_ids = composition_with_criteria(vec![
+        criterion("security", "security"),
+        criterion("security", "reliability"),
+    ]);
+    assert!(matches!(
+        duplicate_ids.validate(),
+        Err(Error::DuplicateCriterionId(_))
+    ));
+
+    let duplicate_lenses = composition_with_criteria(vec![
+        criterion("security", "Security"),
+        criterion("reliability", "security"),
+    ]);
+    assert!(matches!(
+        duplicate_lenses.validate(),
+        Err(Error::DuplicateCriterionLens(_))
+    ));
+}
+
+#[test]
 fn dispatch_validation_fails_closed_for_self_review_and_unsupported_capabilities() {
     use council::{AutomaticReviewerCount as Count, CouncilCompositionError as Error};
     let mut config = config_for_composition(composition(

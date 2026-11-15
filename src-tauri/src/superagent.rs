@@ -3755,7 +3755,8 @@ mod tests {
                 ],
             ).unwrap();
         }
-        let page = |store: &Store, before_at, before_id, project| {
+        let page = |store: &Store, before_at: Option<i64>, before_id: Option<&str>,
+                    project: Option<&str>| {
             list_all_demands_page_for_project(
                 store, 200, before_at, before_id, Some(&team.id),
                 Some("blocked"), None, project,

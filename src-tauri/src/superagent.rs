@@ -337,6 +337,13 @@ fn create_configuration(store: &Store, input: NewOrchestration) -> Result<Orches
     if coordinator.paused || worker.paused {
         return Err("Choose active coordinator and worker bots.".into());
     }
+    // A disabled Team is still trusted local configuration. Never save a
+    // primary role that the native admission harness cannot validate.
+    for bot in [&coordinator, &worker] {
+        if let Some(issue) = roster::member_execution_issue(bot) {
+            return Err(issue.into());
+        }
+    }
     let id = storage::id();
     let now = storage::now();
     store.db.execute(
@@ -2956,6 +2963,13 @@ fn change_enabled(
         {
             return Err("Selected bots are paused or their worker scope has changed.".into());
         }
+        // Old disabled Teams and edited bot profiles must pass the same
+        // native role checks before the user can explicitly enable them.
+        for bot in [&coordinator, &worker] {
+            if let Some(issue) = roster::member_execution_issue(bot) {
+                return Err(issue.into());
+            }
+        }
     }
     if current.enabled == enabled {
         if enabled { return Ok(current); }
@@ -3051,6 +3065,11 @@ fn update_configuration(store: &Store, id: &str, expected_revision: i64, input: 
     if identity_changed {
         if coordinator.paused || worker.paused {
             return Err("Paused bots cannot be selected for a new orchestration policy.".into());
+        }
+        for bot in [&coordinator, &worker] {
+            if let Some(issue) = roster::member_execution_issue(bot) {
+                return Err(issue.into());
+            }
         }
         if roster::has_additional_members(store,id)? {
             return Err("Clear additional Team roles before changing primary bot identities.".into());
@@ -6291,6 +6310,31 @@ mod tests {
         stop(&store, &ticket.id).unwrap();
         assert!(guard_cloud_attach(&store, &sid).is_err(),
             "A revoked task must never reattach with ambient cloud permissions");
+    }
+
+    #[test]
+    fn unsupported_primary_harnesses_fail_before_team_creation_or_activation() {
+        let store = fixture();
+        let input = || NewOrchestration {
+            name: "Unsupported primary".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        };
+        store.db.execute("UPDATE bots SET provider='not-a-real-harness' WHERE id='router'", []).unwrap();
+        assert!(create_configuration(&store, input()).unwrap_err().contains("harness"));
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 0, "Rejected Team must leave no disabled orphan");
+        store.db.execute("UPDATE bots SET provider='codex' WHERE id='router'", []).unwrap();
+        let config = create_configuration(&store, input()).unwrap();
+        store.db.execute("UPDATE bots SET mode='unsupported-test-mode' WHERE id='worker'", []).unwrap();
+        let error = change_enabled(&store, &config.id, config.policy_revision, true).unwrap_err();
+        assert!(error.contains("permission mode"), "{error}");
+        let persisted = configuration(&store, &config.id).unwrap();
+        assert!(!persisted.enabled);
+        assert_eq!(persisted.policy_revision, config.policy_revision);
+        store.db.execute("UPDATE bots SET mode='plan' WHERE id='worker'", []).unwrap();
+        assert!(change_enabled(&store, &config.id, config.policy_revision, true).unwrap().enabled);
     }
 
     #[test]

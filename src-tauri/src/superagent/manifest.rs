@@ -138,6 +138,13 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
         if coordinator.paused || worker.paused {
             return Err("Paused primary Coordinator or Worker cannot be imported.".into());
         }
+        // A portable manifest must not sidestep native role eligibility,
+        // even though imports always start disabled and never issue grants.
+        for bot in [coordinator, worker] {
+            if let Some(issue) = super::roster::member_execution_issue(bot) {
+                return Err(format!("Unsupported portable primary Team member {}: {issue}", bot.name));
+            }
+        }
         if manifest.schema_version==1
             && (!preset.extra_worker_bots.is_empty() || !preset.reviewer_bots.is_empty()) {
             return Err("Version 1 manifests cannot declare multi-member Teams.".into());
@@ -156,12 +163,18 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
                 || bot.project_id != worker.project_id {
                 return Err("Duplicate, paused or cross-project additional Team Worker.".into());
             }
+            if let Some(issue) = super::roster::member_execution_issue(bot) {
+                return Err(format!("Unsupported portable Team Worker {}: {issue}", bot.name));
+            }
             extra_ids.push(bot.id.clone());
         }
         for name in &preset.reviewer_bots {
             let bot=lookup(name)?;
             if !unique.insert(bot.id.as_str()) || bot.paused {
                 return Err("Duplicate or paused Team Reviewer.".into());
+            }
+            if let Some(issue) = super::roster::member_execution_issue(bot) {
+                return Err(format!("Unsupported portable Team Reviewer {}: {issue}", bot.name));
             }
             reviewer_ids.push(bot.id.clone());
         }
@@ -581,6 +594,53 @@ mod tests {
             [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).unwrap();
         assert_eq!(config, (0, "router".into(), "worker".into()));
+    }
+
+    #[test]
+    fn portable_import_rejects_unsupported_member_harnesses_before_backup() {
+        let store = fixture();
+        let doc = document("Validated harness Team");
+        let root = std::env::temp_dir().join(format!(
+            "sa-unsupported-member-backup-{}", storage::id(),
+        ));
+
+        store.db.execute("UPDATE bots SET provider='unknown-harness' WHERE id='router'", []).unwrap();
+        assert!(preview(&store, &doc).unwrap_err().contains("harness"));
+        assert!(apply_with_backup(&store, &root, &doc, true).is_err());
+        store.db.execute("UPDATE bots SET provider='codex' WHERE id='router'", []).unwrap();
+        store.db.execute("UPDATE bots SET mode='invalid-approval-bypass' WHERE id='worker'", []).unwrap();
+        assert!(preview(&store, &doc).unwrap_err().contains("permission mode"));
+        assert!(apply_with_backup(&store, &root, &doc, true).is_err());
+        store.db.execute("UPDATE bots SET mode='plan' WHERE id='worker'", []).unwrap();
+
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('extra','Additional','worker-project','unknown-harness','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        let mut multirole = doc.clone();
+        multirole["schemaVersion"] = json!(2);
+        multirole["orchestrations"][0]["extraWorkerBots"] = json!(["Additional"]);
+        assert!(preview(&store, &multirole).unwrap_err().contains("Team Worker"));
+        assert!(apply_with_backup(&store, &root, &multirole, true).is_err());
+        store.db.execute("UPDATE bots SET provider='codex' WHERE id='extra'", []).unwrap();
+
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('reviewer','Reviewer','worker-project','unknown-harness','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        multirole["orchestrations"][0]["reviewerBots"] = json!(["Reviewer"]);
+        assert!(preview(&store, &multirole).unwrap_err().contains("Team Reviewer"));
+        assert!(apply_with_backup(&store, &root, &multirole, true).is_err());
+        assert!(!root.join("bot-backups").exists());
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations", [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count, 0, "Unsupported members cannot leave imported Teams");
+        store.db.execute("UPDATE bots SET provider='codex' WHERE id='reviewer'", []).unwrap();
+        assert_eq!(apply(&store, &multirole, true).unwrap().created,
+            vec!["Validated harness Team"]);
     }
 
     #[test]

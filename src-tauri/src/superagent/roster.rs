@@ -489,6 +489,15 @@ fn validate_member_ids(store:&Store,cfg:&Orchestration,input:&RosterInput)->Resu
        || input.worker_bot_ids.first()!=Some(&cfg.worker_bot_id) {
         return Err("Choose the original primary Worker, up to 8 Workers and 4 Reviewers.".into());
     }
+    // The primary Coordinator is not listed in the additional-role table,
+    // but must meet the same eligibility contract as every selected member.
+    let coordinator = bots::get(store, &cfg.coordinator_bot_id)?;
+    if coordinator.paused {
+        return Err("Paused bots cannot join a Team.".into());
+    }
+    if let Some(issue) = member_execution_issue(&coordinator) {
+        return Err(issue.into());
+    }
     let mut unique=HashSet::new();
     unique.insert(cfg.coordinator_bot_id.as_str());
     for bot_id in input.worker_bot_ids.iter().chain(input.reviewer_bot_ids.iter()) {
@@ -1064,6 +1073,9 @@ mod tests {
         store.db.execute("UPDATE bots SET paused=1 WHERE id='r1'",[]).unwrap();
         assert!(create_with_roster(&store,input(),roles.clone()).unwrap_err().contains("Paused bots"));
         store.db.execute("UPDATE bots SET paused=0 WHERE id='r1'",[]).unwrap();
+        store.db.execute("UPDATE bots SET provider='not-a-real-harness' WHERE id='lead'",[]).unwrap();
+        assert!(create_with_roster(&store,input(),roles.clone()).unwrap_err().contains("harness"));
+        store.db.execute("UPDATE bots SET provider='codex' WHERE id='lead'",[]).unwrap();
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_orchestrations",[],|r|r.get::<_,i64>(0),
         ).unwrap(),0,"all failed role preflights must roll back the Team");

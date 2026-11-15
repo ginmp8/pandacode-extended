@@ -655,7 +655,10 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
         }
     }
     if let Some(notice) = team.council_status.as_ref()
-        .and_then(|status| composed_native_authority_notice(store, team, status))
+        .and_then(|status| {
+            composed_native_authority_notice(store, team, status)
+                .or_else(|| composed_terminal_receipt_notice(store, team, status))
+        })
     {
         if let Some(status) = &mut team.council_status {
             status.state = "blocked".into();
@@ -675,6 +678,20 @@ fn composed_native_authority_notice(
         && team.config.council.as_ref().is_some_and(|config| config.composition.is_some())
         && !composed_native_authority_current(store, team, status.round))
         .then(|| "reviewer_session_mismatch: composed Council root seats require persisted native reviewer authority before approval.".into())
+}
+
+const COMPOSED_TERMINAL_RECEIPTS_INVALID: &str =
+    "council_terminal_receipts_invalid: every required terminal Council seat needs a correctly correlated persisted Pass receipt.";
+
+fn composed_terminal_receipt_notice(
+    store: &Store,
+    team: &TeamSnapshot,
+    status: &CouncilStatus,
+) -> Option<String> {
+    (status.state == "passed"
+        && team.config.council.as_ref().is_some_and(|config| config.composition.is_some())
+        && !verify_composition_terminal_receipts(store, team, status))
+        .then(|| COMPOSED_TERMINAL_RECEIPTS_INVALID.into())
 }
 
 fn native_council_status(store: &Store, team: &TeamSnapshot) -> Option<CouncilStatus> {
@@ -700,7 +717,9 @@ fn native_council_status(store: &Store, team: &TeamSnapshot) -> Option<CouncilSt
         status.state = "blocked".into();
         status.notice = Some("council_cost_cap_unproven: the configured estimated-cost cap cannot be verified from current native estimate and usage receipts.".into());
     }
-    if let Some(notice) = composed_native_authority_notice(store, team, &status) {
+    if let Some(notice) = composed_native_authority_notice(store, team, &status)
+        .or_else(|| composed_terminal_receipt_notice(store, team, &status))
+    {
         status.state = "blocked".into();
         status.notice = Some(notice);
     }
@@ -736,7 +755,10 @@ fn native_council_finish_refusal(store: &Store, team: &TeamSnapshot) -> Option<S
             team, &ledger.council_criterion_outcomes, &ledger.council_findings,
         );
         if let Some(notice) = status.as_ref()
-            .and_then(|status| composed_native_authority_notice(store, team, status))
+            .and_then(|status| {
+                composed_native_authority_notice(store, team, status)
+                    .or_else(|| composed_terminal_receipt_notice(store, team, status))
+            })
         {
             return Some(notice);
         }
@@ -1111,25 +1133,38 @@ fn verify_composition_terminal_receipts(
     {
         return false;
     }
-    let root_cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    // Native child receipts are persisted in the root ledger. Each child
+    // must still prove its own exact current task cycle and round.
+    let child_link = match validate_council_child_link(store, &team.session_id) {
+        Ok(link) => link,
+        Err(_) => return false,
+    };
+    let task_cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    let root_cycle_id = child_link.as_ref().map_or_else(
+        || task_cycle_id.clone(),
+        |link| link.root_council_cycle_id.clone(),
+    );
+    let ledger_owner = child_link
+        .as_ref()
+        .map_or(team.session_id.as_str(), |link| link.root_session_id.as_str());
     let Ok(current_delivery) = channel_delivery_id(store, &team.session_id) else {
         return false;
     };
     let Ok(review_receipts) = council_records::<council::CouncilReviewReceipt>(
         store,
-        &team.session_id,
+        ledger_owner,
         "council_review_receipt",
     ) else {
         return false;
     };
     let Ok(child_receipts) = council_records::<council::ChildCouncilReceipt>(
         store,
-        &team.session_id,
+        ledger_owner,
         "council_child_receipt",
     ) else {
         return false;
     };
-    if !child_receipt_roster_current(team, &child_receipts) {
+    if child_link.is_none() && !child_receipt_roster_current(team, &child_receipts) {
         return false;
     }
     let mut seats = 0usize;
@@ -1252,6 +1287,7 @@ fn verify_composition_terminal_receipts(
                     &idempotency_key,
                 )
                 .is_err()
+                || receipt.task_id.as_deref() != Some(team.session_id.as_str())
                 || receipt.policy_fingerprint != policy
                 || receipt.terminal_revision != worker.result_revision
                 || receipt.verdict != council::CouncilReviewVerdict::Passed
@@ -1265,16 +1301,17 @@ fn verify_composition_terminal_receipts(
     }
     let Ok(usage) = council_records::<council::CouncilUsageRecord>(
         store,
-        &team.session_id,
+        ledger_owner,
         "council_usage_record",
     ) else {
         return false;
     };
     let mut usage_count = 0usize;
-    for item in usage
-        .iter()
-        .filter(|item| item.root_cycle_id == root_cycle_id)
-    {
+    let task_round_prefix = format!("{task_cycle_id}:");
+    for item in usage.iter().filter(|item| {
+        item.root_cycle_id == root_cycle_id
+            && (child_link.is_none() || item.round_id.starts_with(&task_round_prefix))
+    }) {
         usage_count += 1;
         if item.validate().is_err() {
             return false;

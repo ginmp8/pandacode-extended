@@ -298,3 +298,13 @@ Source heads frozen read-only: [PR #149](https://github.com/ginmp8/pandacode-ext
 - #152 usage accumulator type aliases had already been independently integrated under equivalent names, so no duplicate aliases were added.
 - **Partial semantic integration only.** Do not claim parity with the 22 #149 changes or the remaining #152 terminal-receipt, recovery and executable acceptance work. Both contain substantially changed native orchestration and test paths, including competing child-Council models. The target retains its existing single authoritative Council engine.
 - No GitHub source/base branch refs were modified. No merge commit, rebase, force update, release or PR approval. These new tests are source-only and were **not compiled or executed** in this connector-only run. Exact-HEAD Rust, Node, browser, supported-harness, S2/S3 terminal and AC-01..40 evidence remain outstanding. Keep PR #155 draft.
+
+## November 15, 2026: root/child terminal receipt scope and native status
+
+Read-only PR #152 source: `22af3bdee9af5337b6101d6cf7e28cc24614cf46`. Previous target: `56f8e0d615d87aaaf9846d434643a2ef3701f3a4`.
+
+- Ported #152's **child ledger-owner and own-round receipt correlation** into the unified native receipt gate, while retaining the target's stricter uniqueness checks, root roster validation and persisted reviewer authority.
+- Terminal pass display, refresh and native finish now require verified **current** composed receipts; a cached pass with missing, stale or forged receipts becomes blocked, not success.
+- Terminal review receipts must explicitly match the task session ID. Child usage records must match the child's own cycle and round prefix, never another child's shared-root ledger rows.
+- Ported #152's persisted-state regression for invalid one-round S3 child dispatch. This does not imply all source tests or AC-01..40 passed.
+- Source refs and base branch are read-only. Exact-HEAD Rust/desktop/browser validation must be reported by its actual CI result. PR remains draft.

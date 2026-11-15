@@ -500,6 +500,7 @@ test('native Council findings remain attributed unverified and safe to render', 
     cycleStartedAt: 1000, teamRevision: 9,
     status: { state: 'fixing', round: 1, lowest: 6, target: 9, stale: false },
     verifiedPass: false, criteria: [], attempts: [],
+    findingTriage: { reported: 1, highPriorityClaims: 1, unverifiedClaims: 1 },
     reportedFindings: [
       { schemaVersion: 1, id: 'cycle:worker:22:0', cycleId: 'cycle', round: 1,
         workerId: 'worker-1', reportMessageId: 22, lens: 'Security', severity: 'high',
@@ -514,6 +515,11 @@ test('native Council findings remain attributed unverified and safe to render', 
   const findings = panel(page).getByRole('region', { name: 'Reviewer-reported findings' });
   await expect(findings.getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
   await expect(findings.getByText('independent evidence unverified', { exact: false })).toBeVisible();
+  await expect(findings.getByText('Finding ID cycle:worker:22:0', { exact: false })).toBeVisible();
+  await expect(findings.getByText('Artifact revision unavailable', { exact: false })).toBeVisible();
+  await expect(findings.getByText('Location unverified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-finding-triage')).toContainText('Critical/high reported: 1');
+  await expect(panel(page).locator('.council-finding-triage')).toContainText('Independently unverified: 1');
   await expect(findings.locator('img')).toHaveCount(0);
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
 });

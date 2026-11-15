@@ -500,6 +500,8 @@ pub struct CouncilInspection {
     pub usage_by_round_source: Vec<CouncilUsageGroup>,
     /// Attributed excerpts from durable reviewer messages. Claims are NOT verified evidence.
     pub reported_findings: Vec<CouncilReportedFinding>,
+    /// Bounded current-cycle claim counts only, never independent verified evidence.
+    pub finding_triage: CouncilFindingTriage,
 }
 /// Explain observed root review coverage without translating a reported score
 /// into an authenticated criterion check or a child Council composite verdict.
@@ -634,6 +636,23 @@ pub struct CouncilInspectionAttempt {
     pub cost_amount: Option<f64>,
     pub cost_currency: Option<String>,
     pub usage_provenance: &'static str,
+}
+
+/// Current-cycle native-attributed claims; not a human disposition or Council approval.
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CouncilFindingTriage {
+    pub reported: usize,
+    pub high_priority_claims: usize,
+    pub unverified_claims: usize,
+}
+pub(super) fn finding_triage(findings: &[CouncilReportedFinding]) -> CouncilFindingTriage {
+    CouncilFindingTriage {
+        reported: findings.len(),
+        high_priority_claims: findings.iter().filter(|f|
+            matches!(f.severity.as_str(), "critical" | "high")).count(),
+        unverified_claims: findings.iter().filter(|f| !f.evidence_verified).count(),
+    }
 }
 
 /// Versioned read-only projection of a real reviewer message, not a verified defect,
@@ -815,6 +834,7 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
         usage_by_round_source: usage_by_round_source(&attempts),
         usage: usage_totals(&attempts), attempts, composed_usage: None,
         reserved_children: Vec::new(), reported_findings: Vec::new(),
+        finding_triage: CouncilFindingTriage::default(),
     })
 }
 

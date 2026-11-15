@@ -33,6 +33,9 @@ fn native_council_finding_projection_reuses_persisted_report_and_invalidates_aft
     assert!(!council::report_claims_escalation(&store, &review_session.id, Some(9.9)).0);
     let first = council_inspection_state(&store, &sid).unwrap().unwrap();
     assert_eq!(first.reported_findings.len(), 2);
+    assert_eq!(first.finding_triage.reported, 2);
+    assert_eq!(first.finding_triage.high_priority_claims, 1);
+    assert_eq!(first.finding_triage.unverified_claims, 2);
     assert!(!first.verified_pass);
     assert!(!first.reported_findings[0].evidence_verified);
     assert!(first.reported_findings[0].verified_evidence_refs.is_empty());
@@ -44,7 +47,11 @@ fn native_council_finding_projection_reuses_persisted_report_and_invalidates_aft
         council_inspection_state(&store, &sid).unwrap().unwrap().reported_findings[0].id);
     store.message(&review_session.id, "coordination", "A new review turn started").unwrap();
     assert!(!council::report_claims_escalation(&store, &review_session.id, Some(6.0)).0);
-    assert!(council_inspection_state(&store, &sid).unwrap().unwrap().reported_findings.is_empty());
+    let refreshed = council_inspection_state(&store, &sid).unwrap().unwrap();
+    assert!(refreshed.reported_findings.is_empty());
+    assert_eq!(refreshed.finding_triage.reported, 0);
+    assert_eq!(refreshed.finding_triage.high_priority_claims, 0);
+    assert_eq!(refreshed.finding_triage.unverified_claims, 0);
 }
 
 #[test]
@@ -4397,7 +4404,7 @@ fn nested_m5_s3_admits_native_first_phase_but_denies_premature_approval() {
     assert!(receipt.phase_two.lowest_score >= 9.5);
     assert!(!verified_council_pass(&store, &saved),
         "child challenge evidence is not an independent root phase-two verdict");
-
+}
 
 #[test]
 fn nested_m5_parallel_terminal_requires_real_root_and_child_callbacks() {

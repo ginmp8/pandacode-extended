@@ -45,7 +45,21 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     '<li><strong>' + escape(f.severity.toUpperCase() + ' · ' + f.title) +
     '</strong><p>' + escape(f.category + ' · ' + f.lens + ' · ' + f.explanation) +
     '</p><small>Reviewer report only; independent evidence unverified · Round ' +
-    escape(String(f.round)) + ' · ' + escape(f.workerId) + '</small></li>';
+    escape(String(f.round)) + ' · ' + escape(f.workerId) +
+    ' · Finding ID ' + escape(typeof f.id === 'string' ? f.id : 'unavailable') +
+    ' · Artifact revision ' + escape(typeof f.artifactRevision === 'string' ? f.artifactRevision : 'unavailable') +
+    ' · ' + (f.locationVerified === true ? 'Location verification indicated' : 'Location unverified') +
+    '</small></li>';
+  // A truncated visual finding window cannot establish native total counts.
+  const triage = inspection.findingTriage;
+  const counts = triage && [triage.reported, triage.highPriorityClaims, triage.unverifiedClaims];
+  const findingTriageHtml = counts && counts.every(value => Number.isSafeInteger(value) && value >= 0) &&
+    triage!.highPriorityClaims <= triage!.reported && triage!.unverifiedClaims <= triage!.reported
+    ? '<p class="council-finding-triage">Native current-cycle reviewer claims: ' +
+      escape(String(triage!.reported)) + ' · Critical/high reported: ' +
+      escape(String(triage!.highPriorityClaims)) + ' · Independently unverified: ' +
+      escape(String(triage!.unverifiedClaims)) + ' (not a verified defect or Council pass)</p>'
+    : '';
   const shown = inspection.attempts.slice(-32);
   const rounds = [...new Set(shown.map(a => a.round))];
   const criteria = inspection.criteria ?? [];
@@ -299,7 +313,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     ': ' + escape(inspection.status.state) + ' · Revision ' + escape(String(inspection.teamRevision)) +
     '</p>' + criteriaHtml + observedCriteriaHtml +
     completion + sourceBreakdown + strategyHtml + usageHtml + composedHtml + groupHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
-    (attempts || '<p>No reviewer attempts have been admitted.</p>') + childHtml + findingsHtml + '</div>';
+    (attempts || '<p>No reviewer attempts have been admitted.</p>') + childHtml + findingTriageHtml + findingsHtml + '</div>';
 }
 
 /** Native lookup on demand; closing and reopening always retrieves fresh evidence. */

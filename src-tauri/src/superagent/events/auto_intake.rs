@@ -451,6 +451,9 @@ pub(crate) async fn poll_one(app:tauri::AppHandle)->Result<bool> {
 /// The only autonomous entrypoint, reusing native task admission, one
 /// provider-read-only worker per Team and immutable authenticated receipts.
 /// No model event may create its own bot/tool/side-effect authority.
+/// Native row shape for one independently authenticated Auto intake candidate.
+type StagedAutoSourceRow = (String, String, String, String, String, String, i64, i64);
+
 pub(crate) async fn drain_one(app:tauri::AppHandle)->Result<bool> {
     if crate::feature_controls::get().bots_paused {return Ok(false);}
     let state=app.state::<AppState>();
@@ -461,7 +464,7 @@ pub(crate) async fn drain_one(app:tauri::AppHandle)->Result<bool> {
         .keys().cloned().collect();
     let admitted={
         let mut store=state.store.lock().map_err(|error|error.to_string())?;
-        let selected:Option<(String,String,String,String,String,String,i64,i64)>=store.db.query_row(
+        let selected:Option<StagedAutoSourceRow>=store.db.query_row(
             "SELECT intake.source_id,intake.delivery_id,src.orchestration_id,
                     src.repository,intake.subject_key,intake.event_kind,
                     intake.source_policy_revision,intake.consent_revision

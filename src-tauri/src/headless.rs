@@ -51,6 +51,7 @@ enum Command {
     InspectTicketEffects { ticket_id: String },
     InspectTicketSource { ticket_id: String },
     InspectSourceHealth { source_id: String },
+    InspectAutoPolicy { source_id: String },
     UnlinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
     InspectTeamReadiness { orchestration_id: String },
     InspectTeamRoster { orchestration_id: String },
@@ -221,6 +222,22 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(status) => { println!("{status}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent source health inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectAutoPolicy { source_id } = &command {
+                // Never invoke restart recovery, GitHub polling, consent changes
+                // or a provider. This is a redacted, observational-only status.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::auto_intake::headless_inspect(
+                        &dir.join("kingcode.sqlite3"), source_id,
+                    ));
+                match result {
+                    Ok(status) => { println!("{status}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Auto policy inspection failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -517,6 +534,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
         | Command::InspectTicketEffects { .. }
         | Command::InspectTicketSource { .. } | Command::InspectSourceHealth { .. }
+        | Command::InspectAutoPolicy { .. }
         | Command::UnlinkSourceThread { .. }
         | Command::ObserveSource { .. } | Command::ObserveCheckRun { .. }
         | Command::CreateOrchestration { .. } | Command::ConfigureTeamRoles { .. }
@@ -1099,6 +1117,15 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--inspect-auto-policy" => {
+                let id = args.get(index + 1)
+                    .ok_or("--inspect-auto-policy needs a source ID.")?;
+                validate_ticket_id(id)
+                    .map_err(|_| "Provide a bounded source ID.".to_owned())?;
+                command = Command::InspectAutoPolicy { source_id: id.clone() };
+                ops += 1;
+                index += 1;
+            }
             "--observe-source" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--observe-source needs a source ID.\n\n{}", help()))?;
@@ -1455,7 +1482,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --inspect-auto-policy <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1502,6 +1529,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-source-health <id>
                          Inspect native source cursor, stored receipts and policy without
                          GitHub access, writes or restart recovery; exit.
+  --inspect-auto-policy <id>
+                         Inspect redacted, consent-bound GitHub Auto quotas and
+                         intake state without polling, writes or startup recovery; exit.
   --observe-source <id> Authenticated one-shot GitHub Observe poll for an activated source; exit.
                          No Auto, inferred task, webhook or external write.
   --observe-check-run <id> <check-run-id>
@@ -1688,6 +1718,12 @@ mod tests {
             Ok(Command::InspectSourceHealth { source_id: "source_123".into() }));
         for invalid in ["--inspect-source-health", "--inspect-source-health ../private",
                         "--inspect-source-health source_123 --observe-source source_123"] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(parsed("--inspect-auto-policy source_123"),
+            Ok(Command::InspectAutoPolicy { source_id: "source_123".into() }));
+        for invalid in ["--inspect-auto-policy", "--inspect-auto-policy ../private",
+                        "--inspect-auto-policy source_123 --stop-ticket ticket_1"] {
             assert!(parsed(invalid).is_err(), "{invalid}");
         }
         assert!(parsed("--list-review-inbox --stop-ticket ticket_1").is_err());

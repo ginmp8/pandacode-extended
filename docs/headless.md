@@ -786,3 +786,8 @@ assignments, and marks pending remote effects uncertain. It acquires the
 cross-process effect fence and never asserts that a live provider was stopped
 or that an external effect may be replayed. Reconcile uncertain receipts
 independently.
+
+
+### Inspect authenticated GitHub Auto consent from headless
+
+`pandacode serve --inspect-auto-policy <source-id>` returns only native source consent mode/revision, configured hourly/daily intake limits, staged/dispatched/uncertain counts and the explicitly disabled auto-write capability. It uses a read-only SQLite connection without GitHub requests, restart recovery, provider admission, policy mutation or external effects. Source IDs must pass the same bounded native validator as other inspection flags. This command does not enable Auto or authorize task admission.

@@ -3,7 +3,7 @@
 **Repository:** `ginmp8/pandacode-extended`
 **Branch:** `feat/issue-148-pe`
 **Original snapshot SHA:** `697a93f6c2b47449caa17a396e630357d5fe385f` (short `697a93f6`)
-**Current checkpoint SHA:** `b7482a452c0e0080f42949eb1e64ed304ca799cc` (short `b7482a45`), pushed to `origin/feat/issue-148-pe`.
+**Current checkpoint SHA:** `95c53710d28f1cbed7d31a1f7c0a536f3091c423` (short `95c53710`), pushed to `origin/feat/issue-148-pe`.
 **Ledger role:** exact-SHA drift evidence for the final acceptance gate. It does not approve a Ticket, grant authority or declare the feature complete.
 
 > **Checkpoint revision note (historical).** The body below is the `697a93f6` snapshot. Later work repaired the Council finalization dispatch-fence re-acquisition and fixture mismatch, exposed required Council in Team Builder/manifest v2, versioned future Team edits, and repaired Windows scoped writes and the effect-stop race. Only the rows named in the checkpoint delta are updated; every unlisted row still describes `697a93f6` and must not be read as executed at `bce1a51e`.
@@ -321,3 +321,23 @@ Normative source for every row: NS addendum acceptance checks. The row number eq
 **Final exact-SHA CI result (subsequent status check; supersedes the queued-at-lookup status above).** GitHub reports PR #151 HEAD `b7482a452c0e0080f42949eb1e64ed304ca799cc`, matching this checkpoint. [Actions run `43691396946`](https://github.com/ginmp8/pandacode-extended/actions/runs/43691396946) (run #1665, `CI`) completed with conclusion `failure`: 11 of 19 jobs passed and 8 failed. The earlier `queued` / null-conclusion entry above records only the state at lookup and is historical; this final result supersedes it.
 - `Rust check and tests (Linux)`, `Panda Router ONNX parity (macOS)`, `Customize Skills native contract (Windows)`, and all five platform Clippy jobs (`linux-aarch64`, `darwin-aarch64`, `darwin-x86_64`, `windows-x86_64`, `windows-aarch64`) failed at Rust compilation with E0597 at `src-tauri/src/superagent.rs:1669`: `stmt` does not live long enough. The affected jobs did not pass their respective test, contract, parity, or Clippy steps.
 - This failed run does not change the acceptance status. Automatic scheduling and multi-worker fan-out remain absent; semantic per-item evidence verification remains absent; broader #131 acceptance, UI/preview parity, and other #148 gaps remain outstanding. Issue #148 is still incomplete.
+
+## Checkpoint delta — 2026-11-15
+
+**Parent checkpoint and exact pushed PR #151 HEAD.** This additive delta follows `b7482a452c0e0080f42949eb1e64ed304ca799cc` (`b7482a45`) and records exact pushed HEAD `95c53710d28f1cbed7d31a1f7c0a536f3091c423` (`95c53710`) on `origin/feat/issue-148-pe`. GitHub PR #151's head was verified as this exact SHA. Historical rows, baseline totals, and previous deltas remain unchanged.
+
+**Change included at this SHA.** Commit `95c53710` fixes the `b7482a45` CI E0597 by materializing dependency query rows while `stmt` is alive. Dependency ordering and readiness behavior are unchanged.
+
+**Prior failed exact-SHA run — `b7482a45`.** Actions run [`43691396946`](https://github.com/ginmp8/pandacode-extended/actions/runs/43691396946) is associated with `b7482a452c0e0080f42949eb1e64ed304ca799cc` and completed with failure: 11 of 19 jobs passed and 8 failed with E0597. This is the prior SHA's result and is distinct from the new run for `95c53710`.
+
+**Current exact-SHA CI status.** GitHub reports PR #151 head `95c53710d28f1cbed7d31a1f7c0a536f3091c423`. The exact-SHA Actions run [`43693288986`](https://github.com/ginmp8/pandacode-extended/actions/runs/43693288986) is associated with that commit and reports `in_progress` with a null conclusion at this lookup; it had been queued at the earlier lookup. No success or failure is claimed for this SHA.
+
+**Local execution.** No local tests were run for this checkpoint: the Visual Studio 18 2026 CMake toolchain is missing and `node_modules` is absent. `src-tauri/target` was also absent when checked. No local pass is claimed.
+
+**Remaining gaps and acceptance status.** Automatic scheduling and multi-worker fan-out remain absent; dispatch/readiness behavior remains sequential and manual. Semantic per-item evidence verification remains absent. Broader #131 acceptance, UI/preview parity, and other #148 gaps remain outstanding. Issue #148 is explicitly incomplete.
+
+**Final exact-SHA CI result (subsequent status check; supersedes the in-progress-at-lookup status above).** PR #151 remains OPEN/DRAFT at branch `feat/issue-148-pe`, with HEAD matching checkpoint `95c53710d28f1cbed7d31a1f7c0a536f3091c423`. Exact-SHA Actions run [`43693288986`](https://github.com/ginmp8/pandacode-extended/actions/runs/43693288986) completed successfully: 19 of 19 jobs passed, with 0 failed, cancelled, or otherwise unsuccessful. The preceding queued/in-progress and null-conclusion observation records only the earlier lookup state and is historical; this final result supersedes it.
+- `Rust check and tests (Linux)` passed, including `cargo test --lib` and `cargo clippy --all-targets -- -D warnings`.
+- `Customize Skills native contract (Windows)` passed its Windows native-contract checks.
+- `SuperAgent Orchestrations UI (Playwright)` passed its Playwright job.
+- Issue #148 remains explicitly incomplete: automatic scheduling and multi-worker fan-out are absent; semantic per-item evidence verification is absent; broader acceptance and UI/preview parity gaps remain outstanding.

@@ -656,6 +656,20 @@ a background GitHub subscription or general Auto mode. See
 [`superagent-unified-integration.md`](superagent-unified-integration.md) for
 source lineage and the outstanding acceptance gates.
 
+### Explicit Issue-to-PR association in headless mode
+
+An operator may attach a Pull Request to an already linked Issue and Ticket
+without inferring execution or GitHub write authority:
+
+```sh
+pandacode serve --link-source-thread ISSUE_SOURCE_ID TICKET_ID issue:42
+pandacode serve --link-issue-pull PR_SOURCE_ID TICKET_ID issue:42 pull:99
+```
+
+Both sources must refer to the same repository and Team. The native
+transaction records an idempotent operator assertion, **not** an authenticated
+GitHub relationship, a permission grant or a provider run.
+
 ### Create and configure Teams from the native headless CLI
 
 Team administration can run without an active Desktop Webview or a live provider.

@@ -94,9 +94,11 @@ fn prior_cycle_findings_remain_unverified_and_require_the_native_parent_session_
     // findings. The native parent/worker/session link must still reject it.
     let project = store.session(&sid).unwrap().project_id;
     let foreign_current = store.create_session(&project, "codex", "", "full").unwrap();
-    store.message(&foreign_current.id, "assistant",
-        "Council findings JSON: [{\"severity\":\"critical\",\"category\":\"privacy\",\"title\":\"Foreign Council claim\",\"explanation\":\"Private reviewer data\"}]\\nCouncil score: 7/10").unwrap();
-    team.workers[0].session_id = foreign_current.id;
+    let foreign_report = "Council findings JSON: [{\"severity\":\"critical\",\"category\":\"privacy\",\"title\":\"Foreign Council claim\",\"explanation\":\"Private reviewer data\"}]\nCouncil score: 7/10";
+    assert_eq!(council::parse_score(foreign_report), Some(7.0));
+    assert_eq!(council::parse_reported_findings(foreign_report).len(), 1);
+    store.message(&foreign_current.id, "assistant", foreign_report).unwrap();
+    team.workers[0].session_id = foreign_current.id.clone();
     save(&store, &mut team).unwrap();
     assert!(council_inspection_state(&store, &sid).unwrap().unwrap()
         .reported_findings.is_empty(),
@@ -106,6 +108,20 @@ fn prior_cycle_findings_remain_unverified_and_require_the_native_parent_session_
     assert_eq!(council_inspection_state(&store, &sid).unwrap().unwrap()
         .reported_findings.len(), 1,
         "the real linked native review remains visible");
+    // The same identity boundary applies when a new turn moves the score
+    // into same-cycle history; historical claims are not approval evidence.
+    store.message(&reviewer_session, "coordination", "A new native turn").unwrap();
+    store.message(&foreign_current.id, "coordination", "A foreign new turn").unwrap();
+    team.workers[0].session_id = foreign_current.id;
+    save(&store, &mut team).unwrap();
+    assert!(council_inspection_state(&store, &sid).unwrap().unwrap()
+        .historical_reported_findings.is_empty(),
+        "same-cycle history cannot expose foreign reviewer session content");
+    team.workers[0].session_id = reviewer_session.clone();
+    save(&store, &mut team).unwrap();
+    assert_eq!(council_inspection_state(&store, &sid).unwrap().unwrap()
+        .historical_reported_findings.len(), 1,
+        "same-cycle native history is restored under its original session");
     team.council_since = reviewer_created_at + 1;
     save(&store, &mut team).unwrap();
     let inspected = council_inspection_state(&store, &sid).unwrap().unwrap();

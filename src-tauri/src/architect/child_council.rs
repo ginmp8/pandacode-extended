@@ -959,7 +959,7 @@ pub(super) fn verified_s3_receipts(
 ) -> Result<Option<Vec<VerifiedChildChallengeReceipt>>> {
     let Some(config) = root.config.council.as_ref() else { return Ok(None) };
     if config.strategy != super::council::CouncilExecutionStrategy::TwoPhase
-        || config.mode() != "m4"
+        || !matches!(config.mode(), "m4" | "m5" | "m6" | "m7")
         || !root_artifact_revision(store, root, false)?
         || !super::council_evidence_is_current(store, root)
     {

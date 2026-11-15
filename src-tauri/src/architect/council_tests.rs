@@ -4684,6 +4684,18 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
             "a complete authenticated first child wave must remain available during S2 leaf escalation");
         assert!(child_council::verified_s2_receipts(&store, &root).unwrap().is_none(),
             "an admitted but unfinished S2 child wave is not an authenticated terminal receipt");
+        assert!(council_evidence_is_current(&store, &root),
+            "a completed first root wave must retain the current artifact revision");
+        let mut first_wave = root.clone();
+        first_wave.workers.retain(|worker|
+            worker.council.as_ref().is_none_or(|seat| seat.round == 1));
+        first_wave.config.council.as_mut().unwrap().force_escalation = false;
+        let first_children = child_council::verified_parent_seats(&store, &root)
+            .unwrap().expect("authenticated first-wave child seats");
+        assert!(council::status_for_authenticated_children(&first_wave, &first_children).is_some(),
+            "the native first-wave scoring and composite gate must pass before escalation");
+        assert!(mixed_native_authority_current(&store, &first_wave),
+            "the frozen first-wave root reviewer grant must still be valid");
         assert!(eligible_hierarchical_s2_root_escalation(&store, &root),
             "the unchanged frozen policy and authenticated first wave must permit a new root session");
         let mut forged = root.clone();

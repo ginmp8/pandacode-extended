@@ -848,6 +848,51 @@ pub(crate) fn inspect_headless_ticket_graph(
     })).map_err(|e| e.to_string())
 }
 
+/// Keyset-paginated, redacted native audit metadata for one Ticket. Unlike
+/// Store::open, this inspector cannot migrate, interrupt or replay live work.
+/// Only controlled audit kinds and timestamps are exposed; details may contain
+/// private objectives, user reasons or provider output and must stay private.
+pub(crate) fn list_headless_ticket_activity(
+    database_path: &std::path::Path, ticket_id: &str, before_id: Option<i64>,
+) -> Result<String> {
+    if before_id.is_some_and(|id| id <= 0) {
+        return Err("Activity cursor must be a positive audit ID.".into());
+    }
+    let store = Store::open_read_only(database_path)?;
+    get_ticket(&store, ticket_id)?;
+    let mut stmt = store.db.prepare(
+        "SELECT id,kind,at FROM sa_audit
+         WHERE ticket_id=?1 AND (?2 IS NULL OR id < ?2)
+         ORDER BY id DESC LIMIT 101",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![ticket_id, before_id], |row| {
+        Ok(serde_json::json!({
+            "id": row.get::<_, i64>(0)?,
+            "kind": row.get::<_, String>(1)?,
+            "at": row.get::<_, i64>(2)?,
+        }))
+    }).map_err(|e| e.to_string())?;
+    let mut items = rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    let has_more = items.len() > 100;
+    items.truncate(100);
+    let next_cursor = if has_more {
+        items.last().and_then(|entry| entry["id"].as_i64())
+    } else {
+        None
+    };
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket_id,
+        "pageLimit": 100,
+        "hasMore": has_more,
+        "nextCursor": next_cursor,
+        "items": items,
+        "redacted": true,
+        "observationalOnly": true,
+        "recoveryPerformed": false,
+    })).map_err(|e| e.to_string())
+}
+
 /// A one-shot local CLI inspector is deliberately read-only: it must not run
 /// Store::open's migration/restart settlement behind a live serve process.
 /// Return bounded operational metadata, never the task objective, worker result,
@@ -3538,6 +3583,80 @@ mod tests {
         assert_eq!(get_ticket(&reopened, id).unwrap().state, "stopped");
     }
 
+
+    #[test]
+    fn headless_activity_is_paginated_private_and_read_only_across_reopen() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private activity objective",
+            "activity-page-main", false,
+        ).unwrap();
+        assert!(launched);
+        for index in 0..205 {
+            store.db.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES(?1,'activity_test',?2,?3)",
+                params![&ticket.id, format!("private-marker-{index}"), storage::now()],
+            ).unwrap();
+        }
+        let (other, _) = admit(
+            &mut store, &cfg.id, "Other private objective",
+            "activity-page-other", true,
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'unrelated', 'cross-ticket-marker',?2)",
+            params![&other.id, storage::now()],
+        ).unwrap();
+        let audit_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let mut cursor = None;
+        let mut previous = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let raw = list_headless_ticket_activity(&store.path, &ticket.id, cursor).unwrap();
+            assert!(!raw.contains("private-marker"));
+            assert!(!raw.contains("Private activity objective"));
+            assert!(!raw.contains("cross-ticket-marker"));
+            let page: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(page["ticketId"], ticket.id);
+            assert_eq!(page["pageLimit"], 100);
+            assert_eq!(page["redacted"], true);
+            assert_eq!(page["observationalOnly"], true);
+            assert_eq!(page["recoveryPerformed"], false);
+            let entries = page["items"].as_array().unwrap();
+            assert!(entries.len() <= 100);
+            for entry in entries {
+                let id = entry["id"].as_i64().unwrap();
+                assert!(previous.is_none_or(|last| id < last));
+                assert!(seen.insert(id), "audit row replayed across pages");
+                assert!(entry.get("detail").is_none());
+                previous = Some(id);
+            }
+            if page["hasMore"] == false {
+                assert!(page["nextCursor"].is_null());
+                break;
+            }
+            cursor = Some(page["nextCursor"].as_i64().unwrap());
+        }
+        assert_eq!(seen.len() as i64, audit_count);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), audit_count);
+        assert!(list_headless_ticket_activity(&store.path, &ticket.id, Some(0)).is_err());
+        assert!(list_headless_ticket_activity(&store.path, "missing-ticket", None).is_err());
+        let path = store.path.clone();
+        drop(store);
+        let restarted: serde_json::Value = serde_json::from_str(
+            &list_headless_ticket_activity(&path, &ticket.id, None).unwrap(),
+        ).unwrap();
+        assert_eq!(restarted["items"].as_array().unwrap().len(), 100);
+    }
 
     #[test]
     fn headless_roster_inspection_preserves_multi_role_profiles_without_admission() {

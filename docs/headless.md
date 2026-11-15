@@ -396,6 +396,8 @@ execute an external effect.
 
 ```sh
 pandacode serve --list-tickets
+pandacode serve --list-ticket-activity <ticket-id>
+pandacode serve --list-ticket-activity <ticket-id> --before <audit-id>
 pandacode serve --list-review-inbox
 pandacode serve --list-recovery-inbox
 pandacode serve --list-team-demands <team-id> blocked
@@ -403,6 +405,13 @@ pandacode serve --accept-ticket <ticket-id> <expected-revision>
 pandacode serve --reject-ticket <ticket-id> <expected-revision> "Needs changes"
 pandacode serve --stop-ticket <ticket-id>
 ```
+
+The Ticket activity command pages a durable audit stream in descending event-ID order
+(100 entries per page). Use the response's `nextCursor` with `--before` while
+`hasMore` is true. Each invocation is a new read-only snapshot. It shows only
+event ID, controlled event kind and timestamp; private reasons, objectives,
+provider output, secrets and evidence are excluded. It neither authorizes
+execution nor runs startup recovery beside another live host.
 
 Accept and reject use the current Ticket revision; reject also requires a
 nonempty reason. Stop revokes the Ticket mandate in the shared database. A

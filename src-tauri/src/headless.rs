@@ -31,6 +31,7 @@ enum Command {
     ExportOrchestrations { path: PathBuf },
     InspectOrchestrations,
     ListTickets,
+    ListTicketActivity { ticket_id: String, before_id: Option<i64> },
     ListReviewInbox,
     ListRecoveryInbox { before_priority: Option<i64>, before_updated_at: Option<i64>, before_id: Option<String> },
     ListDemands {
@@ -226,6 +227,22 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(tasks) => { println!("{tasks}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent task listing failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::ListTicketActivity { ticket_id, before_id } = &command {
+                // Read only the current Ticket's redacted audit metadata. Never
+                // open a recovering store or reveal private event details.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::list_headless_ticket_activity(
+                        &dir.join("kingcode.sqlite3"), ticket_id, *before_id,
+                    ));
+                match result {
+                    Ok(activity) => { println!("{activity}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Ticket activity inspection failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -437,7 +454,7 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
 fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import: Option<PathBuf>) {
     match command {
         // Inspection exits before setup_common and must never reach this branch.
-        Command::InspectOrchestrations | Command::ListTickets | Command::ListReviewInbox
+        Command::InspectOrchestrations | Command::ListTickets | Command::ListTicketActivity { .. } | Command::ListReviewInbox
         | Command::ListRecoveryInbox { .. } | Command::ListDemands { .. }
         | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
@@ -874,6 +891,22 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 command = Command::ListTickets;
                 ops += 1;
             }
+            "--list-ticket-activity" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or("--list-ticket-activity needs a Ticket ID.")?;
+                validate_ticket_id(ticket_id)?;
+                let before_id = if args.get(index + 2).map(String::as_str) == Some("--before") {
+                    let value = args.get(index + 3)
+                        .ok_or("--before needs a positive audit event ID.")?;
+                    let parsed = value.parse::<i64>().ok().filter(|id| *id > 0)
+                        .ok_or("--before needs a positive audit event ID.")?;
+                    index += 2;
+                    Some(parsed)
+                } else { None };
+                command = Command::ListTicketActivity { ticket_id: ticket_id.clone(), before_id };
+                ops += 1;
+                index += 1;
+            }
             "--list-recovery-inbox" => {
                 let (before_priority,before_updated_at,before_id)=
                     if args.get(index+1).map(String::as_str)==Some("--before") {
@@ -1258,7 +1291,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-review-inbox | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1284,6 +1317,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-orchestrations
                          List native orchestration status without modifying live tasks; exit.
   --list-tickets         List up to 200 redacted native SuperAgent tickets; exit.
+  --list-ticket-activity <id> [--before <audit-id>]
+                          Page 100 redacted native Ticket audit events by immutable ID.
+                          Event details remain private; never replay or recover; exit.
   --list-review-inbox    List up to 200 pending human/Council decisions across Teams;
                          redact objectives, never approve or run a reviewer; exit.
   --list-recovery-inbox [--before <priority> <ms> <ticket-id>]
@@ -1385,6 +1421,22 @@ mod tests {
             Ok(Command::ExportOrchestrations { path: PathBuf::from("presets.json") }));
         assert_eq!(parsed("--inspect-orchestrations"), Ok(Command::InspectOrchestrations));
         assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
+        assert_eq!(parsed("--list-ticket-activity ticket_123"), Ok(Command::ListTicketActivity {
+            ticket_id:"ticket_123".into(), before_id:None,
+        }));
+        assert_eq!(parsed("--list-ticket-activity ticket_123 --before 42"), Ok(Command::ListTicketActivity {
+            ticket_id:"ticket_123".into(), before_id:Some(42),
+        }));
+        for invalid in [
+            "--list-ticket-activity", "--list-ticket-activity ../unsafe",
+            "--list-ticket-activity ticket_123 --before",
+            "--list-ticket-activity ticket_123 --before 0",
+            "--list-ticket-activity ticket_123 --before -1",
+            "--list-ticket-activity ticket_123 --before invalid",
+            "--list-ticket-activity ticket_123 --before 9223372036854775808",
+            "--list-ticket-activity ticket_123 --stop-ticket ticket_123",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
+
         assert_eq!(parsed("--list-review-inbox"), Ok(Command::ListReviewInbox));
         assert_eq!(parsed("--list-recovery-inbox"), Ok(Command::ListRecoveryInbox {
             before_priority:None,before_updated_at:None,before_id:None
@@ -1659,6 +1711,7 @@ mod tests {
             "--export-orchestrations",
             "--inspect-orchestrations",
             "--list-tickets",
+            "--list-ticket-activity",
             "--list-review-inbox",
             "--list-recovery-inbox",
             "--list-demands",

@@ -368,7 +368,7 @@ fn snapshot_base_for_database(database_path: &Path) -> Result<PathBuf> {
     {
         if created {
             let mut permissions = fs::metadata(&base).map_err(|_| "Council review snapshot storage is unavailable.")?.permissions();
-            permissions.set_readonly(false);
+            make_writable_permissions(&mut permissions);
             fs::set_permissions(&base,permissions)
                 .map_err(|_| "Council review snapshot storage permissions could not be restricted.")?;
         }
@@ -428,6 +428,19 @@ fn private_directory(path: &Path) -> Result<()> {
         return Err("Council review snapshot directory is unavailable.".into());
     }
     Ok(())
+}
+
+fn make_writable_permissions(permissions: &mut fs::Permissions) {
+    #[cfg(unix)]
+    permissions.set_mode(permissions.mode() | 0o200);
+    #[cfg(not(unix))]
+    {
+        #[allow(
+            clippy::permissions_set_readonly_false,
+            reason = "Windows has no mode bits, so clearing the read-only attribute is the only way to restore writability"
+        )]
+        permissions.set_readonly(false);
+    }
 }
 
 fn make_read_only(path: &Path) -> Result<()> {
@@ -506,17 +519,26 @@ fn create_snapshot_symlink(
     }
 }
 
+/// Shared state for one snapshot copy. The recursive walk threads the same
+/// hashers, visited set and limits through every directory; grouping them keeps
+/// the recursion signature small without hiding any parameter at the call site.
+struct SnapshotCopy<'a> {
+    source_root: &'a Path,
+    destination_root: &'a Path,
+    source_hasher: &'a mut Sha256,
+    snapshot_hasher: &'a mut Sha256,
+    visited_directories: &'a mut std::collections::HashSet<PathBuf>,
+    budget: &'a mut SnapshotBudget,
+}
+
 fn copy_workspace_directory(
-    source_root: &Path, source_directory: &Path, destination_root: &Path,
-    destination_directory: &Path, source_hasher: &mut Sha256,
-    snapshot_hasher: &mut Sha256, visited_directories: &mut std::collections::HashSet<PathBuf>,
-    budget: &mut SnapshotBudget,
+    copy: &mut SnapshotCopy<'_>, source_directory: &Path, destination_directory: &Path,
 ) -> Result<()> {
-    budget.check_time()?;
+    copy.budget.check_time()?;
     let canonical_directory = fs::canonicalize(source_directory)
         .map_err(|_| "Council workspace is unavailable or unreadable.")?;
-    workspace_relative_path(&canonical_directory,source_root)?;
-    if !visited_directories.insert(canonical_directory) {
+    workspace_relative_path(&canonical_directory,copy.source_root)?;
+    if !copy.visited_directories.insert(canonical_directory) {
         return Err("Council workspace contains an aliased or cyclic directory link.".into());
     }
     let directory_before = fs::metadata(source_directory)
@@ -534,24 +556,21 @@ fn copy_workspace_directory(
         let entry_type = entry.file_type()
             .map_err(|_| "Council workspace changed while it was being copied.")?;
         if name_text == ".git" && entry_type.is_dir() { continue; }
-        budget.entry()?;
-        let relative = workspace_relative_path(&source,source_root)?;
+        copy.budget.entry()?;
+        let relative = workspace_relative_path(&source,copy.source_root)?;
         let destination = destination_directory.join(&name);
         if entry_type.is_dir() {
             let metadata = fs::metadata(&source)
                 .map_err(|_| "Council workspace changed while it was being copied.")?;
-            source_hasher.update(b"D");
-            hash_field(source_hasher,relative.as_bytes());
-            hash_permissions(source_hasher,&metadata,false);
-            snapshot_hasher.update(b"D");
-            hash_field(snapshot_hasher,relative.as_bytes());
-            hash_snapshot_permissions(snapshot_hasher,&metadata);
+            copy.source_hasher.update(b"D");
+            hash_field(copy.source_hasher,relative.as_bytes());
+            hash_permissions(copy.source_hasher,&metadata,false);
+            copy.snapshot_hasher.update(b"D");
+            hash_field(copy.snapshot_hasher,relative.as_bytes());
+            hash_snapshot_permissions(copy.snapshot_hasher,&metadata);
             fs::create_dir(&destination)
                 .map_err(|_| "Council workspace directory could not be copied into its review snapshot.")?;
-            copy_workspace_directory(
-                source_root,&source,destination_root,&destination,source_hasher,
-                snapshot_hasher,visited_directories,budget,
-            )?;
+            copy_workspace_directory(copy,&source,&destination)?;
             fs::set_permissions(&destination,metadata.permissions())
                 .map_err(|_| "Council workspace permissions could not be copied into its review snapshot.")?;
         } else if entry_type.is_file() {
@@ -561,14 +580,14 @@ fn copy_workspace_directory(
                 return Err("Council workspace contains a file above the review snapshot limit.".into());
             }
             let modified_before = before.modified().ok();
-            source_hasher.update(b"F");
-            hash_field(source_hasher,relative.as_bytes());
-            source_hasher.update(before.len().to_be_bytes());
-            hash_permissions(source_hasher,&before,false);
-            snapshot_hasher.update(b"F");
-            hash_field(snapshot_hasher,relative.as_bytes());
-            snapshot_hasher.update(before.len().to_be_bytes());
-            hash_snapshot_permissions(snapshot_hasher,&before);
+            copy.source_hasher.update(b"F");
+            hash_field(copy.source_hasher,relative.as_bytes());
+            copy.source_hasher.update(before.len().to_be_bytes());
+            hash_permissions(copy.source_hasher,&before,false);
+            copy.snapshot_hasher.update(b"F");
+            hash_field(copy.snapshot_hasher,relative.as_bytes());
+            copy.snapshot_hasher.update(before.len().to_be_bytes());
+            hash_snapshot_permissions(copy.snapshot_hasher,&before);
             let mut input = fs::File::open(&source)
                 .map_err(|_| "Council workspace is unavailable or unreadable.")?;
             let mut output = fs::OpenOptions::new().write(true).create_new(true).open(&destination)
@@ -579,10 +598,10 @@ fn copy_workspace_directory(
                 let count = input.read(&mut bytes)
                     .map_err(|_| "Council workspace is unavailable or unreadable.")?;
                 if count == 0 { break; }
-                budget.copied_bytes(count)?;
+                copy.budget.copied_bytes(count)?;
                 copied = copied.saturating_add(count as u64);
-                source_hasher.update(&bytes[..count]);
-                snapshot_hasher.update(&bytes[..count]);
+                copy.source_hasher.update(&bytes[..count]);
+                copy.snapshot_hasher.update(&bytes[..count]);
                 output.write_all(&bytes[..count])
                     .map_err(|_| "Council workspace file could not be copied into its review snapshot.")?;
             }
@@ -600,15 +619,15 @@ fn copy_workspace_directory(
         } else if entry_type.is_symlink() {
             let target = fs::canonicalize(&source)
                 .map_err(|_| "Council workspace contains an unavailable symbolic link.")?;
-            let target_relative = workspace_relative_path(&target,source_root)
+            let target_relative = workspace_relative_path(&target,copy.source_root)
                 .map_err(|_| "Council workspace contains a symbolic link outside its authorized root.")?;
-            source_hasher.update(b"L");
-            hash_field(source_hasher,relative.as_bytes());
-            hash_field(source_hasher,target_relative.as_bytes());
-            snapshot_hasher.update(b"L");
-            hash_field(snapshot_hasher,relative.as_bytes());
-            hash_field(snapshot_hasher,target_relative.as_bytes());
-            create_snapshot_symlink(&source,&destination,source_root,destination_root,&target_relative)?;
+            copy.source_hasher.update(b"L");
+            hash_field(copy.source_hasher,relative.as_bytes());
+            hash_field(copy.source_hasher,target_relative.as_bytes());
+            copy.snapshot_hasher.update(b"L");
+            hash_field(copy.snapshot_hasher,relative.as_bytes());
+            hash_field(copy.snapshot_hasher,target_relative.as_bytes());
+            create_snapshot_symlink(&source,&destination,copy.source_root,copy.destination_root,&target_relative)?;
         } else {
             return Err("Council workspace contains an unsupported special file.".into());
         }
@@ -632,10 +651,7 @@ fn make_snapshot_writable_for_cleanup(path: &Path) -> Result<()> {
         }
     }
     let mut permissions = metadata.permissions();
-    #[cfg(unix)]
-    permissions.set_mode(permissions.mode() | 0o200);
-    #[cfg(not(unix))]
-    permissions.set_readonly(false);
+    make_writable_permissions(&mut permissions);
     fs::set_permissions(path,permissions).map_err(|_| "Council review snapshot cleanup failed.".into())
 }
 
@@ -678,10 +694,18 @@ fn freeze_workspace_snapshot(store: &Store, source_root: &Path, expected_identit
         let mut snapshot_hasher = Sha256::new();
         snapshot_hasher.update(b"PandaCode SuperAgent Council snapshot v1\0");
         let mut budget = SnapshotBudget::default();
-        copy_workspace_directory(
-            &source_root,&source_root,&destination,&staging,&mut source_hasher,
-            &mut snapshot_hasher,&mut std::collections::HashSet::new(),&mut budget,
-        )?;
+        {
+            let mut visited_directories = std::collections::HashSet::new();
+            let mut copy = SnapshotCopy {
+                source_root: &source_root,
+                destination_root: &destination,
+                source_hasher: &mut source_hasher,
+                snapshot_hasher: &mut snapshot_hasher,
+                visited_directories: &mut visited_directories,
+                budget: &mut budget,
+            };
+            copy_workspace_directory(&mut copy,&source_root,&staging)?;
+        }
         let copied_source_identity = format!("{:x}",source_hasher.finalize());
         let snapshot_digest = format!("{:x}",snapshot_hasher.finalize());
         if copied_source_identity != expected_identity
@@ -723,9 +747,10 @@ fn council_config(snapshot: &super::TeamSnapshot) -> Result<architect::CouncilCo
     {
         return Err("Ticket is not pinned to a valid required native Council roster.".into());
     }
-    let mut config = architect::CouncilConfig::default();
-    config.reviewer_bot_ids = snapshot.reviewer_bot_ids.clone();
-    Ok(config)
+    Ok(architect::CouncilConfig {
+        reviewer_bot_ids: snapshot.reviewer_bot_ids.clone(),
+        ..Default::default()
+    })
 }
 
 fn frozen_reviewer_policy(snapshot: &super::TeamSnapshot) -> Result<(String, String)> {
@@ -828,7 +853,7 @@ pub(super) fn bind_required_finished(
         .ok_or("Council-required worker assignment has no frozen review request.")?;
     if !matches!(request.state.as_str(),"admitted")
         || request.worker_session_id != worker_session_id
-        || request.policy_revision != ticket_policy_revision(&store, &ticket.id)?
+        || request.policy_revision != ticket_policy_revision(store, &ticket.id)?
         || ticket.state != "waiting_review"
         || ticket.revision != request.admitted_ticket_revision.saturating_add(1)
         || ticket.evidence.as_deref().is_none_or(str::is_empty)
@@ -905,8 +930,7 @@ pub(crate) fn recover_starting(app: &tauri::AppHandle) {
     let request_ids: rusqlite::Result<Vec<String>> = (|| {
         let mut statement = store.db.prepare("SELECT id FROM sa_council_requests WHERE state='starting'")?;
         let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
-        let collected = rows.collect();
-        collected
+        rows.collect()
     })();
     let request_ids = match request_ids {
         Ok(ids) => ids,
@@ -1007,7 +1031,7 @@ fn start_after_worker_completion_inner(
             .map_err(|_| "Frozen Council configuration is malformed.")?;
         let policy_ok = request.reviewer_policy_sha256 == sha256(request.reviewer_policy_json.as_bytes())
             && request.council_config_sha256 == sha256(config_bytes)
-            && request.policy_revision == ticket_policy_revision(&store, &ticket.id)?
+            && request.policy_revision == ticket_policy_revision(store, &ticket.id)?
             && snapshot.policy.council_required
             && snapshot.policy.policy_revision == request.policy_revision
             && snapshot.reviewer_bot_ids == config.reviewer_bot_ids
@@ -1253,7 +1277,7 @@ fn current_binding_valid(
     Ok(request.state == "dispatched"
         && ticket.id == request.ticket_id && ticket.state == "waiting_review"
         && ticket.revision == request.ticket_revision
-        && ticket_policy_revision(&store, &ticket.id)? == request.policy_revision
+        && ticket_policy_revision(store, &ticket.id)? == request.policy_revision
         && request.cycle_started_at > 0 && request.generation > 0
         && sha256(evidence.as_bytes()) == artifact
         && sha256(request.reviewer_policy_json.as_bytes()) == request.reviewer_policy_sha256
@@ -1392,6 +1416,7 @@ pub(crate) fn finalize_after_native_run_from_app(
 
 /// Direct Store calls are retained for controlled native test contexts only.
 /// Production callbacks must use the AppHandle wrapper and dispatch fence.
+#[cfg(test)]
 pub(crate) fn finalize_after_native_run(
     store: &Store, reviewer_session_id: &str,
 ) -> Result<bool> {

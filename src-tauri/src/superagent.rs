@@ -2501,6 +2501,7 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
                       WHEN o.enabled=0
                         THEN 'Team disabled; no replay'
                       WHEN m.ticket_id IS NULL OR m.revoked!=0 OR m.expires_at<=?1
+                           OR trim(m.authorization_id)='' OR m.actor!=t.actor
                            OR m.policy_revision!=o.policy_revision
                            OR t.policy_revision!=o.policy_revision
                            OR m.allowed_side_effects!=0 OR m.allowed_tools!='[]'
@@ -3376,6 +3377,7 @@ pub(crate) fn read_only_policy(
             || scope.side_effects || scope.tools_json != "[]"
             || scope.mandate_project != scope.project_id
             || scope.mandate_actor != scope.ticket_actor
+            || scope.authorization_id.trim().is_empty()
             || !execution_permitted(scope.enabled, crate::feature_controls::get().bots_paused)
         {
             return Err("policy_unsupported: SuperAgent mandate is inactive or stale.".into());

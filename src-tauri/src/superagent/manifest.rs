@@ -50,6 +50,8 @@ struct TeamPolicy {
     max_concurrent_tasks: u8,
     max_attempts_per_assignment: u8,
     council_enabled: bool,
+    #[serde(default)]
+    strategy: super::strategy::StrategySettings,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +111,9 @@ struct PresetV3 {
     max_concurrent_tasks: u8,
     max_attempts_per_assignment: u8,
     council: Council,
+    /// V5-only portable preferences. They are not execution grants.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    strategy: Option<super::strategy::StrategySettings>,
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +152,7 @@ struct Resolved {
     worker_ids: Vec<String>,
     reviewer_ids: Vec<String>,
     project_id: String,
+    policy: TeamPolicy,
     existing: bool,
 }
 
@@ -163,6 +169,7 @@ fn policy_from_snapshot(snapshot: &super::TeamSnapshot) -> TeamPolicy {
         max_concurrent_tasks: snapshot.policy.max_concurrent_tasks,
         max_attempts_per_assignment: snapshot.policy.max_attempts_per_assignment,
         council_enabled: snapshot.policy.council_enabled,
+        strategy: snapshot.policy.strategy.clone(),
     }
 }
 
@@ -196,6 +203,7 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
                         max_concurrent_tasks: preset.max_concurrent_tasks,
                         max_attempts_per_assignment: preset.max_attempts_per_assignment,
                         council_enabled: preset.council.enabled,
+                        strategy: Default::default(),
                     },
                     bot_profiles: None,
                 })
@@ -220,20 +228,26 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
                 })
                 .collect()
         }
-        3 | 4 => {
+        3 | 4 | 5 => {
             let manifest: ManifestV3 = serde_json::from_value(document.clone())
                 .map_err(|e| format!("Invalid SuperAgent companion manifest: {e}"))?;
             if manifest.schema_version != schema_version {
                 return Err("Unsupported SuperAgent manifest schema.".into());
             }
             for preset in &manifest.orchestrations {
-                if schema_version == 4 &&
+                if schema_version >= 4 &&
                     preset.bot_profiles.iter().any(|profile| profile.reasoning_effort.is_none()) {
                     return Err("Schema v4 requires reasoning effort for every Team role.".into());
                 }
                 if schema_version == 3 &&
                     preset.bot_profiles.iter().any(|profile| profile.reasoning_effort.is_some()) {
                     return Err("Reasoning effort profiles require SuperAgent schema v4.".into());
+                }
+                if schema_version < 5 && preset.strategy.is_some() {
+                    return Err("Portable resource strategy requires SuperAgent schema v5.".into());
+                }
+                if schema_version == 5 && preset.strategy.is_none() {
+                    return Err("Schema v5 requires a bounded resource strategy for every Team.".into());
                 }
             }
             manifest.orchestrations.into_iter().map(|preset| PortablePreset {
@@ -247,6 +261,7 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
                     max_concurrent_tasks: preset.max_concurrent_tasks,
                     max_attempts_per_assignment: preset.max_attempts_per_assignment,
                     council_enabled: preset.council.enabled,
+                    strategy: preset.strategy.unwrap_or_default(),
                 },
                 bot_profiles: Some(preset.bot_profiles),
             }).collect()
@@ -271,11 +286,21 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
             ));
         }
         if preset.policy.autonomy != "off"
-            || preset.policy.max_concurrent_tasks != 1
-            || preset.policy.max_attempts_per_assignment != 2
-            || preset.policy.council_enabled
-        {
-            return Err("Unsupported SuperAgent autonomy, Council or execution policy.".into());
+            || !(1..=8).contains(&preset.policy.max_concurrent_tasks)
+            || !(1..=8).contains(&preset.policy.max_attempts_per_assignment) {
+            return Err("Unsupported SuperAgent autonomy or unbounded worker limits.".into());
+        }
+        if preset.policy.council_enabled
+            && !(2..=super::MAX_REVIEWERS_PER_TEAM).contains(&preset.reviewers.len()) {
+            return Err("Native Council requires two to eight selected independent reviewers.".into());
+        }
+        let strategy = &preset.policy.strategy;
+        if !matches!(strategy.priority.as_str(),
+            "balanced" | "cost" | "latency" | "throughput" | "quality")
+            || !(60_000..=super::MAX_ASSIGNMENT_RUN_MS).contains(&strategy.attempt_timeout_ms)
+            || strategy.token_ceiling == Some(0)
+            || strategy.estimated_cost_ceiling_minor == Some(0) {
+            return Err("Portable strategy contains an unsupported priority, timeout or resource ceiling.".into());
         }
     }
     Ok(presets)
@@ -404,6 +429,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
             worker_ids: workers.iter().map(|bot| bot.id.clone()).collect(),
             reviewer_ids: reviewers.iter().map(|bot| bot.id.clone()).collect(),
             project_id,
+            policy: preset.policy.clone(),
             existing: existing.is_some(),
         });
     }
@@ -465,7 +491,7 @@ fn apply(store: &Store, document: &serde_json::Value, confirmed: bool) -> Result
         .map_err(|e| format!("Atomic SuperAgent import aborted: {e}"))?;
         // The legacy projection keeps its first-worker column, while the
         // immutable Team version stores every ordered role.
-        let snapshot = super::make_team_snapshot(
+        let mut snapshot = super::make_team_snapshot(
             &tx,
             &id,
             1,
@@ -475,9 +501,14 @@ fn apply(store: &Store, document: &serde_json::Value, confirmed: bool) -> Result
             &candidate.coordinator_id,
             &candidate.worker_ids,
             &candidate.reviewer_ids,
-            false,
+            candidate.policy.council_enabled,
             super::TeamSnapshotProvenance::Native,
         )?;
+        // Imported policy is a future-only immutable Team version; no
+        // provider, external source or native grant is started by import.
+        snapshot.policy.max_concurrent_tasks = candidate.policy.max_concurrent_tasks;
+        snapshot.policy.max_attempts_per_assignment = candidate.policy.max_attempts_per_assignment;
+        snapshot.policy.strategy = candidate.policy.strategy;
         super::insert_team_version(&tx, &snapshot)
             .map_err(|e| format!("Atomic SuperAgent import aborted: {e}"))?;
         result.created.push(candidate.name);
@@ -576,10 +607,11 @@ fn export(store: &Store) -> Result<serde_json::Value> {
             max_concurrent_tasks: policy.max_concurrent_tasks,
             max_attempts_per_assignment: policy.max_attempts_per_assignment,
             council: Council { enabled: policy.council_enabled },
+            strategy: Some(policy.strategy),
         });
     }
     serde_json::to_value(ManifestV3 {
-        schema_version: 4,
+        schema_version: 5,
         orchestrations: presets,
     })
     .map_err(|e| e.to_string())
@@ -750,7 +782,7 @@ mod tests {
         let path = first.backup_path.unwrap();
         let snapshot: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
-        assert_eq!(snapshot["schemaVersion"], 4);
+        assert_eq!(snapshot["schemaVersion"], 5);
         assert_eq!(snapshot["orchestrations"].as_array().unwrap().len(), 0);
         let repeat =
             apply_with_backup(&store, &root, &document("Software Development"), true).unwrap();
@@ -819,7 +851,7 @@ mod tests {
         assert_eq!(imported.worker_bot_ids, vec!["worker"]);
         assert!(imported.reviewer_bot_ids.is_empty());
         let exported = export(&store).unwrap();
-        assert_eq!(exported["schemaVersion"], 4);
+        assert_eq!(exported["schemaVersion"], 5);
         assert_eq!(exported["orchestrations"][0]["enabled"], false);
         assert_eq!(exported["orchestrations"][0]["coordinatorBot"], "Router");
         assert_eq!(exported["orchestrations"][0]["workerBot"], "Builder");
@@ -871,7 +903,7 @@ mod tests {
         assert_eq!(imported.reviewer_bot_ids, vec!["reviewer"]);
 
         let exported = export(&store).unwrap();
-        assert_eq!(exported["schemaVersion"], 4);
+        assert_eq!(exported["schemaVersion"], 5);
         assert_eq!(exported["orchestrations"][0]["coordinatorBot"], "Router");
         assert_eq!(
             exported["orchestrations"][0]["workerBot"], "Builder");
@@ -1135,7 +1167,7 @@ mod tests {
         );
         let backup: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&backups[0]).unwrap()).unwrap();
-        assert_eq!(backup["schemaVersion"], 4);
+        assert_eq!(backup["schemaVersion"], 5);
         assert!(backup["orchestrations"].as_array().unwrap().is_empty());
         store
             .db
@@ -1151,14 +1183,84 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
     #[test]
-    fn v4_ordered_profile_drift_is_denied_before_backup_or_authorization() {
+    fn v5_round_trip_preserves_future_strategy_without_granting_execution() {
+        let origin = fixture();
+        apply(&origin, &document("Economy Team"), true).unwrap();
+        let mut portable = export(&origin).unwrap();
+        assert_eq!(portable["schemaVersion"], 5);
+        portable["orchestrations"][0]["maxConcurrentTasks"] = json!(3);
+        portable["orchestrations"][0]["maxAttemptsPerAssignment"] = json!(4);
+        portable["orchestrations"][0]["strategy"] = json!({
+            "priority": "cost",
+            "attemptTimeoutMs": 300000,
+            "tokenCeiling": 40000,
+            "estimatedCostCeilingMinor": 500,
+            "subagentDelegationEnabled": true
+        });
+
+        let fresh = fixture_with_ids(
+            "fresh-router", "fresh-worker", "fresh-worker-two", "fresh-reviewer",
+        );
+        assert_eq!(preview(&fresh, &portable).unwrap().would_create,
+            vec!["Economy Team"]);
+        assert_eq!(apply(&fresh, &portable, true).unwrap().created,
+            vec!["Economy Team"]);
+        let id = orchestration_id(&fresh, "Economy Team");
+        let team = super::super::configuration(&fresh, &id).unwrap();
+        assert!(!team.enabled, "A portable strategy must never grant execution.");
+        let snapshot = super::super::load_team_version_snapshot(
+            &fresh.db, &id, team.team_version,
+        ).unwrap();
+        assert_eq!(snapshot.policy.max_concurrent_tasks, 3);
+        assert_eq!(snapshot.policy.max_attempts_per_assignment, 4);
+        assert_eq!(snapshot.policy.strategy.priority, "cost");
+        assert_eq!(snapshot.policy.strategy.attempt_timeout_ms, 300000);
+        assert_eq!(snapshot.policy.strategy.token_ceiling, Some(40000));
+        assert!(snapshot.policy.strategy.subagent_delegation_enabled);
+        // Unsupported budgets must not become an executable Team by import.
+        assert!(super::super::change_enabled(
+            &fresh, &id, team.policy_revision, true,
+        ).is_err());
+        assert_eq!(apply(&fresh, &portable, true).unwrap().unchanged,
+            vec!["Economy Team"]);
+        let exported = export(&fresh).unwrap();
+        assert_eq!(exported["orchestrations"][0]["strategy"]["priority"], "cost");
+        assert_eq!(exported["orchestrations"][0]["enabled"], false);
+
+        let mut invalid = portable.clone();
+        invalid["orchestrations"][0]["strategy"]["attemptTimeoutMs"] = json!(0);
+        assert!(preview(&fresh, &invalid).is_err());
+        invalid = portable.clone();
+        invalid["orchestrations"][0]["maxConcurrentTasks"] = json!(0);
+        assert!(preview(&fresh, &invalid).is_err());
+        invalid = portable.clone();
+        invalid["orchestrations"][0]["strategy"]["tokenCeiling"] = json!(0);
+        assert!(preview(&fresh, &invalid).is_err());
+        invalid = portable.clone();
+        invalid["schemaVersion"] = json!(4);
+        assert!(preview(&fresh, &invalid).is_err());
+    }
+
+    #[test]
+    fn portable_required_council_needs_eligible_reviewer_membership() {
+        let store = fixture();
+        let mut document = document_v2("Unreviewable Council");
+        document["orchestrations"][0]["policy"]["councilEnabled"] = json!(true);
+        assert!(preview(&store, &document).unwrap_err().contains("two to eight"));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations",[],|row|row.get::<_,i64>(0),
+        ).unwrap(),0);
+    }
+
+    #[test]
+    fn v5_ordered_profile_drift_is_denied_before_backup_or_authorization() {
         let origin = fixture();
         origin.db.execute(
             "UPDATE bots SET skills='[\"required-skill\"]',reasoning_effort='high' WHERE id='worker'", [],
         ).unwrap();
         apply(&origin, &document_v2("Pinned Team"), true).unwrap();
         let portable = export(&origin).unwrap();
-        assert_eq!(portable["schemaVersion"], 4);
+        assert_eq!(portable["schemaVersion"], 5);
         assert_eq!(portable["orchestrations"][0]["botProfiles"][1]["skills"],
             json!(["required-skill"]));
         let rendered = portable.to_string();
@@ -1193,8 +1295,8 @@ mod tests {
         downgrade["schemaVersion"] = json!(2);
         assert!(preview(&destination, &downgrade).is_err());
 
-        // An older #150 exporter may include enabled=true. Accept its schema
-        // as provenance only; never reactivate an imported Team.
+        // Some portable sources may include enabled=true. Treat it only as
+        // untrusted provenance; never reactivate an imported Team.
         let mut legacy_enabled = portable.clone();
         legacy_enabled["orchestrations"][0]["enabled"] = json!(true);
         let imported = apply_with_backup(&destination, &root, &legacy_enabled, true).unwrap();

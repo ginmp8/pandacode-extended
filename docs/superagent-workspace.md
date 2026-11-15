@@ -157,17 +157,17 @@ remains disabled until native scoped role admission is implemented.
 
 Disabled Teams can rename themselves and change their configured additional Worker/Reviewer roster after all previous Tickets reach terminal states and every external-effect receipt is reconciled. These operations increment the native policy revision and retain every historical Ticket's admitted revision, original Worker, objective, audit and evidence. Primary Coordinator/Worker/project identity changes remain forbidden once a Team has Ticket history; create a separate Team to change those identities. The native SQL guards also reject active/reviewable Tickets, running assignments, pending/uncertain effects and stale revisions at the moment of mutation. The UI enables role editing for settled history, but native validation remains authoritative even if the visible list is incomplete. No such edit starts a Worker or grants access.
 
-### Portable bot-profile drift preflight (schema v4, partial S2)
+### Portable bot-profile and Team strategy preflight (schema v5, partial S2)
 
-The native companion export now uses schema version 4 with an **ordered,
+The native companion export now uses schema version 5 with an **ordered,
 configuration-only bot profile** for every Coordinator, Worker and Reviewer:
 portable bot display name, configured provider/harness, model, bot mode,
 reasoning effort and assigned Skill IDs. It does **not** export provider
 credentials, local bot IDs, task grants, objectives, session history or
-Skill contents. Earlier v1/v2/v3 imports remain accepted under their
+Skill contents. Earlier v1/v2/v3/v4 imports remain accepted under their
 respective conservative policies.
 
-A v3/v4 preview or confirmed import requires the target installation to
+A v3/v4/v5 preview or confirmed import requires the target installation to
 already contain an unambiguous bot for every role with the same configured
 profile. Schema v4 requires reasoning effort on every role and checks it
 against the existing local bot; v3 profiles must omit that new field.
@@ -176,7 +176,12 @@ assignment rejects the entire preflight **before a private backup or any
 SQLite mutation**. A destination may use different local bot IDs; no
 version downgrade may silently discard pinned v4 metadata. Successful
 imports remain **disabled and Off**, do not install Skills, change bots,
-issue grants or prove provider availability/Skill invocation. Native
+issue grants or prove provider availability/Skill invocation. Schema v5 also round-trips Team resource strategy preferences (priority,
+attempt timeout, optional token/cost ceilings and subagent-delegation preference)
+without granting runtime authority. Imported Teams remain disabled and Off;
+invalid or unsupported budgets are rejected before installation. A local
+preview mirrors these safe contracts but cannot prove native provider support.
+Native
 execution still requires independent task-scoped admission checks.
 
 

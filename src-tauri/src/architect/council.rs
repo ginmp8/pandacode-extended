@@ -713,13 +713,38 @@ pub(super) fn parse_reported_findings(report: &str) -> Vec<ReportedFindingDraft>
     items
 }
 
+/// A native-bound reviewer cannot supply another session's text simply by
+/// changing the mutable worker's session ID. Legacy unbound M1 snapshots keep
+/// their existing compatibility path; composed reviewers have native grants.
+fn current_finding_origin_is_authorized(
+    store: &storage::Store, team: &TeamSnapshot, worker: &Worker,
+) -> bool {
+    let Some(binding) = worker.reviewer_binding.as_ref() else { return true };
+    if !worker.read_only
+        || binding.validate(team, worker).is_err()
+        || super::reviewer_security::validate_issued_authority(
+            store, &team.session_id, binding,
+        ).is_err()
+    {
+        return false;
+    }
+    store.db.query_row(
+        "SELECT 1 FROM architect_workers
+         WHERE parent_session_id=?1 AND worker_id=?2 AND session_id=?3 LIMIT 1",
+        params![team.session_id, worker.id, worker.session_id],
+        |row| row.get::<_, i64>(0),
+    ).optional().ok().flatten() == Some(1)
+}
+
 /// Extract from the SAME native assistant turn whose score was admitted. A later
 /// user/coordination turn invalidates the projection. Durable message IDs make
 /// read-only finding IDs stable across restart without a second state store.
 pub(super) fn reported_findings(store: &storage::Store, team: &TeamSnapshot) -> Vec<CouncilReportedFinding> {
     let mut findings = Vec::new();
     for (worker, seat) in seats(team) {
-        if worker.status != "completed" || !counts(worker, seat) || seat.score.is_none() {
+        if worker.status != "completed" || !counts(worker, seat) || seat.score.is_none()
+            || !current_finding_origin_is_authorized(store, team, worker)
+        {
             continue;
         }
         let latest = store.db.query_row(
@@ -807,6 +832,9 @@ pub(super) fn historical_reported_findings(
             }
             binding.council_cycle_id.clone()
         } else {
+            if !current_finding_origin_is_authorized(store, team, worker) {
+                continue;
+            }
             current_cycle.clone()
         };
         let latest = store.db.query_row(

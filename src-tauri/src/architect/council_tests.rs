@@ -69,6 +69,11 @@ fn native_council_finding_projection_reuses_persisted_report_and_invalidates_aft
 #[test]
 fn prior_cycle_findings_remain_unverified_and_require_the_native_parent_session_link() {
     let (state, sid) = council_state(on(9.0, 3, 2));
+    // state_fixture starts an active task; a second start must be explicitly
+    // prepared as ready, just as other native new-cycle tests do.
+    let mut ready = saved(&state, &sid);
+    ready.status = "ready".into();
+    store_team(&state, &mut ready);
     let (started, _) = start_state(&state, &sid,
         "Inspect native findings across Council cycles", None, None).unwrap();
     assert!(started.council_since > 0, "historical evidence requires a real native cycle");
@@ -85,6 +90,22 @@ fn prior_cycle_findings_remain_unverified_and_require_the_native_parent_session_
         "Council findings JSON: [{\"severity\":\"high\",\"category\":\"authorization\",\"title\":\"Prior finding\",\"explanation\":\"Requires review\"}]\nCouncil score: 7/10").unwrap();
     team.workers[0].status = "completed".into();
     team.workers[0].council.as_mut().unwrap().score = Some(7.0);
+    // A foreign session can contain the same numeric score and well-formed
+    // findings. The native parent/worker/session link must still reject it.
+    let project = store.session(&sid).unwrap().project_id;
+    let foreign_current = store.create_session(&project, "codex", "", "full").unwrap();
+    store.message(&foreign_current.id, "assistant",
+        "Council findings JSON: [{\"severity\":\"critical\",\"category\":\"privacy\",\"title\":\"Foreign Council claim\",\"explanation\":\"Private reviewer data\"}]\\nCouncil score: 7/10").unwrap();
+    team.workers[0].session_id = foreign_current.id;
+    save(&store, &mut team).unwrap();
+    assert!(council_inspection_state(&store, &sid).unwrap().unwrap()
+        .reported_findings.is_empty(),
+        "a mutable worker may not expose foreign-session findings as current native review");
+    team.workers[0].session_id = reviewer_session.clone();
+    save(&store, &mut team).unwrap();
+    assert_eq!(council_inspection_state(&store, &sid).unwrap().unwrap()
+        .reported_findings.len(), 1,
+        "the real linked native review remains visible");
     team.council_since = reviewer_created_at + 1;
     save(&store, &mut team).unwrap();
     let inspected = council_inspection_state(&store, &sid).unwrap().unwrap();

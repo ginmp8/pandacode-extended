@@ -336,6 +336,42 @@ fn required_native_criterion_lens_and_target_are_not_averaged_away() {
 }
 
 #[test]
+fn native_criterion_inspector_never_converts_scored_reports_to_required_evidence() {
+    let mut config = on(9.0, 3, 2);
+    config.criteria_source = council::CouncilCriteriaSource::User;
+    config.criteria = vec![council::CouncilCriterion {
+        id: "security".into(), lens: "Security".into(),
+        required: true, target: 9.8, evidence_required: true,
+    }];
+    let mut workers = vec![
+        seat("reviewer-a", 1, Some(9.9), SINCE + 1),
+        seat("reviewer-b", 1, Some(10.0), SINCE + 2),
+    ];
+    for worker in &mut workers {
+        worker.council.as_mut().unwrap().lens = "Security".into();
+    }
+    let mut team = team_with(config, workers);
+    let observed = council::inspection(&team, false).unwrap();
+    assert_eq!(observed.criterion_observations.len(), 1);
+    let criterion = &observed.criterion_observations[0];
+    assert_eq!(criterion.state, "native_evidence_unverified");
+    assert_eq!(criterion.root_scored_seats, 2);
+    assert_eq!(criterion.lowest_root_score, Some(9.9));
+    assert!(!observed.verified_pass);
+    assert_ne!(council::status(&team).unwrap().state, "passed");
+
+    team.workers[0].council.as_mut().unwrap().score = Some(8.0);
+    let below = council::inspection(&team, false).unwrap();
+    assert_eq!(below.criterion_observations[0].state, "below_target");
+    assert_eq!(below.criterion_observations[0].lowest_root_score, Some(8.0));
+    team.workers[0].council.as_mut().unwrap().lens = "Not Security".into();
+    team.workers[1].council.as_mut().unwrap().lens = "Not Security".into();
+    let missing = council::inspection(&team, false).unwrap();
+    assert_eq!(missing.criterion_observations[0].state, "missing_root_score");
+    assert_eq!(missing.criterion_observations[0].root_scored_seats, 0);
+}
+
+#[test]
 fn criterion_failures_cannot_complete_by_exhausting_round_limit() {
     let mut config = on(9.0, 1, 2);
     config.criteria_source = council::CouncilCriteriaSource::User;

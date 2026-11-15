@@ -482,6 +482,9 @@ pub struct CouncilInspection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified_completion: Option<CouncilVerifiedCompletion>,
     pub criteria: Vec<CouncilCriterion>,
+    /// Native root-seat observations only, never independently verified artifact evidence
+    /// or a replacement for the actual root/child Council approval gate.
+    pub criterion_observations: Vec<CouncilCriterionObservation>,
     /// Authenticated native reservations only; no child scores or pass claims.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reserved_children: Vec<super::child_council::ChildReservationView>,
@@ -497,6 +500,44 @@ pub struct CouncilInspection {
     pub usage_by_round_source: Vec<CouncilUsageGroup>,
     /// Attributed excerpts from durable reviewer messages. Claims are NOT verified evidence.
     pub reported_findings: Vec<CouncilReportedFinding>,
+}
+/// Explain observed root review coverage without translating a reported score
+/// into an authenticated criterion check or a child Council composite verdict.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CouncilCriterionObservation {
+    pub id: String,
+    pub round: usize,
+    pub root_scored_seats: usize,
+    pub lowest_root_score: Option<f64>,
+    /// optional | awaiting_review | missing_root_score | below_target |
+    /// native_evidence_unverified | root_scores_observed
+    pub state: &'static str,
+}
+fn criterion_observations(
+    team: &TeamSnapshot, config: &CouncilConfig, round: usize,
+) -> Vec<CouncilCriterionObservation> {
+    config.criteria.iter().map(|criterion| {
+        // This is deliberately not the native pass oracle: child leaves do not
+        // occupy root seats, and model-produced scores cannot attest an artifact.
+        let scores: Vec<f64> = in_round(team, round)
+            .filter(|(worker, seat)| counts(worker, seat)
+                && worker.status == "completed"
+                && same_lens(&seat.lens, &criterion.lens))
+            .filter_map(|(_, seat)| seat.score.filter(|score| score.is_finite()))
+            .collect();
+        let lowest = scores.iter().copied().reduce(f64::min);
+        let state = if !criterion.required { "optional" }
+            else if round == 0 { "awaiting_review" }
+            else if lowest.is_none() { "missing_root_score" }
+            else if lowest.is_some_and(|score| score < criterion.target.max(config.target)) { "below_target" }
+            else if criterion.evidence_required { "native_evidence_unverified" }
+            else { "root_scores_observed" };
+        CouncilCriterionObservation {
+            id: criterion.id.clone(), round, root_scored_seats: scores.len(),
+            lowest_root_score: lowest, state,
+        }
+    }).collect()
 }
 /// Observed lifecycle only. Missing provider billing receipts remain unknown, not zero.
 #[derive(Clone, Debug, Serialize)]
@@ -769,6 +810,7 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
         mode: config.mode(), strategy: config.strategy,
         force_escalation: config.force_escalation, criteria_source: config.criteria_source,
         cycle_started_at: team.council_since, team_revision: team.revision,
+        criterion_observations: criterion_observations(team, config, status.round),
         status, verified_pass, verified_completion, criteria: config.criteria.clone(),
         usage_by_round_source: usage_by_round_source(&attempts),
         usage: usage_totals(&attempts), attempts, composed_usage: None,

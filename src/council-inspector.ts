@@ -63,6 +63,27 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
           ? 'User-defined criterion' : 'Configured criterion') + '</li>').join('') +
       '</ul><p>Targets and evidence obligations do not establish reviewer coverage or approval.</p></section>'
     : '<p>Criteria: Architect-defined</p>';
+  const criterionObservationLabels: Record<NonNullable<CouncilInspection['criterionObservations']>[number]['state'], string> = {
+    optional: 'Optional, not a required pass gate',
+    awaiting_review: 'No review round admitted',
+    missing_root_score: 'No settled scored root reviewer for this lens',
+    below_target: 'Observed root reviewer score below required target',
+    native_evidence_unverified: 'Independent native criterion evidence not verified; approval blocked',
+    root_scores_observed: 'Root reviewer scores observed; not independently verified artifact evidence',
+  };
+  const nativeCriterionObservations = inspection.criterionObservations ?? [];
+  const observedCriteriaHtml = nativeCriterionObservations.length
+    ? '<section aria-label="Native criterion observations" class="council-criterion-observations">' +
+      '<h4>Native criterion observations (not approvals)</h4>' +
+      '<p>Root reviewer reports only; child Council receipts are inspected separately. No score proves a mandatory artifact check.</p><ul>' +
+      nativeCriterionObservations.map(item => '<li><strong>' + escape(item.id) + '</strong> · Round ' +
+        escape(String(item.round)) + ' · Scored root reports ' +
+        escape(String(item.rootScoredSeats)) + ' · Lowest root score ' +
+        (item.lowestRootScore == null || !Number.isFinite(item.lowestRootScore)
+          ? 'unknown' : escape(item.lowestRootScore.toFixed(1)) + '/10') + ' · ' +
+        escape(criterionObservationLabels[item.state] ?? 'Unrecognized native observation; no approval') + '</li>').join('') +
+      '</ul></section>'
+    : '';
   const attempts = rounds.map(round => {
     const entries = shown.filter(a => a.round === round).map(a => {
       const score = a.score === null ? 'No native score' : a.score.toFixed(1) + '/10';
@@ -276,7 +297,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
   return '<div class="council-inspection-detail"><p><strong>' + escape(verdict) +
     '</strong> · ' + (inspection.status.stale ? 'Stale revision' : 'Current native status') +
     ': ' + escape(inspection.status.state) + ' · Revision ' + escape(String(inspection.teamRevision)) +
-    '</p>' + criteriaHtml +
+    '</p>' + criteriaHtml + observedCriteriaHtml +
     completion + sourceBreakdown + strategyHtml + usageHtml + composedHtml + groupHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
     (attempts || '<p>No reviewer attempts have been admitted.</p>') + childHtml + findingsHtml + '</div>';
 }

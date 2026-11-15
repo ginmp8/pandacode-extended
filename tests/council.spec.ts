@@ -78,6 +78,32 @@ test('native Council inspector displays unknown usage and never trusts a display
   await expect(panel(page).locator('.council-inspection img')).toHaveCount(0);
 });
 
+test('Council inspector exposes native mandatory evidence gaps without manufacturing a passed criterion', async ({ page }) => {
+  const inspection = {
+    mode: 'm3', strategy: 'parallel', criteriaSource: 'user',
+    cycleStartedAt: 1000, teamRevision: 9,
+    status: { state: 'fixing', round: 1, lowest: 9.9, target: 9, stale: false },
+    verifiedPass: false,
+    criteria: [{ id: '<svg onload=alert(1)>', lens: 'Security', required: true,
+      target: 9.8, evidenceRequired: true }],
+    criterionObservations: [{ id: '<svg onload=alert(1)>', round: 1,
+      rootScoredSeats: 2, lowestRootScore: 9.9, state: 'native_evidence_unverified' }],
+    attempts: [],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const observations = panel(page).getByRole('region', { name: 'Native criterion observations' });
+  await expect(observations).toContainText('Independent native criterion evidence not verified; approval blocked');
+  await expect(observations).toContainText('Scored root reports 2');
+  await expect(observations).toContainText('Lowest root score 9.9/10');
+  await expect(observations).toContainText('child Council receipts are inspected separately');
+  await expect(observations.getByText('<svg onload=alert(1)>')).toBeVisible();
+  await expect(observations.locator('svg')).toHaveCount(0);
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+});
+
 test('Council inspector shows disjoint root usage per round/source without claiming child billing', async ({ page }) => {
   const usage = (count: number, queue: number | null, span: number | null) => ({
     uniqueAttempts: count, queueMeasuredAttempts: queue === null ? 0 : count,

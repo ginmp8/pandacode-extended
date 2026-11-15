@@ -117,6 +117,12 @@ export interface CouncilInspection {
   cycleStartedAt: number; teamRevision: number; status: CouncilStatus;
   verifiedPass: boolean; verifiedCompletion?: CouncilVerifiedCompletion | null;
   criteria: CouncilCriterion[];
+  /** Host-observed root-only scored coverage. Never native evidence or root/child approval. */
+  criterionObservations?: {
+    id: string; round: number; rootScoredSeats: number; lowestRootScore: number | null;
+    state: 'optional' | 'awaiting_review' | 'missing_root_score' | 'below_target' |
+      'native_evidence_unverified' | 'root_scores_observed';
+  }[];
   attempts: CouncilInspectionAttempt[];
   /** Optional for older native builds / existing preview fixtures. */
   usage?: CouncilUsageTotals;

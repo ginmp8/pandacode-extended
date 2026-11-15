@@ -100,6 +100,8 @@ export interface CouncilChildReservation {
   leafAttempts?: CouncilInspectionAttempt[];
   /** Absent for unadmitted, incomplete, failed, or legacy child reviews. */
   verifiedChildReceipt?: CouncilVerifiedChildReceipt | null;
+  /** Fresh child S2 native receipt; does not authorize a terminal parent vote. */
+  verifiedEscalationReceipt?: CouncilVerifiedChildReceipt | null;
 }
 export interface CouncilInspection {
   mode: 'm1' | 'm2' | 'm3' | 'm4' | 'm5' | 'm6' | 'm7';

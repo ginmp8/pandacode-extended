@@ -353,6 +353,59 @@ test('forced S2 child inspector exposes both native waves without promoting firs
   await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
 });
 
+test('child S2 inspector distinguishes a native second-wave receipt from terminal root approval', async ({ page }) => {
+  const attempts = ['first-a', 'first-b', 'fresh-a', 'fresh-b'].map((workerId, index) => ({
+    workerId, round: index < 2 ? 1 : 2, name: workerId,
+    lens: 'Authorization', reviewerSource: 'automatic',
+    status: 'completed', score: 9.6, provider: 'codex', model: 'native-reviewer',
+    queueWaitMs: 25, observedSpanMs: 160,
+  }));
+  const receipt = {
+    rootCycleId: 'root:1000', childSessionId: 'child-only-task', botId: 'security-child',
+    objectiveSha256: 'pinned-objective', policySha256: 'pinned-policy',
+    childConfigSha256: 'pinned-criteria', lowestScore: 9.6,
+    leafWorkerIds: ['first-a', 'first-b'],
+  };
+  const inspection = {
+    mode: 'm5', strategy: 'escalated', forceEscalation: true,
+    cycleStartedAt: 1000, teamRevision: 16,
+    status: { state: 'blocked', round: 2, lowest: null, target: 9.0, stale: false },
+    verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
+    reservedChildren: [{
+      botId: 'security-child', childSessionId: 'child-only-task',
+      rootCycleId: 'root:1000', requiredLeafReviewers: 2,
+      status: 'child_escalation_evidence_ready_root_pending',
+      leafAttempts: attempts,
+      verifiedChildReceipt: receipt,
+      verifiedEscalationReceipt: {
+        ...receipt, leafWorkerIds: ['fresh-a', 'fresh-b'],
+      },
+    }],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const child = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await child.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  await expect(child).toContainText('Native second-wave child evidence recorded (root approval pending)');
+  await expect(child).toContainText('2 independent fresh reviewer identifiers');
+  await expect(child).toContainText('Fresh child evidence is recorded separately; root approval remains pending');
+  await expect(child.getByRole('list', { name: 'Fresh child reviewer evidence identifiers' }).locator('li')).toHaveCount(2);
+  await expect(panel(page)).toContainText('Native pass not verified');
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+
+  inspection.reservedChildren[0].verifiedEscalationReceipt.leafWorkerIds[0] = 'first-a';
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const altered = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await altered.locator('summary').click();
+  await expect(altered.getByRole('alert')).toContainText('Second-wave child receipt correlation or reviewer identity mismatch');
+  await expect(panel(page)).toContainText('Native pass not verified');
+});
+
 test('native Council findings remain attributed unverified and safe to render', async ({ page }) => {
   const inspection = {
     cycleStartedAt: 1000, teamRevision: 9,

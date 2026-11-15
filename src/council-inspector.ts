@@ -105,6 +105,24 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
           && Number.isFinite(receipt.lowestScore) && receipt.lowestScore >= 0 && receipt.lowestScore <= 10
           && Array.isArray(ids) && ids.length === child.requiredLeafReviewers
           && ids.length >= 2 && ids.length <= 8 && new Set(ids).size === ids.length;
+        const escalationReceipt = child.verifiedEscalationReceipt;
+        const freshIds = escalationReceipt?.leafWorkerIds ?? [];
+        // Correlation is display hygiene, not a second native approval gate.
+        // A receipt displayed by the host must refer to the same frozen child
+        // and to fresh identities outside the original child review wave.
+        const escalationCorrelated = escalationReceipt && correlated
+          && escalationReceipt.rootCycleId === child.rootCycleId
+          && escalationReceipt.childSessionId === child.childSessionId
+          && escalationReceipt.botId === child.botId
+          && escalationReceipt.objectiveSha256 === receipt?.objectiveSha256
+          && escalationReceipt.policySha256 === receipt?.policySha256
+          && escalationReceipt.childConfigSha256 === receipt?.childConfigSha256
+          && Number.isFinite(escalationReceipt.lowestScore)
+          && escalationReceipt.lowestScore >= 0 && escalationReceipt.lowestScore <= 10
+          && Array.isArray(freshIds) && freshIds.length === child.requiredLeafReviewers
+          && freshIds.length >= 2 && freshIds.length <= 8
+          && new Set(freshIds).size === freshIds.length
+          && freshIds.every(id => !ids.includes(id));
         const measured = child.observedLeafUsage;
         const childUsageHtml = measured
           ? '<p>Child-observed native leaf attempts: ' + escape(String(measured.uniqueAttempts)) +
@@ -125,8 +143,19 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
         const escalationHtml = hasFreshWave
           ? '<p role="status">Fresh native child escalation: round 2 admitted ' +
             escape(String(freshLeafCount)) + ' of ' + escape(String(child.requiredLeafReviewers)) +
-            ' reviewers. First-wave receipts do not verify second-wave completion or authorize root approval.</p>'
+            ' reviewers. ' + (escalationCorrelated
+              ? 'Fresh child evidence is recorded separately; root approval remains pending.'
+              : 'First-wave receipts do not verify second-wave completion or authorize root approval.') + '</p>'
           : '';
+        const escalationReceiptHtml = escalationReceipt
+          ? (escalationCorrelated
+            ? '<p>Native second-wave child evidence recorded (root approval pending): minimum score ' +
+              escape(escalationReceipt.lowestScore.toFixed(1)) + '/10 · ' +
+              escape(String(freshIds.length)) + ' independent fresh reviewer identifiers.</p>' +
+              '<ul aria-label="Fresh child reviewer evidence identifiers">' +
+              freshIds.map(id => '<li>' + escape(id) + '</li>').join('') + '</ul>'
+            : '<p role="alert">Second-wave child receipt correlation or reviewer identity mismatch; no approval.</p>')
+          : hasFreshWave ? '<p>No independent second-wave child receipt is available yet; no parent vote.</p>' : '';
         const leafHtml = leafAttempts.length
           ? '<section aria-label="Child native reviewer attempts"><h5>Native child reviewer attempts (not root votes)</h5><ul>' +
             leafAttempts.map(attempt => {
@@ -155,7 +184,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
           '<p>Configured leaf reviewers: ' + escape(String(child.requiredLeafReviewers)) +
           ' · Task session: ' + escape(child.childSessionId) +
           ' · Parent cycle: ' + escape(child.rootCycleId) +
-          '</p>' + childUsageHtml + leafHtml + escalationHtml + receiptHtml + '</details></li>';
+          '</p>' + childUsageHtml + leafHtml + escalationHtml + receiptHtml + escalationReceiptHtml + '</details></li>';
       }).join('') + '</ul></section>'
     : '';
   const hidden = inspection.attempts.length - shown.length;

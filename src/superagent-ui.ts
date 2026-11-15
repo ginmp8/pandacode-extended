@@ -1261,6 +1261,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       call<ThreadLink[]>('superagent_source_thread_links', { ticketId:id }),
     ]);
     if (inspectedTicket === id) {
+      if (snapshot.ticket.id !== id || snapshot.ticket.orchestrationId !== selected) {
+        ticketDetails = null; threadLinks = []; inspectedAssignmentId = '';
+        throw new Error('Native Ticket identity or Team changed; reload before acting.');
+      }
       ticketDetails = snapshot;
       if (!snapshot.assignments.some(item => item.id === inspectedAssignmentId)) {
         inspectedAssignmentId = '';
@@ -1302,6 +1306,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       tickets = [];
       ticketDetails = null; inspectedAssignmentId = '';
       tickets = selected ? await call<Ticket[]>('superagent_tickets',{ orchestrationId:selected, limit:50 }) : [];
+      // An inspected cross-Team Demand can fall outside this Team's latest-50
+      // page. Rehydrate its exact native identity before showing actions.
+      if (inspectedTicket && !tickets.some(ticket => ticket.id === inspectedTicket)) {
+        const historical = await call<TicketDetails>('superagent_snapshot', {
+          ticketId:inspectedTicket, limit:50,
+        });
+        if (historical.ticket.id !== inspectedTicket ||
+            historical.ticket.orchestrationId !== selected) {
+          inspectedTicket = '';
+          throw new Error('Native demand ownership changed; reload the index.');
+        }
+        tickets = [historical.ticket, ...tickets];
+      }
       await refreshTicketDetails();
       if (roleRoster && selected) {
         roleRoster = await call<TeamRoster>('superagent_roster',{orchestrationId:selected});

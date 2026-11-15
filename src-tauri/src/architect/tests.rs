@@ -4021,6 +4021,29 @@ fn add_parallel_root_seat(
     team.workers.push(reviewer);
 }
 
+fn has_correlated_current_nested_root_source(
+    team: &TeamSnapshot,
+    status: &CouncilStatus,
+    bot_id: &str,
+) -> bool {
+    let cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    team.workers.iter().any(|worker| {
+        !worker.abandoned
+            && worker.parent_worker.is_none()
+            && worker
+                .council
+                .as_ref()
+                .is_some_and(|seat| seat.round == status.round)
+            && worker.reviewer_binding.as_ref().is_some_and(|binding| {
+                binding.council_cycle_id == cycle_id
+                    && binding.round == status.round
+                    && binding.seat_id == worker.id
+                    && binding.composition_mode.as_deref() == Some("nested")
+                    && binding.reviewer_bot_id.as_deref() == Some(bot_id)
+            })
+    })
+}
+
 #[test]
 fn required_parallel_nested_failure_waits_for_live_direct_root_branch() {
     use council::SelectedReviewerMode as Mode;
@@ -4101,6 +4124,90 @@ fn stale_replaced_and_abandoned_nested_attempts_do_not_block_the_current_cycle()
 
     assert_eq!(status.state, "reviewing", "only non-abandoned seats bound to the exact current cycle can trigger blocking");
     assert_eq!(status.notice, None);
+}
+
+#[test]
+fn mismatched_required_nested_binding_round_cannot_block_the_current_source() {
+    use council::SelectedReviewerMode as Mode;
+    let (mut team, mut status) = parallel_nested_failure_fixture(
+        1,
+        &[("nested-fails", Mode::Nested), ("direct-sibling", Mode::Direct)],
+    );
+    add_parallel_root_seat(&mut team, "nested-current", "completed", "nested", Some("nested-fails"), None, false);
+    add_parallel_root_seat(&mut team, "direct-current", "completed", "direct", Some("direct-sibling"), None, false);
+    add_parallel_root_seat(&mut team, "automatic-current", "completed", "direct", None, None, false);
+    add_parallel_root_seat(&mut team, "nested-wrong-round", "failed", "nested", Some("nested-fails"), None, false);
+    team.workers.last_mut().unwrap().reviewer_binding.as_mut().unwrap().round = 2;
+
+    apply_required_parallel_nested_failure(&team, &mut status);
+
+    assert_eq!(status.state, "reviewing", "a failed seat bound to another round cannot replace the current required source evidence");
+    assert_eq!(status.notice, None, "mismatched round evidence cannot manufacture a terminal block");
+}
+
+#[test]
+fn mismatched_required_nested_binding_seat_id_cannot_block_the_current_source() {
+    use council::SelectedReviewerMode as Mode;
+    let (mut team, mut status) = parallel_nested_failure_fixture(
+        1,
+        &[("nested-fails", Mode::Nested), ("direct-sibling", Mode::Direct)],
+    );
+    add_parallel_root_seat(&mut team, "nested-current", "completed", "nested", Some("nested-fails"), None, false);
+    add_parallel_root_seat(&mut team, "direct-current", "completed", "direct", Some("direct-sibling"), None, false);
+    add_parallel_root_seat(&mut team, "automatic-current", "completed", "direct", None, None, false);
+    add_parallel_root_seat(&mut team, "nested-wrong-seat", "failed", "nested", Some("nested-fails"), None, false);
+    team.workers.last_mut().unwrap().reviewer_binding.as_mut().unwrap().seat_id = "another-seat".into();
+
+    apply_required_parallel_nested_failure(&team, &mut status);
+
+    assert_eq!(status.state, "reviewing", "a failed seat bound to another seat ID cannot replace the current required source evidence");
+    assert_eq!(status.notice, None, "mismatched seat ID evidence cannot manufacture a terminal block");
+}
+
+#[test]
+fn mismatched_required_nested_binding_round_is_only_candidate_and_leaves_source_missing() {
+    use council::SelectedReviewerMode as Mode;
+    let (mut team, mut status) = parallel_nested_failure_fixture(
+        1,
+        &[("nested-fails", Mode::Nested), ("direct-sibling", Mode::Direct)],
+    );
+    add_parallel_root_seat(&mut team, "direct-current", "completed", "direct", Some("direct-sibling"), None, false);
+    add_parallel_root_seat(&mut team, "automatic-current", "completed", "direct", None, None, false);
+    add_parallel_root_seat(&mut team, "nested-wrong-round-only", "failed", "nested", Some("nested-fails"), None, false);
+    team.workers.last_mut().unwrap().reviewer_binding.as_mut().unwrap().round = 2;
+
+    assert!(
+        !has_correlated_current_nested_root_source(&team, &status, "nested-fails"),
+        "the required current nested source remains missing when its only candidate is bound to another round",
+    );
+
+    apply_required_parallel_nested_failure(&team, &mut status);
+
+    assert_eq!(status.state, "reviewing", "the mismatched failed worker cannot settle the missing required nested source");
+    assert_eq!(status.notice, None, "a missing current nested source cannot create a terminal notice or block");
+}
+
+#[test]
+fn mismatched_required_nested_binding_seat_id_is_only_candidate_and_leaves_source_missing() {
+    use council::SelectedReviewerMode as Mode;
+    let (mut team, mut status) = parallel_nested_failure_fixture(
+        1,
+        &[("nested-fails", Mode::Nested), ("direct-sibling", Mode::Direct)],
+    );
+    add_parallel_root_seat(&mut team, "direct-current", "completed", "direct", Some("direct-sibling"), None, false);
+    add_parallel_root_seat(&mut team, "automatic-current", "completed", "direct", None, None, false);
+    add_parallel_root_seat(&mut team, "nested-wrong-seat-only", "failed", "nested", Some("nested-fails"), None, false);
+    team.workers.last_mut().unwrap().reviewer_binding.as_mut().unwrap().seat_id = "another-seat".into();
+
+    assert!(
+        !has_correlated_current_nested_root_source(&team, &status, "nested-fails"),
+        "the required current nested source remains missing when its only candidate is bound to another seat ID",
+    );
+
+    apply_required_parallel_nested_failure(&team, &mut status);
+
+    assert_eq!(status.state, "reviewing", "the mismatched failed worker cannot settle the missing required nested source");
+    assert_eq!(status.notice, None, "a missing current nested source cannot create a terminal notice or block");
 }
 
 #[test]

@@ -4404,6 +4404,31 @@ fn nested_m5_s3_admits_native_first_phase_but_denies_premature_approval() {
     assert!(receipt.phase_two.lowest_score >= 9.5);
     assert!(!verified_council_pass(&store, &saved),
         "child challenge evidence is not an independent root phase-two verdict");
+    let receipt_key = format!("native-council-child-s3-receipt:{}:security-child", saved.council_since);
+    let original: String = store.db.query_row(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s3_receipt'",
+        rusqlite::params![sid, receipt_key], |row| row.get(0),
+    ).unwrap();
+    let mut tampered: serde_json::Value = serde_json::from_str(&original).unwrap();
+    tampered["phaseTwo"]["lowestScore"] = json!(10.0);
+    store.db.execute(
+        "UPDATE architect_requests SET content=?3
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s3_receipt'",
+        rusqlite::params![sid, receipt_key, tampered.to_string()],
+    ).unwrap();
+    assert!(child_council::inspect(&store, &saved).is_err(),
+        "an altered M5 phase-two child receipt must fail native inspection");
+    assert!(!verified_council_pass(&store, &saved),
+        "a forged M5 child challenge must not approve the root");
+    store.db.execute(
+        "UPDATE architect_requests SET content=?3
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s3_receipt'",
+        rusqlite::params![sid, receipt_key, original],
+    ).unwrap();
+    assert!(child_council::inspect(&store, &saved).unwrap()[0]
+        .verified_challenge_receipt.is_some(),
+        "the unchanged M5 challenge receipt must remain verifiable");
 }
 
 #[test]

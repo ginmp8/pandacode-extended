@@ -315,7 +315,7 @@ fn validate_admitted(
                     (policy.strategy == super::council::CouncilExecutionStrategy::Escalated
                         && policy.force_escalation)
                         || (policy.strategy == super::council::CouncilExecutionStrategy::TwoPhase
-                            && policy.mode() == "m4"))))
+                            && matches!(policy.mode(), "m4" | "m5" | "m6" | "m7")))))
         || team.pending_turn.is_some() || team.pending_setup.is_some()
         || team.summary.is_some() || team.council_accepted.is_some()
     {

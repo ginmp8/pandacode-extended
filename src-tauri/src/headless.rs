@@ -39,6 +39,10 @@ enum Command {
     InspectOrchestrations,
     InspectTeamStrategy { orchestration_id: String },
     ListTickets,
+    ListDemands {
+        state: String, before_updated_at: Option<i64>, before_id: Option<String>,
+        search_query: Option<String>,
+    },
     ListTicketActivity { ticket_id: String, before_id: Option<i64> },
     ListReviewInbox,
     ListRecoveryInbox,
@@ -49,7 +53,10 @@ enum Command {
     },
     InspectTicket { ticket_id: String },
     InspectTicketGraph { ticket_id: String },
-    InspectTicketEffects { ticket_id: String },
+    InspectTicketEffects {
+        ticket_id: String, before_created_at: Option<i64>,
+        before_key: Option<String>, unresolved_only: bool,
+    },
     InspectTicketSource { ticket_id: String },
     InspectSourceHealth { source_id: String },
     InspectAutoPolicy { source_id: String },
@@ -202,11 +209,14 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
-            if let Command::InspectTicketEffects { ticket_id } = &command {
+            if let Command::InspectTicketEffects {
+                ticket_id, before_created_at, before_key, unresolved_only,
+            } = &command {
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
-                    .and_then(|dir| crate::superagent::inspect_headless_effect_receipts(
+                    .and_then(|dir| crate::superagent::inspect_headless_effect_receipts_page(
                         &dir.join("kingcode.sqlite3"), ticket_id,
+                        *before_created_at, before_key.as_deref(), *unresolved_only,
                     ));
                 match result {
                     Ok(receipts) => { println!("{receipts}"); std::process::exit(0) }
@@ -366,6 +376,23 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(events) => { println!("{events}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent activity inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::ListDemands {
+                state, before_updated_at, before_id, search_query,
+            } = &command {
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::list_headless_all_demands_searched(
+                        &dir.join("kingcode.sqlite3"), state,
+                        *before_updated_at, before_id.as_deref(), search_query.as_deref(),
+                    ));
+                match result {
+                    Ok(demands) => { println!("{demands}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent global Demands inspection failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -601,7 +628,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
     match command {
         // Inspection exits before setup_common and must never reach this branch.
         Command::InspectOrchestrations | Command::InspectTeamStrategy { .. }
-        | Command::ListTickets | Command::ListTicketActivity { .. }
+        | Command::ListTickets | Command::ListDemands { .. } | Command::ListTicketActivity { .. }
         | Command::ListReviewInbox
         | Command::ListRecoveryInbox | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
@@ -1144,6 +1171,41 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 command = Command::ListReviewInbox;
                 ops += 1;
             }
+            "--list-demands" => {
+                let state = args.get(index + 1)
+                    .ok_or("--list-demands needs a native Ticket state or all.")?;
+                if !matches!(state.as_str(), "all" | "queued" | "running" |
+                    "waiting_approval" | "waiting_review" | "blocked" | "completed" |
+                    "failed" | "stopped" | "interrupted" | "inconclusive") {
+                    return Err("Choose an exact native Ticket state or all.".into());
+                }
+                let mut extra=2_usize;
+                let (before_updated_at,before_id) = if args.get(index + extra).map(String::as_str)==Some("--before") {
+                    let timestamp=args.get(index+extra+1)
+                        .ok_or("--before needs a positive millisecond timestamp.")?
+                        .parse::<i64>().ok().filter(|value|*value>0)
+                        .ok_or("--before needs a positive millisecond timestamp.")?;
+                    let cursor=args.get(index+extra+2)
+                        .ok_or("--before needs the prior page's last Ticket ID.")?;
+                    validate_ticket_id(cursor)?;
+                    extra+=3;
+                    (Some(timestamp),Some(cursor.clone()))
+                } else {(None,None)};
+                let search_query=if args.get(index+extra).map(String::as_str)==Some("--search") {
+                    let query=args.get(index+extra+1)
+                        .ok_or("--search needs a bounded objective fragment.")?;
+                    if query.is_empty() || query.len()>128 || query.trim()!=query
+                        || query.starts_with("--") || query.chars().any(char::is_control) {
+                        return Err("--search requires a nonempty bounded literal fragment.".into());
+                    }
+                    extra+=2;Some(query.clone())
+                } else {None};
+                command=Command::ListDemands {
+                    state:state.clone(),before_updated_at,before_id,search_query,
+                };
+                ops+=1;
+                index+=extra-1;
+            }
             "--list-team-demands" => {
                 let id = args.get(index + 1)
                     .ok_or_else(|| format!("--list-team-demands needs a Team ID and state.\n\n{}", help()))?;
@@ -1332,12 +1394,31 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 index += 3;
             }
             "--inspect-ticket-effects" => {
-                let value = args.get(index + 1)
-                    .ok_or_else(|| format!("--inspect-ticket-effects needs a Ticket ID.\n\n{}", help()))?;
-                validate_ticket_id(value)?;
-                command = Command::InspectTicketEffects { ticket_id: value.clone() };
-                ops += 1;
-                index += 1;
+                let ticket_id=args.get(index+1)
+                    .ok_or("--inspect-ticket-effects needs a Ticket ID.")?;
+                validate_ticket_id(ticket_id)?;
+                let mut consumed=1_usize;
+                let (before_created_at,before_key)=if args.get(index+consumed+1).map(String::as_str)==Some("--before") {
+                    let time=args.get(index+consumed+2)
+                        .ok_or("--before needs a positive timestamp and effect key.")?
+                        .parse::<i64>().ok().filter(|value|*value>0)
+                        .ok_or("--before needs a positive timestamp.")?;
+                    let key=args.get(index+consumed+3)
+                        .ok_or("--before needs a bounded exact effect key.")?;
+                    if key.is_empty()||key.len()>128
+                        || !key.bytes().all(|b|b.is_ascii_alphanumeric()||matches!(b,b'-'|b'_'|b'.'|b':')) {
+                        return Err("Invalid effect receipt cursor key.".into());
+                    }
+                    consumed+=3;
+                    (Some(time),Some(key.clone()))
+                } else {(None,None)};
+                let unresolved_only=args.get(index+consumed+1).map(String::as_str)==Some("--unresolved-only");
+                if unresolved_only {consumed+=1;}
+                command=Command::InspectTicketEffects {
+                    ticket_id:ticket_id.clone(),before_created_at,before_key,unresolved_only,
+                };
+                ops+=1;
+                index+=consumed;
             }
             "--inspect-ticket-graph" => {
                 let ticket_id = args.get(index + 1)
@@ -1628,7 +1709,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox | --list-recovery-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --preflight-demand <id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --inspect-auto-policy <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox | --list-recovery-inbox | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --preflight-demand <id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --inspect-auto-policy <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1661,6 +1742,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --list-ticket-activity <id> [--before <audit-id>]
                          Page 100 redacted native audit kinds and timestamps without
                          private details, provider invocation or restart recovery.
+  --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>]
+                         Page redacted native Tickets across all Teams with
+                         bound objective search. No startup recovery or provider.
   --list-review-inbox    List up to 200 pending human/Council decisions across Teams;
                          redact objectives, never approve or run a reviewer; exit.
   --list-recovery-inbox  Prioritize up to 200 actual recovery/decision Tickets across Teams;
@@ -1705,7 +1789,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-ticket-graph <id>
                          Inspect bounded native Ticket/attempt topology without task
                          objectives, results, inferred subagents or Council verdicts; exit.
-  --inspect-ticket-effects <id>
+  --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only]
+                         Page exact native effect receipts, including outstanding
+                         uncertain states; no external write or replay.
+  --inspect-ticket-effects (continued)
                          List up to 100 native effect receipt keys, payload digests and
                          states; never replay or mark applied; exit.
   --inspect-ticket-source <id>
@@ -1879,6 +1966,35 @@ mod tests {
             "--stop-ticket-at-revision ticket_1 nope",
             "--stop-ticket-at-revision ticket_1 4 --accept-ticket ticket_1 4",
         ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
+        assert_eq!(parsed("--list-demands blocked"),Ok(Command::ListDemands {
+            state:"blocked".into(),before_updated_at:None,before_id:None,search_query:None,
+        }));
+        assert_eq!(parsed("--list-demands blocked --before 2000 ticket_1 --search needle"),
+            Ok(Command::ListDemands {
+                state:"blocked".into(),before_updated_at:Some(2000),
+                before_id:Some("ticket_1".into()),search_query:Some("needle".into()),
+            }));
+        for invalid in [
+            "--list-demands","--list-demands INVALID","--list-demands blocked --before 0 ticket_1",
+            "--list-demands blocked --search","--list-demands blocked --search ../unsafe",
+            "--list-demands blocked --stop-ticket ticket_1",
+        ] {assert!(parsed(invalid).is_err(),"{invalid}");}
+        assert_eq!(parsed("--inspect-ticket-effects ticket_1"),
+            Ok(Command::InspectTicketEffects {
+                ticket_id:"ticket_1".into(),before_created_at:None,
+                before_key:None,unresolved_only:false,
+            }));
+        assert_eq!(parsed("--inspect-ticket-effects ticket_1 --before 2000 effect:000 --unresolved-only"),
+            Ok(Command::InspectTicketEffects {
+                ticket_id:"ticket_1".into(),before_created_at:Some(2000),
+                before_key:Some("effect:000".into()),unresolved_only:true,
+            }));
+        for invalid in [
+            "--inspect-ticket-effects ticket_1 --before 0 effect:000",
+            "--inspect-ticket-effects ticket_1 --before 2000 ../unsafe",
+            "--inspect-ticket-effects ticket_1 --before 2000",
+            "--inspect-ticket-effects ticket_1 --unresolved-only --stop-ticket ticket_1",
+        ] {assert!(parsed(invalid).is_err(),"{invalid}");}
         assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
         assert_eq!(parsed("--list-ticket-activity ticket_1"),
             Ok(Command::ListTicketActivity { ticket_id:"ticket_1".into(), before_id:None }));

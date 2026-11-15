@@ -818,3 +818,18 @@ stopped, pending external effects become uncertain, and one Stop event is
 committed atomically. The command never claims to terminate detached provider
 processes or replays uncertain effects. Emergency `--stop-ticket` remains
 available for unconditional operator revocation.
+
+
+### Cross-Team Demand and external-effect history pages
+
+`pandacode serve --list-demands <state|all> [--before <milliseconds> <ticket-id>] [--search <fragment>]`
+returns at most 200 native Ticket metadata rows across Teams with a stable
+timestamp/ID cursor. Objective matching is performed by bound SQLite predicates;
+raw objective text, mandates, authorization IDs and private evidence are omitted.
+The query opens the existing database read-only and never recovers or dispatches.
+
+`pandacode serve --inspect-ticket-effects <ticket-id> [--before <milliseconds> <effect-key>] [--unresolved-only]`
+returns 100 effect receipts at a time using a stable composite timestamp/key cursor.
+This view does not call GitHub, replay effects, authorize retry or acknowledge
+an uncertain effect. The native unresolved total remains authoritative even when
+older receipts are outside the current page.

@@ -167,3 +167,8 @@ quarantined explicitly using its current revision through the headless CLI.
 This does not retry a provider or an external effect, and does not grant new
 execution authority. A recovered pending effect must be reconciled before
 any subsequent remote action.
+
+
+### Cross-branch WorkItem schema compatibility
+
+PR #151 schema versions 52–53 stored WorkItems as stateful `sa_work_items(id, objective, ...)` records. The unified branch uses a different immutable operator-approved work-plan graph, `sa_work_items(ticket_id, item_key, ...)`. During upgrade from schema v53 or earlier, the original PR #151 WorkItems are **preserved without deletion** as `sa_legacy_work_items_151`, including their existing assignment and dependency foreign-key references. The unified graph is created separately. No historical model-derived item becomes a new locally approved task, grant, Council verdict, or runnable work assignment merely through schema migration. Unknown or conflicting layouts fail closed instead of overwriting data. Legacy archived state remains historical evidence; it is not an automatically resumed scheduler.

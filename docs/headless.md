@@ -600,6 +600,16 @@ exception remain unimplemented; Council-Off Tickets retain normal manual
 acceptance.
 
 
+### Read-only native Demand preflight
+
+`pandacode serve --preflight-demand <team-id> <direct|coordinated> <objective-file>`
+reads a UTF-8 objective file bounded to 16 KiB and returns a read-only native
+eligibility snapshot for the currently configured Team. No task, mandate,
+assignment or provider execution is created, and the objective text is not
+printed. Actual admission must recheck policy revision, bot eligibility and
+checkout availability before granting any authority. Ineligible or malformed
+input cannot become implicit execution approval.
+
 ### Redacted Ticket audit pagination
 
 `pandacode serve --list-ticket-activity <ticket-id>` returns up to 100 native

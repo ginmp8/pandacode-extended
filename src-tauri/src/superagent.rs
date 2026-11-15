@@ -1748,6 +1748,31 @@ pub(crate) fn inspect_headless_ticket_graph(
 /// Store::open's migration/restart settlement behind a live serve process.
 /// Return bounded operational metadata, never the task objective, worker result,
 /// private evidence, rejection reason, authorization token, or transcript.
+pub(crate) fn inspect_headless_demand_preflight(
+    database_path: &std::path::Path, orchestration_id: &str,
+    objective: &str, coordinated: bool,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let status = manual_preflight(&store, orchestration_id, objective, coordinated, false)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": status.orchestration_id,
+        "policyRevision": status.policy_revision,
+        "projectId": status.project_id,
+        "selectedRole": status.selected_role,
+        "selectedBotId": status.selected_bot_id,
+        "eligibleAtSnapshot": status.eligible,
+        "reason": status.reason,
+        "objectiveBytes": objective.trim().len(),
+        "allowedTools": status.allowed_tools,
+        "allowedSideEffects": status.allowed_side_effects,
+        "attemptBudgetMs": status.attempt_budget_ms,
+        "requiresLiveAdmissionRecheck": true,
+        "mandateIssued": false,
+        "providerDispatched": false,
+        "observationalOnly": true
+    })).map_err(|e| e.to_string())
+}
+
 pub(crate) fn inspect_headless_status(
     database_path: &std::path::Path, ticket_id: Option<&str>,
 ) -> Result<String> {
@@ -5838,6 +5863,36 @@ mod tests {
             &list_headless_ticket_activity(&path,&ticket.id,None).unwrap(),
         ).unwrap();
         assert_eq!(reopened["items"].as_array().unwrap().len(),100);
+    }
+
+    #[test]
+    fn headless_demand_preflight_is_observational_and_does_not_issue_authority() {
+        let store=fixture();
+        let cfg=enabled(&store);
+        let before:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get(0),
+        ).unwrap();
+        let raw=inspect_headless_demand_preflight(
+            &store.path,&cfg.id,"Read a disposable fixture",false,
+        ).unwrap();
+        let view:serde_json::Value=serde_json::from_str(&raw).unwrap();
+        assert_eq!(view["orchestrationId"],cfg.id);
+        assert_eq!(view["selectedRole"],"worker");
+        assert_eq!(view["mandateIssued"],false);
+        assert_eq!(view["providerDispatched"],false);
+        assert_eq!(view["observationalOnly"],true);
+        assert_eq!(view["requiresLiveAdmissionRecheck"],true);
+        assert_eq!(view["allowedSideEffects"],false);
+        let after:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(before,after);
+        assert!(inspect_headless_demand_preflight(
+            &store.path,&cfg.id,"",false,
+        ).is_err());
+        assert!(inspect_headless_demand_preflight(
+            &store.path,"nonexistent-Team","Read a fixture",true,
+        ).is_err());
     }
 
     #[test]

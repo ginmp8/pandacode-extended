@@ -1455,6 +1455,7 @@ mod tests {
                     });
                     architect::reviewer_security::record_native_authority(store, &child.session_id, &leaf_binding).unwrap();
                     leaf.reviewer_binding = Some(leaf_binding);
+                    store.message(&leaf.session_id, "assistant", "Council score: 9.5/10").unwrap();
                     test_council_record(store, &session, &format!("leaf-receipt-{leaf_index}"),
                         "council_review_receipt", test_review_receipt(&child, &leaf));
                     test_council_record(store, &session, &format!("child-outcome-{leaf_index}"),
@@ -1494,6 +1495,9 @@ mod tests {
                     "snapshotFingerprint":sha256(&child_snapshot)
                 }));
             } else {
+                // Native-composed authority checks the latest scored reply of
+                // every direct root reviewer, including automatic reviewers.
+                store.message(&worker.session_id, "assistant", "Council score: 9.5/10").unwrap();
                 test_council_record(store, &session, &format!("root-receipt-{index}"),
                     "council_review_receipt", test_review_receipt(&team, &worker));
                 test_council_record(store, &session, &format!("root-outcome-{index}"),

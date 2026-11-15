@@ -2773,7 +2773,9 @@ fn composed_verdict_in(
     let round = view.latest;
     let needed = required_reviewers(team, config, round);
     if round == 0 {
-        return has_writer(team).then(|| (format!("No Council round yet. Once writers settle, dispatch at least {needed} reviewers in one batch with councilLens."), false));
+        // A composed child has no writers, but still requires independent reviews.
+        // Never let its empty worker roster finish as an approved Council.
+        return Some((format!("No Council round yet. Dispatch at least {needed} independent reviewers in one batch with councilLens."), false));
     }
     if reconfigured(team, round) {
         return Some((format!("Council round {round} was closed by a composition or reviewer selection change. Dispatch a fresh round with the new frozen plan and councilLens."), false));

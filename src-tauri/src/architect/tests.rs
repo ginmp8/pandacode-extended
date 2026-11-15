@@ -6228,6 +6228,7 @@ fn persisted_council_criterion_receipts_drive_the_gate_and_dispositions_project_
         reviewer.created_at = created_at;
         reviewer.updated_at = created_at;
         reviewer.read_only = true;
+        reviewer.result_revision = index as u64 + 1;
         reviewer.council = Some(council::CouncilSeat {
             round: 1,
             lens: format!("lens {id}"),
@@ -6358,6 +6359,11 @@ fn persisted_council_criterion_receipts_drive_the_gate_and_dispositions_project_
             id,
         )
         .unwrap();
+    }
+    // The composed terminal gate independently requires current native review
+    // receipts and usage records, not only matching criterion score receipts.
+    for reviewer in &team.workers {
+        persist_council_terminal_receipts(&store, &team, reviewer).unwrap();
     }
     save(&store, &mut team).unwrap();
     assert_eq!(team.council_status.as_ref().unwrap().state, "passed");
@@ -8271,6 +8277,13 @@ fn nested_leaf_score_fixture() -> (
             &seat,
         );
         binding.composition_mode = Some("direct".into());
+        binding.parent_council = Some(reviewer_security::ReviewerParentBinding {
+            session_id: root_id.clone(),
+            council_cycle_id: root_cycle_id.clone(),
+            artifact_revision: link.root_artifact_revision.clone(),
+            seat_id: link.root_worker_id.clone(),
+            depth: 1,
+        });
         leaf.reviewer_binding = Some(binding.clone());
         reviewer_security::record_native_authority(&store, &child_id, &binding).unwrap();
         leaves.push(leaf);
@@ -9497,7 +9510,7 @@ fn automatic_only_two_phase_council_keeps_s3_coexistence() {
 fn council_usage_leaf_reviews_project_the_current_root_round_total_for_root_and_child_seats() {
     use council::CouncilUsageValueStatus::CalculatedEstimated;
 
-    let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();
+    let (state, root_id, child_id, link) = nested_child_lifecycle_fixture();
     let store = state.store.lock().unwrap();
     let mut root = load(&store, &root_id).unwrap().unwrap();
     let root_cycle_id = format!("{}:{}", root.session_id, root.council_since);
@@ -9582,6 +9595,13 @@ fn council_usage_leaf_reviews_project_the_current_root_round_total_for_root_and_
             &seat,
         );
         binding.composition_mode = Some("direct".into());
+        binding.parent_council = Some(reviewer_security::ReviewerParentBinding {
+            session_id: root_id.clone(),
+            council_cycle_id: root_cycle_id.clone(),
+            artifact_revision: link.root_artifact_revision.clone(),
+            seat_id: link.root_worker_id.clone(),
+            depth: 1,
+        });
         reviewer_security::record_native_authority(&store, &child_id, &binding).unwrap();
         review.reviewer_binding = Some(binding);
         child_reviews.push(review);

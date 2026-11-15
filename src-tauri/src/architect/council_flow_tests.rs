@@ -1748,7 +1748,8 @@ fn native_concurrent_roots_dispatch_and_settle_the_same_bot_without_state_leakag
     // recreate it from later live bot or library contents.
     let replayed_ids =
         super::super::dispatch_council_round(&state, &root_a_id, vec![root_assignment_a]).unwrap();
-    assert_eq!(replayed_ids, root_worker_ids_a);
+    assert_eq!(replayed_ids, vec![task_a.worker_id.clone()],
+        "replaying one assignment returns only that existing seat, not unrelated sibling seats");
     assert_eq!(saved(&state, &root_a_id).workers.len(), 2);
 
     // Mutating both live sources after admission must leave both dispatched

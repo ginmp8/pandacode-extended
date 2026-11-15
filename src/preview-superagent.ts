@@ -250,11 +250,15 @@ export async function invokeSuperagent<T>(
     }
     case 'superagent_update':{
       const c=get(args.orchestrationId),input=args.input;
-      if(c.enabled||c.policyRevision!==args.expectedRevision||(tickets.get(c.id)?.length||0)>0)
-        throw Error('Preset cannot change after use or while enabled.');
+      if(c.policyRevision!==args.expectedRevision)
+        throw Error('Team policy changed; reload before editing future-only configuration.');
       const roles=resolveRoles(input),b=roles.workers[0];
       if(!input.name?.trim()||configName(input.name)?.id!==undefined&&configName(input.name)?.id!==c.id)
         throw Error('Invalid or duplicate preset.');
+      if((tickets.get(c.id)?.length||0)>0 && (
+        c.coordinatorBotId!==roles.coordinator.id || c.workerBotId!==b.id ||
+        c.projectId!==b.projectId))
+        throw Error('Existing Tickets freeze primary Team identities and project.');
       c.name=input.name;c.coordinatorBotId=roles.coordinator.id;c.workerBotId=b.id;
       c.workerBotIds=roles.workerBotIds;c.reviewerBotIds=roles.reviewerBotIds;
       c.projectId=b.projectId;c.teamVersion++;c.policyRevision++;

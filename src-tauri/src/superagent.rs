@@ -4465,25 +4465,9 @@ fn update_configuration_roles_with_policy(
     if current.policy_revision != expected_revision {
         return Err("Orchestration policy revision changed; reload before editing.".into());
     }
-    if current.enabled {
-        return Err("Disable the orchestration before editing its Team.".into());
-    }
-    // A settled demand remains immutable while the reusable Team evolves.
-    // Active/reviewable Tickets or unresolved effects still block a policy edit.
-    let unsettled: bool = store.db.query_row(
-        "SELECT EXISTS(
-            SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
-             AND (t.state NOT IN ('completed','failed','stopped','interrupted','inconclusive')
-               OR EXISTS(SELECT 1 FROM sa_assignments a
-                         WHERE a.ticket_id=t.id AND a.state='running')
-               OR EXISTS(SELECT 1 FROM sa_effect_receipts e
-                         WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain')))
-        )",
-        [id], |row| row.get(0),
-    ).map_err(|e| e.to_string())?;
-    if unsettled {
-        return Err("Active Tickets or unresolved effects prevent Team edits.".into());
-    }
+    // A versioned Team edit affects future Tickets only. Existing Ticket
+    // snapshots, mandates, Council cycles and exact grants remain immutable.
+    // Primary identities and checkout cannot change once history exists.
     let name = input.name.trim();
     if name.is_empty() || name.len()>120 || name.chars().any(char::is_control) {
         return Err("Choose a valid orchestration name of at most 120 characters.".into());
@@ -4531,21 +4515,15 @@ fn update_configuration_roles_with_policy(
     let changed = tx.execute(
         "UPDATE sa_orchestrations SET name=?2,coordinator_bot_id=?3,worker_bot_id=?4,
             project_id=?5,policy_revision=?6,updated_at=?7
-         WHERE id=?1 AND policy_revision=?8 AND enabled=0
-           AND NOT (SELECT EXISTS(
-            SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
-             AND (t.state NOT IN ('completed','failed','stopped','interrupted','inconclusive')
-               OR EXISTS(SELECT 1 FROM sa_assignments a
-                         WHERE a.ticket_id=t.id AND a.state='running')
-               OR EXISTS(SELECT 1 FROM sa_effect_receipts e
-                         WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain')))
-        ))
+         WHERE id=?1 AND policy_revision=?8
+           AND COALESCE((SELECT MAX(version) FROM sa_team_versions
+                         WHERE orchestration_id=?1),0)=?9
            AND (NOT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)
              OR (coordinator_bot_id=?3 AND worker_bot_id=?4 AND project_id=?5))",
         params![id,name,coordinator.id,worker_bot_ids[0],project_id,next_revision,
-            storage::now(),expected_revision],
+            storage::now(),expected_revision,current.team_version],
     ).map_err(|e| e.to_string())?;
-    if changed!=1 { return Err("Orchestration changed or is no longer eligible for Team editing.".into()); }
+    if changed!=1 { return Err("Team changed concurrently; reload before editing future-only policy.".into()); }
     let previous_snapshot = load_team_version_snapshot(&tx,id,current.team_version)?;
     let mut snapshot = make_team_snapshot(&tx,id,next_version,name,&project_id,next_revision,
         &coordinator.id,&worker_bot_ids,&reviewer_bot_ids,council_required,
@@ -8023,6 +8001,56 @@ mod tests {
         let preflight=manual_preflight(&store,&cfg.id,"inspect a fixture",false,false).unwrap();
         assert!(!preflight.eligible);
         assert!(preflight.reason.unwrap_or_default().contains("harness"));
+    }
+
+    #[test]
+    fn future_only_team_role_edit_preserves_live_ticket_snapshot_and_mandate() {
+        let mut store=fixture();
+        add_worker(&store,"worker-future");
+        let initial=enabled(&store);
+        let (ticket,launched)=admit(
+            &mut store,&initial.id,"Immutable live Ticket","future-only-role-edit",false,
+        ).unwrap();
+        assert!(launched);
+        let session=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        let before=ticket_team_snapshot(&store,&ticket.id).unwrap();
+        let mandate_before=mandate(&store,&ticket.id).unwrap();
+        let updated=update_configuration_roles_with_policy(
+            &store,&initial.id,initial.policy_revision,
+            &NewOrchestration {
+                name:"Future-only Team roles".into(),
+                coordinator_bot_id:initial.coordinator_bot_id.clone(),
+                worker_bot_id:initial.worker_bot_id.clone(),
+            },
+            vec![initial.worker_bot_id.clone(),"worker-future".into()],vec![],false,
+        ).unwrap();
+        assert!(updated.enabled);
+        assert_eq!(updated.team_version,initial.team_version+1);
+        assert_eq!(updated.policy_revision,initial.policy_revision+1);
+        assert_eq!(ticket_team_snapshot(&store,&ticket.id).unwrap(),before);
+        let after=mandate(&store,&ticket.id).unwrap();
+        assert_eq!(after.policy_revision,mandate_before.policy_revision);
+        assert_eq!(after.authorization_id,mandate_before.authorization_id);
+        assert_eq!(after.revoked,mandate_before.revoked);
+        assert!(read_only_policy(&store,&session).unwrap().is_some());
+        assert!(update_configuration_roles_with_policy(
+            &store,&initial.id,initial.policy_revision,
+            &NewOrchestration {
+                name:"Stale Team edit".into(),
+                coordinator_bot_id:initial.coordinator_bot_id.clone(),
+                worker_bot_id:initial.worker_bot_id.clone(),
+            },
+            vec![initial.worker_bot_id.clone()],vec![],false,
+        ).is_err(),"stale edits may not roll back a future Team version");
+        assert!(update_configuration_roles_with_policy(
+            &store,&initial.id,updated.policy_revision,
+            &NewOrchestration {
+                name:"Moved Team".into(),
+                coordinator_bot_id:"worker-future".into(),
+                worker_bot_id:initial.worker_bot_id.clone(),
+            },
+            vec![initial.worker_bot_id.clone()],vec![],false,
+        ).is_err(),"historical Tickets forbid changing their coordinator identity");
     }
 
     #[test]

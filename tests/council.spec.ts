@@ -1697,7 +1697,7 @@ test('nested child leaf scores render verified numbers and criterion outcomes, w
   await expect(child).toHaveAttribute('data-leaf-scores', '1');
   const reviewer = child.locator('[data-level="reviewer"][data-score-verified="true"]');
   await expect(reviewer).toHaveCount(1);
-  await expect(reviewer.locator(':scope > summary')).toContainText('Score 9.4 / 10');
+  await expect(reviewer.locator(':scope > summary')).toContainText('Verified score 9.4 / 10');
   await expect(reviewer.locator('.council-inspector-criteria')).toContainText('security');
   await expect(reviewer.locator('.council-inspector-criteria')).toContainText('9.4 / 10');
   await expect(child).not.toContainText('Score Unknown');

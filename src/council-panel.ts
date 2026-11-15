@@ -224,10 +224,10 @@ function childCouncilHierarchyHtml(value: CouncilLedgerView, receipt: NonNullabl
       ])];
       const verdicts = [...new Set([...records.usage.map(item => item.terminalStatus), ...records.reviews.map(item => item.verdict)])];
       const score = records.scores.length === 1 ? records.scores[0] : null;
-      const scoreText = score ? `Score ${formatScore(score.score)} / 10` : 'Score Unknown';
+      const scoreText = score ? `Verified score ${formatScore(score.score)} / 10` : 'Score Unknown';
       const criterionMarkup = score
         ? `<div class="council-inspector-criteria"><h5>Criterion outcomes</h5>${score.criterionOutcomes.length
-          ? `<ul>${score.criterionOutcomes.map(outcome => `<li><strong>${escape(outcome.criterionId)}</strong><span>${formatScore(outcome.score)} / 10</span>${outcome.verifiedEvidenceRefs.length ? `<span>${outcome.verifiedEvidenceRefs.length} verified evidence reference${outcome.verifiedEvidenceRefs.length === 1 ? '' : 's'}</span>` : ''}</li>`).join('')}</ul>`
+          ? `<ul>${score.criterionOutcomes.map(outcome => `<li><strong>Criterion ${escape(outcome.criterionId)} · </strong><span>${formatScore(outcome.score)} / 10</span>${outcome.verifiedEvidenceRefs.length ? `<span>${outcome.verifiedEvidenceRefs.length} verified evidence reference${outcome.verifiedEvidenceRefs.length === 1 ? '' : 's'}</span>` : ''}</li>`).join('')}</ul>`
           : '<p class="council-ledger-empty">No criterion outcomes were recorded for this reviewer.</p>'}</div>`
         : '';
       const scoreDetails = score

@@ -1,7 +1,7 @@
 # Extended SuperAgent orchestration
 
-> **Implementation status:** Incomplete. The persistent Orchestrations workspace, manual read-only Ticket flow, scoped-write candidate, exact-effect candidate and source-policy groundwork exist on the pushed branch. Team Builder creates and edits ordered worker/reviewer membership for disabled Teams with no Tickets; Ticket evidence displays the native immutable Team snapshot and its provenance. Multi-worker scheduling remains incomplete. For a Ticket pinned to `council_required`, the native adapter binds the finished worker artifact (artifact digest, ticket revision, workspace identity, policy revision) and dispatches exact task-bound native reviewers; finalization requires a fresh verified native Council verdict or an attributed, reasoned human exception. Manual acceptance remains available when the policy is not `council_required`. At `697a93f6` the focused required-Council Rust tests failed (seven failures: non-reentrant dispatch-fence re-acquisition and a fixture admission-audit mismatch); this checkpoint repairs both and awaits CI. The S4 manual one-shot Observe slice fetches bounded metadata for an exact linked thread across six event classes; Auto, all other event classes, durable recovery/headless parity, nested subagents and S6 exact-SHA evidence remain outstanding. S1 writes pass focused Windows checks but are disabled on Unix; one SuperAgent effects restart test fails. No overall acceptance is claimed.
-> **Requested push branch:** feat/issue-148-pe. HEAD `697a93f6c2b47449caa17a396e630357d5fe385f` (`697a93f6`) is pushed on `origin/feat/issue-148-pe`. CI is red at that SHA, and local Rust/Playwright checks were not run for this docs update; no green-CI or executed-test claim is made.
+> **Implementation status:** Incomplete. At HEAD `bce1a51e` the persistent Orchestrations workspace, manual read-only Ticket flow, scoped-write candidate, exact-effect candidate and source-policy groundwork exist. Team Builder creates and edits ordered worker/reviewer membership; an edit now appends a new immutable Team version and policy revision for future Tickets, while active Tickets keep their admitted snapshot, mandate, assignment and write grants. Required Council is selectable in Team Builder (two to eight distinct reviewers) and manifest v2 carries `councilRequired` without downgrading; the latest green CI run (`43648593574`, 19/19 jobs) covers that commit `7747c538`, while HEAD run `43654608546` had no conclusion when this was recorded. For a Ticket pinned to `council_required`, the native adapter binds the finished worker artifact (artifact digest, ticket revision, workspace identity, policy revision) and dispatches exact task-bound native reviewers; finalization requires a fresh verified native Council verdict or an attributed, reasoned human exception. Manual acceptance remains available when the policy is not `council_required`; the attributed exception exists natively but is not exposed in the desktop UI or headless CLI. Multi-worker scheduling and the work-item graph remain incomplete. Windows scoped writes were repaired locally (39/39 focused scoped-write/exact-grant tests) and the effect-stop race was serialized (11/11), but Unix writes remain disabled and HEAD has no green CI. S4's manual one-shot Observe slice fetches bounded metadata for an exact linked thread across six event classes; Auto, durable recovery/headless parity, nested subagents, EGM-04 durable findings and EGM-07 Plan/Readiness remain outstanding. No overall acceptance is claimed.
+> **Requested push branch:** feat/issue-148-pe. HEAD `bce1a51eb23ccba97cd4b3953d36009acf12298f` (`bce1a51e`) is pushed on `origin/feat/issue-148-pe`. The latest green CI is run `43648593574` at `7747c5380aeb83718ce15715b6a0f3ba32ab496c` (19/19 jobs); HEAD's run `43654608546` had no conclusion when this was recorded, so no green-CI claim is made for HEAD. Local Windows checks passed: native clippy and the manifest round-trip test for required Council; the focused native tests for versioned Team edits; the scoped-write/exact-grant suite (39/39); and the effect-stop test (11/11). The Council Team Builder UI tests were CI-tested at `7747c538`, while the future-only Team edit UI test was not run locally and is not CI-tested.
 
 **Authoritative specification:** [Issue #148](https://github.com/ginmp8/pandacode-extended/issues/148), extending [Issue #131](https://github.com/ginmp8/pandacode-extended/issues/131). Addenda: [EGM-01–07](https://github.com/ginmp8/pandacode-extended/issues/148#issuecomment-6817527256), [DD-01–14](https://github.com/ginmp8/pandacode-extended/issues/148#issuecomment-6817744113), [SA-01–09](https://github.com/ginmp8/pandacode-extended/issues/148#issuecomment-6817864073), [NS-01–12](https://github.com/ginmp8/pandacode-extended/issues/148#issuecomment-6817979555).
 
@@ -44,13 +44,13 @@ The standalone design packet and source map are [here](extended-superagent-desig
 | --- | --- |
 | #148/#131 and EGM/DD/SA/NS | Mapped; S0 independent review pending |
 | S0 source map | Updated for #148 baseline and candidate boundaries |
-| S1 scoped writes | Partial: focused Windows checks pass; Unix disabled; one unrelated effects test fails |
-| S2 UX-P1 persistent workspace | Implemented and browser-verified; preserve non-modal route |
-| S2 multi-role Teams/work graph | Partial: Team Builder supports ordered Workers and Reviewers; Ticket evidence uses the immutable saved Team snapshot. Required-Council reviewer dispatch is native; multi-worker scheduling and the full work graph remain incomplete. |
-| S3 task-bound Council | Partial: required-Council admission freezes the reviewer policy, the worker result binds the exact artifact/workspace/ticket/policy identity, and native reviewers are dispatched and finalized only from a revalidated native verdict; an attributed human exception requires the same current binding and a recorded reason. At `697a93f6` seven focused required-Council Rust tests failed on a non-reentrant dispatch-fence re-acquisition and a fixture admission-audit mismatch; this checkpoint repairs both and awaits CI. S6 exact-SHA evidence remains outstanding. |
-| S4 manual Observe / Auto | One-shot linked-thread metadata intake supports exactly six event classes and has focused native/UI tests added; tests not run in this low-space worktree. Auto and background intake remain unavailable. |
-| S5 recovery/headless/subagents | Incomplete; Rust validation outstanding |
-| S6 exact-SHA evidence | Not started |
+| S1 scoped writes | Partial: Windows scoped writes pass 39/39 focused scoped-write/exact-grant tests and the effect-stop race passed 11/11 local runs; Unix writes remain disabled; HEAD CI has no conclusion, so this is local Windows evidence only. |
+| S2 UX-P1 persistent workspace | Implemented; covered by the green `7747c538` browser run; preserve non-modal route |
+| S2 multi-role Teams/work graph | Partial: Team Builder supports ordered Workers and Reviewers and appends a new immutable Team version for future Tickets; active Tickets keep their saved snapshot, mandate, assignment and grants. Required-Council reviewer dispatch is native; multi-worker scheduling and the full work graph remain incomplete. |
+| S3 task-bound Council | Partial: required Council is selectable in Team Builder and carried by manifest v2 without downgrade; required-Council admission freezes the reviewer policy, the worker result binds the exact artifact/workspace/ticket/policy identity, and native reviewers are dispatched and finalized only from a revalidated native verdict. An attributed human exception requires the same current binding and a recorded reason but has no desktop or headless surface. Green run `43648593574` at `7747c538` covers the named required-Council UI/native tests; HEAD `bce1a51e` is not CI-tested. A WorkItem/Run binding and a real required-Council browser journey remain absent. |
+| S4 manual Observe / Auto | One-shot linked-thread metadata intake supports exactly six event classes and has focused native/UI tests; those tests are covered by the green `7747c538` run, not by a run at HEAD. Auto and background intake remain unavailable. |
+| S5 recovery/headless/subagents | Incomplete: checkpoint resume, general effects, headless lifecycle parity and nested subagents remain absent. The effect-stop race is locally tested (11/11), not CI-tested at HEAD. |
+| S6 exact-SHA evidence | Partial: the acceptance ledger now records a checkpoint delta with green `7747c538` evidence and local Windows checks; HEAD CI has no conclusion and no final-SHA proof or screenshots exist. |
 | Live GitHub smoke | not_run until a disposable authorized repository is available |
 
 ## Existing safe import and thread behavior
@@ -66,11 +66,17 @@ explicitly. They do not create profiles, enable a policy, grant tools or start w
 
 ## Team Builder and Ticket role evidence
 
-Team Builder creates a disabled manual Team with one Coordinator, 1–16 ordered
-Workers and up to 8 ordered Reviewers. It can update a Team only while disabled
-and before its first Ticket; the native command remains the final revision and
-eligibility check. `workerBotId` is retained as the first ordered Worker for
-compatibility. Every changed Team edit creates a new immutable Team version.
+Team Builder creates a manual Team with one Coordinator, 1–16 ordered Workers
+and up to 8 ordered Reviewers. An edit appends a new immutable Team version and
+policy revision for future Tickets, including when the Team is enabled or already
+has Ticket history; the native command remains the final revision and eligibility
+check and rejects a stale revision. Active Tickets keep the role/profile snapshot,
+mandate, assignment and write grants they were admitted under. `workerBotId` is
+retained as the first ordered Worker for compatibility. A no-op edit returns the
+current Team without a new version. Required Council is a per-Team choice that
+validates two to eight distinct reviewers; manifest v2 carries `councilRequired`
+and normalizes a legacy `councilEnabled` gate to required so import cannot
+silently downgrade it.
 
 Ticket evidence reads `teamSnapshot` from that Ticket's native snapshot response
 and exposes its provenance, ordered roles and the exact returned payload. The UI
@@ -83,7 +89,8 @@ whose policy is `council_required`: admission freezes the exact reviewer roster
 and policy, and the finished worker artifact is bound and dispatched to those
 native reviewers. Council-off Tickets keep manual acceptance, and a complete
 below-target required round can be accepted only through the attributed,
-reasoned native command. The multi-role editor does not claim parallel worker
+reasoned native command; that command is not exposed in the current desktop UI
+or headless CLI. The multi-role editor does not claim parallel worker
 scheduling; the S2 work graph and scheduler remain incomplete.
 
 The trusted local Ticket detail can link an exact issue:NUMBER or pull:NUMBER to

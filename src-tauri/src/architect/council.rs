@@ -1840,6 +1840,11 @@ pub(super) fn status_for_authenticated_children(
         .collect();
     if roots.len() != root_needed
         || !unverified_required_skill_checks(team, 1).is_empty()
+        // Composite child scores cannot silently cover a named user criterion:
+        // child receipts currently attest their own native quorum/score, not
+        // per-criterion lens coverage. Require an independently scored root
+        // seat until the child receipt carries verifiable criterion evidence.
+        || !missing_required_criteria(team, config, 1).is_empty()
         || !criterion_blockers(team, config, 1).is_empty()
     {
         return None;

@@ -3651,6 +3651,25 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     assert_eq!(composite.state, "passed");
     assert_eq!(composite.lowest, Some(9.5));
     assert_eq!(composite.round, 1);
+    // A child composite score alone does not attest that the user's named
+    // required criterion was independently covered by an eligible reviewer.
+    // M4 has no root leaf to attest it, so the gate must fail closed until
+    // native child criterion receipts are implemented.
+    let mut missing_criterion = root.clone();
+    {
+        let config = missing_criterion.config.council.as_mut().unwrap();
+        config.criteria_source = council::CouncilCriteriaSource::User;
+        config.criteria.push(council::CouncilCriterion {
+            id: "security-review".into(),
+            lens: "Security requirements".into(),
+            required: true,
+            target: 9.0,
+            evidence_required: false,
+        });
+        assert!(config.validate().is_ok());
+    }
+    assert!(council::status_for_authenticated_children(&missing_criterion, &complete_roster).is_none(),
+        "child scores must not approve a missing user-required criterion without native lens evidence");
     let mut forbidden_strategy = root.clone();
     forbidden_strategy.config.council.as_mut().unwrap().strategy =
         council::CouncilExecutionStrategy::TwoPhase;

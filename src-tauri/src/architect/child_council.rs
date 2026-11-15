@@ -55,6 +55,9 @@ pub struct ChildReservationView {
     /// Authenticated fresh S2 leaf evidence; not a terminal parent approval.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified_escalation_receipt: Option<VerifiedChildReceipt>,
+    /// Authenticated S3 challenge evidence, not a terminal root approval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_challenge_receipt: Option<VerifiedChildChallengeReceipt>,
     /// Native correlation to exactly one child receipt, not a passed root vote.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authenticated_parent_seat: Option<AuthenticatedParentSeat>,
@@ -1731,6 +1734,7 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
             .ok_or("child_council_stale: child team is missing.")?;
         let verified_child_receipt = read_verified_receipt(store, root, &record, &team)?;
         let verified_escalation_receipt = read_escalation_receipt(store, root, &record, &team, child)?;
+        let verified_challenge_receipt = read_challenge_receipt(store, root, &record, &team, child)?;
         let authenticated_parent_seat = parent_seat(store, root, &record, &team, false)?;
         let active = team.status == "running";
         let (observed_leaf_usage, leaf_attempts) =
@@ -1746,11 +1750,17 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
             required_leaf_reviewers: child.child_reviewers,
             observed_leaf_usage,
             leaf_attempts,
-            status: if verified_escalation_receipt.is_some() {
+            status: if verified_challenge_receipt.is_some() {
+                "child_challenge_evidence_ready_root_pending"
+            } else if verified_escalation_receipt.is_some() {
                 "child_escalation_evidence_ready_root_pending"
             } else if team.workers.iter().any(|leaf|
                 leaf.council.as_ref().is_some_and(|seat| seat.round == 2)) {
-                "child_escalation_reviewing"
+                if council.strategy == super::council::CouncilExecutionStrategy::TwoPhase {
+                    "child_challenge_reviewing"
+                } else {
+                    "child_escalation_reviewing"
+                }
             } else if authenticated_parent_seat.is_some() {
                 "parent_composite_ready_root_pending"
             } else if verified_child_receipt.is_some() {
@@ -1758,6 +1768,7 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
             } else if active { "reviewing" } else { "blocked_until_native_child_review" },
             verified_child_receipt,
             verified_escalation_receipt,
+            verified_challenge_receipt,
             authenticated_parent_seat,
         })
     }).collect()

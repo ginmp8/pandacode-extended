@@ -406,6 +406,69 @@ test('child S2 inspector distinguishes a native second-wave receipt from termina
   await expect(panel(page)).toContainText('Native pass not verified');
 });
 
+
+test('native M4 S3 child challenge inspector correlates distinct phases without approving the root', async ({ page }) => {
+  const receipt = {
+    rootCycleId: 'cycle:1000', childSessionId: 'task-owned-child', botId: 'child-reviewer',
+    objectiveSha256: 'frozen-objective', policySha256: 'frozen-policy',
+    childConfigSha256: 'frozen-child-policy', lowestScore: 9.7,
+    leafWorkerIds: ['first-a', 'first-b'],
+  };
+  const inspection = {
+    mode: 'm4', strategy: 'two_phase', cycleStartedAt: 1000, teamRevision: 20,
+    status: { state: 'blocked', round: 2, lowest: null, target: 9.0, stale: false },
+    verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
+    reservedChildren: [{
+      botId: 'child-reviewer', childSessionId: 'task-owned-child',
+      rootCycleId: 'cycle:1000', requiredLeafReviewers: 2,
+      status: 'child_challenge_evidence_ready_root_pending',
+      leafAttempts: ['first-a', 'first-b', 'challenger-a', 'challenger-b'].map((workerId, i) => ({
+        workerId, round: i < 2 ? 1 : 2, name: workerId,
+        lens: 'Security', reviewerSource: 'automatic',
+        status: 'completed', score: 9.7, provider: 'codex', model: 'native',
+        queueWaitMs: 12, observedSpanMs: 120,
+      })),
+      verifiedChildReceipt: receipt,
+      verifiedChallengeReceipt: {
+        rootCycleId: 'cycle:1000', childSessionId: 'task-owned-child',
+        botId: 'child-reviewer', phaseOneReceiptSha256: 'a'.repeat(64),
+        phaseTwo: { ...receipt, leafWorkerIds: ['challenger-a', 'challenger-b'] },
+      },
+    }],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const children = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await children.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  await expect(children).toContainText('Native S3 challenge child receipt recorded (root approval pending)');
+  await expect(children).toContainText('2 fresh independent reviewer identifiers');
+  await expect(children.getByRole('list', { name: 'S3 child challenge reviewer evidence identifiers' }).locator('li')).toHaveCount(2);
+  await expect(panel(page)).toContainText('Native pass not verified');
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+
+  inspection.reservedChildren[0].verifiedChallengeReceipt.phaseTwo.leafWorkerIds[0] = 'first-a';
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const tampered = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await tampered.locator('summary').click();
+  await expect(tampered.getByRole('alert')).toContainText('S3 challenge receipt correlation or reviewer identity mismatch');
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+
+  // Untrusted inspection payloads must not crash the panel or become evidence.
+  inspection.reservedChildren[0].verifiedChallengeReceipt.phaseTwo.leafWorkerIds = 'not-an-array';
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const malformed = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await malformed.locator('summary').click();
+  await expect(malformed.getByRole('alert')).toContainText('S3 challenge receipt correlation or reviewer identity mismatch');
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
 test('native Council findings remain attributed unverified and safe to render', async ({ page }) => {
   const inspection = {
     cycleStartedAt: 1000, teamRevision: 9,

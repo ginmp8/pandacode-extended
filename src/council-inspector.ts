@@ -123,6 +123,29 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
           && freshIds.length >= 2 && freshIds.length <= 8
           && new Set(freshIds).size === freshIds.length
           && freshIds.every(id => !ids.includes(id));
+        const challengeReceipt = child.verifiedChallengeReceipt;
+        const challenge = challengeReceipt?.phaseTwo;
+        const challengeIds = challenge?.leafWorkerIds ?? [];
+        // UI correlation is only display hygiene. The native authorization
+        // boundary separately re-derives all receipts, grants and callbacks.
+        const challengeCorrelated = challengeReceipt && correlated
+          && challengeReceipt.rootCycleId === child.rootCycleId
+          && challengeReceipt.childSessionId === child.childSessionId
+          && challengeReceipt.botId === child.botId
+          && /^[a-f0-9]{64}$/.test(challengeReceipt.phaseOneReceiptSha256 ?? '')
+          && challenge?.rootCycleId === child.rootCycleId
+          && challenge?.childSessionId === child.childSessionId
+          && challenge?.botId === child.botId
+          && challenge?.objectiveSha256 === receipt?.objectiveSha256
+          && challenge?.policySha256 === receipt?.policySha256
+          && challenge?.childConfigSha256 === receipt?.childConfigSha256
+          && Number.isFinite(challenge?.lowestScore)
+          && (challenge?.lowestScore ?? -1) >= 0 && (challenge?.lowestScore ?? 11) <= 10
+          && Array.isArray(challengeIds)
+          && challengeIds.length === child.requiredLeafReviewers
+          && challengeIds.length >= 2 && challengeIds.length <= 8
+          && new Set(challengeIds).size === challengeIds.length
+          && challengeIds.every(id => typeof id === 'string' && id.length > 0 && !ids.includes(id));
         const measured = child.observedLeafUsage;
         const childUsageHtml = measured
           ? '<p>Child-observed native leaf attempts: ' + escape(String(measured.uniqueAttempts)) +
@@ -139,15 +162,35 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
         // Show both; a first-wave receipt cannot certify the second wave.
         const leafAttempts = (child.leafAttempts ?? []).slice(-16);
         const freshLeafCount = leafAttempts.filter(attempt => attempt.round === 2).length;
-        const hasFreshWave = child.status === 'child_escalation_reviewing' || freshLeafCount > 0;
-        const escalationHtml = hasFreshWave
+        const s3 = inspection.strategy === 'two_phase';
+        const hasFreshWave = child.status === 'child_escalation_reviewing'
+          || child.status === 'child_challenge_reviewing' || freshLeafCount > 0;
+        const escalationHtml = hasFreshWave && !s3
           ? '<p role="status">Fresh native child escalation: round 2 admitted ' +
             escape(String(freshLeafCount)) + ' of ' + escape(String(child.requiredLeafReviewers)) +
             ' reviewers. ' + (escalationCorrelated
               ? 'Fresh child evidence is recorded separately; root approval remains pending.'
               : 'First-wave receipts do not verify second-wave completion or authorize root approval.') + '</p>'
           : '';
-        const escalationReceiptHtml = escalationReceipt
+        const challengeHtml = hasFreshWave && s3
+          ? '<p role="status">Independent S3 child challenge: phase 2 admitted ' +
+            escape(String(freshLeafCount)) + ' of ' + escape(String(child.requiredLeafReviewers)) +
+            ' reviewers. ' + (challengeCorrelated
+              ? 'The challenge receipt is authenticated; root approval remains pending.'
+              : 'A first-phase score is not independent challenge evidence or terminal approval.') + '</p>'
+          : '';
+        const challengeReceiptHtml = s3 && challengeReceipt
+          ? (challengeCorrelated
+            ? '<p>Native S3 challenge child receipt recorded (root approval pending): minimum score ' +
+              escape((challenge?.lowestScore ?? 0).toFixed(1)) + '/10 · ' +
+              escape(String(challengeIds.length)) + ' fresh independent reviewer identifiers.</p>' +
+              '<ul aria-label="S3 child challenge reviewer evidence identifiers">' +
+              challengeIds.map(id => '<li>' + escape(id) + '</li>').join('') + '</ul>'
+            : '<p role="alert">S3 challenge receipt correlation or reviewer identity mismatch; no approval.</p>')
+          : hasFreshWave && s3
+            ? '<p>No independent S3 challenge receipt is available yet; root approval remains pending.</p>'
+            : '';
+        const escalationReceiptHtml = !s3 && escalationReceipt
           ? (escalationCorrelated
             ? '<p>Native second-wave child evidence recorded (root approval pending): minimum score ' +
               escape(escalationReceipt.lowestScore.toFixed(1)) + '/10 · ' +
@@ -184,7 +227,8 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
           '<p>Configured leaf reviewers: ' + escape(String(child.requiredLeafReviewers)) +
           ' · Task session: ' + escape(child.childSessionId) +
           ' · Parent cycle: ' + escape(child.rootCycleId) +
-          '</p>' + childUsageHtml + leafHtml + escalationHtml + receiptHtml + escalationReceiptHtml + '</details></li>';
+          '</p>' + childUsageHtml + leafHtml + escalationHtml + challengeHtml +
+          receiptHtml + escalationReceiptHtml + challengeReceiptHtml + '</details></li>';
       }).join('') + '</ul></section>'
     : '';
   const hidden = inspection.attempts.length - shown.length;

@@ -90,6 +90,11 @@ export interface CouncilVerifiedChildReceipt {
   objectiveSha256: string; policySha256: string; childConfigSha256: string;
   lowestScore: number; leafWorkerIds: string[];
 }
+/** Native phase-two evidence from distinct child reviewers; still not an approval. */
+export interface CouncilVerifiedChildChallengeReceipt {
+  rootCycleId: string; childSessionId: string; botId: string;
+  phaseOneReceiptSha256: string; phaseTwo: CouncilVerifiedChildReceipt;
+}
 /** Read-only task-owned native reservation, never authorization to approve the root. */
 export interface CouncilChildReservation {
   botId: string; childSessionId: string; rootCycleId: string;
@@ -102,6 +107,8 @@ export interface CouncilChildReservation {
   verifiedChildReceipt?: CouncilVerifiedChildReceipt | null;
   /** Fresh child S2 native receipt; does not authorize a terminal parent vote. */
   verifiedEscalationReceipt?: CouncilVerifiedChildReceipt | null;
+  /** Independently authenticated S3 phase-two receipt, not a terminal approval. */
+  verifiedChallengeReceipt?: CouncilVerifiedChildChallengeReceipt | null;
 }
 export interface CouncilInspection {
   mode: 'm1' | 'm2' | 'm3' | 'm4' | 'm5' | 'm6' | 'm7';

@@ -2178,8 +2178,18 @@ pub(super) fn historical_reported_findings(
                 .strip_prefix(&task_cycle_prefix)
                 .and_then(|value| value.parse::<i64>().ok())
             else { continue };
+            // Reauthenticate the original seat attribution, rather than allowing
+            // a mutable historical worker snapshot to relabel a past report.
+            let revision = binding.artifact_revision.split(':').collect::<Vec<_>>();
             if !worker.read_only || started_at <= 0 || started_at >= team.council_since
                 || worker.created_at < started_at || binding.seat_id != worker.id
+                || binding.round != seat.round || binding.snapshot.lens != seat.lens
+                || binding.snapshot.provider != worker.provider
+                || binding.snapshot.model != worker.model
+                || revision.len() != 4 || revision[0] != started_at.to_string()
+                || revision[1].parse::<u64>().is_err()
+                || revision[2] != worker.created_at.to_string()
+                || revision[3] != worker.id.as_str()
             {
                 continue;
             }

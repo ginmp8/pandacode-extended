@@ -3425,6 +3425,24 @@ Council score: 7/10"#
     assert!(!historical.evidence_verified && !historical.location_verified);
     assert!(historical.verified_evidence_refs.is_empty());
 
+    // Historical claims must retain their original native reviewer identity.
+    // A mutable snapshot must not change the recorded lens, harness or artifact.
+    let original = team.workers[0].clone();
+    team.workers[0].council.as_mut().unwrap().lens = "forged-security".into();
+    assert!(council_read_snapshot(&store, &team).council_historical_reported_findings.is_empty(),
+        "a relabeled historical criterion must not expose the old report");
+    team.workers[0] = original.clone();
+    team.workers[0].provider = "forged-provider".into();
+    assert!(council_read_snapshot(&store, &team).council_historical_reported_findings.is_empty(),
+        "a relabeled provider must not inherit native history");
+    team.workers[0] = original.clone();
+    team.workers[0].reviewer_binding.as_mut().unwrap().artifact_revision = "forged:revision".into();
+    assert!(council_read_snapshot(&store, &team).council_historical_reported_findings.is_empty(),
+        "a forged historical revision cannot be attributed to the original grant");
+    team.workers[0] = original;
+    assert_eq!(council_read_snapshot(&store, &team).council_historical_reported_findings.len(), 1,
+        "restoring exact native identity restores its read-only history");
+
     assert_eq!(store.db.execute(
         "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
         rusqlite::params![sid, "native-reviewer-authority:prior-native"],

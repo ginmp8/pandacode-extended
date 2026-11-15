@@ -114,7 +114,9 @@ fn reviewers_started_after_binding<'a>(
     let mut seen = std::collections::HashSet::new();
     let mut total = 0_usize;
     for (id, started_at) in seats {
-        if id.is_empty() || started_at < bound_at || !seen.insert(id) {
+        // Equal millisecond timestamps cannot prove the reviewer started
+        // after the artifact was frozen. Fail closed on ambiguous ordering.
+        if id.is_empty() || started_at <= bound_at || !seen.insert(id) {
             return false;
         }
         total += 1;
@@ -170,7 +172,7 @@ fn composed_review_started_after_binding(
                 || child.workers.iter().filter(|leaf| {
                     !leaf.abandoned && leaf.created_at >= child.council_since
                         && leaf.council.as_ref().is_some_and(|seat| seat.round == child_status.round)
-                }).any(|leaf| leaf.council.as_ref().is_none_or(|seat| seat.started_at < bound_at))
+                }).any(|leaf| leaf.council.as_ref().is_none_or(|seat| seat.started_at <= bound_at))
             {
                 return false;
             }
@@ -725,7 +727,9 @@ mod tests {
         assert!(!reviewers_started_after_binding(2, [("a",10),("a",11)].into_iter(), 10));
         assert!(!reviewers_started_after_binding(2, [("a",9),("b",11)].into_iter(), 10));
         assert!(!reviewers_started_after_binding(2, [("a",10),("b",11),("c",12)].into_iter(), 10));
-        assert!(reviewers_started_after_binding(2, [("a",10),("b",11)].into_iter(), 10));
+        assert!(!reviewers_started_after_binding(2, [("a",10),("b",11)].into_iter(), 10),
+            "same-timestamp starts cannot establish artifact freshness");
+        assert!(reviewers_started_after_binding(2, [("a",11),("b",12)].into_iter(), 10));
     }
 
     fn fixture() -> Store {

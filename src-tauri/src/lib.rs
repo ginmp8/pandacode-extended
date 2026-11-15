@@ -2738,25 +2738,55 @@ async fn launch_operation_admitted(
         if let Err(error) = superagent::council_adapter::finalize_after_native_run_from_app(&app,&session_id) {
             eprintln!("SuperAgent Council finalization failed: {error}");
         }
-        // Successful bot workers have no failover path. Settle their Ticket
-        // synchronously so the exact artifact is frozen before actual native
-        // reviewers are dispatched; the later gateway callback is idempotent.
+        // Settle structured worker items on this shared desktop/serve path so
+        // one dependency-ready continuation can use the native gateway. Keep
+        // the Council fast path too: its exact artifact is frozen before native
+        // reviewers start. Legacy whole-Ticket work stays on the old callback.
         if successful && !was_stopped {
-            let required = store.lock().ok().and_then(|db| {
-                superagent::council_adapter::required_worker_session(&db,&session_id).ok()
-            }).unwrap_or(false);
-            if required {
-                let reply = store.lock().ok().and_then(|db| db.db.query_row(
-                    "SELECT content FROM messages WHERE session_id=?1 AND role='assistant' ORDER BY id DESC LIMIT 1",
-                    [&session_id],|row| row.get::<_,String>(0),
-                ).ok()).unwrap_or_default();
-                let settled = store.lock().ok().and_then(|db| {
-                    superagent::on_run_finished(&db,&session_id,true,&reply).ok()
-                }).unwrap_or(false);
-                if settled {
-                    if let Err(error) = superagent::council_adapter::start_after_worker_completion(&app,&session_id) {
+            let completion = store.lock().ok().and_then(|db| {
+                let structured =
+                    superagent::active_structured_worker_session(&db, &session_id).ok()?;
+                let required =
+                    superagent::council_adapter::required_worker_session(&db, &session_id).ok()?;
+                (structured || required).then_some((structured, required))
+            });
+            if let Some((structured, required)) = completion {
+                let reply = store.lock().ok().and_then(|db| {
+                    if required {
+                        db.db.query_row(
+                            "SELECT content FROM messages WHERE session_id=?1 AND role='assistant' ORDER BY id DESC LIMIT 1",
+                            [&session_id],
+                            |row| row.get::<_,String>(0),
+                        ).ok()
+                    } else {
+                        superagent::latest_worker_reply(&db, &session_id).ok()
+                    }
+                }).unwrap_or_default();
+                let settled = store
+                    .lock()
+                    .ok()
+                    .and_then(|db| superagent::on_run_finished(&db, &session_id, true, &reply).ok())
+                    .unwrap_or(false);
+                if settled && required {
+                    if let Err(error) = superagent::council_adapter::start_after_worker_completion(
+                        &app,
+                        &session_id,
+                    ) {
                         eprintln!("SuperAgent Council dispatch failed: {error}");
                     }
+                }
+                if settled && structured {
+                    let (advance_app, advance_session) = (app.clone(), session_id.clone());
+                    tauri::async_runtime::spawn(async move {
+                        if let Err(error) = superagent::auto_advance_after_successful_worker(
+                            &advance_app,
+                            &advance_session,
+                        )
+                        .await
+                        {
+                            eprintln!("SuperAgent WorkItem continuation failed: {error}");
+                        }
+                    });
                 }
             }
         }

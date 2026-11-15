@@ -2960,27 +2960,60 @@ fn fail_launch(store: &Store, ticket_id: &str, reason: &str) -> Result<()> {
     tx.commit().map_err(|e| e.to_string())
 }
 
-/// A provider turn is evidence for a task, not its approval. The only successful
-/// transition here is running -> waiting_approval; native human acceptance is separate.
+/// Record a provider turn without conflating model text with proof or approval.
+/// Structured WorkItems stay blocked until a native verifier binds evidence to
+/// the exact item and assignment; native human acceptance remains separate.
 pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool, text: &str) -> Result<bool> {
     let _dispatch_fence = effects::lock_dispatch(&store.path)?;
     // A callback may arrive twice, after Stop, or after process restart.
     // Result, Ticket revision and audit must settle in one transaction; an
     // injected storage failure cannot strand an assignment in a terminal state.
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-    let assignment: Option<(String, String, String, i64, i64)> = tx.query_row(
-        "SELECT a.ticket_id,a.id,a.bot_id,a.created_at,a.attempt
+    let assignment: Option<(String, String, String, i64, i64, Option<String>)> = tx.query_row(
+        "SELECT a.ticket_id,a.id,a.bot_id,a.created_at,a.attempt,a.work_item_id
          FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id AND t.active_assignment_id=a.id
          WHERE a.session_id=?1 AND a.state='running' AND t.state='running'",
-        [session_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        [session_id], |r| Ok((
+            r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
+        )),
     ).optional().map_err(|e| e.to_string())?;
-    let Some((task_id, assignment_id, bot_id, started_at, attempt)) = assignment else { return Ok(false) };
+    let Some((task_id, assignment_id, bot_id, started_at, attempt, work_item_id)) = assignment else {
+        return Ok(false);
+    };
     let team_snapshot = ticket_team_snapshot(store,&task_id)?;
     let prior_ticket_revision: i64 = tx.query_row(
         "SELECT revision FROM sa_tickets WHERE id=?1",[&task_id],|row| row.get(0),
     ).map_err(|e| e.to_string())?;
     let coordinator = bot_id == team_snapshot.coordinator_bot_id;
+    let structured_plan = if coordinator {
+        false
+    } else {
+        tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_audit
+             WHERE ticket_id=?1 AND kind='coordinator_plan_ingested')",
+            [&task_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?
+    };
+    let exact_running_item_link = if structured_plan {
+        if let Some(work_item_id) = work_item_id.as_deref() {
+            tx.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM sa_assignments assignment
+               JOIN sa_work_items item
+                 ON item.id=assignment.work_item_id AND item.ticket_id=assignment.ticket_id
+               WHERE assignment.id=?1 AND assignment.ticket_id=?2
+                 AND assignment.work_item_id=?3 AND item.state='running'
+             )",
+            params![assignment_id,task_id,work_item_id], |row| row.get(0),
+            ).map_err(|e| e.to_string())?
+        } else {
+            false
+        }
+    } else {
+        true
+    };
+    let structured_work_item = structured_plan;
     let role_current = assignment_role_authorized(store,&task_id,&bot_id,attempt)?;
     // Reuse the same Ticket-snapshot validation as the provider/tool boundary.
     // A Team edit can advance the mutable config revision without rewriting
@@ -3000,6 +3033,13 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         authorized && role_current && provenance_ok && within_budget && thread_current,
         crate::feature_controls::get().bots_paused,
     );
+    // Structured plans have a descriptive evidenceContract, but no native
+    // verifier records whether it passed for this exact WorkItem/Assignment.
+    // Scoped write receipts prove file effects against an Assignment only;
+    // they do not validate the contract. A successful provider turn and its
+    // self-reported text are not that proof. Contain this item until a verifier
+    // exists; legacy/manual Ticket settlement keeps its existing approval path.
+    let work_item_evidence_missing = structured_work_item && authorized && successful;
     let coordinator_plan = if coordinator && authorized && successful && !trimmed.is_empty() {
         Some(work_items::parse_coordinator_plan(text))
     } else {
@@ -3009,16 +3049,18 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         else if !successful { "failed" }
         else if trimmed.is_empty() { "inconclusive" }
         else if coordinator { "queued" }
+        else if work_item_evidence_missing { "blocked" }
         else if team_snapshot.policy.council_required { "waiting_review" }
         else { "waiting_approval" };
     let now = storage::now();
+    let assignment_finished = authorized && successful && !work_item_evidence_missing;
     let moved = tx.execute(
         "UPDATE sa_assignments SET state=?2,result=?3,updated_at=?4
          WHERE id=?1 AND state='running'",
         // Rejected callbacks are not successful coordinator plans, even if
         // the provider returned text. Otherwise a later manual retry after
         // pause/revocation could promote that unauthorized plan to authority.
-        params![assignment_id,if authorized && successful { "finished" } else { "failed" },trimmed,now],
+        params![assignment_id,if assignment_finished { "finished" } else { "failed" },trimmed,now],
     ).map_err(|e| e.to_string())?;
     if moved != 1 { return Err("SuperAgent assignment changed before settlement.".into()); }
     // The coordinator's WorkItems remain queued planning output. Only an
@@ -3044,11 +3086,16 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
             }
         }
     }
+    let ticket_evidence = if work_item_evidence_missing {
+        None
+    } else {
+        Some(trimmed.as_str())
+    };
     let updated = tx.execute(
         "UPDATE sa_tickets SET state=?2,evidence=?3,active_assignment_id=NULL,
          revision=revision+1,updated_at=?4
          WHERE id=?1 AND state='running' AND active_assignment_id=?5",
-        params![task_id,next,trimmed,now,assignment_id],
+        params![task_id,next,ticket_evidence,now,assignment_id],
     ).map_err(|e| e.to_string())?;
     if updated != 1 { return Err("SuperAgent ticket changed before settlement.".into()); }
     // Atomically pin the native Council cycle and exact finished artifact,
@@ -3104,6 +3151,19 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
             }
         }
     }
+    if work_item_evidence_missing {
+        let detail = serde_json::json!({
+            "assignmentId": assignment_id.as_str(),
+            "workItemId": work_item_id.as_deref(),
+            "workItemBindingValid": exact_running_item_link,
+            "reason": "no_native_work_item_evidence_verifier",
+        }).to_string();
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'work_item_evidence_missing',?2,?3)",
+            params![task_id,detail,now],
+        ).map_err(|e| e.to_string())?;
+    }
     if team_snapshot.policy.council_required && !matches!(next,"queued" | "waiting_review") {
         let invalidated = tx.execute(
             "UPDATE sa_council_requests SET state='blocked',updated_at=?2
@@ -3123,6 +3183,302 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
             else if coordinator { "coordinator_planned" } else { "turn_settled" },next,now],
     ).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
+    Ok(true)
+}
+
+/// True only for a live native Worker assignment that owns a running item in
+/// an ingested Coordinator plan. `lib.rs` uses this to settle structured worker
+/// turns on the shared desktop/serve completion path; legacy whole-Ticket work
+/// continues through its existing gateway callback.
+pub(crate) fn active_structured_worker_session(store: &Store, session_id: &str) -> Result<bool> {
+    let assignment: Option<(String, String, i64, Option<String>)> = store
+        .db
+        .query_row(
+            "SELECT a.ticket_id,a.bot_id,a.attempt,a.work_item_id
+             FROM sa_assignments a
+             JOIN sa_tickets t ON t.id=a.ticket_id AND t.active_assignment_id=a.id
+             WHERE a.session_id=?1 AND a.state='running' AND t.state='running'",
+            [session_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some((ticket_id, bot_id, attempt, Some(work_item_id))) = assignment else {
+        return Ok(false);
+    };
+    let snapshot = ticket_team_snapshot(store, &ticket_id)?;
+    if bot_id == snapshot.coordinator_bot_id
+        || !assignment_role_authorized(store, &ticket_id, &bot_id, attempt)?
+    {
+        return Ok(false);
+    }
+    let structured_plan: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_audit WHERE ticket_id=?1 AND kind='coordinator_plan_ingested')",
+        [&ticket_id],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    let running_item: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_work_items WHERE id=?1 AND ticket_id=?2 AND state='running')",
+        params![work_item_id, ticket_id],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    Ok(structured_plan && running_item)
+}
+
+/// The ordinary bot gateway's reply boundary, kept in the native SuperAgent
+/// path for structured workers settled before the asynchronous bot callback.
+pub(crate) fn latest_worker_reply(store: &Store, session_id: &str) -> Result<String> {
+    let mut statement = store
+        .db
+        .prepare(
+            "SELECT content FROM messages WHERE session_id=?1 AND role='assistant'
+             AND id > COALESCE((SELECT MAX(id) FROM messages WHERE session_id=?1 AND role='user'),0)
+             ORDER BY id",
+        )
+        .map_err(|error| error.to_string())?;
+    let parts = statement
+        .query_map([session_id], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error| error.to_string())?;
+    Ok(parts.join("\n\n").trim().to_owned())
+}
+
+/// Find a single automatic continuation only after a current, successful
+/// structured worker settlement. Until a native WorkItem evidence verifier is
+/// available, even persisted completed state cannot authorize continuation:
+/// it may have been written by an older model-text-only settlement path.
+/// Failures, Stop, stale callbacks, legacy items, and replays also cannot qualify.
+fn prepare_automatic_next_work_item(
+    store: &mut Store,
+    completed_session_id: &str,
+    active_sessions: &[String],
+) -> Result<Option<(Ticket, String, String, String, Option<work_items::WorkItem>)>> {
+    if !work_item_evidence_verifier_available() {
+        return Ok(None);
+    }
+    let settled: Option<(
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        String,
+    )> = store
+        .db
+        .query_row(
+            "SELECT a.ticket_id,a.bot_id,a.attempt,a.created_at,a.updated_at,
+                    a.state,t.state,a.work_item_id,item.state,COALESCE(a.result,'')
+             FROM sa_assignments a
+             JOIN sa_tickets t ON t.id=a.ticket_id
+             LEFT JOIN sa_work_items item ON item.id=a.work_item_id AND item.ticket_id=a.ticket_id
+             WHERE a.session_id=?1",
+            [completed_session_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some((
+        ticket_id,
+        bot_id,
+        attempt,
+        started_at,
+        settled_at,
+        assignment_state,
+        ticket_state,
+        Some(work_item_id),
+        Some(item_state),
+        result,
+    )) = settled
+    else {
+        return Ok(None);
+    };
+    if assignment_state != "finished"
+        || ticket_state != "queued"
+        || item_state != "completed"
+        || result.trim().is_empty()
+        || !assignment_within_budget(started_at, settled_at)
+    {
+        return Ok(None);
+    }
+    let no_newer_attempt: bool = store
+        .db
+        .query_row(
+            "SELECT ?2=MAX(attempt) FROM sa_assignments WHERE ticket_id=?1",
+            params![ticket_id, attempt],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if !no_newer_attempt {
+        return Ok(None);
+    }
+    let active_assignment: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE id=?1 AND active_assignment_id IS NOT NULL)",
+        [&ticket_id],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if active_assignment {
+        return Ok(None);
+    }
+    let structured_plan: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_audit WHERE ticket_id=?1 AND kind='coordinator_plan_ingested')",
+        [&ticket_id],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if !structured_plan {
+        return Ok(None);
+    }
+    let snapshot = ticket_team_snapshot(store, &ticket_id)?;
+    if bot_id == snapshot.coordinator_bot_id
+        || !assignment_role_authorized(store, &ticket_id, &bot_id, attempt)?
+    {
+        return Ok(None);
+    }
+    let worker_attempts: i64 = store
+        .db
+        .query_row(
+            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1 AND bot_id=?2",
+            params![ticket_id, bot_id],
+            |row| row.get(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if worker_attempts >= i64::from(snapshot.policy.max_attempts_per_assignment)
+        || work_items::ready_work_items(store, &ticket_id)?.is_empty()
+    {
+        return Ok(None);
+    }
+
+    let worker_id = ticket_worker(store, &ticket_id)?;
+    let busy = active_sessions.iter().any(|session_id| {
+        bots::owner_of(store, session_id)
+            .ok()
+            .flatten()
+            .is_some_and(|(bot, _)| bot.id == worker_id)
+    });
+    let prepared = prepare_coordinated_worker(store, &ticket_id, busy)?;
+    if prepared.4.is_none() {
+        return Err("Structured automatic continuation did not bind a WorkItem.".into());
+    }
+    Ok(Some(prepared))
+}
+
+/// No current native API verifies a WorkItem's evidenceContract and persists
+/// its verdict against both the WorkItem ID and Assignment ID. Keep automatic
+/// progression disabled until that contract is implemented.
+fn work_item_evidence_verifier_available() -> bool {
+    false
+}
+
+/// Recheck the exact prepared assignment immediately before crossing the bot
+/// gateway. This fence is shared by the production continuation and focused
+/// lifecycle tests so Stop, revocation, or a changed project lease cannot turn
+/// a stale prepared Worker into a new delivery.
+fn preflight_automatic_work_item_delivery(
+    store: &Store,
+    worker_session_id: &str,
+    active_sessions: &[String],
+) -> Result<()> {
+    if read_only_policy(store, worker_session_id)?.is_none() {
+        return Err("Automatic WorkItem assignment has no current native policy.".into());
+    }
+    guard_run_admission(store, worker_session_id, active_sessions)
+}
+
+/// Dispatch exactly one dependency-ready item through the existing native bot
+/// gateway. Gateway ingress and run admission revalidate the current mandate,
+/// policy revision, role/profile, project lease, pause state, assignment and
+/// time budget immediately before execution. No reviewer, approval or effect
+/// path is invoked here.
+pub(crate) async fn auto_advance_after_successful_worker(
+    app: &tauri::AppHandle,
+    completed_session_id: &str,
+) -> Result<bool> {
+    let state = app.state::<AppState>();
+    let database_path = state
+        .store
+        .lock()
+        .map_err(|error| error.to_string())?
+        .path
+        .clone();
+    let dispatch_fence = effects::lock_dispatch(&database_path)?;
+    let active_sessions: Vec<String> = state
+        .agents
+        .lock()
+        .map_err(|error| error.to_string())?
+        .keys()
+        .cloned()
+        .collect();
+    let prepared = {
+        let mut store = state.store.lock().map_err(|error| error.to_string())?;
+        prepare_automatic_next_work_item(&mut store, completed_session_id, &active_sessions)?
+    };
+    drop(dispatch_fence);
+    let Some((ticket, thread, worker_id, plan, work_item)) = prepared else {
+        return Ok(false);
+    };
+    let worker_session_id = {
+        let store = state.store.lock().map_err(|error| error.to_string())?;
+        assignment_session(&store, &ticket.id)?
+            .ok_or_else(|| "Automatic WorkItem assignment is no longer active.".to_owned())?
+    };
+    let preflight = state
+        .store
+        .lock()
+        .map_err(|error| error.to_string())
+        .and_then(|store| preflight_automatic_work_item_delivery(
+            &store,
+            &worker_session_id,
+            &active_sessions,
+        ));
+    if let Err(error) = preflight {
+        if let Ok(store) = state.store.lock() {
+            let _ = fail_launch(&store, &ticket.id, &error);
+        }
+        return Err(format!(
+            "Automatic WorkItem pre-delivery check failed; ticket {} retained: {error}",
+            ticket.id
+        ));
+    }
+    let delivered = bots::gateway::deliver(app, bots::gateway::Inbound {
+        bot_id: worker_id,
+        channel_id: CHANNEL.into(),
+        thread,
+        sender_id: "local-user".into(),
+        sender_name: "Automatic dependency-ready WorkItem".into(),
+        text: format!(
+            "{}Read-only assignment. Report evidence and remaining gaps; only native approval may finish the ticket.",
+            worker_assignment_prompt(&ticket, &plan, work_item.as_ref()),
+        ),
+        trusted: true,
+        image_ids: None,
+        moodboard_ids: None,
+    }).await;
+    if let Err(error) = delivered {
+        if let Ok(store) = state.store.lock() {
+            let _ = fail_launch(&store, &ticket.id, &error);
+        }
+        return Err(format!(
+            "Automatic WorkItem dispatch failed; ticket {} retained: {error}",
+            ticket.id
+        ));
+    }
     Ok(true)
 }
 
@@ -7730,9 +8086,9 @@ mod tests {
             .find(|assignment| assignment.bot_id == "worker").unwrap().session_id;
         assert!(on_run_finished(&store, &worker_session, true, "First slice complete").unwrap());
         let after_prerequisite = ticket_work_items(&store, &ticket.id).unwrap();
-        assert_eq!(after_prerequisite[0].readiness, work_items::WorkItemReadiness::NotReady);
-        assert_eq!(after_prerequisite[1].readiness, work_items::WorkItemReadiness::Ready);
-        assert_eq!(after_prerequisite[2].readiness, work_items::WorkItemReadiness::DependencyBlocked);
+        assert_eq!(after_prerequisite[0].readiness, work_items::WorkItemReadiness::DependencyBlocked);
+        assert_eq!(after_prerequisite[1].readiness, work_items::WorkItemReadiness::NotReady);
+        assert_eq!(after_prerequisite[2].readiness, work_items::WorkItemReadiness::Ready);
         let foreign = work_items::create_work_item(&store, &other.id, "Foreign item", 0).unwrap();
         assert!(work_items::add_work_item_dependency(&store, &items[0].id, &foreign.id).is_err());
     }
@@ -7874,7 +8230,7 @@ mod tests {
     }
 
     #[test]
-    fn structured_plan_stays_queued_until_the_last_work_item_completes() {
+    fn structured_plan_self_report_blocks_before_acceptance_or_next_dispatch() {
         let mut store = fixture();
         let config = enabled(&store);
         let plan = serde_json::json!({
@@ -7898,28 +8254,282 @@ mod tests {
         let first_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
         assert!(on_run_finished(&store, &first_session, true, "First slice evidence").unwrap());
 
-        // The Ticket returns to queued, never waiting_approval, while the
-        // second planned item remains incomplete.
+        // A provider self-report cannot complete an item or qualify its
+        // dependency. Without native evidence the Ticket is contained.
         let mid = get_ticket(&store, &ticket.id).unwrap();
-        assert_eq!(mid.state, "queued");
+        assert_eq!(mid.state, "blocked");
         assert!(mid.active_assignment_id.is_none());
         let items = work_items::list_work_items(&store, &ticket.id, 10).unwrap();
-        assert_eq!(items[0].state, "completed");
+        assert_eq!(items[0].state, "blocked");
         assert_eq!(items[1].state, "queued");
         assert!(accept(&store, &ticket.id, mid.revision).is_err());
+        assert!(prepare_coordinated_worker(&mut store, &ticket.id, false).is_err(),
+            "the dependent item must not dispatch before a native proof verifies its prerequisite");
+    }
 
-        // The next dispatch advances the now-ready dependent item, and only
-        // after it completes may the Ticket reach the approval gate.
-        let (_, _, _, _, selected) =
+    #[test]
+    fn structured_worker_text_is_not_work_item_proof_or_automatic_dispatch() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let plan = serde_json::json!({
+            "version": 1,
+            "workItems": [
+                {"ordinal": 0, "objective": "First slice", "evidenceContract": "First evidence", "dependsOn": []},
+                {"ordinal": 1, "objective": "Second slice", "evidenceContract": "Second evidence", "dependsOn": [0]},
+                {"ordinal": 2, "objective": "Third slice", "evidenceContract": "Third evidence", "dependsOn": [1]},
+            ],
+        }).to_string();
+        let ticket = coordinated_plan_ticket(
+            &mut store,
+            &config.id,
+            "Whole Ticket objective",
+            "auto-advance-unverified-text",
+            &plan,
+        );
+        let (running, _, _, _, selected) =
             prepare_coordinated_worker(&mut store, &ticket.id, false).unwrap();
-        let second = selected.expect("the dependent item is now ready");
-        assert_eq!(second.ordinal, 1);
-        let second_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
-        assert!(on_run_finished(&store, &second_session, true, "Second slice evidence").unwrap());
-        let waiting = get_ticket(&store, &ticket.id).unwrap();
-        assert_eq!(waiting.state, "waiting_approval");
-        assert!(work_items::all_work_items_completed(&store, &ticket.id).unwrap());
-        assert_eq!(accept(&store, &ticket.id, waiting.revision).unwrap().state, "completed");
+        let first_item = selected.expect("the prerequisite is ready");
+        assert_eq!(first_item.ordinal, 0);
+        let first_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let first_assignment_id = running.active_assignment_id.unwrap();
+        let linked_item: String = store.db.query_row(
+            "SELECT work_item_id FROM sa_assignments WHERE id=?1",
+            [&first_assignment_id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(linked_item, first_item.id, "assignment must name the exact selected WorkItem");
+        let assignment_count = assignments(&store, &ticket.id, 10).unwrap().len();
+        let user_message_count = |store: &Store| -> i64 {
+            store.db.query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_id=?1 AND role='user'",
+                [&first_session], |row| row.get(0),
+            ).unwrap()
+        };
+        let messages_before = user_message_count(&store);
+
+        // Boilerplate is a provider self-report, not a native proof that the
+        // first WorkItem's evidenceContract was met.
+        assert!(on_run_finished(&store, &first_session, true, "Done.").unwrap());
+        let blocked = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(blocked.state, "blocked");
+        assert_eq!(blocked.evidence, None, "unverified model text is not Ticket evidence");
+        let (assignment_item, assignment_result, assignment_state): (Option<String>, Option<String>, String) =
+            store.db.query_row(
+                "SELECT work_item_id,result,state FROM sa_assignments WHERE id=?1",
+                [&first_assignment_id],
+                |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+            ).unwrap();
+        assert_eq!(assignment_item.as_deref(), Some(first_item.id.as_str()));
+        assert_eq!(assignment_result.as_deref(), Some("Done."));
+        assert_eq!(assignment_state, "failed", "structured self-report is not verified task completion");
+        let items = work_items::list_work_items(&store, &ticket.id, 10).unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.state.as_str())
+                .collect::<Vec<_>>(),
+            vec!["blocked", "queued", "queued"]
+        );
+        let missing_evidence: serde_json::Value = serde_json::from_str(
+            &history(&store, &ticket.id, 20).unwrap().into_iter()
+                .find(|entry| entry.kind == "work_item_evidence_missing")
+                .expect("the missing native evidence contract is audited")
+                .detail,
+        ).unwrap();
+        assert_eq!(
+            missing_evidence["assignmentId"].as_str(),
+            Some(first_assignment_id.as_str()),
+        );
+        assert_eq!(missing_evidence["workItemId"].as_str(), Some(first_item.id.as_str()));
+        assert_eq!(missing_evidence["workItemBindingValid"].as_bool(), Some(true));
+        assert_eq!(
+            missing_evidence["reason"].as_str(),
+            Some("no_native_work_item_evidence_verifier"),
+        );
+        assert!(
+            prepare_automatic_next_work_item(&mut store, &first_session, &[])
+                .unwrap()
+                .is_none(),
+            "unverified model text must not dispatch a dependent WorkItem"
+        );
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap().len(), assignment_count);
+        assert_eq!(user_message_count(&store), messages_before,
+            "no gateway continuation message may be delivered without native proof");
+        assert!(!on_run_finished(&store, &first_session, true, "duplicate success").unwrap());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked",
+            "a duplicate callback cannot resurrect a blocked Ticket");
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap().len(), assignment_count);
+    }
+
+    #[test]
+    fn structured_failure_empty_and_boilerplate_results_never_advance() {
+        for (suffix, successful, result, expected_ticket, expected_item) in [
+            ("failure", false, "Provider failed", "failed", "failed"),
+            ("empty", true, "", "inconclusive", "failed"),
+            ("boilerplate", true, "I am done.", "blocked", "blocked"),
+        ] {
+            let mut store = fixture();
+            let config = enabled(&store);
+            let plan = serde_json::json!({
+                "version": 1,
+                "workItems": [
+                    {"ordinal": 0, "objective": "First", "evidenceContract": "Verify first", "dependsOn": []},
+                    {"ordinal": 1, "objective": "Second", "evidenceContract": "Verify second", "dependsOn": [0]},
+                ],
+            }).to_string();
+            let ticket = coordinated_plan_ticket(
+                &mut store, &config.id, "Whole Ticket objective", &format!("auto-advance-{suffix}"), &plan,
+            );
+            let (_, _, _, _, selected) = prepare_coordinated_worker(&mut store, &ticket.id, false).unwrap();
+            let item = selected.unwrap();
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            let before = assignments(&store, &ticket.id, 10).unwrap().len();
+            assert!(on_run_finished(&store, &session, successful, result).unwrap());
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, expected_ticket, "{suffix}");
+            assert_eq!(work_items::get_work_item(&store, &item.id).unwrap().state, expected_item, "{suffix}");
+            assert!(prepare_automatic_next_work_item(&mut store, &session, &[]).unwrap().is_none(), "{suffix}");
+            assert_eq!(assignments(&store, &ticket.id, 10).unwrap().len(), before, "{suffix}");
+        }
+    }
+
+    #[test]
+    fn pre_delivery_stop_revoke_and_lease_change_cannot_dispatch_or_resurrect() {
+        for change in ["stop", "revoke", "lease"] {
+            let mut store = fixture();
+            let config = enabled(&store);
+            let plan = serde_json::json!({
+                "version": 1,
+                "workItems": [
+                    {"ordinal": 0, "objective": "First", "evidenceContract": "Verify first", "dependsOn": []},
+                    {"ordinal": 1, "objective": "Second", "evidenceContract": "Verify second", "dependsOn": [0]},
+                ],
+            }).to_string();
+            let ticket = coordinated_plan_ticket(
+                &mut store, &config.id, "Whole Ticket objective", &format!("pre-delivery-{change}"), &plan,
+            );
+            let (running, _, _, _, selected) =
+                prepare_coordinated_worker(&mut store, &ticket.id, false).unwrap();
+            let item = selected.unwrap();
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            let assignment_id = running.active_assignment_id.unwrap();
+            assert_eq!(
+                store.db.query_row(
+                    "SELECT work_item_id FROM sa_assignments WHERE id=?1",
+                    [&assignment_id], |row| row.get::<_,String>(0),
+                ).unwrap(),
+                item.id,
+            );
+            assert!(preflight_automatic_work_item_delivery(&store, &session, &[]).is_ok());
+            let before_assignments = assignments(&store, &ticket.id, 10).unwrap().len();
+            let before_messages: i64 = store.db.query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_id=?1 AND role='user'",
+                [&session], |row| row.get(0),
+            ).unwrap();
+
+            match change {
+                "stop" => { stop(&store, &ticket.id).unwrap(); }
+                "revoke" => {
+                    store.db.execute(
+                        "UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1", [&ticket.id],
+                    ).unwrap();
+                }
+                "lease" => {
+                    // Moving the active session off the Ticket's snapshotted
+                    // project changes the lease identity before delivery.
+                    store.db.execute(
+                        "INSERT INTO projects(id,name,path) VALUES('moved-project','Moved','/tmp/moved-superagent')",
+                        [],
+                    ).unwrap();
+                    store.db.execute(
+                        "UPDATE sessions SET project_id='moved-project' WHERE id=?1", [&session],
+                    ).unwrap();
+                }
+                _ => unreachable!(),
+            }
+
+            assert!(preflight_automatic_work_item_delivery(&store, &session, &[]).is_err(), "{change}");
+            if change == "stop" {
+                assert!(!on_run_finished(&store, &session, true, "late success").unwrap());
+                assert!(!on_run_finished(&store, &session, true, "duplicate late success").unwrap());
+                assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "stopped");
+                assert_eq!(work_items::get_work_item(&store, &item.id).unwrap().state, "blocked");
+            } else {
+                assert!(on_run_finished(&store, &session, true, "late success").unwrap());
+                assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked", "{change}");
+                assert!(!on_run_finished(&store, &session, true, "duplicate late success").unwrap());
+                assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked", "{change}");
+                assert_eq!(work_items::get_work_item(&store, &item.id).unwrap().state, "blocked", "{change}");
+            }
+            assert!(
+                prepare_automatic_next_work_item(&mut store, &session, &[])
+                    .unwrap()
+                    .is_none(),
+                "{change}",
+            );
+            assert_eq!(assignments(&store, &ticket.id, 10).unwrap().len(), before_assignments, "{change}");
+            let after_messages: i64 = store.db.query_row(
+                "SELECT COUNT(*) FROM messages WHERE session_id=?1 AND role='user'",
+                [&session], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(after_messages, before_messages,
+                "stale continuation cannot deliver a user message: {change}");
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().active_assignment_id, None, "{change}");
+        }
+    }
+
+    #[test]
+    fn failed_or_stopped_structured_worker_never_prepares_an_advance() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let plan = serde_json::json!({
+            "version": 1,
+            "workItems": [
+                {"ordinal": 0, "objective": "First slice", "evidenceContract": "First evidence", "dependsOn": []},
+                {"ordinal": 1, "objective": "Second slice", "evidenceContract": "Second evidence", "dependsOn": [0]},
+            ],
+        }).to_string();
+
+        let failed = coordinated_plan_ticket(
+            &mut store,
+            &config.id,
+            "Whole Ticket objective",
+            "auto-advance-failure",
+            &plan,
+        );
+        let (_, _, _, _, _) = prepare_coordinated_worker(&mut store, &failed.id, false).unwrap();
+        let failed_session = assignment_session(&store, &failed.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &failed_session, false, "Provider failed").unwrap());
+        let failed_assignments = assignments(&store, &failed.id, 10).unwrap().len();
+        assert!(
+            prepare_automatic_next_work_item(&mut store, &failed_session, &[])
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            assignments(&store, &failed.id, 10).unwrap().len(),
+            failed_assignments
+        );
+        assert_eq!(get_ticket(&store, &failed.id).unwrap().state, "failed");
+
+        let stopped = coordinated_plan_ticket(
+            &mut store,
+            &config.id,
+            "Whole Ticket objective",
+            "auto-advance-stop",
+            &plan,
+        );
+        let (_, _, _, _, _) = prepare_coordinated_worker(&mut store, &stopped.id, false).unwrap();
+        let stopped_session = assignment_session(&store, &stopped.id).unwrap().unwrap();
+        assert_eq!(stop(&store, &stopped.id).unwrap().0.state, "stopped");
+        let stopped_assignments = assignments(&store, &stopped.id, 10).unwrap().len();
+        assert!(
+            prepare_automatic_next_work_item(&mut store, &stopped_session, &[])
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            assignments(&store, &stopped.id, 10).unwrap().len(),
+            stopped_assignments
+        );
     }
 
     #[test]
@@ -7940,7 +8550,7 @@ mod tests {
         assert!(selected.is_some());
         let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
         assert!(on_run_finished(&store, &session, true, "First slice evidence").unwrap());
-        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "queued");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked");
 
         // Even if an inconsistent state reached the approval gate, a human
         // decision must not complete the Ticket while a planned item remains
@@ -7958,7 +8568,7 @@ mod tests {
     }
 
     #[test]
-    fn human_rejection_creates_a_dependent_correction_item_in_multi_item_plans() {
+    fn human_rejection_cannot_treat_structured_self_report_as_completed_evidence() {
         let mut store = fixture();
         let config = enabled(&store);
         let plan = serde_json::json!({
@@ -7972,42 +8582,20 @@ mod tests {
             &mut store, &config.id, "Whole Ticket objective", "multi-item-rejection-correction", &plan,
         );
 
-        // Complete both planned items so the Ticket reaches the approval gate.
-        let (_, _, _, _, _) = prepare_coordinated_worker(&mut store, &ticket.id, false).unwrap();
+        // A structured worker's self-report cannot settle its item, so the
+        // separate human rejection/correction flow is not reachable yet.
+        let (_, _, _, _, selected) = prepare_coordinated_worker(&mut store, &ticket.id, false).unwrap();
+        let first = selected.unwrap();
         let first_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
         assert!(on_run_finished(&store, &first_session, true, "First slice evidence").unwrap());
-        let (_, _, _, _, _) = prepare_coordinated_worker(&mut store, &ticket.id, false).unwrap();
-        let second_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
-        assert!(on_run_finished(&store, &second_session, true, "Second slice evidence").unwrap());
-        let waiting = get_ticket(&store, &ticket.id).unwrap();
-        assert_eq!(waiting.state, "waiting_approval");
-        assert!(work_items::all_work_items_completed(&store, &ticket.id).unwrap());
-
-        let rejected = reject(&store, &ticket.id, waiting.revision, "Needs revision").unwrap();
-        assert_eq!(rejected.state, "blocked");
-
-        // A rejected multi-item result gets a new dependent correction item,
-        // while every completed original WorkItem stays terminal and preserved.
-        let tx = store.db.unchecked_transaction().unwrap();
-        let correction = work_items::prepare_retry_work_item_in(
-            &tx, &ticket.id, "worker", &ticket.objective,
-        ).unwrap();
-        tx.commit().unwrap();
-
-        assert!(!correction.requeue, "a rejection correction is a new item, not a replay");
-        assert_eq!(correction.objective, "Whole Ticket objective");
+        let blocked = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(blocked.state, "blocked");
+        assert_eq!(work_items::get_work_item(&store, &first.id).unwrap().state, "blocked");
+        assert!(reject(&store, &ticket.id, blocked.revision, "Needs revision").is_err());
         let items = work_items::list_work_items(&store, &ticket.id, 10).unwrap();
-        assert_eq!(items.len(), 3);
-        assert_eq!(items[0].state, "completed");
-        assert_eq!(items[1].state, "completed");
-        assert_eq!(items[2].ordinal, 2);
-        assert_eq!(items[2].objective, "Whole Ticket objective");
-        assert_eq!(items[2].state, "queued");
-        let dependency: Option<String> = store.db.query_row(
-            "SELECT depends_on FROM sa_work_item_deps WHERE item_id=?1",
-            [&items[2].id], |row| row.get(0),
-        ).unwrap();
-        assert_eq!(dependency.as_deref(), Some(items[1].id.as_str()));
+        assert_eq!(items.len(), 2);
+        assert_eq!(items[1].state, "queued");
+        assert!(!work_items::all_work_items_completed(&store, &ticket.id).unwrap());
     }
 
     #[test]

@@ -7874,7 +7874,11 @@ fn automatic_only_s3_native_terminal_waits_for_fresh_phase_two_challengers() {
     settle_native_council_round(&state, &root_id, 2, "completed", Some(9.6));
     {
         let store = state.store.lock().unwrap();
-        let root = load(&store, &root_id).unwrap().unwrap();
+        let mut root = load(&store, &root_id).unwrap().unwrap();
+        // Verifiable terminal callbacks read the persisted root status,
+        // not merely a recomputed projection of the native receipts.
+        refresh_council(&store, &mut root);
+        save(&store, &mut root).unwrap();
         assert_eq!(root.workers.iter().filter(|worker| {
             worker.council.as_ref().is_some_and(|seat| seat.round == 2)
         }).count(), 2);

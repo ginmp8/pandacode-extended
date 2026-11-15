@@ -2458,13 +2458,9 @@ fn persist_s3_challenge_decision(store: &Store, team: &TeamSnapshot, worker: &Wo
         return Err("council_phase2_blocked: phase 1 has no scored reviewer reports to challenge.".into());
     }
     let challenger_identity = challenge_reviewer_identity(worker);
-    if team.workers.iter().any(|other| {
-        other.id != worker.id
-            && other.council.as_ref().is_some_and(|other_seat| other_seat.round == seat.round)
-            && challenge_reviewer_identity(other) == challenger_identity
-    }) {
-        return Err("council_phase2_blocked: challenge reviewers must use distinct reviewer identities.".into());
-    }
+    // One reviewer identity may independently challenge different lenses, but never
+    // the same lens that identity authored in phase 1. Native seats and sessions
+    // remain unique and every challenge retains its own frozen binding.
     let mut has_matching_lens = false;
     let mut same_lens_independent = true;
     for author in &authors {

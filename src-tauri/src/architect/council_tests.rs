@@ -2229,6 +2229,33 @@ fn two_phase_allows_a_challenger_that_authored_a_different_lens() {
 }
 
 #[test]
+fn two_phase_allows_shared_challenger_model_across_independent_lenses() {
+    let (mut team, receipts) = two_phase_fixture(true);
+    // Two distinct native seats may use the same model for different lenses;
+    // each must remain independent of the author of its own lens.
+    for worker in team.workers.iter_mut().filter(|worker| {
+        worker.council.as_ref().is_some_and(|seat| seat.round == 2)
+    }) {
+        worker.model = "shared-challenger-model".into();
+        worker.reviewer_binding.as_mut().unwrap().snapshot.model = worker.model.clone();
+    }
+    assert_eq!(
+        council::status_with_criterion_outcomes(&team, &receipts).unwrap().state,
+        "passed",
+        "per-lens independence must not become an unintended global model-identity restriction",
+    );
+
+    // The same identity may not challenge a report it authored for that lens.
+    team.workers[2].model = team.workers[0].model.clone();
+    team.workers[2].reviewer_binding.as_mut().unwrap().snapshot.model = team.workers[2].model.clone();
+    assert_ne!(
+        council::status_with_criterion_outcomes(&team, &receipts).unwrap().state,
+        "passed",
+        "a same-lens author cannot validate their own phase-one report",
+    );
+}
+
+#[test]
 fn two_phase_requires_both_correlated_rounds_and_independent_challengers() {
     let (phase1_only, phase1_receipts) = two_phase_fixture(false);
     let phase1_status = council::status_with_criterion_outcomes(&phase1_only, &phase1_receipts).unwrap();

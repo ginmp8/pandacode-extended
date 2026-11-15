@@ -3105,9 +3105,6 @@ fn two_phase_independent(team: &TeamSnapshot, phase1: usize, phase2: usize) -> b
         && later.len() == earlier.len()
         && !stale(team, phase1)
         && !stale(team, phase2)
-        && later.iter().enumerate().all(|(index, (challenger, _))| {
-            later.iter().skip(index + 1).all(|(other, _)| reviewer_identity(challenger) != reviewer_identity(other))
-        })
         && frozen_artifact
         && independent_sessions
         && independent_per_lens

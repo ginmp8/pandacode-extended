@@ -1426,7 +1426,8 @@ fn list_decisions(store: &Store, source_id: &str, limit: i64) -> Result<Vec<Even
 /// identifies PRs currently matching the head, not a proven triggering PR.
 /// Only a unique exact head SHA match is safe to correlate as read-only context.
 fn authenticated_check_run(
-    selected: &EventSource, raw: &serde_json::Value, requested_id: i64, sequence: i64,
+    selected: &EventSource, raw: &serde_json::Value, requested_id: i64,
+    sequence: i64, repository_id: u64,
 ) -> Result<EventEnvelope> {
     if selected.event_kind != "check_run.completed"
         || requested_id <= 0
@@ -1468,6 +1469,13 @@ fn authenticated_check_run(
         .is_some_and(|url| url.eq_ignore_ascii_case(&expected_base_repo))
     {
         return Err("Check Run pull request base repository is missing or mismatched.".into());
+    }
+    // A repository name and REST URL can be reused after deletion. Correlate
+    // only with the numeric repository identity authenticated by gh api.
+    if prs[0].pointer("/base/repo/id")
+        .and_then(serde_json::Value::as_u64) != Some(repository_id)
+    {
+        return Err("Check Run PR base repository ID differs from authenticated repository identity.".into());
     }
     let number = prs[0].get("number").and_then(serde_json::Value::as_u64)
         .ok_or("Check Run pull request number is unavailable.")?;
@@ -1533,7 +1541,7 @@ fn observe_authenticated_check_run_with_repository_id(
         None => current.last_sequence.checked_add(1)
             .ok_or("Check Run observation cursor is exhausted.")?,
     };
-    let envelope = authenticated_check_run(&current, raw, requested_id, sequence)?;
+    let envelope = authenticated_check_run(&current, raw, requested_id, sequence, repository_id)?;
     let receipt = observe_authenticated_in_tx(&tx, &current, &envelope, signed_in)?;
     // Replays must preserve their original result. A v41-v44 receipt with no
     // original verified result stays unknown; never backfill it on replay.
@@ -1950,11 +1958,19 @@ mod tests {
             "head_sha":sha, "completed_at":chrono::Utc::now().to_rfc3339(),
             "app":{"slug":"trusted-bot"},
             "pull_requests":[{"number":42,"head":{"sha":sha},
-                "base":{"repo":{"url":"https://api.github.com/repos/owner/repo"}}}]
+                "base":{"repo":{"url":"https://api.github.com/repos/owner/repo","id":73}}}]
         });
         assert!(observe_authenticated_check_run_with_repository_id(
             &store, &observed, 701, &raw, "operator", 73,
         ).is_ok());
+        // Same repository URL but different numeric PR base identity must
+        // not pin a misleading Check Run to this Team's authenticated source.
+        raw["pull_requests"][0]["base"]["repo"]["id"] = serde_json::json!(74);
+        assert!(observe_authenticated_check_run_with_repository_id(
+            &store, &observed, 701, &raw, "operator", 73,
+        ).is_err());
+        assert_eq!(source(&store, &observed.id).unwrap().last_sequence, 1);
+        raw["pull_requests"][0]["base"]["repo"]["id"] = serde_json::json!(73);
         raw["id"] = serde_json::json!(702);
         assert!(observe_authenticated_check_run_with_repository_id(
             &store, &observed, 702, &raw, "operator", 74,
@@ -2824,7 +2840,7 @@ mod tests {
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
             "app": {"slug": "trusted-bot"},
             "pull_requests": [{"number": 42, "head": {"sha": sha},
-                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo"}}}]
+                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo", "id": 1}}}]
         });
         assert!(observe_authenticated_check_run(&store, &off, 240, &run, "operator").is_err());
         let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
@@ -2867,7 +2883,7 @@ mod tests {
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
             "app": {"slug": "trusted-bot"},
             "pull_requests": [{"number": 42, "head": {"sha": sha},
-                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo"}}}]
+                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo", "id": 1}}}]
         });
         let first = observe_authenticated_check_run(&store, &on, 701, &run, "operator").unwrap();
         assert_eq!(first.decision, "observed_permitted");
@@ -2917,7 +2933,7 @@ mod tests {
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
             "app": {"slug": "trusted-bot"},
             "pull_requests": [{"number": 42, "head": {"sha": sha},
-                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo"}}}]
+                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo", "id": 1}}}]
         });
         store.db.execute_batch(
             "CREATE TEMP TRIGGER reject_check_outcome BEFORE INSERT ON sa_check_run_results
@@ -2928,7 +2944,7 @@ mod tests {
         assert!(list_decisions(&store, &on.id, 10).unwrap().is_empty());
         store.db.execute_batch("DROP TRIGGER reject_check_outcome").unwrap();
         // Simulate a pre-v45 receipt with no checked outcome attached.
-        let envelope = authenticated_check_run(&on, &run, 702, 1).unwrap();
+        let envelope = authenticated_check_run(&on, &run, 702, 1, 1).unwrap();
         let transaction = store.db.unchecked_transaction().unwrap();
         observe_authenticated_in_tx(&transaction, &on, &envelope, "operator").unwrap();
         transaction.commit().unwrap();
@@ -2953,7 +2969,7 @@ mod tests {
             "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
             "app": {"slug": "trusted-bot"},
             "pull_requests": [{"number": 42, "head": {"sha": sha},
-                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo"}}}]
+                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo", "id": 1}}}]
         });
         for mutation in 0..13 {
             let mut bad = run.clone();
@@ -2986,7 +3002,7 @@ mod tests {
         case_variant["pull_requests"][0]["base"]["repo"]["url"] =
             serde_json::json!("https://api.github.com/repos/OWNER/REPO");
         assert_eq!(
-            authenticated_check_run(&on, &case_variant, 390, 1).unwrap().subject_key,
+            authenticated_check_run(&on, &case_variant, 390, 1, 1).unwrap().subject_key,
             "pull:42",
             "GitHub repository paths are case insensitive"
         );

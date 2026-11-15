@@ -100,6 +100,8 @@ test('versioned Team strategy is saved future-only with native unsupported-budge
   await create.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await create.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
   await create.getByRole('button',{name:'Create disabled preset'}).click();
+  // Creation opens Demands / Runs; inspect future-Team policy on Teams.
+  await host.getByRole('button',{name:'Teams',exact:true}).click();
   const pane=host.getByRole('region',{name:'Team runtime strategy'});
   await pane.getByRole('button',{name:'Inspect native policy'}).click();
   await expect(pane).toContainText('Native executable parallel Workers: 1');
@@ -116,6 +118,7 @@ test('versioned Team strategy is saved future-only with native unsupported-budge
   await expect(pane).toContainText('Parallel writes over one leased checkout are not supported');
   await expect(form.getByRole('combobox',{name:'Optimization priority'})).toHaveValue('cost');
   await expect(form.getByRole('spinbutton',{name:'Maximum attempts per Worker (1–8)'})).toHaveValue('3');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
   await host.getByRole('button',{name:'Enable manual'}).click();
   await host.getByRole('alertdialog',{name:'Confirm orchestration action'})
     .getByRole('button',{name:'Confirm',exact:true}).click();
@@ -245,7 +248,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await expect(details).toContainText('No side effects allowed');
   await expect(details).toContainText('Attempt 1');
   await expect(details).toContainText('admitted');
-  await expect(details.getByRole('heading',{name:'Native activity',exact:true}).locator('xpath=following-sibling::ol[1] li').first()).toContainText(' · admitted · ');
+  await expect(details.getByRole('heading',{name:'Native activity',exact:true}).locator('xpath=following-sibling::ol[1]/li[1]')).toContainText(' · admitted · ');
   await row.getByRole('button',{name:'Stop'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(row).toContainText('stopped');
@@ -1737,6 +1740,9 @@ test('Demand WorkItem inspector explains native dependency blockers without laun
       if(command==='superagent_tickets')return [ticket] as never;
       if(command==='superagent_snapshot')return {
         ticket,assignments:[],activity:[],finalizationGate:'not_pending',
+        mandate:{actor:'local-user',authorizationId:'native-manual',policyRevision:1,
+          projectId:'fixture',expiresAt:1800000000000,revoked:false,
+          allowedTools:[],allowedSideEffects:false},
       } as never;
       if(command==='superagent_source_thread_links')return [] as never;
       if(command==='superagent_demand_plan')return {

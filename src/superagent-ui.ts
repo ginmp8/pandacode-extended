@@ -679,7 +679,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             safe(ticketDetails.council.nativeStatus) + ' · Round ' +
             safe(ticketDetails.council.nativeRound) +
             (ticketDetails.council.nativeStale ? ' · stale' : '') +
-            '. Council evidence is authoritative only for an exact Ticket, artifact and verified native cycle; unbound or stale results cannot approve a task.</p></section>'
+            '. Council evidence is authoritative only for an exact Ticket, artifact and verified native cycle; unbound or stale results cannot approve a task. Such unverified evidence cannot authorize SuperAgent completion.</p></section>'
           : '') +
         (canComment
           ? '<section class="sa-effect-editor" aria-label="Explicit GitHub effect"><h5>GitHub issue comment</h5>' +
@@ -730,7 +730,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '</li>';
     }).join('');
     const sourcePanel = '<section class="sa-event-sources" aria-label="GitHub event sources">' +
-      '<h4>GitHub event sources</h4><p>Off and authenticated Observe remain available. Read-only Auto for exact issues.opened events requires separate local native confirmation and expires within 24 hours. A source grant never authorizes files, GitHub comments, pushes, merges, or releases.</p>' +
+      '<h4>GitHub event sources</h4><p>Authenticated GitHub Events polling is bounded and read-only in Observe mode. Off and authenticated Observe remain available. Read-only Auto for exact issues.opened events requires separate local native confirmation and expires within 24 hours. A source grant never authorizes files, GitHub comments, pushes, merges, or releases.</p>' +
       (!sourcesLoaded ? '<button type="button" data-sa-load-sources>Load sources</button>'
         : '<form data-sa-form="source"><div class="sa-grid">' +
           '<label>Repository (owner/name)<input name="repository" maxlength="200" required></label>' +

@@ -2803,6 +2803,36 @@ fn checkout_path(store:&Store,project_id:&str)->Result<String> {
     Ok(path)
 }
 
+fn canonical_checkout_intent(path: &str) -> Option<std::path::PathBuf> {
+    let source = std::path::Path::new(path);
+    let absolute = if source.is_absolute() {
+        source.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(source)
+    };
+    let mut cursor = absolute.as_path();
+    let mut unresolved = Vec::new();
+    loop {
+        match std::fs::canonicalize(cursor) {
+            Ok(mut resolved) => {
+                for segment in unresolved.into_iter().rev() {
+                    resolved.push(segment);
+                }
+                return Some(resolved);
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                // A dangling symlink is not a safe ordinary missing directory.
+                if std::fs::symlink_metadata(cursor).is_ok() {
+                    return None;
+                }
+                unresolved.push(cursor.file_name()?.to_os_string());
+                cursor = cursor.parent()?;
+            }
+            Err(_) => return None,
+        }
+    }
+}
+
 fn checkout_paths_equivalent(left: &str, right: &str) -> bool {
     if left == right { return true; }
     if std::path::Path::new(left)
@@ -2814,7 +2844,7 @@ fn checkout_paths_equivalent(left: &str, right: &str) -> bool {
     {
         return true;
     }
-    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+    match (canonical_checkout_intent(left), canonical_checkout_intent(right)) {
         (Ok(left), Ok(right)) => left == right,
         _ => false,
     }
@@ -6673,6 +6703,119 @@ mod tests {
         assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "running");
         assert!(!serde_json::to_string(&after_restart).unwrap()
             .contains("Private native mandate recovery"));
+    }
+
+    #[test]
+    fn unresolved_dot_checkout_alias_fences_native_leases_without_path_creation() {
+        let mut store = fixture();
+        let root = std::env::temp_dir().join(format!(
+            "sa-unresolved-checkout-{}", storage::id(),
+        ));
+        let original = root.join("checkout").to_string_lossy().to_string();
+        let alias = root.join(".").join("checkout").to_string_lossy().to_string();
+        let unrelated = root.join("other").to_string_lossy().to_string();
+        assert!(!root.exists());
+        assert_ne!(original, alias);
+        assert!(checkout_paths_equivalent(&original, &alias));
+        assert!(!checkout_paths_equivalent(&original, &unrelated));
+        store.db.execute(
+            "UPDATE projects SET path=?1 WHERE id='project'",
+            [&original],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('alias-project','Alias',?1)",
+            [&alias],
+        ).unwrap();
+        let config = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &config.id, "Keep an uncreated checkout reserved",
+            "unresolved-dot-alias", false,
+        ).unwrap();
+        assert!(started);
+        let ordinary = store.create_session(
+            "alias-project", "codex", "default", "plan",
+        ).unwrap();
+        assert!(active_manual_conflict(
+            &store, std::slice::from_ref(&ordinary.id), "worker", "project",
+        ).unwrap());
+        assert!(manual_candidate_occupied(
+            &store, "unrelated-worker", "alias-project", "alias-project",
+        ).unwrap());
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_err());
+        stop(&store, &ticket.id).unwrap();
+        assert!(!manual_candidate_occupied(
+            &store, "unrelated-worker", "alias-project", "alias-project",
+        ).unwrap());
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unresolved_symlinked_parent_checkout_alias_keeps_native_lease() {
+        let mut store = fixture();
+        let root = std::env::temp_dir().join(format!(
+            "sa-pending-symlink-checkout-{}", storage::id(),
+        ));
+        let physical = root.join("physical");
+        let alias = root.join("alias");
+        std::fs::create_dir_all(&physical).unwrap();
+        std::os::unix::fs::symlink(&physical, &alias).unwrap();
+        let pending = physical.join("future").join("checkout");
+        let pending_alias = alias.join("future").join("checkout");
+        assert!(!pending.exists() && !pending_alias.exists());
+        let original = pending.to_string_lossy().to_string();
+        let alternate = pending_alias.to_string_lossy().to_string();
+        assert!(checkout_paths_equivalent(&original, &alternate));
+        assert!(!checkout_paths_equivalent(
+            &original, &alias.join("future").join("different").to_string_lossy(),
+        ));
+
+        store.db.execute(
+            "UPDATE projects SET path=?1 WHERE id='project'",
+            [&original],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('unresolved-alias','Alias',?1)",
+            [&alternate],
+        ).unwrap();
+        let config = enabled(&store);
+        let (ticket, started) = admit(
+            &mut store, &config.id, "Fence an uncreated symlinked checkout",
+            "unresolved-symlink-checkout", false,
+        ).unwrap();
+        assert!(started);
+        let ordinary = store.create_session(
+            "unresolved-alias", "codex", "default", "plan",
+        ).unwrap();
+        assert!(manual_candidate_occupied(
+            &store, "other-worker", "unresolved-alias", "unresolved-alias",
+        ).unwrap());
+        assert!(active_manual_conflict(
+            &store, std::slice::from_ref(&ordinary.id), "worker", "project",
+        ).unwrap());
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_err());
+        stop(&store, &ticket.id).unwrap();
+        assert!(!manual_candidate_occupied(
+            &store, "other-worker", "unresolved-alias", "unresolved-alias",
+        ).unwrap());
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_ok());
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn unresolved_relative_and_absolute_checkout_aliases_share_native_identity() {
+        let relative = std::path::PathBuf::from(format!(
+            "sa-uncreated-relative-{}", storage::id(),
+        )).join("checkout");
+        let absolute = std::env::current_dir().unwrap().join(&relative);
+        assert!(!absolute.exists());
+        assert!(checkout_paths_equivalent(
+            &relative.to_string_lossy(), &absolute.to_string_lossy(),
+        ));
+        let unrelated = absolute.with_file_name("another-checkout");
+        assert!(!checkout_paths_equivalent(
+            &relative.to_string_lossy(), &unrelated.to_string_lossy(),
+        ));
     }
 
     #[test]

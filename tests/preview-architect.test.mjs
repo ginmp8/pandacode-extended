@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createPreviewArchitect } from '../src/preview-architect.ts';
+import { newCouncilComposition, withCouncilComposition } from '../src/council.ts';
 import { workerQueueReason } from '../src/worker-scheduling.ts';
 import { namedTeamSetup, sameTeamSetup } from '../src/team-mode.ts';
 
@@ -34,6 +35,36 @@ const config = (count = 3) => ({
 });
 
 const assignment = (id, values = {}) => ({ id, name: id, status: 'queued', dependsOn: [], files: [`src/${id}.ts`], ...values });
+
+test('architect preview preserves native S3 root and nested round limits without changing legacy Council', t => {
+  const { api, host } = fixture(t);
+  api.configure('parent', config());
+  const legacy = { target: 9, maxRounds: 1, reviewers: 0 };
+  assert.equal(api.setCouncil('parent', legacy).config.council.composition, undefined);
+
+  const strategy = { ...newCouncilComposition(), strategy: 'two_phase' };
+  const twoPhase = withCouncilComposition({ ...legacy, maxRounds: 3 }, strategy);
+  assert.throws(() => api.setCouncil('parent', { ...twoPhase, maxRounds: 1 }), /at least two review rounds/);
+  const saved = api.setCouncil('parent', twoPhase);
+  assert.equal(saved.councilStatus.state, 'waiting', 'preview cannot manufacture verified reviews');
+  assert.equal(createPreviewArchitect(host).get('parent').config.council.composition.strategy, 'two_phase');
+
+  const selected = { botId: 'nested-a', mode: 'nested', required: true, nested: {
+    template: 'explicit_task', childCriteriaSource: 'architect', childReviewerCount: 2,
+    target: 9, maxRounds: 1, escalation: 'always',
+  } };
+  const mixed = withCouncilComposition({ ...legacy, maxRounds: 3 }, { ...strategy,
+    automatic: { enabled: true, count: 1 }, selected: [selected],
+  });
+  assert.throws(() => api.setCouncil('parent', mixed), /at least 2 for the two-phase/);
+  const corrected = withCouncilComposition({ ...legacy, maxRounds: 3 }, { ...strategy,
+    automatic: { enabled: true, count: 1 },
+    selected: [{ ...selected, nested: { ...selected.nested, maxRounds: 2 } }],
+  });
+  assert.equal(api.setCouncil('parent', corrected).councilStatus.state, 'waiting');
+  assert.equal(createPreviewArchitect(host).get('parent').config.council.composition.selected[0].nested.maxRounds, 2);
+  assert.equal(api.setCouncil('parent', legacy).config.council.composition, undefined);
+});
 
 test('preview eligibility keeps dependencies queued until they complete', () => {
   const dependent = assignment('dependent', { dependsOn: ['dependency'], readOnly: true });

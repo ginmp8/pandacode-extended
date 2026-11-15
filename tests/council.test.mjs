@@ -48,6 +48,17 @@ test('composition validation accepts all strategy and source-mode combinations a
     }
   }
   assert.match(validateCouncilComposition({ ...composition, strategy: 'unknown' }, 9).join(' '), /supported Council execution strategy/);
+  // Nested Councils inherit S3, so a single child round cannot satisfy a
+  // distinct independent second-phase challenge.
+  const invalidNested = { botId: 'nested-single-round', mode: 'nested', required: true, nested: {
+    template: 'explicit_task', childCriteriaSource: 'architect', childReviewerCount: 2,
+    target: 9, maxRounds: 1, escalation: 'always',
+  } };
+  const invalidTwoPhase = { ...composition, strategy: 'two_phase',
+    automatic: { enabled: true, count: 1 }, selected: [invalidNested] };
+  assert.match(validateCouncilComposition(invalidTwoPhase, 9).join(' '), /at least 2 for the two-phase/);
+  assert.deepEqual(validateCouncilComposition({ ...invalidTwoPhase,
+    selected: [{ ...invalidNested, nested: { ...invalidNested.nested, maxRounds: 2 } }] }, 9), []);
   const selectedOnly = { ...composition, automatic: { enabled: false, count: 0 }, selected: [
     { botId: 'bot-a', mode: 'nested', required: true, nested: { template: 'explicit_task', childCriteriaSource: 'user', childReviewerCount: 2, target: 9, maxRounds: 3, escalation: 'on_trigger' } },
     { botId: 'bot-b', mode: 'direct', required: true },

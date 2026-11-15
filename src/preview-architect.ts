@@ -56,6 +56,8 @@ export function createPreviewArchitect(host: PreviewHost) {
     if (council.composition) {
       const errors = validateCouncilComposition(council.composition, council.target);
       if (errors.length) throw new Error(`council_composition_invalid: ${errors[0]}`);
+      if (council.composition.strategy === 'two_phase' && council.maxRounds < 2)
+        throw new Error('S3 two-phase Council requires at least two review rounds.');
     }
     const ids = council.reviewerBotIds ?? [];
     const permissions = council.reviewPermissions;

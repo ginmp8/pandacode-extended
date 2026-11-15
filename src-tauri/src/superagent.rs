@@ -1204,6 +1204,11 @@ fn create_configuration_roles_with_policy(
     let coordinator = bots::get(store, &input.coordinator_bot_id)?;
     let workers = worker_bot_ids.iter().map(|id| bots::get(store,id)).collect::<Result<Vec<_>>>()?;
     let reviewers = reviewer_bot_ids.iter().map(|id| bots::get(store,id)).collect::<Result<Vec<_>>>()?;
+    for bot in std::iter::once(&coordinator).chain(workers.iter()).chain(reviewers.iter()) {
+        if let Some(issue)=roster::member_execution_issue(bot) {
+            return Err(issue.into());
+        }
+    }
     // Every native bot owns its own project/workspace. A coordinator is a separate
     // existing bot, not a second profile inside the worker's checkout. Ordered
     // workers share one execution project; Council reviewers are independent
@@ -2809,6 +2814,9 @@ fn manual_preflight(
         Some("Team is disabled or bots are globally paused.".to_owned())
     } else if coordinator.paused || worker.paused || worker.project_id != cfg.project_id {
         Some("Selected bot is paused or outside the Team project.".to_owned())
+    } else if let Some(issue) = roster::member_execution_issue(&coordinator)
+        .or_else(||roster::member_execution_issue(&worker)) {
+        Some(issue.to_owned())
     } else if roster::has_additional_members(store, config_id)? {
         Some("Multi-member execution requires native scoped role admission; manual runner is single-worker.".to_owned())
     } else if busy || manual_candidate_occupied(store, &candidate.id, &cfg.project_id, &candidate.project_id)? {
@@ -3054,6 +3062,11 @@ fn admit_role_with_grant_inner(
     }
     let coordinator = bots::get(store, &config.coordinator_bot_id)?;
     let worker = bots::get(store, chosen_worker)?;
+    for bot in [&coordinator,&worker] {
+        if let Some(issue)=roster::member_execution_issue(bot) {
+            return Err(issue.into());
+        }
+    }
     if authorized_paths.is_some() && worker.provider!="codex" {
         return Err("policy_unsupported: scoped Demand file writes require a native Codex Worker.".into());
     }
@@ -4169,6 +4182,13 @@ fn change_enabled(
         let coordinator=bots::get(store,&current.coordinator_bot_id)?;
         let workers=current.worker_bot_ids.iter().map(|id| bots::get(store,id))
             .collect::<Result<Vec<_>>>()?;
+        let reviewers=current.reviewer_bot_ids.iter().map(|id| bots::get(store,id))
+            .collect::<Result<Vec<_>>>()?;
+        for bot in std::iter::once(&coordinator).chain(workers.iter()).chain(reviewers.iter()) {
+            if let Some(issue)=roster::member_execution_issue(bot) {
+                return Err(issue.into());
+            }
+        }
         if coordinator.paused || workers.iter().any(|worker| worker.paused
             || worker.project_id != current.project_id)
             || crate::feature_controls::get().bots_paused
@@ -7693,6 +7713,37 @@ mod tests {
              VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
             params![id,storage::now()],
         ).unwrap();
+    }
+
+    #[test]
+    fn unsupported_bot_harnesses_and_modes_never_admit_a_team() {
+        let store=fixture();
+        let input=||NewOrchestration {
+            name:"Persisted harness gate".into(),
+            coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
+        };
+        store.db.execute(
+            "UPDATE bots SET provider='unsupported-native-harness' WHERE id='router'",[],
+        ).unwrap();
+        assert!(create_configuration(&store,input()).unwrap_err().contains("harness"));
+        let count:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations",[],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(count,0,"Rejected Team must not leave a saved orphan");
+        store.db.execute("UPDATE bots SET provider='codex' WHERE id='router'",[]).unwrap();
+        let cfg=create_configuration(&store,input()).unwrap();
+        store.db.execute("UPDATE bots SET mode='unsupported-mode' WHERE id='worker'",[]).unwrap();
+        let reason=change_enabled(&store,&cfg.id,cfg.policy_revision,true).unwrap_err();
+        assert!(reason.contains("permission mode"),"{reason}");
+        let saved=configuration(&store,&cfg.id).unwrap();
+        assert!(!saved.enabled);
+        assert_eq!(saved.policy_revision,cfg.policy_revision);
+        store.db.execute("UPDATE bots SET mode='plan' WHERE id='worker'",[]).unwrap();
+        assert!(change_enabled(&store,&cfg.id,cfg.policy_revision,true).unwrap().enabled);
+        store.db.execute("UPDATE bots SET provider='unsupported-native-harness' WHERE id='worker'",[]).unwrap();
+        let preflight=manual_preflight(&store,&cfg.id,"inspect a fixture",false,false).unwrap();
+        assert!(!preflight.eligible);
+        assert!(preflight.reason.unwrap_or_default().contains("harness"));
     }
 
     #[test]

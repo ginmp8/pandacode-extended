@@ -14,7 +14,12 @@ must identify that exact completed run, a supported conclusion, its exact
 GitHub App slug and **exactly one** PR with the same 40-hex-character head SHA
 whose API-provided `base.repo.url` identifies the exact configured repository.
 A missing or foreign base repository rejects correlation even when the PR number
-and head SHA match.
+and head SHA match. The PR's numeric `base.repo.id` must also match the
+repository ID independently obtained by the authenticated `gh api repos/...`
+lookup. A matching owner/name or REST URL alone is insufficient because
+repository names can be reused after deletion. Missing, malformed or mismatched
+IDs fail the entire observation atomically, without advancing the source cursor
+or persisting a source pin or outcome.
 Missing PR associations (including some fork checks), multiple matching PRs,
 a changed PR head, an unmatched App, a Check Run before Observe activation,
 a stale policy revision or an invalid response all fail **without recording

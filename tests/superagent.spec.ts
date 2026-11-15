@@ -579,12 +579,12 @@ test('native Council observation is advisory and never authorizes task completio
         workerBotId:'worker',enabled:true,policyRevision:2
       }] as never;
       if (command === 'superagent_tickets') return [{
-        id:'ticket-one',objective:'Review artifact',state:'waiting_approval',
+        id:'ticket-one',orchestrationId:'preset',objective:'Review artifact',state:'waiting_approval',
         revision:2,evidence:'worker evidence'
       }] as never;
       if (command === 'superagent_source_thread_links') return [] as never;
       if (command === 'superagent_snapshot') return {
-        ticket:{id:'ticket-one',objective:'Review artifact',
+        ticket:{id:'ticket-one',orchestrationId:'preset',objective:'Review artifact',
           state:'waiting_approval',revision:2,evidence:'worker evidence'},
         mandate:{actor:'local-user',authorizationId:'manual',policyRevision:2,
           projectId:'fixture',expiresAt:1800000000000,revoked:false,
@@ -777,7 +777,7 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
     const links:Array<{sourceId:string;ticketId:string;repository:string;subjectKey:string;createdAt:number}>=[];
     const configs=[{id:'one',name:'One',coordinatorBotId:'router',
       workerBotId:'worker',enabled:true,policyRevision:1}];
-    const ticket={id:'ticket-one',objective:'Private fixture',state:'queued',revision:1,evidence:null};
+    const ticket={id:'ticket-one',orchestrationId:'one',objective:'Private fixture',state:'queued',revision:1,evidence:null};
     let dispatches=0, unlinks=0;
     mountSuperagent(host,async (command,args)=>{
       if(command==='bots_list')return [{id:'router',name:'Router',paused:false},
@@ -904,7 +904,7 @@ test('Ticket activity offers native All, Compact and JSON views without invented
   await page.evaluate(async () => {
     const {mountSuperagent}=await import('/src/superagent-ui.ts');
     const host=document.createElement('div'); host.id='sa-audit-native-fixture';document.body.appendChild(host);
-    const ticket={id:'audit-ticket',objective:'Review bounded evidence',state:'waiting_approval',revision:3,evidence:'evidence'};
+    const ticket={id:'audit-ticket',orchestrationId:'audit-team',objective:'Review bounded evidence',state:'waiting_approval',revision:3,evidence:'evidence'};
     mountSuperagent(host,async command => {
       if (command==='bots_list')return [{id:'router',name:'Router',paused:false},{id:'worker',name:'Worker',paused:false}] as never;
       if (command==='superagent_list')return [{id:'audit-team',name:'Audit Team',coordinatorBotId:'router',workerBotId:'worker',enabled:true,policyRevision:1}] as never;

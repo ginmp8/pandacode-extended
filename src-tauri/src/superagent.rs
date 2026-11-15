@@ -3654,6 +3654,8 @@ pub(crate) fn guard_run_admission(
 ) -> Result<()> {
     let session = store.session(session_id)?;
     let superagent_run = read_only_policy(store, session_id)?.is_some();
+    // A native bot lease also fences stale sessions opened under another project.
+    let session_bot_id = bots::owner_of(store, session_id)?.map(|(bot, _)| bot.id);
     let leased_by_other: bool = store.db.query_row(
         "SELECT EXISTS(
             SELECT 1 FROM sa_assignments a
@@ -3661,13 +3663,14 @@ pub(crate) fn guard_run_admission(
             LEFT JOIN sessions assigned ON assigned.id=a.session_id
             WHERE a.state='running' AND t.state='running'
               AND (t.project_id=?1 OR assigned.project_id=?1 OR assigned.id IS NULL
+                OR (?3 IS NOT NULL AND a.bot_id=?3)
                 OR EXISTS(SELECT 1 FROM projects requested,projects leased
                           WHERE requested.id=?1
                             AND leased.id IN (t.project_id,assigned.project_id)
                             AND requested.path=leased.path))
               AND (a.session_id IS NULL OR a.session_id<>?2)
          )",
-        params![session.project_id, session_id],
+        params![session.project_id, session_id, session_bot_id.as_deref()],
         |row| row.get(0),
     ).map_err(|e| e.to_string())?;
     if leased_by_other {
@@ -3707,7 +3710,9 @@ pub(crate) fn guard_run_admission(
             if other_id == session_id { continue; }
             // A disappeared active session is not proof that a lease is free.
             let other = store.session(other_id)?;
-            if other.project_id == session.project_id
+            let other_bot_id = bots::owner_of(store, other_id)?.map(|(bot, _)| bot.id);
+            if (session_bot_id.is_some() && session_bot_id == other_bot_id)
+                || other.project_id == session.project_id
                 || checkout_paths_equivalent(&requested_path,&checkout_path(store,&other.project_id)?) {
                 return Err("Project has another active agent; SuperAgent dispatch denied.".into());
             }
@@ -10235,6 +10240,40 @@ mod tests {
         ).unwrap();
         assert_eq!(count,0);
         assert!(admit(&mut store,&config.id,&"x".repeat(MAX_OBJECTIVE_BYTES),"max-accepted",false).is_ok());
+    }
+
+    #[test]
+    fn native_bot_lease_fences_stale_ordinary_session_in_another_project() {
+        let mut store = fixture();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('old-project','Old workspace','/tmp/sa-old-session-project')",
+            [],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE bots SET project_id='old-project' WHERE id='worker'", [],
+        ).unwrap();
+        let previous_worker = bots::get(&store, "worker").unwrap();
+        let (old_session, _) = bots::thread_session(
+            &store, &previous_worker, bots::DESKTOP, "old-workspace-chat", "Older conversation",
+        ).unwrap();
+        // A bot can change its current project while its earlier session is
+        // still active. The stale session must not race a fresh Team lease.
+        store.db.execute(
+            "UPDATE bots SET project_id='project' WHERE id='worker'", [],
+        ).unwrap();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Read-only inspection", "same-bot-other-project", false,
+        ).unwrap();
+        assert!(launched);
+        let native_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(guard_run_admission(&store, &native_session, &[]).is_ok());
+        assert!(guard_run_admission(
+            &store, &native_session, std::slice::from_ref(&old_session),
+        ).is_err());
+        assert!(guard_run_admission(&store, &old_session, &[]).is_err());
+        fail_launch(&store, &ticket.id, "Release exclusive bot lease").unwrap();
+        assert!(guard_run_admission(&store, &old_session, &[]).is_ok());
     }
 
     #[test]

@@ -8,7 +8,7 @@ import { openModelPicker } from './model-picker';
 import { showPopover, hidePopover } from './popover-motion';
 import { streamMarkdown } from './streaming-markdown';
 import { captureTranscriptAnchor, preserveTranscriptPosition } from './transcript-scroll';
-import { bindFileLinkContext, refreshFileLinks, type FileLinkContext } from './file-links';
+import { bindFileLinkContext, decorateFileLinks, refreshFileLinks, type FileLinkContext } from './file-links';
 import { createAgentInput, type AgentInput } from './agent-input';
 import { TailText } from './tail-text';
 import { decodeToolActivity, renderToolActivity } from './tool-activity';
@@ -20,7 +20,7 @@ import { workerQueueReason } from './worker-scheduling';
 import { Subagents } from './subagents';
 import { TeamMessages } from './team-messages';
 import { teamSignature } from './team-progress';
-import { councilNotice, councilProgress, councilSeatIds, formatScore, seatVerdict } from './council';
+import { acceptsCouncilSnapshot, councilNotice, councilProgress, councilSeatIds, formatScore, seatVerdict } from './council';
 import { councilSummaryHtml } from './council-panel';
 import { renderCoordination } from './coordination-message';
 import { bindMessageActions, messageActionsHtml } from './message-actions';
@@ -306,14 +306,19 @@ export class ArchitectView {
     button.textContent = this.selected ? 'Review with Jev' : 'Suggest worker';
   }
   setTask(taskId: string, team: TeamSnapshot | null, providers: Provider[]): void {
-    const same = taskId === this.taskId && team;
+    const sameTask = taskId === this.taskId;
+    if (team && team.sessionId !== taskId) team = sameTask ? this.team : null;
+    // Rendered task loads can finish out of order. Keep a newer current-cycle projection if an older
+    // architect_get response arrives for the same session after the panel has already been updated.
+    if (sameTask && team && this.team && !acceptsCouncilSnapshot(team, this.team, taskId)) team = this.team;
+    const same = sameTask && team;
     if (taskId !== this.taskId) this.close();
     this.taskId = taskId; this.providers = providers; this.team = team;
     // The same task repaints at most once a frame (renderComposer calls this on every render).
     if (same) this.schedulePaint(); else this.paint();
   }
   update(team: TeamSnapshot): void {
-    if (team.sessionId === this.taskId && (!this.team || team.revision >= this.team.revision)) {
+    if (acceptsCouncilSnapshot(team, this.team, this.taskId)) {
       const unchanged = this.team && teamSignature(this.team) === teamSignature(team);
       this.team = team;
       // Only a new revision: nothing to repaint, though team messages may have arrived.
@@ -488,7 +493,13 @@ export class ArchitectView {
     const councilSlot = panel.querySelector<HTMLElement>('.council-slot')!;
     councilSlot.hidden = Boolean(worker);
     // Council's state line and reviewer rows; its actions live in the composer's strip.
-    if (!worker) morph(councilSlot, councilSummaryHtml(team));
+    if (!worker) {
+      morph(councilSlot, councilSummaryHtml(team));
+      // File-shaped evidence references are candidates only. This resolver verifies them against the
+      // task workspace, then opens them with the app's authorized file-tab flow.
+      bindFileLinkContext(councilSlot, this.options.fileContext?.(team.sessionId));
+      decorateFileLinks(councilSlot, councilSlot);
+    }
     panel.querySelector<HTMLElement>('.architect-worker-detail')!.hidden = !worker;
     if (this.teamMessages) { this.teamMessages.host.hidden = Boolean(worker); if (!worker) this.teamMessages.update(team); }
     if (worker) {

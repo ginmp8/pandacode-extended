@@ -22,8 +22,7 @@ impl ObservedSkillEvidence {
 }
 /// A NativeReadOnly reviewer gets no general-purpose tools. Even an arbitrary
 /// handler call with a hidden name must be denied after catalog filtering.
-pub(super) fn readonly_host(host: ToolHost) -> Option<ToolHost> {
-    let allowed_specs = tools();
+pub(super) fn readonly_host(host: ToolHost, allowed_specs: Vec<Value>) -> Option<ToolHost> {
     let exposed = host.tools.into_iter().filter(|spec| allowed_specs.contains(spec)).collect::<Vec<_>>();
     if exposed.is_empty() { return None; }
     let allowed = exposed.iter().filter_map(|spec| spec["name"].as_str().map(str::to_owned))
@@ -32,7 +31,7 @@ pub(super) fn readonly_host(host: ToolHost) -> Option<ToolHost> {
     let handler = Arc::new(move |name: String, args: Value| {
         if !allowed.contains(&name) {
             let denied: crate::providers::ToolFuture = Box::pin(async {
-                Err("capability_not_authorized: this reviewer can use only native pinned-skill read-only tools.".into())
+                Err("capability_not_authorized: tool is outside this native reviewer role.".into())
             });
             return denied;
         }
@@ -136,7 +135,7 @@ mod tests {
             tools: catalog, approval_tools: HashSet::new(),
             handler: Arc::new(|_, _| Box::pin(async { Ok(json!({"executed": true})) })),
         };
-        let filtered = readonly_host(raw).unwrap();
+        let filtered = readonly_host(raw, tools()).unwrap();
         assert_eq!(filtered.tools.len(), 2);
         assert!(!filtered.tools.iter().any(|spec| spec["name"] == "pandacode_dispatch_workers"));
         assert!((filtered.handler)("pandacode_dispatch_workers".into(), json!({})).await.is_err());

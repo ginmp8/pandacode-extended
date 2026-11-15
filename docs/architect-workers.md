@@ -104,7 +104,9 @@ no Council keeps the team's, and removing the team removes it. Council is per ta
   so does cancelling or replacing a worker that already settled, none of which edits anything.
 - **The gate.** Once this cycle has changes or a round, `finish_team` refuses until the latest round is complete,
   no change landed after it started, and its lowest score reaches the target, or the round limit is reached with
-  nothing live. Each refusal says what to do next; an incomplete round
+  nothing live. Composed terminal checks can still block a would-be pass: in S1/Parallel, a failed required nested
+  branch makes the result terminal `blocked` after all required current-round root sources settle. Missing required
+  terminal proof can also block a composed pass. Other refusals describe what to do next; an incomplete round
   whose open seats stopped or failed names them to cancel. A lead that ends its turn while Council refuses, after a user
   message too, is brought back once: the Continue turn quotes the refusal and keeps it as the team's `error`.
   Below the target the refusal says to fix the blockers through workers and convene a new round; only if a
@@ -126,10 +128,10 @@ no Council keeps the team's, and removing the team removes it. Council is per ta
   scores), `waiting` (no round yet), `reviewing`
   (a seat of the latest round is live), `dispatch` (the latest round is incomplete and no seat is live: the lead
   must act), `asking` (the team rests with its below-target refusal as its error: the lead asked the user),
-  `fixing` (below target or out of date), `passed`, or `limit` (the limit is reached without passing). `notice`
-  is a short plain sentence for the user whenever a Council refusal holds the team as its `error` (asking, or
-  paused with the refusal), and absent otherwise. It comes from the same
-  checks as the gate, so the webview shows it as it is and never reads refusal text. When a setting ends the
+  `fixing` (below target or out of date), `passed`, `limit` (the limit is reached without passing), or `blocked`
+  (a terminal non-pass after a required branch or composed terminal check fails). `notice` is optional native
+  context for a held refusal. For `blocked`, the webview shows the generic summary “Council cannot pass in its
+  current state.” and never exposes the raw native machine notice. When a setting ends the
   `asking` state (the target lowered, Council off, or a changed reviewer count), the lead is woken once: with the
   refusal that now stands, if any, else to verify and finish with the first-and-final table, the prompt carrying
   each lens's first and final score. Accept and finish (`architect_council_accept`) marks this cycle accepted
@@ -138,6 +140,34 @@ no Council keeps the team's, and removing the team removes it. Council is per ta
   after a round below the target, wakes the lead once with that refusal; a refusal lifted from a paused team's error leaves the pause
   note. The lead's review carries `council`: `round`, `target`, `lowest`, `complete`, `passed`, `roundsLeft`,
   `scores` (the latest round), `firstScores` (each lens's first score this cycle) and `next`.
+
+### Schema v1 composition
+
+`CouncilConfig.composition` is an additive, task-scoped schema. When it is absent, the original automatic-reviewer and selected-bot paths (M1 and M2) keep their existing meaning. The direct Council panel keeps its current entry point and adds a compact composition editor; **Apply composition** sends the full `CouncilConfig` to `architect_set_council`. Team profiles and new-thread defaults do not store this task's composition.
+
+The seven mode labels are derived from the automatic source and each selected bot's branch. They are read-only summaries, not buttons that can make an invalid plan:
+
+| Mode | Reviewer sources |
+| --- | --- |
+| M1 | Automatic Architect reviewers |
+| M2 | Selected direct-review bots |
+| M3 | Selected direct-review bots and automatic reviewers |
+| M4 | Selected bots with child Councils |
+| M5 | Selected bots with child Councils and automatic reviewers |
+| M6 | Selected direct-review bots and bots with child Councils |
+| M7 | Both selected bot branches and automatic reviewers |
+
+Each selected bot is required. Its draft keeps direct and nested settings when the branch is changed or bots are excluded and restored. Native still validates bot identity, availability and the submitted branch before dispatch. The nested editor contains `template`, `childCriteriaSource`, `childReviewerCount`, `target`, `maxRounds` and `escalation`; a missing or unavailable selected bot remains removable, while its saved branch is shown read-only.
+
+`criteriaSource` is `architect`, `user` or `hybrid`. User criteria have a stable ID, lens, description, required flag, target, evidence requirement and `source`. The editor keeps architect and user criteria drafts while switching source. User and hybrid plans need at least one required user criterion. Native verifies criteria and evidence at dispatch; form validation and the visible plan are not runtime proof.
+
+Execution strategy is independent of the A/D/N reviewer-source mode: S1 Parallel, S2 Escalated / on-demand and S3 Two-phase are selectable in the direct and Shared Channel editors and are forwarded with the schema-v1 composition. Native remains authoritative for strategy validation and dispatch. The limits show the fixed `maxDepth: 2` and `maxRootSeats: 8`, plus editable finite limits for concurrent leaves, leaf reviews per round, timeout and estimated cost. The plan preview is explicitly an estimate; native owns admission and completion. Unknown or estimated usage stays labeled as such. An unknown cost is not treated as a zero-cost pass.
+
+The Workers inspector consumes the typed current-cycle arrays on native `ArchitectReadSnapshot` results and `architect-event` snapshots: findings, finding dispositions, child receipts, review receipts and usage. Native projects only records correlated to current issued reviewer bindings; the UI also checks the root cycle ID (`<sessionId>:<councilSince>`) and admits child cycle records only through current-root child receipts or usage records. Finding cards show cycle, round, seat, reviewer and artifact digest. Evidence and location strings remain escaped references; file-shaped references become buttons only after the existing workspace resolver confirms them for the selected task, then open in the authorized file tab. Other references stay plain text, and the UI never queries `architect_requests` itself.
+
+Usage values keep native statuses and units (measured, provider-estimated, calculated-estimated or unknown); estimated cost is shown as an estimate, not a billed amount. Missing fields from an older host are reported explicitly. Legacy Council configurations without a composition plan do not produce finding, receipt or usage ledger rows, while their reviewer scores remain in the existing scorecard.
+
+Shared Channel posts can also carry `CouncilConfig.composition` from the visible schema-v1 editor; the composition is forwarded with that message and does not become a channel or task default. Selected direct or nested reviewers come from the channel's current member bots, and every selected bot is required. Up to eight member bots can be selected. Automatic reviewers can be `Auto` or a fixed count from 1–8; total root seats must be 2–8. A nested reviewer may use 2–8 child reviewers, at a target from 1–10 and 1–100 rounds. Root target is 1–10 and rounds are 1–100. User criteria are capped at 64, with IDs and lenses up to 80 characters and descriptions up to 4,096 characters. The channel plan fixes `maxDepth: 2` (one child level), `maxRootSeats: 8`, `maxConcurrentLeaves: 64`, `maxLeafReviewsPerRound: 128`, `timeoutMs: 86,400,000` (24 hours) and `maxEstimatedCostMicros: 1,000,000`. The selected strategy is forwarded per message, and native revalidates it before scheduling.
 
 ## Saved setups and profiles
 

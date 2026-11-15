@@ -308,6 +308,34 @@ test('SuperAgent preset draft survives an asynchronous native list reload', asyn
   await expect(host.getByRole('combobox',{name:'Example preset'})).toHaveValue('Software Development');
 });
 
+test('SuperAgent keeps a newly created preset selected when the immediate list read is stale', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-stale-create-list-test'; document.body.appendChild(host);
+    const created = {id:'created',name:'Fresh preset',coordinatorBotId:'router',
+      workerBotId:'worker',enabled:false,policyRevision:1};
+    mountSuperagent(host, async command => {
+      if (command === 'bots_list') return [
+        {id:'router',name:'Router',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if (command === 'superagent_list') return [] as never;
+      if (command === 'superagent_create') return created as never;
+      if (command === 'superagent_tickets') return [] as never;
+      throw new Error('Unexpected command: ' + command);
+    });
+  });
+  const host = page.locator('#sa-stale-create-list-test');
+  await host.getByRole('textbox',{name:'Name'}).fill('Fresh preset');
+  await host.getByRole('combobox',{name:'Coordinator'}).selectOption('router');
+  await host.getByRole('combobox',{name:'Worker'}).selectOption('worker');
+  await host.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(host.getByRole('button',{name:'Enable manual'})).toBeVisible();
+  await expect(host.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
+});
+
 
 test('SuperAgent links explicit GitHub source threads to the selected Ticket without dispatch', async ({page}) => {
   await page.goto('/?bots=sample');

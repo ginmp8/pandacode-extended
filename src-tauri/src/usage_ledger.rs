@@ -16,6 +16,7 @@ mod tests;
 use parse::{CodexState, Record};
 pub(crate) use parse::unix_seconds;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Seek, SeekFrom, Write};
@@ -30,6 +31,71 @@ const CACHE_VERSION: u32 = 1;
 const SAVE_EVERY_MS: i64 = 60_000;
 /// An unused cache is dropped from memory after this long.
 const IDLE_DROP_MS: i64 = 600_000;
+const COUNCIL_ESTIMATE_CHARS_PER_TOKEN: u64 = 4;
+const COUNCIL_REVIEW_PROMPT_OVERHEAD_TOKENS: u64 = 256;
+pub(crate) const COUNCIL_REVIEW_OUTPUT_TOKEN_CAP: u64 = 2_048;
+const COUNCIL_BUNDLED_PRICE_CARDS: &str = include_str!("usage_ledger/prices.json");
+
+/// A local-only, reproducible estimate for one frozen Council review prompt.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct CouncilPriceEstimate {
+    pub amount_micros: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub pricing_source: String,
+    pub pricing_version: String,
+    pub calculated_at_ms: u64,
+}
+
+/// Token budget used for cost ranking. The prompt is frozen native input; the
+/// byte ratio and provider framing allowance are explicit so candidate models
+/// share one estimate method instead of provider-specific guesses.
+pub(crate) fn council_prompt_token_budget(frozen_prompt: &str) -> Option<u64> {
+    if frozen_prompt.trim().is_empty() {
+        return None;
+    }
+    let bytes = u64::try_from(frozen_prompt.len()).ok()?;
+    let content_tokens = bytes
+        .checked_add(COUNCIL_ESTIMATE_CHARS_PER_TOKEN - 1)?
+        .checked_div(COUNCIL_ESTIMATE_CHARS_PER_TOKEN)?;
+    content_tokens.checked_add(COUNCIL_REVIEW_PROMPT_OVERHEAD_TOKENS)
+}
+
+/// Prices only from the checked-in cards. This deliberately never calls the
+/// usage-ledger refresh path, which may fetch a newer public price list.
+pub(crate) fn estimate_council_review_cost(
+    model: &str,
+    frozen_prompt: &str,
+) -> Option<CouncilPriceEstimate> {
+    let input_tokens = council_prompt_token_budget(frozen_prompt)?;
+    let output_tokens = COUNCIL_REVIEW_OUTPUT_TOKEN_CAP;
+    let book = pricing::PriceBook::bundled();
+    let record = parse::Record {
+        model: parse::Model::from(model),
+        class: parse::size_class(input_tokens),
+        input: input_tokens,
+        output: output_tokens,
+        ..Default::default()
+    };
+    let (usd, _) = book.cost(&record)?;
+    let micros = usd * 1_000_000.0;
+    if !micros.is_finite() || micros < 0.0 || micros.ceil() > u64::MAX as f64 {
+        return None;
+    }
+    let version = Sha256::digest(COUNCIL_BUNDLED_PRICE_CARDS.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    Some(CouncilPriceEstimate {
+        amount_micros: micros.ceil() as u64,
+        input_tokens,
+        output_tokens,
+        pricing_source: "panda-local-bundled-price-cards".into(),
+        pricing_version: format!("sha256:{version}"),
+        calculated_at_ms: crate::storage::now().max(1) as u64,
+    })
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]

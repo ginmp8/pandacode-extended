@@ -1033,6 +1033,89 @@ mod tests {
         assert!(server.claude_config()["mcpServers"][SERVER_NAME].is_object());
         assert_eq!(server.kimi_config()["type"], "http");
     }
+
+    #[tokio::test]
+    async fn mcp_adapter_enforces_scoped_reviewer_grants_before_host_handler() {
+        use crate::architect::reviewer_security::{
+            ReviewerCapabilityGrant, ReviewerPhase, ReviewerToolPolicy,
+        };
+
+        let specs = ["workspace_read", "workspace_write", "shell_exec", "mcp_add_server"]
+            .into_iter()
+            .map(|name| json!({
+                "type":"function", "name":name, "description":"Host operation",
+                "inputSchema":{"type":"object","properties":{
+                    "action":{"type":"string"}, "path":{"type":"string"}
+                }}
+            }))
+            .collect();
+        let handled = Arc::new(Mutex::new(Vec::<(String, Value)>::new()));
+        let handler_calls = handled.clone();
+        let original = ToolHost {
+            tools: specs,
+            approval_tools: HashSet::new(),
+            handler: Arc::new(move |name, args| {
+                handler_calls.lock().unwrap().push((name, args.clone()));
+                Box::pin(async move { Ok(json!({"accepted":true})) })
+            }),
+        };
+        let grant = ReviewerCapabilityGrant {
+            tool: "workspace_read".into(),
+            action: "read".into(),
+            action_argument: Some("action".into()),
+            resource_argument: "path".into(),
+            resource: "src/lib.rs".into(),
+        };
+        let policy = ReviewerToolPolicy::from_user_grants(
+            ReviewerPhase::Review,
+            "user-authorization",
+            std::slice::from_ref(&grant),
+            std::slice::from_ref(&grant),
+        ).unwrap();
+        let scoped = policy.restrict_host(Some(original)).unwrap().unwrap();
+        let server = Server::start(scoped, "reviewer".into(), Arc::new(|_| {})).await.unwrap();
+
+        let (_, catalog) = request(&server, json!({"jsonrpc":"2.0","id":1,"method":"tools/list"}), "").await;
+        assert_eq!(catalog["result"]["tools"].as_array().unwrap().len(), 1);
+        assert_eq!(catalog["result"]["tools"][0]["name"], "workspace_read");
+
+        let invoke = |id, name: &str, arguments| json!({
+            "jsonrpc":"2.0", "id":id, "method":"tools/call",
+            "params":{"name":name,"arguments":arguments}
+        });
+        let (_, allowed) = request(&server, invoke(2, "workspace_read", json!({"action":"read","path":"src/lib.rs"})), "").await;
+        assert_eq!(allowed["result"]["isError"], false);
+        assert_eq!(handled.lock().unwrap().len(), 1, "the granted MCP invocation reaches the wrapped handler once");
+
+        for (id, name, args) in [
+            (3, "workspace_read", json!({"action":"read","path":"src/other.rs"})),
+            (4, "workspace_read", json!({"action":"read"})),
+            (5, "workspace_read", json!({"action":"write","path":"src/lib.rs"})),
+            (10, "workspace_read", json!({"path":"src/lib.rs"})),
+        ] {
+            let (_, denied) = request(&server, invoke(id, name, args), "").await;
+            assert_eq!(denied["result"]["isError"], true,
+                "{name} policy denial must be an MCP tool error: {denied}");
+            assert!(denied["result"]["content"][0]["text"]
+                .as_str()
+                .is_some_and(|text| text.contains("capability_not_authorized")),
+                "{name} policy denial must identify the capability rejection: {denied}");
+            assert_eq!(handled.lock().unwrap().len(), 1, "denied {name} must not reach the handler");
+        }
+
+        for (id, name, args) in [
+            (6, "workspace_write", json!({"action":"write","path":"src/lib.rs"})),
+            (7, "unknown_tool", json!({})),
+            (8, "shell_exec", json!({"command":"echo unsafe"})),
+            (9, "mcp_add_server", json!({"server":"untrusted"})),
+        ] {
+            let (_, rejected) = request(&server, invoke(id, name, args), "").await;
+            assert_eq!(rejected["error"]["code"], -32602,
+                "{name} must be rejected as an unknown MCP tool: {rejected}");
+            assert_eq!(handled.lock().unwrap().len(), 1, "rejected {name} must not reach the handler");
+        }
+    }
+
     #[tokio::test]
     async fn rejects_auth_origin_host_smuggling_and_oversized_frames() {
         let server = server().await;

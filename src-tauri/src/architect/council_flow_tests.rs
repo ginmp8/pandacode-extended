@@ -932,6 +932,15 @@ fn concurrent_roots_freeze_the_same_nested_bot_and_keep_child_approval_task_scop
         let mut plan =
             super::composition(true, Count::Fixed(1), vec![super::nested_reviewer(BOT_ID)]);
         plan.limits.max_estimated_cost_micros = None;
+        plan.criteria.push(council::CouncilCriterion {
+            id: "coverage".into(),
+            lens: "coverage".into(),
+            description: "Independently verify the task-scoped frozen artifact.".into(),
+            required: true,
+            target: 9.0,
+            evidence_required: false,
+            source: council::CouncilCriterionOrigin::Architect,
+        });
         let mut config = super::config_for_composition(plan);
         config.review_permissions = Some(reviewer_security::ReviewerPermissionSelection {
             authorization_id: authorization_id.into(),
@@ -1236,10 +1245,13 @@ fn concurrent_roots_freeze_the_same_nested_bot_and_keep_child_approval_task_scop
                 closed_by_selection: false,
             };
             let mut leaf = super::super::worker(&id, "completed", &["src"], &[]);
-            leaf.session_id = format!("{}:{id}", task.child_id);
             leaf.profile_id = format!("local-reviewer-{index}");
             leaf.provider = "codex".into();
             leaf.model = "gpt-5-nano".into();
+            let child_session = store.session(&task.child_id).unwrap();
+            leaf.session_id = store.create_session(
+                &child_session.project_id, &leaf.provider, &leaf.model, &child_session.mode,
+            ).unwrap().id;
             leaf.created_at = at;
             leaf.updated_at = at;
             leaf.result_revision = index as u64 + 1;
@@ -1270,7 +1282,34 @@ fn concurrent_roots_freeze_the_same_nested_bot_and_keep_child_approval_task_scop
         child.dispatch_revision = child.workers.len() as u64;
         save(&store, &mut child).unwrap();
         for leaf in &child.workers {
+            let score = leaf.council.as_ref().unwrap().score.unwrap();
+            store.message(&leaf.session_id, "assistant", &format!("Council score: {score}/10")).unwrap();
             super::super::super::persist_council_terminal_receipts(&store, &child, leaf).unwrap();
+            let binding = leaf.reviewer_binding.as_ref().unwrap();
+            for criterion in &child.config.council.as_ref().unwrap().composition.as_ref().unwrap().criteria {
+                let outcome = council::CouncilCriterionOutcome { criterion_id: criterion.id.clone(),
+                    score, verified_evidence_refs: Vec::new() };
+                let local = council::CouncilCriterionOutcomeReceipt {
+                    schema_version: 1, root_cycle_id: child_cycle_id.clone(),
+                    task_id: child.session_id.clone(), task_cycle_id: child_cycle_id.clone(),
+                    child_cycle_id: None, round: 1, seat_id: leaf.id.clone(),
+                    parent_seat_id: None, attempt: leaf.attempt,
+                    artifact_revision: binding.artifact_revision.clone(), outcome: outcome.clone(),
+                };
+                local.validate().unwrap();
+                super::super::super::persist_council_record(&store, &child.session_id,
+                    &format!("native-test-child-criterion:{}:{}", leaf.id, criterion.id),
+                    "council_criterion_outcome", &local, &leaf.id).unwrap();
+                let root_outcome = council::CouncilCriterionOutcomeReceipt {
+                    root_cycle_id: root_cycle_id.clone(), child_cycle_id: Some(child_cycle_id.clone()),
+                    parent_seat_id: Some(task.parent_seat_id.clone()),
+                    artifact_revision: link.root_artifact_revision.clone(), ..local
+                };
+                root_outcome.validate().unwrap();
+                super::super::super::persist_council_record(&store, &root.session_id,
+                    &format!("native-test-root-leaf-criterion:{}:{}", leaf.id, criterion.id),
+                    "council_criterion_outcome", &root_outcome, &leaf.id).unwrap();
+            }
         }
         let child_status = super::super::super::native_council_status(&store, &child).unwrap();
         assert_eq!(
@@ -1309,6 +1348,8 @@ fn concurrent_roots_freeze_the_same_nested_bot_and_keep_child_approval_task_scop
             .as_mut()
             .unwrap()
             .score = Some(automatic_score);
+        store.message(&root.workers[automatic_index].session_id, "assistant",
+            &format!("Council score: {automatic_score}/10")).unwrap();
         root.status = "completed".into();
         root.dispatch_revision = 4;
         save(&store, &mut root).unwrap();
@@ -1318,6 +1359,23 @@ fn concurrent_roots_freeze_the_same_nested_bot_and_keep_child_approval_task_scop
             &root.workers[automatic_index],
         )
         .unwrap();
+        let automatic = &root.workers[automatic_index];
+        let binding = automatic.reviewer_binding.as_ref().unwrap();
+        for criterion in &root.config.council.as_ref().unwrap().composition.as_ref().unwrap().criteria {
+            let outcome = council::CouncilCriterionOutcomeReceipt {
+                schema_version: 1, root_cycle_id: root_cycle_id.clone(),
+                task_id: root.session_id.clone(), task_cycle_id: root_cycle_id.clone(),
+                child_cycle_id: None, round: 1, seat_id: automatic.id.clone(),
+                parent_seat_id: None, attempt: automatic.attempt,
+                artifact_revision: binding.artifact_revision.clone(),
+                outcome: council::CouncilCriterionOutcome { criterion_id: criterion.id.clone(),
+                    score: automatic_score, verified_evidence_refs: Vec::new() },
+            };
+            outcome.validate().unwrap();
+            super::super::super::persist_council_record(&store, &root.session_id,
+                &format!("native-test-automatic-criterion:{}", criterion.id),
+                "council_criterion_outcome", &outcome, &automatic.id).unwrap();
+        }
 
         let status = super::super::super::native_council_status(&store, &root).unwrap();
         assert_eq!(

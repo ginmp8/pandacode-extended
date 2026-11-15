@@ -2478,6 +2478,13 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
                 model: "gpt-5-nano".into(),
                 reasoning_effort: None,
             });
+            team.config.workers.push(WorkerProfile {
+                id: "priced-micro".into(),
+                name: "Independent challenge reviewer".into(),
+                provider: "codex".into(),
+                model: "gpt-5-mini".into(),
+                reasoning_effort: None,
+            });
             let selected = selected_specs.iter().map(|(id, reviewer_mode)| {
                 state.store.lock().unwrap().db.execute(
                     "INSERT INTO bots(id,name,role,instructions,goals,soul,project_id,provider,model,mode,created_at,updated_at,skills) VALUES(?1,?1,'Reviewer','Review only the assigned task.','','',?2,'codex','gpt-5-nano','full',1,1,'[]')",
@@ -2512,7 +2519,7 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
                     description: "Verify the native dispatch path.".into(),
                     required: true,
                     target: 9.0,
-                    evidence_required: true,
+                    evidence_required: false,
                     source: Origin::User,
                 }],
                 strategy,
@@ -2587,6 +2594,12 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
             let root_cycle_id = format!("{}:{}", root.session_id, root.council_since);
             let root_seats = root.workers.iter().filter(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 1)).collect::<Vec<_>>();
             assert_eq!(root_seats.len(), automatic_count + selected_specs.len(), "{mode_name} × {strategy:?} root seat count");
+            let artifact_revisions = root_seats.iter().map(|worker| {
+                worker.reviewer_binding.as_ref().unwrap().artifact_revision.clone()
+            }).collect::<std::collections::HashSet<_>>();
+            assert_eq!(artifact_revisions.len(), 1,
+                "{mode_name} × {strategy:?} freezes one exact artifact revision across every root source");
+            let root_artifact_revision = artifact_revisions.into_iter().next().unwrap();
             let selected_ids = root_seats.iter().filter_map(|worker| worker.reviewer_binding.as_ref()?.reviewer_bot_id.clone()).collect::<std::collections::HashSet<_>>();
             assert_eq!(selected_ids, selected_specs.iter().map(|(id, _)| (*id).to_string()).collect(),
                 "{mode_name} × {strategy:?} selected reviewer identities stay pinned");
@@ -2690,14 +2703,550 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
                         && parent.depth == 1
                 })), "{mode_name} × {strategy:?} child leaves must retain root and parent-seat correlation");
                 for leaf in &child_leaves {
+                    assert!(load_council_child_link(&state.store.lock().unwrap(), &leaf.session_id)
+                        .unwrap().is_none(),
+                        "{mode_name} × {strategy:?} nested Councils stop at one child level");
                     let host = native_reviewer_test_host(state.clone(), leaf.session_id.clone(),
                         Admission { parent: child.session_id.clone(), generation: child_generation }).unwrap();
                     assert_eq!(host.tools, vec![council_finding_tool(), council_finding_verification_tool()]);
                     runtime.block_on(assert_native_reviewer_host_denials(&host, false));
                 }
             }
+
+            let premature = dispatch_state_runtime_test(
+                &state,
+                &root_id,
+                root.generation,
+                "pandacode_finish_team",
+                json!({"summary":"Must not finish while any required branch is unresolved."}),
+            ).unwrap_err();
+            assert!(premature.contains("Every worker must complete"),
+                "{mode_name} × {strategy:?} cannot finish before its required reviewers settle: {premature}");
+
+            settle_native_council_round(&state, &root_id, 1, "completed", Some(9.6));
+            complete_nested_children_for_root_round(&state, &root_id, 1, &runtime, mode_name, strategy);
+            {
+                let store = state.store.lock().unwrap();
+                let mut root = load(&store, &root_id).unwrap().unwrap();
+                refresh_council(&store, &mut root);
+                save(&store, &mut root).unwrap();
+                let status = root.council_status.as_ref().map(|status| status.state.as_str());
+                if strategy == Strategy::TwoPhase {
+                    assert_eq!(status, Some("dispatch"),
+                        "{mode_name} × S3 phase 1 is settled but cannot pass before challengers");
+                } else {
+                    assert_eq!(status, Some("passed"),
+                        "{mode_name} × {strategy:?} settles every configured source into a native pass");
+                }
+                assert_ne!(root.status, "completed",
+                    "{mode_name} × {strategy:?} must not mark the parent terminal before finish_team");
+                if strategy == Strategy::TwoPhase {
+                    assert!(!verified_council_pass(&store, &root),
+                        "{mode_name} S3 phase 1 cannot expose an approved result before its challenge phase");
+                }
+            }
+
+            let terminal_round = if strategy == Strategy::TwoPhase {
+                let phase1_gate = dispatch_state_runtime_test(
+                    &state,
+                    &root_id,
+                    root.generation,
+                    "pandacode_finish_team",
+                    json!({"summary":"S3 phase 1 alone is not final."}),
+                ).unwrap_err();
+                assert!(phase1_gate.contains("council_phase2_required"),
+                    "{mode_name} must hold the terminal gate until phase 2: {phase1_gate}");
+
+                let total = automatic_count + selected_specs.len();
+                let phase2_assignments = (0..total).map(|index| {
+                    let selected = selected_specs.get(index);
+                    let challenged_lens = (index + 1) % total;
+                    json!({
+                        "key":format!("{mode_name}-S3-phase2-{index}"),
+                        "profileId":if selected.is_some() { "priced-nano" } else { "priced-micro" },
+                        "name":format!("phase 2 reviewer {index}"),
+                        "prompt":"Challenge the frozen phase-1 report and artifact independently.",
+                        "files":["src"],
+                        "readOnly":true,
+                        "councilLens":format!("root-lens-{challenged_lens}"),
+                        "councilSource":if selected.is_some() { "selected_bot" } else { "automatic" },
+                        "reviewerBotId":selected.map(|(id, _)| *id)
+                    })
+                }).collect::<Vec<_>>();
+                dispatch_state_runtime_test(
+                    &state,
+                    &root_id,
+                    root.generation,
+                    "pandacode_dispatch_workers",
+                    json!({"assignments":phase2_assignments}),
+                ).unwrap_or_else(|error| panic!("{mode_name} × S3 phase 2 dispatch failed: {error}"));
+                mark_council_round_waiting(&state, &root_id, 2);
+                {
+                    let store = state.store.lock().unwrap();
+                    let root = load(&store, &root_id).unwrap().unwrap();
+                    let phase2 = root.workers.iter().filter(|worker| {
+                        worker.council.as_ref().is_some_and(|seat| seat.round == 2)
+                    }).collect::<Vec<_>>();
+                    assert_eq!(phase2.len(), total, "{mode_name} S3 phase 2 root seat count");
+                    assert_eq!(phase2.iter().filter(|worker| worker.reviewer_binding.as_ref()
+                        .is_some_and(|binding| binding.reviewer_bot_id.is_none())).count(), automatic_count,
+                        "{mode_name} S3 preserves the automatic source quota in phase 2");
+                    assert_eq!(phase2.iter().filter_map(|worker| worker.reviewer_binding.as_ref()
+                        .and_then(|binding| binding.reviewer_bot_id.clone())).collect::<std::collections::HashSet<_>>(),
+                        selected_specs.iter().map(|(id, _)| (*id).to_string()).collect(),
+                        "{mode_name} S3 preserves the selected identities in phase 2");
+                    assert!(phase2.iter().all(|worker| worker.reviewer_binding.as_ref()
+                        .is_some_and(|binding| binding.artifact_revision == root_artifact_revision)),
+                        "{mode_name} S3 challengers review the exact phase-1 artifact revision");
+                }
+                dispatch_nested_child_leaves_for_root_round(&state, &root_id, 2, &runtime, mode_name, strategy);
+                settle_native_council_round(&state, &root_id, 2, "completed", Some(9.6));
+                complete_nested_children_for_root_round(&state, &root_id, 2, &runtime, mode_name, strategy);
+                2
+            } else {
+                1
+            };
+
+            {
+                let store = state.store.lock().unwrap();
+                let mut root = load(&store, &root_id).unwrap().unwrap();
+                refresh_council(&store, &mut root);
+                save(&store, &mut root).unwrap();
+                assert_eq!(root.council_status.as_ref().map(|status| status.state.as_str()), Some("passed"),
+                    "{mode_name} × {strategy:?} must reach a native terminal pass after all configured sources settle");
+                assert!(verified_council_pass(&store, &root),
+                    "{mode_name} × {strategy:?} pass must be backed by current persisted review/child receipts");
+                let completed_rounds = root.workers.iter().filter(|worker| worker.council.as_ref()
+                    .is_some_and(|seat| seat.round <= terminal_round)).collect::<Vec<_>>();
+                assert!(completed_rounds.iter().all(|worker| worker.reviewer_binding.as_ref()
+                    .is_some_and(|binding| binding.artifact_revision == root_artifact_revision)),
+                    "{mode_name} × {strategy:?} keeps every root phase bound to the same artifact revision");
+                let review_receipts = council_records::<council::CouncilReviewReceipt>(
+                    &store, &root_id, "council_review_receipt").unwrap();
+                let expected_review_receipts = terminal_round * (automatic_count + selected_specs.len()
+                    - selected_specs.iter().filter(|(_, mode)| *mode == Mode::Nested).count())
+                    + terminal_round * selected_specs.iter().filter(|(_, mode)| *mode == Mode::Nested).count()
+                        * (if strategy == Strategy::TwoPhase { 4 } else { 2 });
+                assert_eq!(review_receipts.len(), expected_review_receipts,
+                    "{mode_name} × {strategy:?} persists one terminal receipt per direct/automatic and child-leaf review");
+                assert!(review_receipts.iter().all(|receipt| receipt.verdict == council::CouncilReviewVerdict::Passed),
+                    "{mode_name} × {strategy:?} terminal review receipts are all passing and current");
+                for worker in completed_rounds.iter().filter(|worker| worker.reviewer_binding.as_ref()
+                    .is_some_and(|binding| binding.composition_mode.as_deref() != Some("nested"))) {
+                    let binding = worker.reviewer_binding.as_ref().unwrap();
+                    let receipt = review_receipts.iter().find(|receipt| {
+                        receipt.cycle_id == binding.council_cycle_id
+                            && receipt.assignment_id.as_deref() == Some(worker.id.as_str())
+                    }).unwrap_or_else(|| panic!("{mode_name} × {strategy:?} missing terminal receipt for {}", worker.id));
+                    assert_eq!(receipt.terminal_revision, worker.result_revision,
+                        "{mode_name} × {strategy:?} terminal receipt pins the exact settled worker revision");
+                    assert_eq!(receipt.artifact_digest, council_artifact_digest(&root_artifact_revision));
+                }
+                let child_receipts = council_records::<council::ChildCouncilReceipt>(
+                    &store, &root_id, "council_child_receipt").unwrap();
+                let nested_parent_count = completed_rounds.iter().filter(|worker| worker.reviewer_binding.as_ref()
+                    .is_some_and(|binding| binding.composition_mode.as_deref() == Some("nested"))).count();
+                assert_eq!(child_receipts.len(), nested_parent_count,
+                    "{mode_name} × {strategy:?} persists exactly one composite receipt per terminal nested seat");
+                assert!(child_receipts.iter().all(|receipt| {
+                    receipt.status == council::ChildCouncilStatus::Passed
+                        && receipt.artifact_revision == root_artifact_revision
+                        && receipt.validate().is_ok()
+                }), "{mode_name} × {strategy:?} child receipts prove a pass for the exact root artifact");
+            }
+
+            let finish = dispatch_state_runtime_test(
+                &state,
+                &root_id,
+                root.generation,
+                "pandacode_finish_team",
+                json!({"summary":format!("{mode_name} × {strategy:?} terminal Council pass.")}),
+            ).unwrap_or_else(|error| panic!("{mode_name} × {strategy:?} native terminal gate refused a verified pass: {error}"));
+            assert_eq!(finish.0["completed"], true, "{mode_name} × {strategy:?} terminal finish result");
+            let finished = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap();
+            assert_eq!(finished.status, "completed", "{mode_name} × {strategy:?} root completes only after the terminal gate");
+            assert_eq!(finished.council_status.as_ref().map(|status| status.state.as_str()), Some("passed"));
         }
     }
+}
+
+#[test]
+fn native_composed_terminal_gate_fails_closed_for_nonpassing_outcomes() {
+    let cases = [
+        ("failed", "failed", None, false, 5, None),
+        ("stopped", "stopped", None, false, 5, None),
+        ("missing-evidence", "completed", Some(9.6), true, 5, None),
+        ("round-limit", "completed", Some(8.0), false, 1, Some("limit")),
+    ];
+    for (label, worker_status, score, evidence_required, max_rounds, expected_state) in cases {
+        let (state, root_id) = state_fixture();
+        install_two_phase_team(&state, &root_id, 2, &[]);
+        {
+            let store = state.store.lock().unwrap();
+            let mut root = load(&store, &root_id).unwrap().unwrap();
+            let config = root.config.council.as_mut().unwrap();
+            config.max_rounds = max_rounds;
+            let composition = config.composition.as_mut().unwrap();
+            composition.strategy = council::CouncilStrategy::Parallel;
+            composition.criteria[0].evidence_required = evidence_required;
+            save(&store, &mut root).unwrap();
+        }
+        dispatch_council_round(
+            &state,
+            &root_id,
+            vec![
+                council_review_assignment(&format!("{label}-a"), Some("fast"), None, "security"),
+                council_review_assignment(&format!("{label}-b"), Some("fast"), None, "quality"),
+            ],
+        ).unwrap_or_else(|error| panic!("{label} native Council dispatch failed: {error}"));
+        mark_council_round_waiting(&state, &root_id, 1);
+        settle_native_council_round(&state, &root_id, 1, worker_status, score);
+
+        let store = state.store.lock().unwrap();
+        let mut root = load(&store, &root_id).unwrap().unwrap();
+        refresh_council(&store, &mut root);
+        save(&store, &mut root).unwrap();
+        let status = root.council_status.as_ref().map(|status| status.state.as_str());
+        assert_ne!(status, Some("passed"), "{label} cannot reach a terminal Council pass");
+        if let Some(expected) = expected_state {
+            assert_eq!(status, Some(expected), "{label} retains its explicit terminal state");
+        }
+        assert!(!verified_council_pass(&store, &root), "{label} is not verified evidence for completion");
+        let receipts = council_records::<council::CouncilReviewReceipt>(
+            &store, &root_id, "council_review_receipt",
+        ).unwrap();
+        assert_eq!(receipts.len(), 2, "{label} persists one terminal receipt per dispatched reviewer");
+        let expected_verdict = match label {
+            "failed" => council::CouncilReviewVerdict::Failed,
+            "stopped" => council::CouncilReviewVerdict::Stopped,
+            "missing-evidence" => council::CouncilReviewVerdict::Passed,
+            "round-limit" => council::CouncilReviewVerdict::Failed,
+            _ => unreachable!(),
+        };
+        assert!(receipts.iter().all(|receipt| receipt.verdict == expected_verdict),
+            "{label} retains the per-review terminal outcome");
+        if label == "missing-evidence" {
+            let refusal = native_council_finish_refusal(&store, &root).unwrap();
+            assert!(refusal.contains("council_criteria_gate_blocked"), "{refusal}");
+        }
+        drop(store);
+        assert!(dispatch_state_runtime_test(
+            &state,
+            &root_id,
+            root.generation,
+            "pandacode_finish_team",
+            json!({"summary":format!("{label} must not finish as a Council pass.")}),
+        ).is_err(), "{label} cannot pass the native terminal finish gate");
+    }
+}
+
+#[test]
+fn native_nested_child_failure_propagates_beside_a_passing_required_child() {
+    use council::SelectedReviewerMode as Mode;
+    let (state, root_id) = state_fixture();
+    let state = Arc::new(state);
+    install_two_phase_team(&state, &root_id, 0, &[("nested-fails", Mode::Nested), ("nested-passes", Mode::Nested)]);
+    {
+        let store = state.store.lock().unwrap();
+        let mut root = load(&store, &root_id).unwrap().unwrap();
+        let composition = root.config.council.as_mut().unwrap().composition.as_mut().unwrap();
+        composition.strategy = council::CouncilStrategy::Parallel;
+        composition.criteria[0].evidence_required = false;
+        save(&store, &mut root).unwrap();
+    }
+    dispatch_council_round(
+        &state,
+        &root_id,
+        vec![
+            council_review_assignment("nested-failure-parent-a", None, Some("nested-fails"), "security"),
+            council_review_assignment("nested-failure-parent-b", None, Some("nested-passes"), "quality"),
+        ],
+    ).unwrap_or_else(|error| panic!("nested root dispatch failed: {error}"));
+    mark_council_round_waiting(&state, &root_id, 1);
+    let root = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap();
+    let nested = root.workers.iter().filter(|worker| {
+        worker.council.as_ref().is_some_and(|seat| seat.round == 1)
+            && worker.reviewer_binding.as_ref()
+                .and_then(|binding| binding.composition_mode.as_deref()) == Some("nested")
+    }).map(|worker| (worker.id.clone(), worker.session_id.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(nested.len(), 2, "both required nested sources receive a root seat");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    for (index, (_, child_id)) in nested.iter().enumerate() {
+        dispatch_child_round(&state, child_id, 1, "fast", &runtime,
+            &format!("nested-failure-branch-{index}"));
+        if index == 0 {
+            settle_native_council_round(&state, child_id, 1, "failed", None);
+            let store = state.store.lock().unwrap();
+            let mut child = load(&store, child_id).unwrap().unwrap();
+            child.status = "failed".into();
+            child.error = Some("Native child reviewers failed.".into());
+            save(&store, &mut child).unwrap();
+        } else {
+            settle_native_council_round(&state, child_id, 1, "completed", Some(9.6));
+            let generation = load(&state.store.lock().unwrap(), child_id).unwrap().unwrap().generation;
+            dispatch_state_runtime_test(&state, child_id, generation, "pandacode_finish_team",
+                json!({"summary":"The sibling nested Council passed with persisted native receipts."}))
+                .unwrap_or_else(|error| panic!("passing nested child was refused: {error}"));
+        }
+    }
+
+    let store = state.store.lock().unwrap();
+    let mut root = load(&store, &root_id).unwrap().unwrap();
+    let no_agents = std::collections::HashMap::new();
+    reconcile_nested_child_seats(&store, &no_agents, &mut root).unwrap();
+    refresh_council(&store, &mut root);
+    save(&store, &mut root).unwrap();
+    let root_seats = root.workers.iter().filter(|worker| {
+        worker.council.as_ref().is_some_and(|seat| seat.round == 1)
+    }).collect::<Vec<_>>();
+    assert_eq!(root_seats.len(), 2);
+    let failed_parent = nested[0].0.as_str();
+    let passing_parent = nested[1].0.as_str();
+    let failed_seat = root_seats.iter().find(|worker| worker.id.as_str() == failed_parent).unwrap();
+    let passing_seat = root_seats.iter().find(|worker| worker.id.as_str() == passing_parent).unwrap();
+    assert_eq!(failed_seat.status, "failed");
+    assert_eq!(failed_seat.error.as_deref(), Some("Native child reviewers failed."));
+    assert_eq!(passing_seat.status, "completed");
+    let child_receipts = council_records::<council::ChildCouncilReceipt>(
+        &store, &root_id, "council_child_receipt",
+    ).unwrap();
+    assert_eq!(child_receipts.len(), 1, "only the passing child creates a parent receipt");
+    assert_eq!(child_receipts[0].parent_seat_id.as_str(), passing_parent);
+    assert_eq!(child_receipts[0].status, council::ChildCouncilStatus::Passed);
+    let review_receipts = council_records::<council::CouncilReviewReceipt>(
+        &store, &root_id, "council_review_receipt",
+    ).unwrap();
+    assert_eq!(review_receipts.len(), 4, "both child leaf reviews persist terminal receipts");
+    assert_eq!(review_receipts.iter().filter(|receipt| receipt.verdict == council::CouncilReviewVerdict::Failed).count(), 2);
+    assert_eq!(review_receipts.iter().filter(|receipt| receipt.verdict == council::CouncilReviewVerdict::Passed).count(), 2);
+    assert_ne!(root.council_status.as_ref().map(|status| status.state.as_str()), Some("passed"),
+        "one failed required child blocks the root Council pass even when its sibling passes");
+    assert!(!verified_council_pass(&store, &root), "the root does not verify with a failed required child");
+    assert!(native_council_finish_refusal(&store, &root).is_some());
+    drop(store);
+    assert!(dispatch_state_runtime_test(&state, &root_id, root.generation, "pandacode_finish_team",
+        json!({"summary":"A failed nested branch cannot finish the root Council."})).is_err());
+}
+
+fn mark_council_round_waiting(state: &AppState, sid: &str, round: usize) {
+    let store = state.store.lock().unwrap();
+    let mut team = load(&store, sid).unwrap().unwrap();
+    for worker in &mut team.workers {
+        if worker.council.as_ref().is_some_and(|seat| seat.round == round) {
+            worker.status = "waiting".into();
+        }
+    }
+    save(&store, &mut team).unwrap();
+}
+
+fn settle_native_council_round(
+    state: &AppState,
+    sid: &str,
+    round: usize,
+    status: &str,
+    score: Option<f64>,
+) {
+    let store = state.store.lock().unwrap();
+    let mut team = load(&store, sid).unwrap().unwrap();
+    let now = storage::now().max(team.council_since + 1);
+    let revision_count = team.workers.iter().filter(|worker| {
+        worker.council.as_ref().is_some_and(|seat| seat.round == round)
+            && worker.reviewer_binding.as_ref()
+                .and_then(|binding| binding.composition_mode.as_deref()) != Some("nested")
+    }).count();
+    let mut revision = team.dispatch_revision;
+    for worker in &mut team.workers {
+        if !worker.council.as_ref().is_some_and(|seat| seat.round == round)
+            || worker.reviewer_binding.as_ref()
+                .and_then(|binding| binding.composition_mode.as_deref()) == Some("nested")
+        {
+            continue;
+        }
+        worker.status = status.into();
+        worker.updated_at = now;
+        worker.error = (status != "completed").then(|| format!("Native fixture settled this reviewer as {status}."));
+        if let Some(seat) = worker.council.as_mut() {
+            seat.score = if status == "completed" { score } else { None };
+            if seat.started_at == 0 { seat.started_at = now; }
+        }
+        revision = revision.saturating_add(1);
+        worker.result_revision = revision;
+    }
+    team.dispatch_revision = team.dispatch_revision.saturating_add(revision_count as u64);
+    save(&store, &mut team).unwrap();
+    let settled = load(&store, sid).unwrap().unwrap();
+    let link = load_council_child_link(&store, sid).unwrap();
+    for worker in settled.workers.iter().filter(|worker| {
+        worker.council.as_ref().is_some_and(|seat| seat.round == round)
+            && worker.reviewer_binding.as_ref()
+                .and_then(|binding| binding.composition_mode.as_deref()) != Some("nested")
+    }) {
+        persist_council_terminal_receipts(&store, &settled, worker).unwrap();
+    }
+    if status == "completed" {
+        let cycle_id = format!("{}:{}", settled.session_id, settled.council_since);
+        let root_cycle_id = link.as_ref().map_or(cycle_id.clone(), |link| link.root_council_cycle_id.clone());
+        let criteria = settled.config.council.as_ref().and_then(|config| config.composition.as_ref())
+            .map(|composition| composition.criteria.clone()).unwrap_or_default();
+        for worker in settled.workers.iter().filter(|worker| {
+            worker.status == "completed"
+                && worker.council.as_ref().is_some_and(|seat| seat.round == round && seat.score.is_some())
+                && worker.reviewer_binding.as_ref()
+                    .and_then(|binding| binding.composition_mode.as_deref()) != Some("nested")
+        }) {
+            let (seat, binding) = (worker.council.as_ref().unwrap(), worker.reviewer_binding.as_ref().unwrap());
+            for criterion in &criteria {
+                let outcome = council::CouncilCriterionOutcome {
+                    criterion_id: criterion.id.clone(),
+                    score: seat.score.unwrap(),
+                    verified_evidence_refs: Vec::new(),
+                };
+                let local = council::CouncilCriterionOutcomeReceipt {
+                    schema_version: 1,
+                    root_cycle_id: cycle_id.clone(),
+                    task_id: settled.session_id.clone(),
+                    task_cycle_id: binding.council_cycle_id.clone(),
+                    child_cycle_id: None,
+                    round,
+                    seat_id: worker.id.clone(),
+                    parent_seat_id: None,
+                    attempt: worker.attempt,
+                    artifact_revision: binding.artifact_revision.clone(),
+                    outcome: outcome.clone(),
+                };
+                local.validate().unwrap();
+                let key = format!("native-council-criterion:{cycle_id}:{round}:{}:{}", worker.id, criterion.id);
+                persist_council_record(&store, &settled.session_id, &key, "council_criterion_outcome", &local, &worker.id).unwrap();
+                if let Some(link) = &link {
+                    let projected = council::CouncilCriterionOutcomeReceipt {
+                        root_cycle_id: root_cycle_id.clone(),
+                        task_id: settled.session_id.clone(),
+                        task_cycle_id: link.child_council_cycle_id.clone(),
+                        child_cycle_id: Some(link.child_council_cycle_id.clone()),
+                        round,
+                        seat_id: worker.id.clone(),
+                        parent_seat_id: Some(link.root_worker_id.clone()),
+                        attempt: worker.attempt,
+                        artifact_revision: link.root_artifact_revision.clone(),
+                        outcome,
+                        ..local
+                    };
+                    projected.validate().unwrap();
+                    let key = format!("native-council-criterion:{root_cycle_id}:{round}:{}:{}:{}",
+                        link.root_worker_id, worker.id, criterion.id);
+                    persist_council_record(&store, &link.root_session_id, &key,
+                        "council_criterion_outcome", &projected, &worker.id).unwrap();
+                }
+            }
+        }
+    }
+}
+
+fn dispatch_child_round(
+    state: &Arc<AppState>,
+    child_id: &str,
+    round: usize,
+    profile: &str,
+    runtime: &tokio::runtime::Runtime,
+    prefix: &str,
+) {
+    let child = load(&state.store.lock().unwrap(), child_id).unwrap().unwrap();
+    let host = native_reviewer_test_host(
+        state.clone(),
+        child.session_id.clone(),
+        Admission { parent: child.session_id.clone(), generation: child.generation },
+    ).unwrap();
+    let assignments = (0..2).map(|index| json!({
+        "key":format!("{prefix}-child-round-{round}-{index}"),
+        "profileId":profile,
+        "name":format!("child round {round} reviewer {index}"),
+        "prompt":"Review the same frozen nested task and criteria.",
+        "files":["src"],
+        "readOnly":true,
+        "councilLens":format!("child-lens-{}", if round == 1 { index } else { 1 - index }),
+        "councilSource":"automatic"
+    })).collect::<Vec<_>>();
+    runtime.block_on((host.handler)("pandacode_dispatch_workers".into(), json!({"assignments":assignments})))
+        .unwrap_or_else(|error| panic!("{prefix} child round {round} dispatch failed: {error}"));
+    mark_council_round_waiting(state, child_id, round);
+}
+
+fn dispatch_nested_child_leaves_for_root_round(
+    state: &Arc<AppState>,
+    root_id: &str,
+    root_round: usize,
+    runtime: &tokio::runtime::Runtime,
+    mode: &str,
+    strategy: council::CouncilStrategy,
+) {
+    let root = load(&state.store.lock().unwrap(), root_id).unwrap().unwrap();
+    let children = root.workers.iter().filter(|worker| {
+        worker.council.as_ref().is_some_and(|seat| seat.round == root_round)
+            && worker.reviewer_binding.as_ref()
+                .and_then(|binding| binding.composition_mode.as_deref()) == Some("nested")
+    }).map(|worker| (worker.id.clone(), worker.session_id.clone())).collect::<Vec<_>>();
+    for (parent_id, child_id) in children {
+        dispatch_child_round(state, &child_id, 1, "priced-nano", runtime,
+            &format!("{mode}-{strategy:?}-root-round-{root_round}-{parent_id}"));
+    }
+}
+
+fn complete_nested_children_for_root_round(
+    state: &Arc<AppState>,
+    root_id: &str,
+    root_round: usize,
+    runtime: &tokio::runtime::Runtime,
+    mode: &str,
+    strategy: council::CouncilStrategy,
+) {
+    let root = load(&state.store.lock().unwrap(), root_id).unwrap().unwrap();
+    let children = root.workers.iter().filter(|worker| {
+        worker.council.as_ref().is_some_and(|seat| seat.round == root_round)
+            && worker.reviewer_binding.as_ref()
+                .and_then(|binding| binding.composition_mode.as_deref()) == Some("nested")
+    }).map(|worker| (worker.id.clone(), worker.session_id.clone())).collect::<Vec<_>>();
+    for (parent_id, child_id) in children {
+        settle_native_council_round(state, &child_id, 1, "completed", Some(9.6));
+        {
+            let store = state.store.lock().unwrap();
+            let mut child = load(&store, &child_id).unwrap().unwrap();
+            refresh_council(&store, &mut child);
+            let phase1 = child.council_status.as_ref().map(|status| status.state.as_str());
+            if strategy == council::CouncilStrategy::TwoPhase {
+                assert_eq!(phase1, Some("dispatch"), "{mode} nested child phase 1 requires its own S3 challenge");
+            } else {
+                assert_eq!(phase1, Some("passed"), "{mode} nested child must pass its own native Council");
+            }
+            save(&store, &mut child).unwrap();
+        }
+        if strategy == council::CouncilStrategy::TwoPhase {
+            let generation = load(&state.store.lock().unwrap(), &child_id).unwrap().unwrap().generation;
+            let early = dispatch_state_runtime_test(state, &child_id, generation, "pandacode_finish_team",
+                json!({"summary":"A child phase-1 result is not terminal."})).unwrap_err();
+            assert!(early.contains("council_phase2_required"), "nested child cannot finish after S3 phase 1 only: {early}");
+            dispatch_child_round(state, &child_id, 2, "priced-micro", runtime,
+                &format!("{mode}-{strategy:?}-root-round-{root_round}-{parent_id}"));
+            settle_native_council_round(state, &child_id, 2, "completed", Some(9.6));
+        }
+        let generation = load(&state.store.lock().unwrap(), &child_id).unwrap().unwrap().generation;
+        dispatch_state_runtime_test(state, &child_id, generation, "pandacode_finish_team",
+            json!({"summary":format!("{mode} nested child Council passed with current persisted receipts.")}))
+            .unwrap_or_else(|error| panic!("{mode} nested child terminal gate refused a pass: {error}"));
+        let child = load(&state.store.lock().unwrap(), &child_id).unwrap().unwrap();
+        assert_eq!(child.status, "completed");
+        assert_eq!(child.council_status.as_ref().map(|status| status.state.as_str()), Some("passed"));
+    }
+    let store = state.store.lock().unwrap();
+    let mut root = load(&store, root_id).unwrap().unwrap();
+    let no_agents = std::collections::HashMap::new();
+    reconcile_nested_child_seats(&store, &no_agents, &mut root).unwrap();
+    refresh_council(&store, &mut root);
+    save(&store, &mut root).unwrap();
+    let root_seats = root.workers.iter().filter(|worker| worker.council.as_ref()
+        .is_some_and(|seat| seat.round == root_round)).collect::<Vec<_>>();
+    assert!(root_seats.iter().all(|worker| worker.status == "completed"),
+        "{mode} × {strategy:?} every nested child result is reconciled into one settled root seat");
 }
 
 fn two_phase_test_config(
@@ -3338,6 +3887,20 @@ fn s2_usage_phase_requires_a_saved_trigger_for_the_followup_round() {
     persist_council_record(&store, &team.session_id, &valid_usage.id, "council_usage_record", &valid_usage, &followup.id).unwrap();
     let ledger = council_ledger_projection(&store, &team);
     assert_eq!(ledger.council_usage, vec![valid_usage], "the matching persisted trigger keeps the follow-up escalation usage visible");
+    let usage_aggregation = ledger.council_usage_aggregation.as_ref().unwrap();
+    let measured_total = |metric: &council::CouncilUsageMetricAggregate| {
+        metric.totals.iter()
+            .find(|total| total.status == council::CouncilUsageValueStatus::Measured)
+            .map(|total| total.value)
+    };
+    assert_eq!(measured_total(&usage_aggregation.root.escalations), Some(1));
+    assert_eq!(usage_aggregation.root.request_count.unknown_records, 1);
+    assert_eq!(measured_total(&usage_aggregation.root.concurrent_leaves), Some(1));
+    assert_eq!(measured_total(&usage_aggregation.root.leaf_reviews), Some(2));
+    let serialized = serde_json::to_value(&ledger).unwrap();
+    assert_eq!(serialized["councilUsageAggregation"]["root"]["escalations"]["totals"][0]["value"], 1);
+    assert_eq!(event_read_payload(&store, &team).council_usage_aggregation, ledger.council_usage_aggregation,
+        "architect-event snapshots expose the same persisted usage rollup");
 
     for invalid_case in [
         "stale artifact chain",

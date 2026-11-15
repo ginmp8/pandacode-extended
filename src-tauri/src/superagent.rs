@@ -4781,11 +4781,12 @@ async fn confirm_issue_comment(
 
 fn draft_pull_request_confirmation(intent: &effects::DraftPullRequestIntent) -> String {
     format!(
-        "Authorize one draft GitHub pull request for SuperAgent Ticket {} at revision {}?\n\nRepository: {}\nHead (already-pushed branch): {}\nBase: {}\nTitle: {}\nEffect key: {}\nPayload SHA-256: {}\n\nExact pull request body (including PandaCode's idempotency marker):\n{}",
+        "Authorize one draft GitHub pull request for SuperAgent Ticket {} at revision {}?\n\nRepository: {}\nHead (already-pushed branch): {}\nVerified head SHA: {}\nBase: {}\nTitle: {}\nEffect key: {}\nPayload SHA-256: {}\n\nExact pull request body (including PandaCode's idempotency marker):\n{}",
         intent.ticket_id,
         intent.expected_revision,
         intent.repository,
         intent.head,
+        intent.head_sha,
         intent.base,
         intent.title,
         intent.effect_key,
@@ -4817,6 +4818,24 @@ async fn confirm_draft_pull_request(
 }
 
 #[tauri::command]
+pub async fn superagent_verify_draft_pull_request_target(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    ticket_id: String,
+    expected_revision: i64,
+    repository: String,
+    head: String,
+    base: String,
+) -> Result<String> {
+    require_main_window(&window)?;
+    let database_path = state.store.lock().map_err(|error| error.to_string())?.path.clone();
+    let store = effects::open_effect_store(&database_path)?;
+    effects::verify_draft_pull_request_target(
+        &store, &ticket_id, expected_revision, &repository, &head, &base,
+    )
+}
+
+#[tauri::command]
 #[expect(
     clippy::too_many_arguments,
     reason = "Tauri binds the exact draft PR request from the Ticket-bound grant surface"
@@ -4828,6 +4847,7 @@ pub async fn superagent_create_draft_pull_request(
     expected_revision: i64,
     repository: String,
     head: String,
+    head_sha: String,
     base: String,
     title: String,
     body: String,
@@ -4839,6 +4859,7 @@ pub async fn superagent_create_draft_pull_request(
         expected_revision,
         &repository,
         &head,
+        &head_sha,
         &base,
         &title,
         &body,

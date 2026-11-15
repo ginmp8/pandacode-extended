@@ -882,7 +882,7 @@ pub(crate) fn verify_draft_pull_request_target(
     repository: &str,
     head: &str,
     base: &str,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let mut run_gh = |root: &Path, args: &[&str], timeout| run_gh(root, args, timeout);
     verify_draft_pull_request_target_with(root, repository, head, base, &mut run_gh)
 }
@@ -893,7 +893,7 @@ pub(crate) fn verify_draft_pull_request_target_with(
     head: &str,
     base: &str,
     run_gh: &mut impl FnMut(&Path, &[&str], Duration) -> Result<Capture, String>,
-) -> Result<(), String> {
+) -> Result<String, String> {
     if !valid_draft_pr_branch(head) || !valid_draft_pr_branch(base) || head == base {
         return Err("Choose distinct valid head and base branches.".into());
     }
@@ -904,6 +904,9 @@ pub(crate) fn verify_draft_pull_request_target_with(
     let status = crate::workspace::git_status(root)?;
     if !status.is_repo || status.branch != head {
         return Err("The head must be the active Ticket worker's current repository branch.".into());
+    }
+    if !status.files.is_empty() {
+        return Err("The active Ticket checkout must be clean before creating a draft pull request.".into());
     }
     let local_head = crate::workspace::checked(crate::workspace::run_git_bounded(
         root,
@@ -935,7 +938,7 @@ pub(crate) fn verify_draft_pull_request_target_with(
         return Err("The active Ticket head is not pushed at its current commit.".into());
     }
     branch_sha(root, repository, base, run_gh)?;
-    Ok(())
+    Ok(pushed_head)
 }
 
 /// Create one draft PR through GitHub's API. Passing a branch name to `gh pr

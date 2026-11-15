@@ -627,6 +627,9 @@ test('Preview scoped-write adapter is deterministic and creates no grant',async 
     },listBots);
     const ticket=await invokeSuperagent<{id:string;revision:number}>(
       'superagent_submit',{orchestrationId:config.id,objective:'Preview a scoped request',requestKey:'stable'},listBots);
+    const headSha=await invokeSuperagent<string>('superagent_verify_draft_pull_request_target',{
+      ticketId:ticket.id,expectedRevision:ticket.revision,repository:'owner/repo',head:'feature',base:'main',
+    },listBots);
     const request={ticketId:ticket.id,expectedRevision:ticket.revision,
       allowedPaths:['src/notes.md','src/config.json']};
     const first=await invokeSuperagent('superagent_dispatch_worker_with_write_grant',request,listBots);
@@ -638,9 +641,9 @@ test('Preview scoped-write adapter is deterministic and creates no grant',async 
     const draftPr=await invokeSuperagent('superagent_create_draft_pull_request',{
       ticketId:ticket.id,expectedRevision:ticket.revision,repository:'owner/repo',
       head:'feature',base:'main',title:'Preview only',body:'No external write',
-      effectKey:'github-draft-pr:preview',
+      headSha,effectKey:'github-draft-pr:preview',
     },listBots);
-    return {first,second,effect,draftPr};
+    return {first,second,effect,draftPr,headSha};
   });
   expect(results.first).toEqual(results.second);
   expect(results.first).toMatchObject({previewOnly:true,
@@ -650,6 +653,7 @@ test('Preview scoped-write adapter is deterministic and creates no grant',async 
   expect(results.effect).toEqual({previewOnly:true,message:'Preview only. No GitHub comment was sent.'});
   expect(results.draftPr).toEqual({previewOnly:true,
     message:'Preview only. No GitHub pull request was created.'});
+  expect(results.headSha).toMatch(/^[a-f0-9]{40}$/);
 });
 
 test('Preview adapter snapshots ordered Team roles at Ticket admission',async ({page})=>{
@@ -812,10 +816,11 @@ test('Draft pull request effect requires review of exact Ticket-bound details be
       if(command==='superagent_snapshot')return snapshot as never;
       if(command==='superagent_source_thread_links')return [] as never;
       if(command==='superagent_work_items')return [] as never;
+      if(command==='superagent_verify_draft_pull_request_target')return 'c'.repeat(40) as never;
       if(command==='superagent_create_draft_pull_request'){
         calls.push({command,args:{...args}});
         return {ticketId:'ticket-draft-pr',ticketRevision:6,repository:args?.repository,
-          head:args?.head,base:args?.base,title:args?.title,effectKey:args?.effectKey,
+          head:args?.head,headSha:args?.headSha,base:args?.base,title:args?.title,effectKey:args?.effectKey,
           payloadSha256:'b'.repeat(64),state:'applied',reconciliation:'exact-readback',
           remotePrNumber:86,remotePrUrl:'https://github.com/acme/widget/pull/86'} as never;
       }
@@ -837,6 +842,7 @@ test('Draft pull request effect requires review of exact Ticket-bound details be
   await expect(review).toBeVisible();
   await expect(review).toContainText('acme/widget');
   await expect(review).toContainText('feature/ticket-148');
+  await expect(review).toContainText('c'.repeat(40));
   await expect(review).toContainText('main');
   await expect(review).toContainText('Fix the focused regression');
   await expect(review).toContainText('github-draft-pr:');
@@ -858,7 +864,7 @@ test('Draft pull request effect requires review of exact Ticket-bound details be
   expect(calls).toHaveLength(1);
   expect(calls[0]).toMatchObject({command:'superagent_create_draft_pull_request',args:{
     ticketId:'ticket-draft-pr',expectedRevision:6,repository:'acme/widget',
-    head:'feature/ticket-148',base:'main',title:'Fix the focused regression',
+    head:'feature/ticket-148',headSha:'c'.repeat(40),base:'main',title:'Fix the focused regression',
     body:'Changed after review; confirmation must be invalidated.',
   }});
   expect(calls[0].args?.effectKey).toMatch(/^github-draft-pr:[0-9a-f]{64}$/);

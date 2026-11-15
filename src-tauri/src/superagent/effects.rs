@@ -224,6 +224,7 @@ pub(crate) struct DraftPullRequestIntent {
     pub expected_revision: i64,
     pub repository: String,
     pub head: String,
+    pub head_sha: String,
     pub base: String,
     pub title: String,
     /// Complete GitHub body, including the PandaCode marker.
@@ -258,6 +259,7 @@ pub(crate) struct DraftPullRequestEffectStatus {
     pub ticket_revision: i64,
     pub repository: String,
     pub head: String,
+    pub head_sha: String,
     pub base: String,
     pub title: String,
     pub effect_key: String,
@@ -404,6 +406,7 @@ pub(crate) fn prepare_draft_pull_request(
     expected_revision: i64,
     repository: &str,
     head: &str,
+    head_sha: &str,
     base: &str,
     title: &str,
     body: &str,
@@ -425,6 +428,11 @@ pub(crate) fn prepare_draft_pull_request(
     validate_effect_key(effect_key)?;
     if !valid_branch_ref(head) || !valid_branch_ref(base) || head == base {
         return Err("Choose distinct valid head and base branches.".into());
+    }
+    if !matches!(head_sha.len(), 40 | 64)
+        || !head_sha.bytes().all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return Err("Provide the exact verified GitHub head SHA.".into());
     }
     if title.trim().is_empty()
         || title.trim() != title
@@ -459,6 +467,7 @@ pub(crate) fn prepare_draft_pull_request(
         expected_revision: i64,
         repository: &'a str,
         head: &'a str,
+        head_sha: &'a str,
         base: &'a str,
         title: &'a str,
         body: &'a str,
@@ -470,6 +479,7 @@ pub(crate) fn prepare_draft_pull_request(
         expected_revision,
         repository,
         head,
+        head_sha,
         base,
         title,
         body: &full_body,
@@ -482,6 +492,7 @@ pub(crate) fn prepare_draft_pull_request(
         expected_revision,
         repository: repository.into(),
         head: head.into(),
+        head_sha: head_sha.into(),
         base: base.into(),
         title: title.into(),
         body: full_body,
@@ -550,7 +561,8 @@ fn active_scope_if_current(
            AND a.ticket_id=t.id AND a.state='running' AND a.bot_id=t.worker_bot_id
          JOIN bots b ON b.id=a.bot_id
          WHERE t.id=?1 AND t.revision=?2 AND t.state='running' AND m.revoked=0
-           AND m.expires_at>?3 AND t.policy_revision=m.policy_revision
+           AND m.expires_at>?3 AND m.allowed_side_effects=1
+           AND t.policy_revision=m.policy_revision
            AND m.policy_revision=o.policy_revision AND t.project_id=m.project_id
            AND m.project_id=o.project_id AND t.actor=m.actor AND m.authorization_id<>''
            AND b.project_id=t.project_id AND b.paused=0 AND o.enabled=1",
@@ -1250,6 +1262,14 @@ fn active_draft_pr_scope_if_current(
     db: &Connection,
     intent: &DraftPullRequestIntent,
 ) -> Result<Option<ActiveScope>> {
+    active_draft_pr_scope_for(db, &intent.ticket_id, intent.expected_revision)
+}
+
+fn active_draft_pr_scope_for(
+    db: &Connection,
+    ticket_id: &str,
+    expected_revision: i64,
+) -> Result<Option<ActiveScope>> {
     if crate::feature_controls::get().bots_paused {
         return Ok(None);
     }
@@ -1266,7 +1286,7 @@ fn active_draft_pr_scope_if_current(
            AND m.policy_revision=o.policy_revision AND t.project_id=m.project_id
            AND m.project_id=o.project_id AND t.actor=m.actor AND m.authorization_id<>''
            AND b.project_id=t.project_id AND b.paused=0 AND o.enabled=1",
-        params![intent.ticket_id, intent.expected_revision, storage::now()],
+        params![ticket_id, expected_revision, storage::now()],
         |row| Ok(ActiveScope {
             project_id: row.get(0)?,
             assignment_id: row.get(1)?,
@@ -1300,23 +1320,24 @@ fn exact_draft_pr_grant_binding(
     db: &Connection,
     intent: &DraftPullRequestIntent,
 ) -> Result<DraftPrGrantBinding> {
-    let grant: Option<(i64,String,String,String,String,String,String,String,String,String,String)> = db
+    let grant: Option<(i64,String,String,String,String,String,String,String,String,String,String,String)> = db
         .query_row(
             "SELECT ticket_revision,project_id,assignment_id,session_id,repository,
-                    head_branch,base_branch,title,body,marker,payload_sha256
+                    head_branch,head_sha,base_branch,title,body,marker,payload_sha256
              FROM sa_draft_pr_effect_grants WHERE ticket_id=?1 AND effect_key=?2",
             params![intent.ticket_id,intent.effect_key],
             |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,
-                row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?,row.get(10)?)),
+                row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?,row.get(10)?,row.get(11)?)),
         )
         .optional()
         .map_err(|error| error.to_string())?;
-    let Some((revision,project_id,assignment_id,session_id,repository,head,base,title,body,marker,digest)) = grant else {
+    let Some((revision,project_id,assignment_id,session_id,repository,head,head_sha,base,title,body,marker,digest)) = grant else {
         return Err("The exact native draft pull request grant is missing.".into());
     };
     if revision != intent.expected_revision
         || repository != intent.repository
         || head != intent.head
+        || head_sha != intent.head_sha
         || base != intent.base
         || title != intent.title
         || body != intent.body
@@ -1351,6 +1372,7 @@ fn exact_draft_pr_grant_binding(
         && detail.get("sessionId").and_then(serde_json::Value::as_str) == Some(session_id.as_str())
         && detail.get("repository").and_then(serde_json::Value::as_str) == Some(intent.repository.as_str())
         && detail.get("head").and_then(serde_json::Value::as_str) == Some(intent.head.as_str())
+        && detail.get("headSha").and_then(serde_json::Value::as_str) == Some(intent.head_sha.as_str())
         && detail.get("base").and_then(serde_json::Value::as_str) == Some(intent.base.as_str())
         && detail.get("effectKey").and_then(serde_json::Value::as_str) == Some(intent.effect_key.as_str())
         && detail.get("payloadSha256").and_then(serde_json::Value::as_str) == Some(intent.payload_sha256.as_str());
@@ -1439,10 +1461,33 @@ pub(crate) fn authorize_draft_pull_request(
     })
 }
 
+pub(crate) fn verify_draft_pull_request_target(
+    store: &Store,
+    ticket_id: &str,
+    expected_revision: i64,
+    repository: &str,
+    head: &str,
+    base: &str,
+) -> Result<String> {
+    validate_repository(repository)?;
+    if expected_revision < 0 {
+        return Err("Provide a nonnegative Ticket revision.".into());
+    }
+    let initial_scope = active_draft_pr_scope_for(&store.db, ticket_id, expected_revision)?
+        .ok_or_else(|| "The Ticket, revision, mandate, or active worker no longer permits this effect.".to_string())?;
+    let root = store.workspace_root(&initial_scope.project_id, Some(&initial_scope.session_id))?;
+    let verified_sha = github::verify_draft_pull_request_target(root.as_path(), repository, head, base)?;
+    let current_scope = active_draft_pr_scope_for(&store.db, ticket_id, expected_revision)?;
+    if current_scope.as_ref() != Some(&initial_scope) {
+        return Err("The active Ticket worker changed during draft pull request verification.".into());
+    }
+    Ok(verified_sha)
+}
+
 fn authorize_draft_pull_request_with(
     store: &Store,
     intent: &DraftPullRequestIntent,
-    mut verify_target: impl FnMut(&Path,&DraftPullRequestIntent)->Result<()>,
+    mut verify_target: impl FnMut(&Path,&DraftPullRequestIntent)->Result<String>,
 ) -> Result<()> {
     let _dispatch_fence = lock_dispatch(&store.path)?;
     let initial_scope = {
@@ -1452,7 +1497,10 @@ fn authorize_draft_pull_request_with(
         scope
     };
     let root = store.workspace_root(&initial_scope.project_id,Some(&initial_scope.session_id))?;
-    verify_target(&root,intent)?;
+    let verified_sha = verify_target(&root,intent)?;
+    if verified_sha != intent.head_sha {
+        return Err("The verified remote head SHA changed; review the draft pull request again.".into());
+    }
     let tx = store.db.unchecked_transaction().map_err(|error| error.to_string())?;
     let current_scope = active_draft_pr_scope(&tx,intent)?;
     if current_scope != initial_scope {
@@ -1474,18 +1522,18 @@ fn authorize_draft_pull_request_with(
     let now = storage::now();
     tx.execute(
         "INSERT INTO sa_draft_pr_effect_grants(ticket_id,effect_key,ticket_revision,project_id,
-         assignment_id,session_id,repository,head_branch,base_branch,title,body,marker,
+         assignment_id,session_id,repository,head_branch,head_sha,base_branch,title,body,marker,
          payload_sha256,created_at)
-         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15)",
         params![intent.ticket_id,intent.effect_key,intent.expected_revision,current_scope.project_id,
             current_scope.assignment_id,current_scope.session_id,intent.repository,intent.head,
-            intent.base,intent.title,intent.body,intent.marker,intent.payload_sha256,now],
+            intent.head_sha,intent.base,intent.title,intent.body,intent.marker,intent.payload_sha256,now],
     ).map_err(|error| error.to_string())?;
     let detail = serde_json::json!({
         "effectKey":intent.effect_key,"ticketRevision":intent.expected_revision,
         "projectId":current_scope.project_id,"assignmentId":current_scope.assignment_id,
         "sessionId":current_scope.session_id,"repository":intent.repository,
-        "head":intent.head,"base":intent.base,"title":intent.title,
+        "head":intent.head,"headSha":intent.head_sha,"base":intent.base,"title":intent.title,
         "marker":intent.marker,"payloadSha256":intent.payload_sha256,
     }).to_string();
     tx.execute(
@@ -1616,6 +1664,8 @@ fn draft_pr_readback_state(
         let base = pull.get("base");
         let target_matches = head.and_then(|value| value.get("ref"))
                 .and_then(serde_json::Value::as_str) == Some(intent.head.as_str())
+            && head.and_then(|value| value.get("sha"))
+                .and_then(serde_json::Value::as_str) == Some(intent.head_sha.as_str())
             && base.and_then(|value| value.get("ref"))
                 .and_then(serde_json::Value::as_str) == Some(intent.base.as_str())
             && head.and_then(|value| value.get("repo"))
@@ -1702,7 +1752,8 @@ fn draft_pr_status(
     };
     Ok(DraftPullRequestEffectStatus {
         ticket_id:intent.ticket_id.clone(),ticket_revision:intent.expected_revision,
-        repository:intent.repository.clone(),head:intent.head.clone(),base:intent.base.clone(),
+        repository:intent.repository.clone(),head:intent.head.clone(),head_sha:intent.head_sha.clone(),
+        base:intent.base.clone(),
         title:intent.title.clone(),effect_key:intent.effect_key.clone(),
         payload_sha256:intent.payload_sha256.clone(),state,reconciliation:reconciliation.into(),
         uncertainty_reason,readback_state,remote_pr_number,remote_pr_url,
@@ -1792,9 +1843,12 @@ fn create_draft_pull_request_with(
                 let _fence = lock_dispatch(database_path)?;
                 let scope = validate_pending_draft_pr_dispatch(&store,intent)?;
                 let dispatch_root = store.workspace_root(&scope.project_id,Some(&scope.session_id))?;
-                github::verify_draft_pull_request_target_with(
+                let verified_sha = github::verify_draft_pull_request_target_with(
                     &dispatch_root,&intent.repository,&intent.head,&intent.base,run_gh,
                 )?;
+                if verified_sha != intent.head_sha {
+                    return Err("The verified remote head SHA changed; the draft pull request was not dispatched.".into());
+                }
                 attempted = true;
                 let remote_result = github::create_draft_pull_request_with(
                     &dispatch_root,&intent.repository,&intent.head,&intent.base,
@@ -1890,6 +1944,10 @@ mod tests {
         let (ticket, started) =
             superagent::admit(&mut store, &cfg.id, "Safe work", "receipt-fixture", false).unwrap();
         assert!(started);
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
         (store, ticket.id)
     }
 
@@ -1932,16 +1990,23 @@ mod tests {
     }
 
     fn make_draft_pr_intent(ticket_id:&str,head:&str,base:&str,body:&str)->DraftPullRequestIntent {
+        let head_sha = "a".repeat(40);
+        make_draft_pr_intent_with_sha(ticket_id,head,&head_sha,base,body)
+    }
+
+    fn make_draft_pr_intent_with_sha(
+        ticket_id:&str,head:&str,head_sha:&str,base:&str,body:&str,
+    )->DraftPullRequestIntent {
         let title = "Draft effect fixture";
         let key = draft_pr_key(ticket_id,"owner/repo",head,base,title,body).unwrap();
-        prepare_draft_pull_request(ticket_id,0,"owner/repo",head,base,title,body,&key).unwrap()
+        prepare_draft_pull_request(ticket_id,0,"owner/repo",head,head_sha,base,title,body,&key).unwrap()
     }
 
     fn exact_draft_pr_readback(intent:&DraftPullRequestIntent)->crate::workspace::Capture {
         capture_json(serde_json::json!([{
             "number":86,"html_url":"https://github.com/owner/repo/pull/86",
             "title":intent.title,"body":intent.body,"draft":true,
-            "head":{"ref":intent.head,"repo":{"full_name":intent.repository}},
+            "head":{"ref":intent.head,"sha":intent.head_sha,"repo":{"full_name":intent.repository}},
             "base":{"ref":intent.base,"repo":{"full_name":intent.repository}},
         }]))
     }
@@ -2534,29 +2599,55 @@ mod tests {
     }
 
     #[test]
-    fn draft_pr_intent_binds_ticket_repository_head_base_title_body_marker_and_key() {
+    fn issue_comment_authorization_requires_native_side_effect_mandate() {
+        let (store,ticket_id)=fixture();
+        let intent=make_intent(&ticket_id,"Mandate must be checked natively");
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=0 WHERE ticket_id=?1",
+            [&ticket_id],
+        ).unwrap();
+        let error=authorize(&store,&intent).unwrap_err();
+        assert!(error.contains("no longer permits"));
+        let grants:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_effect_grants WHERE ticket_id=?1",
+            [&ticket_id],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(grants,0,"a zero side-effect mandate must not persist a comment grant");
+    }
+
+    #[test]
+    fn draft_pr_intent_binds_ticket_repository_head_sha_base_title_body_marker_and_key() {
         let intent=make_draft_pr_intent("ticket_1","feature/topic","main","Draft text");
         assert!(intent.body.ends_with(&intent.marker));
         assert!(intent.marker.contains("ticket=ticket_1"));
         assert!(intent.marker.contains(&intent.effect_key));
         let changed_head=make_draft_pr_intent("ticket_1","feature/other","main","Draft text");
+        let changed_sha=make_draft_pr_intent_with_sha("ticket_1","feature/topic",&"b".repeat(40),"main","Draft text");
         let changed_base=make_draft_pr_intent("ticket_1","feature/topic","release","Draft text");
         let changed_body=make_draft_pr_intent("ticket_1","feature/topic","main","Changed text");
         assert_ne!(intent.effect_key,changed_head.effect_key);
+        assert_eq!(intent.effect_key,changed_sha.effect_key,
+            "the stable effect key must keep changed-head retries tied to the original receipt");
         assert_ne!(intent.effect_key,changed_base.effect_key);
         assert_ne!(intent.effect_key,changed_body.effect_key);
         assert_ne!(intent.payload_sha256,changed_head.payload_sha256);
+        assert_ne!(intent.payload_sha256,changed_sha.payload_sha256);
         assert!(prepare_draft_pull_request(
-            "ticket_1",0,"owner/repo","feature/topic","main","Draft effect fixture",
+            "ticket_1",0,"owner/repo","feature/topic",&intent.head_sha,"main","Draft effect fixture",
             "Draft text","github-draft-pr:wrong",
         ).is_err());
         assert!(prepare_draft_pull_request(
-            "ticket_1",0,"owner/repo","feature/topic","feature/topic","Draft effect fixture",
+            "ticket_1",0,"owner/repo","feature/topic",&intent.head_sha,"feature/topic","Draft effect fixture",
+            "Draft text",&intent.effect_key,
+        ).is_err());
+        assert!(prepare_draft_pull_request(
+            "ticket_1",0,"owner/repo","feature/topic","not-a-sha","main","Draft effect fixture",
             "Draft text",&intent.effect_key,
         ).is_err());
         let confirmation=crate::superagent::draft_pull_request_confirmation(&intent);
         for exact in ["Ticket ticket_1","Repository: owner/repo","Head (already-pushed branch): feature/topic",
-            "Base: main","Title: Draft effect fixture","Effect key: ",&intent.marker] {
+            "Verified head SHA: ",&intent.head_sha,"Base: main","Title: Draft effect fixture",
+            "Effect key: ",&intent.marker] {
             assert!(confirmation.contains(exact),"confirmation must show {exact}");
         }
     }
@@ -2564,14 +2655,14 @@ mod tests {
     #[test]
     fn draft_pr_authorization_rechecks_mandate_policy_after_target_validation() {
         let (store,ticket_id,root,_,_)=draft_pr_fixture();
-        let intent=make_draft_pr_intent(&ticket_id,"feature/ticket-pr","main","Policy check");
+        let intent=make_draft_pr_intent_with_sha(&ticket_id,"feature/ticket-pr",&git_test(&root,&["rev-parse","HEAD"]),"main","Policy check");
         let error=authorize_draft_pull_request_with(&store,&intent,|checked_root,_| {
             assert_eq!(checked_root,root);
             store.db.execute(
                 "UPDATE sa_mandates SET policy_revision=policy_revision+1 WHERE ticket_id=?1",
                 [&ticket_id],
             ).unwrap();
-            Ok(())
+            Ok(intent.head_sha.clone())
         }).unwrap_err();
         assert!(error.contains("no longer permits"));
         let grants:i64=store.db.query_row(
@@ -2586,7 +2677,7 @@ mod tests {
     #[test]
     fn draft_pr_authorization_requires_explicit_side_effect_mandate() {
         let (store,ticket_id,root,_,_)=draft_pr_fixture();
-        let intent=make_draft_pr_intent(&ticket_id,"feature/ticket-pr","main","Mandate check");
+        let intent=make_draft_pr_intent_with_sha(&ticket_id,"feature/ticket-pr",&git_test(&root,&["rev-parse","HEAD"]),"main","Mandate check");
         store.db.execute(
             "UPDATE sa_mandates SET allowed_side_effects=0 WHERE ticket_id=?1",
             [&ticket_id],
@@ -2594,7 +2685,7 @@ mod tests {
         let mut target_verified=false;
         let error=authorize_draft_pull_request_with(&store,&intent,|_,_| {
             target_verified=true;
-            Ok(())
+            Ok(intent.head_sha.clone())
         }).unwrap_err();
         assert!(error.contains("no longer permits"));
         assert!(!target_verified,"the explicit native side-effect mandate must be checked before target verification");
@@ -2608,16 +2699,31 @@ mod tests {
     }
 
     #[test]
+    fn draft_pr_authorization_rejects_a_head_sha_changed_after_review() {
+        let (store,ticket_id,root,head_sha,_)=draft_pr_fixture();
+        let intent=make_draft_pr_intent_with_sha(&ticket_id,"feature/ticket-pr",&head_sha,"main","Changed head SHA");
+        let error=authorize_draft_pull_request_with(&store,&intent,|_,_|Ok("b".repeat(40))).unwrap_err();
+        assert!(error.contains("verified remote head SHA changed"));
+        let grants:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_draft_pr_effect_grants WHERE ticket_id=?1",
+            [&ticket_id],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(grants,0,"a changed reviewed SHA must not persist a PR grant");
+        drop(store);
+        let _=std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn draft_pr_target_refuses_another_repository_head_or_missing_base() {
         let (_store,ticket_id,root,head_sha,base_sha)=draft_pr_fixture();
-        let intent=make_draft_pr_intent(&ticket_id,"feature/ticket-pr","main","Target checks");
+        let intent=make_draft_pr_intent_with_sha(&ticket_id,"feature/ticket-pr",&head_sha,"main","Target checks");
         let writes=Arc::new(AtomicUsize::new(0));
         let reads=Arc::new(AtomicUsize::new(0));
         let mut fake_gh=fake_draft_pr_gh(intent.clone(),head_sha,base_sha,vec![],
             writes,reads,false);
-        assert!(github::verify_draft_pull_request_target_with(
+        assert_eq!(github::verify_draft_pull_request_target_with(
             &root,"owner/repo","feature/ticket-pr","main",&mut fake_gh,
-        ).is_ok());
+        ).unwrap(),head_sha);
         assert!(github::verify_draft_pull_request_target_with(
             &root,"other/repo","feature/ticket-pr","main",&mut fake_gh,
         ).is_err());
@@ -2632,9 +2738,29 @@ mod tests {
     }
 
     #[test]
+    fn draft_pr_target_refuses_a_dirty_checkout_before_remote_reads() {
+        let (_store,ticket_id,root,head_sha,_)=draft_pr_fixture();
+        std::fs::write(root.join("untracked-after-review.txt"),"dirty").unwrap();
+        let mut gh_calls=0usize;
+        let mut fake_gh=|_:&Path,_:&[&str],_:Duration| {
+            gh_calls+=1;
+            Ok(capture_json(serde_json::json!({"nameWithOwner":"owner/repo"})))
+        };
+        let result=github::verify_draft_pull_request_target_with(
+            &root,"owner/repo","feature/ticket-pr","main",&mut fake_gh,
+        );
+        assert!(result.unwrap_err().contains("checkout must be clean"));
+        assert_eq!(gh_calls,0,"a dirty checkout is refused before calling GitHub");
+        drop(_store);
+        let _=std::fs::remove_dir_all(root);
+        let _=head_sha;
+        let _=ticket_id;
+    }
+
+    #[test]
     fn draft_pr_uncertain_write_reconciles_exact_readback_without_replay() {
         let (store,ticket_id,root,head_sha,base_sha)=draft_pr_fixture();
-        let intent=make_draft_pr_intent(&ticket_id,"feature/ticket-pr","main","Reconcile the PR");
+        let intent=make_draft_pr_intent_with_sha(&ticket_id,"feature/ticket-pr",&head_sha,"main","Reconcile the PR");
         let writes=Arc::new(AtomicUsize::new(0));
         let reads=Arc::new(AtomicUsize::new(0));
         let missing=serde_json::json!([]);
@@ -2664,10 +2790,34 @@ mod tests {
     }
 
     #[test]
+    fn draft_pr_branch_change_after_review_fails_closed_before_dispatch() {
+        let (store,ticket_id,root,head_sha,base_sha)=draft_pr_fixture();
+        let intent=make_draft_pr_intent_with_sha(&ticket_id,"feature/ticket-pr",&head_sha,"main","No changed branch dispatch");
+        authorize_draft_pull_request_with(&store,&intent,|_,intent|Ok(intent.head_sha.clone())).unwrap();
+        let stored_sha:String=store.db.query_row(
+            "SELECT head_sha FROM sa_draft_pr_effect_grants WHERE ticket_id=?1 AND effect_key=?2",
+            params![intent.ticket_id,intent.effect_key],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(stored_sha,head_sha,"the reviewed remote SHA is persisted in the native grant");
+        git_test(&root,&["commit","--allow-empty","-m","branch changed after review"]);
+        let writes=Arc::new(AtomicUsize::new(0));
+        let reads=Arc::new(AtomicUsize::new(0));
+        let mut fake_gh=fake_draft_pr_gh(intent.clone(),head_sha,base_sha,vec![],
+            Arc::clone(&writes),Arc::clone(&reads),false);
+        let status=create_draft_pull_request_with(&store.path,&intent,&mut fake_gh).unwrap();
+        assert_eq!(status.state,"uncertain");
+        assert_eq!(status.reconciliation,"dispatch-not-started");
+        assert_eq!(writes.load(Ordering::SeqCst),0,"a branch change after review must not create a PR");
+        assert_eq!(reads.load(Ordering::SeqCst),0,"a failed pre-dispatch check must not invent readback evidence");
+        drop(store);
+        let _=std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn restart_marks_pending_draft_pr_uncertain_and_reconciles_by_readback_only() {
         let (store,ticket_id,root,head_sha,base_sha)=draft_pr_fixture();
-        let intent=make_draft_pr_intent(&ticket_id,"feature/ticket-pr","main","Restart PR receipt");
-        authorize_draft_pull_request_with(&store,&intent,|_,_|Ok(())).unwrap();
+        let intent=make_draft_pr_intent_with_sha(&ticket_id,"feature/ticket-pr",&head_sha,"main","Restart PR receipt");
+        authorize_draft_pull_request_with(&store,&intent,|_,intent|Ok(intent.head_sha.clone())).unwrap();
         assert_eq!(reserve_draft_pull_request(&store,&intent).unwrap(),Reservation::Reserved);
         let path=store.path.clone();
         drop(store);
@@ -2696,8 +2846,8 @@ mod tests {
     #[test]
     fn stop_before_draft_pr_dispatch_allows_only_readback() {
         let (store,ticket_id,root,head_sha,base_sha)=draft_pr_fixture();
-        let intent=make_draft_pr_intent(&ticket_id,"feature/ticket-pr","main","Stop before PR");
-        authorize_draft_pull_request_with(&store,&intent,|_,_|Ok(())).unwrap();
+        let intent=make_draft_pr_intent_with_sha(&ticket_id,"feature/ticket-pr",&head_sha,"main","Stop before PR");
+        authorize_draft_pull_request_with(&store,&intent,|_,intent|Ok(intent.head_sha.clone())).unwrap();
         assert_eq!(reserve_draft_pull_request(&store,&intent).unwrap(),Reservation::Reserved);
         assert_eq!(superagent::stop(&store,&ticket_id).unwrap().0.state,"stopped");
         let path=store.path.clone();
@@ -2726,10 +2876,14 @@ mod tests {
                 "title":intent.title,
                 "body":intent.body,
                 "draft":true,
-                "head":{"ref":intent.head,"repo":{"full_name":intent.repository}},
+                "head":{"ref":intent.head,"sha":intent.head_sha,"repo":{"full_name":intent.repository}},
                 "base":{"ref":intent.base,"repo":{"full_name":intent.repository}}
             }
         ]);
         assert!(matches!(draft_pr_readback_state(&value,&intent).unwrap(),DraftPullRequestReadback::Exact(_)));
+        let mut wrong_sha=value.clone();
+        wrong_sha[2]["head"]["sha"]=serde_json::Value::String("b".repeat(40));
+        assert_eq!(draft_pr_readback_state(&wrong_sha,&intent).unwrap(),DraftPullRequestReadback::Conflict,
+            "readback must require the exact GitHub head.sha");
     }
 }

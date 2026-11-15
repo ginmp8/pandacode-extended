@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 54;
+pub const SCHEMA_VERSION: i64 = 55;
 
 #[cfg(test)]
 std::thread_local! {
@@ -888,6 +888,23 @@ impl Store {
                 migration.execute_batch(crate::superagent::effects::DRAFT_PR_SCHEMA)
                     .map_err(|e| e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=54;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 55 {
+                // Bind each new draft-PR grant to the exact verified remote
+                // head commit. Existing v54 grants keep an empty compatibility
+                // value and fail closed because they cannot prove a head SHA.
+                let has_head_sha: bool = migration.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_draft_pr_effect_grants') WHERE name='head_sha')",
+                    [], |row| row.get(0),
+                ).map_err(|e| e.to_string())?;
+                if !has_head_sha {
+                    migration.execute_batch(
+                        "ALTER TABLE sa_draft_pr_effect_grants ADD COLUMN head_sha TEXT NOT NULL DEFAULT ''
+                         CHECK(head_sha='' OR (length(head_sha) IN (40,64) AND head_sha NOT GLOB '*[^a-f0-9]*'));",
+                    ).map_err(|e| e.to_string())?;
+                }
+                migration.execute_batch("PRAGMA user_version=55;")
                     .map_err(|e| e.to_string())?;
             }
             // Test-only fault injection models a late error before COMMIT so
@@ -4406,7 +4423,7 @@ mod tests {
         }
         let migrated = Store::open(&path).unwrap();
         let version: i64 = migrated.db.pragma_query_value(None,"user_version",|row|row.get(0)).unwrap();
-        assert_eq!(version,54);
+        assert_eq!(version,SCHEMA_VERSION);
         for table in ["sa_draft_pr_effect_grants","sa_draft_pr_effect_receipts"] {
             let exists: i64 = migrated.db.query_row(
                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
@@ -4421,6 +4438,38 @@ mod tests {
             ).unwrap()
         });
         assert_eq!(comment_schema_after,comment_schema_before);
+        drop(migrated);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn v54_adds_head_sha_without_rewriting_existing_draft_pr_grants() {
+        let directory = std::env::temp_dir().join(format!("pandacode-draft-pr-head-sha-{}",id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.sqlite3");
+        {
+            let store = Store::open(&path).unwrap();
+            store.db.execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 ALTER TABLE sa_draft_pr_effect_grants DROP COLUMN head_sha;
+                 INSERT INTO sa_draft_pr_effect_grants
+                   (ticket_id,effect_key,ticket_revision,project_id,assignment_id,session_id,
+                    repository,head_branch,base_branch,title,body,marker,payload_sha256,created_at)
+                 VALUES('legacy-ticket','legacy-effect',4,'project','assignment','session',
+                    'owner/repo','feature','main','Legacy','body','marker',
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1);
+                 PRAGMA user_version=54;",
+            ).unwrap();
+        }
+        let migrated = Store::open(&path).unwrap();
+        let version: i64 = migrated.db.pragma_query_value(None,"user_version",|row|row.get(0)).unwrap();
+        assert_eq!(version,SCHEMA_VERSION);
+        let preserved: (String,String,String) = migrated.db.query_row(
+            "SELECT effect_key,head_branch,head_sha FROM sa_draft_pr_effect_grants WHERE ticket_id='legacy-ticket'",
+            [],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        assert_eq!(preserved,("legacy-effect".into(),"feature".into(),String::new()),
+            "v54 grant data stays intact and an unbound legacy grant fails closed");
         drop(migrated);
         let _ = std::fs::remove_dir_all(directory);
     }

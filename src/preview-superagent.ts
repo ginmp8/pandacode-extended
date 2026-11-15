@@ -433,6 +433,10 @@ export async function invokeSuperagent<T>(
         message:'Preview only. No native authorization or worker dispatch occurred.'};
       break;
     }
+    case 'superagent_verify_draft_pull_request_target':{
+      value='e'.repeat(40);
+      break;
+    }
     case 'superagent_issue_comment':{
       value={previewOnly:true,message:'Preview only. No GitHub comment was sent.'};
       break;

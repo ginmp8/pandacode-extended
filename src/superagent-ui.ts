@@ -77,7 +77,7 @@ interface IssueCommentStatus {
 interface PreviewIssueComment { previewOnly: true; message: string }
 type IssueCommentResult = IssueCommentStatus | PreviewIssueComment;
 interface DraftPullRequestStatus {
-  ticketId: string; ticketRevision: number; repository: string; head: string; base: string;
+  ticketId: string; ticketRevision: number; repository: string; head: string; headSha: string; base: string;
   title: string; effectKey: string; payloadSha256: string;
   state: 'pending' | 'uncertain' | 'applied'; reconciliation: string;
   remotePrNumber?: number | null; remotePrUrl?: string | null;
@@ -85,7 +85,7 @@ interface DraftPullRequestStatus {
 interface PreviewDraftPullRequest { previewOnly: true; message: string }
 type DraftPullRequestResult = DraftPullRequestStatus | PreviewDraftPullRequest;
 interface DraftPullRequestReview {
-  ticketId: string; ticketRevision: number; repository: string; head: string; base: string;
+  ticketId: string; ticketRevision: number; repository: string; head: string; headSha: string; base: string;
   title: string; body: string; effectKey: string; marker: string;
 }
 interface EventSource {
@@ -628,7 +628,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
           : '') +
         (canComment
           ? '<section class="sa-effect-editor" aria-label="Explicit draft pull request effect"><h5>Draft pull request</h5>' +
-            '<p>Only this running Ticket’s active side-effect mandate can authorize a draft from its already-pushed worker branch. Review the exact repository, head, base, title, body marker and effect key before confirming.</p>' +
+            '<p>Only this running Ticket’s active side-effect mandate can authorize a draft from its already-pushed, clean worker checkout. Review the exact repository, head branch and verified commit SHA, base, title, body marker and effect key before confirming.</p>' +
             '<form data-sa-form="draft-pull-request"><div class="sa-grid">' +
             '<label>Repository (owner/name)<input name="repository" maxlength="200" required value="' +
             safe(draftPrRepository) + '"></label>' +
@@ -652,7 +652,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
               ? '<section class="sa-pane" role="group" aria-label="Review exact draft pull request">' +
                 '<h6>Confirm this exact draft PR</h6><dl><dt>Repository</dt><dd><code>' +
                 safe(draftPrReviewForTicket.repository) + '</code></dd><dt>Head</dt><dd><code>' +
-                safe(draftPrReviewForTicket.head) + '</code></dd><dt>Base</dt><dd><code>' +
+                safe(draftPrReviewForTicket.head) + '</code></dd><dt>Verified head SHA</dt><dd><code>' +
+                safe(draftPrReviewForTicket.headSha) + '</code></dd><dt>Base</dt><dd><code>' +
                 safe(draftPrReviewForTicket.base) + '</code></dd><dt>Title</dt><dd>' +
                 safe(draftPrReviewForTicket.title) + '</dd><dt>Effect key</dt><dd><code>' +
                 safe(draftPrReviewForTicket.effectKey) + '</code></dd></dl><h6>Exact body sent to GitHub</h6>' +
@@ -1118,7 +1119,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         }
         const result = await call<DraftPullRequestResult>('superagent_create_draft_pull_request', {
           ticketId:review.ticketId,expectedRevision:review.ticketRevision,
-          repository:review.repository,head:review.head,base:review.base,title:review.title,
+          repository:review.repository,head:review.head,headSha:review.headSha,
+          base:review.base,title:review.title,
           body:review.body,effectKey:review.effectKey,
         });
         if ('previewOnly' in result) {
@@ -1128,6 +1130,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         }
         if (result.ticketId !== review.ticketId || result.ticketRevision !== review.ticketRevision ||
             result.repository !== review.repository || result.head !== review.head ||
+            result.headSha !== review.headSha ||
             result.base !== review.base || result.title !== review.title || result.effectKey !== review.effectKey) {
           throw new Error('The native draft PR result did not match this Ticket and exact request.');
         }
@@ -1603,7 +1606,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
           draftPrError = 'The Ticket is no longer running under an active side-effect mandate.';
           draftPrReview = null; render(); return;
         }
-        const effectKey = await draftPullRequestEffectKey(ticketId,repository,head,base,title,body);
+        const headSha = await call<string>('superagent_verify_draft_pull_request_target', {
+          ticketId,expectedRevision,repository,head,base,
+        });
+        if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(headSha)) {
+          throw new Error('Native verification did not return an exact GitHub head SHA.');
+        }
+        const effectKey = await draftPullRequestEffectKey(
+          ticketId,repository,head,base,title,body,
+        );
         const marker = draftPullRequestMarker(ticketId,effectKey);
         const exactBody = body ? body + '\n\n' + marker : marker;
         if (new TextEncoder().encode(exactBody).length > 8 * 1024) {
@@ -1611,7 +1622,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
           draftPrReview = null; render(); return;
         }
         draftPrReview = {
-          ticketId,ticketRevision:expectedRevision,repository,head,base,title,body,effectKey,marker,
+          ticketId,ticketRevision:expectedRevision,repository,head,headSha,base,title,body,effectKey,marker,
         };
       });
       return;

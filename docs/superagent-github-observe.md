@@ -149,6 +149,10 @@ including after deletion and recreation of a repository. A pinned source does
 not silently match a source whose repository identity is still unknown.
 Existing legacy associations where **both** sources have unknown identities
 remain readable as historical context, not authenticated proof of sameness.
+For exclusive operator link ownership, different **known** numeric IDs may
+hold the same issue/PR number on separate Tickets when a repository name was
+reused. Matching IDs still conflict; a missing identity remains conservative
+rather than permitting an ambiguous historical link.
 Each source's own explicitly linked receipts remain visible without an
 unrelated source's attestation. Operators can explicitly observe eligible
 sources to establish prospective identity pins; importing, linking, or reading

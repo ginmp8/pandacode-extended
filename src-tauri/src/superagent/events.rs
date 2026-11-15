@@ -228,8 +228,17 @@ fn link_thread(store: &Store, source_id: &str, ticket_id: &str, subject_key: &st
         "SELECT l.ticket_id FROM sa_source_thread_links l
          JOIN sa_event_sources linked ON linked.id=l.source_id
          WHERE linked.orchestration_id=?1 AND linked.repository=?2 COLLATE NOCASE
-           AND l.subject_key=?3 AND l.ticket_id<>?4 LIMIT 1",
-        params![&ticket.orchestration_id, &src.repository, subject_key, ticket_id],
+           AND l.subject_key=?3 AND l.ticket_id<>?4
+           -- Different attested GitHub repository IDs are distinct even when
+           -- a deleted repository name is later reused. Unknown stays fenced.
+           AND NOT EXISTS (
+             SELECT 1 FROM sa_source_repository_identity previous_id
+             JOIN sa_source_repository_identity candidate_id
+               ON candidate_id.source_id=?5
+             WHERE previous_id.source_id=linked.id
+               AND previous_id.repository_id<>candidate_id.repository_id
+           ) LIMIT 1",
+        params![&ticket.orchestration_id, &src.repository, subject_key, ticket_id, source_id],
         |row| row.get(0),
     ).optional().map_err(|e| e.to_string())?;
     if conflicting.is_some() {
@@ -315,8 +324,15 @@ fn link_issue_to_pull(store: &Store, source_id: &str, ticket_id: &str,
         "SELECT l.ticket_id FROM sa_source_thread_links l
          JOIN sa_event_sources s ON s.id=l.source_id
          WHERE s.orchestration_id=?1 AND s.repository=?2 COLLATE NOCASE
-           AND l.subject_key=?3 AND l.ticket_id<>?4 LIMIT 1",
-        params![&ticket.orchestration_id,&src.repository,pull_key,ticket_id],
+           AND l.subject_key=?3 AND l.ticket_id<>?4
+           AND NOT EXISTS (
+             SELECT 1 FROM sa_source_repository_identity previous_id
+             JOIN sa_source_repository_identity candidate_id
+               ON candidate_id.source_id=?5
+             WHERE previous_id.source_id=s.id
+               AND previous_id.repository_id<>candidate_id.repository_id
+           ) LIMIT 1",
+        params![&ticket.orchestration_id,&src.repository,pull_key,ticket_id,source_id],
         |r|r.get(0),
     ).optional().map_err(|e|e.to_string())?;
     if conflicting.is_some() || previous.as_deref().is_some_and(|id|id!=ticket_id) {
@@ -3363,6 +3379,70 @@ mod tests {
             "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0),
         ).unwrap();
         assert_eq!(tasks, 1, "Observation and correlation never admit work");
+    }
+
+
+    #[test]
+    fn reused_repository_name_keeps_distinct_attested_ticket_threads_isolated() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "old-ticket", "orch");
+        insert_manual_ticket(&store, "new-ticket", "orch");
+        let old_issue = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let new_issue = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.closed").unwrap();
+        let old_pull = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request.opened").unwrap();
+        let new_pull = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request.closed").unwrap();
+        let unknown = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.reopened").unwrap();
+        let same_id = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.edited").unwrap();
+        for (src, repository_id) in [
+            (&old_issue, 101_i64), (&old_pull, 101_i64),
+            (&same_id, 101_i64), (&new_issue, 202_i64), (&new_pull, 202_i64),
+        ] {
+            store.db.execute(
+                "INSERT INTO sa_source_repository_identity
+                 (source_id,repository_id,attested_at) VALUES(?1,?2,?3)",
+                params![&src.id, repository_id, storage::now()],
+            ).unwrap();
+        }
+        let old_observed = set_mode(&store, &old_issue.id,
+            old_issue.policy_revision, "observe").unwrap();
+        let new_observed = set_mode(&store, &new_issue.id,
+            new_issue.policy_revision, "observe").unwrap();
+        observe(&store, &event("old-repo-issue", &old_observed, 1)).unwrap();
+        let mut newer = event("new-repo-issue", &new_observed, 1);
+        newer.event_kind = "issues.closed".into();
+        observe(&store, &newer).unwrap();
+
+        link_thread(&store, &old_issue.id, "old-ticket", "issue:42").unwrap();
+        link_thread(&store, &new_issue.id, "new-ticket", "issue:42").unwrap();
+        assert!(link_thread(&store, &same_id.id, "new-ticket", "issue:42").is_err(),
+            "Same attested ID cannot reassign the existing thread");
+        assert!(link_thread(&store, &unknown.id, "new-ticket", "issue:42").is_err(),
+            "Missing attestation must not bypass a known owner");
+        link_issue_to_pull(&store, &old_pull.id, "old-ticket", "issue:42", "pull:99").unwrap();
+        link_issue_to_pull(&store, &new_pull.id, "new-ticket", "issue:42", "pull:99").unwrap();
+
+        let old_activity = linked_decisions(&store, "old-ticket", 50).unwrap();
+        let new_activity = linked_decisions(&store, "new-ticket", 50).unwrap();
+        assert_eq!(old_activity.len(), 1);
+        assert_eq!(old_activity[0].delivery_id, "old-repo-issue");
+        assert_eq!(new_activity.len(), 1);
+        assert_eq!(new_activity[0].delivery_id, "new-repo-issue");
+        assert_eq!(list_thread_links(&store, "old-ticket").unwrap().len(), 2);
+        assert_eq!(list_thread_links(&store, "new-ticket").unwrap().len(), 2);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_mandates", [],
+            |r| r.get::<_, i64>(0)).unwrap(), 0);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(linked_decisions(&reopened, "old-ticket", 50).unwrap()[0].delivery_id,
+            "old-repo-issue");
+        assert_eq!(linked_decisions(&reopened, "new-ticket", 50).unwrap()[0].delivery_id,
+            "new-repo-issue");
     }
 
     #[test]

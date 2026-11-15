@@ -28,7 +28,7 @@ interface EffectiveTeam {
 }
 interface Ticket { id: string; orchestrationId: string; objective: string; state: string; revision: number; evidence: string | null }
 interface DemandIndex { id: string; orchestrationId: string; objective: string;
-  state: string; revision: number; updatedAt: number }
+  state: string; revision: number; updatedAt: number; projectId?: string }
 interface DemandQuery { limit?: number; beforeUpdatedAt?: number; beforeId?: string;
   orchestrationId?: string; stateFilter?: string; searchQuery?: string; projectId?: string }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
@@ -155,8 +155,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       item.workerCount >= 1 && item.reviewerCount >= 0
         ? '1 Coordinator · ' + item.workerCount + ' Workers · ' + item.reviewerCount + ' Reviewers'
         : 'Member counts unavailable';
-    const projectChoices = [...new Set(presets.map(item => item.projectId)
-      .filter((id): id is string => typeof id === 'string' && id.length > 0))].sort();
+    // The native Ticket's admitted project can outlive changes to its Team.
+    // Keep historical projects found in loaded pages and exact manual filters available.
+    const projectChoices = [...new Set([
+      ...presets.map(item => item.projectId),
+      ...allDemands.map(item => item.projectId),
+      demandProjectFilter,
+    ].filter((id): id is string => typeof id === 'string' && id.length > 0))].sort();
     const visibleTeams = presets.filter(item =>
       item.name.toLowerCase().includes(teamSearch.trim().toLowerCase()) &&
       (teamStatusFilter === 'all' || item.enabled === (teamStatusFilter === 'enabled')));
@@ -424,7 +429,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '<li class="sa-demand-card"><div><strong>' + safe(demand.objective) +
       '</strong><small>' + safe(presets.find(item => item.id === demand.orchestrationId)?.name ??
         'Unknown Team') + ' · ' + safe(demand.state) + ' · Revision ' +
-      demand.revision + ' · Updated ' + safe(activityTime(demand.updatedAt)) +
+      demand.revision + ' · Project ' + safe(demand.projectId ?? 'Unknown') +
+      ' · Updated ' + safe(activityTime(demand.updatedAt)) +
       '</small></div><button type="button" data-sa-open-demand="' + safe(demand.id) +
       '">Open demand</button></li>';
     const demandGroups = [
@@ -459,6 +465,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       projectChoices.map(id => '<option value="' + safe(id) + '"' +
         (demandProjectFilter === id ? ' selected' : '') + '>' + safe(id) + '</option>').join('') +
       '</select></label>' +
+      '<form data-sa-form="demand-project-id" role="search" aria-label="Filter by exact admitted project">' +
+      '<label>Historical project ID<input type="text" name="projectId" maxlength="128" ' +
+      'aria-label="Exact admitted Project ID" value="' + safe(demandProjectFilter) + '"></label>' +
+      '<button type="submit">Apply project filter</button></form>' +
       '<label class="sa-demand-state-filter">Filter by State<select aria-label="Filter Demands by State" data-sa-demand-state-filter>' +
       '<option value="">All States</option>' +
       (['queued','running','waiting_approval','waiting_review','blocked','completed',
@@ -808,9 +818,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       bots = known; presets = configs;
       if (demandTeamFilter && !presets.some(config => config.id === demandTeamFilter)) {
         demandTeamFilter = '';
-      }
-      if (demandProjectFilter && !presets.some(config => config.projectId === demandProjectFilter)) {
-        demandProjectFilter = '';
       }
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
@@ -1468,6 +1475,28 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (!(form instanceof HTMLFormElement) || !host.contains(form)) return;
     event.preventDefault();
     const data = new FormData(form);
+    if (form.dataset.saForm === 'demand-project-id') {
+      const exact = String(data.get('projectId') ?? '').trim();
+      if (exact.length > 128 || (exact && !/^[A-Za-z0-9_-]+$/.test(exact))) {
+        error = 'Use an exact Project ID: letters, numbers, hyphens or underscores (max 128).';
+        render();
+        return;
+      }
+      demandProjectFilter = exact;
+      allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
+      render();
+      void work(async () => {
+        const loaded = await fetchDemandPage({
+          limit:200, orchestrationId:demandTeamFilter || undefined,
+          stateFilter:demandStateFilter || undefined,
+          searchQuery:demandSearch || undefined,
+          projectId:exact || undefined,
+        });
+        allDemands = loaded; allDemandsHasMore = loaded.length === 200;
+        allDemandsLoaded = true;
+      });
+      return;
+    }
     if (form.dataset.saForm === 'demand-search') {
       const next = String(data.get('searchQuery') ?? '').trim();
       if (new TextEncoder().encode(next).length > 128 ||

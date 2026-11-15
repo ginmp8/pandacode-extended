@@ -1095,6 +1095,60 @@ test('native project filter preserves immutable Ticket scope across pages and ot
   expect(queries).toHaveLength(4);
 });
 
+test('historical native Ticket project stays visible and filterable after Team changes', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div'); host.id='sa-historical-project';
+    document.body.appendChild(host);
+    const queries:Record<string,unknown>[]=[];
+    (window as unknown as {saHistoricalQueries:Record<string,unknown>[]}).saHistoricalQueries=queries;
+    const archived={id:'old-run',orchestrationId:'team',objective:'Historical run',
+      state:'blocked',revision:2,updatedAt:2000,projectId:'archived-project'};
+    const recent={id:'new-run',orchestrationId:'team',objective:'Recent run',
+      state:'running',revision:1,updatedAt:3000,projectId:'current-project'};
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return [
+        {id:'lead',name:'Lead',paused:false},{id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [
+        {id:'team',name:'Updated Team',coordinatorBotId:'lead',workerBotId:'worker',
+          projectId:'current-project',enabled:false,policyRevision:2},
+      ] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_all_demands'){
+        const query=args?.query as Record<string,unknown>;
+        queries.push({...query});
+        if(query.projectId==='archived-project')return [archived] as never;
+        if(query.projectId==='unknown-old-project')return [] as never;
+        if(!query.projectId)return [recent,archived] as never;
+      }
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-historical-project');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  const global=host.getByRole('region',{name:'All Demands across Teams'});
+  await global.getByRole('button',{name:'Refresh all Teams'}).click();
+  await expect(global).toContainText('Project archived-project');
+  await global.getByRole('combobox',{name:'Filter Demands by Project'})
+    .selectOption('archived-project');
+  await expect(global).toContainText('1 native Demands loaded.');
+  await expect(global).toContainText('Historical run');
+  await expect(global).not.toContainText('Recent run');
+  await global.getByRole('textbox',{name:'Exact admitted Project ID'}).fill('unknown-old-project');
+  await global.getByRole('button',{name:'Apply project filter'}).click();
+  await expect(global).toContainText('0 native Demands loaded.');
+  expect(await page.evaluate(() =>
+    (window as unknown as {saHistoricalQueries:Record<string,unknown>[]}).saHistoricalQueries
+  )).toMatchObject([
+    {limit:200,projectId:undefined},
+    {limit:200,projectId:'archived-project'},
+    {limit:200,projectId:'unknown-old-project'},
+  ]);
+});
+
 test('native objective search filters durable Demands before pagination without dispatch', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

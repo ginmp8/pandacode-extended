@@ -469,6 +469,8 @@ pub struct DemandIndex {
     pub state: String,
     pub revision: i64,
     pub updated_at: i64,
+    /// Immutable project chosen when this Ticket was admitted, never the Team's current project.
+    pub project_id: String,
 }
 
 /// Test-only compatibility helper for pagination oracles; production callers
@@ -563,7 +565,7 @@ fn list_all_demands_page_for_project(
         configuration(store, id)?;
     }
     let mut stmt = store.db.prepare(
-        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at
+        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at,t.project_id
          FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
          WHERE (?2 IS NULL OR t.updated_at < ?2
                 OR (t.updated_at=?2 AND t.id < ?3))
@@ -576,6 +578,7 @@ fn list_all_demands_page_for_project(
     let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id,state_filter,search_query,project_id], |row| Ok(DemandIndex {
         id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
         state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
+        project_id: row.get(6)?,
     })).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
@@ -609,7 +612,7 @@ fn list_review_inbox_page(
         return Err("Review cursor needs a positive timestamp and bounded Ticket ID.".into());
     }
     let mut stmt = store.db.prepare(
-        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at
+        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at,t.project_id
          FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
          WHERE t.state IN ('waiting_approval','waiting_review')
            AND (?2 IS NULL OR t.updated_at < ?2
@@ -619,6 +622,7 @@ fn list_review_inbox_page(
     let rows = stmt.query_map(params![limit,before_updated_at,before_id], |row| Ok(DemandIndex {
         id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
         state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
+        project_id: row.get(6)?,
     })).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
@@ -3827,6 +3831,8 @@ mod tests {
         let foreign = page(&store, None, None, Some("other-native-project")).unwrap();
         assert_eq!(foreign.len(), 1);
         assert_eq!(foreign[0].id, "native-project-204");
+        assert_eq!(foreign[0].project_id, "other-native-project");
+        assert!(first.iter().all(|entry| entry.project_id == team.project_id));
         for invalid in ["", "../escape", "project%secret", " spaces "] {
             assert!(page(&store, None, None, Some(invalid)).is_err());
         }
@@ -3835,6 +3841,40 @@ mod tests {
         let reopened = Store::open_read_only(&path).unwrap();
         assert_eq!(page(&reopened, None, None, Some(&team.project_id)).unwrap().len(), 200);
         assert_eq!(page(&reopened, None, None, Some("other-native-project")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn demand_review_inbox_keeps_admitted_project_when_team_config_changes() {
+        let store = fixture();
+        let team = enabled(&store);
+        store.db.execute(
+            "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,
+                    source,project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+             VALUES('historical-review',?1,'historical-review-request','Historical project',
+                    'local-user','manual','archived-project','worker',?2,'waiting_review',1000,1000)",
+            params![team.id, team.policy_revision],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET project_id='new-team-project' WHERE id=?1",
+            [&team.id],
+        ).unwrap();
+        let review = list_review_inbox(&store, 200).unwrap();
+        let historical = review.iter().find(|item| item.id == "historical-review").unwrap();
+        assert_eq!(historical.project_id, "archived-project");
+        let page = list_all_demands_page_for_project(
+            &store, 200, None, None, DemandPageFilters {
+                orchestration_id: Some(&team.id), state_filter: Some("waiting_review"),
+                search_query: None, project_id: Some("archived-project"),
+            },
+        ).unwrap();
+        assert_eq!(page.len(), 1);
+        assert_eq!(page[0].project_id, "archived-project");
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(list_review_inbox(&reopened, 200).unwrap()
+            .into_iter().find(|item| item.id == "historical-review").unwrap().project_id,
+            "archived-project");
     }
 
     #[test]

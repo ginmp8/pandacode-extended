@@ -854,7 +854,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       optionsFor(chosen.coordinatorBotId) + '</select></label>' +
       '<label>Edit worker<select name="workerBotId" required>' + optionsFor(chosen.workerBotId) +
       '</select></label></div><button class="primary-button" type="submit"' +
-      (chosen.enabled ? ' disabled' : '') + '>Save preset</button></form>' +
+      '>Save preset</button></form>' +
       '<p>Policy revision ' + chosen.policyRevision + ' · Native read-only permission until separately authorized.</p>' +
       '<form data-sa-form="run"><label>Task objective<textarea name="objective" rows="3" maxlength="16000" required>' +
       safe(demandObjective) + '</textarea></label>' +
@@ -1009,9 +1009,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               (roleRoster.councilRequired ? ' checked' : '') +
               '> Require independent native Council review before completion</label>' +
               '<p>Enabling required Council needs at least two eligible reviewer bots. Each native Ticket freezes its policy and reviewers.</p>' +
-              '<p>A bot may have one role only. Workers must share the primary Worker project. A disabled Team may change roles after all demands settle; active/reviewable work and unresolved effects block native saves.</p>' +
+              '<p>Saving roles appends a future-only Team version. Active Tickets retain their frozen roster, Council policy, mandate and grants. A saved primary identity cannot change after the Team has Ticket history.</p>' +
               '<button class="primary-button" type="submit"' +
-                (chosen.enabled || tickets.some(ticket => !['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)) ? ' disabled' : '') +
                 '>Save configured roles</button></form>' +
               '<p role="status">' + (roleRoster.executionReady ?
                 (roleRoster.councilRequired ?
@@ -2291,11 +2290,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (form.dataset.saForm === 'edit') {
       const existing = current();
-      if (!existing || existing.enabled) return;
+      if (!existing) return;
+      // A name/primary edit must not discard additional saved role identities.
+      // Native compare-and-swap appends the future-only policy version.
       const input = {
         name:String(data.get('name') ?? '').trim(),
         coordinatorBotId:String(data.get('coordinatorBotId') ?? ''),
         workerBotId:String(data.get('workerBotId') ?? ''),
+        workerBotIds:[...existing.workerBotIds],
+        reviewerBotIds:[...existing.reviewerBotIds],
+        councilRequired:existing.councilRequired,
       };
       void work(async () => {
         await call('superagent_update',{ orchestrationId:existing.id, expectedRevision:existing.policyRevision, input });

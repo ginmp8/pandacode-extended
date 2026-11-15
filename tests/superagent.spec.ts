@@ -390,6 +390,58 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
 });
 
 
+test('active Team title edit preserves immutable saved role IDs in future-only IPC', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async() => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-future-only-edit';
+    document.body.appendChild(host);
+    const cfg={
+      id:'team-pinned',name:'Pinned Team',coordinatorBotId:'lead',workerBotId:'primary',
+      workerBotIds:['primary','secondary'],reviewerBotIds:['reviewer'],
+      projectId:'work-project',councilRequired:false,
+      teamVersion:1,enabled:true,policyRevision:4,
+    };
+    (window as unknown as {saFutureOnlyEdit:unknown}).saFutureOnlyEdit=null;
+    mountSuperagent(host, async(command,args) => {
+      if(command==='bots_list')return [
+        {id:'lead',name:'Lead',paused:false,projectId:'lead-project'},
+        {id:'primary',name:'Primary',paused:false,projectId:'work-project'},
+        {id:'secondary',name:'Secondary',paused:false,projectId:'work-project'},
+        {id:'reviewer',name:'Reviewer',paused:false,projectId:'review-project'},
+      ] as never;
+      if(command==='superagent_list')return [cfg] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_update') {
+        (window as unknown as {saFutureOnlyEdit:unknown}).saFutureOnlyEdit=args;
+        return {...cfg,name:'Pinned Team renamed',policyRevision:5,teamVersion:2} as never;
+      }
+      throw Error('Unexpected command: '+command);
+    });
+  });
+  const host=page.locator('#sa-future-only-edit');
+  await expect(host).toHaveAttribute('aria-busy','false');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  const edit=host.locator('form[data-sa-form="edit"]');
+  await edit.locator('input[name="name"]').fill('Pinned Team renamed');
+  await expect(edit.getByRole('button',{name:'Save preset'})).toBeEnabled();
+  await edit.getByRole('button',{name:'Save preset'}).click();
+  await expect.poll(async()=>page.evaluate(
+    () => (window as unknown as {saFutureOnlyEdit:unknown}).saFutureOnlyEdit
+  )).not.toBeNull();
+  const request=await page.evaluate(() =>
+    (window as unknown as {saFutureOnlyEdit:unknown}).saFutureOnlyEdit);
+  expect(request).toMatchObject({
+    orchestrationId:'team-pinned',expectedRevision:4,
+    input:{
+      name:'Pinned Team renamed',coordinatorBotId:'lead',workerBotId:'primary',
+      workerBotIds:['primary','secondary'],reviewerBotIds:['reviewer'],
+      councilRequired:false,
+    },
+  });
+});
+
 test('native SuperAgent preset edit and deletion require unused disabled configuration',async ({page})=>{
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

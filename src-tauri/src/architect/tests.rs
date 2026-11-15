@@ -10746,3 +10746,371 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
         }
     }
 }
+
+// Pinned native security and mixed child-failure regressions from PR #152.
+#[test]
+fn native_nested_child_failure_propagates_beside_a_passing_required_child() {
+    use council::SelectedReviewerMode as Mode;
+    let (state, root_id) = state_fixture();
+    let state = Arc::new(state);
+    install_two_phase_team(&state, &root_id, 0, &[("nested-fails", Mode::Nested), ("nested-passes", Mode::Nested)]);
+    {
+        let store = state.store.lock().unwrap();
+        let mut root = load(&store, &root_id).unwrap().unwrap();
+        let composition = root.config.council.as_mut().unwrap().composition.as_mut().unwrap();
+        composition.strategy = council::CouncilStrategy::Parallel;
+        composition.criteria[0].evidence_required = false;
+        save(&store, &mut root).unwrap();
+    }
+    dispatch_council_round(
+        &state,
+        &root_id,
+        vec![
+            council_review_assignment("nested-failure-parent-a", None, Some("nested-fails"), "security"),
+            council_review_assignment("nested-failure-parent-b", None, Some("nested-passes"), "quality"),
+        ],
+    ).unwrap_or_else(|error| panic!("nested root dispatch failed: {error}"));
+    mark_council_round_waiting(&state, &root_id, 1);
+    let root = load(&state.store.lock().unwrap(), &root_id).unwrap().unwrap();
+    let nested = root.workers.iter().filter(|worker| {
+        worker.council.as_ref().is_some_and(|seat| seat.round == 1)
+            && worker.reviewer_binding.as_ref()
+                .and_then(|binding| binding.composition_mode.as_deref()) == Some("nested")
+    }).map(|worker| (worker.id.clone(), worker.session_id.clone()))
+        .collect::<Vec<_>>();
+    assert_eq!(nested.len(), 2, "both required nested sources receive a root seat");
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    for (index, (_, child_id)) in nested.iter().enumerate() {
+        dispatch_child_round(&state, child_id, 1, "fast", &runtime,
+            &format!("nested-failure-branch-{index}"));
+        if index == 0 {
+            settle_native_council_round(&state, child_id, 1, "failed", None);
+            let store = state.store.lock().unwrap();
+            let mut child = load(&store, child_id).unwrap().unwrap();
+            child.status = "failed".into();
+            child.error = Some("Native child reviewers failed.".into());
+            save(&store, &mut child).unwrap();
+        } else {
+            settle_native_council_round(&state, child_id, 1, "completed", Some(9.6));
+            let generation = load(&state.store.lock().unwrap(), child_id).unwrap().unwrap().generation;
+            dispatch_state_runtime_test(&state, child_id, generation, "pandacode_finish_team",
+                json!({"summary":"The sibling nested Council passed with persisted native receipts."}))
+                .unwrap_or_else(|error| panic!("passing nested child was refused: {error}"));
+        }
+    }
+
+    let store = state.store.lock().unwrap();
+    let mut root = load(&store, &root_id).unwrap().unwrap();
+    let no_agents = std::collections::HashMap::new();
+    reconcile_nested_child_seats(&store, &no_agents, &mut root).unwrap();
+    refresh_council(&store, &mut root);
+    save(&store, &mut root).unwrap();
+    let root_seats = root.workers.iter().filter(|worker| {
+        worker.council.as_ref().is_some_and(|seat| seat.round == 1)
+    }).collect::<Vec<_>>();
+    assert_eq!(root_seats.len(), 2);
+    let failed_parent = nested[0].0.as_str();
+    let passing_parent = nested[1].0.as_str();
+    let failed_seat = root_seats.iter().find(|worker| worker.id.as_str() == failed_parent).unwrap();
+    let passing_seat = root_seats.iter().find(|worker| worker.id.as_str() == passing_parent).unwrap();
+    assert_eq!(failed_seat.status, "failed");
+    assert_eq!(failed_seat.error.as_deref(), Some("Native child reviewers failed."));
+    assert_eq!(passing_seat.status, "completed");
+    let child_receipts = council_records::<council::ChildCouncilReceipt>(
+        &store, &root_id, "council_child_receipt",
+    ).unwrap();
+    assert_eq!(child_receipts.len(), 1, "only the passing child creates a parent receipt");
+    assert_eq!(child_receipts[0].parent_seat_id.as_str(), passing_parent);
+    assert_eq!(child_receipts[0].status, council::ChildCouncilStatus::Passed);
+    let review_receipts = council_records::<council::CouncilReviewReceipt>(
+        &store, &root_id, "council_review_receipt",
+    ).unwrap();
+    assert_eq!(review_receipts.len(), 4, "both child leaf reviews persist terminal receipts");
+    assert_eq!(review_receipts.iter().filter(|receipt| receipt.verdict == council::CouncilReviewVerdict::Failed).count(), 2);
+    assert_eq!(review_receipts.iter().filter(|receipt| receipt.verdict == council::CouncilReviewVerdict::Passed).count(), 2);
+    assert_ne!(root.council_status.as_ref().map(|status| status.state.as_str()), Some("passed"),
+        "one failed required child blocks the root Council pass even when its sibling passes");
+    assert!(!verified_council_pass(&store, &root), "the root does not verify with a failed required child");
+    assert!(native_council_finish_refusal(&store, &root).is_some());
+    drop(store);
+    assert!(dispatch_state_runtime_test(&state, &root_id, root.generation, "pandacode_finish_team",
+        json!({"summary":"A failed nested branch cannot finish the root Council."})).is_err());
+}
+
+#[test]
+fn native_reviewer_test_host_bypasses_only_the_frozen_executable_probe() {
+    // The Linux CI runner has no provider CLIs. If every harness executable is
+    // installed on this machine there is nothing to simulate, so skip rather
+    // than invent a failure.
+    let Some(provider) = HARNESSES.iter().copied()
+        .find(|provider| crate::providers::executable(provider).is_none())
+    else {
+        eprintln!("all harness executables are installed; executable-gate regression check skipped");
+        return;
+    };
+    let (state, sid) = state_fixture();
+    let state = Arc::new(state);
+    let project = state.store.lock().unwrap().session(&sid).unwrap().project_id;
+    let session = state.store.lock().unwrap()
+        .create_session(&project, provider, "test-model", "ask").unwrap();
+    let store = state.store.lock().unwrap();
+    store.db.execute(
+        "INSERT INTO bots(id,name,role,instructions,goals,soul,project_id,provider,model,mode,created_at,updated_at,skills) VALUES('unavailable-bot','Unavailable bot','Reviewer','Review only the assigned task.','','',?1,?2,'test-model','full',1,1,'[]')",
+        params![project, provider],
+    ).unwrap();
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    team.council_since = storage::now().max(1);
+    team.config.council = Some(council::CouncilConfig {
+        target: 9.0,
+        max_rounds: 3,
+        reviewers: 2,
+        composition: Some(council::CouncilComposition {
+            schema_version: 1,
+            automatic: council::CouncilAutomaticReviewers {
+                enabled: true,
+                count: council::AutomaticReviewerCount::Fixed(2),
+            },
+            selected: Vec::new(),
+            criteria_source: council::CouncilCriteriaSource::User,
+            criteria: vec![council::CouncilCriterion {
+                id: "coverage".into(), lens: "coverage".into(),
+                description: "Verify the task coverage.".into(), required: true,
+                target: 9.0, evidence_required: false,
+                source: council::CouncilCriterionOrigin::User,
+            }],
+            strategy: council::CouncilStrategy::Parallel,
+            limits: council::CouncilCompositionLimits {
+                max_depth: 2, max_root_seats: 8, max_concurrent_leaves: 4,
+                max_leaf_reviews_per_round: 32, timeout_ms: 3_600_000,
+                max_estimated_cost_micros: None,
+            },
+        }),
+        ..council::CouncilConfig::default()
+    });
+    let seat = CouncilSeat { round: 1, lens: "coverage".into(), ..CouncilSeat::default() };
+    let mut reviewer = worker("unavailable-executable-reviewer", "waiting", &["src"], &[]);
+    reviewer.session_id = session.id.clone();
+    reviewer.provider = provider.into();
+    reviewer.model = "test-model".into();
+    reviewer.read_only = true;
+    reviewer.council = Some(seat.clone());
+    let mut binding = reviewer_security::ReviewerBinding::native(
+        &team, &reviewer.id, reviewer.created_at, &reviewer.provider, &reviewer.model, &seat,
+    );
+    binding.reviewer_bot_id = Some("unavailable-bot".into());
+    binding.composition_mode = Some("direct".into());
+    binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+        name: "Unavailable bot".into(), role: "Reviewer".into(), instructions: String::new(),
+        goals: String::new(), soul: String::new(), reasoning_effort: String::new(),
+        skill_ids: Vec::new(),
+    });
+    reviewer.reviewer_binding = Some(binding.clone());
+    reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+    team.workers.push(reviewer);
+    save(&store, &mut team).unwrap();
+    let admission = Admission { parent: sid.clone(), generation: team.generation };
+
+    // Production keeps enforcing harness/model availability even though the
+    // test-only host path deliberately skips only that executable probe.
+    let error = reviewer_policy(&store, &session.id, Some(&admission)).unwrap_err();
+    assert!(error.contains("reviewer_unavailable"), "{error}");
+    let error = NativeReviewerAccess::resolve(&store, &session.id, &admission).unwrap_err();
+    assert!(error.contains("reviewer_unavailable"), "{error}");
+    drop(store);
+
+    let host = native_reviewer_test_host(state, session.id, admission)
+        .expect("the test host must not require an installed provider CLI");
+    assert_eq!(host.tools, vec![council_criterion_tool(), council_finding_tool(), council_finding_verification_tool()]);
+}
+
+#[tokio::test]
+async fn native_reviewer_host_records_pinned_skills_and_file_evidence_and_rejects_stale_callers() {
+    let (state, sid) = state_fixture();
+    let state = Arc::new(state);
+    let evidence_name = format!("pandacode-native-reviewer-{}.txt", storage::id());
+    let evidence_path = std::env::temp_dir().join(&evidence_name);
+    std::fs::write(&evidence_path, "Frozen review evidence.\n").unwrap();
+    struct Cleanup(std::path::PathBuf);
+    impl Drop for Cleanup { fn drop(&mut self) { let _ = std::fs::remove_file(&self.0); } }
+    let _cleanup = Cleanup(evidence_path.clone());
+    let reviewer = {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        let session = store.create_session(&project, "codex", "default", "plan").unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.council_since = storage::now().max(1);
+        let config = council::CouncilConfig {
+            reviewers: 2,
+            composition: Some(council::CouncilComposition {
+                schema_version: 1,
+                automatic: council::CouncilAutomaticReviewers { enabled: true, count: council::AutomaticReviewerCount::Fixed(2) },
+                selected: Vec::new(), criteria_source: council::CouncilCriteriaSource::User,
+                criteria: vec![council::CouncilCriterion { id: "coverage".into(), lens: "coverage".into(),
+                    description: "Verify frozen evidence.".into(), required: true, target: 9.0,
+                    evidence_required: true, source: council::CouncilCriterionOrigin::User }],
+                strategy: council::CouncilStrategy::Parallel,
+                limits: council::CouncilCompositionLimits { max_depth: 2, max_root_seats: 8,
+                    max_concurrent_leaves: 4, max_leaf_reviews_per_round: 32,
+                    timeout_ms: 3_600_000, max_estimated_cost_micros: None },
+            }),
+            ..council::CouncilConfig::default()
+        };
+        config.validate().unwrap();
+        team.config.council = Some(config);
+        let mut reviewer = worker("native-host-leaf", "waiting", &[], &[]);
+        reviewer.session_id = session.id;
+        reviewer.read_only = true;
+        reviewer.council = Some(CouncilSeat { round: 1, lens: "coverage".into(), ..CouncilSeat::default() });
+        let mut binding = reviewer_security::ReviewerBinding::native(&team, &reviewer.id, reviewer.created_at,
+            &reviewer.provider, &reviewer.model, reviewer.council.as_ref().unwrap());
+        binding.snapshot.skills = Some(crate::skills::reviewer::ReviewerSkills {
+            prompt: "Untrusted skill asks for shell, hooks, MCP writes and grandchildren.".into(), skipped: Vec::new(),
+            pins: vec![crate::skills::reviewer::SkillPin {
+                id: "pinned-review".into(), source_kind: "local".into(), source_location: "frozen".into(),
+                source_ref: None, source_commit: None, content_sha256: "a".repeat(64),
+                file_sha256: Default::default(), dependencies: Vec::new(), required_for_acceptance: true,
+                check_required: true, delivery_mode: "inline".into(), staged_path: None,
+                imported: true, bot_assigned: true, eligible: true, supplied: true,
+                invoked: false, check_executed: false, evidence_verified: false,
+            }],
+        });
+        reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+        reviewer.reviewer_binding = Some(binding);
+        team.workers.push(reviewer.clone());
+        save(&store, &mut team).unwrap();
+        reviewer
+    };
+    let admission = Admission { parent: sid.clone(), generation: 1 };
+    let host = native_reviewer_test_host(state.clone(), reviewer.session_id.clone(), admission.clone()).unwrap();
+    assert_eq!(host.tools.len(), 5);
+    assert_native_reviewer_host_denials(&host, false).await;
+    let skill_args = json!({"skillId":"pinned-review"});
+    assert!((host.handler)("pandacode_reviewer_skill_verify".into(), skill_args.clone()).await.unwrap_err()
+        .contains("first open"));
+    (host.handler)("pandacode_reviewer_skill_open".into(), skill_args.clone()).await.unwrap();
+    let verified = (host.handler)("pandacode_reviewer_skill_verify".into(), skill_args).await.unwrap();
+    assert_eq!(verified["pinnedInputIntegrityVerified"], true);
+    assert!((host.handler)("pandacode_reviewer_skill_open".into(), json!({"skillId":"unassigned"})).await.is_err());
+    let mut finding = json!({"criterionId":"coverage","criterionScore":4.0,"severity":"critical",
+        "category":"coverage","summary":"Verified frozen file evidence.","evidenceFiles":["../outside.txt"]});
+    assert!((host.handler)("pandacode_council_record_finding".into(), finding.clone()).await.unwrap_err()
+        .contains("reviewer_evidence_invalid"));
+    finding["evidenceFiles"] = json!([evidence_name]);
+    let receipt = (host.handler)("pandacode_council_record_finding".into(), finding.clone()).await.unwrap();
+    assert_eq!(receipt["recorded"], true);
+    let verify_error = (host.handler)("pandacode_council_verify_finding".into(),
+        json!({"findingId":receipt["findingId"]})).await.unwrap_err();
+    assert!(!verify_error.contains("capability_not_authorized"), "{verify_error}");
+    assert_eq!(std::fs::read_to_string(&evidence_path).unwrap(), "Frozen review evidence.\n");
+    {
+        let store = state.store.lock().unwrap();
+        let team = load(&store, &sid).unwrap().unwrap();
+        let observed = &team.workers[0].reviewer_binding.as_ref().unwrap().skill_evidence["pinned-review"];
+        assert!(observed.invoked && observed.check_executed && observed.evidence_verified);
+        let receipts = council_records::<council::CouncilCriterionOutcomeReceipt>(&store, &sid, "council_criterion_outcome").unwrap();
+        assert_eq!(receipts.len(), 1);
+        assert_eq!(receipts[0].seat_id, reviewer.id);
+        assert_eq!(receipts[0].attempt, reviewer.attempt);
+        assert_eq!(receipts[0].task_cycle_id, reviewer.reviewer_binding.as_ref().unwrap().council_cycle_id);
+        assert!(receipts[0].outcome.verified_evidence_refs[0].contains("#sha256:"));
+        let mut changed = team;
+        changed.workers[0].attempt += 1;
+        save(&store, &mut changed).unwrap();
+    }
+    assert!((host.handler)("pandacode_council_record_finding".into(), finding.clone()).await.unwrap_err()
+        .contains("reviewer_session_mismatch"));
+    std::fs::write(&evidence_path, "Resolved review evidence.\n").unwrap();
+    // A different seat with the same frozen artifact is not a changed
+    // artifact: verification must reject it instead of relying on the
+    // seat-specific suffix of the artifact token.
+    let same_epoch_sid = {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.workers[0].attempt = reviewer.attempt;
+        team.dispatch_revision += 1;
+        let project = store.session(&sid).unwrap().project_id;
+        let session = store.create_session(&project, "codex", "independent-review", "plan").unwrap();
+        let mut fresh = worker("independent-host-leaf", "waiting", &[], &[]);
+        fresh.session_id = session.id.clone();
+        fresh.model = "independent-review".into();
+        fresh.read_only = true;
+        fresh.council = Some(CouncilSeat { round: 2, lens: "coverage".into(), ..CouncilSeat::default() });
+        let binding = reviewer_security::ReviewerBinding::native(&team, &fresh.id, fresh.created_at,
+            &fresh.provider, &fresh.model, fresh.council.as_ref().unwrap());
+        reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+        fresh.reviewer_binding = Some(binding);
+        team.workers.push(fresh);
+        save(&store, &mut team).unwrap();
+        session.id
+    };
+    let same_epoch_host = native_reviewer_test_host(state.clone(), same_epoch_sid, admission.clone()).unwrap();
+    finding["severity"] = json!("info");
+    finding["criterionScore"] = json!(9.5);
+    finding["summary"] = json!("Independent review confirms the fix with current evidence.");
+    (same_epoch_host.handler)("pandacode_council_record_finding".into(), finding.clone()).await.unwrap();
+    let unchanged_error = (same_epoch_host.handler)("pandacode_council_verify_finding".into(),
+        json!({"findingId":receipt["findingId"]})).await.unwrap_err();
+    assert!(unchanged_error.contains("changed artifact"), "{unchanged_error}");
+    // A write recorded between the author's report and this later review
+    // advances the native change epoch, so a fresh seat can verify it.
+    let changed_sid = {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.workers[0].attempt = reviewer.attempt;
+        let change_id = uuid::Uuid::new_v4().to_string();
+        let summary = crate::turn_changes::TurnChanges {
+            id: change_id,
+            files: vec![crate::turn_changes::ChangedFile {
+                path: "src/resolved.rs".into(), old_path: None, status: "modified".into(),
+                additions: Some(1), deletions: Some(0), binary: false, truncated: false,
+            }],
+            additions: 1, deletions: 0, truncated: false, concurrent: false,
+            attributed: true, error: None,
+        };
+        let detail = crate::turn_changes::TurnChangeDiff {
+            path: "src/resolved.rs".into(), old_path: None, patch: "+fixed\n".into(),
+            binary: false, truncated: false, error: None,
+        };
+        crate::turn_changes::persist(
+            &store,
+            &sid,
+            crate::turn_changes::Captured { summary, details: vec![detail] },
+        ).unwrap();
+        refresh_council(&store, &mut team);
+        assert!(team.changed_at > 0, "the written change advances the artifact epoch");
+        team.dispatch_revision += 1;
+        let project = store.session(&sid).unwrap().project_id;
+        let session = store.create_session(&project, "codex", "independent-review-2", "plan").unwrap();
+        let mut fresh = worker("independent-host-leaf-2", "waiting", &[], &[]);
+        fresh.session_id = session.id.clone();
+        fresh.model = "independent-review-2".into();
+        fresh.read_only = true;
+        fresh.council = Some(CouncilSeat { round: 2, lens: "coverage".into(), ..CouncilSeat::default() });
+        let binding = reviewer_security::ReviewerBinding::native(&team, &fresh.id, fresh.created_at,
+            &fresh.provider, &fresh.model, fresh.council.as_ref().unwrap());
+        reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+        fresh.reviewer_binding = Some(binding);
+        team.workers.push(fresh);
+        save(&store, &mut team).unwrap();
+        session.id
+    };
+    let changed_host = native_reviewer_test_host(state.clone(), changed_sid, admission.clone()).unwrap();
+    (changed_host.handler)("pandacode_council_record_finding".into(), finding).await.unwrap();
+    let disposition = (changed_host.handler)("pandacode_council_verify_finding".into(),
+        json!({"findingId":receipt["findingId"]})).await.unwrap();
+    assert_eq!(disposition["verified"], true);
+    assert_eq!(disposition["disposition"], "addressed");
+    assert_eq!(std::fs::read_to_string(&evidence_path).unwrap(), "Resolved review evidence.\n");
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.workers[0].attempt = reviewer.attempt;
+        team.council_since += 1;
+        save(&store, &mut team).unwrap();
+    }
+    assert!((host.handler)("pandacode_reviewer_skill_open".into(), json!({"skillId":"pinned-review"}))
+        .await.unwrap_err().contains("reviewer_session_mismatch"));
+    assert!(NativeReviewerAccess::resolve(&state.store.lock().unwrap(), "wrong-session", &admission).is_err());
+    assert!(NativeReviewerAccess::resolve(&state.store.lock().unwrap(), &reviewer.session_id,
+        &Admission { generation: 2, ..admission }).is_err());
+}

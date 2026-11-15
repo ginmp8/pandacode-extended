@@ -2383,12 +2383,20 @@ pub(crate) fn headless_rename_orchestration(
 ) -> Result<String> {
     let store = open_headless_transition_store(database_path)?;
     let existing = configuration(&store, orchestration_id)?;
-    let updated = update_configuration(&store, orchestration_id, expected_revision,
+    if existing.enabled {
+        return Err("Disable the Team before renaming it from headless mode.".into());
+    }
+    // Reuse the single versioned Team policy path and preserve ordered roles,
+    // Council policy and existing immutable Ticket snapshots.
+    let updated = update_configuration_roles_with_policy(
+        &store, orchestration_id, expected_revision,
         &NewOrchestration {
             name: name.to_owned(),
-            coordinator_bot_id: existing.coordinator_bot_id,
-            worker_bot_id: existing.worker_bot_id,
-        })?;
+            coordinator_bot_id: existing.coordinator_bot_id.clone(),
+            worker_bot_id: existing.worker_bot_id.clone(),
+        },
+        existing.worker_bot_ids, existing.reviewer_bot_ids, existing.council_required,
+    )?;
     serde_json::to_string_pretty(&serde_json::json!({
         "orchestrationId": updated.id,
         "name": updated.name,

@@ -2,7 +2,7 @@
 //! Additional Workers/Reviewers do not become authorized providers or Council seats.
 //! The current native runner remains single-worker until scoped role admission exists.
 use super::{configuration,require_main_window};
-use crate::{bots,storage::Store,AppState,Result};
+use crate::{bots,storage::{self,Store},AppState,Result};
 use serde::{Deserialize,Serialize};
 use std::collections::HashMap;
 use tauri::State;

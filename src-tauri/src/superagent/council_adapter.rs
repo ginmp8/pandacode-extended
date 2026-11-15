@@ -1031,7 +1031,7 @@ fn start_after_worker_completion_inner(
             .map_err(|_| "Frozen Council configuration is malformed.")?;
         let policy_ok = request.reviewer_policy_sha256 == sha256(request.reviewer_policy_json.as_bytes())
             && request.council_config_sha256 == sha256(config_bytes)
-            && request.policy_revision == ticket_policy_revision(store, &ticket.id)?
+            && request.policy_revision == ticket_policy_revision(&store, &ticket.id)?
             && snapshot.policy.council_required
             && snapshot.policy.policy_revision == request.policy_revision
             && snapshot.reviewer_bot_ids == config.reviewer_bot_ids

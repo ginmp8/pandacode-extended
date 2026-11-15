@@ -438,12 +438,12 @@ pub(crate) async fn poll_one(app:tauri::AppHandle)->Result<bool> {
     let Some((snapshot,since))=candidate else {return Ok(false);};
     let repo=snapshot.repository.clone();
     let cursor=snapshot.last_sequence;
-    let (signed_in,events,pages)=tokio::task::spawn_blocking(move||
+    let (signed_in,events,pages,repository_id)=tokio::task::spawn_blocking(move||
         super::fetch_authenticated_github_window(&repo,since,cursor)
     ).await.map_err(|error|error.to_string())??;
     let store=state.store.lock().map_err(|error|error.to_string())?;
-    super::poll_authenticated_events_with_identity(
-        &store,&snapshot,since,&events,&signed_in,pages,
+    super::poll_authenticated_events_with_repository_id(
+        &store,&snapshot,since,&events,&signed_in,pages,repository_id,
     )?;
     Ok(true)
 }

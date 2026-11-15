@@ -7836,7 +7836,7 @@ fn invalid_nested_two_phase_dispatch_leaves_persisted_state_unchanged() {
     .unwrap_err();
     assert_eq!(
         error,
-        "Council configuration is invalid: Nested Council reviewer \"nested-a\" has invalid maxRounds (at least 2 for inherited TwoPhase strategy)."
+        "Nested Council reviewer \"nested-a\" has invalid maxRounds (at least 2 for inherited TwoPhase strategy)."
     );
     let after = persisted_snapshot(&state.store.lock().unwrap());
     assert_eq!(after, before, "rejected dispatch must not change team, sessions, workers, or requests");

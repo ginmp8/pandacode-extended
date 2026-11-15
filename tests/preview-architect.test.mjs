@@ -61,6 +61,11 @@ test('architect preview preserves native S3 root and nested round limits without
     automatic: { enabled: true, count: 1 },
     selected: [{ ...selected, nested: { ...selected.nested, maxRounds: 2 } }],
   });
+  const missingRootSeat = withCouncilComposition({ ...legacy, maxRounds: 3 }, { ...strategy,
+    automatic: { enabled: false, count: 0 }, selected: corrected.composition.selected,
+  });
+  assert.throws(() => api.setCouncil('parent', missingRootSeat), /At least 2 root reviewers/);
+  assert.throws(() => api.setCouncil('parent', { ...legacy, reviewerBotIds: ['nested-a'] }), /Select 2 to 8 distinct reviewer bots/);
   assert.equal(api.setCouncil('parent', corrected).councilStatus.state, 'waiting');
   assert.equal(createPreviewArchitect(host).get('parent').config.council.composition.selected[0].nested.maxRounds, 2);
   assert.equal(api.setCouncil('parent', legacy).config.council.composition, undefined);

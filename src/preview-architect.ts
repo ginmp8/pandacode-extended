@@ -66,7 +66,7 @@ export function createPreviewArchitect(host: PreviewHost) {
         || permissions.grants[0].action !== 'call' || permissions.grants[0].resourceArgument !== 'path'
         || !/^[^/:\\]+(?:\u002f[^/:\\]+)*$/.test(permissions.grants[0].resource)
         || permissions.grants[0].resource.split('/').some(part => part === '..' || !part))) throw new Error('Scoped reviewer access requires an exact relative file and native authorization.');
-    if (!Array.isArray(ids) || (ids.length > 0 && (ids.length < 2 || ids.length > 8 || new Set(ids).size !== ids.length || ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(id))))) throw new Error('Select 2 to 8 distinct reviewer bots.');
+    if (!Array.isArray(ids) || (ids.length > 0 && ((!council.composition && ids.length < 2) || ids.length > 8 || new Set(ids).size !== ids.length || ids.some(id => typeof id !== 'string' || !/^[a-zA-Z0-9_-]{1,80}$/.test(id))))) throw new Error('Select 2 to 8 distinct reviewer bots.');
     // Match native Council: optional skill roles are task-scoped and must survive reloads.
     const optionalSkills = council.optionalSkillIds ?? [];
     if (!Array.isArray(optionalSkills) || optionalSkills.length > 32

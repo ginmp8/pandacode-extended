@@ -2720,20 +2720,24 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         else if coordinator { "queued" }
         else { "waiting_approval" };
     let now = storage::now();
+    // A stale, revoked or remapped task may transition to blocked, but its
+    // provider output must not survive as trusted worker evidence or an
+    // assignment result consumed by later review/recovery paths.
+    let trusted_result = authorized.then_some(trimmed.as_str());
     let moved = tx.execute(
         "UPDATE sa_assignments SET state=?2,result=?3,updated_at=?4
          WHERE id=?1 AND state='running'",
         // Rejected callbacks are not successful coordinator plans, even if
         // the provider returned text. Otherwise a later manual retry after
         // pause/revocation could promote that unauthorized plan to authority.
-        params![assignment_id,if authorized && successful { "finished" } else { "failed" },trimmed,now],
+        params![assignment_id,if authorized && successful { "finished" } else { "failed" },trusted_result,now],
     ).map_err(|e| e.to_string())?;
     if moved != 1 { return Err("SuperAgent assignment changed before settlement.".into()); }
     let updated = tx.execute(
         "UPDATE sa_tickets SET state=?2,evidence=?3,active_assignment_id=NULL,
          revision=revision+1,updated_at=?4
          WHERE id=?1 AND state='running' AND active_assignment_id=?5",
-        params![task_id,next,trimmed,now,assignment_id],
+        params![task_id,next,trusted_result,now,assignment_id],
     ).map_err(|e| e.to_string())?;
     if updated != 1 { return Err("SuperAgent ticket changed before settlement.".into()); }
     // Atomically pin the native Council cycle and exact finished artifact,
@@ -6058,10 +6062,49 @@ mod tests {
             assert!(on_run_finished(&store, &session, true, "Untrusted success").unwrap());
             let blocked = get_ticket(&store, &ticket.id).unwrap();
             assert_eq!(blocked.state, "blocked");
+            assert!(blocked.evidence.is_none(), "Rejected callbacks must not retain provider evidence: {suffix}");
+            assert!(assignments(&store, &ticket.id, 10).unwrap()[0].result.is_none(),
+                "Rejected attempts must not retain untrusted provider text: {suffix}");
             assert!(accept(&store, &ticket.id, blocked.revision).is_err());
             assert_eq!(history(&store, &ticket.id, 10).unwrap()[0].kind, "callback_rejected");
             assert!(!on_run_finished(&store, &session, true, "Duplicate").unwrap());
         }
+    }
+
+
+    #[test]
+    fn revoked_live_callback_discards_untrusted_evidence_across_restart() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Inspect without external effects",
+            "revoked-evidence-restart", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        store.db.execute(
+            "UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        assert!(read_only_policy(&store, &session).is_err());
+        assert!(on_run_finished(
+            &store, &session, true, "UNTRUSTED POST-REVOCATION OUTPUT",
+        ).unwrap());
+        let blocked = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(blocked.state, "blocked");
+        assert!(blocked.evidence.is_none());
+        assert!(assignments(&store, &ticket.id, 10).unwrap()[0].result.is_none());
+        assert!(history(&store, &ticket.id, 10).unwrap().iter()
+            .any(|entry| entry.kind == "callback_rejected"));
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let persisted = get_ticket(&reopened, &ticket.id).unwrap();
+        assert_eq!(persisted.state, "blocked");
+        assert!(persisted.evidence.is_none());
+        assert!(assignments(&reopened, &ticket.id, 10).unwrap()[0].result.is_none());
+        assert!(accept(&reopened, &ticket.id, persisted.revision).is_err());
+        assert!(!on_run_finished(&reopened, &session, true, "REPLAYED CALLBACK").unwrap());
     }
 
     #[test]

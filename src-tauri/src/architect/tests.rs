@@ -7842,6 +7842,54 @@ fn invalid_nested_two_phase_dispatch_leaves_persisted_state_unchanged() {
     assert_eq!(after, before, "rejected dispatch must not change team, sessions, workers, or requests");
 }
 
+
+#[test]
+fn automatic_only_s3_native_terminal_waits_for_fresh_phase_two_challengers() {
+    // AC-15/19: phase-one completion must not fire the final root callback.
+    // The native fixture persists task/cycle-scoped reviewer evidence.
+    let (state, root_id) = state_fixture();
+    install_two_phase_team(&state, &root_id, 2, &[]);
+    dispatch_council_round(&state, &root_id, vec![
+        council_review_assignment("s3-native-first-security", Some("fast"), None, "security"),
+        council_review_assignment("s3-native-first-quality", Some("kimi"), None, "quality"),
+    ]).unwrap();
+    settle_native_council_round(&state, &root_id, 1, "completed", Some(9.6));
+    let generation = {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &root_id).unwrap().unwrap();
+        assert_ne!(native_council_status(&store, &root).unwrap().state, "passed");
+        assert!(native_council_finish_refusal(&store, &root).is_some());
+        root.generation
+    };
+    let refused = dispatch_state_runtime_test(
+        &state, &root_id, generation, "pandacode_finish_team",
+        json!({"summary": "Phase one cannot approve the Council."}),
+    ).unwrap_err();
+    assert!(refused.to_ascii_lowercase().contains("council"), "{refused}");
+
+    dispatch_council_round(&state, &root_id, vec![
+        council_review_assignment("s3-native-second-security", Some("kimi"), None, "security"),
+        council_review_assignment("s3-native-second-quality", Some("fast"), None, "quality"),
+    ]).unwrap();
+    settle_native_council_round(&state, &root_id, 2, "completed", Some(9.6));
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &root_id).unwrap().unwrap();
+        assert_eq!(root.workers.iter().filter(|worker| {
+            worker.council.as_ref().is_some_and(|seat| seat.round == 2)
+        }).count(), 2);
+        assert!(s3_phase2_decisions_proven(&store, &root, 2),
+            "every fresh challenger needs a correlated native decision");
+        assert_eq!(native_council_status(&store, &root).unwrap().state, "passed");
+        assert!(verified_council_pass(&store, &root));
+    }
+    let completed = dispatch_state_runtime_test(
+        &state, &root_id, generation, "pandacode_finish_team",
+        json!({"summary": "Both native S3 phases passed."}),
+    ).unwrap();
+    assert_eq!(completed.0["completed"], true);
+}
+
 // Native two-phase fixture reused from the read-only PR #152 regressions.
 fn two_phase_test_config(
     automatic: usize,

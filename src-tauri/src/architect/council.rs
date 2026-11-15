@@ -786,7 +786,13 @@ pub(super) fn historical_reported_findings(
                 params![team.session_id, worker.id, worker.session_id],
                 |row| row.get::<_, i64>(0),
             ).optional().ok().flatten() == Some(1);
-            if !native_parent_link { continue; }
+            if !native_parent_link
+                || super::reviewer_security::validate_recorded_authority(
+                    store, &team.session_id, binding,
+                ).is_err()
+            {
+                continue;
+            }
             binding.council_cycle_id.clone()
         } else {
             current_cycle.clone()

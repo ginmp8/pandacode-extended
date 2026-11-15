@@ -110,6 +110,15 @@ fn prior_cycle_findings_remain_unverified_and_require_the_native_parent_session_
         "unlinked cross-session messages must never be included in historical inspection");
     assert_eq!(inspected.historical_reported_findings[0].cycle_id, prior_cycle);
     assert!(!inspected.verified_pass);
+    let original_seat_id = tampered.workers[0].id.clone();
+    store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, format!("native-reviewer-authority:{original_seat_id}")],
+    ).unwrap();
+    let revoked = council_inspection_state(&store, &sid).unwrap().unwrap();
+    assert!(revoked.historical_reported_findings.is_empty(),
+        "revoking the native reviewer authority must remove its historical content from the inspector");
+    assert!(!revoked.verified_pass);
 }
 
 #[test]

@@ -1840,12 +1840,22 @@ pub(super) fn status_for_authenticated_children(
         .collect();
     if roots.len() != root_needed
         || !unverified_required_skill_checks(team, 1).is_empty()
-        // Composite child scores cannot silently cover a named user criterion:
-        // child receipts currently attest their own native quorum/score, not
-        // per-criterion lens coverage. Require an independently scored root
-        // seat until the child receipt carries verifiable criterion evidence.
-        || !missing_required_criteria(team, config, 1).is_empty()
         || !criterion_blockers(team, config, 1).is_empty()
+        // Each child must attest a grant-validated native scored leaf for
+        // every required lens. A child composite minimum is never coverage
+        // by itself, and score-only proof cannot satisfy an evidence-required
+        // criterion until an independent native evidence receipt exists.
+        || config.criteria.iter().filter(|criterion| criterion.required).any(|criterion| {
+            criterion.evidence_required || children.iter().any(|child| {
+                !child.criterion_evidence.iter().any(|proof| {
+                    proof.id == criterion.id
+                        && same_lens(&proof.lens, &criterion.lens)
+                        && !proof.leaf_worker_ids.is_empty()
+                        && proof.lowest_score.is_finite()
+                        && proof.lowest_score >= criterion.target.max(config.target)
+                })
+            })
+        })
     {
         return None;
     }

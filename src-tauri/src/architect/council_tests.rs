@@ -3826,6 +3826,107 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
 
 
 #[test]
+fn nested_child_required_criteria_are_proved_by_native_scored_leaf_lenses() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["security-child", "architecture-child"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.criteria_source = council::CouncilCriteriaSource::User;
+        config.criteria.push(council::CouncilCriterion {
+            id: "security-review".into(),
+            lens: "Security requirements".into(),
+            required: true, target: 9.5, evidence_required: false,
+        });
+        config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
+            .map(|bot| council::CouncilNestedReviewer {
+                bot_id: (*bot).into(), child_reviewers: 2,
+                child_target: 9.5, child_max_rounds: 2,
+            }).collect();
+        config.validate().unwrap();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid, "Review the frozen task with required security evidence", None, None).unwrap();
+    let (pending, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Wait for native child criteria"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    for _ in 0..4 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                "Independently assessed the frozen artifact.\nCouncil score: 9.6/10").unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    }
+    let (finished, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Native child criteria completed"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(finished["completed"], true);
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    let children = child_council::verified_parent_seats(&store, &root).unwrap().unwrap();
+    assert_eq!(children.len(), 2);
+    for child in &children {
+        assert_eq!(child.criterion_evidence.len(), 1);
+        let proof = &child.criterion_evidence[0];
+        assert_eq!(proof.id, "security-review");
+        assert_eq!(proof.lens, "Security requirements");
+        assert_eq!(proof.lowest_score, 9.6);
+        assert_eq!(proof.leaf_worker_ids.len(), 1);
+    }
+    assert!(verified_council_pass(&store, &root),
+        "an authentic scored criterion in each child is sufficient without invented root votes");
+    let mut mismatched = root.clone();
+    mismatched.config.council.as_mut().unwrap().criteria[0].lens = "Missing lens".into();
+    assert!(council::status_for_authenticated_children(&mismatched, &children).is_none(),
+        "child composite scores do not cover arbitrary user criteria");
+    let mut native_evidence_required = root.clone();
+    native_evidence_required.config.council.as_mut().unwrap().criteria[0].evidence_required = true;
+    assert!(council::status_for_authenticated_children(&native_evidence_required, &children).is_none(),
+        "a scored review is not independently verified required-evidence proof");
+
+    let receipt_key = format!("native-council-child-receipt:{}:security-child", root.council_since);
+    let original: String = store.db.query_row(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_receipt'",
+        rusqlite::params![sid, receipt_key], |row| row.get(0),
+    ).unwrap();
+    let mut tampered: serde_json::Value = serde_json::from_str(&original).unwrap();
+    tampered["criterionEvidence"][0]["lowestScore"] = json!(10.0);
+    store.db.execute(
+        "UPDATE architect_requests SET content=?3
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_receipt'",
+        rusqlite::params![sid, receipt_key, tampered.to_string()],
+    ).unwrap();
+    assert!(!verified_council_pass(&store, &root),
+        "a forged stored criterion score must revoke the root terminal gate");
+    store.db.execute(
+        "UPDATE architect_requests SET content=?3
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_receipt'",
+        rusqlite::params![sid, receipt_key, original],
+    ).unwrap();
+    assert!(verified_council_pass(&store, &root));
+}
+
+
+#[test]
 fn child_only_parallel_root_finishes_from_real_revalidated_composite_seats() {
     let (state, sid) = state_fixture();
     {

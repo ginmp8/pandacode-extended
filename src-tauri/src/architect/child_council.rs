@@ -362,6 +362,16 @@ fn validate_admitted(
 }
 
 
+/// A scored criterion maps to actual, grant-validated child leaf identities.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct VerifiedChildCriterion {
+    pub id: String,
+    pub lens: String,
+    pub lowest_score: f64,
+    pub leaf_worker_ids: Vec<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct VerifiedChildReceipt {
@@ -373,6 +383,9 @@ pub struct VerifiedChildReceipt {
     pub child_config_sha256: String,
     pub lowest_score: f64,
     pub leaf_worker_ids: Vec<String>,
+    /// Omitted for legacy Councils without named required criteria.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub criterion_evidence: Vec<VerifiedChildCriterion>,
 }
 
 /// A task-scoped composite seat backed by a revalidated real child Council.
@@ -388,6 +401,8 @@ pub struct AuthenticatedParentSeat {
     pub policy_sha256: String,
     pub child_receipt_sha256: String,
     pub lowest_score: f64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub criterion_evidence: Vec<VerifiedChildCriterion>,
 }
 
 fn parent_seat_key(root: &TeamSnapshot, bot_id: &str) -> String {
@@ -487,6 +502,29 @@ fn verified_receipt(
         leaf_worker_ids.push(leaf.id.clone());
     }
     if status.lowest != Some(lowest_score) { return Ok(None); }
+    // The child Council's native criterion gate has already passed. Persist
+    // the exact matching scored leaf identities so the root can revalidate
+    // required lens coverage without treating the composite minimum as proof.
+    let config = child.config.council.as_ref()
+        .ok_or("child_council_stale: child criterion policy is missing.")?;
+    let mut criterion_evidence = Vec::new();
+    for criterion in config.criteria.iter().filter(|criterion| criterion.required) {
+        let matches = child.workers.iter().filter_map(|leaf| {
+            let seat = leaf.council.as_ref()?;
+            (seat.lens.trim().to_lowercase() == criterion.lens.trim().to_lowercase())
+                .then_some((leaf.id.clone(), seat.score?))
+        }).collect::<Vec<_>>();
+        if matches.is_empty() { return Ok(None); }
+        let lowest = matches.iter().map(|(_, score)| *score).fold(f64::INFINITY, f64::min);
+        if !lowest.is_finite() || lowest < config.target.max(criterion.target) {
+            return Ok(None);
+        }
+        criterion_evidence.push(VerifiedChildCriterion {
+            id: criterion.id.clone(), lens: criterion.lens.clone(),
+            lowest_score: lowest,
+            leaf_worker_ids: matches.into_iter().map(|(id, _)| id).collect(),
+        });
+    }
     Ok(Some(VerifiedChildReceipt {
         root_cycle_id: record.root_cycle_id.clone(),
         child_session_id: record.child_session_id.clone(),
@@ -494,7 +532,7 @@ fn verified_receipt(
         objective_sha256: record.objective_sha256.clone(),
         policy_sha256: record.policy_sha256.clone(),
         child_config_sha256: record.child_config_sha256.clone(),
-        lowest_score, leaf_worker_ids,
+        lowest_score, leaf_worker_ids, criterion_evidence,
     }))
 }
 
@@ -580,6 +618,7 @@ fn parent_seat(
             policy_sha256: record.policy_sha256.clone(),
             child_receipt_sha256: digest(&serde_json::to_vec(&receipt).map_err(|e| e.to_string())?),
             lowest_score: receipt.lowest_score,
+            criterion_evidence: receipt.criterion_evidence.clone(),
         })
     } else { None };
     if let Some((content, owned_child)) = existing {

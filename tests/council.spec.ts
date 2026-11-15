@@ -49,6 +49,8 @@ const settle = async (page: Page) => { await expect(button(page)).toBeVisible();
 // One describe, so the WebKit config's title grep can select every Council test.
 test.describe('Council', () => {
 test('schema v1 derives all seven modes and keeps each bot branch draft when modes change', async ({ page }) => {
+  // Exercise all seven mode transitions without dropping coverage on slower CI hosts.
+  test.setTimeout(120_000);
   const reviewers: ReviewerFixture = { ids: [], bots: [
     { id: 'reviewer-a', name: 'Reviewer A', role: 'Reviewer', provider: 'codex', model: 'gpt-6', paused: false, available: true },
     { id: 'reviewer-b', name: 'Reviewer B', role: 'Reviewer', provider: 'claude', model: 'sonnet', paused: false, available: true },

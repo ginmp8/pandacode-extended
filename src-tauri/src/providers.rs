@@ -4612,8 +4612,8 @@ mod tests {
             cfg.mode = "plan".into();
             cfg.reviewer_boundary = true;
             cfg.reviewer_policy = Some(ReviewerToolPolicy::NativeReadOnly);
-            let mut protocol = Protocol::new(cfg);
-            let denied = protocol.receive(json!({
+            let mut pi = Protocol::new(cfg);
+            let denied = pi.receive(json!({
                 "type":"extension_ui_request","id":"ui","method":"confirm","title":"Write files"
             })).unwrap();
             assert_eq!(denied.write[0]["confirmed"], false);

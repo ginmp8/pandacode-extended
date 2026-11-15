@@ -9328,7 +9328,7 @@ fn failed_nested_child_restart_preserves_one_link_and_terminal_reason() {
     assert_eq!(root.workers[0].error.as_deref(), Some(reason));
     save(&reopened, &mut root).unwrap();
     assert_eq!(
-        reopened.db.query_row("SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1 AND kind='council_child_link'", [&root_id], |row| row.get::<_, i64>(0)).unwrap(),
+        reopened.db.query_row("SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1 AND kind='council_child_link'", [root_id], |row| row.get::<_, i64>(0)).unwrap(),
         1,
         "restart must keep one durable child ownership link"
     );

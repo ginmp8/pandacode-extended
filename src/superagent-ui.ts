@@ -2297,8 +2297,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         name:String(data.get('name') ?? '').trim(),
         coordinatorBotId:String(data.get('coordinatorBotId') ?? ''),
         workerBotId:String(data.get('workerBotId') ?? ''),
-        workerBotIds:[...existing.workerBotIds],
-        reviewerBotIds:[...existing.reviewerBotIds],
+        // Legacy one-worker previews may not expose optional ordered lists.
+        workerBotIds:[...(existing.workerBotIds ?? [existing.workerBotId])],
+        reviewerBotIds:[...(existing.reviewerBotIds ?? [])],
         councilRequired:existing.councilRequired,
       };
       void work(async () => {

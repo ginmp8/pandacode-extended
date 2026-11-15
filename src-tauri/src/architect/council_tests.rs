@@ -4370,6 +4370,8 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
         let child = child_council::inspect(&store, &root).unwrap();
         assert_eq!(child.len(), 1);
         assert_eq!(child[0].status, "child_escalation_reviewing");
+        assert!(child[0].verified_escalation_receipt.is_none(),
+            "admission and queued second-wave reviewers cannot create an evidence receipt");
         assert_eq!(child[0].leaf_attempts.len(), 4,
             "second S2 child wave must issue two additional actual native reviewers");
         assert_eq!(child[0].leaf_attempts.iter().filter(|leaf| leaf.round == 2).count(), 2);
@@ -4402,7 +4404,61 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
         "pandacode_finish_team", json!({"summary":"Keep escalated Council pending"}),
         &std::sync::atomic::AtomicBool::new(false)).unwrap();
     assert_eq!(waiting["completed"], false,
-        "completed phase-two child scores cannot be counted without a separate verified terminal receipt");
+        "a verified second child wave is still not an authenticated terminal root approval");
+    let store = state.store.lock().unwrap();
+    let saved = load(&store, &sid).unwrap().unwrap();
+    let inspected = child_council::inspect(&store, &saved).unwrap();
+    let child = &inspected[0];
+    assert_eq!(child.status, "child_escalation_evidence_ready_root_pending");
+    let first = child.verified_child_receipt.as_ref().unwrap();
+    let second = child.verified_escalation_receipt.as_ref()
+        .expect("only two real settled native second-wave callbacks may yield a receipt");
+    assert_eq!(second.lowest_score, 9.6);
+    assert_eq!(second.leaf_worker_ids.len(), 2);
+    assert!(first.leaf_worker_ids.iter().all(|id| !second.leaf_worker_ids.contains(id)),
+        "second-wave reviewer identities must not reuse an earlier native grant");
+    assert_eq!(first.root_cycle_id, second.root_cycle_id);
+    assert_eq!(first.policy_sha256, second.policy_sha256);
+    assert!(!verified_council_pass(&store, &saved),
+        "a child receipt is evidence only; the root S2 terminal gate is still pending");
+
+    let key = format!("native-council-child-s2-receipt:{}:security-child", saved.council_since);
+    let original: String = store.db.query_row(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s2_receipt'",
+        rusqlite::params![sid, key], |row| row.get(0),
+    ).unwrap();
+    let mut tampered: serde_json::Value = serde_json::from_str(&original).unwrap();
+    tampered["lowestScore"] = json!(10.0);
+    store.db.execute(
+        "UPDATE architect_requests SET content=?3
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s2_receipt'",
+        rusqlite::params![sid, key, tampered.to_string()],
+    ).unwrap();
+    assert!(child_council::inspect(&store, &saved).is_err(),
+        "a forged persisted second-wave score must be rejected on native inspection");
+    store.db.execute(
+        "UPDATE architect_requests SET content=?3
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s2_receipt'",
+        rusqlite::params![sid, key, original],
+    ).unwrap();
+    assert!(child_council::inspect(&store, &saved).unwrap()[0]
+        .verified_escalation_receipt.is_some(),
+        "a restored exact receipt remains independently revalidated");
+    let second_worker = saved.config.council.as_ref().unwrap()
+        .nested_bot_reviewers.first().unwrap();
+    assert_eq!(second_worker.bot_id, "security-child");
+    let second_child_session = child.child_session_id.clone();
+    let second_leaf = child.leaf_attempts.iter().find(|leaf| leaf.round == 2).unwrap();
+    store.db.execute(
+        "DELETE FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![second_child_session,
+            format!("native-reviewer-authority:{}", second_leaf.worker_id)],
+    ).unwrap();
+    assert!(child_council::inspect(&store, &saved).is_err(),
+        "a revoked native second-wave reviewer grant invalidates the recorded receipt");
+    assert!(!verified_council_pass(&store, &saved));
 }
 
 #[test]

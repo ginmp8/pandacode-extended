@@ -52,6 +52,9 @@ pub struct ChildReservationView {
     /// Native verified leaf result, not a verified composite parent vote.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub verified_child_receipt: Option<VerifiedChildReceipt>,
+    /// Authenticated fresh S2 leaf evidence; not a terminal parent approval.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub verified_escalation_receipt: Option<VerifiedChildReceipt>,
     /// Native correlation to exactly one child receipt, not a passed root vote.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub authenticated_parent_seat: Option<AuthenticatedParentSeat>,
@@ -598,6 +601,172 @@ fn record_verified_receipt(
     Ok(true)
 }
 
+/// A forced hierarchical S2 wave has its own immutable native receipt. The
+/// original child composite remains a first-wave receipt and cannot stand in
+/// for newly admitted reviewers or confer terminal root approval.
+fn escalation_receipt_key(root: &TeamSnapshot, bot_id: &str) -> String {
+    format!("native-council-child-s2-receipt:{}:{bot_id}", root.council_since)
+}
+
+/// Independently rederive second-wave evidence from actual native leaf
+/// callbacks and recorded grants. No model-authored claim or first-wave score
+/// is allowed to become a second-wave receipt.
+fn escalation_receipt(
+    store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
+    child: &TeamSnapshot, choice: &CouncilNestedReviewer,
+) -> Result<Option<VerifiedChildReceipt>> {
+    let Some(first) = read_verified_receipt(store, root, record, child)? else {
+        return Ok(None);
+    };
+    let Some(root_config) = root.config.council.as_ref() else { return Ok(None) };
+    if root_config.strategy != super::council::CouncilExecutionStrategy::Escalated
+        || !root_config.force_escalation
+        || !root_artifact_revision(store, root, false)?
+        || !super::council_evidence_is_current(store, root)
+        || !super::council_evidence_is_current(store, child)
+        || !fresh_s2_root_reviewers(store, root, root_config)
+        || parent_seat(store, root, record, child, false)?.is_none()
+    {
+        return Ok(None);
+    }
+    let previous = child.workers.iter().filter(|leaf|
+        leaf.council.as_ref().is_some_and(|seat| seat.round == 1)
+    ).collect::<Vec<_>>();
+    let fresh = child.workers.iter().filter(|leaf|
+        leaf.council.as_ref().is_some_and(|seat| seat.round == 2)
+    ).collect::<Vec<_>>();
+    if previous.len() != choice.child_reviewers
+        || fresh.len() != choice.child_reviewers
+        || child.workers.len() != previous.len() + fresh.len()
+    {
+        return Ok(None);
+    }
+    let original_ids: HashSet<&str> = first.leaf_worker_ids.iter().map(String::as_str).collect();
+    let previous_ids: HashSet<&str> = previous.iter().map(|leaf| leaf.id.as_str()).collect();
+    let previous_sessions: HashSet<&str> = previous.iter()
+        .map(|leaf| leaf.session_id.as_str()).collect();
+    if original_ids.len() != choice.child_reviewers || original_ids != previous_ids
+        || previous_sessions.len() != choice.child_reviewers
+    {
+        return Ok(None);
+    }
+    let mut fresh_ids = HashSet::new();
+    let mut fresh_sessions = HashSet::new();
+    let mut lowest_score = f64::INFINITY;
+    let config = child.config.council.as_ref()
+        .ok_or("child_council_stale: child escalation criterion policy missing.")?;
+    for leaf in &fresh {
+        let Some(seat) = leaf.council.as_ref() else { return Ok(None) };
+        let Some(score) = seat.score else { return Ok(None) };
+        let Some(binding) = leaf.reviewer_binding.as_ref() else { return Ok(None) };
+        if leaf.status != "completed" || !leaf.read_only || leaf.abandoned
+            || leaf.wrote_at != 0 || !leaf.files.is_empty()
+            || seat.round != 2 || seat.started_at <= 0
+            || seat.reported_severe_finding || seat.reported_conflict
+            || !score.is_finite() || score < config.target.max(choice.child_target)
+            || previous_ids.contains(leaf.id.as_str())
+            || previous_sessions.contains(leaf.session_id.as_str())
+            || !fresh_ids.insert(leaf.id.as_str())
+            || !fresh_sessions.insert(leaf.session_id.as_str())
+            || super::council::latest_score(store, &leaf.session_id) != Some(score)
+            || binding.validate(child, leaf).is_err()
+            || reviewer_security::validate_recorded_authority(
+                store, &child.session_id, binding,
+            ).is_err()
+        {
+            return Ok(None);
+        }
+        lowest_score = lowest_score.min(score);
+    }
+    let mut criterion_evidence = Vec::new();
+    for criterion in config.criteria.iter().filter(|criterion| criterion.required) {
+        // Native scored reviewer evidence is not an independent artifact check.
+        // A required check still needs its own native verification receipt.
+        if criterion.evidence_required { return Ok(None); }
+        let matching = fresh.iter().filter_map(|leaf| {
+            let seat = leaf.council.as_ref()?;
+            seat.lens.eq_ignore_ascii_case(&criterion.lens)
+                .then_some((leaf.id.clone(), seat.score?))
+        }).collect::<Vec<_>>();
+        if matching.is_empty() { return Ok(None); }
+        let minimum = matching.iter().map(|(_, score)| *score)
+            .fold(f64::INFINITY, f64::min);
+        if !minimum.is_finite() || minimum < config.target.max(criterion.target) {
+            return Ok(None);
+        }
+        criterion_evidence.push(VerifiedChildCriterion {
+            id: criterion.id.clone(),
+            lens: criterion.lens.clone(),
+            lowest_score: minimum,
+            leaf_worker_ids: matching.into_iter().map(|(id, _)| id).collect(),
+        });
+    }
+    Ok(Some(VerifiedChildReceipt {
+        root_cycle_id: record.root_cycle_id.clone(),
+        child_session_id: record.child_session_id.clone(),
+        bot_id: record.bot_id.clone(),
+        objective_sha256: record.objective_sha256.clone(),
+        policy_sha256: record.policy_sha256.clone(),
+        child_config_sha256: record.child_config_sha256.clone(),
+        lowest_score,
+        leaf_worker_ids: fresh.iter().map(|leaf| leaf.id.clone()).collect(),
+        criterion_evidence,
+    }))
+}
+
+/// Persist and revalidate exactly one second-wave receipt per child/root cycle.
+/// A stale, altered or replayed receipt fails closed, including after restart.
+fn record_escalation_receipt(
+    store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
+    child: &TeamSnapshot, choice: &CouncilNestedReviewer,
+) -> Result<bool> {
+    let key = escalation_receipt_key(root, &record.bot_id);
+    let existing: Option<String> = store.db.query_row(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s2_receipt'
+         AND worker_id=?3",
+        params![root.session_id, key, record.child_session_id],
+        |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    let candidate = escalation_receipt(store, root, record, child, choice)?;
+    if let Some(raw) = existing {
+        let recorded: VerifiedChildReceipt = serde_json::from_str(&raw)
+            .map_err(|_| "child_council_stale: invalid second-wave receipt.")?;
+        if candidate.as_ref() != Some(&recorded) {
+            return Err("child_council_stale: second-wave receipt no longer matches native evidence.".into());
+        }
+        return Ok(false);
+    }
+    let Some(receipt) = candidate else { return Ok(false) };
+    super::record_request(
+        store, &root.session_id, &key, "council_child_s2_receipt",
+        &serde_json::to_string(&receipt).map_err(|e| e.to_string())?,
+        &record.child_session_id,
+    )?;
+    Ok(true)
+}
+
+fn read_escalation_receipt(
+    store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
+    child: &TeamSnapshot, choice: &CouncilNestedReviewer,
+) -> Result<Option<VerifiedChildReceipt>> {
+    let key = escalation_receipt_key(root, &record.bot_id);
+    let recorded: Option<String> = store.db.query_row(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s2_receipt'
+         AND worker_id=?3",
+        params![root.session_id, key, record.child_session_id],
+        |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    let Some(raw) = recorded else { return Ok(None) };
+    let stored: VerifiedChildReceipt = serde_json::from_str(&raw)
+        .map_err(|_| "child_council_stale: malformed second-wave receipt.")?;
+    if escalation_receipt(store, root, record, child, choice)?.as_ref() != Some(&stored) {
+        return Err("child_council_stale: second-wave evidence changed or was revoked.".into());
+    }
+    Ok(Some(stored))
+}
+
 /// Bind the real child receipt to one root-owned native worker identity.
 fn parent_seat(
     store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
@@ -873,6 +1042,7 @@ pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
             .ok_or("child_council_stale: reserved child Architect is missing.")?;
         if child.status == "running" {
             created |= record_verified_receipt(store, root, &record, &child)?;
+            created |= record_escalation_receipt(store, root, &record, &child, choice)?;
             let had_parent_seat = parent_seat(store, root, &record, &child, false)?.is_some();
             if parent_seat(store, root, &record, &child, true)?.is_some() && !had_parent_seat {
                 created = true;
@@ -1113,6 +1283,7 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
         let team = super::load(store, &record.child_session_id)?
             .ok_or("child_council_stale: child team is missing.")?;
         let verified_child_receipt = read_verified_receipt(store, root, &record, &team)?;
+        let verified_escalation_receipt = read_escalation_receipt(store, root, &record, &team, child)?;
         let authenticated_parent_seat = parent_seat(store, root, &record, &team, false)?;
         let active = team.status == "running";
         let (observed_leaf_usage, leaf_attempts) =
@@ -1128,7 +1299,9 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
             required_leaf_reviewers: child.child_reviewers,
             observed_leaf_usage,
             leaf_attempts,
-            status: if team.workers.iter().any(|leaf|
+            status: if verified_escalation_receipt.is_some() {
+                "child_escalation_evidence_ready_root_pending"
+            } else if team.workers.iter().any(|leaf|
                 leaf.council.as_ref().is_some_and(|seat| seat.round == 2)) {
                 "child_escalation_reviewing"
             } else if authenticated_parent_seat.is_some() {
@@ -1137,6 +1310,7 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
                 "child_evidence_ready_root_pending"
             } else if active { "reviewing" } else { "blocked_until_native_child_review" },
             verified_child_receipt,
+            verified_escalation_receipt,
             authenticated_parent_seat,
         })
     }).collect()

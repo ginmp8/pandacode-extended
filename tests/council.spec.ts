@@ -17,7 +17,10 @@ async function open(page: Page, url = '/', refuse: Record<string, string> = {}, 
     const response = await route.fetch();
     const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/, `
       if (command === 'architect_set_council') (window.__councilCalls ??= []).push(structuredClone(args.council));
-      if (command === 'architect_start') (window.__councilStarts ??= []).push(args.text);
+      if (command === 'architect_start') {
+        (window.__councilStarts ??= []).push(args.text);
+        (window.__councilStartSessionIds ??= []).push(args.sessionId);
+      }
       if (command === 'architect_council_accept') (window.__councilAccepts ??= []).push(args.sessionId);
       if (command === 'architect_set_council' && ${delay} && (!${JSON.stringify(delaySession)} || args.sessionId === ${JSON.stringify(delaySession)})) await new Promise(done => setTimeout(done, ${delay}));
       if (${JSON.stringify(slow)}[command]) await new Promise(done => setTimeout(done, ${JSON.stringify(slow)}[command]));
@@ -932,12 +935,18 @@ test('"Turn on for new threads" starts Council with the first send of a new thre
   await panel(page).getByLabel('Start new threads with Council on').check();
   expect(JSON.parse(await page.evaluate(() => localStorage.getItem('pandacode.council') ?? '{}')).newThreads).toBe(true);
   await page.keyboard.press('Escape');
+  const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });
+  const previousSession = await prompt.getAttribute('data-session-id');
   await page.locator('.new-task-button').click();
-  await composerSettled(page);
-  await page.getByRole('textbox', { name: 'Message your coding agent' }).fill('Add a search box');
-  await page.getByRole('textbox', { name: 'Message your coding agent' }).press('Enter');
+  await expect.poll(() => prompt.getAttribute('data-session-id')).not.toBe(previousSession);
+  await composerReady(page);
+  const newSessionId = await prompt.getAttribute('data-session-id');
+  expect(newSessionId).toBeTruthy();
+  await prompt.fill('Add a search box');
+  await prompt.press('Enter');
   await expect.poll(() => calls(page)).toEqual([{ target: 9, maxRounds: 10, reviewers: 0 }]);
   await expect.poll(() => page.evaluate(() => (window as any).__councilStarts ?? [])).toEqual(['Add a search box']);
+  await expect.poll(() => page.evaluate(() => (window as any).__councilStartSessionIds ?? [])).toEqual([newSessionId]);
 });
 
 test('with Classic team setup, enabling Council on a thread with no team opens that setup', async ({ page }) => {
@@ -980,12 +989,18 @@ const composerSettled = (page: Page) => page.waitForFunction(() => {
   seen.__prompt = now; return same;
 }, undefined, { polling: 300 });
 
+/** The next thread owns the prompt only once its session identity changed and input is enabled. */
+const composerReady = (page: Page) => expect(page.getByRole('textbox', { name: 'Message your coding agent' })).toBeEnabled();
+
 async function newThreadsOn(page: Page): Promise<void> {
   await button(page).click();
   await panel(page).getByLabel('Start new threads with Council on').check();
   await page.keyboard.press('Escape');
+  const prompt = page.getByRole('textbox', { name: 'Message your coding agent' });
+  const previousSession = await prompt.getAttribute('data-session-id');
   await page.locator('.new-task-button').click();
-  await composerSettled(page);
+  await expect.poll(() => prompt.getAttribute('data-session-id')).not.toBe(previousSession);
+  await composerReady(page);
 }
 
 test('with Classic team setup, a first send starts no automatic team for Council', async ({ page }) => {
@@ -1005,8 +1020,7 @@ test('a second Enter while Council turns on for the first send sends nothing mor
   // New task creates its thread asynchronously. Typing before it opens would send to the previous thread.
   const previous = await prompt.getAttribute('data-session-id');
   await newThreadsOn(page);
-  await expect.poll(() => prompt.getAttribute('data-session-id')).not.toBe(previous);
-  await composerSettled(page);
+  expect(await prompt.getAttribute('data-session-id')).not.toBe(previous);
   // The team's start waits on a request the test holds, then releases: no timers.
   await page.evaluate(() => { (window as any).__hold = { architect_profiles: new Promise(done => { (window as any).__release = done; }) }; });
   await prompt.fill('Add a search box');

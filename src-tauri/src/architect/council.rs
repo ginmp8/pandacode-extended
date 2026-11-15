@@ -294,6 +294,9 @@ impl CouncilConfig {
                 {
                     return Err("Forced nested S2 requires at least two child Council rounds.".into());
                 }
+                if self.strategy == CouncilExecutionStrategy::TwoPhase && child.child_max_rounds < 2 {
+                    return Err("Nested S3 requires two independent child Council phases.".into());
+                }
                 if !(MIN_REVIEWERS..=MAX_REVIEWERS).contains(&child.child_reviewers)
                     || !child.child_target.is_finite() || !(1.0..=10.0).contains(&child.child_target)
                     || !(1..=MAX_ROUNDS).contains(&child.child_max_rounds)

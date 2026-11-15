@@ -4656,6 +4656,119 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
 }
 
 
+
+#[test]
+fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phase_two() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["security-child", "architecture-child"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 2, 0);
+        config.strategy = council::CouncilExecutionStrategy::TwoPhase;
+        config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
+            .map(|bot| council::CouncilNestedReviewer {
+                bot_id: (*bot).into(), child_reviewers: 2,
+                child_target: 9.5, child_max_rounds: 2,
+            }).collect();
+        assert_eq!(config.mode(), "m4");
+        config.validate().unwrap();
+        let mut invalid = config.clone();
+        invalid.nested_bot_reviewers[0].child_max_rounds = 1;
+        assert!(invalid.validate().unwrap_err().contains("two independent child Council phases"));
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid,
+        "Run two independent task-owned phases for child Council review",
+        None, None).unwrap();
+    let (pending, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Admit first S3 child phase"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(pending["completed"], false);
+    for _ in 0..4 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                "Council findings JSON: [{\"severity\":\"medium\",\"category\":\"coverage\",\"title\":\"Missing edge case\",\"explanation\":\"Challenge the replay boundary\"}]\nCouncil score: 9.6/10").unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    }
+    let (pending, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Admit independent S3 challengers"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(pending["completed"], false);
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let children = child_council::inspect(&store, &root).unwrap();
+        assert_eq!(children.len(), 2);
+        assert!(children.iter().all(|child| child.verified_child_receipt.is_some()
+            && child.leaf_attempts.len() == 4
+            && child.leaf_attempts.iter().filter(|leaf| leaf.round == 2).count() == 2));
+        assert!(!verified_council_pass(&store, &root),
+            "challenger admission is not a second-phase Council approval");
+        for child in &children {
+            for leaf in child.leaf_attempts.iter().filter(|leaf| leaf.round == 2) {
+                let prompt: String = store.db.query_row(
+                    "SELECT task_description FROM sessions WHERE id=(
+                        SELECT session_id FROM architect_workers
+                        WHERE parent_session_id=?1 AND worker_id=?2)",
+                    rusqlite::params![child.child_session_id, leaf.worker_id],
+                    |row| row.get(0),
+                ).unwrap();
+                assert!(prompt.contains("S3 NATIVE CHILD CHALLENGE HANDOFF"));
+                assert!(prompt.contains("Missing edge case"));
+                assert!(!prompt.contains("Council score: 9.6/10"),
+                    "phase-one numeric scores cannot bias independent challengers");
+            }
+        }
+    }
+    let (replayed, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Challengers are still running"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(replayed["completed"], false);
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        assert!(child_council::inspect(&store, &root).unwrap().iter()
+            .all(|child| child.leaf_attempts.len() == 4));
+    }
+    for _ in 0..4 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                "Independent challenge, still awaiting a native phase-two receipt.\nCouncil score: 9.7/10").unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    }
+    let (unverified, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Await authenticated S3 terminal gate"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(unverified["completed"], false,
+        "two rounds of real scores do not confer terminal approval without authenticated challenge receipts");
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    assert!(!verified_council_pass(&store, &root));
+    let leaves = child_council::inspect(&store, &root).unwrap().into_iter()
+        .flat_map(|child| child.leaf_attempts.into_iter().map(|leaf| leaf.worker_id))
+        .collect::<Vec<_>>();
+    assert_eq!(leaves.len(), 8);
+    assert_eq!(leaves.iter().collect::<std::collections::HashSet<_>>().len(), 8,
+        "S3 native reviewer identities must remain distinct across two children and two phases");
+}
+
 #[test]
 fn nested_m4_forced_s2_passes_only_after_two_authenticated_child_waves() {
     let (state, sid) = state_fixture();

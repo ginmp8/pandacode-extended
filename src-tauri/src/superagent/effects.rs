@@ -1108,10 +1108,12 @@ pub(crate) fn receipt_history(
 
 /// Paged, task-scoped native receipts. A compound timestamp/key cursor
 /// prevents dropping receipts with identical creation timestamps.
+pub(crate) type EffectReceiptPage = (Vec<EffectReceiptView>, Option<(i64, String)>);
+
 pub(crate) fn receipt_history_page(
     store: &Store, ticket_id: &str, limit: i64,
     before: Option<(i64, &str)>, unresolved_only: bool,
-) -> Result<(Vec<EffectReceiptView>, Option<(i64, String)>)> {
+) -> Result<EffectReceiptPage> {
     if !(1..=100).contains(&limit) {
         return Err("Effect receipt page size must be between 1 and 100.".into());
     }

@@ -1991,12 +1991,6 @@ pub(crate) fn inspect_headless_team_roster(
     })).map_err(|e|e.to_string())
 }
 
-pub(crate) fn inspect_headless_effect_receipts(
-    database_path: &std::path::Path, ticket_id: &str,
-) -> Result<String> {
-    inspect_headless_effect_receipts_page(database_path, ticket_id, None, None, false)
-}
-
 /// Page native effect history without Store restart recovery or provider calls.
 pub(crate) fn inspect_headless_effect_receipts_page(
     database_path: &std::path::Path, ticket_id: &str,

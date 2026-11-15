@@ -3803,10 +3803,12 @@ fn create_nested_child_team(
     child_config.max_parallel = composition.limits.max_concurrent_leaves;
     child_config.max_assignments = composition.limits.max_leaf_reviews_per_round;
     child_config.lead_guidance = Some(nested_child_guidance(root, worker, nested)?);
-    let mut child_council = CouncilConfig::default();
-    child_council.target = nested.target;
-    child_council.max_rounds = nested.max_rounds;
-    child_council.reviewers = nested.child_reviewer_count;
+    let mut child_council = CouncilConfig {
+        target: nested.target,
+        max_rounds: nested.max_rounds,
+        reviewers: nested.child_reviewer_count,
+        ..CouncilConfig::default()
+    };
     let mut child_composition = composition.clone();
     child_composition.automatic = council::CouncilAutomaticReviewers {
         enabled: true,

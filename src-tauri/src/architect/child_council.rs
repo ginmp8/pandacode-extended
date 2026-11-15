@@ -302,7 +302,12 @@ fn validate_admitted(
     if team.status != "running" || team.generation != root.generation
         || team.council_since != root.council_since || team.objective != root.objective
         || team.config != child_config(root.config.council.as_ref().ok_or("Council is off.")?, choice)?
-        || team.workers.len() != choice.child_reviewers
+        || !(team.workers.len() == choice.child_reviewers
+            || (team.workers.len() == choice.child_reviewers * 2
+                && choice.child_max_rounds >= 2
+                && root.config.council.as_ref().is_some_and(|policy|
+                    policy.strategy == super::council::CouncilExecutionStrategy::Escalated
+                        && policy.force_escalation)))
         || team.pending_turn.is_some() || team.pending_setup.is_some()
         || team.summary.is_some() || team.council_accepted.is_some()
     {
@@ -316,13 +321,14 @@ fn validate_admitted(
         "SELECT COUNT(*) FROM architect_workers WHERE parent_session_id=?1",
         [&record.child_session_id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
-    if requests != choice.child_reviewers as i64 || owned != choice.child_reviewers as i64 {
+    if requests != team.workers.len() as i64 || owned != team.workers.len() as i64 {
         return Err(invalid().into());
     }
     let coordinator = store.session(&record.child_session_id)?;
     let mut ids = HashSet::new();
     let mut sessions = HashSet::new();
-    for leaf in &team.workers {
+    for (index, leaf) in team.workers.iter().enumerate() {
+        let expected_round = if index < choice.child_reviewers { 1 } else { 2 };
         let session = store.session(&leaf.session_id)?;
         if !ids.insert(&leaf.id) || !sessions.insert(&leaf.session_id)
             || super::parent_of(store, &leaf.session_id)?.as_deref()
@@ -334,7 +340,7 @@ fn validate_admitted(
             || !leaf.read_only || leaf.wrote_at != 0 || !leaf.files.is_empty()
             || leaf.parent_worker.is_some() || leaf.abandoned
             || !matches!(leaf.status.as_str(), "queued" | "running" | "completed" | "failed" | "stopped")
-            || leaf.council.as_ref().is_none_or(|seat| seat.round != 1)
+            || leaf.council.as_ref().is_none_or(|seat| seat.round != expected_round)
             || super::parent_of(store, &record.child_session_id)?.as_deref()
                 != Some(root.session_id.as_str())
         {
@@ -472,18 +478,24 @@ fn root_artifact_revision(
 fn verified_receipt(
     store: &Store, record: &FrozenChildReservation, child: &TeamSnapshot,
 ) -> Result<Option<VerifiedChildReceipt>> {
-    if child.workers.is_empty() || child.workers.iter().any(|leaf| leaf.status != "completed") {
+    // Keep the immutable first-wave receipt verifiable after independently
+    // admitted S2 leaves appear. The old evidence is never rewritten.
+    let mut first = child.clone();
+    first.workers.retain(|leaf| leaf.council.as_ref().is_some_and(|seat| seat.round == 1));
+    if first.workers.len() != first.config.council.as_ref().map_or(0, |c| c.needed())
+        || first.workers.iter().any(|leaf| leaf.status != "completed")
+    {
         return Ok(None);
     }
-    let Some(status) = super::council::status(child) else { return Ok(None) };
+    let Some(status) = super::council::status(&first) else { return Ok(None) };
     if status.state != "passed" || status.stale || status.round != 1
-        || !super::council_evidence_is_current(store, child)
+        || !super::council_evidence_is_current(store, &first)
     {
         return Ok(None);
     }
     let mut lowest_score = f64::INFINITY;
-    let mut leaf_worker_ids = Vec::with_capacity(child.workers.len());
-    for leaf in &child.workers {
+    let mut leaf_worker_ids = Vec::with_capacity(first.workers.len());
+    for leaf in &first.workers {
         let Some(seat) = leaf.council.as_ref() else { return Ok(None) };
         let Some(score) = seat.score else { return Ok(None) };
         let Some(binding) = leaf.reviewer_binding.as_ref() else { return Ok(None) };
@@ -491,7 +503,7 @@ fn verified_receipt(
             || !leaf.files.is_empty() || seat.round != 1 || seat.started_at <= 0
             || seat.reported_severe_finding || seat.reported_conflict
             || super::council::latest_score(store, &leaf.session_id) != Some(score)
-            || binding.validate(child, leaf).is_err()
+            || binding.validate(&first, leaf).is_err()
             || reviewer_security::validate_recorded_authority(
                 store, &child.session_id, binding,
             ).is_err()
@@ -505,11 +517,11 @@ fn verified_receipt(
     // The child Council's native criterion gate has already passed. Persist
     // the exact matching scored leaf identities so the root can revalidate
     // required lens coverage without treating the composite minimum as proof.
-    let config = child.config.council.as_ref()
+    let config = first.config.council.as_ref()
         .ok_or("child_council_stale: child criterion policy is missing.")?;
     let mut criterion_evidence = Vec::new();
     for criterion in config.criteria.iter().filter(|criterion| criterion.required) {
-        let matches = child.workers.iter().filter_map(|leaf| {
+        let matches = first.workers.iter().filter_map(|leaf| {
             let seat = leaf.council.as_ref()?;
             (seat.lens.trim().to_lowercase() == criterion.lens.trim().to_lowercase())
                 .then_some((leaf.id.clone(), seat.score?))
@@ -737,6 +749,108 @@ pub(super) fn require_total_attempt_capacity(
     super::council::require_composed_attempt_budget(root, child_attempts, additional_attempts)
 }
 
+/// Issue one fresh, independently authorized native child reviewer wave.
+/// Parent seats remain task-bound; this never creates a second Council engine.
+fn issue_leaf_wave(
+    store: &Store, root: &TeamSnapshot, choice: &CouncilNestedReviewer,
+    record: &FrozenChildReservation, child: &mut TeamSnapshot, round: usize,
+) -> Result<()> {
+    let config = root.config.council.as_ref().ok_or("Council is off.")?;
+    let session = store.session(&record.child_session_id)?;
+    super::validate_worker_role(&session.provider, true)?;
+    let lenses: Vec<String> = config.criteria.iter().map(|criterion| criterion.lens.clone()).collect();
+    for index in 0..choice.child_reviewers {
+            let lens = lenses.get(index).cloned().unwrap_or_else(|| format!("Child review {}", index + 1));
+        let mut assignment = format!(
+                "Review the frozen task artifact independently for the {lens} criterion. \
+                 You are a task-scoped Council leaf, never the coordinating bot. \
+                 Inspect only; do not edit the checkout, access a bot conversation, \
+                 invoke tools with side effects or spawn another agent. \
+                 Report concrete findings and end with Council score: N/10. \
+                 Task objective: {}",
+                root.objective,
+            );
+        if round == 2 {
+            assignment.push_str(" This is a fresh, independent forced S2 escalation review. Recheck the unchanged artifact without inheriting first-wave scores, reports or verdicts.");
+        }
+        let leaf = store.create_session(&session.project_id, &session.provider, &session.model, "plan")?;
+            let now = storage::now();
+            store.db.execute(
+                "UPDATE sessions SET title=?2,task_description=?3,worktree_path=?4,reasoning_effort=?5 WHERE id=?1",
+                params![leaf.id, format!("Child Council reviewer {}", index + 1),
+                    assignment, session.worktree_path, session.reasoning_effort],
+            ).map_err(|e| e.to_string())?;
+            let id = storage::id();
+            store.db.execute(
+                "INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",
+                params![record.child_session_id, id, leaf.id],
+            ).map_err(|e| e.to_string())?;
+            let seat = CouncilSeat {
+                round, lens, score: None, started_at: 0,
+                closed_by_selection: false, reported_severe_finding: false, reported_conflict: false,
+            };
+            let binding = ReviewerBinding::native(&child, &id, now, &session.provider, &session.model, &seat);
+            reviewer_security::record_native_authority(store, &record.child_session_id, &binding)?;
+            child.workers.push(Worker {
+                id, session_id: leaf.id, name: format!("Child reviewer {}", index + 1),
+                profile_id: "native-child-reviewer".into(), provider: session.provider.clone(),
+                model: session.model.clone(), reasoning_effort: session.reasoning_effort.clone(),
+                status: "queued".into(), assignment, summary: String::new(), error: None,
+                depends_on: Vec::new(), files: Vec::new(), read_only: true,
+                attempt: 1, created_at: now, updated_at: now, keys: vec![if round == 1 { format!("leaf-{}", index + 1) }
+                    else { format!("leaf-{round}-{}", index + 1) }],
+                abandoned: false, result_revision: 0, checkpoint: None, timed_out: false,
+                failovers: 0, parent_worker: None, resume_prompt: None,
+                tool_catalog_version: super::TOOL_CATALOG_VERSION, nudged: false,
+                reported: false, council: Some(seat), reviewer_binding: Some(binding),
+                score_nudged: false, wrote_at: 0,
+            });
+        }
+    Ok(())
+}
+
+/// A second child wave is never admitted from a cached verdict. It requires
+/// completed, authentically scored root reviewers from the same enabled
+/// sources, with fresh native sessions and no severe or conflicting findings.
+fn fresh_s2_root_reviewers(store: &Store, root: &TeamSnapshot, config: &CouncilConfig) -> bool {
+    let expected = config.reviewer_bot_ids.len() + config.automatic_reviewers;
+    if expected == 0 { return true; }
+    let first_sessions: HashSet<&str> = root.workers.iter()
+        .filter(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 1))
+        .map(|worker| worker.session_id.as_str()).collect();
+    let second = root.workers.iter().filter(|worker|
+        worker.council.as_ref().is_some_and(|seat| seat.round == 2)
+    ).collect::<Vec<_>>();
+    if second.len() != expected { return false; }
+    let mut sessions = HashSet::new();
+    let mut direct = HashSet::new();
+    let mut automatic = 0usize;
+    for worker in second {
+        let Some(seat) = worker.council.as_ref() else { return false };
+        let Some(binding) = worker.reviewer_binding.as_ref() else { return false };
+        if worker.status != "completed" || !worker.read_only || worker.abandoned
+            || worker.wrote_at != 0 || !worker.files.is_empty()
+            || seat.started_at <= 0 || seat.reported_severe_finding || seat.reported_conflict
+            || seat.score.is_none_or(|score| !score.is_finite() || score < config.target)
+            || super::council::latest_score(store, &worker.session_id) != seat.score
+            || first_sessions.contains(worker.session_id.as_str())
+            || !sessions.insert(worker.session_id.as_str())
+            || binding.validate(root, worker).is_err()
+            || reviewer_security::validate_recorded_authority(store, &root.session_id, binding).is_err()
+        {
+            return false;
+        }
+        match binding.reviewer_bot_id.as_deref() {
+            Some(bot) if config.reviewer_bot_ids.iter().any(|id| id == bot)
+                && super::bot_reviewers::validate_frozen_seat(store, binding, true).is_ok()
+                && direct.insert(bot) => {}
+            Some(_) => return false,
+            None => automatic += 1,
+        }
+    }
+    direct.len() == config.reviewer_bot_ids.len() && automatic == config.automatic_reviewers
+}
+
 /// Trusted root-only transition: allocate fresh read-only reviewer sessions
 /// after the root's actual writing workers settle. No bot conversation, prompt
 /// claim or persisted child reservation can request this operation.
@@ -775,56 +889,43 @@ pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
         child.generation = root.generation;
         child.objective = root.objective.clone();
         child.council_since = root.council_since;
-        let lenses: Vec<String> = config.criteria.iter().map(|criterion| criterion.lens.clone()).collect();
-        for index in 0..choice.child_reviewers {
-            let lens = lenses.get(index).cloned().unwrap_or_else(|| format!("Child review {}", index + 1));
-            let assignment = format!(
-                "Review the frozen task artifact independently for the {lens} criterion. \
-                 You are a task-scoped Council leaf, never the coordinating bot. \
-                 Inspect only; do not edit the checkout, access a bot conversation, \
-                 invoke tools with side effects or spawn another agent. \
-                 Report concrete findings and end with Council score: N/10. \
-                 Task objective: {}",
-                root.objective,
-            );
-            let leaf = store.create_session(&session.project_id, &session.provider, &session.model, "plan")?;
-            let now = storage::now();
-            store.db.execute(
-                "UPDATE sessions SET title=?2,task_description=?3,worktree_path=?4,reasoning_effort=?5 WHERE id=?1",
-                params![leaf.id, format!("Child Council reviewer {}", index + 1),
-                    assignment, session.worktree_path, session.reasoning_effort],
-            ).map_err(|e| e.to_string())?;
-            let id = storage::id();
-            store.db.execute(
-                "INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",
-                params![record.child_session_id, id, leaf.id],
-            ).map_err(|e| e.to_string())?;
-            let seat = CouncilSeat {
-                round: 1, lens, score: None, started_at: 0,
-                closed_by_selection: false, reported_severe_finding: false, reported_conflict: false,
-            };
-            let binding = ReviewerBinding::native(&child, &id, now, &session.provider, &session.model, &seat);
-            reviewer_security::record_native_authority(store, &record.child_session_id, &binding)?;
-            child.workers.push(Worker {
-                id, session_id: leaf.id, name: format!("Child reviewer {}", index + 1),
-                profile_id: "native-child-reviewer".into(), provider: session.provider.clone(),
-                model: session.model.clone(), reasoning_effort: session.reasoning_effort.clone(),
-                status: "queued".into(), assignment, summary: String::new(), error: None,
-                depends_on: Vec::new(), files: Vec::new(), read_only: true,
-                attempt: 1, created_at: now, updated_at: now, keys: vec![format!("leaf-{}", index + 1)],
-                abandoned: false, result_revision: 0, checkpoint: None, timed_out: false,
-                failovers: 0, parent_worker: None, resume_prompt: None,
-                tool_catalog_version: super::TOOL_CATALOG_VERSION, nudged: false,
-                reported: false, council: Some(seat), reviewer_binding: Some(binding),
-                score_nudged: false, wrote_at: 0,
-            });
-        }
+        issue_leaf_wave(store, root, choice, &record, &mut child, 1)?;
         super::save(store, &mut child)?;
         // Validate the complete native issuance before the parent transaction
         // commits. A partial or forged set rolls back, never becoming a vote.
         read(store, root, choice)?
             .ok_or("child_council_stale: native child admission was not persisted.")?;
         created = true;
+    }
+    // Forced S2 admits a second real child wave only after every first-wave
+    // composite receipt has been authenticated and every enabled root source
+    // has independently completed its second wave. A missing root reviewer
+    // can never be silently replaced by an automatic reviewer or a child vote.
+    if config.strategy == super::council::CouncilExecutionStrategy::Escalated
+        && config.force_escalation
+        && super::eligible_hierarchical_s2_root_escalation(store, root)
+        && fresh_s2_root_reviewers(store, root, config)
+    {
+        for choice in &config.nested_bot_reviewers {
+            let record = read(store, root, choice)?
+                .ok_or("child_council_stale: expected child reservation for S2 escalation.")?;
+            let mut child = super::load(store, &record.child_session_id)?
+                .ok_or("child_council_stale: S2 child Architect is missing.")?;
+            if child.status != "running" || child.workers.len() != choice.child_reviewers {
+                return Err("child_council_stale: S2 child first-wave roster changed.".into());
+            }
+            if read_verified_receipt(store, root, &record, &child)?.is_none()
+                || parent_seat(store, root, &record, &child, false)?.is_none()
+            {
+                return Err("child_council_denied: S2 requires authenticated first-wave child evidence.".into());
+            }
+            require_total_attempt_capacity(store, root, choice.child_reviewers)?;
+            issue_leaf_wave(store, root, choice, &record, &mut child, 2)?;
+            super::save(store, &mut child)?;
+            read(store, root, choice)?
+                .ok_or("child_council_stale: S2 leaf wave was not persisted.")?;
+            created = true;
+        }
     }
     // A completed child cannot be used while any sibling composite identity
     // or extra persisted root seat conflicts with the frozen roster.
@@ -1029,7 +1130,10 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
             required_leaf_reviewers: child.child_reviewers,
             observed_leaf_usage,
             leaf_attempts,
-            status: if authenticated_parent_seat.is_some() {
+            status: if team.workers.iter().any(|leaf|
+                leaf.council.as_ref().is_some_and(|seat| seat.round == 2)) {
+                "child_escalation_reviewing"
+            } else if authenticated_parent_seat.is_some() {
                 "parent_composite_ready_root_pending"
             } else if verified_child_receipt.is_some() {
                 "child_evidence_ready_root_pending"

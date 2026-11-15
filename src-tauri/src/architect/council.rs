@@ -286,6 +286,11 @@ impl CouncilConfig {
                 if !super::valid_id(&child.bot_id) || !ids.insert(&child.bot_id) {
                     return Err("Nested Council bot IDs must be valid, unique and distinct from direct reviewers.".into());
                 }
+                if self.strategy == CouncilExecutionStrategy::Escalated
+                    && self.force_escalation && child.child_max_rounds < 2
+                {
+                    return Err("Forced nested S2 requires at least two child Council rounds.".into());
+                }
                 if !(MIN_REVIEWERS..=MAX_REVIEWERS).contains(&child.child_reviewers)
                     || !child.child_target.is_finite() || !(1.0..=10.0).contains(&child.child_target)
                     || !(1..=MAX_ROUNDS).contains(&child.child_max_rounds)

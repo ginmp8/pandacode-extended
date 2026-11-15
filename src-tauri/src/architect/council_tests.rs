@@ -4359,6 +4359,44 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
     assert_eq!(root.workers.iter().filter(|w| w.council.as_ref().is_some_and(|s| s.round == 2)).count(), 1);
     assert!(!verified_council_pass(&store, &root),
         "fresh root callbacks cannot replace missing phase-two child evidence");
+    drop(store);
+    let (waiting, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Admit fresh child escalation reviewers"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(waiting["completed"], false, "S2 must not approve on admission alone");
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let child = child_council::inspect(&store, &root).unwrap();
+        assert_eq!(child.len(), 1);
+        assert_eq!(child[0].status, "child_escalation_reviewing");
+        assert_eq!(child[0].leaf_attempts.len(), 4,
+            "second S2 child wave must issue two additional actual native reviewers");
+        assert_eq!(child[0].leaf_attempts.iter().filter(|leaf| leaf.round == 2).count(), 2);
+        assert!(child[0].verified_child_receipt.is_some(),
+            "first-wave receipt remains immutable and reverified");
+        assert!(child_council::verified_parent_seats(&store, &root).unwrap().is_none(),
+            "first-wave parent seat cannot approve while second child wave is pending");
+        assert!(!verified_council_pass(&store, &root));
+    }
+    for _ in 0..2 {
+        let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        assert_ne!(action.sid, first_run.config.session_id);
+        assert_ne!(action.sid, second_run.config.session_id);
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&action.sid, "assistant",
+                "Fresh independent child S2 review.\\nCouncil score: 9.6/10").unwrap();
+        }
+        completed_state(&state, &action.sid, Some(&action.admission), true, false, &mut |_| {});
+    }
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    let child = child_council::inspect(&store, &root).unwrap();
+    assert_eq!(child[0].leaf_attempts.iter().filter(|leaf|
+        leaf.round == 2 && leaf.status == "completed" && leaf.score == Some(9.6)).count(), 2);
+    assert!(!verified_council_pass(&store, &root),
+        "second-wave callbacks are real, but final hierarchical S2 reconciliation remains fail-closed");
 }
 
 #[test]

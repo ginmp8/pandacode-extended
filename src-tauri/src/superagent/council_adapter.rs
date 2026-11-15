@@ -1725,9 +1725,12 @@ mod tests {
     }
 
     fn fixture() -> Store {
-        let path = std::env::temp_dir().join(format!("sa-council-{}.sqlite3",storage::id()));
-        let store = Store::open(&path).unwrap();
-        let workspace = std::env::temp_dir().join(format!("sa-council-workspace-{}",storage::id()));
+        // Isolate both the SQLite file and the private snapshot base per test.
+        // Parallel Council tests must not share a snapshot directory.
+        let root = std::env::temp_dir().join(format!("sa-council-{}",storage::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let store = Store::open(&root.join("store.sqlite3")).unwrap();
+        let workspace = root.join("workspace");
         std::fs::create_dir_all(&workspace).unwrap();
         store.db.execute(
             "INSERT INTO projects(id,name,path)

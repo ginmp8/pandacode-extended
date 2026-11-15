@@ -2123,11 +2123,47 @@ pub(super) fn parse_reported_findings(report: &str) -> Vec<ReportedFindingDraft>
 }
 
 
+/// Reports are never authorization evidence. A native-bound reviewer may only
+/// display text from the exact task-owned session that received its frozen grant.
+/// Legacy unbound Council snapshots retain their original read-only projection.
+fn current_finding_origin_is_authorized(
+    store: &storage::Store, team: &TeamSnapshot, worker: &Worker,
+) -> bool {
+    let Some(binding) = worker.reviewer_binding.as_ref() else {
+        return team.config.council.as_ref().is_none_or(|config| config.composition.is_none());
+    };
+    if !worker.read_only || binding.validate(team, worker).is_err() {
+        return false;
+    }
+    let authorized = if team.config.council.as_ref()
+        .is_some_and(|config| config.composition.is_some())
+    {
+        super::reviewer_security::validate_recorded_authority(
+            store, &team.session_id, binding,
+        )
+    } else {
+        super::reviewer_security::validate_issued_authority(
+            store, &team.session_id, binding,
+        )
+    };
+    if authorized.is_err() {
+        return false;
+    }
+    store.db.query_row(
+        "SELECT 1 FROM architect_workers
+         WHERE parent_session_id=?1 AND worker_id=?2 AND session_id=?3 LIMIT 1",
+        params![team.session_id, worker.id, worker.session_id],
+        |row| row.get::<_, i64>(0),
+    ).optional().ok().flatten() == Some(1)
+}
+
 // Current scored model reports remain unverified claims, separate from native findings.
 pub(super) fn reported_findings(store: &storage::Store, team: &TeamSnapshot) -> Vec<CouncilHistoricalReportedFinding> {
     let mut findings = Vec::new();
     for (worker, seat) in seats(team) {
-        if worker.status != "completed" || !counts(worker, seat) || seat.score.is_none() {
+        if worker.status != "completed" || !counts(worker, seat) || seat.score.is_none()
+            || !current_finding_origin_is_authorized(store, team, worker)
+        {
             continue;
         }
         let latest = store.db.query_row(
@@ -2206,6 +2242,9 @@ pub(super) fn historical_reported_findings(
             }
             binding.council_cycle_id.clone()
         } else {
+            if !current_finding_origin_is_authorized(store, team, worker) {
+                continue;
+            }
             current_cycle.clone()
         };
         if worker.status != "completed" || !counts(worker, seat) || seat.score.is_none() {

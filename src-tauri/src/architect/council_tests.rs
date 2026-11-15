@@ -3383,6 +3383,55 @@ fn scored_report_claims_become_unverified_history_without_mutating_native_approv
 }
 
 #[test]
+fn native_current_and_same_cycle_history_never_read_foreign_reviewer_sessions() {
+    let (state, sid) = council_state(on(9.0, 3, 2));
+    let store = state.store.lock().unwrap();
+    let project = store.session(&sid).unwrap().project_id;
+    let reviewer_session = store.create_session(&project, "codex", "", "full").unwrap();
+    let foreign = store.create_session(&project, "codex", "", "full").unwrap();
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    team.council_since = storage::now().max(20) - 10;
+    let mut reviewer = seat("native-session-binding", 1, Some(7.0), team.council_since + 1);
+    reviewer.session_id = reviewer_session.id.clone();
+    reviewer.read_only = true;
+    reviewer.status = "completed".into();
+    let binding = reviewer_security::ReviewerBinding::native(
+        &team, &reviewer.id, reviewer.created_at, &reviewer.provider,
+        &reviewer.model, reviewer.council.as_ref().unwrap(),
+    );
+    reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+    reviewer.reviewer_binding = Some(binding);
+    team.workers.push(reviewer);
+    let original_report = "Council findings JSON: [{\"severity\":\"high\",\"category\":\"security\",\"title\":\"Linked finding\",\"explanation\":\"Review needed\"}]\nCouncil score: 7/10";
+    let foreign_report = "Council findings JSON: [{\"severity\":\"critical\",\"category\":\"privacy\",\"title\":\"Foreign finding\",\"explanation\":\"Do not reveal\"}]\nCouncil score: 7/10";
+    assert_eq!(parse_score(original_report), Some(7.0));
+    assert_eq!(parse_reported_findings(foreign_report).len(), 1);
+    store.message(&reviewer_session.id, "assistant", original_report).unwrap();
+    store.message(&foreign.id, "assistant", foreign_report).unwrap();
+    store.db.execute(
+        "INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",
+        rusqlite::params![sid, "native-session-binding", reviewer_session.id],
+    ).unwrap();
+    assert_eq!(council_read_snapshot(&store, &team).council_reported_findings.len(), 1);
+
+    let original_session = team.workers[0].session_id.clone();
+    team.workers[0].session_id = foreign.id.clone();
+    assert!(council_read_snapshot(&store, &team).council_reported_findings.is_empty(),
+        "a forged worker session cannot expose another Council's findings");
+    team.workers[0].session_id = original_session.clone();
+    assert_eq!(council_read_snapshot(&store, &team).council_reported_findings.len(), 1);
+
+    store.message(&reviewer_session.id, "coordination", "A new reviewer turn").unwrap();
+    store.message(&foreign.id, "coordination", "An unrelated turn").unwrap();
+    team.workers[0].session_id = foreign.id;
+    assert!(council_read_snapshot(&store, &team).council_historical_reported_findings.is_empty(),
+        "same-cycle historical projection must also authenticate the worker session");
+    team.workers[0].session_id = original_session;
+    assert_eq!(council_read_snapshot(&store, &team).council_historical_reported_findings.len(), 1,
+        "linked read-only history remains available without granting approval");
+}
+
+#[test]
 fn historical_prior_cycle_claims_require_native_session_link_and_unrevoked_grant() {
     let (state, sid) = council_state(on(9.0, 3, 2));
     let store = state.store.lock().unwrap();

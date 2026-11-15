@@ -16,7 +16,7 @@ interface Config {
 interface Ticket { id: string; objective: string; state: string; revision: number; evidence: string | null }
 interface WorkItem {
   id: string; ticketId: string; objective: string; evidenceContract?: string;
-  state: string; ordinal: number;
+  state: string; ordinal: number; dependsOnIds?: string[]; readiness?: string;
   createdAt: number; updatedAt: number;
 }
 interface TeamSnapshot {
@@ -305,12 +305,29 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '. Verified native pass: ' + verified + '.</p><p>' + meaning + '</p></section>';
   }
   function renderWorkItems(): string {
+    const itemsById = new Map(workItems.map(item => [item.id, item]));
     const rows = workItems.map(item => {
       const evidenceContract = typeof item.evidenceContract === 'string' && item.evidenceContract.trim()
         ? item.evidenceContract : 'Unavailable';
+      const readiness = item.readiness === 'ready' ? 'Ready'
+        : item.readiness === 'dependency_blocked' ? 'Dependency blocked'
+          : item.readiness === 'active' ? 'Active'
+            : item.readiness === 'not_ready' ? 'Not ready' : 'Unavailable';
+      const readinessKey = ['ready', 'dependency_blocked', 'active', 'not_ready'].includes(item.readiness ?? '')
+        ? item.readiness! : 'unavailable';
+      const dependencyIds = Array.isArray(item.dependsOnIds)
+        ? item.dependsOnIds.filter(id => typeof id === 'string') : null;
+      const dependencies = dependencyIds === null ? 'Prerequisite links unavailable'
+        : dependencyIds.length === 0 ? 'Prerequisites: none'
+          : 'Depends on: ' + dependencyIds.map(id => {
+            const prerequisite = itemsById.get(id);
+            return (prerequisite ? safe(prerequisite.objective) + ' · ' : '') + 'ID ' + safe(id);
+          }).join(', ');
       return '<li class="sa-item" data-sa-work-item="' + safe(item.id) + '"><div><strong>' +
-      safe(item.objective) + '</strong><small>Ordinal ' + safe(item.ordinal) + ' · State ' +
-      safe(item.state) + '</small><small>Evidence contract (descriptive only; not verified evidence): ' +
+      safe(item.objective) + '</strong><small data-sa-work-readiness="' + safe(readinessKey) + '">Ordinal ' +
+      safe(item.ordinal) + ' · State ' + safe(item.state) + ' · Readiness ' + readiness +
+      '</small><small data-sa-work-dependencies>' + safe(dependencies) +
+      '</small><small>Evidence contract (descriptive only; not verified evidence): ' +
       safe(evidenceContract) + '</small></div></li>';
     }).join('');
     const body = workItemsLoading
@@ -324,9 +341,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     return '<details class="sa-plan-readiness" role="region" aria-label="Plan / Readiness" data-sa-plan-readiness' +
       (planReadinessExpanded ? ' open' : '') + '><summary>Plan / Readiness</summary>' +
       '<div class="sa-plan-readiness-body" data-sa-plan-body><p class="sa-plan-readiness-note">' +
-      'Read-only native WorkItem objectives and states, in ordinal order. This list does not authorize or dispatch work. ' +
+      'Read-only WorkItem objectives and states, in ordinal order. Prerequisite IDs and readiness come from native dependency rows and the active Assignment binding; absent fields remain unavailable. This list does not authorize or dispatch work. ' +
       'Evidence contracts are informational descriptions, not proof that work is complete. ' +
-      'The WorkItem response does not report dependency edges, overall readiness, design-review findings, drift, or Council approval.</p>' +
+      'This view does not report design-review findings, drift, or Council approval.</p>' +
       '<h5>WorkItem List</h5>' + body + '</div></details>';
   }
   function render(): void {

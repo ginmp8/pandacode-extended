@@ -1384,7 +1384,31 @@ pub(crate) mod work_items {
         pub updated_at: i64,
     }
 
+    /// A read-only readiness label derived from the persisted dependency graph
+    /// and this Ticket's exact active assignment binding.
+    #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+    #[serde(rename_all = "snake_case")]
+    pub(crate) enum WorkItemReadiness {
+        Ready,
+        DependencyBlocked,
+        Active,
+        NotReady,
+    }
+
+    /// Enriched read model used by the Ticket-scoped list command. Keep this
+    /// separate from `WorkItem`, which is also used by transition and admission
+    /// code and must not carry derived UI state.
+    #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+    #[serde(rename_all = "camelCase")]
+    pub(crate) struct WorkItemReadModel {
+        #[serde(flatten)]
+        pub item: WorkItem,
+        pub depends_on_ids: Vec<String>,
+        pub readiness: WorkItemReadiness,
+    }
+
     /// The one item a native retry may safely bind in its admission transaction.
+    #[derive(Debug)]
     pub(super) struct RetryWorkItem {
         pub(super) id: String,
         pub(super) objective: String,
@@ -1617,6 +1641,71 @@ pub(crate) mod work_items {
         let rows = stmt.query_map(params![ticket_id, limit], work_item_row)
             .map_err(|e| e.to_string())?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+    }
+
+    /// Return the actual persisted prerequisite IDs and a native readiness
+    /// result for each item. `ready` requires a queued/ready state, completed
+    /// prerequisites and no running Assignment already bound to that item;
+    /// `active` requires the Ticket's exact current running Assignment binding.
+    pub(crate) fn list_work_item_read_models(
+        store: &Store, ticket_id: &str, limit: i64,
+    ) -> Result<Vec<WorkItemReadModel>> {
+        list_work_items(store, ticket_id, limit)?
+            .into_iter()
+            .map(|item| work_item_read_model(&store.db, item))
+            .collect()
+    }
+
+    fn work_item_read_model(
+        conn: &Connection, item: WorkItem,
+    ) -> Result<WorkItemReadModel> {
+        let dependencies = {
+            let mut stmt = conn.prepare(
+                "SELECT prerequisite.id,prerequisite.state
+                 FROM sa_work_item_deps d
+                 JOIN sa_work_items prerequisite ON prerequisite.id=d.depends_on
+                 WHERE d.item_id=?1 ORDER BY prerequisite.ordinal,prerequisite.id",
+            ).map_err(|error| error.to_string())?;
+            stmt.query_map([&item.id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            }).map_err(|error| error.to_string())?
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|error| error.to_string())?
+        };
+        let active_binding: bool = conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM sa_tickets t
+               JOIN sa_assignments a ON a.id=t.active_assignment_id
+               WHERE t.id=?1 AND t.state='running'
+                 AND a.ticket_id=t.id AND a.state='running' AND a.work_item_id=?2
+             )",
+            params![item.ticket_id,item.id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        let running_assignment: bool = conn.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM sa_assignments
+               WHERE ticket_id=?1 AND work_item_id=?2 AND state='running'
+             )",
+            params![item.ticket_id,item.id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        let readiness = if active_binding {
+            WorkItemReadiness::Active
+        } else if !matches!(item.state.as_str(), "queued" | "ready") {
+            WorkItemReadiness::NotReady
+        } else if dependencies.iter().any(|(_, state)| state != "completed") {
+            WorkItemReadiness::DependencyBlocked
+        } else if running_assignment {
+            // Fail closed on an inconsistent/stale binding. Only the exact
+            // Ticket pointer above is sufficient to label work Active.
+            WorkItemReadiness::NotReady
+        } else {
+            WorkItemReadiness::Ready
+        };
+        Ok(WorkItemReadModel {
+            item,
+            depends_on_ids: dependencies.into_iter().map(|(id, _)| id).collect(),
+            readiness,
+        })
     }
 
     /// Create a queued WorkItem on the connection's current transaction. The
@@ -3578,18 +3667,18 @@ pub async fn superagent_assignments(window: tauri::WebviewWindow,
 
 /// Read-only WorkItem list for exactly one existing Ticket. The query is
 /// Ticket-scoped, so an empty or unknown id never falls back to another Ticket.
-fn ticket_work_items(store: &Store, ticket_id: &str) -> Result<Vec<work_items::WorkItem>> {
+fn ticket_work_items(store: &Store, ticket_id: &str) -> Result<Vec<work_items::WorkItemReadModel>> {
     let ticket_id = ticket_id.trim();
     if ticket_id.is_empty() {
         return Err("A Ticket id is required.".into());
     }
-    work_items::list_work_items(store, ticket_id, 200)
+    work_items::list_work_item_read_models(store, ticket_id, 200)
 }
 
 #[tauri::command]
 pub async fn superagent_work_items(
     window: tauri::WebviewWindow, state: State<'_, AppState>, ticket_id: String,
-) -> Result<Vec<work_items::WorkItem>> {
+) -> Result<Vec<work_items::WorkItemReadModel>> {
     require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     ticket_work_items(&store, &ticket_id)
@@ -7112,9 +7201,19 @@ mod tests {
             ],
         );
         let api_items = ticket_work_items(&store, &ticket.id).unwrap();
-        assert_eq!(api_items, items);
+        assert_eq!(
+            api_items.iter().map(|read| read.item.clone()).collect::<Vec<_>>(),
+            items,
+        );
         let api_item = serde_json::to_value(&api_items[0]).unwrap();
         assert_eq!(api_item["evidenceContract"], "Record the relevant current behavior and source or test evidence.");
+        assert_eq!(api_item["dependsOnIds"], serde_json::json!([]));
+        assert_eq!(api_item["readiness"], "ready");
+        assert_eq!(api_items[0].readiness, work_items::WorkItemReadiness::Ready);
+        assert_eq!(api_items[1].depends_on_ids, vec![items[0].id.clone()]);
+        assert_eq!(api_items[1].readiness, work_items::WorkItemReadiness::DependencyBlocked);
+        assert_eq!(api_items[2].depends_on_ids, vec![items[1].id.clone()]);
+        assert_eq!(api_items[2].readiness, work_items::WorkItemReadiness::DependencyBlocked);
         let edges = {
             let mut statement = store.db.prepare(
                 "SELECT item.ordinal, prerequisite.ordinal
@@ -7159,6 +7258,10 @@ mod tests {
         let dispatched_items = work_items::list_work_items(&store, &ticket.id, 10).unwrap();
         assert_eq!(dispatched_items[0].state, "running");
         assert!(dispatched_items[1..].iter().all(|item| item.state == "queued"));
+        let dispatched_read_models = work_items::list_work_item_read_models(&store, &ticket.id, 10).unwrap();
+        assert_eq!(dispatched_read_models[0].readiness, work_items::WorkItemReadiness::Active);
+        assert_eq!(dispatched_read_models[1].readiness, work_items::WorkItemReadiness::DependencyBlocked);
+        assert_eq!(dispatched_read_models[2].readiness, work_items::WorkItemReadiness::DependencyBlocked);
 
         // Dependencies cannot cross Ticket boundaries, even for callers that
         // use the existing manual WorkItem helper.
@@ -7166,6 +7269,13 @@ mod tests {
             &mut store, &config.id, "Other demand", "coordinator-plan-other", false,
         ).unwrap();
         assert!(!other_launched);
+        let worker_session = assignments(&store, &ticket.id, 10).unwrap().into_iter()
+            .find(|assignment| assignment.bot_id == "worker").unwrap().session_id;
+        assert!(on_run_finished(&store, &worker_session, true, "First slice complete").unwrap());
+        let after_prerequisite = ticket_work_items(&store, &ticket.id).unwrap();
+        assert_eq!(after_prerequisite[0].readiness, work_items::WorkItemReadiness::NotReady);
+        assert_eq!(after_prerequisite[1].readiness, work_items::WorkItemReadiness::Ready);
+        assert_eq!(after_prerequisite[2].readiness, work_items::WorkItemReadiness::DependencyBlocked);
         let foreign = work_items::create_work_item(&store, &other.id, "Foreign item", 0).unwrap();
         assert!(work_items::add_work_item_dependency(&store, &items[0].id, &foreign.id).is_err());
     }
@@ -7457,9 +7567,9 @@ mod tests {
         assert!(on_run_finished(&store, &coordinator_session, true, plan).unwrap());
         let items = ticket_work_items(&store, &ticket.id).unwrap();
         assert_eq!(items.len(), 1);
-        assert_eq!(items[0].evidence_contract, LEGACY_EVIDENCE_CONTRACT);
-        assert!(!items[0].evidence_contract.trim().is_empty());
-        assert!(items[0].evidence_contract.len() <= MAX_EVIDENCE_CONTRACT_BYTES);
+        assert_eq!(items[0].item.evidence_contract, LEGACY_EVIDENCE_CONTRACT);
+        assert!(!items[0].item.evidence_contract.trim().is_empty());
+        assert!(items[0].item.evidence_contract.len() <= MAX_EVIDENCE_CONTRACT_BYTES);
         assert_eq!(
             serde_json::to_value(&items[0]).unwrap()["evidenceContract"],
             LEGACY_EVIDENCE_CONTRACT,
@@ -8105,12 +8215,12 @@ mod tests {
 
         let first_items = ticket_work_items(&store, &first.id).unwrap();
         assert_eq!(first_items.len(), 1);
-        assert_eq!(first_items[0].ticket_id, first.id);
+        assert_eq!(first_items[0].item.ticket_id, first.id);
         let second_items = ticket_work_items(&store, &second.id).unwrap();
         assert_eq!(second_items.len(), 1);
-        assert_eq!(second_items[0].ticket_id, second.id);
-        assert_ne!(first_items[0].id, second_items[0].id);
-        assert!(first_items.iter().all(|item| item.ticket_id == first.id));
+        assert_eq!(second_items[0].item.ticket_id, second.id);
+        assert_ne!(first_items[0].item.id, second_items[0].item.id);
+        assert!(first_items.iter().all(|item| item.item.ticket_id == first.id));
         let payload = serde_json::to_value(&second_items[0]).unwrap();
         for field in ["id","ticketId","objective","state","ordinal","createdAt","updatedAt"] {
             assert!(payload.get(field).is_some(), "missing camelCase field {field}");

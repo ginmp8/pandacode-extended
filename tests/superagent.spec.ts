@@ -149,6 +149,8 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   const plan=details.getByRole('region',{name:'Plan / Readiness'});
   await expect(plan.locator('.sa-work-items-list .sa-item')).toContainText('Inspect a disposable fixture');
   await expect(plan.locator('.sa-work-items-list .sa-item')).toContainText('Ordinal 0 · State running');
+  await expect(plan.locator('.sa-work-items-list .sa-item')).toContainText('Readiness Unavailable');
+  await expect(plan.locator('.sa-work-items-list .sa-item')).toContainText('Prerequisite links unavailable');
   await expect(details).toContainText('admitted');
   await expect(details.getByRole('heading',{name:'Native activity',exact:true}).locator('xpath=following-sibling::ol[1]/li').first()).toContainText(' · admitted · ');
   await row.getByRole('button',{name:'Stop'}).click();
@@ -1450,7 +1452,8 @@ test('Ticket Plan and Readiness shows native WorkItems with loading, empty and e
   await page.evaluate(async () => {
     const {mountSuperagent}=await import('/src/superagent-ui.ts');
     const host=document.createElement('div');host.id='sa-work-items-test';document.body.appendChild(host);
-    const ticket={id:'ticket-work-items',objective:'Render ordered WorkItems',state:'queued',revision:1,evidence:null};
+    const ticket={id:'ticket-work-items',objective:'Render ordered WorkItems',state:'running',
+      revision:1,activeAssignmentId:'assignment-first',evidence:null};
     const state:{mode:'items'|'empty'|'error';calls:Array<Record<string,unknown>>;
       waitForItems:boolean;releaseItems?:()=>void}={mode:'items',calls:[],waitForItems:true};
     mountSuperagent(host,async (command,args)=>{
@@ -1464,21 +1467,29 @@ test('Ticket Plan and Readiness shows native WorkItems with loading, empty and e
       if(command==='superagent_snapshot')return {ticket,teamSnapshot:null,
         mandate:{actor:'local-user',authorizationId:'manual',policyRevision:1,projectId:'fixture',
           expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:false},
-        assignments:[],activity:[]} as never;
+        assignments:[{id:'assignment-first',ticketId:'ticket-work-items',botId:'worker',
+          sessionId:'session-first',state:'running',attempt:1,workItemId:'item-first',
+          result:null,createdAt:1,updatedAt:2}],activity:[]} as never;
       if(command==='superagent_source_thread_links')return [] as never;
       if(command==='superagent_work_items'){
         state.calls.push({...args});
         if(state.mode==='error')throw new Error('Native WorkItem read failed.');
         if(state.mode==='empty')return [] as never;
         // Deliberately reversed: the native order is authoritative and the
-        // section still renders ordinal 0 before ordinal 1.
+        // section still renders ordinal 0 before later ordinals.
         const rows=[
+          {id:'item-fourth',ticketId:'ticket-work-items',objective:'Fourth bounded slice',
+            evidenceContract:'Record why this slice is not ready to begin.',
+            state:'blocked',ordinal:3,dependsOnIds:[],readiness:'not_ready',createdAt:1,updatedAt:2},
+          {id:'item-third',ticketId:'ticket-work-items',objective:'Third bounded slice',
+            evidenceContract:'Record why this slice is still waiting.',
+            state:'queued',ordinal:2,dependsOnIds:['item-first'],readiness:'dependency_blocked',createdAt:1,updatedAt:2},
           {id:'item-second',ticketId:'ticket-work-items',objective:'Second bounded slice',
             evidenceContract:'Record the completed second slice and its output.',
-            state:'completed',ordinal:1,createdAt:1,updatedAt:2},
+            state:'queued',ordinal:1,dependsOnIds:[],readiness:'ready',createdAt:1,updatedAt:2},
           {id:'item-first',ticketId:'ticket-work-items',objective:'First bounded slice',
             evidenceContract:'Show the first slice has produced its expected result.',
-            state:'running',ordinal:0,createdAt:1,updatedAt:2},
+            state:'running',ordinal:0,dependsOnIds:[],readiness:'active',createdAt:1,updatedAt:2},
         ];
         if(state.waitForItems)return await new Promise(resolve=>{
           state.releaseItems=()=>resolve(rows as never);
@@ -1517,16 +1528,21 @@ test('Ticket Plan and Readiness shows native WorkItems with loading, empty and e
   await expect(workItems.getByRole('heading',{name:'WorkItem List',exact:true})).toBeVisible();
   await expect(workItems).toContainText('This list does not authorize or dispatch work.');
   await expect(workItems).toContainText('Evidence contracts are informational descriptions, not proof that work is complete.');
-  await expect(workItems).toContainText('does not report dependency edges, overall readiness, design-review findings, drift, or Council approval.');
+  await expect(workItems).toContainText('Prerequisite IDs and readiness come from native dependency rows and the active Assignment binding');
   const rows=workItems.locator('.sa-work-items-list .sa-item');
-  await expect(rows).toHaveCount(2);
+  await expect(rows).toHaveCount(4);
   await expect(rows.nth(0)).toContainText('First bounded slice');
-  await expect(rows.nth(0)).toContainText('Ordinal 0 · State running');
+  await expect(rows.nth(0)).toContainText('Ordinal 0 · State running · Readiness Active');
+  await expect(rows.nth(0)).toContainText('Prerequisites: none');
   await expect(rows.nth(0)).toContainText('Evidence contract (descriptive only; not verified evidence): Show the first slice has produced its expected result.');
   await expect(rows.nth(1)).toContainText('Second bounded slice');
-  await expect(rows.nth(1)).toContainText('Ordinal 1 · State completed');
+  await expect(rows.nth(1)).toContainText('Ordinal 1 · State queued · Readiness Ready');
+  await expect(rows.nth(1)).toContainText('Prerequisites: none');
   await expect(rows.nth(1)).toContainText('Evidence contract (descriptive only; not verified evidence): Record the completed second slice and its output.');
-  await expect(workItems).not.toContainText('Depends on');
+  await expect(rows.nth(2)).toContainText('Third bounded slice');
+  await expect(rows.nth(2)).toContainText('Ordinal 2 · State queued · Readiness Dependency blocked');
+  await expect(rows.nth(2)).toContainText('Depends on: First bounded slice · ID item-first');
+  await expect(rows.nth(3)).toContainText('Ordinal 3 · State blocked · Readiness Not ready');
   await expect(workItems.getByRole('button')).toHaveCount(0);
 
   await details.getByRole('button',{name:'Close evidence'}).click();

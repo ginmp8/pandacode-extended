@@ -15,6 +15,7 @@ interface Config {
 }
 interface Ticket {
   id: string; objective: string; state: string; revision: number; evidence: string | null;
+  activeAssignmentId?: string | null;
   orchestrationId?: string; createdAt?: number; updatedAt?: number; actor?: string;
   provenance?: string;
 }
@@ -58,6 +59,7 @@ function isPreviewWorkerWriteDispatch(result: WorkerWriteDispatchResult): result
 interface Mandate {
   actor: string; authorizationId: string; policyRevision: number; projectId: string;
   expiresAt: number; revoked: boolean; allowedTools: string[]; allowedSideEffects: boolean;
+  sideEffectConsent: boolean;
 }
 interface Assignment { id: string; botId: string; sessionId: string; state: string; attempt: number }
 interface Activity { id: number; kind: string; detail: string; at: number }
@@ -84,6 +86,8 @@ interface DraftPullRequestStatus {
 }
 interface PreviewDraftPullRequest { previewOnly: true; message: string }
 type DraftPullRequestResult = DraftPullRequestStatus | PreviewDraftPullRequest;
+interface PreviewSideEffectConsent { previewOnly: true; message: string }
+type SideEffectConsentResult = Ticket | PreviewSideEffectConsent;
 interface DraftPullRequestReview {
   ticketId: string; ticketRevision: number; repository: string; head: string; headSha: string; base: string;
   title: string; body: string; effectKey: string; marker: string;
@@ -552,9 +556,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     const draftProjectId = botProjectId(draftCoordinatorBotId);
     const inspected = tickets.find(ticket => ticket.id === inspectedTicket);
     const writeTicket = tickets.find(ticket => ticket.id === writeGrantTicket);
+    const canManageSideEffects = activeSurface === 'runs' && !!inspected &&
+      ticketDetails?.ticket.id === inspected.id &&
+      ticketDetails.ticket.revision === inspected.revision && inspected.state === 'running' &&
+      ticketDetails.ticket.state === 'running' && !ticketDetails.mandate.revoked &&
+      ticketDetails.mandate.expiresAt > Date.now() &&
+      ticketDetails.assignments.some(assignment => assignment.id === inspected.activeAssignmentId &&
+        assignment.state === 'running');
     const canComment = !!inspected && ticketDetails?.ticket.id === inspected.id &&
       inspected.state === 'running' && !ticketDetails.mandate.revoked &&
-      ticketDetails.mandate.allowedSideEffects;
+      ticketDetails.mandate.sideEffectConsent;
     const commentStatus = issueCommentStatus && inspected &&
       issueCommentStatus.ticketId === inspected.id &&
       issueCommentStatus.ticketRevision === inspected.revision ? issueCommentStatus : null;
@@ -584,8 +595,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         '<dt>Project / policy</dt><dd>' + safe(ticketDetails.mandate.projectId) + ' / ' +
         ticketDetails.mandate.policyRevision + '</dd>' +
         '<dt>Mandate</dt><dd>' + (ticketDetails.mandate.revoked ? 'Revoked' : 'Issued') +
-        ' · ' + (ticketDetails.mandate.allowedSideEffects ? 'Scoped side effects' : 'No side effects allowed') +
         ' · Tools: ' + safe(ticketDetails.mandate.allowedTools.join(', ') || 'none') + '</dd>' +
+        '<dt>GitHub side effects</dt><dd>' +
+        (ticketDetails.mandate.sideEffectConsent ? 'Scoped side effects' : 'No side effects allowed') + '</dd>' +
         '<dt>Expires</dt><dd>' + safe(new Date(ticketDetails.mandate.expiresAt).toLocaleString()) + '</dd></dl>' +
         '<h5>Assignment attempts</h5><ul>' +
         (ticketDetails.assignments.map(item => '<li>Attempt ' + item.attempt + ' · ' +
@@ -606,9 +618,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
               : '<small>Manual fetch unavailable for this event class.</small>')
             : '<small>Off · no GitHub request</small>') + '</li>').join('') ||
           '<li>No threads linked.</li>') + '</ul>' +
+        (canManageSideEffects
+          ? '<section class="sa-effect-editor" aria-label="Ticket GitHub side-effect consent"><h5>Ticket GitHub effects</h5>' +
+            '<p>The operator-controlled scope covers only issue and pull request conversation comments and draft pull request creation. Each effect still requires a separate native confirmation for its exact target and payload. Push is unavailable.</p>' +
+            '<button type="button" data-sa-side-effect-consent="' +
+            (ticketDetails.mandate.sideEffectConsent ? 'revoke' : 'enable') + '" data-sa-ticket-id="' +
+            safe(inspected.id) + '" data-sa-ticket-revision="' + inspected.revision + '"' +
+            (busy ? ' disabled' : '') + '>' +
+            (ticketDetails.mandate.sideEffectConsent ? 'Revoke GitHub effects' : 'Enable bounded GitHub effects') +
+            '</button></section>'
+          : '') +
         (canComment
           ? '<section class="sa-effect-editor" aria-label="Explicit GitHub effect"><h5>GitHub issue comment</h5>' +
-            '<p>Available only for this running Ticket’s active side-effect mandate. The native confirmation shows the exact target and comment.</p>' +
+            '<p>Available only with this running Ticket’s current mandate and operator consent. The native confirmation shows the exact target and comment.</p>' +
             '<form data-sa-form="issue-comment"><div class="sa-grid">' +
             '<label>Repository (owner/name)<input name="repository" maxlength="200" required value="' +
             safe(commentRepository) + '"></label>' +
@@ -628,7 +650,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
           : '') +
         (canComment
           ? '<section class="sa-effect-editor" aria-label="Explicit draft pull request effect"><h5>Draft pull request</h5>' +
-            '<p>Only this running Ticket’s active side-effect mandate can authorize a draft from its already-pushed, clean worker checkout. Review the exact repository, head branch and verified commit SHA, base, title, body marker and effect key before confirming.</p>' +
+            '<p>This running Ticket needs its current mandate and operator consent to authorize a draft from its already-pushed, clean worker checkout. Review the exact repository, head branch and verified commit SHA, base, title, body marker and effect key before confirming.</p>' +
             '<form data-sa-form="draft-pull-request"><div class="sa-grid">' +
             '<label>Repository (owner/name)<input name="repository" maxlength="200" required value="' +
             safe(draftPrRepository) + '"></label>' +
@@ -1105,9 +1127,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
           throw new Error('This Ticket changed. Review its updated evidence before authorizing the draft PR.');
         }
         if (current.ticket.state !== 'running' || current.mandate.revoked ||
-            !current.mandate.allowedSideEffects) {
+            !current.mandate.sideEffectConsent) {
           clearDraftPullRequestReview();
-          throw new Error('The Ticket is no longer running under an active side-effect mandate.');
+          throw new Error('The Ticket no longer has its current mandate and operator side-effect consent.');
         }
         const effectKey = await draftPullRequestEffectKey(
           review.ticketId,review.repository,review.head,review.base,review.title,review.body,
@@ -1411,6 +1433,36 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       });
       return;
     }
+    if (target.dataset.saSideEffectConsent === 'enable' ||
+        target.dataset.saSideEffectConsent === 'revoke') {
+      const ticketId = target.dataset.saTicketId ?? '';
+      const ticket = tickets.find(item => item.id === ticketId);
+      const snapshot = ticketDetails;
+      const expectedRevision = Number(target.dataset.saTicketRevision);
+      const enabled = target.dataset.saSideEffectConsent === 'enable';
+      if (activeSurface !== 'runs' || !ticket || ticket.state !== 'running' ||
+          ticket.revision !== expectedRevision || !snapshot || snapshot.ticket.id !== ticketId ||
+          snapshot.ticket.revision !== expectedRevision || snapshot.ticket.state !== 'running' ||
+          snapshot.mandate.revoked || snapshot.mandate.expiresAt <= Date.now() ||
+          !snapshot.assignments.some(assignment => assignment.id === ticket.activeAssignmentId &&
+            assignment.state === 'running') || snapshot.mandate.sideEffectConsent === enabled) return;
+      void work(async () => {
+        const result = await call<SideEffectConsentResult>('superagent_set_side_effects', {
+          ticketId, expectedRevision, enabled,
+        });
+        if ('previewOnly' in result) {
+          feedback = result.message;
+        } else {
+          if (result.id !== ticketId || result.revision !== expectedRevision || result.state !== 'running') {
+            throw new Error('The native side-effect consent response did not match this active Ticket.');
+          }
+          const index = tickets.findIndex(item => item.id === ticketId);
+          if (index >= 0) tickets[index] = result;
+        }
+        await refreshTicketDetails();
+      });
+      return;
+    }
     if (target.dataset.saStop) {
       const t = tickets.find(item => item.id === target.dataset.saStop);
       if (t) ask('Stop the task and revoke its authorization?', async () => {
@@ -1513,7 +1565,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       }
       if (!ticket || ticket.state !== 'running' || !snapshot || snapshot.ticket.id !== ticketId ||
           snapshot.ticket.revision !== ticket.revision || snapshot.mandate.revoked ||
-          !snapshot.mandate.allowedSideEffects) {
+          !snapshot.mandate.sideEffectConsent) {
         issueCommentError = 'This Ticket has no current side-effect authorization. Refresh evidence before continuing.';
         render(); return;
       }
@@ -1528,8 +1580,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
           throw new Error('This Ticket changed. Review its updated evidence before continuing.');
         }
         if (refreshed.ticket.state !== 'running' || refreshed.mandate.revoked ||
-            !refreshed.mandate.allowedSideEffects) {
-          throw new Error('The Ticket is no longer running under an active side-effect mandate.');
+            !refreshed.mandate.sideEffectConsent) {
+          throw new Error('The Ticket no longer has its current mandate and operator side-effect consent.');
         }
         const effectKey = await issueCommentEffectKey(ticketId, repository, issueNumber, comment);
         const result = await call<IssueCommentResult>('superagent_issue_comment', {
@@ -1586,7 +1638,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       }
       if (!ticket || ticket.state !== 'running' || !snapshot || snapshot.ticket.id !== ticketId ||
           snapshot.ticket.revision !== ticket.revision || snapshot.mandate.revoked ||
-          !snapshot.mandate.allowedSideEffects) {
+          !snapshot.mandate.sideEffectConsent) {
         draftPrError = 'This Ticket has no current side-effect authorization. Refresh evidence before continuing.';
         draftPrReview = null; render(); return;
       }
@@ -1602,8 +1654,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
           draftPrReview = null; render(); return;
         }
         if (refreshed.ticket.state !== 'running' || refreshed.mandate.revoked ||
-            !refreshed.mandate.allowedSideEffects) {
-          draftPrError = 'The Ticket is no longer running under an active side-effect mandate.';
+            !refreshed.mandate.sideEffectConsent) {
+          draftPrError = 'The Ticket no longer has its current mandate and operator side-effect consent.';
           draftPrReview = null; render(); return;
         }
         const headSha = await call<string>('superagent_verify_draft_pull_request_target', {

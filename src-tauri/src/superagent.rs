@@ -1201,6 +1201,9 @@ pub struct MandateSummary {
     pub revoked: bool,
     pub allowed_tools: Vec<String>,
     pub allowed_side_effects: bool,
+    /// Separate operator consent for the current live Ticket assignment.
+    /// The admission mandate's `allowed_side_effects` remains immutable/default-deny.
+    pub side_effect_consent: bool,
     pub created_at: i64,
 }
 
@@ -1216,11 +1219,13 @@ fn mandate(store: &Store, ticket_id: &str) -> Result<MandateSummary> {
             policy_revision: r.get(3)?, project_id: r.get(4)?,
             expires_at: r.get(5)?, revoked: r.get::<_, i64>(6)? != 0,
             allowed_tools: Vec::new(), allowed_side_effects: r.get::<_, i64>(8)? != 0,
+            side_effect_consent: false,
             created_at: r.get(9)?,
         }, r.get(7)?)),
     ).map_err(|e| e.to_string())?;
     grant.allowed_tools = serde_json::from_str::<Vec<String>>(&tools)
         .map_err(|_| "SuperAgent mandate contains invalid tool authorization.")?;
+    grant.side_effect_consent = effects::has_active_side_effect_consent(store, ticket_id)?;
     Ok(grant)
 }
 
@@ -2163,6 +2168,7 @@ pub(crate) fn inspect_headless_status(
                 "policyRevision": snapshot.mandate.policy_revision,
                 "expiresAt": snapshot.mandate.expires_at,
                 "allowedSideEffects": snapshot.mandate.allowed_side_effects,
+                "sideEffectConsent": snapshot.mandate.side_effect_consent,
                 "allowedToolCount": snapshot.mandate.allowed_tools.len()
             },
             "assignments": snapshot.assignments.iter().map(|a| {
@@ -4747,6 +4753,97 @@ pub async fn superagent_reject(window: tauri::WebviewWindow,
     reject(&store, &ticket_id, expected_revision, &reason)
 }
 
+fn side_effect_consent_confirmation(
+    ticket_id: &str,
+    scope: &effects::SideEffectConsentScope,
+    enabled: bool,
+) -> String {
+    if enabled {
+        format!(
+            "Enable bounded GitHub side effects for SuperAgent Ticket {ticket_id}?\n\nObjective: {}\nTicket revision: {}\n\nThis enables only these currently supported effects:\n• Issue and pull request conversation comments\n• Draft pull request creation\n\nEach individual effect still requires its own native confirmation showing the exact target and payload. GitHub push and other write operations are not permitted.",
+            scope.objective, scope.ticket_revision,
+        )
+    } else {
+        format!(
+            "Revoke bounded GitHub side effects for SuperAgent Ticket {ticket_id}?\n\nObjective: {}\nTicket revision: {}\n\nThis revokes issue and pull request conversation comments and draft pull request creation for this Ticket.",
+            scope.objective, scope.ticket_revision,
+        )
+    }
+}
+
+async fn confirm_side_effect_consent(
+    window: &tauri::WebviewWindow,
+    ticket_id: &str,
+    scope: &effects::SideEffectConsentScope,
+    enabled: bool,
+) -> bool {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let dialog = window
+        .dialog()
+        .message(side_effect_consent_confirmation(ticket_id, scope, enabled))
+        .title(if enabled {
+            "Enable bounded GitHub effects"
+        } else {
+            "Revoke bounded GitHub effects"
+        })
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            if enabled {
+                "Enable these effects".into()
+            } else {
+                "Revoke GitHub effects".into()
+            },
+            "Cancel".into(),
+        ));
+    #[cfg(desktop)]
+    let dialog = dialog.parent(window);
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    dialog.show(move |confirmed| {
+        let _ = sender.send(confirmed);
+    });
+    receiver.await.unwrap_or(false)
+}
+
+#[tauri::command]
+pub async fn superagent_set_side_effects(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    ticket_id: String,
+    expected_revision: i64,
+    enabled: bool,
+) -> Result<Ticket> {
+    require_main_window(&window)?;
+    // Do not hold the shared Store mutex while the native dialog is open. The
+    // exact live authority and revision are checked again under the shared
+    // Stop/effect fence after the operator confirms.
+    let scope = {
+        let store = state.store.lock().map_err(|error| error.to_string())?;
+        let scope = effects::side_effect_consent_for_change(
+            &store,
+            &ticket_id,
+            expected_revision,
+            enabled,
+        )?;
+        if scope.consent_active == enabled {
+            return Err(if enabled {
+                "This Ticket already has bounded GitHub side effects enabled.".into()
+            } else {
+                "This Ticket already has bounded GitHub side effects revoked.".into()
+            });
+        }
+        scope
+    };
+    if !confirm_side_effect_consent(&window, &ticket_id, &scope, enabled).await {
+        return Err(if enabled {
+            "GitHub side-effect authorization was not confirmed by the local user.".into()
+        } else {
+            "GitHub side-effect revocation was not confirmed by the local user.".into()
+        });
+    }
+    let store = state.store.lock().map_err(|error| error.to_string())?;
+    effects::set_side_effect_consent(&store, &ticket_id, expected_revision, enabled)?;
+    get_ticket(&store, &ticket_id)
+}
+
 async fn confirm_issue_comment(
     window: &tauri::WebviewWindow,
     intent: &effects::IssueCommentIntent,
@@ -5641,6 +5738,30 @@ mod tests {
                 "SuperAgent desktop commands require the main window."
             );
         }
+    }
+
+    #[test]
+    fn side_effect_consent_confirmation_names_ticket_and_lists_only_supported_effects() {
+        let scope = effects::SideEffectConsentScope {
+            objective: "Review the exact fix".into(),
+            ticket_revision: 8,
+            policy_revision: 3,
+            project_id: "project-one".into(),
+            authorization_id: "auth-one".into(),
+            assignment_id: "assignment-one".into(),
+            session_id: "session-one".into(),
+            expires_at: 1_800_000_000_000,
+            worker_paused: false,
+            consent_active: false,
+        };
+        let message = side_effect_consent_confirmation("ticket-one", &scope, true);
+        assert!(message.contains("SuperAgent Ticket ticket-one"));
+        assert!(message.contains("Review the exact fix"));
+        assert!(message.contains("Issue and pull request conversation comments"));
+        assert!(message.contains("Draft pull request creation"));
+        assert!(message.contains("Each individual effect still requires its own native confirmation"));
+        assert!(!message.contains("merge pull request"));
+        assert!(!message.contains("delete issue"));
     }
 
 

@@ -62,7 +62,7 @@ async function mountCouncilTicket(page: Page, options: {
             {role:'worker',ordinal:0,botId:'worker',effectiveConfig:null,effectiveConfigSha256:null}]},
         mandate:{actor:'local-user',authorizationId:'manual',policyRevision:2,
           projectId:'fixture',expiresAt:1800000000000,revoked:false,
-          allowedTools:[],allowedSideEffects:false},
+          allowedTools:[],allowedSideEffects:false,sideEffectConsent:false},
         assignments:[],activity:[],council:options.council,
       } as never;
       throw new Error('Unexpected Council command: ' + command);
@@ -191,6 +191,39 @@ test('Demands / Runs renders Ticket evidence only in the active surface', async 
   await expect(teamsPanel.getByRole('region',{name:'Ticket evidence'})).toHaveCount(1);
   await expect(teamsPanel.getByText('No threads linked.')).toHaveCount(1);
   await expect(host.locator('#sa-runs-panel').getByRole('region',{name:'Ticket evidence'})).toHaveCount(0);
+});
+
+test('GitHub side-effect consent is operator-controlled only in the active local Runs inspector',async ({page})=>{
+  test.setTimeout(60_000);
+  const host=await openOrchestrationWorkspace(page,'/?bots=sample&superagent=sample');
+  await host.getByRole('tab',{name:'Demands / Runs',exact:true}).click();
+  const queue=host.getByRole('region',{name:'Global Demands and Runs'});
+  const row=queue.locator('[data-sa-queue-ticket="preview-ticket-web-104"]');
+  await row.getByRole('button',{name:'View evidence for Add keyboard navigation to the search panel'}).click();
+  const inspector=host.getByRole('region',{name:'Selected Run evidence'});
+  const details=inspector.getByRole('region',{name:'Ticket evidence'});
+  await expect(details).toContainText('No side effects allowed');
+  await expect(details.getByRole('button',{name:'Enable bounded GitHub effects'})).toBeVisible();
+  await expect(details).toContainText('issue and pull request conversation comments');
+  await expect(details).toContainText('draft pull request creation');
+  await expect(details.locator('form[data-sa-form="issue-comment"]')).toHaveCount(0);
+
+  await details.getByRole('button',{name:'Enable bounded GitHub effects'}).click();
+  await expect(host.getByRole('status').filter({hasText:'Preview only: no native confirmation was shown'})).toBeVisible();
+  await expect(details).toContainText('Scoped side effects');
+  await expect(details.getByRole('button',{name:'Revoke GitHub effects'})).toBeVisible();
+  await expect(details.locator('form[data-sa-form="issue-comment"]')).toBeVisible();
+
+  await host.getByRole('tab',{name:'Teams',exact:true}).click();
+  const teams=host.locator('#sa-teams-panel');
+  await expect(teams.getByRole('region',{name:'Ticket evidence'})).toBeVisible();
+  await expect(teams.locator('[data-sa-side-effect-consent]')).toHaveCount(0);
+  await host.getByRole('tab',{name:'Demands / Runs',exact:true}).click();
+  await details.getByRole('button',{name:'Revoke GitHub effects'}).click();
+  await expect(details).toContainText('No side effects allowed');
+  await expect(details.getByRole('button',{name:'Enable bounded GitHub effects'})).toBeVisible();
+  await expect(details.getByRole('heading',{name:'Native activity'}).locator('xpath=following-sibling::ol[1]'))
+    .toContainText('side_effect_consent_revoked');
 });
 
 test('Demands / Runs gives an honest empty state when no Teams exist', async ({page}) => {
@@ -716,7 +749,7 @@ test('SuperAgent issue comments use a stable receipt and report uncertain state 
         {role:'reviewer',ordinal:0,botId:'reviewer',effectiveConfig:{name:'Reviewer'},effectiveConfigSha256:'reviewer-hash'},
       ]},mandate:{actor:'local-user',authorizationId:'auth-one',
       policyRevision:3,projectId:'project-one',expiresAt:1800000000000,revoked:false,
-      allowedTools:[],allowedSideEffects:true},assignments:[{id:'assignment-one',botId:'worker',
+      allowedTools:[],allowedSideEffects:false,sideEffectConsent:true},assignments:[{id:'assignment-one',botId:'worker',
       sessionId:'session-one',state:'running',attempt:1}],activity:[]};
     const calls:Array<{command:string;args?:Record<string,unknown>}> = [];
     mountSuperagent(host,async(command,args)=>{
@@ -801,7 +834,7 @@ test('Draft pull request effect requires review of exact Ticket-bound details be
       roles:[{role:'coordinator',ordinal:0,botId:'coordinator',effectiveConfig:null,effectiveConfigSha256:null},
         {role:'worker',ordinal:0,botId:'worker',effectiveConfig:null,effectiveConfigSha256:null}]},
       mandate:{actor:'local-user',authorizationId:'auth-pr',policyRevision:3,projectId:'project-one',
-        expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:true},
+        expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:false,sideEffectConsent:true},
       assignments:[{id:'assignment-pr',botId:'worker',sessionId:'session-pr',state:'running',attempt:1}],
       activity:[]};
     const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
@@ -1655,7 +1688,7 @@ test('Ticket evidence reports a missing saved Team snapshot without using the cu
       if(command==='superagent_snapshot')return {
         ticket,mandate:{actor:'local-user',authorizationId:'manual',policyRevision:1,
           projectId:'fixture',expiresAt:1800000000000,revoked:false,
-          allowedTools:[],allowedSideEffects:false},assignments:[],activity:[],
+          allowedTools:[],allowedSideEffects:false,sideEffectConsent:false},assignments:[],activity:[],
       } as never;
       if(command==='superagent_source_thread_links')return [] as never;
       if(command==='superagent_work_items')return [] as never;
@@ -1748,7 +1781,7 @@ test('Ticket Plan and Readiness shows native WorkItems with loading, empty and e
       if(command==='superagent_tickets')return [ticket] as never;
       if(command==='superagent_snapshot')return {ticket,teamSnapshot:null,
         mandate:{actor:'local-user',authorizationId:'manual',policyRevision:1,projectId:'fixture',
-          expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:false},
+          expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:false,sideEffectConsent:false},
         assignments:[{id:'assignment-first',ticketId:'ticket-work-items',botId:'worker',
           sessionId:'session-first',state:'running',attempt:1,workItemId:'item-first',
           result:null,createdAt:1,updatedAt:2}],activity:[]} as never;
@@ -1977,7 +2010,7 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
           roles:[{role:'coordinator',ordinal:0,botId:'router',effectiveConfig:null,effectiveConfigSha256:null},
             {role:'worker',ordinal:0,botId:'worker',effectiveConfig:null,effectiveConfigSha256:null}]},
         mandate:{actor:'local-user',authorizationId:'manual',policyRevision:1,projectId:'fixture',
-          expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:false},
+          expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:false,sideEffectConsent:false},
         assignments:[],activity:[]} as never;
       if(command==='superagent_source_list')return [{
         id:'source-one',orchestrationId:'one',repository:'test/fixture',actorFilter:'trusted',
@@ -2053,7 +2086,7 @@ test('manual Observe fetch supports issues.edited and check_run.completed with d
             effectiveConfig:null,effectiveConfigSha256:null},
             {role:'worker',ordinal:0,botId:'worker-old',effectiveConfig:null,effectiveConfigSha256:null}]},
         mandate:{actor:'local-user',authorizationId:'manual',policyRevision:1,projectId:'fixture',
-          expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:false},
+          expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:false,sideEffectConsent:false},
         assignments:[],activity:[]} as never;
       if(command==='superagent_source_thread_links')return links as never;
       if(command==='superagent_work_items')return [] as never;

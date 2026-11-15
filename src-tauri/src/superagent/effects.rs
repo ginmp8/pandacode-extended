@@ -561,11 +561,26 @@ fn active_scope_if_current(
            AND a.ticket_id=t.id AND a.state='running' AND a.bot_id=t.worker_bot_id
          JOIN bots b ON b.id=a.bot_id
          WHERE t.id=?1 AND t.revision=?2 AND t.state='running' AND m.revoked=0
-           AND m.expires_at>?3 AND m.allowed_side_effects=1
+           AND m.expires_at>?3
            AND t.policy_revision=m.policy_revision
            AND m.policy_revision=o.policy_revision AND t.project_id=m.project_id
            AND m.project_id=o.project_id AND t.actor=m.actor AND m.authorization_id<>''
-           AND b.project_id=t.project_id AND b.paused=0 AND o.enabled=1",
+           AND b.project_id=t.project_id AND b.paused=0 AND o.enabled=1
+           AND EXISTS (
+             SELECT 1 FROM sa_audit choice
+             WHERE choice.ticket_id=t.id AND choice.kind='side_effect_consent_enabled'
+               AND json_extract(choice.detail,'$.authorizationId')=m.authorization_id
+               AND json_extract(choice.detail,'$.policyRevision')=m.policy_revision
+               AND json_extract(choice.detail,'$.projectId')=m.project_id
+               AND json_extract(choice.detail,'$.assignmentId')=a.id
+               AND json_extract(choice.detail,'$.sessionId')=a.session_id
+               AND NOT EXISTS (
+                 SELECT 1 FROM sa_audit newer
+                 WHERE newer.ticket_id=choice.ticket_id
+                   AND newer.kind IN ('side_effect_consent_enabled','side_effect_consent_revoked')
+                   AND newer.id>choice.id
+               )
+           )",
         params![intent.ticket_id, intent.expected_revision, storage::now()],
         |row| Ok(ActiveScope {
             project_id: row.get(0)?,
@@ -586,6 +601,209 @@ fn active_scope(db: &Connection, intent: &IssueCommentIntent) -> Result<ActiveSc
     active_scope_if_current(db, intent)?.ok_or_else(|| {
         "The Ticket, revision, mandate, or active worker no longer permits this effect.".into()
     })
+}
+
+const SUPPORTED_GITHUB_SIDE_EFFECTS: [&str; 2] = [
+    "issue_and_pull_request_conversation_comments",
+    "draft_pull_request_creation",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SideEffectConsentScope {
+    pub objective: String,
+    pub ticket_revision: i64,
+    pub policy_revision: i64,
+    pub project_id: String,
+    pub authorization_id: String,
+    pub assignment_id: String,
+    pub session_id: String,
+    pub expires_at: i64,
+    pub worker_paused: bool,
+    pub consent_active: bool,
+}
+
+fn current_side_effect_consent_scope(
+    db: &Connection,
+    ticket_id: &str,
+    expected_revision: i64,
+    now: i64,
+) -> Result<Option<SideEffectConsentScope>> {
+    db.query_row(
+        "SELECT t.objective,t.revision,t.policy_revision,t.project_id,a.id,a.session_id,
+                m.expires_at,m.authorization_id,b.paused,
+                COALESCE((
+                  SELECT CASE WHEN choice.kind='side_effect_consent_enabled'
+                    AND json_extract(choice.detail,'$.authorizationId')=m.authorization_id
+                    AND json_extract(choice.detail,'$.policyRevision')=m.policy_revision
+                    AND json_extract(choice.detail,'$.projectId')=m.project_id
+                    AND json_extract(choice.detail,'$.assignmentId')=a.id
+                    AND json_extract(choice.detail,'$.sessionId')=a.session_id
+                    THEN 1 ELSE 0 END
+                  FROM sa_audit choice
+                  WHERE choice.ticket_id=t.id
+                    AND choice.kind IN ('side_effect_consent_enabled','side_effect_consent_revoked')
+                  ORDER BY choice.id DESC LIMIT 1
+                ),0)
+         FROM sa_tickets t
+         JOIN sa_mandates m ON m.ticket_id=t.id
+         JOIN sa_orchestrations o ON o.id=t.orchestration_id
+         JOIN sa_assignments a ON a.id=t.active_assignment_id
+           AND a.ticket_id=t.id AND a.state='running' AND a.bot_id=t.worker_bot_id
+         JOIN bots b ON b.id=a.bot_id
+         WHERE t.id=?1 AND t.revision=?2 AND t.state='running' AND m.revoked=0
+           AND m.expires_at>?3 AND t.policy_revision=m.policy_revision
+           AND m.policy_revision=o.policy_revision AND t.project_id=m.project_id
+           AND m.project_id=o.project_id AND t.actor=m.actor AND m.authorization_id<>''
+           AND b.project_id=t.project_id AND o.enabled=1",
+        params![ticket_id, expected_revision, now],
+        |row| {
+            Ok(SideEffectConsentScope {
+                objective: row.get(0)?,
+                ticket_revision: row.get(1)?,
+                policy_revision: row.get(2)?,
+                project_id: row.get(3)?,
+                assignment_id: row.get(4)?,
+                session_id: row.get(5)?,
+                expires_at: row.get(6)?,
+                authorization_id: row.get(7)?,
+                worker_paused: row.get::<_, i64>(8)? != 0,
+                consent_active: row.get::<_, i64>(9)? != 0,
+            })
+        },
+    )
+    .optional()
+    .map_err(|error| error.to_string())
+}
+
+/// Whether the append-only operator consent is current for this live assignment.
+/// Consent survives normal Ticket revision changes but never follows a new
+/// mandate, policy, project, or assignment.
+pub(crate) fn has_active_side_effect_consent(store: &Store, ticket_id: &str) -> Result<bool> {
+    let revision: Option<i64> = store.db.query_row(
+        "SELECT revision FROM sa_tickets WHERE id=?1",
+        [ticket_id],
+        |row| row.get(0),
+    ).optional().map_err(|error| error.to_string())?;
+    let Some(revision) = revision else { return Ok(false) };
+    Ok(current_side_effect_consent_scope(&store.db, ticket_id, revision, storage::now())?
+        .is_some_and(|scope| scope.consent_active))
+}
+
+/// Read the exact live Ticket authority before opening the native confirmation.
+/// The state is reloaded under the shared dispatch fence after the dialog closes.
+pub(crate) fn side_effect_consent_for_change(
+    store: &Store,
+    ticket_id: &str,
+    expected_revision: i64,
+    enabled: bool,
+) -> Result<SideEffectConsentScope> {
+    side_effect_consent_for_change_with_pause(
+        store,
+        ticket_id,
+        expected_revision,
+        enabled,
+        || crate::feature_controls::get().bots_paused,
+    )
+}
+
+fn side_effect_consent_for_change_with_pause(
+    store: &Store,
+    ticket_id: &str,
+    expected_revision: i64,
+    enabled: bool,
+    globally_paused: impl Fn() -> bool,
+) -> Result<SideEffectConsentScope> {
+    if enabled && globally_paused() {
+        return Err("Bots are globally paused; GitHub side-effect authorization cannot be enabled.".into());
+    }
+    let scope = current_side_effect_consent_scope(
+        &store.db, ticket_id, expected_revision, storage::now(),
+    )?.ok_or_else(|| "The Ticket, revision, mandate, active assignment, or current policy no longer permits this change.".to_string())?;
+    if enabled && scope.worker_paused {
+        return Err("The active Ticket worker is paused; GitHub side-effect consent cannot be enabled.".into());
+    }
+    Ok(scope)
+}
+
+/// Operator-only transition for this Ticket's bounded GitHub effects. The
+/// immutable admission mandate remains default-deny; operator consent is an
+/// append-only, assignment-bound audit choice. Revocation stays available
+/// during global pause, while enabling is denied.
+pub(crate) fn set_side_effect_consent(
+    store: &Store,
+    ticket_id: &str,
+    expected_revision: i64,
+    enabled: bool,
+) -> Result<()> {
+    set_side_effect_consent_with_pause(
+        store,
+        ticket_id,
+        expected_revision,
+        enabled,
+        || crate::feature_controls::get().bots_paused,
+    )
+}
+
+fn set_side_effect_consent_with_pause(
+    store: &Store,
+    ticket_id: &str,
+    expected_revision: i64,
+    enabled: bool,
+    globally_paused: impl Fn() -> bool,
+) -> Result<()> {
+    let _dispatch_fence = lock_dispatch(&store.path)?;
+    if enabled && globally_paused() {
+        return Err("Bots are globally paused; GitHub side-effect authorization cannot be enabled.".into());
+    }
+    let tx = store.db.unchecked_transaction().map_err(|error| error.to_string())?;
+    let scope = current_side_effect_consent_scope(
+        &tx,
+        ticket_id,
+        expected_revision,
+        storage::now(),
+    )?
+    .ok_or_else(|| "The Ticket, revision, mandate, active assignment, or current policy no longer permits this change.".to_string())?;
+    if scope.consent_active == enabled {
+        return Err(if enabled {
+            "This Ticket already has bounded GitHub side effects enabled.".into()
+        } else {
+            "This Ticket already has bounded GitHub side effects revoked.".into()
+        });
+    }
+    if enabled && scope.worker_paused {
+        return Err("The active Ticket worker is paused; GitHub side-effect consent cannot be enabled.".into());
+    }
+    // Recheck immediately before the durable grant so a concurrent global pause
+    // that began after the dialog cannot enable new authority.
+    if enabled && globally_paused() {
+        return Err("Bots are globally paused; GitHub side-effect authorization cannot be enabled.".into());
+    }
+    let detail = serde_json::json!({
+        "actor": "local-user",
+        "choice": if enabled { "enabled" } else { "revoked" },
+        "sideEffectConsent": enabled,
+        "ticketRevision": scope.ticket_revision,
+        "policyRevision": scope.policy_revision,
+        "projectId": scope.project_id,
+        "authorizationId": scope.authorization_id,
+        "assignmentId": scope.assignment_id,
+        "sessionId": scope.session_id,
+        "expiresAt": scope.expires_at,
+        "supportedEffects": SUPPORTED_GITHUB_SIDE_EFFECTS,
+    }).to_string();
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,?2,?3,?4)",
+        params![
+            ticket_id,
+            if enabled { "side_effect_consent_enabled" } else { "side_effect_consent_revoked" },
+            detail,
+            storage::now(),
+        ],
+    ).map_err(|error| error.to_string())?;
+    if enabled && globally_paused() {
+        return Err("Bots are globally paused; GitHub side-effect authorization cannot be enabled.".into());
+    }
+    tx.commit().map_err(|error| error.to_string())
 }
 
 // Keep durable consent separate from current execution authority. A stored
@@ -1281,11 +1499,26 @@ fn active_draft_pr_scope_for(
            AND a.ticket_id=t.id AND a.state='running' AND a.bot_id=t.worker_bot_id
          JOIN bots b ON b.id=a.bot_id
          WHERE t.id=?1 AND t.revision=?2 AND t.state='running' AND m.revoked=0
-           AND m.expires_at>?3 AND m.allowed_side_effects=1
+           AND m.expires_at>?3
            AND t.policy_revision=m.policy_revision
            AND m.policy_revision=o.policy_revision AND t.project_id=m.project_id
            AND m.project_id=o.project_id AND t.actor=m.actor AND m.authorization_id<>''
-           AND b.project_id=t.project_id AND b.paused=0 AND o.enabled=1",
+           AND b.project_id=t.project_id AND b.paused=0 AND o.enabled=1
+           AND EXISTS (
+             SELECT 1 FROM sa_audit choice
+             WHERE choice.ticket_id=t.id AND choice.kind='side_effect_consent_enabled'
+               AND json_extract(choice.detail,'$.authorizationId')=m.authorization_id
+               AND json_extract(choice.detail,'$.policyRevision')=m.policy_revision
+               AND json_extract(choice.detail,'$.projectId')=m.project_id
+               AND json_extract(choice.detail,'$.assignmentId')=a.id
+               AND json_extract(choice.detail,'$.sessionId')=a.session_id
+               AND NOT EXISTS (
+                 SELECT 1 FROM sa_audit newer
+                 WHERE newer.ticket_id=choice.ticket_id
+                   AND newer.kind IN ('side_effect_consent_enabled','side_effect_consent_revoked')
+                   AND newer.id>choice.id
+               )
+           )",
         params![ticket_id, expected_revision, storage::now()],
         |row| Ok(ActiveScope {
             project_id: row.get(0)?,
@@ -1906,6 +2139,10 @@ mod tests {
     };
 
     fn fixture() -> (Store, String) {
+        fixture_with_side_effects(true)
+    }
+
+    fn fixture_with_side_effects(with_consent: bool) -> (Store, String) {
         let path = std::env::temp_dir().join(format!("sa-effect-{}.db", storage::id()));
         let mut store = Store::open(&path).unwrap();
         store
@@ -1944,10 +2181,9 @@ mod tests {
         let (ticket, started) =
             superagent::admit(&mut store, &cfg.id, "Safe work", "receipt-fixture", false).unwrap();
         assert!(started);
-        store.db.execute(
-            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
-            [&ticket.id],
-        ).unwrap();
+        if with_consent {
+            set_side_effect_consent(&store, &ticket.id, ticket.revision, true).unwrap();
+        }
         (store, ticket.id)
     }
 
@@ -1985,7 +2221,6 @@ mod tests {
         git_test(&root,&["commit","--allow-empty","-m","pushed head"]);
         let head_sha = git_test(&root,&["rev-parse","HEAD"]);
         store.db.execute("UPDATE projects SET path=?1 WHERE id='p'",[root.to_string_lossy().as_ref()]).unwrap();
-        store.db.execute("UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",[&ticket_id]).unwrap();
         (store,ticket_id,root,head_sha,base_sha)
     }
 
@@ -2599,20 +2834,211 @@ mod tests {
     }
 
     #[test]
-    fn issue_comment_authorization_requires_native_side_effect_mandate() {
-        let (store,ticket_id)=fixture();
-        let intent=make_intent(&ticket_id,"Mandate must be checked natively");
+    fn operator_side_effect_consent_defaults_denied_and_records_bounded_enable_and_revoke() {
+        let (store, ticket_id) = fixture_with_side_effects(false);
+        let ticket = superagent::get_ticket(&store, &ticket_id).unwrap();
+        let initial: i64 = store.db.query_row(
+            "SELECT allowed_side_effects FROM sa_mandates WHERE ticket_id=?1",
+            [&ticket_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(initial, 0, "new Ticket mandates remain default-deny");
+
+        let scope = side_effect_consent_for_change(
+            &store, &ticket_id, ticket.revision, true,
+        ).unwrap();
+        assert!(!scope.consent_active);
+        set_side_effect_consent(&store, &ticket_id, ticket.revision, true).unwrap();
+        let enabled: i64 = store.db.query_row(
+            "SELECT allowed_side_effects FROM sa_mandates WHERE ticket_id=?1",
+            [&ticket_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(enabled, 0, "operator consent never mutates the immutable admission mandate");
+        let session_id = superagent::assignment_session(&store, &ticket_id).unwrap().unwrap();
+        assert!(superagent::read_only_policy(&store, &session_id).unwrap().is_some(),
+            "operator GitHub consent must not disable the worker's native read-only policy");
+        assert!(has_active_side_effect_consent(&store, &ticket_id).unwrap());
+        let (kind, detail): (String, String) = store.db.query_row(
+            "SELECT kind,detail FROM sa_audit WHERE ticket_id=?1 ORDER BY id DESC LIMIT 1",
+            [&ticket_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        let detail: serde_json::Value = serde_json::from_str(&detail).unwrap();
+        assert_eq!(kind, "side_effect_consent_enabled");
+        assert_eq!(detail["actor"], "local-user");
+        assert_eq!(detail["choice"], "enabled");
+        assert_eq!(detail["sideEffectConsent"], true);
+        assert_eq!(detail["ticketRevision"], ticket.revision);
+        assert_eq!(detail["assignmentId"], scope.assignment_id);
+        assert_eq!(detail["sessionId"], scope.session_id);
+        assert_eq!(detail["supportedEffects"].as_array().unwrap().len(), 2);
+
+        let current = side_effect_consent_for_change(
+            &store, &ticket_id, ticket.revision, false,
+        ).unwrap();
+        assert!(current.consent_active);
+        set_side_effect_consent(&store, &ticket_id, ticket.revision, false).unwrap();
+        let revoked: i64 = store.db.query_row(
+            "SELECT allowed_side_effects FROM sa_mandates WHERE ticket_id=?1",
+            [&ticket_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(revoked, 0);
+        assert!(!has_active_side_effect_consent(&store, &ticket_id).unwrap());
+        let (kind, detail): (String, String) = store.db.query_row(
+            "SELECT kind,detail FROM sa_audit WHERE ticket_id=?1 ORDER BY id DESC LIMIT 1",
+            [&ticket_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        let detail: serde_json::Value = serde_json::from_str(&detail).unwrap();
+        assert_eq!(kind, "side_effect_consent_revoked");
+        assert_eq!(detail["actor"], "local-user");
+        assert_eq!(detail["choice"], "revoked");
+        assert_eq!(detail["sideEffectConsent"], false);
+    }
+
+    #[test]
+    fn operator_side_effect_consent_requires_exact_live_ticket_assignment_and_policy() {
+        let (store, ticket_id) = fixture_with_side_effects(false);
+        let ticket = superagent::get_ticket(&store, &ticket_id).unwrap();
+        assert!(side_effect_consent_for_change(
+            &store, &ticket_id, ticket.revision + 1, true,
+        ).is_err(), "stale Ticket revisions are denied");
+
         store.db.execute(
-            "UPDATE sa_mandates SET allowed_side_effects=0 WHERE ticket_id=?1",
+            "UPDATE sa_mandates SET expires_at=?2 WHERE ticket_id=?1",
+            params![ticket_id, storage::now() - 1],
+        ).unwrap();
+        assert!(side_effect_consent_for_change(
+            &store, &ticket_id, ticket.revision, true,
+        ).is_err(), "expired mandates are denied");
+        store.db.execute(
+            "UPDATE sa_mandates SET expires_at=?2 WHERE ticket_id=?1",
+            params![ticket_id, storage::now() + 60_000],
+        ).unwrap();
+
+        store.db.execute(
+            "UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
             [&ticket_id],
         ).unwrap();
+        assert!(side_effect_consent_for_change(
+            &store, &ticket_id, ticket.revision, true,
+        ).is_err(), "revoked mandates are denied");
+        store.db.execute(
+            "UPDATE sa_mandates SET revoked=0 WHERE ticket_id=?1",
+            [&ticket_id],
+        ).unwrap();
+
+        store.db.execute(
+            "UPDATE sa_orchestrations SET policy_revision=policy_revision+1
+             WHERE id=(SELECT orchestration_id FROM sa_tickets WHERE id=?1)",
+            [&ticket_id],
+        ).unwrap();
+        assert!(side_effect_consent_for_change(
+            &store, &ticket_id, ticket.revision, true,
+        ).is_err(), "changed current policy is denied");
+
+        let audit_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1
+             AND kind IN ('side_effect_consent_enabled','side_effect_consent_revoked')",
+            [&ticket_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(audit_count, 0);
+    }
+
+    #[test]
+    fn global_pause_denies_new_side_effect_authority_but_not_safe_revocation() {
+        let (store, ticket_id) = fixture_with_side_effects(false);
+        let ticket = superagent::get_ticket(&store, &ticket_id).unwrap();
+        let paused = || true;
+        assert!(set_side_effect_consent_with_pause(
+            &store, &ticket_id, ticket.revision, true, paused,
+        ).unwrap_err().contains("globally paused"));
+        let initial: i64 = store.db.query_row(
+            "SELECT allowed_side_effects FROM sa_mandates WHERE ticket_id=?1",
+            [&ticket_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(initial, 0);
+
+        set_side_effect_consent(&store, &ticket_id, ticket.revision, true).unwrap();
+        set_side_effect_consent_with_pause(
+            &store, &ticket_id, ticket.revision, false, paused,
+        ).unwrap();
+        let revoked: i64 = store.db.query_row(
+            "SELECT allowed_side_effects FROM sa_mandates WHERE ticket_id=?1",
+            [&ticket_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(revoked, 0);
+    }
+
+    #[test]
+    fn changed_ticket_after_native_confirmation_cannot_enable_side_effects() {
+        let (store, ticket_id) = fixture_with_side_effects(false);
+        let ticket = superagent::get_ticket(&store, &ticket_id).unwrap();
+        assert!(side_effect_consent_for_change(
+            &store, &ticket_id, ticket.revision, true,
+        ).is_ok(), "the live Ticket can be shown in a native confirmation");
+        superagent::stop(&store, &ticket_id).unwrap();
+        assert!(set_side_effect_consent(&store, &ticket_id, ticket.revision, true).is_err());
+        let enabled: i64 = store.db.query_row(
+            "SELECT allowed_side_effects FROM sa_mandates WHERE ticket_id=?1",
+            [&ticket_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(enabled, 0);
+    }
+
+    #[test]
+    fn operator_side_effect_change_waits_on_the_shared_stop_effect_fence() {
+        let (store, ticket_id) = fixture_with_side_effects(false);
+        let ticket = superagent::get_ticket(&store, &ticket_id).unwrap();
+        let path = store.path.clone();
+        let fence = lock_dispatch(&path).unwrap();
+        let (started_tx, started_rx) = mpsc::sync_channel(0);
+        let (done_tx, done_rx) = mpsc::sync_channel(1);
+        let id = ticket_id.clone();
+        let revision = ticket.revision;
+        let thread = thread::spawn(move || {
+            let store = open_effect_store(&path).unwrap();
+            started_tx.send(()).unwrap();
+            done_tx.send(set_side_effect_consent(&store, &id, revision, true)).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_millis(75)).is_err(),
+            "consent transition must wait while the shared dispatch fence is held");
+        let still_denied: i64 = store.db.query_row(
+            "SELECT allowed_side_effects FROM sa_mandates WHERE ticket_id=?1",
+            [&ticket_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(still_denied, 0);
+        drop(fence);
+        done_rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+        thread.join().unwrap();
+        let enabled: i64 = store.db.query_row(
+            "SELECT allowed_side_effects FROM sa_mandates WHERE ticket_id=?1",
+            [&ticket_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(enabled, 0, "consent is recorded separately from the immutable mandate");
+    }
+
+    #[test]
+    fn issue_comment_authorization_requires_native_side_effect_consent() {
+        let (store,ticket_id)=fixture();
+        let intent=make_intent(&ticket_id,"Mandate must be checked natively");
+        set_side_effect_consent(&store,&ticket_id,0,false).unwrap();
         let error=authorize(&store,&intent).unwrap_err();
         assert!(error.contains("no longer permits"));
         let grants:i64=store.db.query_row(
             "SELECT COUNT(*) FROM sa_effect_grants WHERE ticket_id=?1",
             [&ticket_id],|row|row.get(0),
         ).unwrap();
-        assert_eq!(grants,0,"a zero side-effect mandate must not persist a comment grant");
+        assert_eq!(grants,0,"missing operator consent must not persist a comment grant");
     }
 
     #[test]
@@ -2675,25 +3101,22 @@ mod tests {
     }
 
     #[test]
-    fn draft_pr_authorization_requires_explicit_side_effect_mandate() {
+    fn draft_pr_authorization_requires_explicit_side_effect_consent() {
         let (store,ticket_id,root,_,_)=draft_pr_fixture();
         let intent=make_draft_pr_intent_with_sha(&ticket_id,"feature/ticket-pr",&git_test(&root,&["rev-parse","HEAD"]),"main","Mandate check");
-        store.db.execute(
-            "UPDATE sa_mandates SET allowed_side_effects=0 WHERE ticket_id=?1",
-            [&ticket_id],
-        ).unwrap();
+        set_side_effect_consent(&store,&ticket_id,0,false).unwrap();
         let mut target_verified=false;
         let error=authorize_draft_pull_request_with(&store,&intent,|_,_| {
             target_verified=true;
             Ok(intent.head_sha.clone())
         }).unwrap_err();
         assert!(error.contains("no longer permits"));
-        assert!(!target_verified,"the explicit native side-effect mandate must be checked before target verification");
+        assert!(!target_verified,"the explicit native side-effect consent must be checked before target verification");
         let grants:i64=store.db.query_row(
             "SELECT COUNT(*) FROM sa_draft_pr_effect_grants WHERE ticket_id=?1",
             [&ticket_id],|row|row.get(0),
         ).unwrap();
-        assert_eq!(grants,0,"a missing side-effect mandate must leave no PR grant");
+        assert_eq!(grants,0,"missing operator consent must leave no PR grant");
         drop(store);
         let _=std::fs::remove_dir_all(root);
     }

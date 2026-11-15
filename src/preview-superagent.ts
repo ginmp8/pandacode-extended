@@ -22,6 +22,7 @@ type Assignment = { id:string; botId:string; sessionId:string; attempt:number; s
 type ManifestPreset = { name:string; coordinatorBotId:string; workerBotId:string;
   workerBotIds:string[]; reviewerBotIds:string[]; projectId:string; councilRequired:boolean };
 const activity = new Map<string,Activity[]>(), assignments = new Map<string,Assignment[]>();
+const sideEffectConsents = new Map<string,boolean>();
 const PREVIEW_OBSERVE_EVENT_KINDS = [
   'issues.opened','issues.edited','issue_comment.created','pull_request.opened',
   'pull_request_review.submitted','check_run.completed',
@@ -63,6 +64,7 @@ function seedDemandRunsSample(bots:Bot[]):void {
       activeAssignmentId:assignment?.id??null,evidence:input.evidence,createdAt,updatedAt,
       provenance:'preview-fixture'};
     tickets.set(config.id,[...(tickets.get(config.id)||[]),ticket]);
+    sideEffectConsents.set(ticket.id,false);
     const roleIds=[config.coordinatorBotId,...config.workerBotIds,...config.reviewerBotIds];
     teamSnapshots.set(ticket.id,{snapshotVersion:1,provenance:'preview-fixture',
       orchestrationId:config.id,teamVersion:config.teamVersion,name:config.name,
@@ -281,7 +283,8 @@ export async function invokeSuperagent<T>(
       const mandate={ticketId:t.id,actor:'local-user',authorizationId:'preview-only-'+t.id,
         policyRevision:cfg.policyRevision,projectId:cfg.projectId,
         expiresAt:Date.now()+4*60*60*1000,revoked:t.state==='stopped',
-        allowedTools:[],allowedSideEffects:false,createdAt:Date.now()};
+        allowedTools:[],allowedSideEffects:false,sideEffectConsent:sideEffectConsents.get(t.id)??false,
+        createdAt:Date.now()};
       if(command==='superagent_assignments')value=assignments.get(t.id)||[];
       else if(command==='superagent_activity')value=activity.get(t.id)||[];
       else if(command==='superagent_mandate')value=mandate;
@@ -341,6 +344,7 @@ export async function invokeSuperagent<T>(
       const t:Ticket={id:ticketId,orchestrationId:c.id,requestKey:String(args.requestKey??''),
         objective:args.objective,actor:'local-user',state:'running',revision:0,
         activeAssignmentId:assignmentId,evidence:null,createdAt:now,updatedAt:now};
+      sideEffectConsents.set(t.id,false);
       teamSnapshots.set(t.id,makeTeamSnapshot(c));
       tickets.set(c.id,[...(tickets.get(c.id)||[]),t]);
       assignments.set(t.id,[{id:assignmentId,botId:c.workerBotId,
@@ -351,6 +355,29 @@ export async function invokeSuperagent<T>(
         state:'running',ordinal:0,createdAt:now,updatedAt:now}]);
       activity.set(t.id,[{id:1,kind:'admitted',detail:'Manual read-only preview assignment',at:now}]);
       value=t;break;
+    }
+    case 'superagent_set_side_effects':{
+      const ticketId=typeof args.ticketId==='string'?args.ticketId:'';
+      const t=[...tickets.values()].flat().find(item=>item.id===ticketId);
+      if(!t)throw Error('Ticket not found.');
+      if(typeof args.enabled!=='boolean')throw Error('A side-effect consent choice is required.');
+      if(t.revision!==args.expectedRevision)throw Error('Ticket revision changed before preview.');
+      if(t.state!=='running')throw Error('Only an active running Ticket can change its side-effect consent.');
+      const snapshot=teamSnapshots.get(t.id),config=get(t.orchestrationId);
+      const activeAssignment=(assignments.get(t.id)||[]).find(item=>item.id===t.activeAssignmentId);
+      if(!snapshot||!config.enabled||snapshot.policy.policyRevision!==config.policyRevision||
+          snapshot.projectId!==config.projectId||!activeAssignment||activeAssignment.state!=='running')
+        throw Error('The preview Ticket, assignment, or current policy is no longer active.');
+      const enabled=args.enabled;
+      if((sideEffectConsents.get(t.id)??false)===enabled)
+        throw Error('The preview Ticket side-effect consent already has that state.');
+      sideEffectConsents.set(t.id,enabled);
+      const events=activity.get(t.id)||[];
+      events.unshift({id:events.length+1,kind:enabled?'side_effect_consent_enabled':'side_effect_consent_revoked',
+        detail:'Preview operator choice; no native confirmation or real GitHub authority.',at:Date.now()});
+      activity.set(t.id,events);
+      value={previewOnly:true,message:'Preview only: no native confirmation was shown and no real GitHub authority changed. The preview Ticket now shows the requested bounded side-effect state.'};
+      break;
     }
     case 'superagent_stop':
     case 'superagent_retry':

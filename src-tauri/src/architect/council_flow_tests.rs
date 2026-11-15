@@ -2071,7 +2071,11 @@ fn native_concurrent_roots_dispatch_and_settle_the_same_bot_without_state_leakag
     let replayed_ids_b =
         super::super::dispatch_council_round(&state, &task_b.root_id, vec![root_assignment_b])
             .unwrap();
-    assert_eq!(replayed_ids_b, root_worker_ids_b);
+    assert_eq!(
+        replayed_ids_b,
+        vec![task_b.worker_id.clone()],
+        "replay returns only the requested existing seat, not a sibling seat"
+    );
     assert_eq!(saved(&state, &task_b.root_id).workers.len(), 2);
     assert_eq!(saved(&state, &task_b.child_id).status, "running");
 

@@ -253,6 +253,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let preflightObjective = '', preflightMode: 'coordinated' | 'direct' = 'coordinated';
   // Persist the user's editable preset draft across asynchronous list refreshes.
   let draftPresetName = '', draftPresetTemplate = '';
+  // Unsaved native Team roster; never treated as execution authority.
+  let draftCoordinatorBotId = '', draftWorkerBotId = '';
+  let draftAdditionalWorkerIds: string[] = [], draftReviewerBotIds: string[] = [];
+  let draftMembersExpanded = false;
   const guidedBuilder = new GuidedTeamBuilder();
   let rejectingTicket = '', inspectedTicket = '';
   let inspectedAssignmentId = '';
@@ -267,6 +271,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let teamStrategy: StrategyView | null = null;
   // Draft order is committed only by the native revision-guarded roster update.
   let workerOrder: string[] = [];
+  let reviewerDraft: string[] = [];
   let effectiveTeam: EffectiveTeam | null = null;
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
@@ -370,6 +375,24 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       (bot.paused ? ' disabled' : '') + (bot.id === botId ? ' selected' : '') + '>' + safe(bot.name) +
       (bot.paused ? ' (paused)' : '') + '</option>').join('');
     const choices = optionsFor('');
+    const createRoleOptions = (selectedRoles: string[], workerRole: boolean) => {
+      const workerProject = bots.find(bot => bot.id === draftWorkerBotId)?.projectId;
+      const exclusive = new Set([
+        draftCoordinatorBotId, draftWorkerBotId,
+        ...(workerRole ? draftReviewerBotIds : draftAdditionalWorkerIds),
+      ]);
+      return bots.map(bot => {
+        const invalid = bot.paused || exclusive.has(bot.id) ||
+          (workerRole && !!workerProject && bot.projectId !== workerProject);
+        return '<option value="' + safe(bot.id) + '"' +
+          (selectedRoles.includes(bot.id) ? ' selected' : '') +
+          (invalid ? ' disabled' : '') + '>' + safe(bot.name) +
+          (bot.paused ? ' (paused)' : workerRole && workerProject &&
+          bot.projectId !== workerProject ? ' (different Worker project)' : '') +
+          '</option>';
+      }).join('');
+    };
+
     const chosen = current();
     const inspected = tickets.find(ticket => ticket.id === inspectedTicket);
     const writeTicket = tickets.find(ticket => ticket.id === writeGrantTicket);
@@ -1029,8 +1052,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
                 '" data-sa-direction="down" aria-label="Move ' + safe(botName(id)) +
                 ' down"' + (index === workerOrder.length - 1 || chosen.enabled ? ' disabled' : '') +
                 '>Down</button></li>').join('') + '</ol>' +
-              '<label>Optional Council Reviewers (up to 8)<select name="reviewers" multiple size="5">' +
-              roleOptions(roleRoster.reviewerBotIds) + '</select></label>' +
+              '<label>Optional Council Reviewers (up to 8)<select name="reviewers" data-sa-reviewer-select multiple size="5">' +
+              roleOptions(reviewerDraft) + '</select></label>' +
               '<label><input type="checkbox" name="councilRequired"' +
               (roleRoster.councilRequired ? ' checked' : '') +
               '> Require independent native Council review before completion</label>' +
@@ -1147,10 +1170,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '>Issue Resolution</option></select></label>' +
           '<label>Name<input name="name" maxlength="120" placeholder="Software Development" value="' +
           safe(draftPresetName) + '" required></label>' +
-          '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" required>' +
-          '<option value="">Choose bot</option>' + choices + '</select></label>' +
-          '<label>Worker<select name="workerBotId" required><option value="">Choose bot</option>' +
-          choices + '</select></label></div><button class="primary-button" type="submit"' +
+          '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" data-sa-create-coordinator required>' +
+          '<option value="">Choose bot</option>' + optionsFor(draftCoordinatorBotId) + '</select></label>' +
+          '<label>Worker<select name="workerBotId" data-sa-create-worker required><option value="">Choose bot</option>' +
+          optionsFor(draftWorkerBotId) + '</select></label></div>' +
+          '<details class="sa-new-members"' + (draftMembersExpanded ? ' open' : '') +
+          '><summary>Additional Team members (optional)</summary>' +
+          '<p>Additional Workers share the primary Worker checkout; reviewers are isolated. ' +
+          'One bot may hold only one role. Native Team creation remains disabled.</p>' +
+          '<label>Additional Workers (up to 15)<select name="additionalWorkers" data-sa-create-additional-workers multiple size="5">' +
+          createRoleOptions(draftAdditionalWorkerIds, true) + '</select></label>' +
+          '<label>Optional Reviewers (up to 8)<select name="reviewers" data-sa-create-reviewers multiple size="5">' +
+          createRoleOptions(draftReviewerBotIds, false) + '</select></label></details>' +
+          '<button class="primary-button" type="submit"' +
           (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' +
            guidedBuilder.render(bots) + overview + teamRoles + strategyPane
         : '') +
@@ -1221,7 +1253,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         selected = presets[0]?.id ?? '';
         teamStrategy = null;
         inspectedTicket = ''; threadLinks = [];
-        linkedDecisions = []; linkedDecisionsLoaded = false; roleRoster = null; workerOrder = []; effectiveTeam = null;
+        linkedDecisions = []; linkedDecisionsLoaded = false; roleRoster = null; workerOrder = []; reviewerDraft = []; effectiveTeam = null;
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
         sourceIntegrity = null;
         autoStatus = null;
@@ -1235,6 +1267,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (roleRoster && selected) {
         roleRoster = await call<TeamRoster>('superagent_roster',{orchestrationId:selected});
         workerOrder = roleRoster.workerBotIds.slice(1);
+        reviewerDraft = [...roleRoster.reviewerBotIds];
       }
       if (teamStrategy && !presets.some(config =>
         config.id === teamStrategy?.orchestrationId &&
@@ -1277,7 +1310,24 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   // Templates populate editable names only; no bot, tool or task is selected.
   host.addEventListener('change', event => {
     const target = event.target;
+    if (target instanceof HTMLSelectElement && target.closest('form[data-sa-form="create"]')) {
+      if (target.name === 'coordinatorBotId') draftCoordinatorBotId = target.value;
+      else if (target.name === 'workerBotId') draftWorkerBotId = target.value;
+      else if (target.name === 'additionalWorkers') {
+        draftAdditionalWorkerIds = [...target.selectedOptions].map(option => option.value);
+      } else if (target.name === 'reviewers') {
+        draftReviewerBotIds = [...target.selectedOptions].map(option => option.value);
+      } else return;
+      render();
+      return;
+    }
     if (target instanceof Element && guidedBuilder.handleChange(target)) {
+      render();
+      return;
+    }
+    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-reviewer-select')) {
+      if (busy || !roleRoster || roleRoster.orchestrationId !== selected) return;
+      reviewerDraft = [...target.selectedOptions].map(option => option.value);
       render();
       return;
     }
@@ -1352,6 +1402,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const field = target.form?.querySelector<HTMLInputElement>('input[name="name"]');
     if (field) field.value = draftPresetName;
   });
+  host.addEventListener('toggle', event => {
+    const target = event.target;
+    if (target instanceof HTMLDetailsElement && target.classList.contains('sa-new-members')) {
+      draftMembersExpanded = target.open;
+    }
+  }, true);
   host.addEventListener('input', event => {
     const target = event.target;
     if (target instanceof Element && guidedBuilder.handleInput(target)) return;
@@ -1560,7 +1616,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       selected = demand.orchestrationId;
       workspaceView = 'runs';
       tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
-      inspectedAssignmentId = ''; roleRoster = null; workerOrder = []; effectiveTeam = null;
+      inspectedAssignmentId = ''; roleRoster = null; workerOrder = []; reviewerDraft = []; effectiveTeam = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       sourceIntegrity = null;
       void work(async () => {
@@ -1588,6 +1644,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (selected) void work(async () => {
         roleRoster=await call<TeamRoster>('superagent_roster',{orchestrationId:selected});
         workerOrder=roleRoster.workerBotIds.slice(1);
+        reviewerDraft=[...roleRoster.reviewerBotIds];
       });
       return;
     }
@@ -1671,7 +1728,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           throw new Error('Native duplication failed to create an independent disabled Team.');
         }
         selected = created.id; workspaceView = 'teams';
-        roleRoster = null; workerOrder = []; effectiveTeam = null;
+        roleRoster = null; workerOrder = []; reviewerDraft = []; effectiveTeam = null;
         await reload();
         feedback = 'Disabled Team duplicated. Native roles were retained; no tasks or permissions copied.';
       });
@@ -2264,7 +2321,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const cfg=current();
       if (!cfg || !roleRoster || roleRoster.orchestrationId!==cfg.id) return;
       const workerBotIds=[cfg.workerBotId,...workerOrder];
-      const reviewerBotIds=data.getAll('reviewers').map(String);
+      const reviewerBotIds=[...reviewerDraft];
       // Freeze the visible policy before async work; reload may clear the
       // selected roster while the native compare-and-swap request is pending.
       const councilRequired = typeof roleRoster.councilRequired === 'boolean'
@@ -2353,14 +2410,29 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       return;
     }
     if (form.dataset.saForm === 'create') {
-      const input = { name:String(data.get('name') ?? '').trim(),
+      const input = {
+        name:String(data.get('name') ?? '').trim(),
         coordinatorBotId:String(data.get('coordinatorBotId') ?? ''),
-        workerBotId:String(data.get('workerBotId') ?? '') };
+        workerBotId:String(data.get('workerBotId') ?? ''),
+        workerBotIds:[String(data.get('workerBotId') ?? ''), ...draftAdditionalWorkerIds],
+        reviewerBotIds:[...draftReviewerBotIds],
+        councilRequired:false,
+      };
       void work(async () => {
-        if (!input.name || !input.coordinatorBotId || !input.workerBotId ||
-          input.coordinatorBotId === input.workerBotId) throw new Error('Choose two different existing bots.');
+        const all=[input.coordinatorBotId,...input.workerBotIds,...input.reviewerBotIds];
+        if (!input.name || all.some(id => !id) || new Set(all).size !== all.length ||
+            input.workerBotIds.length > 16 || input.reviewerBotIds.length > 8) {
+          throw new Error('Choose a unique bot for each Team role and respect member limits.');
+        }
+        const project=bots.find(bot => bot.id===input.workerBotId)?.projectId;
+        if (input.workerBotIds.some(id => {
+          const bot=bots.find(candidate => candidate.id === id);
+          return !bot || bot.paused || (!!project && bot.projectId !== project);
+        })) throw new Error('Additional Workers must be active in the primary Worker project.');
         const created = await call<Config>('superagent_create',{ input });
-        draftPresetName = ''; draftPresetTemplate = '';
+        draftPresetName=''; draftPresetTemplate='';
+        draftCoordinatorBotId=''; draftWorkerBotId='';
+        draftAdditionalWorkerIds=[]; draftReviewerBotIds=[]; draftMembersExpanded=false;
         selected = created.id; workspaceView = 'runs'; await reload();
       });
     }

@@ -20,6 +20,63 @@ async function openOrchestrationWorkspace(page: Page) {
 }
 
 
+test('new multi-role Team draft survives workspace redraw and submits exact native roster', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-new-team-draft';
+    document.body.appendChild(host);
+    const configs: Array<Record<string, unknown>> = [];
+    (window as unknown as {saCreateTeamPayload: unknown}).saCreateTeamPayload = null;
+    mountSuperagent(host, async (command, args) => {
+      if (command === 'bots_list') return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Primary Worker',paused:false},
+        {id:'worker-b',name:'Additional Worker',paused:false},
+        {id:'reviewer',name:'Reviewer',paused:false},
+      ] as never;
+      if (command === 'superagent_list') return [...configs] as never;
+      if (command === 'superagent_tickets') return [] as never;
+      if (command === 'superagent_create') {
+        (window as unknown as {saCreateTeamPayload: unknown}).saCreateTeamPayload = args;
+        const input = args?.input as Record<string, string>;
+        const cfg = {id:'created-team',...input,enabled:false,policyRevision:1,
+          workerCount:2,reviewerCount:1};
+        configs.push(cfg);
+        return cfg as never;
+      }
+      throw Error('Unexpected command: ' + command);
+    });
+  });
+  const host = page.locator('#sa-new-team-draft');
+  await expect(host.getByRole('button',{name:'Create disabled preset'})).toBeEnabled();
+  await host.getByRole('textbox',{name:'Name',exact:true}).fill('Persisted roles');
+  await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
+  await host.getByRole('combobox',{name:'Worker',exact:true}).selectOption('worker');
+  await host.locator('details.sa-new-members summary').click();
+  await host.locator('select[name="additionalWorkers"]').selectOption(['worker-b']);
+  await host.locator('select[name="reviewers"]').selectOption(['reviewer']);
+  await host.getByRole('combobox',{name:'Team status'}).selectOption('enabled');
+  await host.getByRole('searchbox',{name:'Search Teams'}).fill('another Team');
+  await expect(host.locator('details.sa-new-members')).toHaveAttribute('open','');
+  await expect(host.locator('select[name="additionalWorkers"]')).toHaveValues(['worker-b']);
+  await expect(host.locator('select[name="reviewers"]')).toHaveValues(['reviewer']);
+  await expect(host.locator('select[name="coordinatorBotId"]')).toHaveValue('coordinator');
+  await expect(host.locator('select[name="workerBotId"]')).toHaveValue('worker');
+  await host.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(host.getByRole('button',{name:'Demands / Runs'})).toHaveAttribute('aria-current','page');
+  const payload = await page.evaluate(() =>
+    (window as unknown as {saCreateTeamPayload: Record<string, unknown>}).saCreateTeamPayload);
+  expect(payload).toEqual({
+    input:{
+      name:'Persisted roles',coordinatorBotId:'coordinator',workerBotId:'worker',
+      workerBotIds:['worker','worker-b'],reviewerBotIds:['reviewer'],councilRequired:false,
+    },
+  });
+});
+
 test('native SuperAgent preset UI stays manual and imports disabled portable configurations', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

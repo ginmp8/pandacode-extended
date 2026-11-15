@@ -13,7 +13,11 @@ interface Config {
   enabled: boolean; policyRevision: number;
   ticketCount?: number; runningCount?: number; blockedCount?: number; lastActivityAt?: number;
 }
-interface Ticket { id: string; objective: string; state: string; revision: number; evidence: string | null }
+interface Ticket {
+  id: string; objective: string; state: string; revision: number; evidence: string | null;
+  orchestrationId?: string; createdAt?: number; updatedAt?: number; actor?: string;
+}
+interface QueueTicket extends Ticket { orchestrationId: string }
 interface WorkItem {
   id: string; ticketId: string; objective: string; evidenceContract?: string;
   state: string; ordinal: number; dependsOnIds?: string[]; readiness?: string;
@@ -106,6 +110,10 @@ async function issueCommentEffectKey(
 export function mountSuperagent(host: HTMLElement, call: Call): void {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
+  let activeSurface: 'teams' | 'runs' = 'teams';
+  let intakeTeamId = '', runTeamFilter = 'all', runStatusFilter = 'all', runQuery = '';
+  let globalTickets: QueueTicket[] = [], globalQueueLoaded = false, globalQueueLoading = false;
+  let globalQueueErrors: Array<{ orchestrationId: string; message: string }> = [];
   let preview: Preview | null = null, inspected: unknown = null;
   let confirm: { message: string; action: () => Promise<void> } | null = null;
   let taskKey = crypto.randomUUID();
@@ -208,6 +216,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     const provenance = rawProvenance || 'missing';
     const provenanceNote = rawProvenance === 'native'
       ? 'Native: this immutable Team snapshot was captured for this Ticket.'
+      : rawProvenance === 'preview-fixture'
+        ? 'Preview fixture: this is native-shaped example data, not a Ticket read from native storage.'
       : rawProvenance === 'legacy-current'
         ? 'Legacy-current: backfilled from the mutable Team configuration observed during upgrade; it may not match the exact historical admission state.'
         : rawProvenance === 'legacy-unknown'
@@ -369,6 +379,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       (item.enabled ? 'Manual' : 'Off') + '</span>' +
       '<button type="button" data-sa-select="' + safe(item.id) + '" aria-current="' +
       (item.id === selected) + '">Details</button>' +
+      '<button type="button" data-sa-assign-demand="' + safe(item.id) + '" aria-label="Assign demand to ' +
+      safe(item.name) + '">Assign demand</button>' +
       '<button type="button" data-sa-edit-team="' + safe(item.id) + '">Edit Team</button>' +
       '</li>';
       }
@@ -429,7 +441,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       issueCommentStatus.ticketRevision === inspected.revision ? issueCommentStatus : null;
     const details = inspected && !ticketDetails
       ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
-        '<h4>Ticket evidence</h4>' +
+        '<h4>Ticket evidence</h4><p class="sa-ticket-objective">Objective: ' + safe(inspected.objective) + '</p>' +
         (ticketDetailsLoading
           ? '<p role="status" data-sa-ticket-details-loading>Loading Ticket evidence…</p>'
           : '<p class="sa-error" role="alert">Ticket evidence unavailable: ' +
@@ -437,7 +449,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         renderWorkItems() + '<button type="button" data-sa-close-details>Close evidence</button></section>'
       : inspected && ticketDetails
       ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
-        '<h4>Ticket evidence</h4><p>Read-only native snapshot. Model output is not task approval.</p>' +
+        '<h4>Ticket evidence</h4><p class="sa-ticket-objective">Objective: ' + safe(inspected.objective) +
+        '</p><p>Read-only native snapshot. Model output is not task approval.</p>' +
         renderTeamSnapshot(ticketDetails.teamSnapshot) +
         '<dl><dt>Ticket ID</dt><dd><code>' + safe(inspected.id) + '</code></dd>' +
         '<dt>State / revision</dt><dd>' + safe(inspected.state) + ' / ' + inspected.revision + '</dd>' +
@@ -530,7 +543,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
               ' · Revision ' + d.policyRevision + '</li>').join('') ||
               '<li>No recorded events.</li>') + '</ol></div>' : '')) + '</section>';
     const active = chosen ? '<section class="sa-pane" aria-label="Selected orchestration"><header><h3>' +
-      safe(chosen.name) + '</h3><div class="sa-actions"><button type="button" data-sa-enable="' +
+      safe(chosen.name) + '</h3><div class="sa-actions"><button type="button" data-sa-assign-demand="' +
+      safe(chosen.id) + '">Assign demand</button><button type="button" data-sa-enable="' +
       safe(chosen.id) + '">' + (chosen.enabled ? 'Disable' : 'Enable manual') +
       '</button><button type="button" data-sa-delete="' + safe(chosen.id) + '"' +
       (chosen.enabled ? ' disabled' : '') + '>Delete unused</button></div></header>' +
@@ -577,15 +591,92 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
           '<div class="sa-actions"><button type="submit" class="primary-button">Submit rejection</button>' +
           '<button type="button" data-sa-reject-cancel>Cancel</button></div></form>' : '') +
         details + sourcePanel + '</section>' : '';
-    host.innerHTML = '<div class="sa-ui">' +
-      '<p class="sa-intro">Native SuperAgent uses existing bots. Imported presets stay Off, and all task execution is manual.</p>' +
-      (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
-      (error ? '<p role="alert" class="sa-error">' + safe(error) + '</p>' : '') +
-      (feedback ? '<p role="status" class="sa-feedback">' + safe(feedback) + '</p>' : '') +
-      (confirm ? '<section role="alertdialog" aria-label="Confirm orchestration action" class="sa-confirm"><p>' +
-        safe(confirm.message) + '</p><div class="sa-actions"><button type="button" data-sa-cancel>Cancel</button>' +
-        '<button class="primary-button" type="button" data-sa-confirm>Confirm</button></div></section>' : '') +
-      '<section class="sa-pane"><h3>Orchestrations</h3><ul class="sa-list">' +
+    const teamOptions = presets.map(team => '<option value="' + safe(team.id) + '"' +
+      (team.id === runTeamFilter ? ' selected' : '') + '>' + safe(team.name) + '</option>').join('');
+    const intakeOptions = presets.map(team => '<option value="' + safe(team.id) + '"' +
+      (team.id === intakeTeamId ? ' selected' : '') + (!team.enabled ? ' disabled' : '') + '>' +
+      safe(team.name) + (team.enabled ? '' : ' · Off') + '</option>').join('');
+    const teamName = (id: string) => presets.find(team => team.id === id)?.name ?? 'Unknown Team';
+    const queueStatuses = [...new Set(globalTickets.map(ticket => ticket.state))].sort();
+    const statusOptions = queueStatuses.map(state => '<option value="' + safe(state) + '"' +
+      (state === runStatusFilter ? ' selected' : '') + '>' + safe(state.replace(/_/g, ' ')) + '</option>').join('');
+    const query = runQuery.trim().toLocaleLowerCase();
+    const filteredQueue = globalTickets.filter(ticket => {
+      if (runTeamFilter !== 'all' && ticket.orchestrationId !== runTeamFilter) return false;
+      if (runStatusFilter !== 'all' && ticket.state !== runStatusFilter) return false;
+      if (query && ![ticket.objective, ticket.id, teamName(ticket.orchestrationId)]
+        .some(value => value.toLocaleLowerCase().includes(query))) return false;
+      return true;
+    }).sort((left, right) => {
+      const leftAt = typeof left.createdAt === 'number' ? left.createdAt : 0;
+      const rightAt = typeof right.createdAt === 'number' ? right.createdAt : 0;
+      return rightAt - leftAt || right.id.localeCompare(left.id);
+    });
+    const failedTeam = runTeamFilter === 'all' ? null
+      : globalQueueErrors.find(item => item.orchestrationId === runTeamFilter) ?? null;
+    const queuePartialError = globalQueueErrors.length && runTeamFilter === 'all'
+      ? '<p class="sa-error" role="alert">Some Team queues could not be loaded: ' +
+        safe(globalQueueErrors.map(item => teamName(item.orchestrationId) + ': ' + item.message).join('; ')) +
+        '. Results omit those Teams until the next refresh.</p>' : '';
+    const queueRows = filteredQueue.map(ticket => '<li class="sa-queue-ticket" data-sa-queue-ticket="' +
+      safe(ticket.id) + '"><div><strong>' + safe(ticket.objective) + '</strong>' +
+      '<small>Team: ' + safe(teamName(ticket.orchestrationId)) + ' · State: ' +
+      safe(ticket.state.replace(/_/g, ' ')) + '</small><small>Ticket ID: <code>' + safe(ticket.id) +
+      '</code> · Updated: ' + safe(activityTime(ticket.updatedAt)) + '</small></div>' +
+      '<div class="sa-ticket-actions"><button type="button" data-sa-inspect-global-ticket="' +
+      safe(ticket.id) + '" aria-pressed="' + (ticket.id === inspectedTicket) + '">View evidence for ' +
+      safe(ticket.objective) + '</button><button type="button" data-sa-open-team-queue="' +
+      safe(ticket.orchestrationId) + '">Open Team queue</button></div></li>').join('');
+    const queueBody = globalQueueLoading
+      ? '<p class="sa-empty" role="status" aria-live="polite">Loading native Ticket lists…</p>'
+      : failedTeam
+        ? '<p class="sa-error" role="alert">Tickets for ' + safe(teamName(failedTeam.orchestrationId)) +
+          ' could not be loaded: ' + safe(failedTeam.message) + '</p>'
+        : !presets.length
+          ? '<p class="sa-empty">No Teams yet. Create a Team before assigning a demand.</p>'
+          : !globalQueueLoaded
+            ? '<p class="sa-empty" role="status">Open Demands / Runs to load Team queues.</p>'
+            : !globalTickets.length && !globalQueueErrors.length
+              ? '<p class="sa-empty">No demands yet. Assign a demand to an enabled Team to begin.</p>'
+              : !globalTickets.length && globalQueueErrors.length
+                ? '<p class="sa-empty" role="status">Queue contents are unavailable until the failed Team Ticket lists can be read.</p>'
+                : !filteredQueue.length && globalQueueErrors.length && runTeamFilter === 'all'
+                  ? '<p class="sa-empty" role="status">No demands were found in the available Team queues; unavailable Teams may still have matching Tickets.</p>'
+                  : !filteredQueue.length
+                    ? '<p class="sa-empty">No demands match these filters.</p>'
+                    : '<ul class="sa-tickets sa-run-ticket-list">' + queueRows + '</ul>';
+    const runsPanel = '<section class="sa-surface sa-runs-surface" role="tabpanel" id="sa-runs-panel"' +
+      (activeSurface === 'runs' ? '' : ' hidden') + '><section class="sa-pane" aria-label="Global Demands and Runs">' +
+      '<header><div><h2>Demands / Runs</h2><p>Global work queue backed by each Team’s existing native Ticket list. Manual handoff remains explicit.</p></div>' +
+      '<button type="button" data-sa-refresh-queue' + (globalQueueLoading ? ' disabled' : '') + '>Refresh queue</button></header>' +
+      queuePartialError + '<div class="sa-queue-filters"><label>Filter by Team<select data-sa-queue-team>' +
+      '<option value="all"' + (runTeamFilter === 'all' ? ' selected' : '') + '>All Teams</option>' + teamOptions +
+      '</select></label><label>Filter by status<select data-sa-queue-status><option value="all"' +
+      (runStatusFilter === 'all' ? ' selected' : '') + '>All statuses</option>' + statusOptions +
+      '</select></label><label>Search Ticket<input type="search" data-sa-queue-query aria-label="Search Ticket" value="' +
+      safe(runQuery) + '" placeholder="Objective, Ticket ID or Team"></label></div>' +
+      '<p class="sa-field-hint">Showing up to 200 recent Tickets per Team. Repository filtering is unavailable because the native Ticket list does not expose a repository identity.</p>' +
+      '<div class="sa-global-queue-body">' + queueBody + '</div>' +
+      '<form data-sa-form="global-run" class="sa-global-run"><h3>Assign demand</h3>' +
+      '<p>Choose an existing enabled Team. The current native intake is manual; it does not promise automatic planning, dispatch or delivery.</p>' +
+      '<label>Team<select name="orchestrationId" data-sa-intake-team required>' +
+      '<option value="">Choose an enabled Team</option>' + intakeOptions + '</select></label>' +
+      '<label>Task objective<textarea data-sa-global-objective name="objective" rows="3" maxlength="16000" required></textarea></label>' +
+      '<label>Handoff<select name="mode"><option value="coordinated">Coordinator, then worker</option>' +
+      '<option value="direct">Worker directly</option></select></label>' +
+      '<button class="primary-button" type="submit"' +
+      (!presets.some(team => team.id === intakeTeamId && team.enabled) || globalQueueLoading ? ' disabled' : '') +
+      '>Assign demand manually</button></form></section>' +
+      '<section class="sa-pane sa-run-inspector" aria-label="Selected Run evidence">' +
+      (inspectedTicket && tickets.some(ticket => ticket.id === inspectedTicket)
+        ? details : '<h3>Run inspector</h3><p>Select a Ticket to load its native evidence, mandate, assignments and activity.</p>') +
+      '</section></section>';
+    const tabs = '<nav class="sa-surface-tabs" aria-label="Orchestration surfaces">' +
+      '<button type="button" data-sa-surface="teams" aria-pressed="' + (activeSurface === 'teams') +
+      '">Teams</button><button type="button" data-sa-surface="runs" aria-pressed="' +
+      (activeSurface === 'runs') + '">Demands / Runs</button></nav>';
+    const teamsPanel = '<section class="sa-surface sa-teams-surface" role="region" aria-label="Teams"' +
+      (activeSurface === 'teams' ? '' : ' hidden') + '><section class="sa-pane"><h3>Orchestrations</h3><ul class="sa-list">' +
       (list || '<li class="sa-empty">No orchestrations created.</li>') + '</ul></section>' +
       '<section class="sa-pane"><h3>Team Builder</h3>' +
       '<p>Membership is saved in order. The existing manual dispatch path does not schedule multiple Workers. Native Council reviewer runs start only for a Ticket whose saved policy requires Council; Reviewer membership alone does not start a review.</p>' +
@@ -607,8 +698,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       councilField('sa-create-council', draftCouncilRequired, draftCouncilError) +
       '<button class="primary-button" type="submit"' +
       (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' +
-      active +
-      '<section class="sa-pane"><h3>Portable configuration</h3>' +
+      active + '<section class="sa-pane"><h3>Portable configuration</h3>' +
       '<p>Configuration only: no credentials, memories, conversations, approvals or live tasks.</p>' +
       '<label>Companion manifest JSON<textarea data-sa-manifest rows="5" spellcheck="false">' +
       safe(importText) + '</textarea></label>' +
@@ -617,7 +707,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       (preview ? '<p role="status">' + preview.wouldCreate.length + ' new; ' +
         preview.unchanged.length + ' unchanged. Imported presets will be disabled.</p>' +
         '<button class="primary-button" type="button" data-sa-import>Confirm import</button>' : '') +
-      '</section></div>';
+      '</section></section>';
+    host.innerHTML = '<div class="sa-ui">' +
+      '<p class="sa-intro">Native SuperAgent uses existing bots. Imported presets stay Off, and all task execution is manual.</p>' +
+      (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
+      (error ? '<p role="alert" class="sa-error">' + safe(error) + '</p>' : '') +
+      (feedback ? '<p role="status" class="sa-feedback">' + safe(feedback) + '</p>' : '') +
+      (confirm ? '<section role="alertdialog" aria-label="Confirm orchestration action" class="sa-confirm"><p>' +
+        safe(confirm.message) + '</p><div class="sa-actions"><button type="button" data-sa-cancel>Cancel</button>' +
+        '<button class="primary-button" type="button" data-sa-confirm>Confirm</button></div></section>' : '') +
+      tabs + teamsPanel + runsPanel + '</div>';
     host.setAttribute('aria-busy', String(busy));
   }
   async function refreshTicketDetails(): Promise<void> {
@@ -667,6 +766,38 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     if (snapshotResult.error) throw new Error(snapshotResult.error);
     if (linkResult.error) throw new Error(linkResult.error);
   }
+  async function loadGlobalQueue(shouldRender = true): Promise<void> {
+    if (globalQueueLoading) return;
+    const teams = [...presets];
+    globalQueueLoading = true;
+    globalQueueErrors = [];
+    globalTickets = [];
+    if (shouldRender && activeSurface === 'runs' && !busy) render();
+    const results = await Promise.all(teams.map(async team => {
+      try {
+        // The existing native list is scoped to one Team and bounded to its
+        // newest 200 Tickets. The orchestration id comes from that query scope.
+        const rows = await call<Ticket[]>('superagent_tickets', {
+          orchestrationId:team.id, limit:200,
+        });
+        if (!Array.isArray(rows)) throw new Error('Native Ticket list returned an invalid response.');
+        if (rows.some(ticket => ticket.orchestrationId && ticket.orchestrationId !== team.id)) {
+          throw new Error('Native Ticket list returned a Ticket owned by another Team.');
+        }
+        return { team, rows:rows.map(ticket => ({...ticket, orchestrationId:team.id})), message:'' };
+      } catch (cause) {
+        return { team, rows:[] as QueueTicket[],
+          message:cause instanceof Error ? cause.message : String(cause) };
+      }
+    }));
+    globalTickets = results.flatMap(result => result.rows);
+    globalQueueErrors = results.filter(result => !!result.message).map(result => ({
+      orchestrationId:result.team.id, message:result.message,
+    }));
+    globalQueueLoaded = true;
+    globalQueueLoading = false;
+    if (shouldRender && activeSurface === 'runs' && !busy) render();
+  }
   async function reload(): Promise<void> {
     loading = true;
     // Keep updated controls hidden until the mutating operation has settled.
@@ -681,6 +812,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         threadLinks = []; workItems = []; workItemsError = ''; workItemsLoading = false;
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       }
+      if (!presets.some(config => config.id === runTeamFilter)) runTeamFilter = 'all';
+      if (!presets.some(config => config.id === intakeTeamId)) intakeTeamId = selected;
       // A failed native read must not leave old ticket approval controls
       // visible underneath a newly selected or reloaded preset.
       tickets = [];
@@ -688,6 +821,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       workItems = []; workItemsError = ''; workItemsLoading = false;
       tickets = selected ? await call<Ticket[]>('superagent_tickets',{ orchestrationId:selected, limit:50 }) : [];
       await refreshTicketDetails();
+      if (activeSurface === 'runs') await loadGlobalQueue(false);
       if (sourcesLoaded && selected) {
         sources = await call<EventSource[]>('superagent_source_list',{ orchestrationId:selected });
         if (!sources.some(item => item.id === decisionSourceId)) {
@@ -718,6 +852,18 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   // Templates populate editable names only; no bot, tool or task is selected.
   host.addEventListener('change', event => {
     const target = event.target;
+    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-queue-team')) {
+      runTeamFilter = target.value || 'all'; render(); return;
+    }
+    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-queue-status')) {
+      runStatusFilter = target.value || 'all'; render(); return;
+    }
+    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-intake-team')) {
+      intakeTeamId = target.value; render(); return;
+    }
+    if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-queue-query')) {
+      runQuery = target.value; render(); return;
+    }
     if (target instanceof HTMLInputElement && target.name === 'councilRequired') {
       const form = target.closest<HTMLFormElement>('form[data-sa-form="create"],form[data-sa-form="edit"]');
       if (!form) return;
@@ -751,6 +897,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   });
   host.addEventListener('input', event => {
     const target = event.target;
+    if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-queue-query')) {
+      runQuery = target.value;
+    }
     if (target instanceof HTMLInputElement && target.name === 'name') {
       const form = target.closest<HTMLFormElement>('form[data-sa-form="create"],form[data-sa-form="edit"]');
       if (form) {
@@ -781,6 +930,52 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   host.addEventListener('click', event => {
     const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button') : null;
     if (!target || !host.contains(target) || target.disabled) return;
+    if (target.dataset.saSurface === 'teams' || target.dataset.saSurface === 'runs') {
+      activeSurface = target.dataset.saSurface;
+      render();
+      if (activeSurface === 'runs') void loadGlobalQueue();
+      return;
+    }
+    if (target.dataset.saAssignDemand) {
+      const team = presets.find(item => item.id === target.dataset.saAssignDemand);
+      if (!team) return;
+      activeSurface = 'runs'; intakeTeamId = team.id; runTeamFilter = team.id;
+      render(); void loadGlobalQueue();
+      host.querySelector<HTMLTextAreaElement>('[data-sa-global-objective]')?.focus();
+      return;
+    }
+    if (target.hasAttribute('data-sa-refresh-queue')) {
+      void loadGlobalQueue(); return;
+    }
+    if (target.dataset.saOpenTeamQueue) {
+      const teamId = target.dataset.saOpenTeamQueue;
+      if (!presets.some(team => team.id === teamId)) return;
+      activeSurface = 'teams'; selected = teamId; intakeTeamId = teamId;
+      tickets = []; inspectedTicket = ''; ticketDetails = null; ticketDetailsLoading = false;
+      ticketDetailsError = ''; threadLinks = []; workItems = []; workItemsError = '';
+      workItemsLoading = false; issueCommentStatus = null;
+      render();
+      void work(async () => {
+        tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:teamId, limit:50 });
+      });
+      return;
+    }
+    if (target.dataset.saInspectGlobalTicket) {
+      const ticket = globalTickets.find(item => item.id === target.dataset.saInspectGlobalTicket);
+      if (!ticket || !presets.some(team => team.id === ticket.orchestrationId)) return;
+      if (inspectedTicket === ticket.id) {
+        inspectedTicket = ''; ticketDetails = null; ticketDetailsLoading = false; ticketDetailsError = '';
+        threadLinks = []; workItems = []; workItemsError = ''; workItemsLoading = false;
+        issueCommentStatus = null; render(); return;
+      }
+      selected = ticket.orchestrationId;
+      tickets = globalTickets.filter(item => item.orchestrationId === ticket.orchestrationId);
+      inspectedTicket = ticket.id; ticketDetails = null; ticketDetailsLoading = true;
+      ticketDetailsError = ''; threadLinks = []; workItems = []; workItemsError = '';
+      workItemsLoading = true; issueCommentStatus = null;
+      commentRepository = ''; commentIssueNumber = ''; commentDraft = ''; issueCommentError = '';
+      render(); void work(refreshTicketDetails); return;
+    }
     if (target.hasAttribute('data-sa-cancel')) { confirm = null; render(); return; }
     if (target.hasAttribute('data-sa-write-cancel')) {
       writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = ''; writePathsError = '';
@@ -820,7 +1015,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     if (target.dataset.saSelect) {
       if (busy || loading || selected === target.dataset.saSelect) return;
       const next = target.dataset.saSelect;
-      selected = next;
+      selected = next; intakeTeamId = next;
       tickets = [];
       writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = ''; writePathsError = '';
       inspectedTicket = ''; ticketDetails = null; ticketDetailsLoading = false; ticketDetailsError = '';
@@ -1224,10 +1419,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         rejectingTicket = ''; await reload();
       });
     }
-    if (form.dataset.saForm === 'run') {
-      const selectedConfig = current(), objective = String(data.get('objective') ?? '').trim();
+    if (form.dataset.saForm === 'run' || form.dataset.saForm === 'global-run') {
+      const selectedConfig = form.dataset.saForm === 'global-run'
+        ? presets.find(team => team.id === String(data.get('orchestrationId') ?? ''))
+        : current();
+      const objective = String(data.get('objective') ?? '').trim();
       const command = data.get('mode') === 'direct' ? 'superagent_submit' : 'superagent_submit_coordinated';
       if (!selectedConfig?.enabled || !objective) return;
+      selected = selectedConfig.id; intakeTeamId = selectedConfig.id;
       const key = taskKey;
       void work(async () => {
         await call(command,{ orchestrationId:selectedConfig.id, objective, requestKey:key });

@@ -367,6 +367,25 @@ CREATE TRIGGER IF NOT EXISTS sa_project_lease_update
  BEGIN SELECT RAISE(ABORT,'SuperAgent project already has an active assignment'); END;
 "#;
 
+/// Keep an active native assignment from becoming an ownerless Ticket when a
+/// task is deleted in the short interval between native admission and agent
+/// registration. Bot reset/removal revokes the assignment first, so its
+/// intentional session cleanup still passes this database guard.
+const ACTIVE_ASSIGNMENT_SESSION_DELETE_GUARD: &str = r#"
+CREATE TRIGGER IF NOT EXISTS sa_active_assignment_session_delete_guard
+ BEFORE DELETE ON sessions
+ WHEN EXISTS (
+   SELECT 1 FROM sa_assignments
+   WHERE session_id=OLD.id AND state='running'
+ )
+ BEGIN SELECT RAISE(ABORT,'Cannot delete a session owned by an active SuperAgent assignment'); END;
+"#;
+
+fn ensure_active_assignment_session_delete_guard(db: &Connection) -> Result<()> {
+    db.execute_batch(ACTIVE_ASSIGNMENT_SESSION_DELETE_GUARD)
+        .map_err(|e| e.to_string())
+}
+
 /// An active harness is not resumed automatically after process restart.
 pub(crate) const RECOVER: &str = "
 -- A crash or legacy partial write may leave a running assignment on a
@@ -2416,6 +2435,7 @@ fn admit_role(
     {
         return Err("Provide a stable alphanumeric manual-request key.".into());
     }
+    ensure_active_assignment_session_delete_guard(&store.db)?;
     if let Some(existing) = store.db.query_row(
         "SELECT id FROM sa_tickets WHERE orchestration_id=?1 AND request_key=?2",
         params![config_id,request_key], |row| row.get::<_, String>(0),
@@ -3299,9 +3319,10 @@ pub(crate) fn invalidate_bot(
     removed: bool,
     _dispatch_fence: &effects::DispatchFence,
 ) -> Result<()> {
-    // Resetting either selected bot invalidates every nonterminal mandate:
-    // coordinator sessions are just as ephemeral as worker sessions, and a
-    // previously finished plan must not authorize a worker after reset.
+    ensure_active_assignment_session_delete_guard(&store.db)?;
+    // Resetting any bot in the admitted Team invalidates every nonterminal
+    // mandate. Coordinator sessions and reviewer callbacks are as ephemeral
+    // as worker sessions, and no old role may extend the Ticket after reset.
     let sql =
         "SELECT t.id,t.state FROM sa_tickets t
          JOIN sa_ticket_team_snapshots snapshot ON snapshot.ticket_id=t.id
@@ -3309,7 +3330,7 @@ pub(crate) fn invalidate_bot(
            SELECT 1 FROM sa_team_version_members member
            WHERE member.orchestration_id=snapshot.orchestration_id
              AND member.team_version=snapshot.team_version
-             AND member.bot_id=?1 AND member.role IN ('coordinator','worker'))
+             AND member.bot_id=?1 AND member.role IN ('coordinator','worker','reviewer'))
          AND t.state IN ('queued','running','waiting_approval','waiting_review','blocked')";
     let affected = {
         let mut stmt = store.db.prepare(sql).map_err(|e| e.to_string())?;
@@ -3349,7 +3370,17 @@ pub(crate) fn invalidate_bot(
         // original names/IDs remain in history for audit, never cascaded away.
         store.db.execute(
             "UPDATE sa_orchestrations SET enabled=0,policy_revision=policy_revision+1,
-             updated_at=?2 WHERE (coordinator_bot_id=?1 OR worker_bot_id=?1) AND enabled=1",
+             updated_at=?2 WHERE enabled=1 AND (coordinator_bot_id=?1 OR worker_bot_id=?1
+               OR EXISTS (
+                 SELECT 1 FROM sa_team_versions version
+                 JOIN sa_team_version_members member
+                   ON member.orchestration_id=version.orchestration_id
+                  AND member.team_version=version.version
+                 WHERE version.orchestration_id=sa_orchestrations.id
+                   AND version.version=(SELECT MAX(latest.version) FROM sa_team_versions latest
+                                        WHERE latest.orchestration_id=sa_orchestrations.id)
+                   AND member.bot_id=?1
+               ))",
             params![bot_id,now],
         ).map_err(|e| e.to_string())?;
     }
@@ -3771,6 +3802,7 @@ pub async fn superagent_submit(window: tauri::WebviewWindow,
 fn retry_blocked(
     store: &mut Store, ticket_id: &str, busy: bool,
 ) -> Result<(Ticket, String, String, work_items::RetryWorkItem)> {
+    ensure_active_assignment_session_delete_guard(&store.db)?;
     let ticket = get_ticket(store,ticket_id)?;
     if ticket.state != "blocked" {
         return Err("Only a blocked SuperAgent ticket can be retried manually.".into());
@@ -3930,6 +3962,7 @@ fn prepare_coordinated_worker_inner(
     expected_revision: Option<i64>,
     allowed_paths: Option<&[String]>,
 ) -> Result<(Ticket, String, String, String, Option<work_items::WorkItem>)> {
+    ensure_active_assignment_session_delete_guard(&store.db)?;
     let ticket = get_ticket(store, ticket_id)?;
     if expected_revision.is_some_and(|revision| revision != ticket.revision) {
         return Err("Ticket revision changed before worker authorization.".into());
@@ -5065,6 +5098,39 @@ mod tests {
         configuration(store,&cfg.id).unwrap()
     }
 
+    fn enabled_required_council(store: &Store, name: &str) -> Orchestration {
+        for id in ["reviewer-a", "reviewer-b"] {
+            add_worker(store, id);
+        }
+        let config = create_configuration_roles_with_policy(
+            store,
+            NewOrchestration {
+                name: name.into(), coordinator_bot_id: "router".into(),
+                worker_bot_id: "worker".into(),
+            },
+            vec!["worker".into()],
+            vec!["reviewer-a".into(), "reviewer-b".into()],
+            true,
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&config.id],
+        ).unwrap();
+        configuration(store, &config.id).unwrap()
+    }
+
+    fn admit_required_worker(
+        store: &mut Store, config_id: &str, request_key: &str,
+    ) -> (Ticket, String) {
+        let (ticket, launched) = admit(
+            store, config_id, "Review this exact worker artifact", request_key, false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(store, &session, true, "Worker artifact").unwrap());
+        (get_ticket(store, &ticket.id).unwrap(), session)
+    }
+
     fn coordinated_plan_ticket(
         store: &mut Store,
         config_id: &str,
@@ -6175,6 +6241,38 @@ mod tests {
     }
 
     #[test]
+    fn active_assignment_session_deletion_is_denied_until_owner_revocation() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Keep the admitted owner", "delete-active-owner", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let state = architect::test_app_state(store);
+
+        // Admission reserves the assignment before an agent appears in the
+        // runtime registry. Task deletion must still fail closed in that gap.
+        let error = crate::task_deletion::delete_state(&state, &session).unwrap_err();
+        assert!(error.contains("active SuperAgent assignment"), "{error}");
+        {
+            let store = state.store.lock().unwrap();
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+            assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+            assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "running");
+            assert!(store.session(&session).is_ok());
+
+            // Bot reset first revokes the assignment, then removes its session.
+            bots::reset(&store, "worker").unwrap();
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+            assert!(mandate(&store, &ticket.id).unwrap().revoked);
+            assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "interrupted");
+            assert!(store.session(&session).is_err());
+            assert!(!on_run_finished(&store, &session, true, "late deleted-owner callback").unwrap());
+        }
+    }
+
+    #[test]
     fn native_bot_reset_and_deletion_invalidate_active_work_but_keep_history() {
         let mut store = fixture();
         let cfg = enabled(&store);
@@ -6183,23 +6281,65 @@ mod tests {
         bots::reset(&store, "worker").unwrap();
         assert_eq!(get_ticket(&store, &running.id).unwrap().state, "interrupted");
         assert!(!on_run_finished(&store, &sid, true, "late worker result").unwrap());
-        let revoked: i64 = store.db.query_row(
-            "SELECT revoked FROM sa_mandates WHERE ticket_id=?1",
-            [&running.id], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(revoked, 1);
+        assert!(mandate(&store, &running.id).unwrap().revoked);
+        assert_eq!(assignments(&store, &running.id, 10).unwrap()[0].state, "interrupted");
+        assert!(store.session(&sid).is_err());
+        assert!(history(&store, &running.id, 100).unwrap()
+            .iter().any(|entry| entry.kind == "bot_reset"));
         // Reset keeps the bot identity; a new manual request can be made.
         let (next, launched) = admit(&mut store, &cfg.id, "New request", "delete-work", false).unwrap();
         assert!(launched);
+        let next_session = assignment_session(&store, &next.id).unwrap().unwrap();
         bots::delete(&store, "worker").unwrap();
         assert_eq!(get_ticket(&store, &next.id).unwrap().state, "interrupted");
         assert!(!configuration(&store, &cfg.id).unwrap().enabled);
+        assert!(mandate(&store, &next.id).unwrap().revoked);
+        assert_eq!(assignments(&store, &next.id, 10).unwrap()[0].state, "interrupted");
+        assert!(store.session(&next_session).is_err());
+        assert!(!on_run_finished(&store, &next_session, true, "late removed-owner callback").unwrap());
         assert_eq!(get_ticket(&store, &running.id).unwrap().state, "interrupted");
-        let history: i64 = store.db.query_row(
+        let audit_count: i64 = store.db.query_row(
             "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
             [&running.id], |r| r.get(0),
         ).unwrap();
-        assert!(history >= 2);
+        assert!(audit_count >= 2);
+        assert!(history(&store, &next.id, 100).unwrap()
+            .iter().any(|entry| entry.kind == "bot_removed"));
+    }
+
+    #[test]
+    fn removing_a_secondary_team_worker_disables_the_current_roster() {
+        let mut store = fixture();
+        add_worker(&store, "worker-2");
+        let created = create_configuration_roles_with_policy(
+            &store,
+            NewOrchestration {
+                name: "Ordered workers".into(), coordinator_bot_id: "router".into(),
+                worker_bot_id: "worker".into(),
+            },
+            vec!["worker".into(), "worker-2".into()],
+            Vec::new(),
+            false,
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&created.id],
+        ).unwrap();
+        let config = configuration(&store, &created.id).unwrap();
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Keep the ordered Team identity", "secondary-worker-delete", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+
+        bots::delete(&store, "worker-2").unwrap();
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "interrupted");
+        assert!(!on_run_finished(&store, &session, true, "late secondary-owner result").unwrap());
+        assert!(!configuration(&store, &config.id).unwrap().enabled);
+        assert!(history(&store, &ticket.id, 100).unwrap()
+            .iter().any(|event| event.kind == "bot_removed"));
     }
 
     #[test]
@@ -6225,11 +6365,8 @@ mod tests {
         bots::reset(&store, "router").unwrap();
         let affected = get_ticket(&store, &running.id).unwrap();
         assert_eq!(affected.state, "blocked");
-        let mandate_revoked: i64 = store.db.query_row(
-            "SELECT revoked FROM sa_mandates WHERE ticket_id=?1",
-            [&running.id], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(mandate_revoked, 1);
+        assert!(mandate(&store, &running.id).unwrap().revoked);
+        assert_eq!(assignments(&store, &running.id, 10).unwrap()[0].state, "finished");
         assert!(prepare_coordinated_worker(&mut store, &running.id, false).is_err());
         assert!(!on_run_finished(&store, &running_session, true, "late plan").unwrap());
         assert!(history(&store, &running.id, 100).unwrap()
@@ -6243,25 +6380,210 @@ mod tests {
         bots::reset(&store, "router").unwrap();
         assert_eq!(get_ticket(&store, &next.id).unwrap().state, "interrupted");
         assert_eq!(get_ticket(&store, &queued.id).unwrap().state, "blocked");
+        assert!(mandate(&store, &next.id).unwrap().revoked);
+        assert_eq!(assignments(&store, &next.id, 10).unwrap()[0].state, "interrupted");
+        assert!(store.session(&next_session).is_err());
         assert!(!on_run_finished(&store, &next_session, true, "stale").unwrap());
         assert_eq!(history(&store, &next.id, 100).unwrap()[0].kind, "bot_reset");
     }
 
     #[test]
     fn ticket_history_survives_bot_and_session_deletion_and_reopen() {
-        let mut store=fixture();
-        let cfg=enabled(&store);
-        let (ticket,_)=admit(&mut store,&cfg.id,"Persist","persist-1",false).unwrap();
-        store.db.execute("DELETE FROM bots WHERE id='worker'",[]).unwrap();
-        assert_eq!(get_ticket(&store,&ticket.id).unwrap().objective,"Persist");
-        let count:i64=store.db.query_row(
-            "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",[&ticket.id],|r|r.get(0)
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Persist ticket evidence", "persist-1", false,
         ).unwrap();
-        assert_eq!(count,1);
-        let path=store.path.clone();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session, true, "Persisted worker evidence").unwrap());
+        let settled = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(settled.state, "waiting_approval");
+        assert_eq!(settled.evidence.as_deref(), Some("Persisted worker evidence"));
+        let original_assignment: (String, Option<String>) = store.db.query_row(
+            "SELECT id,result FROM sa_assignments WHERE ticket_id=?1", [&ticket.id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        let original_audit = history(&store, &ticket.id, 100).unwrap().into_iter()
+            .map(|event| (event.id, event.kind, event.detail)).collect::<Vec<_>>();
+
+        // Archived session presentation is settled during Store::open, while
+        // the independent Ticket, mandate, assignment and audit stay durable.
+        store.update(&session, None, Some(true), None, None).unwrap();
+        let path = store.path.clone();
         drop(store);
-        let reopened=Store::open(&path).unwrap();
-        assert_eq!(get_ticket(&reopened,&ticket.id).unwrap().state,"interrupted");
+        let reopened = Store::open(&path).unwrap();
+        let reopened_session = reopened.session(&session).unwrap();
+        assert!(!reopened_session.archived);
+        assert_eq!(reopened_session.task_stage, "completed");
+        let after_archive = get_ticket(&reopened, &ticket.id).unwrap();
+        assert_eq!(after_archive.state, "waiting_approval");
+        assert_eq!(after_archive.evidence.as_deref(), Some("Persisted worker evidence"));
+        assert!(!mandate(&reopened, &ticket.id).unwrap().revoked);
+        assert_eq!(history(&reopened, &ticket.id, 100).unwrap().into_iter()
+            .map(|event| (event.id, event.kind, event.detail)).collect::<Vec<_>>(), original_audit);
+
+        // The ordinary task-deletion path removes the bot-owned session only
+        // after the run settled; native Ticket evidence has no session FK.
+        let state = architect::test_app_state(reopened);
+        let deleted = crate::task_deletion::delete_state(&state, &session).unwrap();
+        assert_eq!(deleted.deleted_session_ids, vec![session.clone()]);
+        {
+            let store = state.store.lock().unwrap();
+            assert!(store.session(&session).is_err());
+            let after_session_delete = get_ticket(&store, &ticket.id).unwrap();
+            assert_eq!(after_session_delete.evidence.as_deref(), Some("Persisted worker evidence"));
+            assert_eq!(ticket_team_snapshot(&store, &ticket.id).unwrap().worker_bot_ids, vec!["worker".to_string()]);
+            assert_eq!(history(&store, &ticket.id, 100).unwrap().into_iter()
+                .map(|event| (event.id, event.kind, event.detail)).collect::<Vec<_>>(), original_audit);
+            let assignment: (String, Option<String>) = store.db.query_row(
+                "SELECT id,result FROM sa_assignments WHERE ticket_id=?1", [&ticket.id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap();
+            assert_eq!(assignment, original_assignment);
+            assert!(!on_run_finished(&store, &session, true, "late deleted-session callback").unwrap());
+
+            // Native bot removal revokes the remaining approval authority and
+            // leaves the original evidence rows available after another reopen.
+            bots::delete(&store, "worker").unwrap();
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked");
+            assert!(mandate(&store, &ticket.id).unwrap().revoked);
+            assert!(history(&store, &ticket.id, 100).unwrap()
+                .iter().any(|event| event.kind == "bot_removed"));
+        }
+        drop(state);
+        let reopened = Store::open(&path).unwrap();
+        let after_delete = get_ticket(&reopened, &ticket.id).unwrap();
+        assert_eq!(after_delete.state, "blocked");
+        assert_eq!(after_delete.evidence.as_deref(), Some("Persisted worker evidence"));
+        assert!(mandate(&reopened, &ticket.id).unwrap().revoked);
+        assert_eq!(ticket_team_snapshot(&reopened, &ticket.id).unwrap().worker_bot_ids, vec!["worker".to_string()]);
+        assert_eq!(assignments(&reopened, &ticket.id, 10).unwrap()[0].id, original_assignment.0);
+        let final_audit = history(&reopened, &ticket.id, 100).unwrap();
+        for (id, kind, detail) in original_audit {
+            assert!(final_audit.iter().any(|event| event.id == id
+                && event.kind == kind && event.detail == detail));
+        }
+        assert!(final_audit.iter().any(|event| event.kind == "bot_removed"));
+    }
+
+    #[test]
+    fn resetting_a_reviewer_blocks_bound_ticket_and_council_dispatch() {
+        let mut store = fixture();
+        let workspace = std::env::temp_dir().join(format!("pandacode-superagent-ac04-reset-{}", storage::id()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        store.db.execute(
+            "UPDATE projects SET path=?2 WHERE id='project'",
+            params![workspace.to_string_lossy().to_string()],
+        ).unwrap();
+        let config = enabled_required_council(&store, "Reset reviewer owner");
+        let (ticket, worker_session) = admit_required_worker(&mut store, &config.id, "reviewer-reset");
+        assert_eq!(ticket.state, "waiting_review");
+        let state = architect::test_app_state(store);
+
+        {
+            let store = state.store.lock().unwrap();
+            bots::reset(&store, "reviewer-a").unwrap();
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked");
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().evidence.as_deref(), Some("Worker artifact"));
+            assert!(mandate(&store, &ticket.id).unwrap().revoked);
+            let request_state: String = store.db.query_row(
+                "SELECT state FROM sa_council_requests WHERE ticket_id=?1", [&ticket.id],
+                |row| row.get(0),
+            ).unwrap();
+            assert_eq!(request_state, "blocked");
+            assert!(history(&store, &ticket.id, 100).unwrap()
+                .iter().any(|event| event.kind == "bot_reset"));
+            assert!(configuration(&store, &config.id).unwrap().enabled);
+        }
+
+        // A late worker-completion callback cannot dispatch the frozen review
+        // after its reviewer owner was reset.
+        assert!(!council_adapter::start_after_worker_completion_for_test(
+            &state, &worker_session,
+        ).unwrap());
+        {
+            let store = state.store.lock().unwrap();
+            let native_session: Option<String> = store.db.query_row(
+                "SELECT native_session_id FROM sa_council_requests WHERE ticket_id=?1",
+                [&ticket.id], |row| row.get(0),
+            ).unwrap();
+            assert!(native_session.is_none());
+        }
+        drop(state);
+        let _ = std::fs::remove_dir_all(workspace);
+    }
+
+    #[test]
+    fn removing_a_reviewer_blocks_dispatched_council_callback_and_future_authority() {
+        let mut store = fixture();
+        let workspace = std::env::temp_dir().join(format!("pandacode-superagent-ac04-remove-{}", storage::id()));
+        std::fs::create_dir_all(&workspace).unwrap();
+        store.db.execute(
+            "UPDATE projects SET path=?2 WHERE id='project'",
+            params![workspace.to_string_lossy().to_string()],
+        ).unwrap();
+        let config = enabled_required_council(&store, "Remove reviewer owner");
+        let (ticket, worker_session) = admit_required_worker(&mut store, &config.id, "reviewer-remove");
+        let state = architect::test_app_state(store);
+        assert!(council_adapter::start_after_worker_completion_for_test(
+            &state, &worker_session,
+        ).unwrap());
+
+        let (native_session, reviewer_session, snapshot_id) = {
+            let store = state.store.lock().unwrap();
+            let (native_session, snapshot_id): (String, Option<String>) = store.db.query_row(
+                "SELECT native_session_id,workspace_snapshot_id FROM sa_council_requests WHERE ticket_id=?1",
+                [&ticket.id], |row| Ok((row.get(0)?, row.get(1)?)),
+            ).unwrap();
+            let team = architect::load(&store, &native_session).unwrap().unwrap();
+            let reviewer_session = team.workers.iter()
+                .find(|worker| worker.council.is_some()).unwrap().session_id.clone();
+            (native_session, reviewer_session, snapshot_id)
+        };
+        {
+            let store = state.store.lock().unwrap();
+            let request_state: String = store.db.query_row(
+                "SELECT state FROM sa_council_requests WHERE ticket_id=?1", [&ticket.id],
+                |row| row.get(0),
+            ).unwrap();
+            assert_eq!(request_state, "dispatched");
+            bots::delete(&store, "reviewer-a").unwrap();
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked");
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().evidence.as_deref(), Some("Worker artifact"));
+            assert!(mandate(&store, &ticket.id).unwrap().revoked);
+            assert!(!configuration(&store, &config.id).unwrap().enabled);
+            assert!(!council_adapter::finalize_after_native_run(&store, &reviewer_session).unwrap());
+            let request_state: String = store.db.query_row(
+                "SELECT state FROM sa_council_requests WHERE ticket_id=?1", [&ticket.id],
+                |row| row.get(0),
+            ).unwrap();
+            assert_eq!(request_state, "blocked");
+            let finalizations: i64 = store.db.query_row(
+                "SELECT COUNT(*) FROM sa_council_finalizations WHERE ticket_id=?1", [&ticket.id],
+                |row| row.get(0),
+            ).unwrap();
+            assert_eq!(finalizations, 0);
+            assert!(history(&store, &ticket.id, 100).unwrap()
+                .iter().any(|event| event.kind == "bot_removed"));
+            if let Some(snapshot_id) = snapshot_id.as_deref() {
+                let frozen = council_adapter::resolve_workspace_snapshot(&store, snapshot_id).unwrap();
+                let mut permissions = std::fs::metadata(&frozen).unwrap().permissions();
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    permissions.set_mode(permissions.mode() | 0o200);
+                }
+                #[cfg(windows)]
+                permissions.set_readonly(false);
+                std::fs::set_permissions(&frozen, permissions).unwrap();
+                std::fs::remove_dir_all(frozen).unwrap();
+            }
+        }
+        assert_eq!(native_session, architect::parent_of(&state.store.lock().unwrap(), &reviewer_session)
+            .unwrap().unwrap());
+        drop(state);
+        let _ = std::fs::remove_dir_all(workspace);
     }
 
     #[test]

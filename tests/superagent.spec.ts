@@ -1,6 +1,7 @@
 import { test, expect, type Page } from '@playwright/test';
 
-async function openOrchestrationWorkspace(page: Page) {
+async function openOrchestrationWorkspace(page: Page, url?: string) {
+  if (url) await page.goto(url);
   await page.evaluate(async () => { await import('/src/preview-superagent.ts'); });
   const bar=page.locator('.sidebar-bots-bar');
   if(await bar.getAttribute('aria-pressed')!=='true')await bar.click();
@@ -91,6 +92,92 @@ test('Orchestrations stays in the workspace across view navigation and reloads',
   await expect(page.locator('#dialog[open]')).toHaveCount(0);
 });
 
+test('Demands / Runs aggregates native-shaped Team queues, filters, inspects Tickets and preserves Team actions', async ({page}) => {
+  test.setTimeout(60_000);
+  const host=await openOrchestrationWorkspace(page,'/?bots=sample&superagent=sample');
+  await expect(host.getByRole('button',{name:'Teams',exact:true})).toHaveAttribute('aria-pressed','true');
+  await host.getByRole('button',{name:'Demands / Runs',exact:true}).click();
+  const queue=host.getByRole('region',{name:'Global Demands and Runs'});
+  await expect(queue.getByRole('heading',{name:'Demands / Runs'})).toBeVisible();
+  await expect(queue.locator('[data-sa-queue-ticket]')).toHaveCount(4);
+  await expect(queue).toContainText('Web Delivery');
+  await expect(queue).toContainText('Issue Resolution');
+
+  await queue.locator('[data-sa-queue-team]').selectOption('preview-team-issues');
+  await expect(queue.locator('[data-sa-queue-ticket]')).toHaveCount(2);
+  await expect(queue).toContainText('Investigate the flaky sidebar assertion');
+  await expect(queue).not.toContainText('Add keyboard navigation to the search panel');
+  await queue.locator('[data-sa-queue-status]').selectOption('blocked');
+  await expect(queue.locator('[data-sa-queue-ticket]')).toHaveCount(1);
+  await expect(queue).toContainText('Investigate the flaky sidebar assertion');
+  await queue.locator('[data-sa-queue-status]').selectOption('all');
+  await queue.locator('[data-sa-queue-team]').selectOption('all');
+  await queue.getByRole('button',{name:'View evidence for Add keyboard navigation to the search panel'}).click();
+  const inspector=host.getByRole('region',{name:'Selected Run evidence'});
+  await expect(inspector.getByRole('region',{name:'Ticket evidence'})).toContainText('preview-ticket-web-104');
+  await expect(inspector).toContainText('Preview fixture: this is native-shaped example data');
+  await expect(inspector).toContainText('Add keyboard navigation');
+  await expect(inspector).toContainText('Verify focus order');
+
+  await queue.locator('[data-sa-queue-ticket="preview-ticket-issue-202"]')
+    .getByRole('button',{name:'Open Team queue'}).click();
+  const teamTab=host.getByRole('button',{name:'Teams',exact:true});
+  await expect(teamTab).toHaveAttribute('aria-pressed','true');
+  const teamSurface=host.getByRole('region',{name:'Teams',exact:true});
+  const queued=teamSurface.locator('.sa-tickets li',{hasText:'Fix issue 73: preserve filters after refresh'});
+  const blocked=teamSurface.locator('.sa-tickets li',{hasText:'Investigate the flaky sidebar assertion'});
+  await expect(queued).toContainText('Dispatch worker');
+  await expect(blocked).toContainText('Retry manually');
+  await queued.getByRole('button',{name:'View evidence'}).click();
+  await expect(host.getByRole('region',{name:'Ticket evidence'})).toContainText('preview-ticket-issue-202');
+  await teamSurface.getByRole('button',{name:'Assign demand to Issue Resolution'}).click();
+  await expect(host.getByRole('button',{name:'Demands / Runs',exact:true})).toHaveAttribute('aria-pressed','true');
+  await expect(host.locator('form[data-sa-form="global-run"]').getByRole('combobox',{name:'Team'}))
+    .toHaveValue('preview-team-issues');
+});
+
+test('Demands / Runs gives an honest empty state when no Teams exist', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  await host.getByRole('button',{name:'Demands / Runs',exact:true}).click();
+  await expect(host.getByRole('region',{name:'Global Demands and Runs'}))
+    .toContainText('No Teams yet. Create a Team before assigning a demand.');
+});
+
+test('Demands / Runs reports loading and per-Team Ticket-list failures', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-queue-error-test';document.body.appendChild(host);
+    const bots=[{id:'coordinator',name:'Coordinator',paused:false,projectId:'project-one'},
+      {id:'worker',name:'Worker',paused:false,projectId:'project-one'}];
+    const config={id:'team-one',name:'Team One',coordinatorBotId:'coordinator',workerBotId:'worker',
+      workerBotIds:['worker'],reviewerBotIds:[],enabled:true,policyRevision:1,projectId:'project-one'};
+    const w=window as unknown as {saQueueRelease?:()=>void};
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return bots as never;
+      if(command==='superagent_list')return [config] as never;
+      if(command==='superagent_tickets'&&args?.limit===50)return [] as never;
+      if(command==='superagent_tickets'&&args?.limit===200){
+        await new Promise<void>(resolve=>{w.saQueueRelease=resolve;});
+        throw new Error('Team ticket store is unavailable.');
+      }
+      throw new Error('Unexpected queue error fixture command: '+command);
+    });
+  });
+  const host=page.locator('#sa-queue-error-test');
+  await expect(host).toHaveAttribute('aria-busy','false');
+  await host.getByRole('button',{name:'Demands / Runs',exact:true}).click();
+  const queue=host.getByRole('region',{name:'Global Demands and Runs'});
+  await expect(queue.getByRole('status')).toContainText('Loading native Ticket lists');
+  await page.evaluate(()=>(window as unknown as {saQueueRelease?:()=>void}).saQueueRelease?.());
+  await expect(queue.getByRole('status')).toContainText('Queue contents are unavailable');
+  const failure=queue.getByRole('alert').filter({hasText:'Some Team queues could not be loaded'});
+  await expect(failure).toContainText('Team One: Team ticket store is unavailable.');
+});
+
 test('native SuperAgent preset UI stays manual and imports disabled portable configurations', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
@@ -105,7 +192,7 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await expect(workspace.locator('.sa-list .sa-item strong')).toHaveText('Software Development');
   await expect(workspace.locator('.sa-list .sa-counts')).toHaveText('0 tasks · 0 running · 0 blocked');
   await expect(workspace.locator('.sa-list .sa-last-activity')).toContainText('Last activity: ');
-  await expect(workspace.locator('.sa-list .sa-last-activity')).not.toContainText('Unavailable');
+  await expect(workspace.locator('.sa-list .sa-last-activity')).toContainText('Unavailable');
   await expect(workspace.getByRole('button',{name:'Enable manual'})).toBeVisible();
   await expect(workspace.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await workspace.getByRole('button',{name:'Export'}).click();
@@ -489,7 +576,7 @@ test('Preview adapter snapshots ordered Team roles at Ticket admission',async ({
   expect(result.updated.teamVersion).toBe(2);
   expect(result.updated.workerBotIds).toEqual(['worker-two','worker-one']);
   expect(result.snapshot).toMatchObject({
-    provenance:'native',teamVersion:2,workerBotIds:['worker-two','worker-one'],reviewerBotIds:['reviewer'],
+    provenance:'preview-fixture',teamVersion:2,workerBotIds:['worker-two','worker-one'],reviewerBotIds:['reviewer'],
     roles:[
       {role:'coordinator',ordinal:0,botId:'coordinator'},
       {role:'worker',ordinal:0,botId:'worker-two'},

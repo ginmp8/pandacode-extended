@@ -4,9 +4,11 @@ type Config = { id:string; name:string; coordinatorBotId:string; workerBotId:str
   workerBotIds:string[]; reviewerBotIds:string[]; teamVersion:number;
   projectId:string; enabled:boolean; policyRevision:number; councilRequired:boolean };
 type Ticket = { id:string; orchestrationId:string; objective:string;
-  state:string; revision:number; evidence:null };
+  requestKey:string; actor:string; state:string; revision:number; activeAssignmentId:string|null;
+  evidence:string|null; createdAt:number; updatedAt:number };
 type WorkItem = { id:string; ticketId:string; objective:string; state:string;
-  evidenceContract:string; ordinal:number; createdAt:number; updatedAt:number };
+  evidenceContract:string; ordinal:number; dependsOnIds?:string[]; readiness?:string;
+  createdAt:number; updatedAt:number };
 type TeamSnapshot = {
   snapshotVersion:number; provenance:string; orchestrationId:string; teamVersion:number;
   name:string; projectId:string; coordinatorBotId:string; workerBotIds:string[];
@@ -30,6 +32,80 @@ const configs = new Map<string,Config>(), tickets = new Map<string,Ticket[]>();
 const teamSnapshots = new Map<string,TeamSnapshot>();
 const workItems = new Map<string,WorkItem[]>();
 const get = (id:string):Config => { const c=configs.get(id); if(!c)throw Error('Orchestration not found.'); return c; };
+const previewParams = typeof location === 'undefined' ? new URLSearchParams() : new URLSearchParams(location.search);
+let demandRunsSampleSeeded = false;
+
+/** Native-shaped fixture data for the explicit `?superagent=sample` browser preview. */
+function seedDemandRunsSample(bots:Bot[]):void {
+  if(previewParams.get('superagent')!=='sample'||demandRunsSampleSeeded)return;
+  const bot=(name:string):Bot=>{
+    const found=bots.find(entry=>entry.name===name);
+    if(!found)throw Error(`The SuperAgent sample needs the preview bot “${name}”.`);
+    return found;
+  };
+  const scout=bot('Scout'),writer=bot('Writer'),ledger=bot('Ledger');
+  const web:Config={id:'preview-team-web',name:'Web Delivery',coordinatorBotId:scout.id,
+    workerBotId:writer.id,workerBotIds:[writer.id],reviewerBotIds:[],teamVersion:1,
+    projectId:writer.projectId,enabled:true,policyRevision:2,councilRequired:false};
+  const issues:Config={id:'preview-team-issues',name:'Issue Resolution',coordinatorBotId:ledger.id,
+    workerBotId:scout.id,workerBotIds:[scout.id],reviewerBotIds:[],teamVersion:1,
+    projectId:scout.projectId,enabled:true,policyRevision:3,councilRequired:false};
+  configs.set(web.id,web);configs.set(issues.id,issues);
+  const now=Date.now();
+  const add=(config:Config,input:{id:string;objective:string;state:string;revision:number;
+    evidence:string|null;age:number;assignment?:Assignment;activityKind:string;
+    workItems?:WorkItem[]}):void=>{
+    const createdAt=now-input.age,updatedAt=createdAt+60_000;
+    const assignment=input.assignment?{...input.assignment}:undefined;
+    const ticket:Ticket={id:input.id,orchestrationId:config.id,
+      requestKey:`preview-request-${input.id}`,objective:input.objective,actor:'local-user',
+      state:input.state,revision:input.revision,
+      activeAssignmentId:assignment?.id??null,evidence:input.evidence,createdAt,updatedAt};
+    tickets.set(config.id,[...(tickets.get(config.id)||[]),ticket]);
+    const roleIds=[config.coordinatorBotId,...config.workerBotIds,...config.reviewerBotIds];
+    teamSnapshots.set(ticket.id,{snapshotVersion:1,provenance:'preview-fixture',
+      orchestrationId:config.id,teamVersion:config.teamVersion,name:config.name,
+      projectId:config.projectId,coordinatorBotId:config.coordinatorBotId,
+      workerBotIds:[...config.workerBotIds],reviewerBotIds:[...config.reviewerBotIds],
+      policy:{policyRevision:config.policyRevision,autonomy:'off',maxConcurrentTasks:1,
+        maxAttemptsPerAssignment:2,councilEnabled:false,councilRequired:false},
+      roles:roleIds.map((botId,index)=>({role:index===0?'coordinator':'worker',
+        ordinal:index===0?0:index-1,botId,effectiveConfig:null,effectiveConfigSha256:null}))});
+    assignments.set(ticket.id,assignment?[assignment]:[]);
+    activity.set(ticket.id,[{id:1,kind:input.activityKind,
+      detail:'Native-shaped preview fixture event; no Ticket transition was executed.',at:updatedAt}]);
+    workItems.set(ticket.id,input.workItems?.map(item=>({...item,ticketId:ticket.id,
+      createdAt,updatedAt}))||[]);
+  };
+  const assignment=(id:string,botId:string,state:string,attempt=1):Assignment=>({
+    id:`preview-assignment-${id}`,botId,sessionId:`preview-session-${id}`,
+    attempt,state,
+  });
+  add(web,{id:'preview-ticket-web-104',objective:'Add keyboard navigation to the search panel',
+    state:'running',revision:3,evidence:null,age:20*60_000,activityKind:'worker_started',
+    assignment:assignment('web-104',writer.id,'running'),workItems:[
+      {id:'preview-work-web-104-1',ticketId:'',objective:'Implement keyboard navigation',
+        evidenceContract:'Keyboard users can move through search results.',state:'running',ordinal:0,
+        dependsOnIds:[],readiness:'active',createdAt:0,updatedAt:0},
+      {id:'preview-work-web-104-2',ticketId:'',objective:'Verify focus order',
+        evidenceContract:'Focus order remains visible and predictable.',state:'queued',ordinal:1,
+        dependsOnIds:['preview-work-web-104-1'],readiness:'dependency_blocked',createdAt:0,updatedAt:0},
+    ]});
+  add(web,{id:'preview-ticket-web-103',objective:'Document the search empty state',
+    state:'waiting_approval',revision:2,evidence:'Preview worker evidence: documented the empty search state.',
+    age:90*60_000,activityKind:'worker_evidence_ready',
+    assignment:assignment('web-103',writer.id,'finished')});
+  add(issues,{id:'preview-ticket-issue-203',objective:'Investigate the flaky sidebar assertion',
+    state:'blocked',revision:4,evidence:null,age:3*60*60_000,activityKind:'worker_blocked',
+    assignment:assignment('issue-203',scout.id,'blocked',2),workItems:[
+      {id:'preview-work-issue-203-1',ticketId:'',objective:'Reproduce the flaky assertion',
+        evidenceContract:'Record the failing condition and reproduction.',state:'blocked',ordinal:0,
+        dependsOnIds:[],readiness:'not_ready',createdAt:0,updatedAt:0},
+    ]});
+  add(issues,{id:'preview-ticket-issue-202',objective:'Fix issue 73: preserve filters after refresh',
+    state:'queued',revision:1,evidence:null,age:4*60*60_000,activityKind:'ticket_queued'});
+  demandRunsSampleSeeded=true;
+}
 
 /** Build a retry transition from native-shaped state without rewriting terminal records. */
 export function preparePreviewRetryState(input:{ticketId:string;objective:string;workerBotId:string;
@@ -67,8 +143,10 @@ export async function invokeSuperagent<T>(
   // Pure listing must not race the preview's first bots_list seed. Only
   // commands that actually resolve portable bot identities may load bots.
   const needsBots=['superagent_create','superagent_update',
-    'superagent_manifest_export','superagent_manifest_preview','superagent_manifest_import'].includes(command);
+    'superagent_manifest_export','superagent_manifest_preview','superagent_manifest_import'].includes(command)||
+    (command==='superagent_list'&&previewParams.get('superagent')==='sample');
   const bots=needsBots?await listBots():[];
+  if(command==='superagent_list'&&previewParams.get('superagent')==='sample')seedDemandRunsSample(bots);
   const find=(id:string)=>{ const b=bots.find(b=>b.id===id); if(!b)throw Error('Bot no longer exists.'); return b; };
   const configName=(name:string)=>[...configs.values()].find(c=>c.name.toLowerCase()===name.toLowerCase());
   const resolveRoles=(input:any)=>{
@@ -152,7 +230,7 @@ export async function invokeSuperagent<T>(
       projectId,councilRequired};
   };
   const makeTeamSnapshot=(config:Config):TeamSnapshot=>({
-    snapshotVersion:1,provenance:'native',orchestrationId:config.id,teamVersion:config.teamVersion,
+    snapshotVersion:1,provenance:'preview-fixture',orchestrationId:config.id,teamVersion:config.teamVersion,
     name:config.name,projectId:config.projectId,coordinatorBotId:config.coordinatorBotId,
     workerBotIds:[...config.workerBotIds],reviewerBotIds:[...config.reviewerBotIds],
     policy:{policyRevision:config.policyRevision,autonomy:'off',maxConcurrentTasks:1,
@@ -168,14 +246,22 @@ export async function invokeSuperagent<T>(
   });
   let value:unknown;
   switch(command){
-    case 'superagent_list': value=[...configs.values()].map(config=>({
-      ...config,
-      ticketCount:(tickets.get(config.id)||[]).length,
-      runningCount:(tickets.get(config.id)||[]).filter(ticket=>ticket.state==='running').length,
-      blockedCount:(tickets.get(config.id)||[]).filter(ticket=>ticket.state==='blocked').length,
-      lastActivityAt:Date.now(),
-    }));break;
-    case 'superagent_tickets':value=tickets.get(args.orchestrationId)||[];break;
+    case 'superagent_list': value=[...configs.values()].map(config=>{
+      const teamTickets=tickets.get(config.id)||[];
+      return {...config,
+        ticketCount:teamTickets.length,
+        runningCount:teamTickets.filter(ticket=>ticket.state==='running').length,
+        blockedCount:teamTickets.filter(ticket=>ticket.state==='blocked').length,
+        lastActivityAt:teamTickets.length?Math.max(...teamTickets.map(ticket=>ticket.updatedAt)):undefined,
+      };
+    });break;
+    case 'superagent_tickets':{
+      const limit=args.limit===undefined?100:Number(args.limit);
+      if(!Number.isInteger(limit)||limit<1||limit>200)throw Error('Ticket page size must be between 1 and 200.');
+      value=[...(tickets.get(args.orchestrationId)||[])]
+        .sort((left,right)=>right.createdAt-left.createdAt||right.id.localeCompare(left.id)).slice(0,limit);
+      break;
+    }
     case 'superagent_work_items':{
       const ticketId=typeof args.ticketId==='string'?args.ticketId.trim():'';
       if(!ticketId)throw Error('A Ticket id is required.');
@@ -250,13 +336,14 @@ export async function invokeSuperagent<T>(
       const coordinated=command==='superagent_submit_coordinated';
       if(coordinated)
         throw Error('Preview cannot run the Coordinator. Coordinated Ticket submission is unavailable.');
-      const t:Ticket={id:crypto.randomUUID(),orchestrationId:c.id,objective:args.objective,
-        state:'running',revision:0,evidence:null};
+      const now=Date.now(),ticketId=crypto.randomUUID(),assignmentId='preview-assignment-'+ticketId;
+      const t:Ticket={id:ticketId,orchestrationId:c.id,requestKey:String(args.requestKey??''),
+        objective:args.objective,actor:'local-user',state:'running',revision:0,
+        activeAssignmentId:assignmentId,evidence:null,createdAt:now,updatedAt:now};
       teamSnapshots.set(t.id,makeTeamSnapshot(c));
       tickets.set(c.id,[...(tickets.get(c.id)||[]),t]);
-      assignments.set(t.id,[{id:'preview-assignment-'+t.id,botId:c.workerBotId,
+      assignments.set(t.id,[{id:assignmentId,botId:c.workerBotId,
         sessionId:'preview-session-'+t.id,attempt:1,state:'running'}]);
-      const now=Date.now();
       workItems.set(t.id,[{id:'preview-work-item-'+t.id,ticketId:t.id,
         objective:t.objective,
         evidenceContract:`Preview-only informational description: record the observable result for "${t.objective}".`,
@@ -310,7 +397,7 @@ export async function invokeSuperagent<T>(
         if(t.state!=='waiting_approval'||t.revision!==args.expectedRevision)throw Error('Stale worker evidence.');
         t.state=command==='superagent_accept'?'completed':'blocked';
       }
-      t.revision++;
+      t.revision++;t.updatedAt=Date.now();
       if(command==='superagent_stop'){
         for(const entry of assignments.get(t.id)||[])if(entry.state==='running')entry.state='stopped';
         workItems.set(t.id,(workItems.get(t.id)||[]).map(item=>item.state==='running'

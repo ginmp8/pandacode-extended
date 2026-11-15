@@ -880,6 +880,11 @@ impl Store {
                 migration.execute_batch("PRAGMA user_version=53;")
                     .map_err(|e| e.to_string())?;
             }
+            // PR #151's independent v53 did not contain the unified v53
+            // headless request outbox. Repair that additive schema regardless
+            // of user_version; never infer a retry request or provider grant.
+            migration.execute_batch(crate::superagent::headless_dispatch::SCHEMA)
+                .map_err(|e| e.to_string())?;
             if version < 54 {
                 // PR #151 schema v52/v53 used the same table name, sa_work_items,
                 // for an independently authorized state machine (id/objective).
@@ -2533,7 +2538,8 @@ mod tests {
              );
              CREATE TABLE sa_work_item_deps(
                  item_id TEXT REFERENCES sa_work_items(id),
-                 depends_on TEXT REFERENCES sa_work_items(id)
+                 depends_on TEXT REFERENCES sa_work_items(id),
+                 CHECK(item_id<>depends_on)
              );
              CREATE TABLE sa_assignments(
                  id TEXT PRIMARY KEY,
@@ -2542,8 +2548,10 @@ mod tests {
              INSERT INTO sa_tickets VALUES('ticket-151');
              INSERT INTO sa_work_items(id,ticket_id,objective,state,ordinal,created_at,updated_at)
                  VALUES('item-151','ticket-151','PRIVATE LEGACY OBJECTIVE','running',0,1,1);
+             INSERT INTO sa_work_items(id,ticket_id,objective,state,ordinal,created_at,updated_at)
+                 VALUES('item-parent','ticket-151','PRIVATE PREREQUISITE','completed',1,1,1);
              INSERT INTO sa_assignments VALUES('assignment-151','item-151');
-             INSERT INTO sa_work_item_deps VALUES('item-151','item-151');"
+             INSERT INTO sa_work_item_deps VALUES('item-151','item-parent');"
         ).unwrap();
         Store::archive_legacy_superagent_work_items(&db).unwrap();
         db.execute_batch(crate::superagent::work_items::SCHEMA).unwrap();
@@ -2589,6 +2597,33 @@ mod tests {
             [],|row|row.get(0),
         ).unwrap();
         assert!(still_exists);
+    }
+
+    #[test]
+    fn unified_schema_recovers_alternate_v53_headless_request_outbox() {
+        let path=std::env::temp_dir().join(format!(
+            "sa-unified-from-pr151-v53-{}.sqlite3", uuid::Uuid::new_v4(),
+        ));
+        {
+            let store=Store::open(&path).unwrap();
+            store.db.execute_batch(
+                "DROP TABLE sa_headless_retry_requests;
+                 PRAGMA user_version=53;"
+            ).unwrap();
+        }
+        let store=Store::open(&path).unwrap();
+        let version:i64=store.db.query_row(
+            "PRAGMA user_version",[],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(version,SCHEMA_VERSION);
+        let exists:bool=store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+             WHERE type='table' AND name='sa_headless_retry_requests')",
+            [],|row|row.get(0),
+        ).unwrap();
+        assert!(exists,"The independent PR #151 v53 cannot skip native headless outbox creation");
+        drop(store);
+        let _=std::fs::remove_file(path);
     }
 
     #[test]

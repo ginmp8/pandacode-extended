@@ -2864,7 +2864,7 @@ fn checkout_paths_equivalent(left: &str, right: &str) -> bool {
         return true;
     }
     match (canonical_checkout_intent(left), canonical_checkout_intent(right)) {
-        (Ok(left), Ok(right)) => left == right,
+        (Some(left), Some(right)) => left == right,
         _ => false,
     }
 }

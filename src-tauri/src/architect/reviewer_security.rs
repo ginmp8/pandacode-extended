@@ -512,6 +512,10 @@ pub(crate) struct ReviewerBinding {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub required_reviewers: Option<usize>,
     /// Native identity/revision token, not evidence of a content checksum.
+    /// Its first two components are the frozen Council cycle and the native
+    /// per-cycle content epoch; scheduling counters such as `dispatch_revision`
+    /// are deliberately excluded so a later phase can address the same frozen
+    /// artifact.
     pub artifact_revision: String,
     pub snapshot: ReviewerSnapshot,
     /// Native-observed skill events are separate from immutable reviewer authority.
@@ -564,6 +568,14 @@ pub(crate) enum ReviewerEvent {
     Reported { seat_id: String, verdict: ReviewerVerdict },
 }
 
+/// The native per-cycle content epoch of the reviewed artifact: the newest
+/// changed-file record in this Council cycle (`council::changed_at`), refreshed
+/// on every save. Scheduling counters such as `dispatch_revision` never enter
+/// it, so phase 2 sees the same epoch as phase 1 until a write is recorded.
+pub(super) fn artifact_epoch(team: &TeamSnapshot) -> u64 {
+    u64::try_from(team.changed_at.max(0)).unwrap_or(0)
+}
+
 impl ReviewerBinding {
     pub fn native(
         team: &TeamSnapshot,
@@ -587,7 +599,13 @@ impl ReviewerBinding {
             required_reviewers: team.config.council.as_ref()
                 .filter(|c| c.composition.is_some() || !c.reviewer_bot_ids.is_empty())
                 .map(|c| c.needed()),
-            artifact_revision: format!("{}:{}:{}:{}", team.council_since, team.dispatch_revision, created_at, worker_id),
+            artifact_revision: format!(
+                "{}:{}:{}:{}",
+                team.council_since,
+                artifact_epoch(team),
+                created_at,
+                worker_id
+            ),
             snapshot: ReviewerSnapshot {
                 provider: provider.to_owned(),
                 model: model.to_owned(),
@@ -605,7 +623,7 @@ impl ReviewerBinding {
         let revision = self.artifact_revision.split(':').collect::<Vec<_>>();
         let frozen_revision_matches = revision.len() == 4
             && revision[0] == team.council_since.to_string()
-            && revision[1].parse::<u64>().is_ok_and(|r| r <= team.dispatch_revision)
+            && revision[1].parse::<u64>().is_ok_and(|epoch| epoch <= artifact_epoch(team))
             && revision[2] == worker.created_at.to_string()
             && revision[3] == worker.id.as_str();
         if self.council_cycle_id != format!("{}:{}", team.session_id, team.council_since)

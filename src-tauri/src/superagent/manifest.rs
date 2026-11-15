@@ -1129,14 +1129,15 @@ mod tests {
 
         bad = document_v2("Unsupported policy");
         bad["orchestrations"][0]["policy"]["maxConcurrentTasks"] = json!(2);
-        assert!(preview(&store, &bad)
-            .unwrap_err()
-            .contains("Unsupported SuperAgent"));
+        assert_eq!(preview(&store, &bad).unwrap().would_create,
+            vec!["Unsupported policy"]);
+        // A non-executable portable resource policy is allowed for preview,
+        // but a missing required Council roster cannot be authorized.
         bad = document_v2("Unsupported council");
         bad["orchestrations"][0]["policy"]["councilEnabled"] = json!(true);
         assert!(preview(&store, &bad)
             .unwrap_err()
-            .contains("Unsupported SuperAgent"));
+            .contains("two to eight"));
 
         let count: i64 = store
             .db
@@ -1368,7 +1369,7 @@ mod tests {
         assert!(!root.join("bot-backups").exists());
 
         destination.db.execute(
-            "UPDATE bots SET skills='[\"required-skill\"]' WHERE id='other-worker'", [],
+            "UPDATE bots SET skills='[\"required-skill\"]',reasoning_effort='high' WHERE id='other-worker'", [],
         ).unwrap();
         assert_eq!(preview(&destination, &portable).unwrap().would_create,
             vec!["Pinned Team"]);

@@ -88,6 +88,8 @@ mod superagent;
 pub use usage_keychain::handle_usage_keychain_helper;
 pub use cloud_agents::handle_cloud_bridge;
 pub use headless::handle as handle_serve;
+// Native-only task API: no webview command or caller-provided authority is exposed.
+pub use architect::native_council_task;
 pub use voice::local::handle_speech_worker;
 
 use providers::{AgentEvent, RunConfig, RunInput};

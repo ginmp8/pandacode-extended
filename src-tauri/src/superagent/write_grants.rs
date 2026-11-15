@@ -143,6 +143,7 @@ pub(crate) fn validate_paths_in_root(root: &std::path::Path, paths: &[String]) -
 
 /// The grant is inserted in the same transaction as worker Assignment
 /// admission. Its revision is the post-admission revision the provider sees.
+#[expect(clippy::too_many_arguments, reason = "Independent security-critical grant fields match the existing native admission call contract.")]
 pub(crate) fn insert_for_assignment(
     tx: &Transaction<'_>,
     ticket_id: &str,

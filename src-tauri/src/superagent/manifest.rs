@@ -30,7 +30,9 @@ struct PresetV1 {
     name: String,
     coordinator_bot: String,
     worker_bot: String,
-    enabled: bool,
+    // Schema-v1 exports carry this flag; importing never grants authority.
+    #[serde(rename = "enabled")]
+    _enabled: bool,
     autonomy: String,
     max_concurrent_tasks: u8,
     max_attempts_per_assignment: u8,
@@ -228,7 +230,7 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
                 })
                 .collect()
         }
-        3 | 4 | 5 => {
+        3..=5 => {
             let manifest: ManifestV3 = serde_json::from_value(document.clone())
                 .map_err(|e| format!("Invalid SuperAgent companion manifest: {e}"))?;
             if manifest.schema_version != schema_version {

@@ -105,7 +105,7 @@ fn read(store: &Store, orchestration_id: &str) -> Result<StrategyView> {
         return Err("Team strategy conflicts with the authoritative versioned Team.".into());
     }
     let mut enable_blockers = Vec::new();
-    if cfg.worker_bot_ids.len() > 1 || cfg.reviewer_bot_ids.len() > 0 {
+    if cfg.worker_bot_ids.len() > 1 || !cfg.reviewer_bot_ids.is_empty() {
         enable_blockers.push("Multi-member dispatch requires scoped native scheduling.".into());
     }
     if snapshot.policy.max_concurrent_tasks != 1 {

@@ -453,8 +453,11 @@ pub struct OrchestrationInput {
     pub council_required: Option<bool>,
 }
 
+/// Validated command-boundary projection and ordered native Team roles.
+type OrchestrationParts = (NewOrchestration, Vec<String>, Vec<String>, Option<bool>);
+
 impl OrchestrationInput {
-    fn into_parts(self) -> Result<(NewOrchestration, Vec<String>, Vec<String>, Option<bool>)> {
+    fn into_parts(self) -> Result<OrchestrationParts> {
         let worker_bot_ids = self.worker_bot_ids
             .unwrap_or_else(|| vec![self.worker_bot_id.clone()]);
         let reviewer_bot_ids = self.reviewer_bot_ids.unwrap_or_default();
@@ -470,16 +473,13 @@ impl OrchestrationInput {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum TeamSnapshotProvenance {
     Native,
     LegacyCurrent,
+    #[default]
     LegacyUnknown,
-}
-
-impl Default for TeamSnapshotProvenance {
-    fn default() -> Self { Self::LegacyUnknown }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -639,6 +639,7 @@ fn effective_role_snapshot(
     })
 }
 
+#[expect(clippy::too_many_arguments, reason = "Each argument is a frozen, auditable Team snapshot field used by existing native constructors.")]
 fn make_team_snapshot(
     db: &Connection,
     orchestration_id: &str,
@@ -1124,11 +1125,13 @@ fn configuration(store: &Store, id: &str) -> Result<Orchestration> {
     hydrate_orchestration(store,config)
 }
 
+#[cfg(test)]
 fn create_configuration(store: &Store, input: NewOrchestration) -> Result<Orchestration> {
     let worker_bot_ids = vec![input.worker_bot_id.clone()];
     create_configuration_roles(store,input,worker_bot_ids,vec![])
 }
 
+#[cfg(test)]
 fn create_configuration_roles(
     store: &Store,
     input: NewOrchestration,
@@ -1316,6 +1319,7 @@ fn list_all_demands_page(
 
 /// Exact native Ticket-state filtering happens in SQLite before keyset paging.
 /// Unknown values fail closed: provider input is never SQL or execution authority.
+#[cfg(test)]
 fn list_all_demands_page_filtered(
     store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
     orchestration_id: Option<&str>, state_filter: Option<&str>,
@@ -1936,6 +1940,7 @@ pub(crate) fn inspect_headless_effect_receipts(
 /// state-filtered page; no migration, startup recovery, provider session,
 /// inferred task, authorization or external effect. Operational metadata
 /// excludes objectives, results, mandates and private transcripts.
+#[cfg(test)]
 pub(crate) fn list_headless_team_demands(
     database_path: &std::path::Path, orchestration_id: &str, state: &str,
     before_updated_at: Option<i64>, before_id: Option<&str>,
@@ -2302,7 +2307,8 @@ pub(crate) fn headless_quarantine_terminal_orphan(
     })).map_err(|e| e.to_string())
 }
 
-pub(crate) fn headless_issue_comment(
+pub(crate) #[expect(clippy::too_many_arguments, reason = "The existing CLI accepts these independently validated issue-comment fields by position.")]
+fn headless_issue_comment(
     database_path: &std::path::Path,
     ticket_id: &str,
     expected_revision: i64,
@@ -2325,7 +2331,8 @@ pub(crate) fn headless_issue_comment(
     )
 }
 
-pub(crate) fn headless_issue_comment_with_dispatch(
+pub(crate) #[expect(clippy::too_many_arguments, reason = "The CLI seam adds an injected dispatcher while preserving the existing invocation contract.")]
+fn headless_issue_comment_with_dispatch(
     database_path: &std::path::Path,
     ticket_id: &str,
     expected_revision: i64,
@@ -2726,6 +2733,7 @@ fn admit_role_with_staging(
     )
 }
 
+#[expect(clippy::too_many_arguments, reason = "Manual and authenticated source admission share explicit native provenance fields.")]
 fn admit_role_with_provenance(
     store: &mut Store, config_id: &str, objective: &str,
     request_key: &str, busy: bool, coordinate: bool, headless_staging: bool,
@@ -3991,11 +3999,13 @@ fn change_enabled(
 /// A Team edit appends a version only while disabled and before its first
 /// Ticket. Existing Ticket snapshots and grants remain bound to their admitted
 /// roles and effective profiles.
+#[cfg(test)]
 fn update_configuration(store: &Store, id: &str, expected_revision: i64, input: &NewOrchestration) -> Result<Orchestration> {
     update_configuration_roles(store,id,expected_revision,input,
         vec![input.worker_bot_id.clone()],vec![])
 }
 
+#[cfg(test)]
 fn update_configuration_roles(
     store: &Store, id: &str, expected_revision: i64, input: &NewOrchestration,
     worker_bot_ids: Vec<String>, reviewer_bot_ids: Vec<String>,
@@ -4169,6 +4179,7 @@ pub async fn superagent_tickets(window: tauri::WebviewWindow,
 }
 
 #[tauri::command]
+#[expect(clippy::too_many_arguments, reason = "Tauri binds the existing named legacy and query-envelope arguments from callers.")]
 pub async fn superagent_all_demands(
     window: tauri::WebviewWindow, state: State<'_, AppState>, limit: Option<i64>,
     before_updated_at: Option<i64>, before_id: Option<String>,
@@ -4840,6 +4851,7 @@ async fn confirm_issue_comment(
 }
 
 #[tauri::command]
+#[expect(clippy::too_many_arguments, reason = "Tauri binds the existing named issue-comment arguments from webview callers.")]
 pub async fn superagent_issue_comment(
     window: tauri::WebviewWindow,
     state: State<'_, AppState>,

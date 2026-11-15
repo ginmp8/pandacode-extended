@@ -2453,6 +2453,14 @@ fn two_phase_independent(team: &TeamSnapshot, phase1: usize, phase2: usize) -> b
                 })
         })
     });
+    // A native session can never author one round and independently challenge a later one,
+    // even when the seats use different lenses or model identities.
+    let prior_sessions: HashSet<&str> = earlier.iter()
+        .map(|(author, _)| author.session_id.as_str()).collect();
+    let independent_sessions = later.iter().all(|(challenger, _)| {
+        !challenger.session_id.is_empty()
+            && !prior_sessions.contains(challenger.session_id.as_str())
+    });
     let independent_per_lens = later.iter().all(|(challenger, challenge_seat)| {
         let mut challenged = false;
         let independent = earlier.iter()
@@ -2471,6 +2479,7 @@ fn two_phase_independent(team: &TeamSnapshot, phase1: usize, phase2: usize) -> b
             later.iter().skip(index + 1).all(|(other, _)| reviewer_identity(challenger) != reviewer_identity(other))
         })
         && frozen_artifact
+        && independent_sessions
         && independent_per_lens
 }
 
@@ -2496,6 +2505,15 @@ fn strategy_terminal_pass(
     findings: &[CouncilFinding],
 ) -> bool {
     let Some(composition) = config.composition.as_ref() else { return true };
+    // A copied worker/session cannot satisfy two distinct native seats in any
+    // composed strategy, even when the score and criterion receipts look valid.
+    let mut sessions = HashSet::new();
+    if !in_round(team, round).filter(|(worker, seat)| counts(worker, seat))
+        .all(|(worker, _)| !worker.session_id.is_empty()
+            && sessions.insert(worker.session_id.as_str()))
+    {
+        return false;
+    }
     match composition.strategy {
         CouncilStrategy::Parallel => true,
         CouncilStrategy::Escalated => s2_escalation_signals(team, round, outcomes, findings).is_empty(),

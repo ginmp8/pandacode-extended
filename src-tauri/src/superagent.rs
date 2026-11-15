@@ -7473,24 +7473,16 @@ mod tests {
             ("worker scope", altered_project),
         ] {
             let (json, hash) = encoded_snapshot(&changed).unwrap();
-            store.db.execute(
+            // The immutable Ticket snapshot write guard must reject even a
+            // self-consistent digest rewrite before it can reach runtime policy.
+            assert!(store.db.execute(
                 "UPDATE sa_ticket_team_snapshots
                  SET snapshot_json=?2,snapshot_sha256=?3 WHERE ticket_id=?1",
                 params![&ticket.id, json, hash],
-            ).unwrap();
-            assert!(ticket_team_snapshot(&store, &ticket.id).is_err(),
-                "{label}: valid outer digest must not authorize a different task");
-            assert!(read_only_policy(&store, &session).is_err(),
-                "{label}: provider authority must remain revoked");
+            ).is_err(),"{label}: immutable Ticket snapshot was changed");
+            assert_eq!(ticket_team_snapshot(&store, &ticket.id).unwrap(),original);
+            assert!(read_only_policy(&store, &session).unwrap().is_some());
         }
-        let (json, hash) = encoded_snapshot(&original).unwrap();
-        store.db.execute(
-            "UPDATE sa_ticket_team_snapshots
-             SET snapshot_json=?2,snapshot_sha256=?3 WHERE ticket_id=?1",
-            params![&ticket.id, json, hash],
-        ).unwrap();
-        assert!(ticket_team_snapshot(&store, &ticket.id).is_ok());
-        assert!(read_only_policy(&store, &session).unwrap().is_some());
     }
 
     #[test]
@@ -8519,7 +8511,7 @@ mod tests {
     }
 
     #[test]
-    fn enabled_orchestration_rejects_team_edit_without_mutation() {
+    fn enabled_team_without_history_can_version_future_roles_with_policy_cas() {
         let store=fixture();
         let config=enabled(&store);
         add_worker(&store,"worker-2");
@@ -8527,17 +8519,18 @@ mod tests {
         let input=NewOrchestration {
             name:"Changed Team".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker-2".into(),
         };
+        // A configured Team without admitted work may change its future
+        // primary Worker while staying enabled. Previous versions are immutable.
+        let changed=update_configuration(&store,&config.id,before.policy_revision,&input).unwrap();
+        assert!(changed.enabled);
+        assert_eq!(changed.name,"Changed Team");
+        assert_eq!(changed.worker_bot_id,"worker-2");
+        assert_eq!(changed.policy_revision,before.policy_revision+1);
+        assert_eq!(changed.team_version,before.team_version+1);
         assert!(update_configuration(&store,&config.id,before.policy_revision,&input).is_err());
-        assert!(update_configuration(&store,&config.id,before.policy_revision-1,&input).is_err());
-        let after=configuration(&store,&config.id).unwrap();
-        assert_eq!(after.name,before.name);
-        assert_eq!(after.coordinator_bot_id,before.coordinator_bot_id);
-        assert_eq!(after.project_id,before.project_id);
-        assert_eq!(after.policy_revision,before.policy_revision);
-        assert_eq!(after.team_version,before.team_version);
-        assert_eq!(after.worker_bot_id,before.worker_bot_id);
-        assert_eq!(after.worker_bot_ids,before.worker_bot_ids);
-        assert_eq!(after.reviewer_bot_ids,before.reviewer_bot_ids);
+        let pinned=load_team_version_snapshot(&store.db,&config.id,before.team_version).unwrap();
+        assert_eq!(pinned.worker_bot_ids,before.worker_bot_ids);
+        assert_eq!(pinned.coordinator_bot_id,before.coordinator_bot_id);
     }
 
     #[test]
@@ -10620,7 +10613,7 @@ mod tests {
     }
 
     #[test]
-    fn active_ticket_remains_bound_to_its_team_when_edit_is_rejected() {
+    fn active_ticket_keeps_immutable_authority_across_future_only_team_edit() {
         let mut store=fixture();
         let cfg=enabled(&store);
         let (ticket,_)=admit(&mut store,&cfg.id,"Review","revision-1",false).unwrap();
@@ -10628,14 +10621,17 @@ mod tests {
         let input=NewOrchestration{
             name:"Future policy".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
         };
-        assert!(update_configuration(&store,&cfg.id,cfg.policy_revision,&input).is_err());
-        let after=configuration(&store,&cfg.id).unwrap();
-        assert_eq!(after.policy_revision,cfg.policy_revision);
-        assert_eq!(after.team_version,cfg.team_version);
+        let pinned=ticket_team_snapshot(&store,&ticket.id).unwrap();
+        let after=update_configuration(&store,&cfg.id,cfg.policy_revision,&input).unwrap();
+        assert_eq!(after.name,"Future policy");
+        assert_eq!(after.policy_revision,cfg.policy_revision+1);
+        assert_eq!(after.team_version,cfg.team_version+1);
         assert_eq!(after.coordinator_bot_id,cfg.coordinator_bot_id);
         assert_eq!(after.project_id,cfg.project_id);
         assert_eq!(after.worker_bot_ids,cfg.worker_bot_ids);
         assert_eq!(after.reviewer_bot_ids,cfg.reviewer_bot_ids);
+        assert_eq!(ticket_team_snapshot(&store,&ticket.id).unwrap(),pinned);
+        assert!(update_configuration(&store,&cfg.id,cfg.policy_revision,&input).is_err());
         assert!(read_only_policy(&store,&sid).unwrap().is_some());
         assert!(on_run_finished(&store,&sid,true,"Stale result").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"waiting_approval");

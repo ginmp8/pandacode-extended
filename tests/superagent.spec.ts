@@ -51,6 +51,7 @@ async function mountCouncilTicket(page: Page, options: {
       }] as never;
       if (command === 'superagent_tickets') return [ticket] as never;
       if (command === 'superagent_source_thread_links') return [] as never;
+      if (command === 'superagent_work_items') return [] as never;
       if (command === 'superagent_snapshot') return {
         ticket,
         teamSnapshot:{snapshotVersion:1,provenance:'native',orchestrationId:'preset',teamVersion:1,
@@ -328,6 +329,7 @@ test('SuperAgent issue comments use a stable receipt and report uncertain state 
       if(command==='superagent_tickets')return [ticket] as never;
       if(command==='superagent_snapshot')return snapshot as never;
       if(command==='superagent_source_thread_links')return [] as never;
+      if(command==='superagent_work_items')return [] as never;
       if(command==='superagent_issue_comment'){
         calls.push({command,args:{...args}});
         return {ticketId:'ticket-comment',ticketRevision:4,repository:'acme/widget',
@@ -1168,6 +1170,7 @@ test('Ticket evidence reports a missing saved Team snapshot without using the cu
           allowedTools:[],allowedSideEffects:false},assignments:[],activity:[],
       } as never;
       if(command==='superagent_source_thread_links')return [] as never;
+      if(command==='superagent_work_items')return [] as never;
       throw new Error('Unexpected missing-snapshot command: '+command);
     });
   });
@@ -1214,6 +1217,7 @@ test('Preview Ticket evidence labels null profile and hash fields as unavailable
       if(command==='superagent_tickets')return [ticket] as never;
       if(command==='superagent_snapshot')return details as never;
       if(command==='superagent_source_thread_links')return [] as never;
+      if(command==='superagent_work_items')return [] as never;
       throw new Error('Unexpected Preview evidence command: '+command);
     });
     return (details.teamSnapshot as {roles:Array<Record<string,unknown>>}).roles;
@@ -1233,6 +1237,89 @@ test('Preview Ticket evidence labels null profile and hash fields as unavailable
   await expect(snapshot.locator('pre')).toContainText('"effectiveConfig": null');
   await expect(snapshot.locator('pre')).toContainText('"effectiveConfigSha256": null');
   await expect(snapshot.locator('pre')).not.toContainText('"effectiveConfigSha256": "');
+});
+
+
+test('Ticket evidence reads Work items in ordinal order with explicit empty and error states', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-work-items-test';document.body.appendChild(host);
+    const ticket={id:'ticket-work-items',objective:'Render ordered WorkItems',state:'queued',revision:1,evidence:null};
+    const state:{mode:'items'|'empty'|'error';calls:Array<Record<string,unknown>>}={mode:'items',calls:[]};
+    mountSuperagent(host,async (command,args)=>{
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [{id:'preset-one',name:'Work Item Team',
+        coordinatorBotId:'coordinator',workerBotId:'worker',enabled:true,policyRevision:1}] as never;
+      if(command==='superagent_tickets')return [ticket] as never;
+      if(command==='superagent_snapshot')return {ticket,teamSnapshot:null,
+        mandate:{actor:'local-user',authorizationId:'manual',policyRevision:1,projectId:'fixture',
+          expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[]} as never;
+      if(command==='superagent_source_thread_links')return [] as never;
+      if(command==='superagent_work_items'){
+        state.calls.push({...args});
+        if(state.mode==='error')throw new Error('Native WorkItem read failed.');
+        if(state.mode==='empty')return [] as never;
+        // Deliberately reversed: the native order is authoritative and the
+        // section still renders ordinal 0 before ordinal 1.
+        return [
+          {id:'item-second',ticketId:'ticket-work-items',objective:'Second bounded slice',
+            state:'completed',ordinal:1,createdAt:1,updatedAt:2},
+          {id:'item-first',ticketId:'ticket-work-items',objective:'First bounded slice',
+            state:'running',ordinal:0,createdAt:1,updatedAt:2},
+        ] as never;
+      }
+      throw new Error('Unexpected WorkItem evidence command: '+command);
+    });
+    (window as unknown as {saWorkItemsState:typeof state}).saWorkItemsState=state;
+  });
+
+  const host=page.locator('#sa-work-items-test');
+  const setMode=(mode:'items'|'empty'|'error')=>page.evaluate(mode=>{
+    (window as unknown as {saWorkItemsState:{mode:string}}).saWorkItemsState.mode=mode;
+  },mode);
+  const readCalls=()=>page.evaluate(()=>(window as unknown as {
+    saWorkItemsState:{calls:Array<Record<string,unknown>>}
+  }).saWorkItemsState.calls);
+
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const details=host.getByRole('region',{name:'Ticket evidence'});
+  const workItems=details.getByRole('region',{name:'Work items'});
+  await expect(workItems.getByRole('heading',{name:'Work items',exact:true})).toBeVisible();
+  const rows=workItems.locator('.sa-work-items-list .sa-item');
+  await expect(rows).toHaveCount(2);
+  await expect(rows.nth(0)).toContainText('First bounded slice');
+  await expect(rows.nth(0)).toContainText('Ordinal 0 · running');
+  await expect(rows.nth(1)).toContainText('Second bounded slice');
+  await expect(rows.nth(1)).toContainText('Ordinal 1 · completed');
+  await expect(workItems.getByRole('button')).toHaveCount(0);
+  expect(await readCalls()).toEqual([{ticketId:'ticket-work-items'}]);
+
+  await details.getByRole('button',{name:'Close evidence'}).click();
+  await setMode('error');
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const errorDetails=host.getByRole('region',{name:'Ticket evidence'});
+  await expect(errorDetails.getByRole('region',{name:'Work items'}).getByRole('alert'))
+    .toHaveText('Work items unavailable: Native WorkItem read failed.');
+  await expect(errorDetails.locator('.sa-work-items-list')).toHaveCount(0);
+  await expect(errorDetails).toContainText('Ticket ID');
+
+  await errorDetails.getByRole('button',{name:'Close evidence'}).click();
+  await setMode('empty');
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const emptyDetails=host.getByRole('region',{name:'Ticket evidence'});
+  const emptyItems=emptyDetails.getByRole('region',{name:'Work items'});
+  await expect(emptyItems.getByText('No WorkItems recorded for this Ticket.',{exact:true})).toBeVisible();
+  await expect(emptyItems.getByRole('alert')).toHaveCount(0);
+  await expect(emptyItems.locator('.sa-item')).toHaveCount(0);
+  expect(await readCalls()).toEqual([
+    {ticketId:'ticket-work-items'},{ticketId:'ticket-work-items'},{ticketId:'ticket-work-items'},
+  ]);
 });
 
 
@@ -1371,6 +1458,7 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
       }] as never;
       if(command==='superagent_source_thread_links')return links.filter(
         link=>link.ticketId===args?.ticketId) as never;
+      if(command==='superagent_work_items')return [] as never;
       if(command==='superagent_source_link_thread'){
         if(args?.sourceId!=='source-one'||args.ticketId!=='ticket-one')throw Error('Wrong scope');
         if(links.some(link=>link.sourceId===args.sourceId&&link.subjectKey===args.subjectKey))
@@ -1441,6 +1529,7 @@ test('manual Observe fetch supports issues.edited and check_run.completed with d
           expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:false},
         assignments:[],activity:[]} as never;
       if(command==='superagent_source_thread_links')return links as never;
+      if(command==='superagent_work_items')return [] as never;
       if(command==='superagent_source_list')return sources as never;
       if(command==='superagent_source_fetch_thread'){
         fetchCalls.push({sourceId:args?.sourceId,subjectKey:args?.subjectKey});

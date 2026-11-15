@@ -387,6 +387,12 @@ INSERT INTO sa_audit(ticket_id,kind,detail,at)
  FROM sa_tickets WHERE state='running';
 UPDATE sa_assignments SET state='interrupted',updated_at=CAST(strftime('%s','now') AS INTEGER)*1000
  WHERE state='running';
+-- A restart interrupted every native run; a WorkItem bound to one of those
+-- interrupted assignments cannot remain running.
+UPDATE sa_work_items SET state='failed',updated_at=CAST(strftime('%s','now') AS INTEGER)*1000
+ WHERE state='running' AND EXISTS (
+   SELECT 1 FROM sa_assignments a
+   WHERE a.work_item_id=sa_work_items.id AND a.state='interrupted');
 UPDATE sa_tickets SET state='interrupted',revision=revision+1,active_assignment_id=NULL,
  updated_at=CAST(strftime('%s','now') AS INTEGER)*1000
  WHERE state='running';
@@ -1215,12 +1221,16 @@ fn ticket_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Ticket> {
     })
 }
 
-fn get_ticket(store: &Store, id: &str) -> Result<Ticket> {
-    store.db.query_row(
+fn get_ticket_on(conn: &Connection, id: &str) -> Result<Ticket> {
+    conn.query_row(
         "SELECT id,orchestration_id,request_key,objective,actor,state,revision,active_assignment_id,evidence,created_at,updated_at
          FROM sa_tickets WHERE id=?1", [id], ticket_row,
     ).optional().map_err(|e| e.to_string())?
         .ok_or_else(|| "SuperAgent ticket not found.".into())
+}
+
+fn get_ticket(store: &Store, id: &str) -> Result<Ticket> {
+    get_ticket_on(&store.db, id)
 }
 
 /// A bounded native task index is required to recover a ticket when the
@@ -1341,10 +1351,10 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
 /// grant authority, or change the existing Ticket/assignment state machine.
 #[cfg_attr(not(test), allow(dead_code))]
 pub(crate) mod work_items {
-    use super::{get_ticket, MAX_OBJECTIVE_BYTES};
+    use super::{get_ticket_on, MAX_OBJECTIVE_BYTES};
     use crate::storage::{self, Store};
     use crate::Result;
-    use rusqlite::{params, OptionalExtension};
+    use rusqlite::{params, Connection, OptionalExtension};
     use serde::Serialize;
 
     /// Every state admitted by the `sa_work_items.state` CHECK constraint.
@@ -1400,13 +1410,17 @@ pub(crate) mod work_items {
         Ok(objective)
     }
 
-    pub(crate) fn get_work_item(store: &Store, id: &str) -> Result<WorkItem> {
-        store.db.query_row(
+    fn get_work_item_on(conn: &Connection, id: &str) -> Result<WorkItem> {
+        conn.query_row(
             "SELECT id,ticket_id,objective,state,ordinal,created_at,updated_at
              FROM sa_work_items WHERE id=?1",
             [id], work_item_row,
         ).optional().map_err(|e| e.to_string())?
             .ok_or_else(|| "SuperAgent WorkItem not found.".into())
+    }
+
+    pub(crate) fn get_work_item(store: &Store, id: &str) -> Result<WorkItem> {
+        get_work_item_on(&store.db, id)
     }
 
     pub(crate) fn list_work_items(
@@ -1415,7 +1429,7 @@ pub(crate) mod work_items {
         if !(1..=200).contains(&limit) {
             return Err("WorkItem page size must be between 1 and 200.".into());
         }
-        get_ticket(store, ticket_id)?;
+        super::get_ticket(store, ticket_id)?;
         let mut stmt = store.db.prepare(
             "SELECT id,ticket_id,objective,state,ordinal,created_at,updated_at
              FROM sa_work_items WHERE ticket_id=?1 ORDER BY ordinal,id LIMIT ?2",
@@ -1425,15 +1439,18 @@ pub(crate) mod work_items {
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
     }
 
-    pub(crate) fn create_work_item(
-        store: &Store, ticket_id: &str, objective: &str, ordinal: i64,
+    /// Create a queued WorkItem on the connection's current transaction. The
+    /// Ticket must already be visible to that transaction; admission calls this
+    /// after inserting the Ticket and its first assignment in the same `tx`.
+    pub(crate) fn create_work_item_in(
+        conn: &Connection, ticket_id: &str, objective: &str, ordinal: i64,
     ) -> Result<WorkItem> {
         let objective = bounded_objective(objective)?;
         if ordinal < 0 {
             return Err("A WorkItem ordinal must be zero or greater.".into());
         }
-        let ticket = get_ticket(store, ticket_id)?;
-        let duplicate: bool = store.db.query_row(
+        let ticket = get_ticket_on(conn, ticket_id)?;
+        let duplicate: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sa_work_items WHERE ticket_id=?1 AND ordinal=?2)",
             params![ticket.id, ordinal], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
@@ -1442,12 +1459,18 @@ pub(crate) mod work_items {
         }
         let id = storage::id();
         let now = storage::now();
-        store.db.execute(
+        conn.execute(
             "INSERT INTO sa_work_items(id,ticket_id,objective,state,ordinal,created_at,updated_at)
              VALUES(?1,?2,?3,'queued',?4,?5,?5)",
             params![id, ticket.id, objective, ordinal, now],
         ).map_err(|e| e.to_string())?;
-        get_work_item(store, &id)
+        get_work_item_on(conn, &id)
+    }
+
+    pub(crate) fn create_work_item(
+        store: &Store, ticket_id: &str, objective: &str, ordinal: i64,
+    ) -> Result<WorkItem> {
+        create_work_item_in(&store.db, ticket_id, objective, ordinal)
     }
 
     /// Record `item_id` -> `depends_on`. Both items must belong to the same
@@ -1493,7 +1516,7 @@ pub(crate) mod work_items {
     /// Queued items whose prerequisites are all completed and which have no
     /// active assignment, in deterministic ordinal order.
     pub(crate) fn ready_work_items(store: &Store, ticket_id: &str) -> Result<Vec<WorkItem>> {
-        get_ticket(store, ticket_id)?;
+        super::get_ticket(store, ticket_id)?;
         let mut stmt = store.db.prepare(
             "SELECT w.id,w.ticket_id,w.objective,w.state,w.ordinal,w.created_at,w.updated_at
              FROM sa_work_items w
@@ -1514,12 +1537,13 @@ pub(crate) mod work_items {
 
     /// Bind one active assignment to one queued/ready WorkItem of the same
     /// Ticket, then compare-and-swap the WorkItem to running. A second bind of
-    /// either side is rejected instead of replaying the first binding.
-    pub(crate) fn bind_work_item(
-        store: &Store, assignment_id: &str, work_item_id: &str,
+    /// either side is rejected instead of replaying the first binding. Admission
+    /// calls the `_in` form inside its own transaction so Ticket, assignment and
+    /// WorkItem binding commit or roll back together.
+    pub(crate) fn bind_work_item_in(
+        conn: &Connection, assignment_id: &str, work_item_id: &str,
     ) -> Result<WorkItem> {
-        let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-        let assignment: Option<(String, String, Option<String>)> = tx.query_row(
+        let assignment: Option<(String, String, Option<String>)> = conn.query_row(
             "SELECT ticket_id,state,work_item_id FROM sa_assignments WHERE id=?1",
             [assignment_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         ).optional().map_err(|e| e.to_string())?;
@@ -1531,19 +1555,14 @@ pub(crate) mod work_items {
         if assignment_state != "running" {
             return Err("Only a running assignment can bind a WorkItem.".into());
         }
-        let item: WorkItem = tx.query_row(
-            "SELECT id,ticket_id,objective,state,ordinal,created_at,updated_at
-             FROM sa_work_items WHERE id=?1",
-            [work_item_id], work_item_row,
-        ).optional().map_err(|e| e.to_string())?
-            .ok_or("SuperAgent WorkItem not found.")?;
+        let item = get_work_item_on(conn, work_item_id)?;
         if item.ticket_id != ticket_id {
             return Err("A WorkItem binding must stay on the same Ticket.".into());
         }
         if !matches!(item.state.as_str(), "queued" | "ready") {
             return Err("Only a queued or ready WorkItem can start.".into());
         }
-        let busy: bool = tx.query_row(
+        let busy: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM sa_assignments
              WHERE work_item_id=?1 AND state='running' AND id<>?2)",
             params![item.id, assignment_id], |row| row.get(0),
@@ -1552,30 +1571,38 @@ pub(crate) mod work_items {
             return Err("This WorkItem already has an active assignment.".into());
         }
         let now = storage::now();
-        let moved = tx.execute(
+        let moved = conn.execute(
             "UPDATE sa_work_items SET state='running',updated_at=?2 WHERE id=?1 AND state=?3",
             params![item.id, now, item.state],
         ).map_err(|e| e.to_string())?;
         if moved != 1 {
             return Err("The WorkItem changed while binding; reload and try again.".into());
         }
-        let bound = tx.execute(
+        let bound = conn.execute(
             "UPDATE sa_assignments SET work_item_id=?2 WHERE id=?1 AND work_item_id IS NULL",
             params![assignment_id, item.id],
         ).map_err(|e| e.to_string())?;
         if bound != 1 {
             return Err("The assignment changed while binding; reload and try again.".into());
         }
+        get_work_item_on(conn, &item.id)
+    }
+
+    pub(crate) fn bind_work_item(
+        store: &Store, assignment_id: &str, work_item_id: &str,
+    ) -> Result<WorkItem> {
+        let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+        let item = bind_work_item_in(&tx, assignment_id, work_item_id)?;
         tx.commit().map_err(|e| e.to_string())?;
-        get_work_item(store, work_item_id)
+        Ok(item)
     }
 
     /// Move one WorkItem along the fixed transition table. The update is a CAS
     /// on the state that was read, so a concurrent transition cannot be lost.
-    pub(crate) fn transition_work_item(
-        store: &Store, work_item_id: &str, next_state: &str,
+    pub(crate) fn transition_work_item_in(
+        conn: &Connection, work_item_id: &str, next_state: &str,
     ) -> Result<WorkItem> {
-        let item = get_work_item(store, work_item_id)?;
+        let item = get_work_item_on(conn, work_item_id)?;
         if !valid_state(next_state) {
             return Err("Unknown WorkItem state.".into());
         }
@@ -1585,14 +1612,69 @@ pub(crate) mod work_items {
                 item.state, next_state
             ));
         }
-        let moved = store.db.execute(
+        let moved = conn.execute(
             "UPDATE sa_work_items SET state=?2,updated_at=?3 WHERE id=?1 AND state=?4",
             params![item.id, next_state, storage::now(), item.state],
         ).map_err(|e| e.to_string())?;
         if moved != 1 {
             return Err("The WorkItem changed; reload and transition again.".into());
         }
-        get_work_item(store, work_item_id)
+        get_work_item_on(conn, work_item_id)
+    }
+
+    pub(crate) fn transition_work_item(
+        store: &Store, work_item_id: &str, next_state: &str,
+    ) -> Result<WorkItem> {
+        transition_work_item_in(&store.db, work_item_id, next_state)
+    }
+
+    fn terminal_state(next_state: &str) -> Result<()> {
+        if matches!(next_state, "completed" | "failed" | "blocked") {
+            Ok(())
+        } else {
+            Err("A bound WorkItem can only settle to completed, failed or blocked.".into())
+        }
+    }
+
+    /// Settle the WorkItem bound to one assignment. This is deliberately
+    /// idempotent for stale or duplicate provider callbacks: an unbound
+    /// assignment, an item already in the requested state, and an item that
+    /// already reached a different terminal state are all left untouched.
+    pub(crate) fn settle_bound_work_item(
+        conn: &Connection, assignment_id: &str, next_state: &str,
+    ) -> Result<bool> {
+        terminal_state(next_state)?;
+        let bound: Option<Option<String>> = conn.query_row(
+            "SELECT work_item_id FROM sa_assignments WHERE id=?1",
+            [assignment_id], |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())?;
+        let Some(Some(work_item_id)) = bound else { return Ok(false) };
+        let item = get_work_item_on(conn, &work_item_id)?;
+        if item.state == next_state || !transition_allowed(&item.state, next_state) {
+            return Ok(false);
+        }
+        let moved = conn.execute(
+            "UPDATE sa_work_items SET state=?2,updated_at=?3 WHERE id=?1 AND state=?4",
+            params![item.id, next_state, storage::now(), item.state],
+        ).map_err(|e| e.to_string())?;
+        Ok(moved == 1)
+    }
+
+    /// Settle every running item this Ticket has bound to an assignment. Used by
+    /// bulk authority invalidation, which interrupts assignments by Ticket
+    /// rather than by a single known assignment id.
+    pub(crate) fn settle_ticket_bound_work_items(
+        conn: &Connection, ticket_id: &str, next_state: &str,
+    ) -> Result<usize> {
+        terminal_state(next_state)?;
+        conn.execute(
+            "UPDATE sa_work_items SET state=?2,updated_at=?3
+             WHERE ticket_id=?1 AND state='running'
+               AND EXISTS(
+                 SELECT 1 FROM sa_assignments a
+                 WHERE a.ticket_id=?1 AND a.work_item_id=sa_work_items.id)",
+            params![ticket_id, next_state, storage::now()],
+        ).map_err(|e| e.to_string())
     }
 }
 
@@ -1844,6 +1926,8 @@ pub(crate) fn watchdog_expired_assignments(store: &Store, now: i64) -> Result<Ve
              WHERE id=?1 AND state='running'",
             params![assignment_id,now],
         ).map_err(|e| e.to_string())?;
+        // A run that exceeded its native budget did not complete its objective.
+        work_items::settle_bound_work_item(&tx, &assignment_id, "failed")?;
         tx.execute(
             "UPDATE sa_council_requests SET state='blocked',updated_at=?2
              WHERE assignment_id=?1 AND state IN ('admitted','bound','starting','dispatched')",
@@ -2011,6 +2095,14 @@ fn admit_role(
             params![assignment_id,ticket_id,current_candidate.id,session_id,now],
         ).map_err(|e| e.to_string())?;
         if !coordinate {
+            // A direct worker immediately owns the Ticket's single objective
+            // WorkItem. The coordinated path seeds it when the worker (not the
+            // planning coordinator) is admitted, in the same transaction as
+            // that assignment.
+            let work_item = work_items::create_work_item_in(
+                &tx, &ticket_id, objective, 0,
+            )?;
+            work_items::bind_work_item_in(&tx, assignment_id, &work_item.id)?;
             council_adapter::admit_required(
                 store,&tx,&ticket_id,assignment_id,session_id,0,&team_snapshot,
             )?;
@@ -2366,6 +2458,10 @@ fn fail_launch(store: &Store, ticket_id: &str, reason: &str) -> Result<()> {
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let now = storage::now();
     let detail = reason.chars().take(500).collect::<String>();
+    let active_assignment: Option<String> = tx.query_row(
+        "SELECT active_assignment_id FROM sa_tickets WHERE id=?1 AND state='running'",
+        [ticket_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?.flatten();
     let assignment = tx.execute(
         "UPDATE sa_assignments SET state='failed',updated_at=?2,result=?3
          WHERE id=(SELECT active_assignment_id FROM sa_tickets
@@ -2374,6 +2470,11 @@ fn fail_launch(store: &Store, ticket_id: &str, reason: &str) -> Result<()> {
     ).map_err(|e| e.to_string())?;
     if assignment != 1 {
         return Err("SuperAgent launch failure no longer owns an active assignment.".into());
+    }
+    if let Some(assignment_id) = active_assignment.as_deref() {
+        // The provider was never reached; the blocked Ticket did not fail the
+        // objective itself, so the bound item becomes blocked, not completed.
+        work_items::settle_bound_work_item(&tx, assignment_id, "blocked")?;
     }
     let ticket = tx.execute(
         "UPDATE sa_tickets SET state='blocked',active_assignment_id=NULL,
@@ -2460,6 +2561,20 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         params![task_id,next,trimmed,now,assignment_id],
     ).map_err(|e| e.to_string())?;
     if updated != 1 { return Err("SuperAgent ticket changed before settlement.".into()); }
+    // The bound WorkItem describes the worker run, not the later human or
+    // Council decision. A coordinator's successful plan is not completion of
+    // the objective; the worker admission owns the item instead.
+    if !coordinator {
+        let item_state = match next {
+            "waiting_approval" | "waiting_review" => Some("completed"),
+            "failed" | "inconclusive" => Some("failed"),
+            "blocked" => Some("blocked"),
+            _ => None,
+        };
+        if let Some(item_state) = item_state {
+            work_items::settle_bound_work_item(&tx, &assignment_id, item_state)?;
+        }
+    }
     // Atomically pin the native Council cycle and exact finished artifact,
     // when this worker session already has a Council team. This is advisory:
     // an unrelated or previously completed Council round never approves it.
@@ -2668,6 +2783,10 @@ fn stop_with_lock_observer(
          WHERE id=?1 AND state='running'",
         params![ticket.active_assignment_id,now],
     ).map_err(|e| e.to_string())?;
+    if let Some(assignment_id) = ticket.active_assignment_id.as_deref() {
+        // Stop ends the bound run without pretending it failed or completed.
+        work_items::settle_bound_work_item(&tx, assignment_id, "blocked")?;
+    }
     tx.execute(
         "UPDATE sa_council_requests SET state='blocked',updated_at=?2
          WHERE ticket_id=?1 AND state IN ('admitted','bound','starting','dispatched')",
@@ -2732,6 +2851,8 @@ pub(crate) fn invalidate_bot(
              WHERE ticket_id=?1 AND state IN ('admitted','bound','starting','dispatched')",
             params![ticket_id,now],
         ).map_err(|e| e.to_string())?;
+        let item_state = if next == "blocked" { "blocked" } else { "failed" };
+        work_items::settle_ticket_bound_work_items(&store.db, &ticket_id, item_state)?;
         record(store,&ticket_id, if removed { "bot_removed" } else { "bot_reset" },
             "Native bot session unavailable; mandate revoked without replay")?;
     }
@@ -3057,6 +3178,25 @@ pub async fn superagent_assignments(window: tauri::WebviewWindow,
     assignments(&store, &ticket_id, limit.unwrap_or(100))
 }
 
+/// Read-only WorkItem list for exactly one existing Ticket. The query is
+/// Ticket-scoped, so an empty or unknown id never falls back to another Ticket.
+fn ticket_work_items(store: &Store, ticket_id: &str) -> Result<Vec<work_items::WorkItem>> {
+    let ticket_id = ticket_id.trim();
+    if ticket_id.is_empty() {
+        return Err("A Ticket id is required.".into());
+    }
+    work_items::list_work_items(store, ticket_id, 200)
+}
+
+#[tauri::command]
+pub async fn superagent_work_items(
+    window: tauri::WebviewWindow, state: State<'_, AppState>, ticket_id: String,
+) -> Result<Vec<work_items::WorkItem>> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    ticket_work_items(&store, &ticket_id)
+}
+
 #[tauri::command]
 pub async fn superagent_activity(window: tauri::WebviewWindow, 
     state: State<'_, AppState>, ticket_id: String, limit: Option<i64>,
@@ -3348,6 +3488,13 @@ fn prepare_coordinated_worker_inner(
          VALUES(?1,?2,?3,?4,'running',?5,?6,?6)",
         params![assignment_id,ticket_id,worker.id,session_id,next_attempt,now],
     ).map_err(|e| e.to_string())?;
+    // The coordinator's earlier admission is planning, not execution of the
+    // objective. The coordinated worker owns ordinal 0 and starts it in the
+    // same transaction that grants this assignment.
+    let work_item = work_items::create_work_item_in(
+        &tx, ticket_id, &ticket.objective, 0,
+    )?;
+    work_items::bind_work_item_in(&tx, &assignment_id, &work_item.id)?;
     let moved = tx.execute(
         "UPDATE sa_tickets SET state='running',active_assignment_id=?2,evidence=NULL,revision=revision+1,updated_at=?3
          WHERE id=?1 AND state='queued' AND revision=?4",
@@ -6245,12 +6392,13 @@ mod tests {
         ).unwrap();
         assert!(launched);
 
+        // Admission already owns ordinal 0, so later slices use later ordinals.
         let first = work_items::create_work_item(
-            &store, &ticket.id, "  Inspect storage  ", 0,
+            &store, &ticket.id, "  Inspect storage  ", 1,
         ).unwrap();
         assert_eq!(first.objective, "Inspect storage");
         assert_eq!(first.state, "queued");
-        assert_eq!(first.ordinal, 0);
+        assert_eq!(first.ordinal, 1);
         assert_eq!(first.ticket_id, ticket.id);
         let second = work_items::create_work_item(
             &store, &ticket.id, "Add scheduler", 2,
@@ -6260,7 +6408,7 @@ mod tests {
         let listed = work_items::list_work_items(&store, &ticket.id, 10).unwrap();
         assert_eq!(
             listed.iter().map(|item| item.ordinal).collect::<Vec<_>>(),
-            vec![0, 2],
+            vec![0, 1, 2],
         );
         assert!(work_items::create_work_item(&store, &ticket.id, "Duplicate", 0).is_err());
         assert!(work_items::create_work_item(&store, &ticket.id, "   ", 3).is_err());
@@ -6281,9 +6429,12 @@ mod tests {
             &mut store, &config.id, "Ordered slices", "work-item-frontier", false,
         ).unwrap();
         assert!(launched);
-        let first = work_items::create_work_item(&store, &ticket.id, "First", 0).unwrap();
-        let second = work_items::create_work_item(&store, &ticket.id, "Second", 1).unwrap();
-        let third = work_items::create_work_item(&store, &ticket.id, "Third", 2).unwrap();
+        // Admission owns ordinal 0 for the objective; dependencies exercise
+        // the remaining ordinals and must not touch the seeded running item.
+        assert_eq!(work_items::list_work_items(&store, &ticket.id, 10).unwrap().len(), 1);
+        let first = work_items::create_work_item(&store, &ticket.id, "First", 1).unwrap();
+        let second = work_items::create_work_item(&store, &ticket.id, "Second", 2).unwrap();
+        let third = work_items::create_work_item(&store, &ticket.id, "Third", 3).unwrap();
 
         work_items::add_work_item_dependency(&store, &second.id, &first.id).unwrap();
         work_items::add_work_item_dependency(&store, &third.id, &second.id).unwrap();
@@ -6332,6 +6483,9 @@ mod tests {
 
         // The frontier excludes a queued item that still has a running assignment.
         let assignment = assignments(&store, &ticket.id, 10).unwrap().remove(0);
+        store.db.execute(
+            "UPDATE sa_assignments SET work_item_id=NULL WHERE id=?1", [&assignment.id],
+        ).unwrap();
         work_items::bind_work_item(&store, &assignment.id, &third.id).unwrap();
         assert!(work_items::ready_work_items(&store, &ticket.id).unwrap().is_empty());
         store.db.execute(
@@ -6349,9 +6503,15 @@ mod tests {
         ).unwrap();
         assert!(launched);
         let assignment = assignments(&store, &ticket.id, 10).unwrap().remove(0);
-        let item = work_items::create_work_item(&store, &ticket.id, "Runnable", 0).unwrap();
+        // Detach the admission-seeded item so this test can drive the bind
+        // helper against a fresh queued item.
+        store.db.execute(
+            "UPDATE sa_assignments SET work_item_id=NULL WHERE id=?1", [&assignment.id],
+        ).unwrap();
+        assert_eq!(work_items::list_work_items(&store, &ticket.id, 10).unwrap()[0].ordinal, 0);
+        let item = work_items::create_work_item(&store, &ticket.id, "Runnable", 1).unwrap();
         let finished = work_items::create_work_item(
-            &store, &ticket.id, "Already done", 1,
+            &store, &ticket.id, "Already done", 2,
         ).unwrap();
         for state in ["ready","running","completed"] {
             work_items::transition_work_item(&store, &finished.id, state).unwrap();
@@ -6393,15 +6553,21 @@ mod tests {
         ).unwrap();
         assert!(launched);
         let assignment = assignments(&store, &ticket.id, 10).unwrap().remove(0);
+        let item = work_items::list_work_items(&store, &ticket.id, 10).unwrap().remove(0);
+        assert_eq!(item.ordinal, 0);
+        assert_eq!(item.state, "running");
+        let linked: Option<String> = store.db.query_row(
+            "SELECT work_item_id FROM sa_assignments WHERE id=?1",
+            [&assignment.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(linked.as_deref(), Some(item.id.as_str()));
+
         let snapshot_before =
             serde_json::to_value(ticket_snapshot(&store, &ticket.id, 20).unwrap()).unwrap();
         assert!(read_only_policy(&store, &assignment.session_id).unwrap().is_some());
 
-        let item = work_items::create_work_item(&store, &ticket.id, "First slice", 0).unwrap();
-        assert_eq!(
-            work_items::bind_work_item(&store, &assignment.id, &item.id).unwrap().state,
-            "running",
-        );
+        // Replaying the admission bind is rejected without changing authority.
+        assert!(work_items::bind_work_item(&store, &assignment.id, &item.id).is_err());
         let snapshot_after =
             serde_json::to_value(ticket_snapshot(&store, &ticket.id, 20).unwrap()).unwrap();
         assert_eq!(snapshot_after, snapshot_before);
@@ -6415,5 +6581,205 @@ mod tests {
         let waiting = get_ticket(&store, &ticket.id).unwrap();
         assert_eq!(waiting.state, "waiting_approval");
         assert!(waiting.active_assignment_id.is_none());
+        assert_eq!(
+            work_items::get_work_item(&store, &item.id).unwrap().state, "completed",
+        );
+    }
+
+    #[test]
+    fn admission_seeds_one_running_work_item_for_direct_and_coordinated_workers() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (direct, launched) = admit(
+            &mut store, &config.id, "  Direct objective  ", "work-item-admission", false,
+        ).unwrap();
+        assert!(launched);
+        let direct_item = work_items::list_work_items(&store, &direct.id, 10).unwrap().remove(0);
+        assert_eq!(direct_item.ticket_id, direct.id);
+        assert_eq!(direct_item.objective, "Direct objective");
+        assert_eq!(direct_item.state, "running");
+        assert_eq!(direct_item.ordinal, 0);
+        let direct_assignment = assignments(&store, &direct.id, 10).unwrap().remove(0);
+        let linked: Option<String> = store.db.query_row(
+            "SELECT work_item_id FROM sa_assignments WHERE id=?1",
+            [&direct_assignment.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(linked.as_deref(), Some(direct_item.id.as_str()));
+
+        // Replaying the same request key must return the durable Ticket without
+        // creating a second item or restarting the existing one.
+        let (replayed, launched) = admit(
+            &mut store, &config.id, "  Direct objective  ", "work-item-admission", false,
+        ).unwrap();
+        assert!(!launched);
+        assert_eq!(replayed.id, direct.id);
+        let replay_items = work_items::list_work_items(&store, &direct.id, 10).unwrap();
+        assert_eq!(replay_items.len(), 1);
+        assert_eq!(replay_items[0], direct_item);
+
+        stop(&store, &direct.id).unwrap();
+        assert_eq!(
+            work_items::get_work_item(&store, &direct_item.id).unwrap().state, "blocked",
+        );
+
+        // The coordinator's own admission is planning, not objective execution.
+        let (coordinated, launched) = admit_role(
+            &mut store, &config.id, "Coordinated objective", "coord-work-item", false, true,
+        ).unwrap();
+        assert!(launched);
+        assert!(work_items::list_work_items(&store, &coordinated.id, 10).unwrap().is_empty());
+        let coordinator_session = assignment_session(&store, &coordinated.id).unwrap().unwrap();
+        assert!(on_run_finished(
+            &store, &coordinator_session, true, "Inspect the worker task first",
+        ).unwrap());
+        assert_eq!(get_ticket(&store, &coordinated.id).unwrap().state, "queued");
+        assert!(work_items::list_work_items(&store, &coordinated.id, 10).unwrap().is_empty());
+
+        let (worker_ticket, _, worker_id, _) =
+            prepare_coordinated_worker(&mut store, &coordinated.id, false).unwrap();
+        assert_eq!(worker_id, "worker");
+        assert_eq!(worker_ticket.state, "running");
+        let worker_item =
+            work_items::list_work_items(&store, &coordinated.id, 10).unwrap().remove(0);
+        assert_eq!(worker_item.ticket_id, coordinated.id);
+        assert_eq!(worker_item.objective, "Coordinated objective");
+        assert_eq!(worker_item.state, "running");
+        assert_eq!(worker_item.ordinal, 0);
+        let worker_assignment = assignments(&store, &coordinated.id, 10).unwrap().remove(0);
+        assert_eq!(worker_assignment.attempt, 2);
+        let linked: Option<String> = store.db.query_row(
+            "SELECT work_item_id FROM sa_assignments WHERE id=?1",
+            [&worker_assignment.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(linked.as_deref(), Some(worker_item.id.as_str()));
+
+        let worker_session = assignment_session(&store, &coordinated.id).unwrap().unwrap();
+        assert!(on_run_finished(
+            &store, &worker_session, true, "Coordinated worker result",
+        ).unwrap());
+        assert_eq!(
+            work_items::get_work_item(&store, &worker_item.id).unwrap().state, "completed",
+        );
+    }
+
+    #[test]
+    fn successful_finish_completes_the_bound_work_item_without_completing_the_ticket() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Finish the bounded run", "work-item-success", false,
+        ).unwrap();
+        assert!(launched);
+        let item = work_items::list_work_items(&store, &ticket.id, 10).unwrap().remove(0);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session, true, "Worker evidence").unwrap());
+        assert_eq!(
+            work_items::get_work_item(&store, &item.id).unwrap().state, "completed",
+        );
+        let waiting = get_ticket(&store, &ticket.id).unwrap();
+        assert_eq!(waiting.state, "waiting_approval");
+        assert_eq!(waiting.revision, ticket.revision + 1);
+    }
+
+    #[test]
+    fn failure_stop_and_policy_block_settle_the_bound_work_item_truthfully() {
+        let mut store = fixture();
+        let config = enabled(&store);
+
+        let (failed, _) = admit(
+            &mut store, &config.id, "Fail the run", "work-item-failure", false,
+        ).unwrap();
+        let failed_item = work_items::list_work_items(&store, &failed.id, 10).unwrap().remove(0);
+        let failed_session = assignment_session(&store, &failed.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &failed_session, false, "Provider failed").unwrap());
+        assert_eq!(get_ticket(&store, &failed.id).unwrap().state, "failed");
+        assert_eq!(
+            work_items::get_work_item(&store, &failed_item.id).unwrap().state, "failed",
+        );
+
+        let (stopped, _) = admit(
+            &mut store, &config.id, "Stop the run", "work-item-stop", false,
+        ).unwrap();
+        let stopped_item = work_items::list_work_items(&store, &stopped.id, 10).unwrap().remove(0);
+        stop(&store, &stopped.id).unwrap();
+        assert_eq!(get_ticket(&store, &stopped.id).unwrap().state, "stopped");
+        assert_eq!(
+            work_items::get_work_item(&store, &stopped_item.id).unwrap().state, "blocked",
+        );
+
+        let (blocked, _) = admit(
+            &mut store, &config.id, "Reject the callback", "work-item-block", false,
+        ).unwrap();
+        let blocked_item = work_items::list_work_items(&store, &blocked.id, 10).unwrap().remove(0);
+        let blocked_session = assignment_session(&store, &blocked.id).unwrap().unwrap();
+        store.db.execute(
+            "DELETE FROM bot_threads WHERE session_id=?1", [&blocked_session],
+        ).unwrap();
+        assert!(on_run_finished(&store, &blocked_session, true, "Unauthorized result").unwrap());
+        assert_eq!(get_ticket(&store, &blocked.id).unwrap().state, "blocked");
+        assert_eq!(
+            work_items::get_work_item(&store, &blocked_item.id).unwrap().state, "blocked",
+        );
+    }
+
+    #[test]
+    fn work_items_command_is_ticket_scoped_and_rejects_an_empty_or_missing_ticket() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (first, _) = admit(
+            &mut store, &config.id, "First ticket", "work-items-command-first", false,
+        ).unwrap();
+        stop(&store, &first.id).unwrap();
+        let (second, _) = admit(
+            &mut store, &config.id, "Second ticket", "work-items-command-second", false,
+        ).unwrap();
+
+        let first_items = ticket_work_items(&store, &first.id).unwrap();
+        assert_eq!(first_items.len(), 1);
+        assert_eq!(first_items[0].ticket_id, first.id);
+        let second_items = ticket_work_items(&store, &second.id).unwrap();
+        assert_eq!(second_items.len(), 1);
+        assert_eq!(second_items[0].ticket_id, second.id);
+        assert_ne!(first_items[0].id, second_items[0].id);
+        assert!(first_items.iter().all(|item| item.ticket_id == first.id));
+        let payload = serde_json::to_value(&second_items[0]).unwrap();
+        for field in ["id","ticketId","objective","state","ordinal","createdAt","updatedAt"] {
+            assert!(payload.get(field).is_some(), "missing camelCase field {field}");
+        }
+        assert!(payload.get("ticket_id").is_none());
+
+        assert!(ticket_work_items(&store, "").is_err());
+        assert!(ticket_work_items(&store, "   ").is_err());
+        assert!(ticket_work_items(&store, "missing-ticket").is_err());
+
+        // A blocked admission never launched, so it has no WorkItem but its
+        // existing Ticket still answers with an empty list rather than a leak.
+        let (blocked, launched) = admit(
+            &mut store, &config.id, "Never launched", "work-items-command-blocked", true,
+        ).unwrap();
+        assert!(!launched);
+        assert!(ticket_work_items(&store, &blocked.id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn replay_does_not_duplicate_or_flip_the_work_item_transition() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Replay-safe finish", "work-item-replay", false,
+        ).unwrap();
+        assert!(launched);
+        let item = work_items::list_work_items(&store, &ticket.id, 10).unwrap().remove(0);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &session, true, "First result").unwrap());
+        let completed = work_items::get_work_item(&store, &item.id).unwrap();
+        assert_eq!(completed.state, "completed");
+
+        assert!(!on_run_finished(&store, &session, false, "Duplicate failure").unwrap());
+        assert!(!on_run_finished(&store, &session, true, "Duplicate success").unwrap());
+        let items = work_items::list_work_items(&store, &ticket.id, 10).unwrap();
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0], completed);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "waiting_approval");
     }
 }

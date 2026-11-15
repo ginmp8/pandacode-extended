@@ -4493,6 +4493,7 @@ pub fn run() {
                 superagent::superagent_mandate,
                 superagent::superagent_tickets,
                 superagent::superagent_assignments,
+                superagent::superagent_work_items,
                 superagent::superagent_activity,
                 superagent::superagent_snapshot,
                 superagent::superagent_submit,

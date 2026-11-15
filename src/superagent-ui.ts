@@ -14,6 +14,10 @@ interface Config {
   ticketCount?: number; runningCount?: number; blockedCount?: number; lastActivityAt?: number;
 }
 interface Ticket { id: string; objective: string; state: string; revision: number; evidence: string | null }
+interface WorkItem {
+  id: string; ticketId: string; objective: string; state: string; ordinal: number;
+  createdAt: number; updatedAt: number;
+}
 interface TeamSnapshot {
   [key: string]: unknown;
   snapshotVersion?: unknown; provenance?: unknown; orchestrationId?: unknown;
@@ -111,6 +115,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   // Persist the user's editable preset draft across asynchronous list refreshes.
   let rejectingTicket = '', inspectedTicket = '';
   let ticketDetails: TicketDetails | null = null;
+  // Ordered read-only scheduler rows for the inspected Ticket, loaded with the
+  // other details. A failed read is local to this section, never approval data.
+  let workItems: WorkItem[] = [], workItemsError = '';
   let draftPresetName = '', draftPresetTemplate = '', draftCoordinatorBotId = '';
   let draftWorkerBotIds = [''], draftReviewerBotIds: string[] = [];
   let draftCouncilRequired = false, draftCouncilError = '';
@@ -294,6 +301,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '<p>Native team status: ' + safe(nativeStatus) + ' · Round ' + safe(round) + stale +
       '. Verified native pass: ' + verified + '.</p><p>' + meaning + '</p></section>';
   }
+  function renderWorkItems(): string {
+    const rows = workItems.map(item =>
+      '<li class="sa-item" data-sa-work-item="' + safe(item.id) + '"><div><strong>' +
+      safe(item.objective) + '</strong><small>Ordinal ' + safe(item.ordinal) + ' · ' +
+      safe(item.state) + '</small></div></li>').join('');
+    return '<section class="sa-work-items" aria-label="Work items"><h5>Work items</h5>' +
+      (workItemsError
+        ? '<p class="sa-error" role="alert" data-sa-work-items-error>Work items unavailable: ' +
+          safe(workItemsError) + '</p>'
+        : '<ul class="sa-list sa-work-items-list">' +
+          (rows || '<li class="sa-empty" data-sa-work-items-empty>No WorkItems recorded for this Ticket.</li>') +
+          '</ul>') + '</section>';
+  }
   function render(): void {
     if (!host.isConnected) return;
     const list = presets.map(item =>
@@ -391,7 +411,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         (ticketDetails.assignments.map(item => '<li>Attempt ' + item.attempt + ' · ' +
           safe(item.state) + ' · Bot ' + safe(botName(item.botId)) + ' · Session <code>' +
           safe(item.sessionId) + '</code></li>').join('') || '<li>No worker assigned.</li>') +
-        '</ul><h5>Native activity</h5><ol>' +
+        '</ul>' + renderWorkItems() + '<h5>Native activity</h5><ol>' +
         (ticketDetails.activity.map(entry => '<li>' + safe(activityTime(entry.at)) + ' · ' +
           safe(entry.kind) + ' · ' + safe(entry.detail) + '</li>').join('') ||
           '<li>No activity recorded.</li>') +
@@ -561,19 +581,30 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   async function refreshTicketDetails(): Promise<void> {
     const id = inspectedTicket;
     if (!id || !tickets.some(ticket => ticket.id === id)) {
-      inspectedTicket = ''; ticketDetails = null; threadLinks = []; issueCommentStatus = null; return;
+      inspectedTicket = ''; ticketDetails = null; threadLinks = []; issueCommentStatus = null;
+      workItems = []; workItemsError = ''; return;
     }
     const previousRevision = ticketDetails?.ticket.id === id ? ticketDetails.ticket.revision : null;
     // Use existing native read endpoints, not model-generated summaries. A
     // revision change refreshes the snapshot before a later human decision.
-    const [snapshot, links] = await Promise.all([
+    // WorkItems are read in parallel with the other details, but their failure
+    // stays in the Work items section instead of hiding the Ticket evidence.
+    const workItemRead = call<WorkItem[]>('superagent_work_items', { ticketId:id })
+      .then(rows => ({ rows: Array.isArray(rows) ? [...rows] : [], error: '' }))
+      .catch(cause => ({
+        rows: [] as WorkItem[], error: cause instanceof Error ? cause.message : String(cause),
+      }));
+    const [snapshot, links, workItemResult] = await Promise.all([
       call<TicketDetails>('superagent_snapshot', { ticketId:id, limit:50 }),
       call<ThreadLink[]>('superagent_source_thread_links', { ticketId:id }),
+      workItemRead,
     ]);
     if (inspectedTicket === id) {
       if (previousRevision !== null && previousRevision !== snapshot.ticket.revision) issueCommentStatus = null;
       ticketDetails = snapshot;
       threadLinks = links;
+      workItems = workItemResult.rows.sort((left, right) => left.ordinal - right.ordinal);
+      workItemsError = workItemResult.error;
       // Keep the ticket row and its grant/history pinned to one native revision.
       const index = tickets.findIndex(ticket => ticket.id === id);
       if (index >= 0) tickets[index] = snapshot.ticket;
@@ -589,13 +620,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       bots = known; presets = configs;
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
-        inspectedTicket = ''; threadLinks = [];
+        inspectedTicket = ''; threadLinks = []; workItems = []; workItemsError = '';
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       }
       // A failed native read must not leave old ticket approval controls
       // visible underneath a newly selected or reloaded preset.
       tickets = [];
-      ticketDetails = null;
+      ticketDetails = null; workItems = []; workItemsError = '';
       tickets = selected ? await call<Ticket[]>('superagent_tickets',{ orchestrationId:selected, limit:50 }) : [];
       await refreshTicketDetails();
       if (sourcesLoaded && selected) {
@@ -733,7 +764,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       selected = next;
       tickets = [];
       writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = ''; writePathsError = '';
-      inspectedTicket = ''; ticketDetails = null; threadLinks = [];
+      inspectedTicket = ''; ticketDetails = null; threadLinks = []; workItems = []; workItemsError = '';
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 });
@@ -753,6 +784,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       if (selected !== team.id) {
         selected = team.id;
         tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
+        workItems = []; workItemsError = '';
         writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = ''; writePathsError = '';
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
         void work(async () => {
@@ -834,14 +866,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     }
     if (target.hasAttribute('data-sa-refresh')) { void work(reload); return; }
     if (target.hasAttribute('data-sa-close-details')) {
-      inspectedTicket = ''; ticketDetails = null; issueCommentStatus = null; render(); return;
+      inspectedTicket = ''; ticketDetails = null; issueCommentStatus = null;
+      workItems = []; workItemsError = ''; render(); return;
     }
     if (target.dataset.saInspectTicket) {
       const id = target.dataset.saInspectTicket;
       if (inspectedTicket === id) {
-        inspectedTicket = ''; ticketDetails = null; issueCommentStatus = null; render();
+        inspectedTicket = ''; ticketDetails = null; issueCommentStatus = null;
+        workItems = []; workItemsError = ''; render();
       } else {
         inspectedTicket = id; ticketDetails = null; issueCommentStatus = null;
+        workItems = []; workItemsError = '';
         commentRepository = ''; commentIssueNumber = ''; commentDraft = ''; issueCommentError = '';
         void work(refreshTicketDetails);
       }

@@ -6576,7 +6576,7 @@ mod tests {
         let workspace = std::env::temp_dir().join(format!("pandacode-superagent-ac04-reset-{}", storage::id()));
         std::fs::create_dir_all(&workspace).unwrap();
         store.db.execute(
-            "UPDATE projects SET path=?2 WHERE id='project'",
+            "UPDATE projects SET path=?1 WHERE id='project'",
             params![workspace.to_string_lossy().to_string()],
         ).unwrap();
         let config = enabled_required_council(&store, "Reset reviewer owner");
@@ -6617,13 +6617,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(workspace);
     }
 
+    #[cfg(windows)]
+    #[allow(clippy::permissions_set_readonly_false)]
+    fn clear_readonly_for_test(permissions: &mut std::fs::Permissions) {
+        // Windows stores this bit as FILE_ATTRIBUTE_READONLY; clear it so the
+        // AC-04 test can remove its frozen workspace snapshot.
+        permissions.set_readonly(false);
+    }
+
     #[test]
     fn removing_a_reviewer_blocks_dispatched_council_callback_and_future_authority() {
         let mut store = fixture();
         let workspace = std::env::temp_dir().join(format!("pandacode-superagent-ac04-remove-{}", storage::id()));
         std::fs::create_dir_all(&workspace).unwrap();
         store.db.execute(
-            "UPDATE projects SET path=?2 WHERE id='project'",
+            "UPDATE projects SET path=?1 WHERE id='project'",
             params![workspace.to_string_lossy().to_string()],
         ).unwrap();
         let config = enabled_required_council(&store, "Remove reviewer owner");
@@ -6678,7 +6686,7 @@ mod tests {
                     permissions.set_mode(permissions.mode() | 0o200);
                 }
                 #[cfg(windows)]
-                permissions.set_readonly(false);
+                clear_readonly_for_test(&mut permissions);
                 std::fs::set_permissions(&frozen, permissions).unwrap();
                 std::fs::remove_dir_all(frozen).unwrap();
             }
@@ -7278,16 +7286,39 @@ mod tests {
         assert!(guard_run_admission(&store, &ordinary_coordinator.id, &[]).is_err());
         assert!(guard_run_admission(&store, &ordinary_worker.id, &[]).is_err());
 
-        // A missing active session must fail closed instead of silently
-        // releasing the coordinator lease before restart reconciliation.
-        store.db.execute(
-            "DELETE FROM bot_threads WHERE session_id=?1", [&coordinator_session],
-        ).unwrap();
-        store.db.execute("DELETE FROM sessions WHERE id=?1", [&coordinator_session]).unwrap();
+        // Active SuperAgent sessions are durable. A direct deletion must not
+        // release the lease; use native launch-failure settlement to recover.
+        let deletion = store
+            .db
+            .execute("DELETE FROM sessions WHERE id=?1", [&coordinator_session]);
+        let deletion_error = deletion.unwrap_err().to_string();
+        assert!(
+            deletion_error
+                .contains("Cannot delete a session owned by an active SuperAgent assignment"),
+            "unexpected session deletion error: {deletion_error}",
+        );
+        assert!(store.session(&coordinator_session).is_ok());
         assert!(guard_run_admission(&store, &ordinary_coordinator.id, &[]).is_err());
         assert!(guard_run_admission(&store, &ordinary_worker.id, &[]).is_err());
 
-        fail_launch(&store, &ticket.id, "original coordinator session disappeared").unwrap();
+        fail_launch(&store, &ticket.id, "coordinator launch failed").unwrap();
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "blocked");
+        assert_eq!(
+            assignments(&store, &ticket.id, 10).unwrap()[0].state,
+            "failed",
+        );
+        assert!(store.session(&coordinator_session).is_ok());
+        assert!(guard_run_admission(&store, &ordinary_coordinator.id, &[]).is_ok());
+        assert!(guard_run_admission(&store, &ordinary_worker.id, &[]).is_ok());
+
+        let state = crate::architect::test_app_state(store);
+        let deleted = crate::task_deletion::delete_state(&state, &coordinator_session).unwrap();
+        assert_eq!(
+            deleted.deleted_session_ids,
+            vec![coordinator_session.clone()],
+        );
+        let store = state.store.lock().unwrap();
+        assert!(store.session(&coordinator_session).is_err());
         assert!(guard_run_admission(&store, &ordinary_coordinator.id, &[]).is_ok());
         assert!(guard_run_admission(&store, &ordinary_worker.id, &[]).is_ok());
     }

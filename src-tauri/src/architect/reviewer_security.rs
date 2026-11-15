@@ -671,11 +671,12 @@ mod tests {
     }
     #[tokio::test]
     async fn native_read_only_reviewer_keeps_only_exact_builtin_council_evidence_tools() {
-        let legitimate = vec![
+        let mut legitimate = vec![
             super::super::council_criterion_tool(),
             super::super::council_finding_tool(),
             super::super::council_finding_verification_tool(),
         ];
+        legitimate.extend(super::super::reviewer_skill_evidence::tools());
         let mut provided = legitimate.clone();
         provided.push(json!({
             "type":"function",
@@ -710,6 +711,10 @@ mod tests {
             json!({"criterionId":"coverage","score":9.5,"evidenceFiles":[]}),
         ).await.is_ok());
         assert_eq!(invoked.load(Ordering::SeqCst), 1);
+        assert!((filtered.handler)(
+            "pandacode_reviewer_skill_open".into(), json!({"skillId":"pinned"}),
+        ).await.is_ok(), "pinned read-only skill retrieval remains callable");
+        assert_eq!(invoked.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

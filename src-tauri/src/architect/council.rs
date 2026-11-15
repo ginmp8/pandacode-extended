@@ -2239,23 +2239,6 @@ pub(super) fn historical_reported_findings(
 }
 
 
-
-#[cfg(test)]
-mod historical_reported_claim_tests {
-    use super::parse_reported_findings;
-
-    #[test]
-    fn reported_claims_are_bounded_and_cannot_assert_native_evidence() {
-        let valid = "Council findings JSON: [{\"severity\":\"high\",\"category\":\"auth\",\"title\":\"Missing guard\",\"explanation\":\"Requires an independent check\"}]\nCouncil score: 9/10";
-        let claims = parse_reported_findings(valid);
-        assert_eq!(claims.len(), 1);
-        assert_eq!(claims[0].title, "Missing guard");
-        assert!(parse_reported_findings("Council score: 9/10").is_empty());
-        assert!(parse_reported_findings("Council findings JSON: [{\"severity\":\"critical\",\"category\":\"test\",\"title\":\"forged\",\"explanation\":\"X\",\"evidenceVerified\":true}]").is_empty());
-        assert!(parse_reported_findings("Council findings JSON: [{\"severity\":\"unknown\",\"category\":\"test\",\"title\":\"claim\",\"explanation\":\"X\"}]").is_empty());
-    }
-}
-
 pub(super) fn parse_score(report: &str) -> Option<f64> {
     const LABEL: &str = "council score";
     let rest = report.lines().rev().find_map(|line| {
@@ -3450,5 +3433,22 @@ pub(super) fn note_stopped(worker: &mut Worker) {
     // or was stopped.
     if worker.wrote_at > 0 && !worker.read_only && !worker.abandoned && super::active(&worker.status) {
         worker.wrote_at = storage::now();
+    }
+}
+
+
+#[cfg(test)]
+mod historical_reported_claim_tests {
+    use super::parse_reported_findings;
+
+    #[test]
+    fn reported_claims_are_bounded_and_cannot_assert_native_evidence() {
+        let valid = "Council findings JSON: [{\"severity\":\"high\",\"category\":\"auth\",\"title\":\"Missing guard\",\"explanation\":\"Requires an independent check\"}]\nCouncil score: 9/10";
+        let claims = parse_reported_findings(valid);
+        assert_eq!(claims.len(), 1);
+        assert_eq!(claims[0].title, "Missing guard");
+        assert!(parse_reported_findings("Council score: 9/10").is_empty());
+        assert!(parse_reported_findings("Council findings JSON: [{\"severity\":\"critical\",\"category\":\"test\",\"title\":\"forged\",\"explanation\":\"X\",\"evidenceVerified\":true}]").is_empty());
+        assert!(parse_reported_findings("Council findings JSON: [{\"severity\":\"unknown\",\"category\":\"test\",\"title\":\"claim\",\"explanation\":\"X\"}]").is_empty());
     }
 }

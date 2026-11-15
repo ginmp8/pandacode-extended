@@ -9881,7 +9881,7 @@ fn complete_nested_children_for_root_round(
                 .collect::<std::collections::HashSet<_>>();
             let root_receipts = council_records::<council::CouncilReviewReceipt>(
                 &store,
-                &root_id,
+                root_id,
                 "council_review_receipt",
             )
             .unwrap();

@@ -3330,9 +3330,11 @@ fn persist_council_terminal_receipts(
         elapsed_ms: elapsed,
         retries: council_usage_known(worker.attempt.saturating_sub(1).min(u32::MAX as usize) as u32),
         escalations: council_usage_known(escalation_count),
-        provider: Some(worker.provider.clone()),
-        model: Some(worker.model.clone()),
-        harness: Some(worker.provider.clone()),
+        // Some supported provider profiles intentionally omit the model until
+        // resolution. Keep incomplete usage metadata explicit, not invalid.
+        provider: (!worker.provider.trim().is_empty()).then(|| worker.provider.clone()),
+        model: (!worker.model.trim().is_empty()).then(|| worker.model.clone()),
+        harness: (!worker.provider.trim().is_empty()).then(|| worker.provider.clone()),
         input_tokens: usage_value(s2_estimate.as_ref().map(|receipt| receipt.estimate.input_tokens)),
         output_tokens: usage_value(s2_estimate.as_ref().map(|receipt| receipt.estimate.output_tokens)),
         request_count: council_usage_unknown(),

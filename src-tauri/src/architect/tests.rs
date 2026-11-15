@@ -9482,6 +9482,8 @@ fn council_usage_leaf_reviews_project_the_current_root_round_total_for_root_and_
     root_review.read_only = true;
     root_review.created_at = root.council_since + 1;
     root_review.updated_at = root.council_since + 4;
+    // A completed native reviewer must have a real terminal result revision.
+    root_review.result_revision = 1;
     root_review.council = Some(CouncilSeat {
         round: 1,
         lens: "security".into(),

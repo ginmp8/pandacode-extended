@@ -3104,10 +3104,10 @@ mod tests {
         let (store, path) = fixture();
         insert_manual_ticket(&store, "headless-one", "orch");
         insert_manual_ticket(&store, "headless-two", "orch");
-        let source = create_source(&store, "orch", "test/fixture",
+        let source_config = create_source(&store, "orch", "test/fixture",
             "trusted-bot", "issues.opened").unwrap();
-        let observed = set_mode(&store, &source.id,
-            source.policy_revision, "observe").unwrap();
+        let observed = set_mode(&store, &source_config.id,
+            source_config.policy_revision, "observe").unwrap();
         observe(&store, &event("headless-linked", &observed, 1)).unwrap();
         assert!(headless_link_thread(&path, &observed.id, "missing", "issue:42").is_err());
         assert!(headless_link_thread(&path, &observed.id, "headless-one", "issue:0").is_err());

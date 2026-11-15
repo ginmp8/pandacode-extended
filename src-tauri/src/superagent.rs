@@ -901,12 +901,15 @@ pub(crate) fn inspect_headless_status(
 /// cannot observe another process's live provider handle, and these fields are
 /// never a grant to retry or to acknowledge an external effect.
 fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result<serde_json::Value> {
-    let (running, active_linked): (i64, i64) = store.db.query_row(
+    let (running, active_linked, missing_sessions): (i64, i64, i64) = store.db.query_row(
         "SELECT COUNT(*),
-                COALESCE(SUM(CASE WHEN id=?2 THEN 1 ELSE 0 END),0)
-         FROM sa_assignments WHERE ticket_id=?1 AND state='running'",
+                COALESCE(SUM(CASE WHEN a.id=?2 THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN live.id IS NULL THEN 1 ELSE 0 END),0)
+         FROM sa_assignments a
+         LEFT JOIN sessions live ON live.id=a.session_id
+         WHERE a.ticket_id=?1 AND a.state='running'",
         params![&ticket.id, ticket.active_assignment_id.as_deref()],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).map_err(|e| e.to_string())?;
     let (pending, uncertain): (i64, i64) = store.db.query_row(
         "SELECT COALESCE(SUM(CASE WHEN state='pending' THEN 1 ELSE 0 END),0),
@@ -925,7 +928,7 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
     let consistent = if ticket.state == "running" {
         // One active native assignment is the current Ticket contract. A
         // duplicate attempt with a valid active link must still be triaged.
-        running == 1 && active_linked == 1
+        running == 1 && active_linked == 1 && missing_sessions == 0
     } else {
         // A completed/stopped Ticket with an orphan live assignment is not
         // healthy, even if its own state is terminal.
@@ -955,6 +958,7 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
     Ok(serde_json::json!({
         "observedAt": now,
         "activeNativeAssignments": running,
+        "missingNativeSessions": missing_sessions,
         "expiredNativeAssignments": expired_running,
         "activeAssignmentLinked": active_linked == 1,
         "assignmentStateConsistent": consistent,
@@ -1204,6 +1208,12 @@ pub(crate) fn list_headless_recovery_inbox_page(
                       WHERE a.ticket_id=t.id AND a.state='running'))
                   OR (t.state='running' AND (
                       t.active_assignment_id IS NULL
+                      -- A live assignment whose provider session vanished
+                      -- needs investigation even before the watchdog settles it.
+                      OR EXISTS(SELECT 1 FROM sa_assignments a
+                          LEFT JOIN sessions live ON live.id=a.session_id
+                          WHERE a.ticket_id=t.id AND a.state='running'
+                            AND live.id IS NULL)
                       OR (SELECT COUNT(*) FROM sa_assignments a
                           WHERE a.ticket_id=t.id AND a.state='running')<>1
                       OR NOT EXISTS(SELECT 1 FROM sa_assignments a
@@ -3800,6 +3810,64 @@ mod tests {
         assert_eq!(again["items"][0]["recovery"]["assignmentStateConsistent"], false);
         assert_eq!(again["items"][0]["recovery"]["nextOperatorAction"],
             "investigate_native_assignment_state");
+    }
+
+
+    #[test]
+    fn headless_recovery_inbox_finds_detached_live_provider_session_before_watchdog() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private detached session objective",
+            "recovery-missing-provider-session", false,
+        ).unwrap();
+        assert!(launched);
+        let original_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let path = store.path.clone();
+        let healthy: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        assert!(healthy["items"].as_array().unwrap().is_empty());
+        let audit_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |r| r.get(0),
+        ).unwrap();
+
+        // Simulate a damaged/legacy assignment referring to a provider
+        // session that is absent. Normal native admission never does this.
+        store.db.execute(
+            "UPDATE sa_assignments SET session_id='missing-native-session'
+             WHERE ticket_id=?1 AND state='running'",
+            [&ticket.id],
+        ).unwrap();
+        assert!(read_only_policy(&store, &original_session).is_err(),
+            "detached task threads cannot fall back to ambient bot authority");
+        let found: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        assert_eq!(found["items"].as_array().unwrap().len(), 1);
+        assert_eq!(found["items"][0]["ticketId"], ticket.id);
+        let recovery = &found["items"][0]["recovery"];
+        assert_eq!(recovery["activeNativeAssignments"], 1);
+        assert_eq!(recovery["missingNativeSessions"], 1);
+        assert_eq!(recovery["activeAssignmentLinked"], true);
+        assert_eq!(recovery["assignmentStateConsistent"], false);
+        assert_eq!(recovery["nextOperatorAction"], "investigate_native_assignment_state");
+        assert_eq!(recovery["automaticReplayAllowed"], false);
+        assert_eq!(found["automaticRecoveryPerformed"], false);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |r| r.get::<_, i64>(0),
+        ).unwrap(), audit_before);
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "running");
+        let again: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        assert_eq!(again["items"][0]["recovery"]["missingNativeSessions"], 1);
+        assert!(!again.to_string().contains("Private detached session objective"));
     }
 
     #[test]

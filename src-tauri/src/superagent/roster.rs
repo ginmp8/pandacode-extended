@@ -58,6 +58,10 @@ pub struct AdmittedMemberProfile {
     pub project_id:String,
     #[serde(default,skip_serializing_if="Option::is_none")]
     pub project_path:Option<String>,
+    /// Resolved checkout identity at admission, when the directory exists.
+    /// Legacy read-only snapshots without it remain compatible.
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub resolved_project_path:Option<String>,
     pub provider:String,
     pub model:String,
     pub mode:String,
@@ -101,9 +105,20 @@ fn member_profile(store:&Store,bot:&bots::Bot,role:&str,position:usize)->Result<
     if project_path.trim().is_empty() {
         return Err("Team member checkout path is unavailable.".into());
     }
+    // Pin the filesystem target, not only the project path string: a local
+    // symlink can be repointed without changing the stored project record.
+    // A missing checkout is legacy read-only metadata, never a write grant.
+    let resolved_project_path=match std::fs::symlink_metadata(&project_path) {
+        Ok(_) => Some(std::fs::canonicalize(&project_path)
+            .map_err(|_|"Team member checkout cannot be resolved safely.")?
+            .to_string_lossy().into_owned()),
+        Err(error) if error.kind()==std::io::ErrorKind::NotFound => None,
+        Err(_) => return Err("Team member checkout cannot be inspected safely.".into()),
+    };
     Ok(AdmittedMemberProfile {
         role:role.into(),position,bot_id:bot.id.clone(),
         project_id:bot.project_id.clone(),project_path:Some(project_path),
+        resolved_project_path,
         provider:bot.provider.clone(),model:bot.model.clone(),mode:bot.mode.clone(),
         reasoning_effort:bot.reasoning_effort.clone(),
         assigned_skill_ids:bot.skills.clone(),
@@ -211,6 +226,13 @@ pub(super) fn checkout_paths_current(store:&Store,ticket_id:&str)->Result<bool> 
             [&member.project_id],|row|row.get(0),
         ).optional().map_err(|e|e.to_string())?;
         if actual.as_deref()!=Some(expected.as_str()) {return Ok(false);}
+        // A repository alias must still resolve to the exact admitted root,
+        // even if the projects.path text and native session ID are unchanged.
+        if let Some(original)=member.resolved_project_path {
+            let Some(current_path)=actual else {return Ok(false);};
+            let Ok(resolved)=std::fs::canonicalize(current_path) else {return Ok(false);};
+            if resolved.to_string_lossy().as_ref()!=original {return Ok(false);}
+        }
     }
     Ok(true)
 }
@@ -227,6 +249,7 @@ pub(super) fn require_current_profile(
         .ok_or("Bot role was not captured in the original Demand.")?;
     let mut current=member_profile(store,&bots::get(store,bot_id)?,role,recorded.position)?;
     if recorded.project_path.is_none() {current.project_path=None;}
+    if recorded.resolved_project_path.is_none() {current.resolved_project_path=None;}
     if *recorded!=current {
         return Err("Bot provider, model, mode, project or Skills changed after Demand admission; create a newly authorized Demand.".into());
     }
@@ -567,6 +590,65 @@ pub async fn superagent_roster_update(window:tauri::WebviewWindow,state:State<'_
 mod tests {
     use super::*;
     use crate::storage;
+
+    #[cfg(unix)]
+    #[test]
+    fn admitted_checkout_alias_cannot_redirect_an_existing_provider_assignment() {
+        use std::os::unix::fs::symlink;
+        let root=std::env::temp_dir().join(format!("sa-checkout-pin-{}",storage::id()));
+        let first=root.join("first");
+        let second=root.join("second");
+        let alias=root.join("checkout");
+        std::fs::create_dir_all(&first).unwrap();
+        std::fs::create_dir_all(&second).unwrap();
+        symlink(&first,&alias).unwrap();
+        let path=root.join("state.sqlite3");
+        let mut store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('p','Checkout alias',?1)",
+            [alias.to_string_lossy().as_ref()],
+        ).unwrap();
+        for id in ["lead","worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'p','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let config=super::super::create_configuration(&store,NewOrchestration {
+            name:"Pinned checkout".into(),
+            coordinator_bot_id:"lead".into(),worker_bot_id:"worker".into(),
+        }).unwrap();
+        super::super::change_enabled(&store,&config.id,config.policy_revision,true).unwrap();
+        let (ticket,launched)=super::super::admit(
+            &mut store,&config.id,"Observe only the pinned checkout","pinned-alias",false,
+        ).unwrap();
+        assert!(launched);
+        let session=super::super::assignment_session(&store,&ticket.id).unwrap().unwrap();
+        let snapshot=ticket_profile(&store,&ticket.id).unwrap().unwrap();
+        let canonical=std::fs::canonicalize(&first).unwrap().to_string_lossy().into_owned();
+        assert!(snapshot.members.iter().all(|member|
+            member.resolved_project_path.as_deref()==Some(canonical.as_str())));
+        assert!(super::super::read_only_policy(&store,&session).unwrap().is_some());
+
+        std::fs::remove_file(&alias).unwrap();
+        symlink(&second,&alias).unwrap();
+        assert!(!checkout_paths_current(&store,&ticket.id).unwrap());
+        assert!(require_current_profile(&store,&ticket.id,"worker","worker").is_err());
+        assert!(super::super::read_only_policy(&store,&session).is_err());
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert!(!checkout_paths_current(&reopened,&ticket.id).unwrap());
+        assert!(super::super::read_only_policy(&reopened,&session).is_err());
+        drop(reopened);
+
+        std::fs::remove_file(&alias).unwrap();
+        symlink(&first,&alias).unwrap();
+        assert!(checkout_paths_current(&store,&ticket.id).unwrap());
+        assert!(super::super::read_only_policy(&store,&session).unwrap().is_some());
+        assert!(!super::super::mandate(&store,&ticket.id).unwrap().allowed_side_effects);
+        drop(store);
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn invalid_stored_harness_mode_and_reasoning_fail_closed_before_manual_admission() {

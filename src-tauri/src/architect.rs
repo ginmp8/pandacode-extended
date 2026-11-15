@@ -655,6 +655,7 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
     }
     if let Some(mut status) = team.council_status.take() {
         require_composed_terminal_receipts(store, team, &mut status);
+        apply_required_parallel_nested_failure(team, &mut status);
         team.council_status = Some(status);
     }
 }
@@ -681,6 +682,116 @@ fn require_composed_terminal_receipts(
     }
 }
 
+/// A settled failed required nested branch makes an S1/Parallel root a terminal non-pass.
+/// Wait for every required current-round root source, not only nested seats, so live direct and
+/// automatic siblings remain visible as reviewing rather than blocked.
+fn apply_required_parallel_nested_failure(team: &TeamSnapshot, status: &mut CouncilStatus) {
+    let Some(config) = team.config.council.as_ref() else {
+        return;
+    };
+    let Some(composition) = config
+        .composition
+        .as_ref()
+        .filter(|composition| composition.strategy == council::CouncilStrategy::Parallel)
+    else {
+        return;
+    };
+    if !composition.selected.iter().any(|selected| {
+        selected.required && selected.mode == council::SelectedReviewerMode::Nested
+    }) || status.round == 0
+    {
+        return;
+    }
+
+    let round = status.round;
+    let cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    let current_root_workers = team
+        .workers
+        .iter()
+        .filter(|worker| {
+            !worker.abandoned
+                && worker.parent_worker.is_none()
+                && worker.council.as_ref().is_some_and(|seat| seat.round == round)
+                && worker.reviewer_binding.as_ref().is_some_and(|binding| {
+                    binding.council_cycle_id == cycle_id
+                        && binding.round == round
+                        && binding.seat_id == worker.id
+                })
+        })
+        .collect::<Vec<_>>();
+    let branch_workers = |mode: &str, bot_id: &str| {
+        current_root_workers
+            .iter()
+            .copied()
+            .filter(|worker| {
+                worker.reviewer_binding.as_ref().is_some_and(|binding| {
+                    binding.composition_mode.as_deref() == Some(mode)
+                        && binding.reviewer_bot_id.as_deref() == Some(bot_id)
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    let automatic_workers = current_root_workers
+        .iter()
+        .copied()
+        .filter(|worker| {
+            worker.reviewer_binding.as_ref().is_some_and(|binding| {
+                binding.reviewer_bot_id.is_none()
+                    && (binding.composition_mode.is_none()
+                        || binding.composition_mode.as_deref() == Some("direct"))
+            })
+        })
+        .collect::<Vec<_>>();
+    let selected_settled = composition
+        .selected
+        .iter()
+        .filter(|selected| selected.required)
+        .all(|selected| {
+            let mode = match selected.mode {
+                council::SelectedReviewerMode::Direct => "direct",
+                council::SelectedReviewerMode::Nested => "nested",
+            };
+            let workers = branch_workers(mode, &selected.bot_id);
+            !workers.is_empty() && workers.iter().all(|worker| !unsettled(&worker.status))
+        });
+    let automatic_quota = config.seat_plan().automatic;
+    let settled = selected_settled
+        && (automatic_quota == 0
+            || (automatic_workers.len() >= automatic_quota
+                && automatic_workers
+                    .iter()
+                    .all(|worker| !unsettled(&worker.status))))
+        && current_root_workers
+            .iter()
+            .all(|worker| !unsettled(&worker.status));
+    if !settled || status.state == "accepted" || status.state == "blocked" {
+        return;
+    }
+
+    let mut failed = composition
+        .selected
+        .iter()
+        .filter(|selected| {
+            selected.required && selected.mode == council::SelectedReviewerMode::Nested
+        })
+        .filter(|selected| {
+            branch_workers("nested", &selected.bot_id)
+                .iter()
+                .any(|worker| worker.status == "failed")
+        })
+        .map(|selected| selected.bot_id.as_str())
+        .collect::<Vec<_>>();
+    if failed.is_empty() {
+        return;
+    }
+    failed.sort_unstable();
+    status.state = "blocked".into();
+    status.notice = Some(format!(
+        "council_required_nested_branch_failed: required nested Council branches failed: {}.",
+        failed.join(", ")
+    ));
+}
+
 fn native_council_status(store: &Store, team: &TeamSnapshot) -> Option<CouncilStatus> {
     let ledger = council_ledger_projection(store, team);
     let mut status = council::status_with_ledger(
@@ -705,6 +816,7 @@ fn native_council_status(store: &Store, team: &TeamSnapshot) -> Option<CouncilSt
         status.notice = Some("council_cost_cap_unproven: the configured estimated-cost cap cannot be verified from current native estimate and usage receipts.".into());
     }
     require_composed_terminal_receipts(store, team, &mut status);
+    apply_required_parallel_nested_failure(team, &mut status);
     Some(status)
 }
 

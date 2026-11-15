@@ -104,7 +104,9 @@ no Council keeps the team's, and removing the team removes it. Council is per ta
   so does cancelling or replacing a worker that already settled, none of which edits anything.
 - **The gate.** Once this cycle has changes or a round, `finish_team` refuses until the latest round is complete,
   no change landed after it started, and its lowest score reaches the target, or the round limit is reached with
-  nothing live. Each refusal says what to do next; an incomplete round
+  nothing live. Composed terminal checks can still block a would-be pass: in S1/Parallel, a failed required nested
+  branch makes the result terminal `blocked` after all required current-round root sources settle. Missing required
+  terminal proof can also block a composed pass. Other refusals describe what to do next; an incomplete round
   whose open seats stopped or failed names them to cancel. A lead that ends its turn while Council refuses, after a user
   message too, is brought back once: the Continue turn quotes the refusal and keeps it as the team's `error`.
   Below the target the refusal says to fix the blockers through workers and convene a new round; only if a
@@ -126,10 +128,10 @@ no Council keeps the team's, and removing the team removes it. Council is per ta
   scores), `waiting` (no round yet), `reviewing`
   (a seat of the latest round is live), `dispatch` (the latest round is incomplete and no seat is live: the lead
   must act), `asking` (the team rests with its below-target refusal as its error: the lead asked the user),
-  `fixing` (below target or out of date), `passed`, or `limit` (the limit is reached without passing). `notice`
-  is a short plain sentence for the user whenever a Council refusal holds the team as its `error` (asking, or
-  paused with the refusal), and absent otherwise. It comes from the same
-  checks as the gate, so the webview shows it as it is and never reads refusal text. When a setting ends the
+  `fixing` (below target or out of date), `passed`, `limit` (the limit is reached without passing), or `blocked`
+  (a terminal non-pass after a required branch or composed terminal check fails). `notice` is optional native
+  context for a held refusal. For `blocked`, the webview shows the generic summary “Council cannot pass in its
+  current state.” and never exposes the raw native machine notice. When a setting ends the
   `asking` state (the target lowered, Council off, or a changed reviewer count), the lead is woken once: with the
   refusal that now stands, if any, else to verify and finish with the first-and-final table, the prompt carrying
   each lens's first and final score. Accept and finish (`architect_council_accept`) marks this cycle accepted

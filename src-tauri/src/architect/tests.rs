@@ -3963,6 +3963,146 @@ fn native_composed_terminal_gate_fails_closed_for_nonpassing_outcomes() {
     }
 }
 
+fn parallel_nested_failure_fixture(
+    automatic: usize,
+    selected: &[(&str, council::SelectedReviewerMode)],
+) -> (TeamSnapshot, council::CouncilStatus) {
+    let (_, mut team) = fixture();
+    team.council_since = storage::now().max(1);
+    let mut config = two_phase_test_config(automatic, selected);
+    config.composition.as_mut().unwrap().strategy = council::CouncilStrategy::Parallel;
+    team.config.council = Some(config);
+    let status = council::CouncilStatus {
+        state: "reviewing".into(),
+        round: 1,
+        lowest: None,
+        target: 9.0,
+        stale: false,
+        notice: None,
+    };
+    (team, status)
+}
+
+fn add_parallel_root_seat(
+    team: &mut TeamSnapshot,
+    id: &str,
+    status: &str,
+    mode: &str,
+    bot_id: Option<&str>,
+    cycle_id: Option<&str>,
+    abandoned: bool,
+) {
+    let mut reviewer = worker(id, status, &[], &[]);
+    reviewer.created_at = team.council_since + team.workers.len() as i64 + 1;
+    reviewer.updated_at = reviewer.created_at;
+    reviewer.abandoned = abandoned;
+    reviewer.error = abandoned.then(|| "Replaced by the current attempt.".into());
+    reviewer.read_only = true;
+    let seat = CouncilSeat {
+        round: 1,
+        lens: id.into(),
+        ..CouncilSeat::default()
+    };
+    reviewer.council = Some(seat.clone());
+    let mut binding = reviewer_security::ReviewerBinding::native(
+        team,
+        &reviewer.id,
+        reviewer.created_at,
+        &reviewer.provider,
+        &reviewer.model,
+        &seat,
+    );
+    binding.composition_mode = Some(mode.into());
+    binding.reviewer_bot_id = bot_id.map(|id| id.to_owned());
+    if let Some(cycle_id) = cycle_id {
+        binding.council_cycle_id = cycle_id.into();
+    }
+    reviewer.reviewer_binding = Some(binding);
+    team.workers.push(reviewer);
+}
+
+#[test]
+fn required_parallel_nested_failure_waits_for_live_direct_root_branch() {
+    use council::SelectedReviewerMode as Mode;
+    let (mut team, mut status) = parallel_nested_failure_fixture(
+        0,
+        &[("nested-fails", Mode::Nested), ("direct-sibling", Mode::Direct)],
+    );
+    add_parallel_root_seat(&mut team, "nested-failure", "failed", "nested", Some("nested-fails"), None, false);
+    add_parallel_root_seat(&mut team, "direct-live", "running", "direct", Some("direct-sibling"), None, false);
+
+    apply_required_parallel_nested_failure(&team, &mut status);
+
+    assert_eq!(status.state, "reviewing", "the live required direct root seat keeps the round reviewing");
+}
+
+#[test]
+fn required_parallel_nested_failure_waits_for_live_automatic_root_branch() {
+    use council::SelectedReviewerMode as Mode;
+    let (mut team, mut status) = parallel_nested_failure_fixture(1, &[("nested-fails", Mode::Nested)]);
+    add_parallel_root_seat(&mut team, "nested-failure", "failed", "nested", Some("nested-fails"), None, false);
+    add_parallel_root_seat(&mut team, "automatic-live", "running", "direct", None, None, false);
+
+    apply_required_parallel_nested_failure(&team, &mut status);
+
+    assert_eq!(status.state, "reviewing", "the live required automatic root seat keeps the round reviewing");
+}
+
+#[test]
+fn required_parallel_nested_failure_blocks_deterministically_after_root_branches_settle() {
+    use council::SelectedReviewerMode as Mode;
+    let (mut team, mut status) = parallel_nested_failure_fixture(
+        1,
+        &[
+            ("nested-z", Mode::Nested),
+            ("nested-a", Mode::Nested),
+            ("direct-sibling", Mode::Direct),
+        ],
+    );
+    add_parallel_root_seat(&mut team, "nested-z-failure", "failed", "nested", Some("nested-z"), None, false);
+    add_parallel_root_seat(&mut team, "nested-a-failure", "failed", "nested", Some("nested-a"), None, false);
+    add_parallel_root_seat(&mut team, "direct-settled", "completed", "direct", Some("direct-sibling"), None, false);
+    add_parallel_root_seat(&mut team, "automatic-settled", "completed", "direct", None, None, false);
+
+    apply_required_parallel_nested_failure(&team, &mut status);
+
+    assert_eq!(status.state, "blocked");
+    assert_eq!(
+        status.notice.as_deref(),
+        Some("council_required_nested_branch_failed: required nested Council branches failed: nested-a, nested-z."),
+    );
+    let expected = status.clone();
+    let mut repeated = council::CouncilStatus {
+        state: "reviewing".into(),
+        round: 1,
+        lowest: None,
+        target: 9.0,
+        stale: false,
+        notice: None,
+    };
+    apply_required_parallel_nested_failure(&team, &mut repeated);
+    assert_eq!(repeated, expected, "the same settled failures produce the same terminal status and notice");
+}
+
+#[test]
+fn stale_replaced_and_abandoned_nested_attempts_do_not_block_the_current_cycle() {
+    use council::SelectedReviewerMode as Mode;
+    let (mut team, mut status) = parallel_nested_failure_fixture(
+        1,
+        &[("nested-fails", Mode::Nested), ("direct-sibling", Mode::Direct)],
+    );
+    add_parallel_root_seat(&mut team, "nested-current", "completed", "nested", Some("nested-fails"), None, false);
+    add_parallel_root_seat(&mut team, "direct-current", "completed", "direct", Some("direct-sibling"), None, false);
+    add_parallel_root_seat(&mut team, "automatic-current", "completed", "direct", None, None, false);
+    add_parallel_root_seat(&mut team, "nested-stale-cycle", "failed", "nested", Some("nested-fails"), Some("old-cycle:1"), false);
+    add_parallel_root_seat(&mut team, "nested-replaced", "failed", "nested", Some("nested-fails"), None, true);
+
+    apply_required_parallel_nested_failure(&team, &mut status);
+
+    assert_eq!(status.state, "reviewing", "only non-abandoned seats bound to the exact current cycle can trigger blocking");
+    assert_eq!(status.notice, None);
+}
+
 #[test]
 fn native_nested_child_failure_propagates_beside_a_passing_required_child() {
     use council::SelectedReviewerMode as Mode;
@@ -3991,28 +4131,45 @@ fn native_nested_child_failure_propagates_beside_a_passing_required_child() {
         worker.council.as_ref().is_some_and(|seat| seat.round == 1)
             && worker.reviewer_binding.as_ref()
                 .and_then(|binding| binding.composition_mode.as_deref()) == Some("nested")
-    }).map(|worker| (worker.id.clone(), worker.session_id.clone()))
+    }).map(|worker| (
+        worker.reviewer_binding.as_ref().unwrap().reviewer_bot_id.clone().unwrap(),
+        worker.id.clone(),
+        worker.session_id.clone(),
+    ))
         .collect::<Vec<_>>();
     assert_eq!(nested.len(), 2, "both required nested sources receive a root seat");
     let runtime = tokio::runtime::Runtime::new().unwrap();
-    for (index, (_, child_id)) in nested.iter().enumerate() {
+    for (bot_id, _, child_id) in &nested {
         dispatch_child_round(&state, child_id, 1, "fast", &runtime,
-            &format!("nested-failure-branch-{index}"));
-        if index == 0 {
-            settle_native_council_round(&state, child_id, 1, "failed", None);
-            let store = state.store.lock().unwrap();
-            let mut child = load(&store, child_id).unwrap().unwrap();
-            child.status = "failed".into();
-            child.error = Some("Native child reviewers failed.".into());
-            save(&store, &mut child).unwrap();
-        } else {
-            settle_native_council_round(&state, child_id, 1, "completed", Some(9.6));
-            let generation = load(&state.store.lock().unwrap(), child_id).unwrap().unwrap().generation;
-            dispatch_state_runtime_test(&state, child_id, generation, "pandacode_finish_team",
-                json!({"summary":"The sibling nested Council passed with persisted native receipts."}))
-                .unwrap_or_else(|error| panic!("passing nested child was refused: {error}"));
-        }
+            &format!("nested-failure-branch-{bot_id}"));
     }
+    let failed_child_id = nested.iter().find(|(bot_id, _, _)| bot_id == "nested-fails").unwrap().2.as_str();
+    settle_native_council_round(&state, failed_child_id, 1, "failed", None);
+    {
+        let store = state.store.lock().unwrap();
+        let mut child = load(&store, failed_child_id).unwrap().unwrap();
+        child.status = "failed".into();
+        child.error = Some("Native child reviewers failed.".into());
+        save(&store, &mut child).unwrap();
+    }
+    {
+        let store = state.store.lock().unwrap();
+        let mut root = load(&store, &root_id).unwrap().unwrap();
+        let no_agents = std::collections::HashMap::new();
+        reconcile_nested_child_seats(&store, &no_agents, &mut root).unwrap();
+        save(&store, &mut root).unwrap();
+        assert_eq!(
+            root.council_status.as_ref().map(|status| status.state.as_str()),
+            Some("reviewing"),
+            "the failed branch stays nonterminal while its required sibling child is unresolved",
+        );
+    }
+    let passing_child_id = nested.iter().find(|(bot_id, _, _)| bot_id == "nested-passes").unwrap().2.as_str();
+    settle_native_council_round(&state, passing_child_id, 1, "completed", Some(9.6));
+    let generation = load(&state.store.lock().unwrap(), passing_child_id).unwrap().unwrap().generation;
+    dispatch_state_runtime_test(&state, passing_child_id, generation, "pandacode_finish_team",
+        json!({"summary":"The sibling nested Council passed with persisted native receipts."}))
+        .unwrap_or_else(|error| panic!("passing nested child was refused: {error}"));
 
     let store = state.store.lock().unwrap();
     let mut root = load(&store, &root_id).unwrap().unwrap();
@@ -4024,25 +4181,85 @@ fn native_nested_child_failure_propagates_beside_a_passing_required_child() {
         worker.council.as_ref().is_some_and(|seat| seat.round == 1)
     }).collect::<Vec<_>>();
     assert_eq!(root_seats.len(), 2);
-    let failed_parent = nested[0].0.as_str();
-    let passing_parent = nested[1].0.as_str();
+    let root_cycle_id = format!("{}:{}", root.session_id, root.council_since);
+    let failed_branch = nested.iter().find(|(bot_id, _, _)| bot_id == "nested-fails").unwrap();
+    let passing_branch = nested.iter().find(|(bot_id, _, _)| bot_id == "nested-passes").unwrap();
+    let failed_parent = failed_branch.1.as_str();
+    let passing_parent = passing_branch.1.as_str();
     let failed_seat = root_seats.iter().find(|worker| worker.id.as_str() == failed_parent).unwrap();
     let passing_seat = root_seats.iter().find(|worker| worker.id.as_str() == passing_parent).unwrap();
     assert_eq!(failed_seat.status, "failed");
     assert_eq!(failed_seat.error.as_deref(), Some("Native child reviewers failed."));
+    assert_eq!(failed_seat.reviewer_binding.as_ref().unwrap().reviewer_bot_id.as_deref(), Some("nested-fails"));
     assert_eq!(passing_seat.status, "completed");
+    assert_eq!(passing_seat.reviewer_binding.as_ref().unwrap().reviewer_bot_id.as_deref(), Some("nested-passes"));
+    assert_eq!(root.council_status.as_ref().map(|status| status.state.as_str()), Some("blocked"),
+        "settled S1/Parallel required branches with a failure produce a terminal non-pass state");
+    assert_eq!(
+        root.council_status.as_ref().and_then(|status| status.notice.as_deref()),
+        Some("council_required_nested_branch_failed: required nested Council branches failed: nested-fails."),
+        "the terminal failure notice is stable and identifies the required branch",
+    );
     let child_receipts = council_records::<council::ChildCouncilReceipt>(
         &store, &root_id, "council_child_receipt",
     ).unwrap();
     assert_eq!(child_receipts.len(), 1, "only the passing child creates a parent receipt");
     assert_eq!(child_receipts[0].parent_seat_id.as_str(), passing_parent);
     assert_eq!(child_receipts[0].status, council::ChildCouncilStatus::Passed);
+    assert_eq!(child_receipts[0].root_cycle_id, root_cycle_id);
+    assert_eq!(child_receipts[0].child_cycle_id, format!("{}:{}", passing_branch.2, load(&store, &passing_branch.2).unwrap().unwrap().council_since));
+    assert_eq!(child_receipts[0].artifact_revision, passing_seat.reviewer_binding.as_ref().unwrap().artifact_revision);
+    assert!(child_receipts[0].validate_for(
+        &root_cycle_id,
+        passing_parent,
+        "nested-passes",
+        &passing_seat.reviewer_binding.as_ref().unwrap().artifact_revision,
+        &child_receipts[0].policy_fingerprint,
+    ).is_ok(), "the passing child receipt is correlated to its required root branch");
+    assert!(!child_receipts.iter().any(|receipt| receipt.parent_seat_id == failed_parent),
+        "a failed required child cannot be consolidated as a passing parent receipt");
     let review_receipts = council_records::<council::CouncilReviewReceipt>(
         &store, &root_id, "council_review_receipt",
     ).unwrap();
     assert_eq!(review_receipts.len(), 4, "both child leaf reviews persist terminal receipts");
     assert_eq!(review_receipts.iter().filter(|receipt| receipt.verdict == council::CouncilReviewVerdict::Failed).count(), 2);
     assert_eq!(review_receipts.iter().filter(|receipt| receipt.verdict == council::CouncilReviewVerdict::Passed).count(), 2);
+    for (bot_id, parent_id, child_id, expected_status, expected_verdict) in [
+        ("nested-fails", failed_parent, failed_branch.2.as_str(), "failed", council::CouncilReviewVerdict::Failed),
+        ("nested-passes", passing_parent, passing_branch.2.as_str(), "completed", council::CouncilReviewVerdict::Passed),
+    ] {
+        let child = load(&store, child_id).unwrap().unwrap();
+        assert_eq!(child.status, expected_status, "{bot_id} child terminal status is preserved");
+        let link = validate_council_child_link(&store, child_id).unwrap().unwrap();
+        assert_eq!(link.root_session_id, root_id);
+        assert_eq!(link.root_worker_id, parent_id, "{bot_id} child ownership resolves to its exact required root seat");
+        assert_eq!(link.root_council_cycle_id, root_cycle_id);
+        assert_eq!(link.child_session_id, child_id);
+        assert_eq!(link.root_round, 1);
+        let child_cycle_id = format!("{}:{}", child.session_id, child.council_since);
+        assert_eq!(link.child_council_cycle_id, child_cycle_id);
+        let leaves = child.workers.iter().filter(|worker| {
+            worker.council.as_ref().is_some_and(|seat| seat.round == 1)
+        }).collect::<Vec<_>>();
+        assert_eq!(leaves.len(), 2, "{bot_id} branch keeps both required leaf reviews");
+        for leaf in leaves {
+            let binding = leaf.reviewer_binding.as_ref().unwrap();
+            let parent_binding = binding.parent_council.as_ref().unwrap();
+            assert_eq!(parent_binding.session_id, root_id);
+            assert_eq!(parent_binding.council_cycle_id, root_cycle_id);
+            assert_eq!(parent_binding.seat_id, parent_id);
+            assert_eq!(parent_binding.artifact_revision, link.root_artifact_revision);
+            let receipt = review_receipts.iter().find(|receipt| {
+                receipt.cycle_id == child_cycle_id
+                    && receipt.task_id.as_deref() == Some(child_id)
+                    && receipt.assignment_id.as_deref() == Some(leaf.id.as_str())
+            }).unwrap_or_else(|| panic!("{bot_id} leaf {} has no correlated terminal receipt", leaf.id));
+            assert_eq!(receipt.verdict, expected_verdict, "{bot_id} leaf receipt preserves its branch outcome");
+            assert_eq!(receipt.terminal_revision, leaf.result_revision);
+            assert_eq!(receipt.artifact_digest, council_artifact_digest(&binding.artifact_revision));
+            assert!(receipt.validate().is_ok());
+        }
+    }
     assert_ne!(root.council_status.as_ref().map(|status| status.state.as_str()), Some("passed"),
         "one failed required child blocks the root Council pass even when its sibling passes");
     assert!(!verified_council_pass(&store, &root), "the root does not verify with a failed required child");

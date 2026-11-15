@@ -4605,16 +4605,20 @@ mod tests {
             "params":{"options":[{"kind":"deny_once","response":{"decision":"deny"}}]}
         })).unwrap();
         assert_eq!(denied.write[0]["result"]["decision"], "deny");
+        assert!(denied.events.iter().all(|event| event.kind != "approval"));
 
-        let mut cfg = config("pi");
-        cfg.mode = "plan".into();
-        cfg.reviewer_boundary = true;
-        cfg.reviewer_policy = Some(ReviewerToolPolicy::NativeReadOnly);
-        let mut pi = Protocol::new(cfg);
-        let denied = pi.receive(json!({
-            "type":"extension_ui_request","id":"ui","method":"confirm","title":"Write files"
-        })).unwrap();
-        assert_eq!(denied.write[0]["confirmed"], false);
+        for provider in ["pi", "omp"] {
+            let mut cfg = config(provider);
+            cfg.mode = "plan".into();
+            cfg.reviewer_boundary = true;
+            cfg.reviewer_policy = Some(ReviewerToolPolicy::NativeReadOnly);
+            let mut protocol = Protocol::new(cfg);
+            let denied = protocol.receive(json!({
+                "type":"extension_ui_request","id":"ui","method":"confirm","title":"Write files"
+            })).unwrap();
+            assert_eq!(denied.write[0]["confirmed"], false);
+            assert!(denied.events.iter().all(|event| event.kind != "approval"), "{provider}");
+        }
 
         let mut cfg = config("muse");
         cfg.mode = "plan".into();

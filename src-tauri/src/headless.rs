@@ -978,14 +978,72 @@ mod tests {
     }
 
     #[test]
-    fn shared_runtime_store_lock_rejects_a_second_owner_until_shutdown() {
-        let dir = std::env::temp_dir().join(format!("pandacode-headless-owner-{}", crate::storage::id()));
-        let first = acquire_store_owner(&dir).unwrap();
-        assert!(acquire_store_owner(&dir).is_err());
+    fn shared_runtime_store_lock_rejects_a_second_process_until_shutdown() {
+        let dir = StoreOwnerTestDir::new();
+        let first = acquire_store_owner(dir.path()).unwrap();
+        assert_child_lock_result(dir.path(), false);
         drop(first);
-        let second = acquire_store_owner(&dir).unwrap();
-        drop(second);
-        std::fs::remove_dir_all(dir).unwrap();
+        assert_child_lock_result(dir.path(), true);
+    }
+
+    struct StoreOwnerTestDir(PathBuf);
+
+    impl StoreOwnerTestDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("pandacode-headless-owner-{}", crate::storage::id()));
+            let dir = Self(path);
+            std::fs::create_dir_all(dir.path()).unwrap();
+            dir
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for StoreOwnerTestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn assert_child_lock_result(dir: &std::path::Path, expected_success: bool) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("headless::tests::store_owner_lock_child_probe")
+            .arg("--nocapture")
+            .env("PANDACODE_STORE_LOCK_PROBE_DIR", dir)
+            .env(
+                "PANDACODE_STORE_LOCK_PROBE_EXPECT_SUCCESS",
+                expected_success.to_string(),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child lock probe failed (expected acquisition: {expected_success}):\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("headless::tests::store_owner_lock_child_probe ... ok"),
+            "child lock probe did not run successfully:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+        );
+    }
+
+    #[test]
+    fn store_owner_lock_child_probe() {
+        let Ok(dir) = std::env::var("PANDACODE_STORE_LOCK_PROBE_DIR") else {
+            return;
+        };
+        let expected_success =
+            std::env::var("PANDACODE_STORE_LOCK_PROBE_EXPECT_SUCCESS").unwrap() == "true";
+        let acquired = acquire_store_owner(std::path::Path::new(&dir));
+        assert_eq!(acquired.is_ok(), expected_success);
+        drop(acquired);
     }
 
     #[test]

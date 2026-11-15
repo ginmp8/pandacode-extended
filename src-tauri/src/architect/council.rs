@@ -309,6 +309,8 @@ pub enum CouncilCompositionMode {
 }
 
 impl CouncilCompositionMode {
+    /// Mode labels are test-facing documentation; nothing in the native path needs them.
+    #[cfg(test)]
     pub fn id(self) -> &'static str {
         match self {
             Self::Architect => "M1",
@@ -788,11 +790,16 @@ fn safe_relative_file(path: &str) -> bool {
     !path.replace('\\', "/").split('/').any(|part| part == ".." || part.is_empty())
 }
 fn valid_usage_value<T>(value: &CouncilUsageValue<T>) -> bool {
-    match (value.status, value.value.is_some()) {
-        (CouncilUsageValueStatus::Unknown, false) => true,
-        (CouncilUsageValueStatus::Measured | CouncilUsageValueStatus::ProviderEstimated | CouncilUsageValueStatus::CalculatedEstimated, true) => true,
-        _ => false,
-    }
+    matches!(
+        (value.status, value.value.is_some()),
+        (CouncilUsageValueStatus::Unknown, false)
+            | (
+                CouncilUsageValueStatus::Measured
+                    | CouncilUsageValueStatus::ProviderEstimated
+                    | CouncilUsageValueStatus::CalculatedEstimated,
+                true
+            )
+    )
 }
 
 impl CouncilFinding {
@@ -1200,10 +1207,6 @@ impl CouncilComposition {
     pub fn maximum_automatic_seats(&self) -> usize {
         if !self.automatic.enabled { return 0; }
         (self.limits.max_root_seats as usize).saturating_sub(self.selected.len())
-    }
-
-    pub fn minimum_root_seats(&self) -> usize {
-        self.selected.len().saturating_add(self.minimum_automatic_seats())
     }
 
     pub fn validate_required_criteria_gate(
@@ -1873,7 +1876,7 @@ pub(super) fn seat_for(team: &TeamSnapshot, lens: Option<&str>, replaces: Option
     if round > 1 && !fixed.is_empty() && !fixed.iter().any(|known| same_lens(known, lens)) {
         return Err(format!("Council lenses are fixed by round 1: {}. Use one of them for {lens:?}.", fixed.join(", ")));
     }
-    Ok(Some(CouncilSeat { round, lens: lens.trim().into(), score: None, started_at: 0, closed_by_selection: false, ..CouncilSeat::default() }))
+    Ok(Some(CouncilSeat { round, lens: lens.trim().into(), score: None, started_at: 0, closed_by_selection: false }))
 }
 
 /// When a new round opens over an incomplete one (changes overtook it), that round's unscored
@@ -1951,12 +1954,6 @@ pub(super) fn asks_user(team: &TeamSnapshot) -> bool {
     verdict(team).is_some_and(|(_, asks)| asks)
 }
 
-pub(super) fn asks_user_with_criterion_outcomes(
-    team: &TeamSnapshot,
-    outcomes: &[CouncilCriterionOutcomeReceipt],
-) -> bool {
-    verdict_with_criterion_outcomes(team, outcomes).is_some_and(|(_, asks)| asks)
-}
 pub(super) fn asks_user_with_ledger(
     team: &TeamSnapshot,
     outcomes: &[CouncilCriterionOutcomeReceipt],
@@ -1975,6 +1972,9 @@ pub(super) fn asks_user_with_ledger(
 pub(super) fn finish_refusal(team: &TeamSnapshot) -> Option<String> {
     verdict(team).map(|(refusal, _)| refusal)
 }
+/// Only the native tests still call the criterion-outcome-only verdict; the shipped path
+/// reads the full ledger.
+#[cfg(test)]
 pub(super) fn finish_refusal_with_criterion_outcomes(
     team: &TeamSnapshot,
     outcomes: &[CouncilCriterionOutcomeReceipt],
@@ -2501,12 +2501,6 @@ fn strategy_terminal_pass(
     }
 }
 
-pub(super) fn unreviewed_with_criterion_outcomes(
-    team: &TeamSnapshot,
-    outcomes: &[CouncilCriterionOutcomeReceipt],
-) -> Option<String> {
-    finish_refusal_with_criterion_outcomes(team, outcomes).filter(|_| has_writer(team))
-}
 pub(super) fn unreviewed_with_ledger(
     team: &TeamSnapshot,
     outcomes: &[CouncilCriterionOutcomeReceipt],

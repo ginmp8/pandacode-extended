@@ -564,11 +564,25 @@ No objective text, private evidence or authentication credential is printed.
 
 ### Inspecting durable external-effect receipts (read-only)
 
-`pandacode serve --inspect-ticket-effects <ticket-id>` inspects up to 100
-existing native receipt identities on the same local SQLite database without
-running restart recovery against a healthy serve process. An unknown Ticket
-or malformed ID exits nonzero. The native UI also offers **Inspect receipts**
-under a Ticket's read-only inspector; neither surface can dispatch an effect.
+`pandacode serve --inspect-ticket-effects <ticket-id>` inspects the first 100
+native receipt identities. Follow the response's `nextCursor.createdAt`
+and `nextCursor.effectKey` to page the complete history:
+
+```bash
+pandacode serve --inspect-ticket-effects <ticket-id> --before <created-at-ms> <effect-key>
+pandacode serve --inspect-ticket-effects <ticket-id> --unresolved-only
+```
+
+The second form filters out `applied` receipts; both flags can be combined.
+A compound (timestamp, key) cursor prevents skipping records created in the
+same millisecond. This is keyset pagination, not a frozen snapshot: concurrent
+effect reconciliation may change unresolved-only results between pages.
+The unfiltered `totalUnresolved` remains authoritative across every page.
+
+All reads use the same local SQLite database without restart recovery against
+a healthy serve process. An unknown Ticket, invalid cursor or malformed ID
+exits nonzero. The native UI also offers **Inspect receipts** under a Ticket's
+read-only inspector; neither surface can dispatch an effect.
 
 Each entry includes an exact effect key, canonical payload SHA-256, persistent
 `pending` / `uncertain` / `applied` state, and creation/update timestamps.

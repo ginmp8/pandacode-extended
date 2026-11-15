@@ -1110,15 +1110,29 @@ pub(crate) fn inspect_headless_team_roster(
 pub(crate) fn inspect_headless_effect_receipts(
     database_path: &std::path::Path, ticket_id: &str,
 ) -> Result<String> {
+    inspect_headless_effect_receipts_page(database_path, ticket_id, None, None, false)
+}
+
+/// Page native effect history without Store restart recovery or provider calls.
+pub(crate) fn inspect_headless_effect_receipts_page(
+    database_path: &std::path::Path, ticket_id: &str,
+    before_created_at: Option<i64>, before_key: Option<&str>, unresolved_only: bool,
+) -> Result<String> {
+    if before_created_at.is_some() != before_key.is_some() {
+        return Err("Effect receipt cursor requires both timestamp and key.".into());
+    }
     let store = Store::open_read_only(database_path)?;
-    let receipts = effects::receipt_history(&store, ticket_id, 100)?;
-    // History is intentionally capped at 100 receipts, so an unresolved
-    // older effect may be absent from this preview. The native total is
-    // authoritative for whether independent reconciliation is required.
+    let (receipts, next_cursor) = effects::receipt_history_page(
+        &store, ticket_id, 100, before_created_at.zip(before_key), unresolved_only,
+    )?;
     let total_unresolved = effects::unresolved_count(&store, ticket_id)?;
     serde_json::to_string_pretty(&serde_json::json!({
         "ticketId": ticket_id,
         "receipts": receipts,
+        "nextCursor": next_cursor.map(|(created_at, effect_key)| serde_json::json!({
+            "createdAt": created_at, "effectKey": effect_key
+        })),
+        "filter": if unresolved_only { "unresolved" } else { "all" },
         "totalUnresolved": total_unresolved,
         "observationalOnly": true,
         "requiresIndependentRemoteReconciliation": total_unresolved > 0,

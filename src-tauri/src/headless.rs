@@ -45,7 +45,7 @@ enum Command {
     },
     InspectTicket { ticket_id: String },
     InspectTicketGraph { ticket_id: String },
-    InspectTicketEffects { ticket_id: String },
+    InspectTicketEffects { ticket_id: String, before_created_at: Option<i64>, before_key: Option<String>, unresolved_only: bool },
     InspectTicketSource { ticket_id: String },
     InspectSourceHealth { source_id: String },
     UnlinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
@@ -130,11 +130,12 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
-            if let Command::InspectTicketEffects { ticket_id } = &command {
+            if let Command::InspectTicketEffects { ticket_id, before_created_at, before_key, unresolved_only } = &command {
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
-                    .and_then(|dir| crate::superagent::inspect_headless_effect_receipts(
+                    .and_then(|dir| crate::superagent::inspect_headless_effect_receipts_page(
                         &dir.join("kingcode.sqlite3"), ticket_id,
+                        *before_created_at, before_key.as_deref(), *unresolved_only,
                     ));
                 match result {
                     Ok(receipts) => { println!("{receipts}"); std::process::exit(0) }
@@ -1123,9 +1124,38 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--inspect-ticket-effects needs a Ticket ID.\n\n{}", help()))?;
                 validate_ticket_id(value)?;
-                command = Command::InspectTicketEffects { ticket_id: value.clone() };
-                ops += 1;
+                let mut before_created_at = None;
+                let mut before_key = None;
+                let mut unresolved_only = false;
                 index += 1;
+                while let Some(flag) = args.get(index + 1) {
+                    match flag.as_str() {
+                        "--unresolved-only" if !unresolved_only => {
+                            unresolved_only = true;
+                            index += 1;
+                        }
+                        "--before" if before_created_at.is_none() => {
+                            let timestamp = args.get(index + 2)
+                                .ok_or("--before requires a positive millisecond timestamp and effect key.")?;
+                            let effect_key = args.get(index + 3)
+                                .ok_or("--before requires the previous page's last effect key.")?;
+                            let created_at = timestamp.parse::<i64>()
+                                .map_err(|_| "Provide a positive effect receipt timestamp.")?;
+                            if created_at <= 0 {
+                                return Err("Provide a positive effect receipt timestamp.".into());
+                            }
+                            validate_effect_key(effect_key)?;
+                            before_created_at = Some(created_at);
+                            before_key = Some(effect_key.clone());
+                            index += 3;
+                        }
+                        _ => break,
+                    }
+                }
+                command = Command::InspectTicketEffects {
+                    ticket_id: value.clone(), before_created_at, before_key, unresolved_only,
+                };
+                ops += 1;
             }
             "--inspect-ticket-graph" => {
                 let ticket_id = args.get(index + 1)
@@ -1317,6 +1347,16 @@ fn validate_orchestration_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_effect_key(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 128
+        || !value.bytes().all(|c| c.is_ascii_alphanumeric()
+            || matches!(c, b'-' | b'_' | b'.' | b':'))
+    {
+        return Err("Provide the bounded effect key from nextCursor.".into());
+    }
+    Ok(())
+}
+
 fn parse_ticket_revision(value: &str) -> Result<i64, String> {
     let revision = value.parse::<i64>()
         .map_err(|_| "Provide a nonnegative expected Ticket revision.".to_string())?;
@@ -1329,7 +1369,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1390,9 +1430,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-ticket-graph <id>
                          Inspect bounded native Ticket/attempt topology without task
                          objectives, results, inferred subagents or Council verdicts; exit.
-  --inspect-ticket-effects <id>
-                         List up to 100 native effect receipt keys, payload digests and
-                         states; never replay or mark applied; exit.
+  --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only]
+                         Page 100 native effect receipt keys, payload digests and
+                         states, optionally unresolved only; never replay or mark applied; exit.
   --inspect-ticket-source <id>
                           Read up to 50 verified linked source receipts without GitHub polling,
                           task execution or startup recovery; exit.
@@ -1640,9 +1680,34 @@ mod tests {
             assert!(parsed(invalid).is_err(), "{invalid}");
         }
         assert_eq!(parsed("--inspect-ticket-effects ticket_123"),
-            Ok(Command::InspectTicketEffects { ticket_id: "ticket_123".into() }));
+            Ok(Command::InspectTicketEffects {
+                ticket_id: "ticket_123".into(), before_created_at: None,
+                before_key: None, unresolved_only: false,
+            }));
+        assert_eq!(parsed("--inspect-ticket-effects ticket_123 --before 1000 github:issue:42 --unresolved-only"),
+            Ok(Command::InspectTicketEffects {
+                ticket_id: "ticket_123".into(), before_created_at: Some(1000),
+                before_key: Some("github:issue:42".into()), unresolved_only: true,
+            }));
+        assert_eq!(parsed("--inspect-ticket-effects ticket_123 --unresolved-only --before 1000 github:issue:42"),
+            Ok(Command::InspectTicketEffects {
+                ticket_id: "ticket_123".into(), before_created_at: Some(1000),
+                before_key: Some("github:issue:42".into()), unresolved_only: true,
+            }));
         assert!(parsed("--inspect-ticket-effects").is_err());
         assert!(parsed("--inspect-ticket-effects ../unsafe").is_err());
+        for invalid in [
+            "--inspect-ticket-effects ticket_123 --before",
+            "--inspect-ticket-effects ticket_123 --before 1000",
+            "--inspect-ticket-effects ticket_123 --before 0 github:issue:42",
+            "--inspect-ticket-effects ticket_123 --before nope github:issue:42",
+            "--inspect-ticket-effects ticket_123 --before 1000 ../unsafe",
+            "--inspect-ticket-effects ticket_123 --unresolved-only --unresolved-only",
+            "--inspect-ticket-effects ticket_123 --before 1000 github:issue:42 --before 999 github:issue:41",
+            "--inspect-ticket-effects ticket_123 --unresolved-only --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert!(parsed("--inspect-ticket-effects ticket_123 --stop-ticket ticket_123").is_err());
         assert_eq!(parsed("--inspect-ticket-graph ticket_123"),
             Ok(Command::InspectTicketGraph { ticket_id: "ticket_123".into() }));

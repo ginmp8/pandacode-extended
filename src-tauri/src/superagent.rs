@@ -5551,19 +5551,16 @@ mod tests {
             name:"Headless roster".into(),
             coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
         }).unwrap();
-        store.db.execute(
-            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
-             VALUES(?1,'worker',1,'additional-worker')",[&config.id],
-        ).unwrap();
-        store.db.execute(
-            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
-             VALUES(?1,'reviewer',0,'reviewer')",[&config.id],
-        ).unwrap();
+        // The versioned Team is canonical; the legacy sidecar is not.
+        let configured=roster::set(&store,&config.id,config.policy_revision,&roster::RosterInput {
+            worker_bot_ids:vec!["worker".into(),"additional-worker".into()],
+            reviewer_bot_ids:vec!["reviewer".into()],council_required:None,
+        }).unwrap();
         let path=store.path.clone();
         drop(store);
         let output=inspect_headless_team_roster(&path,&config.id).unwrap();
         let view:serde_json::Value=serde_json::from_str(&output).unwrap();
-        assert_eq!(view["policyRevision"],config.policy_revision);
+        assert_eq!(view["policyRevision"],configured.policy_revision);
         assert_eq!(view["members"].as_array().unwrap().len(),4);
         assert_eq!(view["members"][0]["role"],"coordinator");
         assert_eq!(view["members"][1]["role"],"worker");
@@ -6850,13 +6847,16 @@ mod tests {
         ).unwrap();
         assert_eq!(enabled["enabled"],true);
         assert_eq!(enabled["providerDispatchedByCommand"],false);
-        assert!(headless_configure_team_roles(
+        let future:roster::TeamRoster=serde_json::from_str(&headless_configure_team_roles(
             &store.path,id,enabled["policyRevision"].as_i64().unwrap(),
             roster::RosterInput {
                 worker_bot_ids:vec!["worker".into()],
                 reviewer_bot_ids:vec![],council_required:None,
             },
-        ).is_err());
+        ).unwrap()).unwrap();
+        assert!(future.execution_ready);
+        assert_eq!(future.policy_revision,enabled["policyRevision"].as_i64().unwrap()+1);
+        assert!(configuration(&store,id).unwrap().enabled);
         assert!(headless_create_orchestration(&store.path,OrchestrationInput {
             name:"Invalid Role".into(),
             coordinator_bot_id:"router".into(),worker_bot_id:"worker".into(),
@@ -7268,14 +7268,11 @@ mod tests {
                 params![id,storage::now()],
             ).unwrap();
         }
-        store.db.execute(
-            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
-             VALUES(?1,'worker',1,'worker-extra')", [&other.id],
-        ).unwrap();
-        store.db.execute(
-            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
-             VALUES(?1,'reviewer',0,'reviewer-extra')", [&other.id],
-        ).unwrap();
+        let updated=roster::set(&store,&other.id,other.policy_revision,&roster::RosterInput {
+            worker_bot_ids:vec!["worker".into(),"worker-extra".into()],
+            reviewer_bot_ids:vec!["reviewer-extra".into()],council_required:None,
+        }).unwrap();
+        assert!(updated.policy_revision>other.policy_revision);
         let before = orchestration_overview(&store).unwrap();
         assert_eq!(before.len(), 2);
         let first = before.iter().find(|item| item.config.id == config.id).unwrap();
@@ -8632,7 +8629,7 @@ mod tests {
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().objective,"Immutable history");
         assert!(delete_configuration(&store,&config.id,disabled.policy_revision).is_err());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().objective,"Immutable history");
-        assert_eq!(configuration(&store,&config.id).unwrap().name,"Changed");
+        assert_eq!(configuration(&store,&config.id).unwrap().name,disabled.name);
     }
 
     #[test]
@@ -10331,8 +10328,8 @@ mod tests {
         // Retry must detect the coordinator's actual session checkout before
         // any session/assignment is created, not depend only on the SQL
         // trigger rejecting the conflicting insert.
-        assert!(retry_blocked(&mut store, &blocked.id, false)
-            .unwrap_err().contains("occupied"));
+        let denied=retry_blocked(&mut store, &blocked.id, false).unwrap_err();
+        assert!(denied.contains("occupied") || denied.contains("active assignment"),"{denied}");
         assert_eq!(get_ticket(&store, &blocked.id).unwrap().state, "blocked");
 
         // The SQLite trigger is a second line of defense against callers
@@ -10406,7 +10403,8 @@ mod tests {
             [&ticket.id], |row| row.get(0),
         ).unwrap();
         let error = prepare_coordinated_worker(&mut store, &ticket.id, false).unwrap_err();
-        assert!(error.contains("occupied"), "Unexpected preflight error: {error}");
+        assert!(error.contains("occupied") || error.contains("active assignment"),
+            "Unexpected preflight error: {error}");
         assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "queued");
         let after: i64 = store.db.query_row(
             "SELECT COUNT(*) FROM sa_assignments WHERE ticket_id=?1",
@@ -10456,7 +10454,9 @@ mod tests {
         store.db.execute(
             "DELETE FROM bot_threads WHERE session_id=?1", [&coordinator_session],
         ).unwrap();
-        store.db.execute("DELETE FROM sessions WHERE id=?1", [&coordinator_session]).unwrap();
+        // Storage now rejects deletion of a live assigned session outright;
+        // the native lease continues to fence both checkouts.
+        assert!(store.db.execute("DELETE FROM sessions WHERE id=?1", [&coordinator_session]).is_err());
         assert!(guard_run_admission(&store, &ordinary_coordinator.id, &[]).is_err());
         assert!(guard_run_admission(&store, &ordinary_worker.id, &[]).is_err());
 

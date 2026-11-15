@@ -601,6 +601,14 @@ pub(crate) fn capture_coordinator_plans(store:&Store)->Result<usize> {
 }
 
 
+// A wake permit survives races with a provider completion. The native
+// scheduler remains the only owner of WorkItem dispatch.
+static SCHEDULER_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+pub(crate) fn wake() {
+    SCHEDULER_WAKE.notify_one();
+}
+
 /// Run native recovery and dependency progression in both the desktop app and
 /// \`pandacode serve\`. This does not introduce an autonomous source poll, new
 /// tool grant or external effect: only already-authorized local-user Demands
@@ -634,7 +642,10 @@ pub(crate) fn start_native(app:tauri::AppHandle) {
                 }
                 Err(_)=>{}
             }
-            tokio::time::sleep(std::time::Duration::from_secs(15)).await;
+            tokio::select! {
+                _ = tokio::time::sleep(std::time::Duration::from_secs(15)) => {}
+                _ = SCHEDULER_WAKE.notified() => {}
+            }
         }
     });
 }

@@ -123,7 +123,7 @@ mod tests {
     use super::*;
 
     fn fixture()->Store {
-        let db=Connection::open_in_memory().unwrap();
+        let db=rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch(
             "PRAGMA foreign_keys=ON;
              CREATE TABLE sa_tickets(id TEXT PRIMARY KEY,state TEXT,evidence TEXT,revision INTEGER);

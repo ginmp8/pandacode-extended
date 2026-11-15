@@ -2745,15 +2745,16 @@ fn manual_preflight(
             "Worker or checkout is occupied; manual admission may create a blocked Ticket.".to_owned()
         })
     } else { None };
+    let attempt_budget_ms = load_team_version_snapshot(
+        &store.db, &cfg.id, cfg.team_version,
+    )?.policy.strategy.attempt_timeout_ms;
     Ok(ManualPreflight {
         orchestration_id: cfg.id, policy_revision: cfg.policy_revision,
         project_id: cfg.project_id, selected_bot_id: candidate.id.clone(),
         selected_role: if coordinate { "coordinator" } else { "worker" }.into(),
         eligible: reason.is_none(), reason,
         allowed_tools: Vec::new(), allowed_side_effects: false,
-        attempt_budget_ms: load_team_version_snapshot(
-            &store.db, &cfg.id, cfg.team_version,
-        )?.policy.strategy.attempt_timeout_ms,
+        attempt_budget_ms,
     })
 }
 
@@ -3335,12 +3336,13 @@ pub(crate) fn read_only_policy(
         mandate_actor: String,
         ticket_actor: String,
         attempt: i64,
+        authorization_id: String,
     }
     let scope: Option<AssignmentPolicyScope> = store.db.query_row(
         "SELECT t.state,a.state,m.expires_at,m.revoked,m.policy_revision,o.enabled,
                 a.bot_id,t.project_id,t.id,a.created_at,
                 m.allowed_side_effects,m.allowed_tools,m.project_id,m.actor,t.actor,a.attempt,
-                t.policy_revision,o.project_id
+                t.policy_revision,o.project_id,m.authorization_id
          FROM sa_assignments a
          JOIN sa_tickets t ON t.id=a.ticket_id
          JOIN sa_mandates m ON m.ticket_id=t.id
@@ -3355,6 +3357,7 @@ pub(crate) fn read_only_policy(
             started_at: r.get(9)?, side_effects: r.get::<_, i64>(10)? != 0,
             tools_json: r.get(11)?, mandate_project: r.get(12)?,
             mandate_actor: r.get(13)?, ticket_actor: r.get(14)?, attempt: r.get(15)?,
+             authorization_id: r.get(18)?,
         }),
     ).optional().map_err(|e| e.to_string())?;
     if let Some(scope) = scope {
@@ -6854,7 +6857,7 @@ mod tests {
             "A child must not retain authority when the parent project grant drifts");
         store.db.execute(
             "UPDATE sa_mandates SET project_id=?2 WHERE ticket_id=?1",
-            params![&root.id,&root.project_id],
+            params![&root.id,&cfg.project_id],
         ).unwrap();
         assert!(scheduler::parent_active(&store,&child.id).unwrap());
         store.db.execute(

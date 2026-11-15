@@ -4366,9 +4366,9 @@ fn nested_m5_s3_admits_native_first_phase_but_denies_premature_approval() {
         let second = CouncilSeat { round: 2, lens: "correctness".into(), score: None,
             started_at: 0, closed_by_selection: false, reported_severe_finding: false,
             reported_conflict: false };
-        assert!(council::reviewer_source_for(&saved, &second, None, None)
-            .unwrap_err().contains("child_council_unavailable"),
-            "unimplemented root S3 challengers stay denied");
+        assert_eq!(council::reviewer_source_for(&saved, &second, None, None).unwrap(),
+            council::CouncilReviewerSource::Automatic,
+            "S3 must reserve a challenger only from the already-enabled root source");
     }
     let (replayed, _) = dispatch_state(&state, &sid, started.generation,
         "pandacode_finish_team", json!({"summary":"M5 challengers still running"}),
@@ -4429,6 +4429,33 @@ fn nested_m5_s3_admits_native_first_phase_but_denies_premature_approval() {
     assert!(child_council::inspect(&store, &saved).unwrap()[0]
         .verified_challenge_receipt.is_some(),
         "the unchanged M5 challenge receipt must remain verifiable");
+    drop(store);
+
+    // Native root phase two is a separately admitted worker, not a phantom
+    // child vote or a recycled root session. Child challenge receipts alone
+    // remain insufficient until this independent callback settles.
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [reviewer_assignment("s3-second-automatic", "correctness")]
+    })).unwrap();
+    let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (second_root, _) = claim(&state, launch);
+    assert!(second_root.config.reviewer_boundary);
+    finish(&state, &second_root, "Independent S3 root challenge.\nCouncil score: 9.8/10", true);
+    let (settled, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Both native S3 root and child phases passed"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(settled["completed"], true,
+        "M5 must pass only after authentic root and child phase-two callbacks");
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    assert_eq!(root.council_status.as_ref().unwrap().state, "passed");
+    assert_eq!(root.council_status.as_ref().unwrap().round, 2);
+    assert!(verified_council_pass(&store, &root));
+    let root_reviewers = root.workers.iter().filter(|worker| worker.council.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(root_reviewers.len(), 2);
+    assert_ne!(root_reviewers[0].id, root_reviewers[1].id);
+    assert_ne!(root_reviewers[0].session_id, root_reviewers[1].session_id);
 }
 
 #[test]

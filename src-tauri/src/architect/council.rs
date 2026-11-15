@@ -1213,12 +1213,14 @@ pub(super) fn reviewer_source_for(
 ) -> Result<CouncilReviewerSource> {
     let config = team.config.council.as_ref().ok_or("Council is off.")?;
     let nested = !config.nested_bot_reviewers.is_empty();
-    // A nested S3 may issue its independent first-phase root seats from
-    // explicitly enabled sources. Its second phase remains closed until
-    // fresh native child and root challenges can be admitted and verified;
-    // no first-phase composite may authorize terminal success.
-    if nested && config.strategy == CouncilExecutionStrategy::TwoPhase && seat.round != 1 {
-        return Err("child_council_unavailable: nested S3 needs native independent challenge admission.".into());
+    // S3's second root wave may use only the sources already selected for
+    // this task. The dispatcher independently authenticates all first-phase
+    // root and child receipts before issuing any challenge session.
+    if nested && config.strategy == CouncilExecutionStrategy::TwoPhase
+        && !(seat.round == 1 || (seat.round == 2
+            && config.reviewer_bot_ids.len() + config.automatic_reviewers > 0))
+    {
+        return Err("child_council_unavailable: nested S3 has no authorized root challenge seats.".into());
     }
     if nested && config.strategy == CouncilExecutionStrategy::Escalated && seat.round > 1
         && !(config.force_escalation && seat.round == 2)
@@ -1338,6 +1340,23 @@ pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: O
         if root_needed > 0 && issued >= root_needed {
             if view.at_limit(config) {
                 return Err(format!("The Council round limit of {} is reached.", config.max_rounds));
+            }
+            return Ok(2);
+        }
+    }
+    // Nested composite children do not appear as root workers. Only the
+    // separately authenticated native child receipts can admit this root
+    // second phase; here we reserve the round number, never its authority.
+    if config.strategy == CouncilExecutionStrategy::TwoPhase
+        && !config.nested_bot_reviewers.is_empty()
+        && latest == 1 && current && !replaced
+    {
+        let required_root = config.reviewer_bot_ids.len() + config.automatic_reviewers;
+        let issued_root = in_round(team, 1)
+            .filter(|(worker, seat)| counts(worker, seat)).count();
+        if required_root > 0 && issued_root >= required_root {
+            if view.at_limit(config) {
+                return Err("S3 nested Council reached the bounded round limit.".into());
             }
             return Ok(2);
         }
@@ -1602,8 +1621,35 @@ pub(super) fn phase_one_challenge_handoff(
         return Err("S3 challenge denied: automatic reviewers are not enabled in this mode.".into());
     }
     let view = Rounds::of(team, config);
-    if !view.complete(1) || stale(team, 1)
-        || lowest(team, 1).is_none_or(|score| score < config.target)
+    let root_needed = if config.nested_bot_reviewers.is_empty() {
+        config.needed()
+    } else {
+        config.reviewer_bot_ids.len() + config.automatic_reviewers
+    };
+    let children = if config.nested_bot_reviewers.is_empty() {
+        Vec::new()
+    } else {
+        // One authenticated child is one root source, never multiple votes.
+        // Revalidate actual native receipts rather than trusting the task
+        // snapshot or an untrusted model-authored challenge request.
+        let children = super::child_council::verified_parent_seats(store, team)?
+            .ok_or("S3 challenge handoff requires authenticated child receipts.")?;
+        let mut first = team.clone();
+        first.workers.retain(|worker|
+            worker.council.as_ref().is_none_or(|seat| seat.round == 1));
+        first.config.council.as_mut()
+            .ok_or("S3 challenge handoff requires a frozen Council policy.")?
+            .strategy = CouncilExecutionStrategy::Parallel;
+        if status_for_authenticated_children(&first, &children)
+            .is_none_or(|status| status.state != "passed" || status.stale)
+            || !super::mixed_native_authority_current(store, &first)
+        {
+            return Err("S3 challenge handoff requires complete native root and child phase-one authority.".into());
+        }
+        children
+    };
+    if (children.is_empty() && !view.complete(1)) || stale(team, 1)
+        || (root_needed > 0 && lowest(team, 1).is_none_or(|score| score < config.target))
         || !criterion_blockers(team, config, 1).is_empty()
         || !unverified_required_skill_checks(team, 1).is_empty()
         || severe_findings(team, 1)
@@ -1653,8 +1699,22 @@ pub(super) fn phase_one_challenge_handoff(
             "reportedFindings": claims,
         }));
     }
-    if verified_reports < config.needed() {
-        return Err("S3 challenge handoff is missing required first-phase reviewer reports.".into());
+    if verified_reports != root_needed {
+        return Err("S3 challenge handoff is missing required first-phase root reports.".into());
+    }
+    // A direct bot may challenge its authenticated sibling child, but may
+    // never receive its own phase-one report or another channel's evidence.
+    // Expose only task-local receipt fingerprints, never child scores,
+    // private conversations, or model instructions as verified findings.
+    for child in &children {
+        sources.push(json!({
+            "reviewerSource": "nested_child",
+            "parentSeatId": child.parent_worker_id,
+            "childSessionId": child.child_session_id,
+            "childReceiptSha256": child.child_receipt_sha256,
+            "artifactContentHashVerified": false,
+            "reportedFindings": [],
+        }));
     }
     if sources.is_empty() {
         return Err("S3 challenge unavailable: no independent peer report can be challenged.".into());
@@ -2107,29 +2167,34 @@ pub(super) fn status_for_authenticated_children_s2(
     })
 }
 
-/// An M4 S3 root has no direct or automatic reviewer source. Admit terminal
-/// success only from two native, independently verified child Council phases;
-/// each child remains a single top-level seat and never contributes phantom
-/// root reviewers. Callers must reauthenticate the native receipts and grants.
+/// A hierarchical S3 root requires both native challenge phases from every
+/// enabled root source and every child. Each child remains one composite seat;
+/// its phase-two leaves cannot substitute for independent root reviewers.
+/// Callers must reauthenticate actual receipts and authority at the boundary.
 pub(super) fn status_for_authenticated_children_s3(
     team: &TeamSnapshot,
     children: &[super::child_council::AuthenticatedParentSeat],
     challenges: &[super::child_council::VerifiedChildChallengeReceipt],
 ) -> Option<CouncilStatus> {
     let config = team.config.council.as_ref()?;
+    let required_root = config.reviewer_bot_ids.len() + config.automatic_reviewers;
     if config.strategy != CouncilExecutionStrategy::TwoPhase
-        || config.mode() != "m4" || accepted(team) || team.council_since <= 0
+        || !matches!(config.mode(), "m4" | "m5" | "m6" | "m7")
+        || accepted(team) || team.council_since <= 0
         || !(MIN_REVIEWERS..=MAX_REVIEWERS).contains(&config.needed())
-        || latest_round(team) != 0
+        || (required_root == 0 && latest_round(team) != 0)
+        || (required_root > 0 && (latest_round(team) != 2 || stale(team, 2)))
         || children.len() != config.nested_bot_reviewers.len()
         || challenges.len() != children.len()
         || team.workers.iter().any(|worker| !worker.read_only && unsettled(&worker.status))
     {
         return None;
     }
-    // Reuse the existing Council gate for phase one. This is a read-only
-    // projection of the same native workers, never a policy/grant mutation.
+    // Reuse the existing first-phase Council gate, excluding fresh root
+    // challengers. This projection never changes stored policy or grants.
     let mut first = team.clone();
+    first.workers.retain(|worker|
+        worker.council.as_ref().is_none_or(|seat| seat.round == 1));
     first.config.council.as_mut()?.strategy = CouncilExecutionStrategy::Parallel;
     let phase_one = status_for_authenticated_children(&first, children)?;
     if phase_one.state != "passed" || phase_one.stale { return None; }
@@ -2173,6 +2238,57 @@ pub(super) fn status_for_authenticated_children_s3(
         lowest = lowest.min(second.lowest_score);
     }
     if bots.len() != config.nested_bot_reviewers.len() { return None; }
+    // No source is silently added in phase two. The second root wave must
+    // preserve the original direct/automatic mix, while worker and session
+    // identities are fresh across the two independent phases.
+    let second = in_round(team, 2)
+        .filter(|(worker, seat)| counts(worker, seat))
+        .collect::<Vec<_>>();
+    if second.len() != required_root
+        || !criterion_blockers(team, config, 2).is_empty()
+        || !unverified_required_skill_checks(team, 2).is_empty()
+    {
+        return None;
+    }
+    let prior_ids: std::collections::HashSet<&str> = in_round(team, 1)
+        .map(|(worker, _)| worker.id.as_str()).collect();
+    let prior_sessions: std::collections::HashSet<&str> = in_round(team, 1)
+        .map(|(worker, _)| worker.session_id.as_str()).collect();
+    let mut new_ids = std::collections::HashSet::new();
+    let mut new_sessions = std::collections::HashSet::new();
+    let mut direct_bots = std::collections::HashSet::new();
+    let mut automatic = 0usize;
+    for (worker, seat) in second {
+        let score = seat.score?;
+        let binding = worker.reviewer_binding.as_ref()?;
+        if worker.status != "completed" || !worker.read_only || worker.abandoned
+            || worker.wrote_at != 0 || !worker.files.is_empty()
+            || seat.started_at <= 0 || seat.reported_severe_finding || seat.reported_conflict
+            || !score.is_finite() || score < config.target
+            || worker.id.is_empty() || worker.session_id.is_empty()
+            || prior_ids.contains(worker.id.as_str())
+            || prior_sessions.contains(worker.session_id.as_str())
+            || !new_ids.insert(worker.id.as_str())
+            || !new_sessions.insert(worker.session_id.as_str())
+            || binding.validate(team, worker).is_err()
+        {
+            return None;
+        }
+        match binding.reviewer_bot_id.as_deref() {
+            Some(bot) if config.reviewer_bot_ids.iter().any(|id| id == bot)
+                && binding.roster_bot_ids == config.reviewer_bot_ids
+                && binding.required_reviewers == Some(config.needed())
+                && direct_bots.insert(bot) => {}
+            Some(_) => return None,
+            None => automatic += 1,
+        }
+        lowest = lowest.min(score);
+    }
+    if direct_bots.len() != config.reviewer_bot_ids.len()
+        || automatic != config.automatic_reviewers
+    {
+        return None;
+    }
     Some(CouncilStatus {
         state: "passed".into(), round: 2, lowest: Some(lowest),
         target: config.target, stale: false, notice: None,

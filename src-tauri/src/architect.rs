@@ -585,12 +585,9 @@ fn authenticated_hierarchical_status(
         }
         let second = child_council::verified_s2_receipts(store, team).ok().flatten()?;
         council::status_for_authenticated_children_s2(team, &children, &second)
-    } else if config.strategy == council::CouncilExecutionStrategy::TwoPhase
-        && config.mode() == "m4"
-    {
-        // M4 has no root leaf reviewers to substitute for child challengers.
-        // Both child phases are authenticated separately before the native
-        // Council gate can produce a terminal result.
+    } else if config.strategy == council::CouncilExecutionStrategy::TwoPhase {
+        // The full enabled root source mix (if any) and every child require
+        // separate, independently authenticated phase-two challenge receipts.
         let challenges = child_council::verified_s3_receipts(store, team).ok().flatten()?;
         council::status_for_authenticated_children_s3(team, &children, &challenges)
     } else {
@@ -643,7 +640,7 @@ fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
             council::CouncilExecutionStrategy::Parallel => vec![1],
             council::CouncilExecutionStrategy::Escalated if config.force_escalation => vec![1, 2],
             council::CouncilExecutionStrategy::Escalated => vec![1],
-            council::CouncilExecutionStrategy::TwoPhase => return false,
+            council::CouncilExecutionStrategy::TwoPhase => vec![1, 2],
         };
         (rounds, config.reviewer_bot_ids.len() + config.automatic_reviewers)
     };
@@ -726,6 +723,29 @@ fn eligible_hierarchical_s2_root_escalation(store: &Store, team: &TeamSnapshot) 
     // This projection only checks whether the first wave merits admitting fresh
     // reviewers. It never changes the persisted policy or grants a terminal pass.
     first.config.council.as_mut().unwrap().force_escalation = false;
+    council::status_for_authenticated_children(&first, &children)
+        .is_some_and(|status| status.state == "passed" && !status.stale)
+        && mixed_native_authority_current(store, &first)
+}
+
+/// S3 root challengers are admitted only after the exact native first phase
+/// is authenticated for both existing root and task-owned child sources.
+/// No child leaf or model-completed turn can authorize a root challenge.
+fn eligible_hierarchical_s3_root_challenge(store: &Store, team: &TeamSnapshot) -> bool {
+    let Some(config) = team.config.council.as_ref() else { return false };
+    if config.strategy != council::CouncilExecutionStrategy::TwoPhase
+        || config.nested_bot_reviewers.is_empty()
+        || config.reviewer_bot_ids.len() + config.automatic_reviewers == 0
+        || !council_evidence_is_current(store, team)
+    {
+        return false;
+    }
+    let Some(children) = child_council::verified_parent_seats(store, team).ok().flatten()
+        else { return false };
+    let mut first = team.clone();
+    first.workers.retain(|worker|
+        worker.council.as_ref().is_none_or(|seat| seat.round == 1));
+    first.config.council.as_mut().unwrap().strategy = council::CouncilExecutionStrategy::Parallel;
     council::status_for_authenticated_children(&first, &children)
         .is_some_and(|status| status.state == "passed" && !status.stale)
         && mixed_native_authority_current(store, &first)
@@ -2489,8 +2509,9 @@ fn dispatch_as(
                 if seat.as_ref().is_some_and(|seat| seat.round > 1)
                     && team.config.council.as_ref().is_some_and(|config| !config.nested_bot_reviewers.is_empty())
                     && !eligible_hierarchical_s2_root_escalation(&store, &team)
+                    && !eligible_hierarchical_s3_root_challenge(&store, &team)
                 {
-                    return Err("child_council_unavailable: a fresh S2 root wave requires complete, authenticated first-wave root and child receipts.".into());
+                    return Err("child_council_unavailable: a second root wave requires complete, authenticated first-phase root and child receipts.".into());
                 }
                 if seat.is_some() {
                     // The budget covers actual new admissions, not duplicated keys;

@@ -762,11 +762,11 @@ fn require_authenticated_feed_repository(raw: &serde_json::Value, repository_id:
     Ok(())
 }
 
-/// Verify the feed's descending GitHub event identities while collecting a
-/// finite pagination window. A short page, an older persisted identity, or
-/// a pre-activation timestamp anchors the historical boundary. Without an
-/// anchor, fail *before* recording newer events: no silent cursor leap over
-/// an unvisited page. This does not assert that GitHub retained every event.
+/// Verify descending GitHub event identities within a finite pagination window.
+/// The first poll may use a short page or a pre-activation timestamp as its
+/// boundary. Once a cursor is persisted, the exact prior event identity must
+/// be present; an older ID or timestamp is not proof of continuity. This does
+/// not assert that GitHub retained every event.
 fn github_page_complete(
     raw: &serde_json::Value, since: i64, cursor: i64, previous_id: &mut Option<i64>,
 ) -> Result<bool> {
@@ -792,7 +792,13 @@ fn github_page_complete(
         let at = chrono::DateTime::parse_from_rfc3339(stamp)
             .map_err(|_| "Authenticated GitHub Event timestamp is invalid.")?
             .timestamp_millis();
-        if sequence <= cursor || at < since {
+        // GitHub event IDs are sparse: an older ID proves ordering but not
+        // that the persisted cursor itself was still within the fetched feed.
+        // Once crossed, later pages cannot recover that exact identity.
+        if cursor > 0 && sequence < cursor {
+            return Err("GitHub Events passed the durable source cursor without its exact identity; reconcile source history before polling.".into());
+        }
+        if (cursor > 0 && sequence == cursor) || (cursor == 0 && at < since) {
             anchored = true;
         }
     }
@@ -2056,6 +2062,57 @@ mod tests {
         assert!(list_decisions(&store,&on.id,10).unwrap().is_empty());
     }
 
+
+    #[test]
+    fn persisted_github_cursor_requires_exact_identity_before_advancing_after_restart() {
+        let (store, path) = fixture();
+        let off = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "issues.opened",
+        ).unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let event = |id: &str, number: i64| serde_json::json!({
+            "id": id, "type": "IssuesEvent",
+            "created_at": "2026-11-12T08:59:00Z",
+            "repo": {"name": "owner/repo"}, "actor": {"login": "trusted-bot"},
+            "payload": {"action": "opened", "issue": {"number": number}}
+        });
+        let cursor = 5_000_000_600;
+        let first = combine_github_pages(
+            &[serde_json::json!([event("5000000600", 1)])], 0, 0,
+        ).unwrap();
+        assert_eq!(poll_authenticated_events(&store, &on, 0, &first).unwrap().recorded, 1);
+        assert_eq!(source(&store, &on.id).unwrap().last_sequence, cursor);
+
+        // Both the older ID and pre-activation timestamps used to complete
+        // pagination without seeing the persisted cursor. Neither proves
+        // that the omitted interval was actually observed.
+        for gap in [
+            serde_json::json!([event("5000000602", 2), event("5000000599", 3)]),
+            serde_json::json!([event("5000000602", 2)]),
+        ] {
+            assert!(combine_github_pages(&[gap], i64::MAX, cursor).is_err());
+        }
+        assert_eq!(source(&store, &on.id).unwrap().last_sequence, cursor);
+        assert_eq!(list_decisions(&store, &on.id, 10).unwrap().len(), 1);
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(source(&reopened, &on.id).unwrap().last_sequence, cursor);
+        // A subsequent valid window containing the *exact* stored ID may
+        // advance, with its existing receipt deduplicated after restart.
+        let complete = combine_github_pages(
+            &[serde_json::json!([
+                event("5000000602", 2), event("5000000600", 1),
+            ])], i64::MAX, cursor,
+        ).unwrap();
+        let accepted = poll_authenticated_events(&reopened, &on, 0, &complete).unwrap();
+        assert_eq!((accepted.recorded, accepted.duplicates), (1, 1));
+        assert_eq!(source(&reopened, &on.id).unwrap().last_sequence, 5_000_000_602);
+        assert_eq!(list_decisions(&reopened, &on.id, 10).unwrap().len(), 2);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+    }
 
     #[test]
     fn live_observe_repository_metadata_pins_every_event_to_authenticated_id() {

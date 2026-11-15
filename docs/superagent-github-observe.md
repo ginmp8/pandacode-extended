@@ -26,8 +26,13 @@ Events feed does not provide a verified Check Runs stream. PR-to-issue linking
 and CI status require separate source-backed adapters; PR titles/bodies and
 review comments must not be interpreted as authenticated linkage or authority.
 Cursor/receipt persistence survives restart, but the finite Events retention
-window is not a gap-free subscription. If pagination cannot establish the
-previous boundary, polling fails without advancing the cursor.
+window is not a gap-free subscription. After the first poll, each bounded
+window must contain the **exact persisted cursor event ID**. Finding only an
+older event or a timestamp before activation cannot justify skipping the
+missing interval. If the original cursor is outside GitHub's finite retention,
+polling fails without advancing the cursor or writing any new decision;
+the operator must investigate/reconcile the source history explicitly.
+No inferred task, replay or Auto write is attempted.
 
 Reference: https://docs.github.com/en/rest/using-the-rest-api/github-event-types
 

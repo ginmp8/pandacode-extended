@@ -78,3 +78,21 @@ The overarching #148 contract still includes a dependency-aware autonomous sched
 ## Exact-SHA verification record
 
 Validation on the reconciled updated-source commit is **pending exact-SHA CI**. Previous CI does not transfer. CI results, passed tests, failing jobs and the tested commit SHA must be recorded on the PR before promoting it out of draft. Existing PR #150/#151 CI results do not transfer to this integrated tree.
+
+## SQLite upgrade and rollback boundary
+
+Before any upgrade, stop PandaCode and all other writers to its application database.
+Back up the complete SQLite file set (the main database and any `-wal`/`-shm`
+sidecars) to an isolated, clearly named pre-upgrade location. Validate the backup
+read-only with `PRAGMA integrity_check` and representative Tickets, assignments,
+audit, effects, Team versions and WorkItem records. Do not mistake an export of
+Team presets for a database backup.
+
+If migration fails, stop every writer and preserve the failed upgraded files
+separately for diagnosis. Restore the **known-good pre-upgrade** SQLite file
+set as one unit; never use the failed upgraded copy as a restore source. Reopen
+PandaCode and verify the current schema and representative historical records.
+This is an operator runbook, not an automated database backup feature. Source
+PR #151's migration tests target an older migration sequence than unified
+schema v59; port their failure-injection coverage to unified migrations rather
+than copying old migration or schema numbers.

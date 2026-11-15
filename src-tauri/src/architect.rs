@@ -4584,6 +4584,59 @@ pub(crate) fn validate_channel_reviewers(
     Ok(())
 }
 
+/// A consistent, read-only Council inspection; never a task approval capability.
+/// The verified flag is calculated from persisted native reviewer authority,
+/// current artifact state and terminal receipts, not from a displayed score.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CouncilNativeInspection {
+    cycle_id: String,
+    team_revision: u64,
+    verified_pass: bool,
+    snapshot: ArchitectReadSnapshot,
+}
+
+fn council_inspection_select_state(
+    store: &Store, session_id: &str, cycle_id: Option<&str>,
+    team_revision: Option<u64>,
+) -> Result<Option<CouncilNativeInspection>> {
+    if parent_of(store, session_id)?.is_some() {
+        return Err("council_inspection_denied: child and reviewer sessions cannot inspect the parent Council.".into());
+    }
+    refuse_mirror(store, session_id)?;
+    let Some(mut team) = load(store, session_id)? else { return Ok(None) };
+    if team.config.council.is_none() { return Ok(None) }
+    match (cycle_id, team_revision) {
+        (None, None) => {}
+        (Some(cycle), Some(revision)) => {
+            if cycle != format!("{}:{}", session_id, team.council_since)
+                || revision != team.revision
+            {
+                return Err("council_inspection_stale: cycle or team revision no longer matches persisted state.".into());
+            }
+        }
+        _ => return Err("council_inspection_denied: cycleId and teamRevision must be supplied together.".into()),
+    }
+    // Checking the stored native gate before refreshing a display projection
+    // prevents a transient or stale status from becoming an approval token.
+    let verified_pass = verified_council_pass(store, &team);
+    let cycle_id = format!("{}:{}", session_id, team.council_since);
+    let team_revision = team.revision;
+    refresh_council(store, &mut team);
+    Ok(Some(CouncilNativeInspection {
+        cycle_id, team_revision, verified_pass,
+        snapshot: event_read_payload(store, &team),
+    }))
+}
+
+#[tauri::command]
+pub async fn architect_council_inspect(
+    state: State<'_, AppState>, session_id: String,
+    cycle_id: Option<String>, team_revision: Option<u64>,
+) -> Result<Option<CouncilNativeInspection>> {
+    let store = state.store.lock().map_err(|error| error.to_string())?;
+    council_inspection_select_state(&store, &session_id, cycle_id.as_deref(), team_revision)
+}
 #[tauri::command]
 pub async fn architect_get(
     state: State<'_, AppState>,

@@ -9642,3 +9642,35 @@ fn council_usage_leaf_reviews_project_the_current_root_round_total_for_root_and_
         .unwrap();
     assert_eq!(child_max.value, 4);
 }
+
+#[test]
+fn native_council_inspection_pins_cycle_revision_and_never_promotes_an_unverified_score() {
+    let (state, session_id) = state_fixture();
+    let store = state.store.lock().unwrap();
+    let mut team = load(&store, &session_id).unwrap().unwrap();
+    team.council_since = storage::now().max(1);
+    team.config.council = Some(council::CouncilConfig::default());
+    save(&store, &mut team).unwrap();
+    let team = load(&store, &session_id).unwrap().unwrap();
+    let cycle = format!("{}:{}", session_id, team.council_since);
+    let current = council_inspection_select_state(&store, &session_id, None, None)
+        .unwrap().expect("enabled native Council is inspectable");
+    assert_eq!(current.cycle_id, cycle);
+    assert_eq!(current.team_revision, team.revision);
+    assert!(!current.verified_pass, "an unreviewed Council cannot be approved by its inspector");
+    assert!(current.snapshot.team.objective.is_empty(), "the read-only view redacts the task objective");
+    assert_eq!(council_inspection_select_state(&store, &session_id, Some(&cycle), Some(team.revision))
+        .unwrap().unwrap().cycle_id, cycle);
+    assert!(council_inspection_select_state(&store, &session_id, Some("foreign:1"), Some(team.revision))
+        .unwrap_err().contains("council_inspection_stale"));
+    assert!(council_inspection_select_state(&store, &session_id, Some(&cycle), Some(team.revision + 1))
+        .unwrap_err().contains("council_inspection_stale"));
+    assert!(council_inspection_select_state(&store, &session_id, Some(&cycle), None)
+        .unwrap_err().contains("must be supplied together"));
+    assert!(council_inspection_select_state(&store, &session_id, None, Some(team.revision))
+        .unwrap_err().contains("must be supplied together"));
+    let mut disabled = team;
+    disabled.config.council = None;
+    save(&store, &mut disabled).unwrap();
+    assert!(council_inspection_select_state(&store, &session_id, None, None).unwrap().is_none());
+}

@@ -791,3 +791,18 @@ independently.
 ### Inspect authenticated GitHub Auto consent from headless
 
 `pandacode serve --inspect-auto-policy <source-id>` returns only native source consent mode/revision, configured hourly/daily intake limits, staged/dispatched/uncertain counts and the explicitly disabled auto-write capability. It uses a read-only SQLite connection without GitHub requests, restart recovery, provider admission, policy mutation or external effects. Source IDs must pass the same bounded native validator as other inspection flags. This command does not enable Auto or authorize task admission.
+
+
+### Read-only headless Ticket activity and Demand preflight
+
+`pandacode serve --list-ticket-activity <ticket-id> [--before <audit-id>]`
+returns an audit-ID-keyset page of up to 100 native event **kinds and timestamps**.
+Private event details, conversation text and tool results are not returned.
+Its SQLite connection is read-only and never performs startup recovery.
+
+`pandacode serve --preflight-demand <team-id> <direct|coordinated> <objective-file>`
+reads a local UTF-8 objective file bounded to 16 KiB and returns the currently
+observed native eligibility, selected role, policy revision and execution
+limits. This snapshot does not create a Ticket or grant authority; the actual
+admission must independently recheck state, checkout and provider availability.
+Malformed inputs fail before any admission or external effect.

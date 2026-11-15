@@ -1709,6 +1709,72 @@ pub(crate) fn inspect_headless_ticket_graph(
 /// Store::open's migration/restart settlement behind a live serve process.
 /// Return bounded operational metadata, never the task objective, worker result,
 /// private evidence, rejection reason, authorization token, or transcript.
+pub(crate) fn list_headless_ticket_activity(
+    database_path: &std::path::Path, ticket_id: &str, before_id: Option<i64>,
+) -> Result<String> {
+    if before_id.is_some_and(|id| id <= 0) {
+        return Err("Activity cursor must be a positive audit ID.".into());
+    }
+    let store = Store::open_read_only(database_path)?;
+    get_ticket(&store, ticket_id)?;
+    let mut stmt = store.db.prepare(
+        "SELECT id,kind,at FROM sa_audit
+         WHERE ticket_id=?1 AND (?2 IS NULL OR id < ?2)
+         ORDER BY id DESC LIMIT 101",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![ticket_id, before_id], |row| {
+        Ok(serde_json::json!({
+            "id": row.get::<_, i64>(0)?,
+            "kind": row.get::<_, String>(1)?,
+            "at": row.get::<_, i64>(2)?,
+        }))
+    }).map_err(|e| e.to_string())?;
+    let mut items = rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    let has_more = items.len() > 100;
+    items.truncate(100);
+    let next_cursor = if has_more {
+        items.last().and_then(|entry| entry["id"].as_i64())
+    } else {
+        None
+    };
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket_id,
+        "pageLimit": 100,
+        "hasMore": has_more,
+        "nextCursor": next_cursor,
+        "items": items,
+        "redacted": true,
+        "observationalOnly": true,
+        "recoveryPerformed": false,
+    })).map_err(|e| e.to_string())
+}
+
+pub(crate) fn inspect_headless_demand_preflight(
+    database_path: &std::path::Path, orchestration_id: &str,
+    objective: &str, coordinated: bool,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    let status = manual_preflight(&store, orchestration_id, objective, coordinated, false)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": status.orchestration_id,
+        "policyRevision": status.policy_revision,
+        "projectId": status.project_id,
+        "selectedRole": status.selected_role,
+        "selectedBotId": status.selected_bot_id,
+        "eligibleAtSnapshot": status.eligible,
+        "reason": status.reason,
+        "objectiveBytes": objective.trim().len(),
+        "allowedTools": status.allowed_tools,
+        "allowedSideEffects": status.allowed_side_effects,
+        "attemptBudgetMs": status.attempt_budget_ms,
+        "requiresLiveAdmissionRecheck": true,
+        "mandateIssued": false,
+        "providerDispatched": false,
+        "observationalOnly": true
+    })).map_err(|e| e.to_string())
+}
+
 pub(crate) fn inspect_headless_status(
     database_path: &std::path::Path, ticket_id: Option<&str>,
 ) -> Result<String> {

@@ -39,6 +39,7 @@ enum Command {
     InspectOrchestrations,
     InspectTeamStrategy { orchestration_id: String },
     ListTickets,
+    ListTicketActivity { ticket_id: String, before_id: Option<i64> },
     ListReviewInbox,
     ListRecoveryInbox,
     ListTeamDemands {
@@ -55,6 +56,7 @@ enum Command {
     LinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
     UnlinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
     InspectTeamReadiness { orchestration_id: String },
+    PreflightDemand { orchestration_id: String, coordinated: bool, objective_file: PathBuf },
     InspectTeamRoster { orchestration_id: String },
     ObserveSource { source_id: String },
     ObserveCheckRun { source_id: String, check_run_id: i64 },
@@ -74,6 +76,21 @@ enum Command {
         comment: String,
         confirmation_hash: Option<String>,
     },
+}
+
+fn read_bounded_objective(path: &std::path::Path) -> Result<String, String> {
+    use std::io::Read;
+    let file = std::fs::File::open(path)
+        .map_err(|e| format!("Cannot read objective file: {e}"))?;
+    let mut bytes = Vec::new();
+    file.take(16 * 1024 + 1).read_to_end(&mut bytes)
+        .map_err(|e| format!("Cannot read bounded objective: {e}"))?;
+    if bytes.len() > 16 * 1024 {
+        return Err("Objective exceeds the native 16 KiB limit.".into());
+    }
+    let objective = std::str::from_utf8(&bytes)
+        .map_err(|_| "Objective file must contain UTF-8 text.")?;
+    Ok(objective.to_owned())
 }
 
 /// `pandacode serve …`: true when the argument was handled; the process then serves until
@@ -291,6 +308,24 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::PreflightDemand { orchestration_id, coordinated, objective_file } = &command {
+                // The objective is read only from an explicitly supplied local file.
+                // No Ticket, mandate, assignment, provider or startup recovery.
+                let result = read_bounded_objective(objective_file)
+                    .and_then(|objective| app.path().app_data_dir()
+                        .map_err(|e| e.to_string())
+                        .and_then(|dir| crate::superagent::inspect_headless_demand_preflight(
+                            &dir.join("kingcode.sqlite3"), orchestration_id,
+                            &objective, *coordinated,
+                        )));
+                match result {
+                    Ok(status) => { println!("{status}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Demand preflight failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             if let Command::InspectTeamRoster { orchestration_id } = &command {
                 let result=app.path().app_data_dir()
                     .map_err(|e|e.to_string())
@@ -315,6 +350,21 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(tasks) => { println!("{tasks}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent task listing failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::ListTicketActivity { ticket_id, before_id } = &command {
+                // Redacted native audit metadata, strictly observational.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::list_headless_ticket_activity(
+                        &dir.join("kingcode.sqlite3"), ticket_id, *before_id,
+                    ));
+                match result {
+                    Ok(events) => { println!("{events}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent activity inspection failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -545,10 +595,12 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
     match command {
         // Inspection exits before setup_common and must never reach this branch.
         Command::InspectOrchestrations | Command::InspectTeamStrategy { .. }
-        | Command::ListTickets | Command::ListReviewInbox
+        | Command::ListTickets | Command::ListTicketActivity { .. }
+        | Command::ListReviewInbox
         | Command::ListRecoveryInbox | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
-        | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
+        | Command::InspectTeamReadiness { .. } | Command::PreflightDemand { .. }
+        | Command::InspectTeamRoster { .. }
         | Command::InspectTicketEffects { .. }
         | Command::InspectTicketSource { .. } | Command::InspectSourceHealth { .. }
         | Command::InspectAutoPolicy { .. }
@@ -1061,6 +1113,22 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 command = Command::ListTickets;
                 ops += 1;
             }
+            "--list-ticket-activity" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or("--list-ticket-activity needs a Ticket ID.")?;
+                validate_ticket_id(ticket_id)?;
+                let before_id = if args.get(index + 2).map(String::as_str) == Some("--before") {
+                    let value = args.get(index + 3)
+                        .ok_or("--before needs a positive audit event ID.")?;
+                    let parsed = value.parse::<i64>().ok().filter(|id| *id > 0)
+                        .ok_or("--before needs a positive audit event ID.")?;
+                    index += 2;
+                    Some(parsed)
+                } else { None };
+                command = Command::ListTicketActivity { ticket_id:ticket_id.clone(), before_id };
+                ops += 1;
+                index += 1;
+            }
             "--list-recovery-inbox" => {
                 command = Command::ListRecoveryInbox;
                 ops += 1;
@@ -1124,6 +1192,29 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 command = Command::InspectTeamReadiness { orchestration_id: value.clone() };
                 ops += 1;
                 index += 1;
+            }
+            "--preflight-demand" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or("--preflight-demand needs Team ID, mode and objective file.")?;
+                validate_orchestration_id(orchestration_id)?;
+                let mode = args.get(index + 2)
+                    .ok_or("--preflight-demand needs direct or coordinated mode.")?;
+                let coordinated = match mode.as_str() {
+                    "direct" => false,
+                    "coordinated" => true,
+                    _ => return Err("Choose direct or coordinated Demand preflight mode.".into()),
+                };
+                let path = args.get(index + 3)
+                    .ok_or("--preflight-demand needs a local UTF-8 objective file.")?;
+                if path.is_empty() || path.starts_with("--") {
+                    return Err("Provide an objective file path, not another command.".into());
+                }
+                command = Command::PreflightDemand {
+                    orchestration_id:orchestration_id.clone(),
+                    coordinated, objective_file:PathBuf::from(path),
+                };
+                ops += 1;
+                index += 3;
             }
             "--inspect-source-health" => {
                 let id = args.get(index + 1)
@@ -1518,7 +1609,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --inspect-auto-policy <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox | --list-recovery-inbox | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --preflight-demand <id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --inspect-auto-policy <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1548,6 +1639,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          Inspect immutable Team resource policy and unavailable
                          execution capabilities without admitting work; exit.
   --list-tickets         List up to 200 redacted native SuperAgent tickets; exit.
+  --list-ticket-activity <id> [--before <audit-id>]
+                         Page 100 redacted native audit kinds and timestamps without
+                         private details, provider invocation or restart recovery.
   --list-review-inbox    List up to 200 pending human/Council decisions across Teams;
                          redact objectives, never approve or run a reviewer; exit.
   --list-recovery-inbox  Prioritize up to 200 actual recovery/decision Tickets across Teams;
@@ -1559,6 +1653,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-team-roster <id>
                          Inspect ordered native Team members, configured models, harnesses and
                          assigned Skill IDs without provider admission or Library trust scanning.
+  --preflight-demand <team-id> <direct|coordinated> <objective-file>
+                         Inspect native manual admission against a bounded UTF-8
+                         objective without creating a Ticket, mandate or worker.
   --inspect-team-readiness <id>
                          Inspect a Team's read-only native manual admission preflight;
                          live sessions and policy must be rechecked on actual admission.
@@ -1750,6 +1847,32 @@ mod tests {
             assert!(parsed(invalid).is_err(), "{invalid}");
         }
         assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
+        assert_eq!(parsed("--list-ticket-activity ticket_1"),
+            Ok(Command::ListTicketActivity { ticket_id:"ticket_1".into(), before_id:None }));
+        assert_eq!(parsed("--list-ticket-activity ticket_1 --before 17"),
+            Ok(Command::ListTicketActivity { ticket_id:"ticket_1".into(), before_id:Some(17) }));
+        for invalid in [
+            "--list-ticket-activity","--list-ticket-activity ../wrong",
+            "--list-ticket-activity ticket_1 --before 0",
+            "--list-ticket-activity ticket_1 --before -1",
+            "--list-ticket-activity ticket_1 --stop-ticket ticket_1",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
+        assert_eq!(parsed("--preflight-demand team_123 direct objective.txt"),
+            Ok(Command::PreflightDemand {
+                orchestration_id:"team_123".into(),coordinated:false,
+                objective_file:PathBuf::from("objective.txt"),
+            }));
+        assert_eq!(parsed("--preflight-demand team_123 coordinated objective.txt"),
+            Ok(Command::PreflightDemand {
+                orchestration_id:"team_123".into(),coordinated:true,
+                objective_file:PathBuf::from("objective.txt"),
+            }));
+        for invalid in [
+            "--preflight-demand","--preflight-demand ../bad direct objective.txt",
+            "--preflight-demand team_123 invalid objective.txt",
+            "--preflight-demand team_123 direct --stop-ticket",
+            "--preflight-demand team_123 direct objective.txt --stop-ticket ticket_1",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
         assert_eq!(parsed("--list-review-inbox"), Ok(Command::ListReviewInbox));
         assert_eq!(parsed("--list-recovery-inbox"), Ok(Command::ListRecoveryInbox));
         assert!(parsed("--list-recovery-inbox --stop-ticket ticket_1").is_err());

@@ -3417,6 +3417,170 @@ fn actual_composed_gate_requires_current_persisted_criterion_outcomes_and_eviden
 }
 
 #[test]
+fn m4_nested_child_verdicts_settle_as_verified_root_composite_seats() {
+    use council::{CouncilStrategy, SelectedReviewerMode as Mode};
+
+    let (state, root_id) = state_fixture();
+    let selected = [("nested-a", Mode::Nested), ("nested-b", Mode::Nested)];
+    install_two_phase_team(&state, &root_id, 0, &selected);
+    let strategy = CouncilStrategy::Parallel;
+    {
+        let store = state.store.lock().unwrap();
+        let mut root = load(&store, &root_id).unwrap().unwrap();
+        root.config.workers.push(WorkerProfile {
+            id: "priced-nano".into(),
+            name: "Locally priced reviewer".into(),
+            provider: "codex".into(),
+            model: "gpt-5-nano".into(),
+            reasoning_effort: None,
+        });
+        root.config
+            .council
+            .as_mut()
+            .unwrap()
+            .composition
+            .as_mut()
+            .unwrap()
+            .strategy = strategy;
+        save(&store, &mut root).unwrap();
+    }
+
+    dispatch_council_round(
+        &state,
+        &root_id,
+        vec![
+            council_review_assignment("m4-nested-a", None, Some("nested-a"), "security"),
+            council_review_assignment("m4-nested-b", None, Some("nested-b"), "architecture"),
+        ],
+    )
+    .unwrap();
+    mark_council_round_waiting(&state, &root_id, 1);
+
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    dispatch_nested_child_leaves_for_root_round(&state, &root_id, 1, &runtime, "M4", strategy);
+    complete_nested_children_for_root_round(&state, &root_id, 1, &runtime, "M4", strategy);
+
+    let store = state.store.lock().unwrap();
+    let mut root = load(&store, &root_id).unwrap().unwrap();
+    refresh_council(&store, &mut root);
+    save(&store, &mut root).unwrap();
+    let root_cycle_id = format!("{}:{}", root.session_id, root.council_since);
+    let root_seats = root
+        .workers
+        .iter()
+        .filter(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 1))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        root_seats.len(),
+        2,
+        "each nested child occupies one root seat"
+    );
+    assert!(root_seats.iter().all(|worker| {
+        worker.status == "completed"
+            && worker.council.as_ref().and_then(|seat| seat.score) == Some(9.6)
+    }));
+
+    let child_receipts =
+        council_records::<council::ChildCouncilReceipt>(&store, &root_id, "council_child_receipt")
+            .unwrap();
+    assert_eq!(
+        child_receipts.len(),
+        2,
+        "one terminal receipt per nested root seat"
+    );
+    let parent_seats = root_seats
+        .iter()
+        .map(|worker| worker.id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        child_receipts
+            .iter()
+            .map(|receipt| receipt.parent_seat_id.as_str())
+            .collect::<std::collections::HashSet<_>>(),
+        parent_seats,
+        "each child verdict is correlated to exactly its selected root seat"
+    );
+    let leaf_outcomes = council_records::<council::CouncilCriterionOutcomeReceipt>(
+        &store,
+        &root_id,
+        "council_criterion_outcome",
+    )
+    .unwrap();
+    assert_eq!(
+        leaf_outcomes.len(),
+        4,
+        "each child contributes both leaf outcomes"
+    );
+    assert!(leaf_outcomes.iter().all(|receipt| {
+        receipt.validate().is_ok()
+            && receipt.root_cycle_id == root_cycle_id
+            && receipt.child_cycle_id.as_deref() == Some(receipt.task_cycle_id.as_str())
+            && receipt
+                .parent_seat_id
+                .as_deref()
+                .is_some_and(|parent| parent_seats.contains(parent))
+            && receipt.outcome.criterion_id == "coverage"
+            && receipt.outcome.score == 9.6
+    }));
+    assert!(child_receipts.iter().all(|receipt| {
+        receipt.root_cycle_id == root_cycle_id
+            && receipt.status == council::ChildCouncilStatus::Passed
+            && receipt.min_score == Some(9.6)
+            && receipt.leaf_score_refs.len() == 2
+    }));
+
+    let leaf_receipts = council_records::<council::CouncilReviewReceipt>(
+        &store,
+        &root_id,
+        "council_review_receipt",
+    )
+    .unwrap();
+    assert_eq!(
+        leaf_receipts.len(),
+        4,
+        "both leaves in each child have terminal receipts"
+    );
+    assert!(leaf_receipts.iter().all(|receipt| {
+        receipt.verdict == council::CouncilReviewVerdict::Passed
+            && receipt
+                .task_id
+                .as_deref()
+                .is_some_and(|task_id| task_id != root_id.as_str())
+    }));
+    assert_eq!(
+        root.council_status
+            .as_ref()
+            .map(|status| status.state.as_str()),
+        Some("passed")
+    );
+    assert!(verified_council_pass(&store, &root));
+    let generation = root.generation;
+    drop(store);
+
+    dispatch_state_runtime_test(
+        &state,
+        &root_id,
+        generation,
+        "pandacode_finish_team",
+        json!({"summary":"Both M4 child Councils passed with verified leaf outcomes."}),
+    )
+    .unwrap_or_else(|error| {
+        panic!("M4 root terminal gate refused verified child verdicts: {error}")
+    });
+    let store = state.store.lock().unwrap();
+    let terminal = load(&store, &root_id).unwrap().unwrap();
+    assert_eq!(terminal.status, "completed");
+    assert_eq!(
+        terminal
+            .council_status
+            .as_ref()
+            .map(|status| status.state.as_str()),
+        Some("passed")
+    );
+    assert!(verified_council_pass(&store, &terminal));
+}
+
+#[test]
 fn mixed_composition_quorum_requires_automatic_seats_in_addition_to_selected_bots() {
     use council::AutomaticReviewerCount as Count;
     let cases = [

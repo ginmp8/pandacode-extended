@@ -4441,6 +4441,18 @@ fn nested_m5_s3_admits_native_first_phase_but_denies_premature_approval() {
     let (second_root, _) = claim(&state, launch);
     assert!(second_root.config.reviewer_boundary);
     finish(&state, &second_root, "Independent S3 root challenge.\nCouncil score: 9.8/10", true);
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let parents = child_council::verified_parent_seats(&store, &root).unwrap()
+            .expect("S3 first-phase child receipts remain authenticated after root challenge");
+        let challenges = child_council::verified_s3_receipts(&store, &root).unwrap()
+            .expect("S3 child challenges have independent live native callback receipts");
+        assert!(mixed_native_authority_current(&store, &root),
+            "both root phases must have current independent native grants");
+        assert!(council::status_for_authenticated_children_s3(&root, &parents, &challenges).is_some(),
+            "native S3 structural gate requires all fresh root and child phase-two callbacks");
+    }
     let (settled, _) = dispatch_state(&state, &sid, started.generation,
         "pandacode_finish_team", json!({"summary":"Both native S3 root and child phases passed"}),
         &std::sync::atomic::AtomicBool::new(false)).unwrap();
@@ -4668,6 +4680,10 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
     {
         let store = state.store.lock().unwrap();
         let root = load(&store, &sid).unwrap().unwrap();
+        assert!(child_council::verified_parent_seats(&store, &root).unwrap().is_some(),
+            "a complete authenticated first child wave must remain available during S2 leaf escalation");
+        assert!(child_council::verified_s2_receipts(&store, &root).unwrap().is_none(),
+            "an admitted but unfinished S2 child wave is not an authenticated terminal receipt");
         assert!(eligible_hierarchical_s2_root_escalation(&store, &root),
             "the unchanged frozen policy and authenticated first wave must permit a new root session");
         let mut forged = root.clone();

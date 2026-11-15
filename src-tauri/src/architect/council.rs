@@ -1213,6 +1213,19 @@ pub(super) fn reviewer_source_for(
 ) -> Result<CouncilReviewerSource> {
     let config = team.config.council.as_ref().ok_or("Council is off.")?;
     let nested = !config.nested_bot_reviewers.is_empty();
+    // Source classification cannot authenticate a child receipt without the
+    // store. Reject speculative later-wave seats before any root review has
+    // actually completed; the dispatcher then checks *all* frozen first-wave
+    // root and child grants before issuing a reviewer session.
+    if nested && seat.round > 1
+        && !team.workers.iter().any(|worker|
+            worker.created_at >= team.council_since
+                && worker.council.as_ref().is_some_and(|previous|
+                    previous.round == 1 && previous.score.is_some()
+                        && worker.status == "completed"))
+    {
+        return Err("child_council_unavailable: a later root wave requires a completed first-phase root reviewer.".into());
+    }
     // S3's second root wave may use only the sources already selected for
     // this task. The dispatcher independently authenticates all first-phase
     // root and child receipts before issuing any challenge session.

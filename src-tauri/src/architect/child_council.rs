@@ -1101,16 +1101,31 @@ pub(super) fn verified_parent_seats(
             && read_escalation_receipt(store, root, &record, &child, choice)?.is_some();
         if config.strategy == super::council::CouncilExecutionStrategy::Escalated
             && !second_ready
-            && (child.workers.len() != choice.child_reviewers
-                || child.workers.iter().any(|worker| {
+        {
+            // Keep the authenticated first-wave composite seat available to
+            // authorize a fresh S2 root review while child phase two is still
+            // running. Pending second-wave leaves are NOT a terminal receipt.
+            // Unforced S2 cannot silently acquire another child wave.
+            let first_wave = child.workers.iter().filter(|worker|
+                worker.council.as_ref().is_some_and(|seat| seat.round == 1)
+            ).collect::<Vec<_>>();
+            let allowed_second_wave = config.force_escalation
+                && child.workers.len() <= 2 * choice.child_reviewers
+                && child.workers.iter().all(|worker|
+                    worker.council.as_ref().is_some_and(|seat|
+                        seat.round == 1 || seat.round == 2));
+            if first_wave.len() != choice.child_reviewers
+                || (!allowed_second_wave && child.workers.len() != choice.child_reviewers)
+                || first_wave.iter().any(|worker| {
                     worker.abandoned || worker.status != "completed"
                         || worker.council.as_ref().is_none_or(|seat| {
                             seat.score.is_none_or(|score| score < choice.child_target.max(config.target))
                                 || seat.reported_severe_finding || seat.reported_conflict
                         })
-                }))
-        {
-            ready = false;
+                })
+            {
+                ready = false;
+            }
         }
         if seat.parent_worker_id.is_empty() || seat.child_session_id.is_empty()
             || !bots.insert(seat.bot_id.clone())

@@ -291,7 +291,7 @@ test('Preview retry keeps a stopped Ticket terminal and its WorkItem blocked',as
   expect(result.snapshotHasCouncil).toBe(false);
 });
 
-test('Preview coordinated admission records Coordinator before manual Worker admission',async ({page})=>{
+test('Preview coordinated submission fails closed and preserves direct preview',async ({page})=>{
   await page.goto('/?bots=sample');
   const result=await page.evaluate(async()=>{
     const {invokeSuperagent}=await import('/src/preview-superagent.ts');
@@ -305,56 +305,120 @@ test('Preview coordinated admission records Coordinator before manual Worker adm
     await invokeSuperagent('superagent_set_enabled',{
       orchestrationId:config.id,expectedRevision:config.policyRevision,enabled:true,
     },listBots);
-    const ticket=await invokeSuperagent<{id:string;state:string}>(
-      'superagent_submit_coordinated',{
+    const directTicket=await invokeSuperagent<Record<string,any>>('superagent_submit',{
+      orchestrationId:config.id,objective:'Keep direct preview available',
+    },listBots);
+    const ticketsBefore=(await invokeSuperagent<Array<Record<string,any>>>(
+      'superagent_tickets',{orchestrationId:config.id},listBots)).map(ticket=>({...ticket}));
+    const assignmentsBefore=(await invokeSuperagent<Array<Record<string,any>>>(
+      'superagent_assignments',{ticketId:directTicket.id},listBots)).map(assignment=>({...assignment}));
+    const workItemsBefore=(await invokeSuperagent<Array<Record<string,any>>>(
+      'superagent_work_items',{ticketId:directTicket.id},listBots)).map(item=>({...item}));
+    let coordinatedSubmitError='';
+    try {
+      await invokeSuperagent('superagent_submit_coordinated',{
         orchestrationId:config.id,objective:'Plan a bounded preview task',
       },listBots);
-    const ticketStateBeforeWorker=ticket.state;
-    const assignmentsBeforeWorker=(await invokeSuperagent<Array<Record<string,any>>>(
-      'superagent_assignments',{ticketId:ticket.id},listBots)).map(assignment=>({...assignment}));
-    const workItemsBeforeWorker=await invokeSuperagent<Array<Record<string,any>>>(
-      'superagent_work_items',{ticketId:ticket.id},listBots);
-    const coordinatorActivity=(await invokeSuperagent<Array<Record<string,any>>>(
-      'superagent_activity',{ticketId:ticket.id},listBots)).map(event=>({...event}));
-
-    const dispatched=await invokeSuperagent<{state:string}>(
-      'superagent_dispatch_worker',{ticketId:ticket.id},listBots);
-    const assignmentsAfterWorker=(await invokeSuperagent<Array<Record<string,any>>>(
-      'superagent_assignments',{ticketId:ticket.id},listBots)).map(assignment=>({...assignment}));
-    const workItemsAfterWorker=await invokeSuperagent<Array<Record<string,any>>>(
-      'superagent_work_items',{ticketId:ticket.id},listBots);
-    return {ticketId:ticket.id,ticketStateBeforeWorker,
-      assignmentsBeforeWorker,workItemsBeforeWorker,coordinatorActivity,
-      ticketStateAfterWorker:dispatched.state,assignmentsAfterWorker,workItemsAfterWorker};
+    } catch(cause) { coordinatedSubmitError=cause instanceof Error?cause.message:String(cause); }
+    const ticketsAfter=(await invokeSuperagent<Array<Record<string,any>>>(
+      'superagent_tickets',{orchestrationId:config.id},listBots)).map(ticket=>({...ticket}));
+    const assignmentsAfter=(await invokeSuperagent<Array<Record<string,any>>>(
+      'superagent_assignments',{ticketId:directTicket.id},listBots)).map(assignment=>({...assignment}));
+    const workItemsAfter=(await invokeSuperagent<Array<Record<string,any>>>(
+      'superagent_work_items',{ticketId:directTicket.id},listBots)).map(item=>({...item}));
+    return {directTicket,ticketsBefore,assignmentsBefore,workItemsBefore,
+      coordinatedSubmitError,ticketsAfter,assignmentsAfter,workItemsAfter};
   });
 
-  expect(result.ticketStateBeforeWorker).toBe('queued');
-  expect(result.assignmentsBeforeWorker).toHaveLength(1);
-  expect(result.assignmentsBeforeWorker[0]).toMatchObject({
-    id:`preview-coordinator-assignment-${result.ticketId}`,
-    botId:'coordinator',sessionId:`preview-coordinator-session-${result.ticketId}`,
-    attempt:1,state:'completed',
-  });
-  expect(result.workItemsBeforeWorker).toEqual([]);
-  expect(result.coordinatorActivity[0]).toMatchObject({kind:'coordinator_preview_completed'});
-  expect(result.coordinatorActivity[0].detail).toContain('Preview-only Coordinator completion');
-  expect(result.coordinatorActivity[0].detail).toContain('no structured plan data was generated');
-  expect(result.coordinatorActivity[0]).not.toHaveProperty('plan');
-  expect(result.coordinatorActivity[0]).not.toHaveProperty('result');
+  expect(result.coordinatedSubmitError).toBe(
+    'Preview cannot run the Coordinator. Coordinated Ticket submission is unavailable.');
+  expect(result.directTicket).toMatchObject({state:'running',revision:0,evidence:null});
+  expect(result.ticketsBefore).toHaveLength(1);
+  expect(result.ticketsAfter).toEqual(result.ticketsBefore);
+  expect(result.assignmentsBefore).toHaveLength(1);
+  expect(result.assignmentsBefore[0]).toMatchObject({botId:'worker',attempt:1,state:'running'});
+  expect(result.assignmentsAfter).toEqual(result.assignmentsBefore);
+  expect(result.workItemsBefore).toHaveLength(1);
+  expect(result.workItemsBefore[0]).toMatchObject({objective:'Keep direct preview available',state:'running'});
+  expect(result.workItemsAfter).toEqual(result.workItemsBefore);
+});
 
-  expect(result.ticketStateAfterWorker).toBe('running');
-  expect(result.assignmentsAfterWorker).toHaveLength(2);
-  expect(result.assignmentsAfterWorker[0]).toEqual(result.assignmentsBeforeWorker[0]);
-  expect(result.assignmentsAfterWorker[1]).toMatchObject({
-    id:`preview-assignment-${result.ticketId}-attempt-2`,
-    botId:'worker',sessionId:`preview-session-${result.ticketId}-attempt-2`,
-    attempt:2,state:'running',
+test('Coordinated preview submission shows a visible error without creating a Ticket',async ({page})=>{
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {invokeSuperagent}=await import('/src/preview-superagent.ts');
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const listBots=async()=>[
+      {id:'coordinator',name:'Coordinator',paused:false,projectId:'preview-project'},
+      {id:'worker',name:'Worker',paused:false,projectId:'preview-project'},
+    ];
+    const config=await invokeSuperagent<{id:string;policyRevision:number}>(
+      'superagent_create',{input:{name:'Preview confirmation',coordinatorBotId:'coordinator',workerBotId:'worker'}},listBots);
+    await invokeSuperagent('superagent_set_enabled',{
+      orchestrationId:config.id,expectedRevision:config.policyRevision,enabled:true,
+    },listBots);
+    const host=document.createElement('div');host.id='sa-preview-dispatch-confirmation';document.body.appendChild(host);
+    const call=async<T>(command:string,args:Record<string,unknown>={})=>{
+      if(command==='bots_list')return await listBots() as T;
+      return await invokeSuperagent<T>(command,args,listBots);
+    };
+    mountSuperagent(host,call);
+    (window as unknown as {saPreviewDispatchState:()=>Promise<Record<string,any>>}).saPreviewDispatchState=async()=>({
+      tickets:await invokeSuperagent<Array<Record<string,any>>>('superagent_tickets',
+        {orchestrationId:config.id},listBots),
+      presets:await invokeSuperagent<Array<Record<string,any>>>('superagent_list',{},listBots),
+    });
   });
-  expect(result.workItemsAfterWorker).toHaveLength(1);
-  expect(result.workItemsAfterWorker[0]).toMatchObject({ticketId:result.ticketId,
-    objective:'Plan a bounded preview task',state:'running',ordinal:0});
-  expect(result.workItemsAfterWorker[0]).not.toHaveProperty('dependsOn');
-  expect(result.workItemsAfterWorker[0]).not.toHaveProperty('council');
+
+  const host=page.locator('#sa-preview-dispatch-confirmation');
+  const runForm=host.locator('form[data-sa-form="run"]');
+  await expect(runForm).toBeVisible();
+  await runForm.getByRole('textbox',{name:'Task objective'}).fill('Preview confirmation objective');
+  await runForm.getByRole('combobox',{name:'Dispatch'}).selectOption('coordinated');
+  await runForm.getByRole('button',{name:'Dispatch manually'}).click();
+  await expect(host.getByRole('alert')).toContainText('Preview cannot run the Coordinator.');
+  await expect(host.locator('.sa-tickets')).toContainText('No tickets yet.');
+  const state=await page.evaluate(()=>(window as unknown as {
+    saPreviewDispatchState:()=>Promise<Record<string,any>>
+  }).saPreviewDispatchState());
+  expect(state.tickets).toEqual([]);
+  expect(state.presets[0]).toMatchObject({ticketCount:0,runningCount:0,blockedCount:0});
+});
+
+test('Preview retry creates a fresh correction item after human rejection',async ({page})=>{
+  await page.goto('/?bots=sample');
+  const result=await page.evaluate(async()=>{
+    const {preparePreviewRetryState}=await import('/src/preview-superagent.ts');
+    const objective='Correct the recorded preview result';
+    const originalItem={id:'original-item',ticketId:'ticket-rejected',objective,
+      state:'completed',ordinal:0,createdAt:1,updatedAt:2};
+    const originalAssignment={id:'original-assignment',botId:'worker',sessionId:'worker-session',
+      attempt:1,state:'finished'};
+    const transition=preparePreviewRetryState({ticketId:'ticket-rejected',objective,
+      workerBotId:'worker',maxAttemptsPerAssignment:2,items:[originalItem],
+      assignments:[originalAssignment],latestActivity:{id:2,kind:'human_rejected',
+        detail:'Preview-only state transition',at:3},now:4});
+    let unrelatedCompletedItemError='';
+    try {
+      preparePreviewRetryState({ticketId:'ticket-rejected',objective,workerBotId:'worker',
+        maxAttemptsPerAssignment:2,items:[originalItem],assignments:[originalAssignment],
+        latestActivity:{id:3,kind:'manual_retry',detail:'not a rejection',at:5},now:6});
+    } catch(cause) { unrelatedCompletedItemError=cause instanceof Error?cause.message:String(cause); }
+    return {objective,originalItem,originalAssignment,transition,unrelatedCompletedItemError};
+  });
+
+  expect(result.unrelatedCompletedItemError).toContain('explicitly rejected completed WorkItem');
+  expect(result.originalItem).toMatchObject({objective:'Correct the recorded preview result',
+    state:'completed',ordinal:0,createdAt:1,updatedAt:2});
+  expect(result.originalAssignment).toMatchObject({attempt:1,state:'finished'});
+  expect(result.transition.workItems).toHaveLength(2);
+  expect(result.transition.workItems[0]).toEqual(result.originalItem);
+  expect(result.transition.workItems[1]).toMatchObject({ticketId:'ticket-rejected',
+    objective:'Correct the recorded preview result',state:'running',ordinal:1,createdAt:4,updatedAt:4});
+  expect(result.transition.workItems[1].id).not.toBe(result.originalItem.id);
+  expect(result.transition.assignment).toMatchObject({botId:'worker',sessionId:'preview-session-ticket-rejected-attempt-2',
+    attempt:2,state:'running'});
+  expect(result.transition.assignment.id).not.toBe(result.originalAssignment.id);
 });
 
 test('Preview scoped-write adapter is deterministic and creates no grant',async ({page})=>{

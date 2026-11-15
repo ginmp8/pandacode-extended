@@ -964,7 +964,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     if (target.hasAttribute('data-sa-reject-cancel')) { rejectingTicket = ''; render(); return; }
     if (target.dataset.saDispatch) {
       const t = tickets.find(item => item.id === target.dataset.saDispatch);
-      if (t?.state === 'queued') ask('Dispatch the worker using the original coordinator evidence?', async () => {
+      if (t?.state === 'queued') ask('Dispatch requires an enabled saved Team and current Coordinator evidence containing a plan.', async () => {
         await call('superagent_dispatch_worker',{ ticketId:t.id }); await reload();
       });
       return;

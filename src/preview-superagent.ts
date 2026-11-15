@@ -30,6 +30,35 @@ const configs = new Map<string,Config>(), tickets = new Map<string,Ticket[]>();
 const teamSnapshots = new Map<string,TeamSnapshot>();
 const workItems = new Map<string,WorkItem[]>();
 const get = (id:string):Config => { const c=configs.get(id); if(!c)throw Error('Orchestration not found.'); return c; };
+
+/** Build a retry transition from native-shaped state without rewriting terminal records. */
+export function preparePreviewRetryState(input:{ticketId:string;objective:string;workerBotId:string;
+  maxAttemptsPerAssignment:number;items:WorkItem[];assignments:Assignment[];
+  latestActivity?:Activity;now?:number}):{assignment:Assignment;workItems:WorkItem[]} {
+  const {ticketId,objective,workerBotId,maxAttemptsPerAssignment,items,assignments}=input;
+  const item=items[0],workerHistory=assignments.filter(entry=>entry.botId===workerBotId);
+  const latestWorkerAssignment=workerHistory[workerHistory.length-1];
+  const correctionRetry=items.length===1&&item?.ticketId===ticketId&&
+    item.state==='completed'&&item.objective===objective&&
+    latestWorkerAssignment?.state==='finished'&&input.latestActivity?.kind==='human_rejected';
+  const failedWorkItemRetry=items.length===1&&item?.ticketId===ticketId&&
+    ['blocked','failed'].includes(item.state);
+  if(!correctionRetry&&!failedWorkItemRetry)
+    throw Error('Preview retry requires one recoverable WorkItem or an explicitly rejected completed WorkItem.');
+  if(workerHistory.length>=maxAttemptsPerAssignment)
+    throw Error('Manual worker retry limit reached; create a new authorized ticket.');
+  const attempt=Math.max(0,...assignments.map(entry=>entry.attempt))+1;
+  const now=input.now??Date.now();
+  const assignment:Assignment={id:`preview-assignment-${ticketId}-attempt-${attempt}`,
+    botId:workerBotId,sessionId:`preview-session-${ticketId}-attempt-${attempt}`,attempt,state:'running'};
+  const workItems=correctionRetry
+    ? [...items,{id:`preview-work-item-${ticketId}-correction-${attempt}`,ticketId,
+        objective,state:'running',ordinal:Math.max(-1,...items.map(workItem=>workItem.ordinal))+1,
+        createdAt:now,updatedAt:now}]
+    : items.map(workItem=>({...workItem,state:'running',updatedAt:now}));
+  return {assignment,workItems};
+}
+
 export async function invokeSuperagent<T>(
   command:string,args:Record<string,any>,listBots:()=>Promise<Bot[]>,
 ):Promise<T> {
@@ -217,29 +246,18 @@ export async function invokeSuperagent<T>(
     case 'superagent_submit_coordinated':{
       const c=get(args.orchestrationId);if(!c.enabled)throw Error('Orchestration disabled.');
       const coordinated=command==='superagent_submit_coordinated';
+      if(coordinated)
+        throw Error('Preview cannot run the Coordinator. Coordinated Ticket submission is unavailable.');
       const t:Ticket={id:crypto.randomUUID(),orchestrationId:c.id,objective:args.objective,
-        state:coordinated?'queued':'running',revision:0,evidence:null};
+        state:'running',revision:0,evidence:null};
       teamSnapshots.set(t.id,makeTeamSnapshot(c));
       tickets.set(c.id,[...(tickets.get(c.id)||[]),t]);
-      assignments.set(t.id,coordinated
-        ? [{id:'preview-coordinator-assignment-'+t.id,botId:c.coordinatorBotId,
-            sessionId:'preview-coordinator-session-'+t.id,attempt:1,state:'completed'}]
-        : [{id:'preview-assignment-'+t.id,botId:c.workerBotId,
-            sessionId:'preview-session-'+t.id,attempt:1,state:'running'}]);
-      // A direct worker owns the objective immediately. Coordinated preview
-      // completes the Coordinator stage immediately to expose the queued state,
-      // but records no coordinator plan or result.
-      if(command==='superagent_submit'){
-        const now=Date.now();
-        workItems.set(t.id,[{id:'preview-work-item-'+t.id,ticketId:t.id,
-          objective:t.objective,state:'running',ordinal:0,createdAt:now,updatedAt:now}]);
-      }
-      activity.set(t.id,[{id:1,
-        kind:coordinated?'coordinator_preview_completed':'admitted',
-        detail:coordinated
-          ? 'Preview-only Coordinator completion; no structured plan data was generated. Worker admission remains manual.'
-          : 'Manual read-only preview assignment',
-        at:Date.now()}]);
+      assignments.set(t.id,[{id:'preview-assignment-'+t.id,botId:c.workerBotId,
+        sessionId:'preview-session-'+t.id,attempt:1,state:'running'}]);
+      const now=Date.now();
+      workItems.set(t.id,[{id:'preview-work-item-'+t.id,ticketId:t.id,
+        objective:t.objective,state:'running',ordinal:0,createdAt:now,updatedAt:now}]);
+      activity.set(t.id,[{id:1,kind:'admitted',detail:'Manual read-only preview assignment',at:now}]);
       value=t;break;
     }
     case 'superagent_stop':
@@ -253,45 +271,35 @@ export async function invokeSuperagent<T>(
         if(['completed','stopped','failed'].includes(t.state))throw Error('Ticket already finished.');
         t.state='stopped';
       }else if(command==='superagent_dispatch_worker') {
+        const config=get(t.orchestrationId);
+        if(!config.enabled)throw Error('Orchestration disabled.');
         if(t.state!=='queued')throw Error('No coordinator plan.');
         const snapshot=teamSnapshots.get(t.id),history=assignments.get(t.id)||[];
         const coordinatorAssignment=history[0];
         const workerBotId=snapshot?.workerBotIds[0];
         if(!snapshot||history.length!==1||!coordinatorAssignment||
           coordinatorAssignment.botId!==snapshot.coordinatorBotId||
-          coordinatorAssignment.attempt!==1||coordinatorAssignment.state!=='completed'||!workerBotId)
+          coordinatorAssignment.attempt!==1||coordinatorAssignment.state!=='finished'||!workerBotId)
           throw Error('Preview Coordinator assignment is unavailable.');
         if((workItems.get(t.id)||[]).length!==0)
           throw Error('Preview worker admission already has a WorkItem.');
-        const attempt=Math.max(0,...history.map(entry=>entry.attempt))+1;
-        history.push({id:`preview-assignment-${t.id}-attempt-${attempt}`,botId:workerBotId,
-          sessionId:`preview-session-${t.id}-attempt-${attempt}`,attempt,state:'running'});
-        assignments.set(t.id,history);
-        t.state='running';
-        const now=Date.now();
-        workItems.set(t.id,[{id:'preview-work-item-'+t.id,ticketId:t.id,
-          objective:t.objective,state:'running',ordinal:0,createdAt:now,updatedAt:now}]);
+        // The preview has no structured Coordinator plan or evidence. Refuse
+        // before touching the Ticket, Assignment history or WorkItems.
+        throw Error('Preview cannot dispatch a Worker without recorded Coordinator evidence and a plan.');
       }else if(command==='superagent_retry') {
         if(t.state!=='blocked')throw Error('Only a blocked SuperAgent ticket can be retried manually.');
         const items=workItems.get(t.id)||[];
-        if(items.length!==1)throw Error('Preview retry requires exactly one blocked or failed WorkItem.');
-        const item=items[0];
-        if(!item||item.ticketId!==t.id||!['blocked','failed'].includes(item.state))
-          throw Error('Preview retry requires exactly one blocked or failed WorkItem.');
         const config=get(t.orchestrationId),snapshot=teamSnapshots.get(t.id);
         const workerBotId=snapshot?.workerBotIds[0];
         if(!config.enabled)throw Error('Orchestration disabled.');
         if(!snapshot||!workerBotId)throw Error('Saved preview worker is unavailable.');
         const history=assignments.get(t.id)||[];
-        const workerAttempts=history.filter(entry=>entry.botId===workerBotId).length;
-        if(workerAttempts>=snapshot.policy.maxAttemptsPerAssignment)
-          throw Error('Manual worker retry limit reached; create a new authorized ticket.');
-        const attempt=Math.max(0,...history.map(entry=>entry.attempt))+1;
-        const now=Date.now();
-        history.push({id:`preview-assignment-${t.id}-attempt-${attempt}`,botId:workerBotId,
-          sessionId:`preview-session-${t.id}-attempt-${attempt}`,attempt,state:'running'});
+        const transition=preparePreviewRetryState({ticketId:t.id,objective:t.objective,workerBotId,
+          maxAttemptsPerAssignment:snapshot.policy.maxAttemptsPerAssignment,items,assignments:history,
+          latestActivity:(activity.get(t.id)||[])[0]});
+        history.push(transition.assignment);
         assignments.set(t.id,history);
-        workItems.set(t.id,items.map(workItem=>({...workItem,state:'running',updatedAt:now})));
+        workItems.set(t.id,transition.workItems);
         t.state='running';
         t.evidence=null;
       }else {
@@ -305,7 +313,8 @@ export async function invokeSuperagent<T>(
           ? {...item,state:'blocked',updatedAt:Date.now()} : item));
       }
       const events=activity.get(t.id)||[];
-      events.unshift({id:events.length+1,kind:command.slice('superagent_'.length),
+      events.unshift({id:events.length+1,kind:command==='superagent_reject'
+        ? 'human_rejected':command.slice('superagent_'.length),
         detail:'Preview-only state transition',at:Date.now()});
       activity.set(t.id,events);
       value=t;break;

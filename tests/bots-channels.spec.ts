@@ -947,4 +947,34 @@ test.describe('shared bot channels', () => {
     await expect(channel.locator('.bc-assigned')).toHaveCount(1);
     await expect(channel.locator('.bc-assigned')).toContainText('Assigned to Scout');
   });
+
+  test('Council off keeps ordinary channel posting available without Council delivery UI', async ({ page }) => {
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    const trigger = composer.locator('.bc-council-trigger');
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    const prompt = page.getByRole('textbox', { name: 'Message channel' });
+    const channel = page.locator('.conversation-pane.channel-thread .bc-channel');
+    const text = 'Ordinary channel review.';
+    const posts = () => page.evaluate(() => (window as any).__previewSharedChannelPosts ?? []);
+
+    await expect(trigger).toHaveAttribute('aria-label', 'Council: off');
+    await expect(panel).toBeHidden();
+    await prompt.fill(text);
+    await composer.getByRole('button', { name: 'Send message' }).click();
+
+    await expect(composer).toHaveAttribute('aria-busy', 'false');
+    await expect(prompt).toBeEnabled();
+    await expect(channel.locator('.bc-message.from-user .bc-message-text')).toContainText(text);
+    await expect.poll(async () => (await posts()).length).toBe(1);
+    expect(await posts()).toEqual([{ channelId: 'sample-launch', text }]);
+
+    const delivery = channel.locator('.bc-assigned').last();
+    await expect(delivery).toContainText('Assigned to Scout');
+    await expect(delivery).not.toContainText('Council:');
+    await expect(delivery.getByRole('button', { name: 'View Council report' })).toHaveCount(0);
+    await expect(trigger).toHaveAttribute('aria-label', 'Council: off');
+    await expect(panel).toBeHidden();
+  });
 });

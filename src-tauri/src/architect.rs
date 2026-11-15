@@ -6791,7 +6791,7 @@ fn preflight_dispatch_batch(
             let profile = if assignment.profile_id.as_deref() == Some(routing::AUTO)
                 || (unchosen && routes.contains_key(&assignment.key))
             {
-                routing::staff(&team.config, parent, &assignment, routes)?
+                routing::staff(&team.config, parent, &assignment, routes)?.0
             } else {
                 staff(&team.config, parent, &assignment)?
             };

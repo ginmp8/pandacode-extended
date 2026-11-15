@@ -7542,7 +7542,7 @@ fn composed_child_terminal_roster_rejects_phantom_and_duplicate_parent_seats() {
         findings_refs: vec![], evidence_refs: vec![],
         snapshot_fingerprint: "child-fingerprint".into(),
     };
-    assert!(child_receipt_roster_current(&team, &[receipt.clone()]));
+    assert!(child_receipt_roster_current(&team, std::slice::from_ref(&receipt)));
     assert!(!child_receipt_roster_current(&team, &[receipt.clone(), receipt.clone()]),
         "a second receipt for one root seat must not silently count as another child");
     let mut phantom = receipt.clone();

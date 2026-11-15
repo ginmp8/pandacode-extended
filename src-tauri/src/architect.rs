@@ -585,6 +585,14 @@ fn authenticated_hierarchical_status(
         }
         let second = child_council::verified_s2_receipts(store, team).ok().flatten()?;
         council::status_for_authenticated_children_s2(team, &children, &second)
+    } else if config.strategy == council::CouncilExecutionStrategy::TwoPhase
+        && config.mode() == "m4"
+    {
+        // M4 has no root leaf reviewers to substitute for child challengers.
+        // Both child phases are authenticated separately before the native
+        // Council gate can produce a terminal result.
+        let challenges = child_council::verified_s3_receipts(store, team).ok().flatten()?;
+        council::status_for_authenticated_children_s3(team, &children, &challenges)
     } else {
         council::status_for_authenticated_children(team, &children)
     }

@@ -4753,14 +4753,15 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
         }
         completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
     }
-    let (unverified, _) = dispatch_state(&state, &sid, started.generation,
-        "pandacode_finish_team", json!({"summary":"Await authenticated S3 terminal gate"}),
+    let (settled, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Verify both authenticated S3 child phases"}),
         &std::sync::atomic::AtomicBool::new(false)).unwrap();
-    assert_eq!(unverified["completed"], false,
-        "two rounds of real scores do not confer terminal approval without authenticated challenge receipts");
+    assert_eq!(settled["completed"], true,
+        "M4/S3 requires two independently authenticated child phases before terminal approval");
     let store = state.store.lock().unwrap();
     let root = load(&store, &sid).unwrap().unwrap();
-    assert!(!verified_council_pass(&store, &root));
+    assert!(verified_council_pass(&store, &root),
+        "only fresh native challenge receipts can settle the root Council");
     let challenges = child_council::verified_s3_receipts(&store, &root).unwrap().unwrap();
     assert_eq!(challenges.len(), 2, "both native S3 child phases must have authenticated receipts");
     assert!(challenges.iter().all(|receipt|
@@ -4790,6 +4791,8 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
     ).unwrap();
     assert!(child_council::verified_s3_receipts(&store, &root).is_err(),
         "a forged phase-two receipt must fail native challenge verification");
+    assert!(!verified_council_pass(&store, &root),
+        "a modified receipt must revoke an otherwise completed root approval");
     store.db.execute(
         "UPDATE architect_requests SET content=?3
          WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s3_receipt'",
@@ -4797,6 +4800,8 @@ fn nested_m4_s3_admits_fresh_child_challengers_without_approving_unverified_phas
     ).unwrap();
     assert_eq!(child_council::verified_s3_receipts(&store, &root).unwrap().unwrap().len(), 2,
         "restoring the exact native receipt must restore read-only verification");
+    assert!(verified_council_pass(&store, &root),
+        "only the restored exact native receipt may revalidate the stored pass");
 }
 
 #[test]

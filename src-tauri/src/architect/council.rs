@@ -2045,6 +2045,78 @@ pub(super) fn status_for_authenticated_children_s2(
     })
 }
 
+/// An M4 S3 root has no direct or automatic reviewer source. Admit terminal
+/// success only from two native, independently verified child Council phases;
+/// each child remains a single top-level seat and never contributes phantom
+/// root reviewers. Callers must reauthenticate the native receipts and grants.
+pub(super) fn status_for_authenticated_children_s3(
+    team: &TeamSnapshot,
+    children: &[super::child_council::AuthenticatedParentSeat],
+    challenges: &[super::child_council::VerifiedChildChallengeReceipt],
+) -> Option<CouncilStatus> {
+    let config = team.config.council.as_ref()?;
+    if config.strategy != CouncilExecutionStrategy::TwoPhase
+        || config.mode() != "m4" || accepted(team) || team.council_since <= 0
+        || !(MIN_REVIEWERS..=MAX_REVIEWERS).contains(&config.needed())
+        || latest_round(team) != 0
+        || children.len() != config.nested_bot_reviewers.len()
+        || challenges.len() != children.len()
+        || team.workers.iter().any(|worker| !worker.read_only && unsettled(&worker.status))
+    {
+        return None;
+    }
+    // Reuse the existing Council gate for phase one. This is a read-only
+    // projection of the same native workers, never a policy/grant mutation.
+    let mut first = team.clone();
+    first.config.council.as_mut()?.strategy = CouncilExecutionStrategy::Parallel;
+    let phase_one = status_for_authenticated_children(&first, children)?;
+    if phase_one.state != "passed" || phase_one.stale { return None; }
+    let mut lowest = phase_one.lowest?;
+    let mut bots = std::collections::HashSet::new();
+    let mut leaf_ids = std::collections::HashSet::new();
+    for challenge in challenges {
+        let second = &challenge.phase_two;
+        let choice = config.nested_bot_reviewers.iter()
+            .find(|choice| choice.bot_id == second.bot_id)?;
+        let parent = children.iter().find(|parent| parent.bot_id == second.bot_id
+            && parent.child_session_id == second.child_session_id
+            && parent.root_cycle_id == second.root_cycle_id)?;
+        if challenge.phase_one_receipt_sha256 != parent.child_receipt_sha256
+            || second.objective_sha256 != parent.objective_sha256
+            || second.policy_sha256 != parent.policy_sha256
+            || !bots.insert(second.bot_id.as_str())
+            || second.leaf_worker_ids.len() != choice.child_reviewers
+            || !second.lowest_score.is_finite()
+            || second.lowest_score < config.target.max(choice.child_target)
+            || second.leaf_worker_ids.iter().any(|id|
+                id.is_empty() || !leaf_ids.insert(id.as_str()))
+        {
+            return None;
+        }
+        // A composite minimum cannot satisfy a missing mandatory criterion,
+        // and a scored report cannot stand in for independent evidenceRequired.
+        for criterion in config.criteria.iter().filter(|criterion| criterion.required) {
+            if criterion.evidence_required || !second.criterion_evidence.iter().any(|proof|
+                proof.id == criterion.id
+                    && same_lens(&proof.lens, &criterion.lens)
+                    && !proof.leaf_worker_ids.is_empty()
+                    && proof.leaf_worker_ids.iter().all(|id|
+                        second.leaf_worker_ids.contains(id))
+                    && proof.lowest_score.is_finite()
+                    && proof.lowest_score >= config.target.max(criterion.target))
+            {
+                return None;
+            }
+        }
+        lowest = lowest.min(second.lowest_score);
+    }
+    if bots.len() != config.nested_bot_reviewers.len() { return None; }
+    Some(CouncilStatus {
+        state: "passed".into(), round: 2, lowest: Some(lowest),
+        target: config.target, stale: false, notice: None,
+    })
+}
+
 /// The snapshot's `councilStatus`, from the same checks as the gate.
 pub(super) fn status(team: &TeamSnapshot) -> Option<CouncilStatus> {
     let config = team.config.council.as_ref()?;

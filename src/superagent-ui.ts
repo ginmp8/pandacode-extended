@@ -111,6 +111,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let preflightObjective = '', preflightMode: 'coordinated' | 'direct' = 'coordinated';
   // Persist the user's editable preset draft across asynchronous list refreshes.
   let draftPresetName = '', draftPresetTemplate = '';
+  // Team roles are an unsaved draft until native create confirms the exact roster.
+  let draftCoordinatorBotId = '', draftWorkerBotId = '';
+  let draftAdditionalWorkerIds: string[] = [], draftReviewerBotIds: string[] = [];
+  let draftMembersExpanded = false;
   let rejectingTicket = '', inspectedTicket = '';
   let inspectedAssignmentId = '';
   let activityMode: 'all' | 'compact' | 'json' = 'all';
@@ -166,10 +170,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       (item.enabled ? 'Manual' : 'Off') + '</span>' +
       '<button type="button" data-sa-select="' + safe(item.id) + '" aria-current="' +
       (item.id === selected) + '">Details</button></li>').join('');
-    const optionsFor = (botId: string) => bots.map(bot => '<option value="' + safe(bot.id) + '"' +
-      (bot.paused ? ' disabled' : '') + (bot.id === botId ? ' selected' : '') + '>' + safe(bot.name) +
-      (bot.paused ? ' (paused)' : '') + '</option>').join('');
-    const choices = optionsFor('');
+    const optionsFor = (selected: string | string[]) => {
+      const selectedIds = Array.isArray(selected) ? selected : [selected];
+      return bots.map(bot => '<option value="' + safe(bot.id) + '"' +
+        (bot.paused ? ' disabled' : '') + (selectedIds.includes(bot.id) ? ' selected' : '') +
+        '>' + safe(bot.name) + (bot.paused ? ' (paused)' : '') + '</option>').join('');
+    };
     const chosen = current();
     const inspected = tickets.find(ticket => ticket.id === inspectedTicket);
     const activity = (ticketDetails?.activity ?? []).filter(entry => {
@@ -674,6 +680,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<button type="button" data-sa-view="' + id + '" aria-current="' +
         (workspaceView === id ? 'page' : 'false') + '">' + label + '</button>').join('') +
       '</nav>';
+    // A full workspace render must not silently close the expanded member editor.
+    const memberEditor = host.querySelector<HTMLDetailsElement>('details.sa-new-members');
+    if (memberEditor) draftMembersExpanded = memberEditor.open;
     host.innerHTML = '<div class="sa-ui">' +
       '<p class="sa-intro">A Team is a reusable SuperAgent. All Run actions below use native Ticket and Mandate records; writes, automatic GitHub dispatch and Council verdicts are not yet supported.</p>' +
       (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
@@ -710,17 +719,18 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<label>Name<input name="name" maxlength="120" placeholder="Software Development" value="' +
           safe(draftPresetName) + '" required></label>' +
           '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" required>' +
-          '<option value="">Choose bot</option>' + choices + '</select></label>' +
+          '<option value="">Choose bot</option>' + optionsFor(draftCoordinatorBotId) + '</select></label>' +
           '<label>Worker<select name="workerBotId" required><option value="">Choose bot</option>' +
-          choices + '</select></label></div>' +
-          '<details class="sa-new-members"><summary>Additional Team members (optional)</summary>' +
+          optionsFor(draftWorkerBotId) + '</select></label></div>' +
+          '<details class="sa-new-members"' + (draftMembersExpanded ? ' open' : '') +
+          '><summary>Additional Team members (optional)</summary>' +
           '<p>Choose up to seven additional Workers and four independent Reviewers. ' +
           'Each bot has one role, and Workers must share the primary Worker project. ' +
           'Multi-member Teams remain Off until scoped admission is supported.</p>' +
           '<label>Additional Workers<select name="additionalWorkers" multiple size="4">' +
-          choices + '</select></label>' +
+          optionsFor(draftAdditionalWorkerIds) + '</select></label>' +
           '<label>Optional Reviewers<select name="reviewers" multiple size="4">' +
-          choices + '</select></label></details>' +
+          optionsFor(draftReviewerBotIds) + '</select></label></details>' +
           '<button class="primary-button" type="submit"' +
           (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' + overview + teamRoles
         : '') +
@@ -838,6 +848,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   // Templates populate editable names only; no bot, tool or task is selected.
   host.addEventListener('change', event => {
     const target = event.target;
+    if (target instanceof HTMLSelectElement &&
+        target.closest('form[data-sa-form="create"]') &&
+        ['coordinatorBotId', 'workerBotId', 'additionalWorkers', 'reviewers'].includes(target.name)) {
+      if (target.name === 'coordinatorBotId') draftCoordinatorBotId = target.value;
+      else if (target.name === 'workerBotId') draftWorkerBotId = target.value;
+      else if (target.name === 'additionalWorkers')
+        draftAdditionalWorkerIds = Array.from(target.selectedOptions, option => option.value);
+      else if (target.name === 'reviewers')
+        draftReviewerBotIds = Array.from(target.selectedOptions, option => option.value);
+      return;
+    }
     if (target instanceof HTMLSelectElement && target.name === 'reviewers' &&
         target.closest('form[data-sa-form="roster"]')) {
       if (busy || !roleRoster || roleRoster.orchestrationId !== selected) return;
@@ -1513,6 +1534,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           : undefined;
         const created = await call<Config>('superagent_create',{ input,roster });
         draftPresetName = ''; draftPresetTemplate = '';
+        draftCoordinatorBotId = ''; draftWorkerBotId = '';
+        draftAdditionalWorkerIds = []; draftReviewerBotIds = []; draftMembersExpanded = false;
         selected = created.id; workspaceView = 'runs'; await reload();
       });
     }

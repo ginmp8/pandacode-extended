@@ -345,3 +345,13 @@ test('seat verdicts: at target everywhere, and only a complete round\'s lowest w
   // The target is native's when it has one.
   assert.equal(seatVerdict(team([mid], { target: 9.5, maxRounds: 10, reviewers: 0 }, { councilStatus: { ...status('fixing', 1), target: 8.5 } }), mid).tone, 'at');
 });
+test('old reviewer claims are projected only for the current root Council cycle', () => {
+  const team = {
+    sessionId: 'review-root', councilSince: 47,
+    councilHistoricalReportedFindings: [
+      { cycleId: 'review-root:47', id: 'old-claim', title: '<img src=x>' },
+      { cycleId: 'foreign-root:47', id: 'foreign-claim', title: 'Foreign' },
+    ],
+  };
+  assert.deepEqual(councilLedgerForCurrentCycle(team).historicalReportedFindings?.map(item => item.id), ['old-claim']);
+});

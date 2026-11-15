@@ -1583,3 +1583,32 @@ for (const width of [1280, 560]) {
   });
 }
 });
+test('historical claims render inertly and never claim verified native approval', async ({ page }) => {
+  await open(page, '/?council=composition');
+  const html = await page.evaluate(async () => {
+    const { councilReadOnlyPresenterHtml } = await import('/src/council-panel.ts');
+    return councilReadOnlyPresenterHtml({
+      cycleId: 'root:7',
+      historicalReportedFindings: [{
+        schemaVersion: 1, id: 'root:7:worker:7:0', cycleId: 'root:7', round: 1,
+        workerId: 'reviewer-a', reportMessageId: 7, lens: 'Security',
+        severity: 'high', category: 'Authorization',
+        title: '<img src=x onerror=alert(1)>',
+        explanation: 'Earlier unresolved claim', artifactRevision: 'revision:1',
+        verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false,
+      }],
+    });
+  });
+  await page.evaluate(html => {
+    const host = document.createElement('div');
+    host.id = 'council-historical-proof';
+    host.innerHTML = html;
+    document.body.append(host);
+  }, html);
+  const history = page.locator('#council-historical-proof').getByRole('region', { name: 'Earlier reviewer-reported findings' });
+  await expect(history).toContainText('<img src=x onerror=alert(1)>');
+  await expect(history).toContainText('not proof of fixes');
+  await expect(history).toContainText('Finding ID root:7:worker:7:0');
+  await expect(history.locator('img')).toHaveCount(0);
+  await expect(page.locator('#council-historical-proof')).not.toContainText('Verified native pass');
+});

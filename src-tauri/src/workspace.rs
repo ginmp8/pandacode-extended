@@ -434,6 +434,7 @@ fn windows_file_dacl(file: &File) -> Result<WindowsFileDacl, String> {
     })
 }
 
+/// A DACL copy needs READ_CONTROL and WRITE_DAC on the destination handle.
 #[cfg(windows)]
 fn preserve_windows_file_dacl(source: &File, destination: &File) -> Result<(), String> {
     use std::os::windows::io::AsRawHandle;
@@ -858,10 +859,11 @@ fn write_scoped_text_at(target: ScopedWriteTarget, text: &str) -> Result<(), Str
 
     let parent = target.directories.last().ok_or("Invalid scoped write path")?;
     let temp_name = format!(".pandacode-write-{}.tmp", crate::storage::id());
+    // SetSecurityInfo needs READ_CONTROL as well as WRITE_DAC.
     let mut file = nt_open_relative(
         HANDLE(parent.as_raw_handle()),
         OsStr::new(&temp_name),
-        0x0015_0082, // DELETE | WRITE_DAC | SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_WRITE_DATA
+        0x0017_0082, // DELETE | WRITE_DAC | READ_CONTROL | SYNCHRONIZE | FILE_READ_ATTRIBUTES | FILE_WRITE_DATA
         0x3, // share read/write, deliberately no delete sharing while the temp is installed
         2, // FILE_CREATE; collisions fail closed
         0x0020_0060, // OPEN_REPARSE_POINT | SYNCHRONOUS_IO_NONALERT | NON_DIRECTORY_FILE
@@ -937,6 +939,9 @@ fn write_scoped_text_at(target: ScopedWriteTarget, text: &str) -> Result<(), Str
             file_information_class: u32,
         ) -> windows::Win32::Foundation::NTSTATUS;
     }
+    // FileRenameInformation cannot replace a target that still has an
+    // open handle. We already copied its DACL, so release the handle now.
+    drop(target.existing);
     let mut io_status = IoStatusBlock { status: 0, information: 0 };
     let status = unsafe {
         NtSetInformationFile(

@@ -500,6 +500,9 @@ pub struct CouncilInspection {
     pub usage_by_round_source: Vec<CouncilUsageGroup>,
     /// Attributed excerpts from durable reviewer messages. Claims are NOT verified evidence.
     pub reported_findings: Vec<CouncilReportedFinding>,
+    /// Older scored claims in this cycle; not current triggers, check receipts or approval.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub historical_reported_findings: Vec<CouncilReportedFinding>,
     /// Bounded current-cycle claim counts only, never independent verified evidence.
     pub finding_triage: CouncilFindingTriage,
 }
@@ -749,6 +752,51 @@ pub(super) fn reported_findings(store: &storage::Store, team: &TeamSnapshot) -> 
     findings
 }
 
+/// Preserve older scored reviewer claims for read-only inspection after a
+/// later coordination turn. Never use them as live triggers or verified fixes.
+pub(super) fn historical_reported_findings(
+    store: &storage::Store, team: &TeamSnapshot,
+) -> Vec<CouncilReportedFinding> {
+    let mut history = Vec::new();
+    for (worker, seat) in seats(team) {
+        if worker.status != "completed" || !counts(worker, seat) || seat.score.is_none() {
+            continue;
+        }
+        let latest = store.db.query_row(
+            "SELECT m.id, substr(m.content,-8192),
+                    EXISTS(SELECT 1 FROM messages newer
+                           WHERE newer.session_id=m.session_id AND newer.id>m.id
+                             AND newer.role IN ('user','coordination'))
+             FROM messages m WHERE m.session_id=?1 AND m.role='assistant'
+             ORDER BY m.id DESC LIMIT 1",
+            params![worker.session_id],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)),
+        ).optional().ok().flatten();
+        let Some((message_id, report, has_newer_turn)) = latest else { continue };
+        if has_newer_turn == 0 || parse_score(&report) != seat.score { continue; }
+        for (index, draft) in parse_reported_findings(&report).into_iter().enumerate() {
+            history.push(CouncilReportedFinding {
+                schema_version: 1,
+                id: format!("{}:{}:{}:{message_id}:{index}", team.session_id, team.council_since, worker.id),
+                cycle_id: format!("{}:{}", team.session_id, team.council_since),
+                round: seat.round,
+                worker_id: worker.id.clone(),
+                report_message_id: message_id,
+                lens: seat.lens.clone(),
+                severity: draft.severity,
+                category: draft.category,
+                title: draft.title,
+                explanation: draft.explanation,
+                artifact_revision: worker.reviewer_binding.as_ref().map(|binding| binding.artifact_revision.clone()),
+                verified_evidence_refs: Vec::new(),
+                evidence_verified: false,
+                location_verified: false,
+            });
+        }
+    }
+    history
+}
+
 /// A high-severity claim is admitted only from the same native assistant report
 /// that supplied the reviewer's scored completion. It may require further review
 /// but cannot itself serve as independently verified evidence.
@@ -834,6 +882,7 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
         usage_by_round_source: usage_by_round_source(&attempts),
         usage: usage_totals(&attempts), attempts, composed_usage: None,
         reserved_children: Vec::new(), reported_findings: Vec::new(),
+        historical_reported_findings: Vec::new(),
         finding_triage: CouncilFindingTriage::default(),
     })
 }

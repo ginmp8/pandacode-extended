@@ -523,6 +523,34 @@ test('native Council findings remain attributed unverified and safe to render', 
   await expect(findings.locator('img')).toHaveCount(0);
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
 });
+test('a newer reviewer turn retains unverified history without approving a fix', async ({ page }) => {
+  const inspection = {
+    cycleStartedAt: 1000, teamRevision: 11,
+    status: { state: 'fixing', round: 2, lowest: 6, target: 9, stale: true },
+    verifiedPass: false, criteria: [], attempts: [], reportedFindings: [],
+    findingTriage: { reported: 0, highPriorityClaims: 0, unverifiedClaims: 0 },
+    historicalReportedFindings: [
+      { schemaVersion: 1, id: 'old:cycle:worker:22:0', cycleId: 'old:cycle', round: 1,
+        workerId: 'former-reviewer', reportMessageId: 22, lens: 'Security',
+        severity: 'high', category: 'authorization',
+        title: '<img src=x onerror=alert(1)>', explanation: 'Earlier report identified a missing guard',
+        artifactRevision: 'frozen-revision', verifiedEvidenceRefs: [],
+        evidenceVerified: false, locationVerified: false },
+    ],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const inspector = panel(page).locator('.council-inspection');
+  const history = inspector.getByRole('region', { name: 'Earlier reviewer-reported findings' });
+  await expect(history.getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
+  await expect(history).toContainText('No automatic resolution or native approval is inferred');
+  await expect(history).toContainText('Finding ID old:cycle:worker:22:0');
+  await expect(history.locator('img')).toHaveCount(0);
+  await expect(inspector.getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(inspector.getByText('Verified native pass', { exact: false })).toHaveCount(0);
+  await expect(inspector.locator('.council-finding-triage')).toContainText('Native current-cycle reviewer claims: 0');
+});
 test('native inspector attributes reported findings to the exact reviewer and round without promoting their claims', async ({ page }) => {
   const attempt = (workerId: string, name: string, round: number) => ({
     workerId, name, round, lens: 'Security', reviewerSource: 'direct_bot',

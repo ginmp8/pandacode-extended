@@ -1205,6 +1205,7 @@ pub(crate) fn council_inspection_state(
     if issued_seats_are_valid {
         if let Some(result) = inspection.as_mut() {
             result.reported_findings = council::reported_findings(store, &team);
+            result.historical_reported_findings = council::historical_reported_findings(store, &team);
             result.finding_triage = council::finding_triage(&result.reported_findings);
         }
     }

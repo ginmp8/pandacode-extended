@@ -60,6 +60,14 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
       escape(String(triage!.highPriorityClaims)) + ' · Independently unverified: ' +
       escape(String(triage!.unverifiedClaims)) + ' (not a verified defect or Council pass)</p>'
     : '';
+  const history = (inspection.historicalReportedFindings ?? []).slice(-32);
+  const historicalHtml = history.length
+    ? '<section aria-label="Earlier reviewer-reported findings" class="council-historical-findings">' +
+      '<h4>Earlier reviewer reports (unverified history)</h4>' +
+      '<p>A newer reviewer turn does not prove these findings were fixed. ' +
+      'No automatic resolution or native approval is inferred.</p><ul>' +
+      history.map(findingRow).join('') + '</ul></section>'
+    : '';
   const shown = inspection.attempts.slice(-32);
   const rounds = [...new Set(shown.map(a => a.round))];
   const criteria = inspection.criteria ?? [];
@@ -313,7 +321,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     ': ' + escape(inspection.status.state) + ' · Revision ' + escape(String(inspection.teamRevision)) +
     '</p>' + criteriaHtml + observedCriteriaHtml +
     completion + sourceBreakdown + strategyHtml + usageHtml + composedHtml + groupHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
-    (attempts || '<p>No reviewer attempts have been admitted.</p>') + childHtml + findingTriageHtml + findingsHtml + '</div>';
+    (attempts || '<p>No reviewer attempts have been admitted.</p>') + childHtml + findingTriageHtml + findingsHtml + historicalHtml + '</div>';
 }
 
 /** Native lookup on demand; closing and reopening always retrieves fresh evidence. */

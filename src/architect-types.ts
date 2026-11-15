@@ -131,6 +131,8 @@ export interface CouncilInspection {
   /** Absent in older builds; all groups together count each root worker ID at most once. */
   usageByRoundSource?: CouncilUsageGroup[];
   reportedFindings?: CouncilReportedFinding[];
+  /** Prior scored claims from this cycle, never verified fixes or native approval. */
+  historicalReportedFindings?: CouncilReportedFinding[];
   /** Native current-cycle claim counts, never verified defects or approval. */
   findingTriage?: { reported: number; highPriorityClaims: number; unverifiedClaims: number };
   /** Absent on legacy builds; pending children cannot be presented as a passing quorum. */

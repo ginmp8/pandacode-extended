@@ -3870,27 +3870,33 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         [session_id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     ).optional().map_err(|e| e.to_string())?;
     let Some((task_id, assignment_id, bot_id, started_at, attempt)) = assignment else { return Ok(false) };
-    let team_snapshot = ticket_team_snapshot(store,&task_id)?;
+    // A corrupted or missing frozen Ticket snapshot must not strand a live
+    // callback or turn it into successful evidence. Settle it as blocked and
+    // revoke the mandate; never substitute mutable Team policy as authority.
+    let team_snapshot = ticket_team_snapshot(store,&task_id).ok();
     let prior_ticket_revision: i64 = tx.query_row(
         "SELECT revision FROM sa_tickets WHERE id=?1",[&task_id],|row| row.get(0),
     ).map_err(|e| e.to_string())?;
-    let coordinator = bot_id == team_snapshot.coordinator_bot_id;
-    let role_current = assignment_role_authorized(store,&task_id,&bot_id,attempt)?;
+    let coordinator = team_snapshot.as_ref().is_some_and(|snapshot|
+        bot_id == snapshot.coordinator_bot_id);
+    let role_current = team_snapshot.is_some()
+        && assignment_role_authorized(store,&task_id,&bot_id,attempt).unwrap_or(false);
     // Reuse the same Ticket-snapshot validation as the provider/tool boundary.
     // A Team edit can advance the mutable config revision without rewriting
     // the admitted Ticket's mandate or active write grant.
     let authorized = read_only_policy(store,session_id).ok().flatten().is_some();
-    let provenance_ok = if coordinator { true } else {
-        bots::get(store, &team_snapshot.coordinator_bot_id)
-            .and_then(|bot| coordinator_plan_current(store, &task_id, &team_snapshot.coordinator_bot_id, &bot.project_id))
+    let provenance_ok = if coordinator { true } else if let Some(snapshot) = &team_snapshot {
+        bots::get(store, &snapshot.coordinator_bot_id)
+            .and_then(|bot| coordinator_plan_current(store, &task_id, &snapshot.coordinator_bot_id, &bot.project_id))
             .unwrap_or(false)
-    };
+    } else { false };
     let trimmed = text.trim().chars().take(4096).collect::<String>();
     // A stop-all transition may happen after admission but before the provider
     // callback. A stale success must not become approvable after global pause.
-    let within_budget = assignment_within_policy_budget(
-        started_at, storage::now(), team_snapshot.policy.strategy.attempt_timeout_ms,
-    );
+    let within_budget = team_snapshot.as_ref().is_none_or(|snapshot|
+        assignment_within_policy_budget(
+            started_at, storage::now(), snapshot.policy.strategy.attempt_timeout_ms,
+        ));
     let thread_current = assignment_thread_current(store, session_id, &task_id)?;
     let authorized = execution_permitted(
         authorized && role_current && provenance_ok && within_budget && thread_current,
@@ -3900,7 +3906,7 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
         else if !successful { "failed" }
         else if trimmed.is_empty() { "inconclusive" }
         else if coordinator { "queued" }
-        else if team_snapshot.policy.council_required { "waiting_review" }
+        else if team_snapshot.as_ref().is_some_and(|snapshot| snapshot.policy.council_required) { "waiting_review" }
         else { "waiting_approval" };
     let now = storage::now();
     let moved = tx.execute(
@@ -3946,7 +3952,8 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     } else if next == "waiting_approval" {
         council_adapter::bind_finished(store, &task_id, &assignment_id, session_id)?;
     }
-    if team_snapshot.policy.council_required && !matches!(next,"queued" | "waiting_review") {
+    if team_snapshot.as_ref().is_some_and(|snapshot| snapshot.policy.council_required)
+        && !matches!(next,"queued" | "waiting_review") {
         let invalidated = tx.execute(
             "UPDATE sa_council_requests SET state='blocked',updated_at=?2
              WHERE ticket_id=?1 AND assignment_id=?3 AND state='admitted'",
@@ -3956,6 +3963,15 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
             tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[&task_id])
                 .map_err(|e| e.to_string())?;
         }
+    }
+    if team_snapshot.is_none() {
+        tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[&task_id])
+            .map_err(|e| e.to_string())?;
+        tx.execute(
+            "UPDATE sa_council_requests SET state='blocked',updated_at=?2
+             WHERE ticket_id=?1 AND state IN ('admitted','bound','starting','dispatched')",
+            params![task_id,now],
+        ).map_err(|e| e.to_string())?;
     }
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)

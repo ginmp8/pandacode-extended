@@ -1456,6 +1456,23 @@ mod tests {
                     architect::reviewer_security::record_native_authority(store, &child.session_id, &leaf_binding).unwrap();
                     leaf.reviewer_binding = Some(leaf_binding);
                     store.message(&leaf.session_id, "assistant", "Council score: 9.5/10").unwrap();
+                    // Each child review is part of the root's persisted usage ledger.
+                    // A fabricated passing child receipt without these records cannot
+                    // establish a verified native child Council terminal.
+                    let unknown = json!({"status":"unknown"});
+                    test_council_record(store, &session, &format!("child-usage-{leaf_index}"),
+                        "council_usage_record", json!({
+                            "id":format!("native-council-usage:{child_cycle}:{}:{}", leaf.id, leaf.attempt),
+                            "rootCycleId":cycle,"childCycleId":child_cycle,
+                            "attemptId":format!("{}:{}", leaf.id, leaf.attempt),
+                            "reviewerId":leaf.profile_id,"roundId":format!("{child_cycle}:1"),
+                            "seatId":leaf.id,"scope":"child","phase":"review","strategy":"parallel",
+                            "queueWaitMs":unknown,"elapsedMs":unknown,"retries":unknown,
+                            "escalations":unknown,"inputTokens":unknown,"outputTokens":unknown,
+                            "requestCount":unknown,"terminalStatus":"passed",
+                            "budgetConsumption":{"concurrentLeaves":unknown,"leafReviews":unknown,
+                                "estimatedCostMicros":unknown}
+                        }));
                     test_council_record(store, &session, &format!("leaf-receipt-{leaf_index}"),
                         "council_review_receipt", test_review_receipt(&child, &leaf));
                     test_council_record(store, &session, &format!("child-outcome-{leaf_index}"),
@@ -1507,15 +1524,26 @@ mod tests {
             }
             team.workers.push(worker);
         }
-        let unknown = json!({"status":"unknown"});
-        test_council_record(store, &session, "usage", "council_usage_record", json!({
-            "id":format!("native-council-usage:{cycle}:composed-0:1"),"rootCycleId":cycle,
-            "attemptId":"composed-0:1","reviewerId":"automatic","roundId":format!("{cycle}:1"),
-            "seatId":"composed-0","scope":"root","phase":"review","strategy":"parallel",
-            "queueWaitMs":unknown,"elapsedMs":unknown,"retries":unknown,"escalations":unknown,
-            "inputTokens":unknown,"outputTokens":unknown,"requestCount":unknown,"terminalStatus":"passed",
-            "budgetConsumption":{"concurrentLeaves":unknown,"leafReviews":unknown,"estimatedCostMicros":unknown}
-        }));
+        for worker in team.workers.iter().filter(|worker|
+            worker.reviewer_binding.as_ref().is_some_and(|binding|
+                binding.composition_mode.as_deref() != Some("nested")))
+        {
+            let unknown = json!({"status":"unknown"});
+            let reviewer_id = worker.reviewer_binding.as_ref().unwrap()
+                .reviewer_bot_id.clone().unwrap_or_else(|| worker.profile_id.clone());
+            test_council_record(store, &session, &format!("root-usage-{}", worker.id),
+                "council_usage_record", json!({
+                    "id":format!("native-council-usage:{cycle}:{}:{}", worker.id, worker.attempt),
+                    "rootCycleId":cycle,"attemptId":format!("{}:{}", worker.id, worker.attempt),
+                    "reviewerId":reviewer_id,"roundId":format!("{cycle}:1"),
+                    "seatId":worker.id,"scope":"root","phase":"review","strategy":"parallel",
+                    "queueWaitMs":unknown,"elapsedMs":unknown,"retries":unknown,"escalations":unknown,
+                    "inputTokens":unknown,"outputTokens":unknown,"requestCount":unknown,
+                    "terminalStatus":"passed",
+                    "budgetConsumption":{"concurrentLeaves":unknown,"leafReviews":unknown,
+                        "estimatedCostMicros":unknown}
+                }));
+        }
         save_test_team(store, &team);
         (ticket, session)
     }

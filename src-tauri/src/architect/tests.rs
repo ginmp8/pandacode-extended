@@ -6217,10 +6217,14 @@ fn persisted_council_criterion_receipts_drive_the_gate_and_dispositions_project_
     team.council_since = storage::now().max(1);
 
     let root_cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    let project_id = store.session(&team.session_id).unwrap().project_id;
     let mut inputs = Vec::new();
     for (index, id) in ["persisted-a", "persisted-b"].into_iter().enumerate() {
         let created_at = team.council_since + index as i64 + 1;
         let mut reviewer = worker(id, "completed", &[], &[]);
+        // A native root score must originate from this reviewer's recorded reply.
+        reviewer.session_id = store.create_session(&project_id, "codex", "default", "ask").unwrap().id;
+        store.message(&reviewer.session_id, "assistant", "Council score: 9.5/10").unwrap();
         reviewer.created_at = created_at;
         reviewer.updated_at = created_at;
         reviewer.read_only = true;

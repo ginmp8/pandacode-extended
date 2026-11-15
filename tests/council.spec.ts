@@ -324,7 +324,7 @@ test('read-only inspector renders supplied findings, receipts, usage, stale stat
       cycleId: 'root:1',
       findings: [{ id: 'finding-1', cycleId: 'root:1', roundId: 'root:1:1', seatId: 'seat-1', artifactDigest: 'digest-1', criterionId: 'security', severity: 'high', category: 'Security', summary: '<img src=x onerror=alert(1)>', title: '<script>alert(1)</script>', explanation: 'The untrusted value must be displayed inertly.', evidenceRefs: ['file:src/security.ts'], locationStatus: 'verified', location: { file: 'src/security.ts', line: 12 }, suggestedFix: 'Use a bounded parser.' }],
       findingDispositions: [{ findingId: 'finding-1', disposition: 'waived_by_authorized_human', actorId: 'user-17', rationale: 'Accepted the documented exception.', timestampMs: 1000, artifactLinks: ['artifact:revision-2'] }],
-      childReceipts: [{ rootCycleId: 'root:1', parentSeatId: 'seat-2', childCycleId: 'child:3', botId: 'reviewer-a', artifactRevision: 'rev-3', policyFingerprint: 'policy-hash', status: 'passed', minScore: 9.2, leafScoreRefs: ['score:1'], findingsRefs: ['finding-1'], evidenceRefs: ['file:src/security.ts'], snapshotFingerprint: 'snapshot-hash' }],
+      childReceipts: [{ rootCycleId: 'root:1', parentSeatId: 'seat-2', childCycleId: 'child:3', botId: 'reviewer-a', artifactRevision: 'rev-3', policyFingerprint: 'policy-hash', status: 'passed', minScore: 9.2, leafScoreRefs: ['child-seat:1'], findingsRefs: ['finding-1'], evidenceRefs: ['file:src/security.ts'], snapshotFingerprint: 'snapshot-hash' }],
       childLeaves: [{ rootCycleId: 'root:1', parentSeatId: 'seat-2', childCycleId: 'child:3', roundId: 'child:3:1', seatId: 'child-seat', reviewerId: 'child-reviewer', attempt: 1, status: 'completed', score: 9.2 }],
       criterionOutcomes: [{ schemaVersion: 1, rootCycleId: 'root:1', taskId: 'child', taskCycleId: 'child:3', childCycleId: 'child:3', round: 1, seatId: 'child-seat', parentSeatId: 'seat-2', attempt: 1, artifactRevision: 'rev-3', outcome: { criterionId: 'security', score: 9.2, verifiedEvidenceRefs: ['file:src/security.ts'] } }],
       reviewReceipts: [{ schemaVersion: 1, requestId: 'request-1', cycleId: 'root:1', taskId: 'task-1', assignmentId: 'seat-1', policyFingerprint: 'policy-hash', artifactDigest: 'digest-1', verdict: 'passed', findingsRefs: ['finding-1'], evidenceRefs: ['file:src/security.ts'], terminalRevision: 4, idempotencyKey: 'terminal-1' }],
@@ -340,7 +340,7 @@ test('read-only inspector renders supplied findings, receipts, usage, stale stat
   const ledger = page.locator('#council-ledger-test .council-ledger');
   await expect(ledger).toContainText('Security');
   await expect(ledger).toContainText('Review receipts · 1');
-  await expect(ledger).toContainText('Reported score 9.2 / 10');
+  await expect(ledger).toContainText('Verified score 9.2 / 10');
   await expect(ledger).toContainText('Criterion security · 9.2 / 10');
   await expect(ledger).toContainText('Usage and hard-limit records · 1');
   await expect(ledger).toContainText('Usage summary · 1 unique reviewer attempts');

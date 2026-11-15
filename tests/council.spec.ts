@@ -303,6 +303,56 @@ test('child Council drill-down shows actual native leaves without root votes or 
   await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
 });
 
+test('forced S2 child inspector exposes both native waves without promoting first-wave proof', async ({ page }) => {
+  const leafAttempts = Array.from({ length: 16 }, (_, index) => ({
+    workerId: index === 15 ? '<img src=x onerror=alert(1)>' : 'leaf-' + index,
+    round: index < 8 ? 1 : 2,
+    name: 'Independent child leaf ' + index,
+    lens: 'Security review', reviewerSource: 'automatic',
+    status: index === 15 ? 'running' : 'completed',
+    score: index === 15 ? null : 9.8,
+    provider: 'codex', model: 'native-reviewer',
+    queueWaitMs: 120, observedSpanMs: index === 15 ? null : 450,
+  }));
+  const inspection = {
+    mode: 'm4', strategy: 'escalated', forceEscalation: true,
+    cycleStartedAt: 1000, teamRevision: 12,
+    status: { state: 'blocked', round: 2, lowest: null, target: 9, stale: false },
+    verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
+    reservedChildren: [{
+      botId: 'security-child', childSessionId: 'isolated-child', rootCycleId: 'task:1000',
+      requiredLeafReviewers: 8, status: 'child_escalation_reviewing',
+      leafAttempts,
+      // This is a genuine first-wave receipt, not a second-wave terminal receipt.
+      verifiedChildReceipt: {
+        rootCycleId: 'task:1000', childSessionId: 'isolated-child', botId: 'security-child',
+        objectiveSha256: 'frozen-objective', policySha256: 'frozen-policy',
+        childConfigSha256: 'frozen-child-policy', lowestScore: 9.8,
+        leafWorkerIds: leafAttempts.slice(0, 8).map(attempt => attempt.workerId),
+      },
+    }],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const child = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await child.locator('summary').focus();
+  await page.keyboard.press('Enter');
+  const leaves = child.getByRole('region', { name: 'Child native reviewer attempts' });
+  await expect(leaves.locator('li')).toHaveCount(16);
+  await expect(leaves).toContainText('Round 1');
+  await expect(leaves).toContainText('Round 2');
+  await expect(leaves).toContainText('No native score');
+  await expect(leaves.getByText('<img src=x onerror=alert(1)>', { exact: false })).toBeVisible();
+  await expect(leaves.locator('img')).toHaveCount(0);
+  await expect(child.getByRole('status')).toContainText('round 2 admitted 8 of 8 reviewers');
+  await expect(child).toContainText('First-wave receipts do not verify second-wave completion');
+  await expect(child).toContainText('First-wave native child evidence recorded (second-wave approval pending)');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
 test('native Council findings remain attributed unverified and safe to render', async ({ page }) => {
   const inspection = {
     cycleStartedAt: 1000, teamRevision: 9,

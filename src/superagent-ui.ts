@@ -121,6 +121,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let roleRoster: TeamRoster | null = null;
   // Draft order is committed only by the native revision-guarded roster update.
   let workerOrder: string[] = [];
+  // Keep unsaved reviewer choices across Worker selection and reorder renders.
+  let reviewerDraft: string[] = [];
   let effectiveTeam: EffectiveTeam | null = null;
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
@@ -603,7 +605,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
                 ' down"' + (index === workerOrder.length - 1 || chosen.enabled ? ' disabled' : '') +
                 '>Down</button></li>').join('') + '</ol>' +
               '<label>Optional Council Reviewers (up to 4)<select name="reviewers" multiple size="5">' +
-              roleOptions(roleRoster.reviewerBotIds) + '</select></label>' +
+              roleOptions(reviewerDraft) + '</select></label>' +
               '<p>A bot may have one role only. Workers must share the primary Worker project. A disabled Team may change roles after all demands settle; active/reviewable work and unresolved effects block native saves.</p>' +
               '<button class="primary-button" type="submit"' +
                 (chosen.enabled || tickets.some(ticket => !['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)) ? ' disabled' : '') +
@@ -786,7 +788,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
         inspectedTicket = ''; threadLinks = [];
-        linkedDecisions = []; linkedDecisionsLoaded = false; roleRoster = null; workerOrder = []; effectiveTeam = null;
+        linkedDecisions = []; linkedDecisionsLoaded = false; roleRoster = null; workerOrder = []; reviewerDraft = []; effectiveTeam = null;
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
         sourceIntegrity = null;
       }
@@ -799,6 +801,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (roleRoster && selected) {
         roleRoster = await call<TeamRoster>('superagent_roster',{orchestrationId:selected});
         workerOrder = roleRoster.workerBotIds.slice(1);
+        reviewerDraft = [...roleRoster.reviewerBotIds];
       }
       // Any native refresh invalidates this non-authoritative, time-bound scan.
       effectiveTeam = null;
@@ -835,12 +838,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   // Templates populate editable names only; no bot, tool or task is selected.
   host.addEventListener('change', event => {
     const target = event.target;
+    if (target instanceof HTMLSelectElement && target.name === 'reviewers' &&
+        target.closest('form[data-sa-form="roster"]')) {
+      if (busy || !roleRoster || roleRoster.orchestrationId !== selected) return;
+      reviewerDraft = Array.from(target.selectedOptions, option => option.value);
+      return;
+    }
     if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-worker-select')) {
       if (busy || !roleRoster || roleRoster.orchestrationId !== selected) return;
       const next = Array.from(target.selectedOptions, option => option.value);
       workerOrder = [...workerOrder.filter(id => next.includes(id)),
         ...next.filter(id => !workerOrder.includes(id))];
       render();
+      host.querySelector<HTMLSelectElement>('[data-sa-worker-select]')?.focus({preventScroll:true});
       return;
     }
     if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-team-status')) {
@@ -997,7 +1007,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         });
         if (created.enabled) throw new Error('New Team did not remain disabled.');
         selected = created.id; workspaceView = 'teams';
-        roleRoster = null; workerOrder = []; sourcesLoaded = false; sources = [];
+        roleRoster = null; workerOrder = []; reviewerDraft = []; sourcesLoaded = false; sources = [];
         await reload();
         feedback = 'Disabled Team duplicated. No prior Tickets, source grants or approvals were copied.';
       });
@@ -1128,7 +1138,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       selected = demand.orchestrationId;
       workspaceView = 'runs';
       tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
-      inspectedAssignmentId = ''; roleRoster = null; workerOrder = []; effectiveTeam = null;
+      inspectedAssignmentId = ''; roleRoster = null; workerOrder = []; reviewerDraft = []; effectiveTeam = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       sourceIntegrity = null;
       void work(async () => {
@@ -1156,6 +1166,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (selected) void work(async () => {
         roleRoster=await call<TeamRoster>('superagent_roster',{orchestrationId:selected});
         workerOrder=roleRoster.workerBotIds.slice(1);
+        reviewerDraft=[...roleRoster.reviewerBotIds];
       });
       return;
     }
@@ -1186,7 +1197,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       selected = next;
       tickets = [];
       inspectedTicket = ''; ticketDetails = null; threadLinks = [];
-      inspectedAssignmentId = ''; roleRoster = null; effectiveTeam = null;
+      inspectedAssignmentId = ''; roleRoster = null; workerOrder = []; reviewerDraft = []; effectiveTeam = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       sourceIntegrity = null;
       void work(async () => {

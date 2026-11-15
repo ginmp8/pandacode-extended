@@ -724,7 +724,7 @@ test('multi-member Team Builder updates settled history safely without launching
         if(args?.expectedRevision!==config.policyRevision)throw Error('Native policy revision mismatch');
         const input=args?.input as {workerBotIds:string[];reviewerBotIds:string[]};
         if(input.workerBotIds.join(',')!=='worker,worker-c,worker-b' ||
-          input.reviewerBotIds.length!==2)throw Error('Role order validation failed');
+          input.reviewerBotIds.join(',')!=='review-a,review-b')throw Error('Role order validation failed');
         config.policyRevision++;
         roster={...roster,workerBotIds:input.workerBotIds,reviewerBotIds:input.reviewerBotIds,
           policyRevision:config.policyRevision,executionReady:false};
@@ -736,10 +736,14 @@ test('multi-member Team Builder updates settled history safely without launching
   const host=page.locator('#sa-configured-roster');
   await host.getByRole('button',{name:'Load native members'}).click();
   const form=host.locator('form[data-sa-form="roster"]');
-  await form.locator('select[name="additionalWorkers"]').selectOption(['worker-b','worker-c']);
-  await form.getByRole('button',{name:'Move Worker C up'}).click();
-  await expect(form.locator('.sa-worker-order li').first()).toContainText('Worker C');
+  // Reviewer draft must survive selecting and reordering Workers before Save.
   await form.locator('select[name="reviewers"]').selectOption(['review-a','review-b']);
+  await form.locator('select[name="additionalWorkers"]').selectOption(['worker-b','worker-c']);
+  await expect(form.locator('select[name="reviewers"] option:checked')).toHaveCount(2);
+  await form.getByRole('button',{name:'Move Worker C up'}).click();
+  await expect(form.locator('select[name="reviewers"] option:checked')).toHaveCount(2);
+  await expect(form.locator('.sa-worker-order li').first()).toContainText('Worker C');
+  await expect(form.locator('select[name="reviewers"]')).toHaveValues(['review-a','review-b']);
   await expect(form.getByRole('button',{name:'Save configured roles'})).toBeEnabled();
   await form.getByRole('button',{name:'Save configured roles'}).click();
   await expect(host.getByText('Multi-member execution is disabled',{exact:false})).toBeVisible();

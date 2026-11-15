@@ -3712,7 +3712,7 @@ fn validate_council_child_link(
     // immutable field while excluding only those evolving observations.
     let mut issued_binding = link.binding.clone();
     issued_binding.skill_evidence.clear();
-    let mut current_binding = binding.clone();
+    let mut current_binding = (*binding).clone();
     current_binding.skill_evidence.clear();
     let root_session = store.session(&root.session_id)?;
     let child_session = store.session(child_session_id)?;

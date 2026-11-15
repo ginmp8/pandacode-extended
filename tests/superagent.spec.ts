@@ -1307,6 +1307,7 @@ test('Team effective policy view is native-backed and never grants or launches t
       if(command==='superagent_effective_team') return {
         orchestrationId:'team',policyRevision:3,enabled:false,executionReady:false,
         grantsIssued:false,manualAdmissionBlockers:[
+          'Team is disabled; explicitly enable it before admitting a Demand.',
           'Multi-role Team requires native scoped role admission; manual dispatch is unavailable.'
         ],members:[
           {role:'coordinator',position:0,botId:'lead',name:'Lead',provider:'codex',
@@ -1342,6 +1343,8 @@ test('Team effective policy view is native-backed and never grants or launches t
   await expect(view.getByRole('list',{name:'Native manual admission blockers'}))
     .toContainText('Multi-role Team requires native scoped role admission');
   await expect(view).toContainText('Native manual admission blocked');
+  await expect(view.getByRole('list',{name:'Native manual admission blockers'}))
+    .toContainText('Team is disabled; explicitly enable it before admitting a Demand.');
   await expect(view).toContainText('No task grant issued');
   const calls=await page.evaluate(()=>
     (window as unknown as {effectiveCalls:()=>string[]}).effectiveCalls());

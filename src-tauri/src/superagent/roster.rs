@@ -231,7 +231,7 @@ pub(super) fn checkout_paths_current(store:&Store,ticket_id:&str)->Result<bool> 
         if let Some(original)=member.resolved_project_path {
             let Some(current_path)=actual else {return Ok(false);};
             let Ok(resolved)=std::fs::canonicalize(current_path) else {return Ok(false);};
-            if resolved.to_string_lossy().as_ref()!=original {return Ok(false);}
+            if resolved.to_string_lossy().into_owned()!=original {return Ok(false);}
         }
     }
     Ok(true)
@@ -419,6 +419,11 @@ fn effective_team(
     // barriers as the native manual admission path, without treating this
     // read-only diagnosis as an authorization or a harness capability check.
     let mut manual_admission_blockers=Vec::new();
+    if !config.enabled {
+        manual_admission_blockers.push(
+            "Team is disabled; explicitly enable it before admitting a Demand.".into(),
+        );
+    }
     if !roster.execution_ready {
         manual_admission_blockers.push(
             "Multi-role Team requires native scoped role admission; manual dispatch is unavailable.".into(),
@@ -606,7 +611,7 @@ mod tests {
         let mut store=Store::open(&path).unwrap();
         store.db.execute(
             "INSERT INTO projects(id,name,path) VALUES('p','Checkout alias',?1)",
-            [alias.to_string_lossy().as_ref()],
+            [alias.to_string_lossy().into_owned()],
         ).unwrap();
         for id in ["lead","worker"] {
             store.db.execute(
@@ -820,7 +825,9 @@ mod tests {
         }).unwrap();
         let one=effective_team(&store,&cfg.id,&HashMap::new()).unwrap();
         assert!(one.execution_ready);
-        assert!(one.manual_admission_blockers.is_empty());
+        assert!(!one.enabled);
+        assert!(one.manual_admission_blockers.iter()
+            .any(|reason|reason.contains("Team is disabled")));
         assert_eq!(one.members.len(),2);
         store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'",[]).unwrap();
         let paused_primary=effective_team(&store,&cfg.id,&HashMap::new()).unwrap();
@@ -881,6 +888,25 @@ mod tests {
         assert!(view.manual_admission_blockers.iter()
             .any(|reason|reason.contains("Multi-role Team")));
         assert!(!view.grants_issued);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+
+        // Topology readiness is not user authorization: enabling and disabling
+        // the same supported Team must change native admission diagnostics.
+        let reset=set(&store,&cfg.id,roster.policy_revision,&RosterInput {
+            worker_bot_ids:vec!["worker".into()],reviewer_bot_ids:Vec::new(),
+        }).unwrap();
+        let enabled=super::super::change_enabled(&store,&cfg.id,reset.policy_revision,true).unwrap();
+        let ready=effective_team(&store,&cfg.id,&HashMap::new()).unwrap();
+        assert!(ready.enabled);
+        assert!(ready.manual_admission_blockers.is_empty());
+        assert!(!ready.grants_issued);
+        super::super::change_enabled(&store,&cfg.id,enabled.policy_revision,false).unwrap();
+        let reopened=Store::open_read_only(&path).unwrap();
+        let off=effective_team(&reopened,&cfg.id,&HashMap::new()).unwrap();
+        assert!(!off.enabled);
+        assert!(off.manual_admission_blockers.iter()
+            .any(|reason|reason.contains("Team is disabled")));
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0)).unwrap(),0);
     }

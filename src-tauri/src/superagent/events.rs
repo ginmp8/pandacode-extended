@@ -795,10 +795,13 @@ fn github_page_complete(
         // GitHub event IDs are sparse: an older ID proves ordering but not
         // that the persisted cursor itself was still within the fetched feed.
         // Once crossed, later pages cannot recover that exact identity.
-        if cursor > 0 && sequence < cursor {
-            return Err("GitHub Events passed the durable source cursor without its exact identity; reconcile source history before polling.".into());
-        }
-        if (cursor > 0 && sequence == cursor) || (cursor == 0 && at < since) {
+        if cursor > 0 {
+            if sequence == cursor {
+                anchored = true;
+            } else if sequence < cursor && !anchored {
+                return Err("GitHub Events passed the durable source cursor without its exact identity; reconcile source history before polling.".into());
+            }
+        } else if at < since {
             anchored = true;
         }
     }
@@ -2103,6 +2106,9 @@ mod tests {
         let complete = combine_github_pages(
             &[serde_json::json!([
                 event("5000000602", 2), event("5000000600", 1),
+                {"id": "5000000599", "type": "WatchEvent",
+                 "created_at": "2026-11-12T08:59:00Z",
+                 "repo": {"name": "owner/repo"}}
             ])], i64::MAX, cursor,
         ).unwrap();
         let accepted = poll_authenticated_events(&reopened, &on, 0, &complete).unwrap();

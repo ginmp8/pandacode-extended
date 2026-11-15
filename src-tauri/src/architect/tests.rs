@@ -8083,6 +8083,19 @@ fn settle_native_council_round(
     save(&store, &mut team).unwrap();
     let settled = load(&store, sid).unwrap().unwrap();
     let link = load_council_child_link(&store, sid).unwrap();
+    // A real terminal callback persists the reviewer's scored assistant reply.
+    // A synthetic completed status alone is not native Council score evidence.
+    for worker in settled.workers.iter().filter(|worker| {
+        worker.status == "completed"
+            && worker.council.as_ref().is_some_and(|seat| seat.round == round)
+            && worker.reviewer_binding.as_ref().is_some_and(|binding|
+                binding.council_cycle_id == cycle_id
+                && binding.composition_mode.as_deref() != Some("nested"))
+    }) {
+        if let Some(score) = worker.council.as_ref().and_then(|seat| seat.score) {
+            store.message(&worker.session_id, "assistant", &format!("Council score: {score}/10")).unwrap();
+        }
+    }
     for worker in settled.workers.iter().filter(|worker| {
         worker
             .reviewer_binding
@@ -8487,6 +8500,19 @@ fn settle_council_round(state: &AppState, sid: &str, round: usize) {
     }
     team.dispatch_revision = revision;
     save(&store, &mut team).unwrap();
+    let settled = load(&store, sid).unwrap().unwrap();
+    // Match the production native completion path: a completed scored review
+    // must have its own latest session reply and correlated terminal receipt.
+    for worker in settled.workers.iter().filter(|worker| {
+        worker.council.as_ref().is_some_and(|seat| seat.round == round)
+            && worker.reviewer_binding.as_ref().is_some_and(|binding|
+                binding.composition_mode.as_deref() != Some("nested"))
+    }) {
+        if let Some(score) = worker.council.as_ref().and_then(|seat| seat.score) {
+            store.message(&worker.session_id, "assistant", &format!("Council score: {score}/10")).unwrap();
+        }
+        persist_council_terminal_receipts(&store, &settled, worker).unwrap();
+    }
 }
 
 fn persist_direct_round_outcomes(state: &AppState, sid: &str, round: usize) {

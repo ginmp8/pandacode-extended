@@ -1377,7 +1377,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   // Templates populate editable names only; no bot, tool or task is selected.
   host.addEventListener('change', event => {
     const target = event.target;
-    if (target instanceof HTMLSelectElement && target.closest('form[data-sa-form="create"]')) {
+    if (target instanceof HTMLSelectElement && target.closest('form[data-sa-form="create"]') &&
+        !target.hasAttribute('data-sa-template')) {
       if (target.name === 'coordinatorBotId') draftCoordinatorBotId = target.value;
       else if (target.name === 'workerBotId') draftWorkerBotId = target.value;
       else if (target.name === 'additionalWorkers') {

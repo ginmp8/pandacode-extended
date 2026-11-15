@@ -1188,6 +1188,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                     let query = args.get(index + 4)
                         .ok_or("--search needs a bounded objective fragment.")?;
                     if query.is_empty() || query.len() > 128 || query.trim() != query
+                        || query.starts_with("--")
                         || query.chars().any(char::is_control) {
                         return Err("--search requires a nonempty, bounded literal fragment.".into());
                     }
@@ -1495,6 +1496,9 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 validate_ticket_id(ticket_id)?;
                 let revision=args.get(index+2).ok_or("Headless retry requires a Ticket revision.")?;
                 let expected_revision=parse_ticket_revision(revision)?;
+                if expected_revision == 0 {
+                    return Err("Headless retry requires a positive Ticket revision.".into());
+                }
                 command=if inspect {
                     Command::InspectRetryRequest {ticket_id:ticket_id.clone(),expected_revision}
                 } else {

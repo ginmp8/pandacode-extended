@@ -314,3 +314,6 @@ Origin PR #152 `22af3bdee9af5337b6101d6cf7e28cc24614cf46`, original unified dest
 - Reconciled immutable task-binding checks for native composed M3/M5/M7 source seats and nested child review evidence; preserved the target's stricter recorded reviewer authority and M1/M2 behavior.
 - Imported 3 adapter terminal evidence/restart/replay regressions with their existing fixture helpers and 2 root-concurrency regressions testing separate Council cycles, tools, skills and assignments for the same bot.
 - This is real source code and tests, **not** full semantic parity with PR #149's alternate pipeline. Do not claim tests pass without the exact-head CI run. Source/base refs were not written.
+## November 15: native concurrency test compiler compatibility
+
+GitHub Actions identified E0425 (missing native settlement fixture) and E0609 (the imported tests referenced `council_child_leaf_scores` instead of the unified `council_child_leaves`). Import the source fixture and use the canonical typed `Option<f64>` projection in the tests; retain the precise Some-score comparisons and all acceptance assertions. Source: frozen PR #152 at `22af3bdee9af5337b6101d6cf7e28cc24614cf46`; source refs read-only.

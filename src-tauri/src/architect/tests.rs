@@ -7964,3 +7964,184 @@ fn dispatch_council_round(
         .map(|id| id.as_str().unwrap().to_string())
         .collect())
 }
+
+// Native settlement fixture imported with the associated original assertions.
+fn settle_native_council_round(
+    state: &AppState,
+    sid: &str,
+    round: usize,
+    status: &str,
+    score: Option<f64>,
+) {
+    let store = state.store.lock().unwrap();
+    let mut team = load(&store, sid).unwrap().unwrap();
+    let cycle_id = format!("{}:{}", team.session_id, team.council_since);
+    let now = storage::now().max(team.council_since + 1);
+    let revision_count = team
+        .workers
+        .iter()
+        .filter(|worker| {
+            worker
+                .reviewer_binding
+                .as_ref()
+                .is_some_and(|binding| binding.council_cycle_id == cycle_id)
+                && worker
+                    .council
+                    .as_ref()
+                    .is_some_and(|seat| seat.round == round)
+                && worker
+                    .reviewer_binding
+                    .as_ref()
+                    .and_then(|binding| binding.composition_mode.as_deref())
+                    != Some("nested")
+        })
+        .count();
+    let mut revision = team.dispatch_revision;
+    for worker in &mut team.workers {
+        if !worker
+            .reviewer_binding
+            .as_ref()
+            .is_some_and(|binding| binding.council_cycle_id == cycle_id)
+            || !worker
+                .council
+                .as_ref()
+                .is_some_and(|seat| seat.round == round)
+            || worker
+                .reviewer_binding
+                .as_ref()
+                .and_then(|binding| binding.composition_mode.as_deref())
+                == Some("nested")
+        {
+            continue;
+        }
+        worker.status = status.into();
+        worker.updated_at = now;
+        worker.error = (status != "completed")
+            .then(|| format!("Native fixture settled this reviewer as {status}."));
+        if let Some(seat) = worker.council.as_mut() {
+            seat.score = if status == "completed" { score } else { None };
+            if seat.started_at == 0 {
+                seat.started_at = now;
+            }
+        }
+        revision = revision.saturating_add(1);
+        worker.result_revision = revision;
+    }
+    team.dispatch_revision = team.dispatch_revision.saturating_add(revision_count as u64);
+    save(&store, &mut team).unwrap();
+    let settled = load(&store, sid).unwrap().unwrap();
+    let link = load_council_child_link(&store, sid).unwrap();
+    for worker in settled.workers.iter().filter(|worker| {
+        worker
+            .reviewer_binding
+            .as_ref()
+            .is_some_and(|binding| binding.council_cycle_id == cycle_id)
+            && worker
+                .council
+                .as_ref()
+                .is_some_and(|seat| seat.round == round)
+            && worker
+                .reviewer_binding
+                .as_ref()
+                .and_then(|binding| binding.composition_mode.as_deref())
+                != Some("nested")
+    }) {
+        persist_council_terminal_receipts(&store, &settled, worker).unwrap();
+    }
+    if status == "completed" {
+        let root_cycle_id = link
+            .as_ref()
+            .map_or(cycle_id.clone(), |link| link.root_council_cycle_id.clone());
+        let criteria = settled
+            .config
+            .council
+            .as_ref()
+            .and_then(|config| config.composition.as_ref())
+            .map(|composition| composition.criteria.clone())
+            .unwrap_or_default();
+        for worker in settled.workers.iter().filter(|worker| {
+            worker.status == "completed"
+                && worker
+                    .reviewer_binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.council_cycle_id == cycle_id)
+                && worker
+                    .council
+                    .as_ref()
+                    .is_some_and(|seat| seat.round == round && seat.score.is_some())
+                && worker
+                    .reviewer_binding
+                    .as_ref()
+                    .and_then(|binding| binding.composition_mode.as_deref())
+                    != Some("nested")
+        }) {
+            let (seat, binding) = (
+                worker.council.as_ref().unwrap(),
+                worker.reviewer_binding.as_ref().unwrap(),
+            );
+            for criterion in &criteria {
+                let outcome = council::CouncilCriterionOutcome {
+                    criterion_id: criterion.id.clone(),
+                    score: seat.score.unwrap(),
+                    verified_evidence_refs: Vec::new(),
+                };
+                let local = council::CouncilCriterionOutcomeReceipt {
+                    schema_version: 1,
+                    root_cycle_id: cycle_id.clone(),
+                    task_id: settled.session_id.clone(),
+                    task_cycle_id: binding.council_cycle_id.clone(),
+                    child_cycle_id: None,
+                    round,
+                    seat_id: worker.id.clone(),
+                    parent_seat_id: None,
+                    attempt: worker.attempt,
+                    artifact_revision: binding.artifact_revision.clone(),
+                    outcome: outcome.clone(),
+                };
+                local.validate().unwrap();
+                let key = format!(
+                    "native-council-criterion:{cycle_id}:{round}:{}:{}",
+                    worker.id, criterion.id
+                );
+                persist_council_record(
+                    &store,
+                    &settled.session_id,
+                    &key,
+                    "council_criterion_outcome",
+                    &local,
+                    &worker.id,
+                )
+                .unwrap();
+                if let Some(link) = &link {
+                    let projected = council::CouncilCriterionOutcomeReceipt {
+                        root_cycle_id: root_cycle_id.clone(),
+                        task_id: settled.session_id.clone(),
+                        task_cycle_id: link.child_council_cycle_id.clone(),
+                        child_cycle_id: Some(link.child_council_cycle_id.clone()),
+                        round,
+                        seat_id: worker.id.clone(),
+                        parent_seat_id: Some(link.root_worker_id.clone()),
+                        attempt: worker.attempt,
+                        artifact_revision: link.root_artifact_revision.clone(),
+                        outcome,
+                        ..local
+                    };
+                    projected.validate().unwrap();
+                    let key = format!(
+                        "native-council-criterion:{root_cycle_id}:{round}:{}:{}:{}",
+                        link.root_worker_id, worker.id, criterion.id
+                    );
+                    persist_council_record(
+                        &store,
+                        &link.root_session_id,
+                        &key,
+                        "council_criterion_outcome",
+                        &projected,
+                        &worker.id,
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+}

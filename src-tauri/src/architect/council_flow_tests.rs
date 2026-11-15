@@ -1405,9 +1405,9 @@ fn concurrent_roots_freeze_the_same_nested_bot_and_keep_child_approval_task_scop
                 ledger.council_child_receipts[0].child_cycle_id,
                 task.link.child_council_cycle_id
             );
-            assert_eq!(ledger.council_child_leaf_scores.len(), 2);
+            assert_eq!(ledger.council_child_leaves.len(), 2);
             assert!(ledger
-                .council_child_leaf_scores
+                .council_child_leaves
                 .iter()
                 .all(|score| score.root_cycle_id == task.link.root_council_cycle_id));
             assert!(ledger
@@ -2037,9 +2037,9 @@ fn native_concurrent_roots_dispatch_and_settle_the_same_bot_without_state_leakag
             task_b.link.child_council_cycle_id
         );
         assert_eq!(ledger_b.council_child_receipts[0].min_score, Some(9.7));
-        assert_eq!(ledger_b.council_child_leaf_scores.len(), 2);
-        assert!(ledger_b.council_child_leaf_scores.iter().all(|score| {
-            score.root_cycle_id == task_b.link.root_council_cycle_id && score.score == 9.7
+        assert_eq!(ledger_b.council_child_leaves.len(), 2);
+        assert!(ledger_b.council_child_leaves.iter().all(|score| {
+            score.root_cycle_id == task_b.link.root_council_cycle_id && score.score == Some(9.7)
         }));
         status_b
     };
@@ -2097,10 +2097,10 @@ fn native_concurrent_roots_dispatch_and_settle_the_same_bot_without_state_leakag
                 ledger.council_child_receipts[0].min_score,
                 Some(expected_score)
             );
-            assert_eq!(ledger.council_child_leaf_scores.len(), 2);
-            assert!(ledger.council_child_leaf_scores.iter().all(|score| {
+            assert_eq!(ledger.council_child_leaves.len(), 2);
+            assert!(ledger.council_child_leaves.iter().all(|score| {
                 score.root_cycle_id == task.link.root_council_cycle_id
-                    && score.score == expected_score
+                    && score.score == Some(expected_score)
             }));
             let persisted = root
                 .workers

@@ -2165,8 +2165,39 @@ pub(super) fn reported_findings(store: &storage::Store, team: &TeamSnapshot) -> 
 pub(super) fn historical_reported_findings(
     store: &storage::Store, team: &TeamSnapshot,
 ) -> Vec<CouncilHistoricalReportedFinding> {
+    // Historical claims are inspector-only and cannot cross task or grant boundaries.
+    let current_cycle = format!("{}:{}", team.session_id, team.council_since);
+    let task_cycle_prefix = format!("{}:", team.session_id);
     let mut history = Vec::new();
-    for (worker, seat) in seats(team) {
+    for worker in &team.workers {
+        let Some(seat) = worker.council.as_ref() else { continue };
+        let prior_cycle = worker.created_at < team.council_since;
+        let cycle_id = if prior_cycle {
+            let Some(binding) = worker.reviewer_binding.as_ref() else { continue };
+            let Some(started_at) = binding.council_cycle_id
+                .strip_prefix(&task_cycle_prefix)
+                .and_then(|value| value.parse::<i64>().ok())
+            else { continue };
+            if !worker.read_only || started_at <= 0 || started_at >= team.council_since
+                || worker.created_at < started_at || binding.seat_id != worker.id
+            {
+                continue;
+            }
+            let linked = store.db.query_row(
+                "SELECT 1 FROM architect_workers
+                 WHERE parent_session_id=?1 AND worker_id=?2 AND session_id=?3 LIMIT 1",
+                params![team.session_id, worker.id, worker.session_id],
+                |row| row.get::<_, i64>(0),
+            ).optional().ok().flatten() == Some(1);
+            if !linked || super::reviewer_security::validate_recorded_authority(
+                store, &team.session_id, binding,
+            ).is_err() {
+                continue;
+            }
+            binding.council_cycle_id.clone()
+        } else {
+            current_cycle.clone()
+        };
         if worker.status != "completed" || !counts(worker, seat) || seat.score.is_none() {
             continue;
         }
@@ -2181,12 +2212,12 @@ pub(super) fn historical_reported_findings(
             |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?)),
         ).optional().ok().flatten();
         let Some((message_id, report, has_newer_turn)) = latest else { continue };
-        if has_newer_turn == 0 || parse_score(&report) != seat.score { continue; }
+        if (!prior_cycle && has_newer_turn == 0) || parse_score(&report) != seat.score { continue; }
         for (index, draft) in parse_reported_findings(&report).into_iter().enumerate() {
             history.push(CouncilHistoricalReportedFinding {
                 schema_version: 1,
-                id: format!("{}:{}:{}:{message_id}:{index}", team.session_id, team.council_since, worker.id),
-                cycle_id: format!("{}:{}", team.session_id, team.council_since),
+                id: format!("{}:{}:{message_id}:{index}", cycle_id, worker.id),
+                cycle_id: cycle_id.clone(),
                 round: seat.round,
                 worker_id: worker.id.clone(),
                 report_message_id: message_id,

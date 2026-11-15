@@ -3381,3 +3381,53 @@ fn scored_report_claims_become_unverified_history_without_mutating_native_approv
     assert!(spoofed.council_historical_reported_findings.is_empty());
     assert_eq!(team.workers[0].council.as_ref().unwrap().score, Some(6.0));
 }
+
+#[test]
+fn historical_prior_cycle_claims_require_native_session_link_and_unrevoked_grant() {
+    let (state, sid) = council_state(on(9.0, 3, 2));
+    let store = state.store.lock().unwrap();
+    let project = store.session(&sid).unwrap().project_id;
+    let reviewer_session = store.create_session(&project, "codex", "", "full").unwrap();
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    let previous_since = storage::now().max(20) - 10;
+    team.council_since = previous_since;
+    let mut reviewer = seat("prior-native", 1, Some(7.0), previous_since + 1);
+    reviewer.session_id = reviewer_session.id.clone();
+    reviewer.read_only = true;
+    reviewer.status = "completed".into();
+    let binding = reviewer_security::ReviewerBinding::native(
+        &team, &reviewer.id, reviewer.created_at, &reviewer.provider,
+        &reviewer.model, reviewer.council.as_ref().unwrap(),
+    );
+    reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+    reviewer.reviewer_binding = Some(binding.clone());
+    team.workers.push(reviewer);
+    store.message(&reviewer_session.id, "assistant",
+        "Council findings JSON: [{\\"severity\\":\\"high\\",\\"category\\":\\"security\\",\\"title\\":\\"Prior-cycle finding\\",\\"explanation\\":\\"Review needed\\"}]\\nCouncil score: 7/10"
+    ).unwrap();
+    team.council_since = previous_since + 2;
+    save(&store, &mut team).unwrap();
+
+    assert!(council_read_snapshot(&store, &team).council_historical_reported_findings.is_empty(),
+        "an unlinked child session cannot expose its previous-cycle transcript");
+    assert_eq!(store.db.execute(
+        "INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",
+        rusqlite::params![sid, "prior-native", reviewer_session.id],
+    ).unwrap(), 1);
+    let inspected = council_read_snapshot(&store, &team);
+    assert!(inspected.council_reported_findings.is_empty(),
+        "an old reviewer must not be presented as a current vote");
+    assert_eq!(inspected.council_historical_reported_findings.len(), 1);
+    let historical = &inspected.council_historical_reported_findings[0];
+    assert_eq!(historical.cycle_id, binding.council_cycle_id);
+    assert_eq!(historical.title, "Prior-cycle finding");
+    assert!(!historical.evidence_verified && !historical.location_verified);
+    assert!(historical.verified_evidence_refs.is_empty());
+
+    assert_eq!(store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, "native-reviewer-authority:prior-native"],
+    ).unwrap(), 1);
+    assert!(council_read_snapshot(&store, &team).council_historical_reported_findings.is_empty(),
+        "revoked native reviewer authority must hide historical claims");
+}

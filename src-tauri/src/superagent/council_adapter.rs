@@ -1914,7 +1914,28 @@ mod tests {
             let store = state.store.lock().unwrap();
             request_for_worker(&store,worker_session_id).unwrap().unwrap().native_session_id.unwrap()
         };
+        start_native_reviewers(&state,&native_session_id);
         (state,native_session_id)
+    }
+
+    /// Production's scheduler records `startedAt` when it launches a reviewer.
+    /// This fixture has no agent runtime, so make the same durable seat
+    /// transition before completing reviewers; acceptance still refuses a
+    /// round whose seats never started.
+    fn start_native_reviewers(state: &crate::AppState, native_session_id: &str) {
+        let store = state.store.lock().unwrap();
+        let mut team = architect::load(&store,native_session_id).unwrap().unwrap();
+        let started_at = team.council_since.max(storage::now());
+        for worker in team.workers.iter_mut().filter(|worker| worker.council.is_some()) {
+            if let Some(seat) = worker.council.as_mut().filter(|seat| seat.started_at == 0) {
+                seat.started_at = started_at;
+            }
+        }
+        let content = serde_json::to_string(&team).unwrap();
+        store.db.execute(
+            "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+            params![native_session_id,content],
+        ).unwrap();
     }
 
     fn complete_native_reviewers(state: &crate::AppState, native_session_id: &str, score: &str) {

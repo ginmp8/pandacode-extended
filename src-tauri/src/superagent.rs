@@ -3992,6 +3992,11 @@ fn accept_with_pause(
     {
         return Err("Task has no current verified worker result to accept.".into());
     }
+    // A pending or uncertain remote write is not settled worker evidence.
+    // Keep this check inside the dispatch fence and approval transaction.
+    if effects::unresolved_count(store,ticket_id)? != 0 {
+        return Err("Ticket has unresolved external effects; reconcile them before acceptance.".into());
+    }
     let team_snapshot = ticket_team_snapshot(store,ticket_id)?;
     if team_snapshot.policy.council_required {
         return Err("Council-required Tickets need the attributed native Council acceptance flow.".into());
@@ -4041,6 +4046,10 @@ fn accept_with_pause(
     let changed = tx.execute(
         "UPDATE sa_tickets SET state='completed',revision=revision+1,updated_at=?3
          WHERE id=?1 AND revision=?2 AND state='waiting_approval'
+         AND NOT EXISTS (
+           SELECT 1 FROM sa_effect_receipts effect
+           WHERE effect.ticket_id=sa_tickets.id AND effect.state!='applied'
+         )
          AND EXISTS (
             SELECT 1 FROM sa_mandates m JOIN sa_orchestrations o
             ON o.id=sa_tickets.orchestration_id

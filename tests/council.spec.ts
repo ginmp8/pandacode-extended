@@ -1596,6 +1596,19 @@ test('historical claims render inertly and never claim verified native approval'
         title: '<img src=x onerror=alert(1)>',
         explanation: 'Earlier unresolved claim', artifactRevision: 'revision:1',
         verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false,
+      }, {
+        schemaVersion: 1, id: 'root:6:worker:6:0', cycleId: 'root:6', round: 1,
+        workerId: 'reviewer-b', reportMessageId: 6, lens: 'Security',
+        severity: 'medium', category: 'Regression',
+        title: '<script>alert(2)</script>', explanation: 'Same-task historical report',
+        artifactRevision: 'revision:0', verifiedEvidenceRefs: [],
+        evidenceVerified: false, locationVerified: false,
+      }, {
+        schemaVersion: 1, id: 'foreign:6:worker:6:0', cycleId: 'foreign:6', round: 1,
+        workerId: 'foreign', reportMessageId: 6, lens: 'Private',
+        severity: 'high', category: 'Foreign', title: 'Foreign private claim',
+        explanation: 'Never render', artifactRevision: 'foreign', verifiedEvidenceRefs: [],
+        evidenceVerified: false, locationVerified: false,
       }],
     });
   });
@@ -1609,7 +1622,12 @@ test('historical claims render inertly and never claim verified native approval'
   await expect(history).toContainText('<img src=x onerror=alert(1)>');
   await expect(history).toContainText('not proof of fixes');
   await expect(history).toContainText('Finding ID root:7:worker:7:0');
+  await expect(history).toContainText('Same-task historical report');
+  await expect(history).toContainText('Cycle root:6');
+  await expect(history).toContainText('<script>alert(2)</script>');
+  await expect(history).not.toContainText('Foreign private claim');
   await expect(history.locator('img')).toHaveCount(0);
+  await expect(history.locator('script')).toHaveCount(0);
   await expect(page.locator('#council-historical-proof')).not.toContainText('Verified native pass');
 });
 test('current scored reviewer claims stay unverified and HTML inert', async ({ page }) => {

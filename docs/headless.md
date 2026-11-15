@@ -787,3 +787,14 @@ role policy requires exact revision and an eligible disabled Team. Manual
 enable never launches a provider, grants tools or enables authenticated Auto.
 Multi-worker Teams may use the separate native scheduler where supported;
 legacy single-worker manual admission does not silently execute multi-role plans.
+
+### Detached native-session quarantine
+
+`pandacode serve --quarantine-detached-ticket <ticket-id> <revision>` is an
+explicit operator recovery action for a running Ticket with exactly one active
+Assignment whose native session row is missing. Under the external-effect
+fence it revokes the native Mandate, interrupts the Ticket and Assignment,
+marks pending remote effects uncertain, and records an audit receipt atomically.
+It never claims to stop an unknown provider, replays remote effects or grants
+a retry. A stale revision, existing live session or audit error aborts the
+operation without partially changing authority.

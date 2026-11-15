@@ -68,6 +68,7 @@ enum Command {
     InspectRetryRequest { ticket_id: String, expected_revision: i64 },
     StopTicket { ticket_id: String },
     StopTicketAtRevision { ticket_id: String, expected_revision: i64 },
+    QuarantineDetachedTicket { ticket_id: String, expected_revision: i64 },
     QuarantineTerminalOrphan { ticket_id: String, expected_revision: i64 },
     DisableOrchestration { orchestration_id: String, expected_revision: i64 },
     RenameOrchestration { orchestration_id: String, expected_revision: i64, name: String },
@@ -522,7 +523,7 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
             let native_action = matches!(&command,
                 Command::EnableOrchestration { .. } | Command::RetryTicket { .. } | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
                 | Command::StopTicket { .. } | Command::StopTicketAtRevision { .. }
-                | Command::QuarantineTerminalOrphan { .. }
+                | Command::QuarantineDetachedTicket { .. } | Command::QuarantineTerminalOrphan { .. }
                 | Command::DisableOrchestration { .. }
                 | Command::RenameOrchestration { .. } | Command::IssueComment { .. });
             if native_action {
@@ -547,6 +548,10 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                                 crate::superagent::headless_stop_ticket(&database, ticket_id),
                             Command::StopTicketAtRevision { ticket_id, expected_revision } =>
                                 crate::superagent::headless_stop_ticket_at_revision(
+                                    &database, ticket_id, *expected_revision,
+                                ),
+                            Command::QuarantineDetachedTicket { ticket_id, expected_revision } =>
+                                crate::superagent::headless_quarantine_detached_ticket(
                                     &database, ticket_id, *expected_revision,
                                 ),
                             Command::QuarantineTerminalOrphan { ticket_id, expected_revision } =>
@@ -619,7 +624,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::EnableOrchestration { .. }
         | Command::RetryTicket { .. } | Command::InspectRetryRequest { .. }
         | Command::StopTicket { .. } | Command::StopTicketAtRevision { .. }
-        | Command::QuarantineTerminalOrphan { .. }
+        | Command::QuarantineDetachedTicket { .. } | Command::QuarantineTerminalOrphan { .. }
         | Command::DisableOrchestration { .. }
         | Command::RenameOrchestration { .. } | Command::IssueComment { .. } => {
             eprintln!("SuperAgent inspection must use the read-only startup path.");
@@ -1458,6 +1463,19 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 3;
             }
+            "--quarantine-detached-ticket" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or("--quarantine-detached-ticket needs Ticket ID and revision.")?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--quarantine-detached-ticket needs a Ticket revision.")?;
+                command = Command::QuarantineDetachedTicket {
+                    ticket_id: ticket_id.clone(),
+                    expected_revision: parse_ticket_revision(revision)?,
+                };
+                ops += 1;
+                index += 2;
+            }
             "--quarantine-terminal-orphan" => {
                 let ticket_id = args.get(index + 1)
                     .ok_or("--quarantine-terminal-orphan needs Ticket ID and revision.")?;
@@ -1674,7 +1692,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox | --list-recovery-inbox | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-delivery <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --create-orchestration <file> | --configure-team-roles <id> <revision> <file> | --enable-orchestration <id> <revision> | --retry-ticket <id> <revision> | --inspect-retry-request <id> <revision> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox | --list-recovery-inbox | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-delivery <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --create-orchestration <file> | --configure-team-roles <id> <revision> <file> | --enable-orchestration <id> <revision> | --retry-ticket <id> <revision> | --inspect-retry-request <id> <revision> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1772,6 +1790,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --stop-ticket <id>    Emergency revoke of a Ticket mandate without prior revision.
   --stop-ticket-at-revision <id> <revision>
                          Revoke only the observed Ticket revision; stale input cannot revoke.
+  --quarantine-detached-ticket <id> <revision>
+                         Revoke a running Ticket with one proven missing native session;
+                         mark pending effects uncertain without provider replay.
   --quarantine-terminal-orphan <id> <revision>
                          Quarantine a running assignment on a terminal Ticket;
                          revoke its mandate, preserve uncertain effects and never replay.
@@ -1847,6 +1868,24 @@ mod tests {
             "--retry-ticket ticket_1 2 --stop-ticket ticket_1",
             "--inspect-retry-request","--inspect-retry-request ticket_1 nope"] {
             assert!(parsed(invalid).is_err(),"{invalid}");
+        }
+    }
+
+    #[test]
+    fn detached_quarantine_requires_exact_revision_and_exclusive_cli_action() {
+        assert_eq!(parsed("--quarantine-detached-ticket ticket_123 7"),
+            Ok(Command::QuarantineDetachedTicket {
+                ticket_id: "ticket_123".into(), expected_revision: 7,
+            }));
+        for invalid in [
+            "--quarantine-detached-ticket",
+            "--quarantine-detached-ticket ticket_123",
+            "--quarantine-detached-ticket ticket_123 0",
+            "--quarantine-detached-ticket ticket_123 nope",
+            "--quarantine-detached-ticket ../unsafe 7",
+            "--quarantine-detached-ticket ticket_123 7 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
         }
     }
 

@@ -1839,12 +1839,15 @@ pub(crate) fn inspect_headless_status(
 /// cannot observe another process's live provider handle, and these fields are
 /// never a grant to retry or to acknowledge an external effect.
 fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result<serde_json::Value> {
-    let (running, active_linked): (i64, i64) = store.db.query_row(
+    let (running, active_linked, missing_sessions): (i64, i64, i64) = store.db.query_row(
         "SELECT COUNT(*),
-                COALESCE(SUM(CASE WHEN id=?2 THEN 1 ELSE 0 END),0)
-         FROM sa_assignments WHERE ticket_id=?1 AND state='running'",
+                COALESCE(SUM(CASE WHEN a.id=?2 THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN live.id IS NULL THEN 1 ELSE 0 END),0)
+         FROM sa_assignments a
+         LEFT JOIN sessions live ON live.id=a.session_id
+         WHERE a.ticket_id=?1 AND a.state='running'",
         params![&ticket.id, ticket.active_assignment_id.as_deref()],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     ).map_err(|e| e.to_string())?;
     let (pending, uncertain): (i64, i64) = store.db.query_row(
         "SELECT COALESCE(SUM(CASE WHEN state='pending' THEN 1 ELSE 0 END),0),
@@ -1863,7 +1866,7 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
     let consistent = if ticket.state == "running" {
         // One active native assignment is the current Ticket contract. A
         // duplicate attempt with a valid active link must still be triaged.
-        running == 1 && active_linked == 1
+        running == 1 && active_linked == 1 && missing_sessions == 0
     } else {
         // A completed/stopped Ticket with an orphan live assignment is not
         // healthy, even if its own state is terminal.
@@ -1877,6 +1880,8 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         "investigate_native_assignment_state"
     } else if expired_running > 0 {
         "investigate_expired_native_assignment_before_retry"
+    } else if ticket.state == "running" && (mandate.revoked || mandate.expires_at <= now) {
+        "stop_or_quarantine_revoked_native_execution"
     } else if running > 0 {
         "verify_live_serve_provider_before_intervention"
     } else if ticket.state == "waiting_review" {
@@ -1891,6 +1896,7 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
     Ok(serde_json::json!({
         "observedAt": now,
         "activeNativeAssignments": running,
+        "missingNativeSessions": missing_sessions,
         "expiredNativeAssignments": expired_running,
         "activeAssignmentLinked": active_linked == 1,
         "assignmentStateConsistent": consistent,
@@ -2117,48 +2123,81 @@ pub(crate) fn list_headless_team_demands_searched(
 /// a healthy running provider is deliberately omitted. This is NOT recovery
 /// admission, permission issuance, or proof that a remote effect was applied.
 /// One read transaction provides a consistent ordered operational snapshot.
-pub(crate) fn list_headless_recovery_inbox(database_path: &std::path::Path) -> Result<String> {
+pub(crate) fn list_headless_recovery_inbox(path: &std::path::Path) -> Result<String> {
+    list_headless_recovery_inbox_page(path,None,None,None)
+}
+
+pub(crate) fn list_headless_recovery_inbox_page(
+    database_path: &std::path::Path, before_priority: Option<i64>,
+    before_updated_at: Option<i64>, before_id: Option<&str>,
+) -> Result<String> {
+    match (before_priority,before_updated_at,before_id) {
+        (None,None,None)=>{},
+        (Some(priority),Some(updated_at),Some(id))
+            if (0..=2).contains(&priority) && updated_at>0
+               && !id.is_empty() && id.len()<=128
+               && id.bytes().all(|c|c.is_ascii_alphanumeric() || matches!(c,b'-'|b'_'))=>{},
+        _=>return Err("Invalid recovery cursor: supply priority 0..2, positive timestamp and bounded Ticket ID.".into()),
+    }
     let store = Store::open_read_only(database_path)?;
     let snapshot = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let observed_at = storage::now();
     let cutoff = observed_at.saturating_sub(MAX_ASSIGNMENT_RUN_MS);
     let ids = {
         let mut stmt = store.db.prepare(
-            "SELECT t.id FROM sa_tickets t
-             WHERE t.state IN ('queued','blocked','waiting_approval','waiting_review',
-                               'failed','interrupted','inconclusive')
-                OR EXISTS(SELECT 1 FROM sa_effect_receipts e
-                          WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
-                OR (t.state<>'running' AND EXISTS(
-                    SELECT 1 FROM sa_assignments a
-                    WHERE a.ticket_id=t.id AND a.state='running'))
-                OR (t.state='running' AND (
-                    t.active_assignment_id IS NULL
-                    OR (SELECT COUNT(*) FROM sa_assignments a
-                        WHERE a.ticket_id=t.id AND a.state='running')<>1
-                    OR NOT EXISTS(SELECT 1 FROM sa_assignments a
-                                  WHERE a.id=t.active_assignment_id
-                                    AND a.ticket_id=t.id AND a.state='running'
-                                    AND a.created_at>0 AND a.created_at<=?1
-                                    AND a.created_at>?2)))
-             ORDER BY CASE WHEN EXISTS(
-                 SELECT 1 FROM sa_effect_receipts e
-                 WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain')
-               ) THEN 0 WHEN EXISTS(
-                   SELECT 1 FROM sa_assignments a
-                   WHERE a.ticket_id=t.id AND a.state='running'
-               ) THEN 1 ELSE 2 END,
-               t.updated_at DESC,t.id DESC
+            "WITH candidates AS (
+               SELECT t.id,t.updated_at,
+                 CASE WHEN EXISTS(SELECT 1 FROM sa_effect_receipts e
+                                  WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
+                      THEN 0 WHEN EXISTS(SELECT 1 FROM sa_assignments a
+                                         WHERE a.ticket_id=t.id AND a.state='running')
+                      THEN 1 ELSE 2 END AS priority
+               FROM sa_tickets t
+               WHERE t.state IN ('queued','blocked','waiting_approval','waiting_review',
+                                 'failed','interrupted','inconclusive')
+                  OR EXISTS(SELECT 1 FROM sa_effect_receipts e
+                            WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
+                  OR (t.state<>'running' AND EXISTS(
+                      SELECT 1 FROM sa_assignments a
+                      WHERE a.ticket_id=t.id AND a.state='running'))
+                  OR (t.state='running' AND (
+                      t.active_assignment_id IS NULL
+                      -- A live assignment whose provider session vanished
+                      -- needs investigation even before the watchdog settles it.
+                      OR EXISTS(SELECT 1 FROM sa_assignments a
+                          LEFT JOIN sessions live ON live.id=a.session_id
+                          WHERE a.ticket_id=t.id AND a.state='running'
+                            AND live.id IS NULL)
+                      OR (SELECT COUNT(*) FROM sa_assignments a
+                          WHERE a.ticket_id=t.id AND a.state='running')<>1
+                      OR NOT EXISTS(SELECT 1 FROM sa_assignments a
+                                    WHERE a.id=t.active_assignment_id
+                                      AND a.ticket_id=t.id AND a.state='running'
+                                      AND a.created_at>0 AND a.created_at<=?1
+                                      AND a.created_at>?2)
+                      -- A live provider with revoked or expired authority
+                      -- must be visible before the watchdog intervenes.
+                      OR NOT EXISTS(SELECT 1 FROM sa_mandates m
+                                    WHERE m.ticket_id=t.id AND m.revoked=0
+                                      AND m.expires_at>?1)))
+             )
+             SELECT id,priority,updated_at FROM candidates
+             WHERE ?3 IS NULL OR priority>?3
+                OR (priority=?3 AND (updated_at<?4
+                    OR (updated_at=?4 AND id<?5)))
+             ORDER BY priority ASC,updated_at DESC,id DESC
              LIMIT 201",
         ).map_err(|e| e.to_string())?;
-        let rows = stmt.query_map(params![observed_at, cutoff],
-            |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(
+            params![observed_at,cutoff,before_priority,before_updated_at,before_id],
+            |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?)),
+        ).map_err(|e| e.to_string())?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
     };
     let mut items = Vec::with_capacity(ids.len().min(200));
-    for id in ids.iter().take(200) {
-        let ticket = get_ticket(&store, id)?;
-        let recovery = headless_recovery_summary(&store, &ticket, observed_at)?;
+    for (id,_,_) in ids.iter().take(200) {
+        let ticket = get_ticket(&store,id)?;
+        let recovery = headless_recovery_summary(&store,&ticket,observed_at)?;
         items.push(serde_json::json!({
             "ticketId": ticket.id,
             "orchestrationId": ticket.orchestration_id,
@@ -2168,11 +2207,19 @@ pub(crate) fn list_headless_recovery_inbox(database_path: &std::path::Path) -> R
             "recovery": recovery
         }));
     }
+    let next_cursor=if ids.len()>200 {
+        ids.get(199).map(|(id,priority,updated_at)| serde_json::json!({
+            "priority": priority,
+            "updatedAt": updated_at,
+            "ticketId": id
+        }))
+    } else {None};
     snapshot.commit().map_err(|e| e.to_string())?;
     serde_json::to_string_pretty(&serde_json::json!({
         "observedAt": observed_at,
         "pageLimit": 200,
         "mayHaveMore": ids.len() > 200,
+        "nextCursor": next_cursor,
         "items": items,
         "observationalOnly": true,
         "automaticRecoveryPerformed": false,
@@ -2384,6 +2431,76 @@ pub(crate) fn headless_stop_ticket_at_revision(
 }
 
 /// Operator quarantine never replays remote effects or claims to stop a live provider.
+pub(crate) fn headless_quarantine_detached_ticket(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+) -> Result<String> {
+    let _effect_fence = effects::lock_dispatch(database_path)?;
+    let store = open_headless_transition_store(database_path)?;
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let (state, revision, active): (String, i64, Option<String>) = tx.query_row(
+        "SELECT state,revision,active_assignment_id FROM sa_tickets WHERE id=?1",
+        [ticket_id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("SuperAgent Ticket not found.")?;
+    if revision != expected_revision {
+        return Err("SuperAgent Ticket revision changed before quarantine.".into());
+    }
+    if state != "running" {
+        return Err("Only a running Ticket with a detached session may be quarantined.".into());
+    }
+    let active = active.ok_or("Missing active Assignment; inspect recovery state first.")?;
+    let (running, linked, missing): (i64,i64,i64) = tx.query_row(
+        "SELECT COUNT(*),
+                COALESCE(SUM(CASE WHEN a.id=?2 THEN 1 ELSE 0 END),0),
+                COALESCE(SUM(CASE WHEN a.id=?2 AND s.id IS NULL THEN 1 ELSE 0 END),0)
+         FROM sa_assignments a LEFT JOIN sessions s ON s.id=a.session_id
+         WHERE a.ticket_id=?1 AND a.state='running'",
+        params![ticket_id,&active],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+    ).map_err(|e| e.to_string())?;
+    if running != 1 || linked != 1 || missing != 1 {
+        return Err("Expected exactly one linked running Assignment with a missing native session.".into());
+    }
+    let now=storage::now();
+    if tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[ticket_id])
+        .map_err(|e| e.to_string())? != 1 {
+        return Err("SuperAgent Mandate missing; quarantine aborted.".into());
+    }
+    if tx.execute(
+        "UPDATE sa_tickets SET state='interrupted',active_assignment_id=NULL,
+         revision=revision+1,updated_at=?3
+         WHERE id=?1 AND revision=?2 AND state='running' AND active_assignment_id=?4",
+        params![ticket_id,expected_revision,now,&active],
+    ).map_err(|e| e.to_string())? != 1 {
+        return Err("Ticket changed before detached quarantine.".into());
+    }
+    if tx.execute(
+        "UPDATE sa_assignments SET state='interrupted',updated_at=?2
+         WHERE ticket_id=?1 AND id=?3 AND state='running'",
+        params![ticket_id,now,&active],
+    ).map_err(|e| e.to_string())? != 1 {
+        return Err("Assignment changed before detached quarantine.".into());
+    }
+    let uncertain=tx.execute(
+        "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
+         WHERE ticket_id=?1 AND state='pending'",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'headless_detached_quarantined',
+           'Missing native session; revoked without provider or effect replay',?2)",
+        params![ticket_id,now],
+    ).map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId":ticket_id,"state":"interrupted","revision":revision+1,
+        "quarantinedAssignments":1,"pendingEffectsMarkedUncertain":uncertain,
+        "providerStoppedByCommand":false,"liveProviderState":"unknown",
+        "externalEffectReplayAllowed":false
+    })).map_err(|e| e.to_string())
+}
+
 pub(crate) fn headless_quarantine_terminal_orphan(
     database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
 ) -> Result<String> {
@@ -6385,6 +6502,177 @@ mod tests {
         assert_eq!(check.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0)
         ).unwrap(), 208);
+    }
+
+    #[test]
+    fn headless_detached_quarantine_is_revisioned_atomic_and_restart_safe() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (ticket,launched)=admit(&mut store,&cfg.id,"Private detached objective",
+            "headless-detached-quarantine",false).unwrap();
+        assert!(launched);
+        let session=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        let revision=get_ticket(&store,&ticket.id).unwrap().revision;
+        assert!(headless_quarantine_detached_ticket(&store.path,&ticket.id,revision).is_err());
+        store.db.execute(
+            "UPDATE sa_assignments SET session_id='missing-native-session'
+             WHERE ticket_id=?1 AND state='running'",[&ticket.id],
+        ).unwrap();
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'detached-write','private-digest','pending',?2,?2)",
+            params![&ticket.id,now],
+        ).unwrap();
+        assert!(headless_quarantine_detached_ticket(&store.path,&ticket.id,revision+1).is_err());
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_detached_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='headless_detached_quarantined'
+             BEGIN SELECT RAISE(ABORT,'injected audit failure'); END;",
+        ).unwrap();
+        assert!(headless_quarantine_detached_ticket(&store.path,&ticket.id,revision).is_err());
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"running");
+        assert!(!mandate(&store,&ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&store,&ticket.id,10).unwrap()[0].state,"running");
+        store.db.execute_batch("DROP TRIGGER deny_detached_audit").unwrap();
+        let output:serde_json::Value=serde_json::from_str(
+            &headless_quarantine_detached_ticket(&store.path,&ticket.id,revision).unwrap(),
+        ).unwrap();
+        assert_eq!(output["state"],"interrupted");
+        assert_eq!(output["pendingEffectsMarkedUncertain"],1);
+        assert_eq!(output["providerStoppedByCommand"],false);
+        assert_eq!(output["externalEffectReplayAllowed"],false);
+        assert!(headless_quarantine_detached_ticket(&store.path,&ticket.id,revision).is_err());
+        assert!(!on_run_finished(&store,&session,true,"Late evidence").unwrap());
+        assert_eq!(history(&store,&ticket.id,20).unwrap().iter()
+            .filter(|a|a.kind=="headless_detached_quarantined").count(),1);
+        let path=store.path.clone();
+        drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        let state=get_ticket(&reopened,&ticket.id).unwrap();
+        assert_eq!(state.state,"interrupted");
+        assert!(state.active_assignment_id.is_none());
+        assert!(mandate(&reopened,&ticket.id).unwrap().revoked);
+        assert_eq!(assignments(&reopened,&ticket.id,10).unwrap()[0].state,"interrupted");
+        assert_eq!(reopened.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1",
+            [&ticket.id],|r|r.get::<_,String>(0),
+        ).unwrap(),"uncertain");
+        assert!(!list_headless_recovery_inbox(&path).unwrap().contains("Private detached objective"));
+    }
+
+    #[test]
+    fn headless_recovery_inbox_finds_detached_live_provider_session_before_watchdog() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private detached session objective",
+            "recovery-missing-provider-session", false,
+        ).unwrap();
+        assert!(launched);
+        let original_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let path = store.path.clone();
+        let healthy: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        assert!(healthy["items"].as_array().unwrap().is_empty());
+        let audit_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |r| r.get(0),
+        ).unwrap();
+
+        // Simulate a damaged/legacy assignment referring to a provider
+        // session that is absent. Normal native admission never does this.
+        store.db.execute(
+            "UPDATE sa_assignments SET session_id='missing-native-session'
+             WHERE ticket_id=?1 AND state='running'",
+            [&ticket.id],
+        ).unwrap();
+        assert!(read_only_policy(&store, &original_session).is_err(),
+            "detached task threads cannot fall back to ambient bot authority");
+        let found: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        assert_eq!(found["items"].as_array().unwrap().len(), 1);
+        assert_eq!(found["items"][0]["ticketId"], ticket.id);
+        let recovery = &found["items"][0]["recovery"];
+        assert_eq!(recovery["activeNativeAssignments"], 1);
+        assert_eq!(recovery["missingNativeSessions"], 1);
+        assert_eq!(recovery["activeAssignmentLinked"], true);
+        assert_eq!(recovery["assignmentStateConsistent"], false);
+        assert_eq!(recovery["nextOperatorAction"], "investigate_native_assignment_state");
+        assert_eq!(recovery["automaticReplayAllowed"], false);
+        assert_eq!(found["automaticRecoveryPerformed"], false);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |r| r.get::<_, i64>(0),
+        ).unwrap(), audit_before);
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "running");
+        let again: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        assert_eq!(again["items"][0]["recovery"]["missingNativeSessions"], 1);
+        assert!(!again.to_string().contains("Private detached session objective"));
+    }
+
+    #[test]
+    fn headless_recovery_inbox_finds_revoked_and_expired_live_mandates_before_watchdog() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private native mandate recovery",
+            "mandate-recovery-inbox", false,
+        ).unwrap();
+        assert!(launched);
+        let path = store.path.clone();
+        let initial: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        assert!(initial["items"].as_array().unwrap().is_empty());
+
+        let audit_before: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        for fault in ["revoked", "expired"] {
+            store.db.execute(
+                "UPDATE sa_mandates SET revoked=?2,expires_at=?3 WHERE ticket_id=?1",
+                params![ticket.id, i64::from(fault == "revoked"),
+                    if fault == "expired" { storage::now() - 1 }
+                    else { storage::now() + 120_000 }],
+            ).unwrap();
+            let found: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            assert_eq!(found["items"].as_array().unwrap().len(), 1, "{fault}");
+            assert_eq!(found["items"][0]["ticketId"], ticket.id, "{fault}");
+            assert_eq!(found["items"][0]["state"], "running", "{fault}");
+            assert_eq!(found["items"][0]["recovery"]["nextOperatorAction"],
+                "stop_or_quarantine_revoked_native_execution", "{fault}");
+            assert_eq!(found["items"][0]["recovery"]["automaticReplayAllowed"], false);
+            assert_eq!(found["items"][0]["recovery"]["mandateRevoked"],
+                fault == "revoked");
+            assert_eq!(found["items"][0]["recovery"]["mandateExpired"],
+                fault == "expired");
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+            assert_eq!(store.db.query_row(
+                "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+                [&ticket.id], |row| row.get::<_, i64>(0),
+            ).unwrap(), audit_before);
+        }
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let after_restart: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox(&path).unwrap(),
+        ).unwrap();
+        assert_eq!(after_restart["items"][0]["ticketId"], ticket.id);
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "running");
+        assert!(!serde_json::to_string(&after_restart).unwrap()
+            .contains("Private native mandate recovery"));
     }
 
     #[test]

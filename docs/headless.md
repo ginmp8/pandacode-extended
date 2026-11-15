@@ -833,3 +833,16 @@ returns 100 effect receipts at a time using a stable composite timestamp/key cur
 This view does not call GitHub, replay effects, authorize retry or acknowledge
 an uncertain effect. The native unresolved total remains authoritative even when
 older receipts are outside the current page.
+
+
+### Recovery diagnostics and detached-session quarantine
+
+`pandacode serve --list-recovery-inbox [--before <priority> <milliseconds> <ticket-id>]`
+returns stable, redacted recovery pages, including missing native sessions
+and active attempts with expired or revoked mandates. This is read-only.
+
+`pandacode serve --quarantine-detached-ticket <ticket-id> <revision>`
+is an explicit revision-guarded, fenced operation for precisely one running
+Assignment whose native session is absent. It revokes the mandate, interrupts
+the orphan, preserves uncertain effects and records native audit evidence in
+one transaction without replaying any external effect.

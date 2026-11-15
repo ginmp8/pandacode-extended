@@ -1402,4 +1402,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(root);
     }
 
-}
+    #[test]
+    fn corrupt_mixed_companion_manifest_is_rejected_before_any_state_or_backup_changes() {
+        let store = fixture();
+        let root = std::env::temp_dir().join(format!("sa-corrupt-mixed-{}", storage::id()));
+        struct TempRoot(std::path::PathBuf);
+        impl Drop for TempRoot {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let _cleanup = TempRoot(root.clone());
+        let seeded = apply_with_backup(&store, &root, &document("Existing"), true).unwrap();
+        let existing_backup = seeded.backup_path.unwrap();
+        store
+            .db
+            .execute("UPDATE sa_orchestrations SET enabled=1 WHERE name='Existing'", [])
+            .unwrap();
+
+        // Companion manifests are separate from legacy bots.json. This document
+        // mixes a valid new Team with a corrupt later entry, which must fail during
+        // whole-document parsing before a backup or any Team/preset mutation.
+        let mut mixed = document_v2("Would Be Partial");
+        mixed["orchestrations"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"name":"Corrupt", "coordinatorBot":"Router"}));
+
+        let before_bots: i64 = store.db.query_row("SELECT COUNT(*) FROM bots", [], |r| r.get(0)).unwrap();
+        let before_channels: i64 = store.db.query_row("SELECT COUNT(*) FROM bot_channels", [], |r| r.get(0)).unwrap();
+        let before_schedules: i64 = store.db.query_row("SELECT COUNT(*) FROM bot_schedules", [], |r| r.get(0)).unwrap();
+        let before_rules: i64 = store.db.query_row("SELECT COUNT(*) FROM bot_rules", [], |r| r.get(0)).unwrap();
+        let before_teams: i64 = store.db.query_row("SELECT COUNT(*) FROM sa_orchestrations", [], |r| r.get(0)).unwrap();
+        let before_versions: i64 = store.db.query_row("SELECT COUNT(*) FROM sa_team_versions", [], |r| r.get(0)).unwrap();
+        let before_members: i64 = store.db.query_row("SELECT COUNT(*) FROM sa_team_version_members", [], |r| r.get(0)).unwrap();
+        let backup_count = std::fs::read_dir(root.join("bot-backups")).unwrap().count();
+
+        assert!(apply_with_backup(&store, &root, &mixed, true).is_err());
+        assert_eq!(store.db.query_row::<i64, _, _>("SELECT COUNT(*) FROM bots", [], |r| r.get(0)).unwrap(), before_bots);
+        assert_eq!(store.db.query_row::<i64, _, _>("SELECT COUNT(*) FROM bot_channels", [], |r| r.get(0)).unwrap(), before_channels);
+        assert_eq!(store.db.query_row::<i64, _, _>("SELECT COUNT(*) FROM bot_schedules", [], |r| r.get(0)).unwrap(), before_schedules);
+        assert_eq!(store.db.query_row::<i64, _, _>("SELECT COUNT(*) FROM bot_rules", [], |r| r.get(0)).unwrap(), before_rules);
+        assert_eq!(store.db.query_row::<i64, _, _>("SELECT COUNT(*) FROM sa_orchestrations", [], |r| r.get(0)).unwrap(), before_teams);
+        assert_eq!(store.db.query_row::<i64, _, _>("SELECT COUNT(*) FROM sa_team_versions", [], |r| r.get(0)).unwrap(), before_versions);
+        assert_eq!(store.db.query_row::<i64, _, _>("SELECT COUNT(*) FROM sa_team_version_members", [], |r| r.get(0)).unwrap(), before_members);
+        assert_eq!(std::fs::read_dir(root.join("bot-backups")).unwrap().count(), backup_count);
+        assert!(std::path::Path::new(&existing_backup).is_file());
+        let enabled: bool = store.db.query_row("SELECT enabled FROM sa_orchestrations WHERE name='Existing'", [], |r| r.get(0)).unwrap();
+        assert!(enabled, "existing enabled configuration must be preserved");
+        assert_eq!(store.db.query_row::<i64, _, _>("SELECT COUNT(*) FROM sa_orchestrations WHERE name='Would Be Partial'", [], |r| r.get(0)).unwrap(), 0);
+
+        // The importer never activates imported presets or starts tasks; malformed
+        // input cannot create an enabled Team or live assignment.
+        assert_eq!(store.db.query_row::<i64, _, _>("SELECT COUNT(*) FROM sa_orchestrations WHERE enabled=1", [], |r| r.get(0)).unwrap(), 1);
+        let active_tickets: i64 = store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [], |r| r.get(0)).unwrap();
+        assert_eq!(active_tickets, 0);
+    }}

@@ -2985,10 +2985,12 @@ fn usage_aggregate_child_receipt(parent: &str, child: &str) -> council::ChildCou
     }
 }
 
+type UsageAggregateMetrics = (Option<u64>, Option<u64>, Option<u64>, Option<u64>, Option<u64>);
+
 fn set_usage_aggregate_metrics(
     record: &mut council::CouncilUsageRecord,
     status: council::CouncilUsageValueStatus,
-    (input, output, queue, elapsed, cost): (Option<u64>, Option<u64>, Option<u64>, Option<u64>, Option<u64>),
+    (input, output, queue, elapsed, cost): UsageAggregateMetrics,
     provenance: Option<(&str, &str, &str, u64)>,
 ) {
     record.input_tokens = usage_aggregate_value(status, input);

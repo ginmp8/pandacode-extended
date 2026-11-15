@@ -7841,3 +7841,82 @@ fn invalid_nested_two_phase_dispatch_leaves_persisted_state_unchanged() {
     let after = persisted_snapshot(&state.store.lock().unwrap());
     assert_eq!(after, before, "rejected dispatch must not change team, sessions, workers, or requests");
 }
+
+// Native two-phase fixture reused from the read-only PR #152 regressions.
+fn two_phase_test_config(
+    automatic: usize,
+    selected: &[(&str, council::SelectedReviewerMode)],
+) -> council::CouncilConfig {
+    use council::{AutomaticReviewerCount as Count, CouncilCriteriaSource as Source, CouncilCriterionOrigin as Origin};
+    let selected = selected.iter().map(|(bot_id, mode)| council::SelectedCouncilReviewer {
+        bot_id: (*bot_id).into(),
+        mode: *mode,
+        required: true,
+        nested: (*mode == council::SelectedReviewerMode::Nested).then_some(council::NestedCouncilConfig {
+            template: council::NestedCouncilTemplate::ValidatedDefault,
+            child_criteria_source: Source::User,
+            child_reviewer_count: 2,
+            target: 9.0,
+            max_rounds: 5,
+            escalation: council::NestedEscalation::Always,
+            user_forced: false,
+        }),
+    }).collect::<Vec<_>>();
+    let composition = council::CouncilComposition {
+        schema_version: 1,
+        automatic: council::CouncilAutomaticReviewers {
+            enabled: automatic > 0,
+            count: Count::Fixed(automatic),
+        },
+        selected: selected.clone(),
+        criteria_source: Source::User,
+        criteria: vec![council::CouncilCriterion {
+            id: "coverage".into(),
+            lens: "coverage".into(),
+            description: "Verify the native two-phase review path.".into(),
+            required: true,
+            target: 9.0,
+            evidence_required: false,
+            source: Origin::User,
+        }],
+        strategy: council::CouncilStrategy::TwoPhase,
+        limits: council::CouncilCompositionLimits {
+            max_depth: 2,
+            max_root_seats: 8,
+            max_concurrent_leaves: 4,
+            max_leaf_reviews_per_round: 32,
+            timeout_ms: 3_600_000,
+            max_estimated_cost_micros: None,
+        },
+    };
+    composition.validate().unwrap();
+    council::CouncilConfig {
+        target: 9.0,
+        max_rounds: 5,
+        reviewers: automatic,
+        reviewer_bot_ids: selected.iter().map(|reviewer| reviewer.bot_id.clone()).collect(),
+        composition: Some(composition),
+        ..council::CouncilConfig::default()
+    }
+}
+
+fn install_two_phase_team(
+    state: &AppState,
+    root_id: &str,
+    automatic: usize,
+    selected: &[(&str, council::SelectedReviewerMode)],
+) {
+    let project_id = state.store.lock().unwrap().session(root_id).unwrap().project_id;
+    for (id, _) in selected {
+        state.store.lock().unwrap().db.execute(
+            "INSERT INTO bots(id,name,role,instructions,goals,soul,project_id,provider,model,mode,created_at,updated_at,skills) VALUES(?1,?1,'Reviewer','Review only the assigned task.','','',?2,'codex','gpt-5-nano','full',1,1,'[]')",
+            params![id, project_id],
+        ).unwrap();
+    }
+    let store = state.store.lock().unwrap();
+    let mut team = load(&store, root_id).unwrap().unwrap();
+    team.config.council = Some(two_phase_test_config(automatic, selected));
+    team.council_since = storage::now().max(1);
+    save(&store, &mut team).unwrap();
+}
+

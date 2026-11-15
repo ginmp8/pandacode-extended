@@ -64,7 +64,7 @@ fn council_request(
          origin_channel_id,origin_external_id,recipients,parent_request_id,depth,route,idempotency_key,created_at)
          VALUES(?1,'assignment',?2,?3,'desktop','desktop',?4,NULL,0,?5,?6,?7)",
         params![message_id,sender.id,sender_session,serde_json::to_string(&recipient_ids).unwrap(),
-            json!([sender.id.clone()]),format!("council-test:{message_id}"),created_at],
+            json!([sender.id.clone()]).to_string(),format!("council-test:{message_id}"),created_at],
     ).unwrap();
     (message_id, created_at)
 }

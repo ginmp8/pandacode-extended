@@ -740,6 +740,7 @@ fn composed_pass_blocks_when_a_configured_cost_cap_has_no_receipt_proof() {
         );
         binding.required_reviewers = Some(2);
         binding.composition_mode = Some("direct".into());
+        reviewer_security::record_native_authority(&store, &team.session_id, &binding).unwrap();
         reviewer.reviewer_binding = Some(binding);
         team.workers.push(reviewer);
     }
@@ -2375,6 +2376,11 @@ fn native_task_council_restart_preserves_request_and_new_cycle_isolation() {
         let mut team = load(&store, &sid).unwrap().unwrap();
         team.council_since = team.council_since.saturating_add(1);
         team.objective = "Review a different artifact in a fresh Council cycle.".into();
+        // A reopened task is explicitly running before a new Council admission.
+        team.status = "running".into();
+        assert!(!team.workers.iter().any(|worker| {
+            worker.council.is_some() && worker.created_at >= team.council_since
+        }), "a fresh native request cannot bypass already-dispatched reviewers");
         save(&store, &mut team).unwrap();
         let next = native_council_task::admit(
             &store, "native-client", &sid, &project_id, "assignment", &"b".repeat(64),
@@ -2847,6 +2853,7 @@ fn s3_usage_phase_requires_a_persisted_independent_challenge_decision() {
             &team, &reviewer.id, reviewer.created_at, &reviewer.provider, &reviewer.model, &seat,
         );
         binding.composition_mode = Some("direct".into());
+        reviewer_security::record_native_authority(&store, &team.session_id, &binding).unwrap();
         reviewer.reviewer_binding = Some(binding);
         seats.push(reviewer);
     }
@@ -6207,7 +6214,7 @@ fn persisted_council_criterion_receipts_drive_the_gate_and_dispositions_project_
         composition: Some(composition),
         ..CouncilConfig::default()
     });
-    team.council_since = 1200;
+    team.council_since = storage::now().max(1);
 
     let root_cycle_id = format!("{}:{}", team.session_id, team.council_since);
     let mut inputs = Vec::new();
@@ -7686,8 +7693,12 @@ fn composed_attempt_budget_counts_child_failures_and_all_rounds_without_refunds(
 
     let used = composed_child_attempt_total(&store, &root, &root).unwrap();
     assert_eq!(used, 2, "failed and abandoned child leaves from earlier rounds are not refunded");
-    assert!(council::require_composed_attempt_budget(&root, used, 1021).is_ok());
-    assert!(council::require_composed_attempt_budget(&root, used, 1022)
+    // The nested parent seat and failed root seat both consume root capacity.
+    assert_eq!(root.workers.iter()
+        .filter(|worker| worker.council.is_some() && worker.created_at >= root.council_since)
+        .count(), 2);
+    assert!(council::require_composed_attempt_budget(&root, used, 1020).is_ok());
+    assert!(council::require_composed_attempt_budget(&root, used, 1021)
         .unwrap_err().contains("council_attempt_budget_exhausted"));
 
     let mut in_flight_child = child.clone();

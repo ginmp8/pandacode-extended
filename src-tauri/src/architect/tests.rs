@@ -2401,7 +2401,8 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
         NestedCouncilTemplate, SelectedCouncilReviewer, SelectedReviewerMode as Mode,
     };
 
-    let cases: [(&str, usize, &[(&str, Mode)]); 7] = [
+    type ModeCase<'a> = (&'a str, usize, &'a [(&'a str, council::SelectedReviewerMode)]);
+    let cases: [ModeCase<'_>; 7] = [
         ("M1", 2, &[]),
         ("M2", 0, &[("direct-a", Mode::Direct), ("direct-b", Mode::Direct)]),
         ("M3", 1, &[("direct-a", Mode::Direct)]),
@@ -2436,7 +2437,7 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
                     bot_id: (*id).into(),
                     mode: *reviewer_mode,
                     required: true,
-                    nested: (*reviewer_mode == Mode::Nested).then(|| council::NestedCouncilConfig {
+                    nested: (*reviewer_mode == Mode::Nested).then_some(council::NestedCouncilConfig {
                         template: NestedCouncilTemplate::ValidatedDefault,
                         child_criteria_source: Source::User,
                         child_reviewer_count: 2,
@@ -6222,7 +6223,6 @@ fn persisted_council_criterion_receipts_drive_the_gate_and_dispositions_project_
             score: Some(9.5),
             started_at: created_at,
             closed_by_selection: false,
-            ..council::CouncilSeat::default()
         });
         let seat = reviewer.council.as_ref().unwrap().clone();
         let binding = reviewer_security::ReviewerBinding::native(
@@ -6405,7 +6405,7 @@ fn nested_child_lifecycle_fixture_for_root(
     root.council_since = 12;
     let seat = council::CouncilSeat {
         round: 1, lens: "security".into(), score: None,
-        closed_by_selection: false, started_at: 0, ..council::CouncilSeat::default()
+        closed_by_selection: false, started_at: 0
     };
     let mut parent_worker = worker("nested-review", "waiting", &["src"], &[]);
     parent_worker.session_id = child_id.clone();
@@ -6522,7 +6522,7 @@ fn legacy_council_reviewers_keep_scoped_sub_workers_but_nested_leaves_cannot_spa
     team.council_since = 20;
     let seat = council::CouncilSeat {
         round: 1, lens: "security".into(), score: None,
-        closed_by_selection: false, started_at: 0, ..council::CouncilSeat::default()
+        closed_by_selection: false, started_at: 0
     };
     let mut reviewer = worker("reviewer", "running", &["src"], &[]);
     reviewer.council = Some(seat.clone());

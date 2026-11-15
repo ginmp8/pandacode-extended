@@ -360,6 +360,25 @@ CREATE TRIGGER IF NOT EXISTS sa_project_lease_update
  BEGIN SELECT RAISE(ABORT,'SuperAgent project already has an active assignment'); END;
 "#;
 
+/// Keep an active native assignment from becoming an ownerless Ticket when a
+/// task is deleted in the short interval between native admission and agent
+/// registration. Bot reset/removal revokes the assignment first, so its
+/// intentional session cleanup still passes this database guard.
+const ACTIVE_ASSIGNMENT_SESSION_DELETE_GUARD: &str = r#"
+CREATE TRIGGER IF NOT EXISTS sa_active_assignment_session_delete_guard
+ BEFORE DELETE ON sessions
+ WHEN EXISTS (
+   SELECT 1 FROM sa_assignments
+   WHERE session_id=OLD.id AND state='running'
+ )
+ BEGIN SELECT RAISE(ABORT,'Cannot delete a session owned by an active SuperAgent assignment'); END;
+"#;
+
+fn ensure_active_assignment_session_delete_guard(db: &Connection) -> Result<()> {
+    db.execute_batch(ACTIVE_ASSIGNMENT_SESSION_DELETE_GUARD)
+        .map_err(|e| e.to_string())
+}
+
 /// An active harness is not resumed automatically after process restart.
 pub(crate) const RECOVER: &str = "
 -- A crash or legacy partial write may leave a running assignment on a
@@ -3041,6 +3060,7 @@ fn admit_role_with_provenance(
     {
         return Err("Provide a stable alphanumeric manual-request key.".into());
     }
+    ensure_active_assignment_session_delete_guard(&store.db)?;
     if let Some(existing) = store.db.query_row(
         "SELECT id FROM sa_tickets WHERE orchestration_id=?1 AND request_key=?2",
         params![config_id,request_key], |row| row.get::<_, String>(0),
@@ -4081,6 +4101,7 @@ pub(crate) fn invalidate_bot(
     removed: bool,
     _dispatch_fence: &effects::DispatchFence,
 ) -> Result<()> {
+    ensure_active_assignment_session_delete_guard(&store.db)?;
     // Resetting either selected bot invalidates every nonterminal mandate:
     // coordinator sessions are just as ephemeral as worker sessions, and a
     // previously finished plan must not authorize a worker after reset.
@@ -4717,6 +4738,7 @@ pub async fn superagent_submit(window: tauri::WebviewWindow,
 fn retry_blocked(
     store: &mut Store, ticket_id: &str, busy: bool,
 ) -> Result<(Ticket, String, String)> {
+    ensure_active_assignment_session_delete_guard(&store.db)?;
     let ticket = get_ticket(store,ticket_id)?;
     // Authenticated GitHub Auto work is tied to a separate immutable event
     // receipt and consent scope. It cannot be re-admitted by a manual retry,
@@ -4848,6 +4870,7 @@ fn prepare_coordinated_worker_inner(
     expected_revision: Option<i64>,
     allowed_paths: Option<&[String]>,
 ) -> Result<(Ticket, String, String, String)> {
+    ensure_active_assignment_session_delete_guard(&store.db)?;
     let ticket = get_ticket(store, ticket_id)?;
     if expected_revision.is_some_and(|revision| revision != ticket.revision) {
         return Err("Ticket revision changed before worker authorization.".into());
@@ -9638,6 +9661,38 @@ mod tests {
             [&first.id],|r|r.get(0),
         ).unwrap();
         assert_eq!(allowed,0);
+    }
+
+    #[test]
+    fn active_assignment_session_deletion_is_denied_until_owner_revocation() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Keep the admitted owner", "delete-active-owner", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let state = crate::architect::test_app_state(store);
+
+        // Admission reserves the assignment before an agent appears in the
+        // runtime registry. Task deletion must still fail closed in that gap.
+        let error = crate::task_deletion::delete_state(&state, &session).unwrap_err();
+        assert!(error.contains("active SuperAgent assignment"), "{error}");
+        {
+            let store = state.store.lock().unwrap();
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+            assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+            assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "running");
+            assert!(store.session(&session).is_ok());
+
+            // Bot reset first revokes the assignment, then removes its session.
+            bots::reset(&store, "worker").unwrap();
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "interrupted");
+            assert!(mandate(&store, &ticket.id).unwrap().revoked);
+            assert_eq!(assignments(&store, &ticket.id, 10).unwrap()[0].state, "interrupted");
+            assert!(store.session(&session).is_err());
+            assert!(!on_run_finished(&store, &session, true, "late deleted-owner callback").unwrap());
+        }
     }
 
     #[test]

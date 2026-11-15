@@ -161,7 +161,24 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 43;
+pub const SCHEMA_VERSION: i64 = 55;
+
+#[cfg(test)]
+std::thread_local! {
+    static MIGRATION_TEST_FAILURE_AFTER: std::cell::Cell<Option<i64>> = std::cell::Cell::new(None);
+}
+
+#[cfg(test)]
+fn maybe_inject_migration_failure(version: i64) -> Result<()> {
+    if MIGRATION_TEST_FAILURE_AFTER.with(|failure_at| failure_at.replace(None)) == Some(version) {
+        return Err(format!(
+            "injected late migration failure after schema {version}"
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) const COUNCIL_REVIEW_SNAPSHOT_DIRECTORY: &str = "council-review-snapshots";
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -691,8 +708,219 @@ impl Store {
                 migration.execute_batch("PRAGMA user_version=43;")
                     .map_err(|e| e.to_string())?;
             }
+            if version < 44 {
+                // Worker file-write grants and per-write receipts are separate
+                // from the immutable read-only mandate. Existing tickets remain
+                // read-only unless a user explicitly grants an active worker.
+                migration.execute_batch(crate::superagent::write_grants::SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=44;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 45 {
+                // Persist the exact canonical checkout captured at grant issue.
+                // Older v44 grants did not bind a root, so revoke them instead
+                // of silently widening them to the path currently on disk.
+                let has_project_root: bool = migration.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_worker_write_grants') WHERE name='project_root')",
+                    [], |row| row.get(0),
+                ).map_err(|e| e.to_string())?;
+                if !has_project_root {
+                    migration.execute_batch(
+                        "ALTER TABLE sa_worker_write_grants ADD COLUMN project_root TEXT NOT NULL DEFAULT '';",
+                    ).map_err(|e| e.to_string())?;
+                }
+                migration.execute_batch(
+                    "UPDATE sa_worker_write_grants SET revoked=1,revoked_at=COALESCE(revoked_at,created_at) WHERE revoked=0 AND project_root='';\n\
+                     PRAGMA user_version=45;",
+                ).map_err(|e| e.to_string())?;
+            }
+            if version < 46 {
+                migration.execute_batch(crate::superagent::effects::GRANT_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=46;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 47 {
+                // Keep only bounded outcome metadata beside the original exact
+                // grant; never duplicate the comment body in a receipt.
+                for (name, definition) in [
+                    ("uncertainty_reason", "TEXT CHECK(uncertainty_reason IS NULL OR length(uncertainty_reason)<=64)"),
+                    ("readback_state", "TEXT CHECK(readback_state IS NULL OR readback_state IN ('not_attempted','exact','missing','conflict','unavailable'))"),
+                    ("remote_comment_id", "TEXT CHECK(remote_comment_id IS NULL OR length(remote_comment_id)<=128)"),
+                    ("remote_comment_url", "TEXT CHECK(remote_comment_url IS NULL OR length(remote_comment_url)<=2048)"),
+                    ("remote_author_login", "TEXT CHECK(remote_author_login IS NULL OR length(remote_author_login)<=128)"),
+                ] {
+                    let exists: bool = migration.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_effect_receipts') WHERE name=?1)",
+                        [name], |row| row.get(0),
+                    ).map_err(|e| e.to_string())?;
+                    if !exists {
+                        migration.execute_batch(&format!("ALTER TABLE sa_effect_receipts ADD COLUMN {name} {definition};"))
+                            .map_err(|e| e.to_string())?;
+                    }
+                }
+                migration.execute_batch("PRAGMA user_version=47;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 48 {
+                // S2 Team versions preserve ordered roles independently from
+                // the legacy coordinator/worker projection. Every historical
+                // Ticket receives one immutable effective-policy snapshot.
+                migration.execute_batch(crate::superagent::TEAM_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                crate::superagent::migrate_team_versions(&migration)?;
+                migration.execute_batch("PRAGMA user_version=48;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 49 {
+                // S3 stores exact required-Council request and finalization
+                // identities independently from the advisory legacy target.
+                migration.execute_batch(crate::superagent::COUNCIL_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=49;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 50 {
+                // Bind required Council reviews to the authorized workspace
+                // tree, including writes made by the admitted worker.
+                for (table, definition) in [
+                    ("sa_council_requests", "TEXT CHECK(workspace_sha256 IS NULL OR length(workspace_sha256)=64)"),
+                    ("sa_council_finalizations", "TEXT CHECK(workspace_sha256 IS NULL OR length(workspace_sha256)=64)"),
+                ] {
+                    let exists: bool = migration.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name='workspace_sha256')",
+                        [table], |row| row.get(0),
+                    ).map_err(|e| e.to_string())?;
+                    if !exists {
+                        migration.execute_batch(&format!(
+                            "ALTER TABLE {table} ADD COLUMN workspace_sha256 {definition};"
+                        )).map_err(|e| e.to_string())?;
+                    }
+                }
+                // Existing databases already have the S3 trigger without the
+                // workspace field. Recreate it with the complete immutable identity.
+                migration.execute_batch("DROP TRIGGER IF EXISTS sa_council_request_identity_immutable;")
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch(crate::superagent::COUNCIL_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=50;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 51 {
+                // S3 Council reviews bind an app-managed immutable workspace
+                // snapshot identity and digest before reviewer dispatch.
+                for (table, columns) in [
+                    ("sa_council_requests", [
+                        ("workspace_snapshot_id", "TEXT"),
+                        ("workspace_snapshot_sha256", "TEXT CHECK(workspace_snapshot_sha256 IS NULL OR length(workspace_snapshot_sha256)=64)"),
+                    ]),
+                    ("sa_council_finalizations", [
+                        ("workspace_snapshot_id", "TEXT"),
+                        ("workspace_snapshot_sha256", "TEXT CHECK(workspace_snapshot_sha256 IS NULL OR length(workspace_snapshot_sha256)=64)"),
+                    ]),
+                ] {
+                    for (name, definition) in columns {
+                        let exists: bool = migration.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+                            rusqlite::params![table,name], |row| row.get(0),
+                        ).map_err(|e| e.to_string())?;
+                        if !exists {
+                            migration.execute_batch(&format!(
+                                "ALTER TABLE {table} ADD COLUMN {name} {definition};"
+                            )).map_err(|e| e.to_string())?;
+                        }
+                    }
+                }
+                migration.execute_batch("DROP TRIGGER IF EXISTS sa_council_request_identity_immutable;")
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch(crate::superagent::COUNCIL_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=51;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 52 {
+                // S5 WorkItems are ordered per-Ticket units with prerequisite
+                // edges. The assignment link is nullable, so every existing
+                // attempt keeps its exact history and authority.
+                migration.execute_batch(crate::superagent::WORK_ITEM_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                let has_work_item: bool = migration.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_assignments') WHERE name='work_item_id')",
+                    [], |row| row.get(0),
+                ).map_err(|e| e.to_string())?;
+                if !has_work_item {
+                    migration.execute_batch(
+                        "ALTER TABLE sa_assignments ADD COLUMN work_item_id TEXT REFERENCES sa_work_items(id) ON DELETE SET NULL;",
+                    ).map_err(|e| e.to_string())?;
+                }
+                migration.execute_batch(
+                    "CREATE INDEX IF NOT EXISTS sa_assignment_work_item
+                       ON sa_assignments(work_item_id) WHERE work_item_id IS NOT NULL;
+                     PRAGMA user_version=52;",
+                ).map_err(|e| e.to_string())?;
+            }
+            if version < 53 {
+                // S5 WorkItems gain a durable evidence contract. Existing v52
+                // rows receive an explicit compatibility contract through the
+                // column default; no item, edge, or assignment is rewritten.
+                let has_evidence_contract: bool = migration.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_work_items') WHERE name='evidence_contract')",
+                    [], |row| row.get(0),
+                ).map_err(|e| e.to_string())?;
+                if !has_evidence_contract {
+                    let fallback = crate::superagent::LEGACY_EVIDENCE_CONTRACT
+                        .replace('\'', "''");
+                    migration.execute_batch(&format!(
+                        "ALTER TABLE sa_work_items ADD COLUMN evidence_contract TEXT NOT NULL
+                         DEFAULT '{fallback}'
+                         CHECK(length(CAST(evidence_contract AS BLOB)) BETWEEN 1 AND 16384
+                           AND length(trim(evidence_contract))>0
+                           AND instr(evidence_contract,char(0))=0);"
+                    )).map_err(|e| e.to_string())?;
+                }
+                migration.execute_batch("PRAGMA user_version=53;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 54 {
+                // Draft pull request grants and receipts have a separate
+                // durable identity from issue-comment grants and receipts.
+                migration.execute_batch(crate::superagent::effects::DRAFT_PR_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=54;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 55 {
+                // Bind each new draft-PR grant to the exact verified remote
+                // head commit. Existing v54 grants keep an empty compatibility
+                // value and fail closed because they cannot prove a head SHA.
+                let has_head_sha: bool = migration.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_draft_pr_effect_grants') WHERE name='head_sha')",
+                    [], |row| row.get(0),
+                ).map_err(|e| e.to_string())?;
+                if !has_head_sha {
+                    migration.execute_batch(
+                        "ALTER TABLE sa_draft_pr_effect_grants ADD COLUMN head_sha TEXT NOT NULL DEFAULT ''
+                         CHECK(head_sha='' OR (length(head_sha) IN (40,64) AND head_sha NOT GLOB '*[^a-f0-9]*'));",
+                    ).map_err(|e| e.to_string())?;
+                }
+                migration.execute_batch("PRAGMA user_version=55;")
+                    .map_err(|e| e.to_string())?;
+            }
+            // Test-only fault injection models a late error before COMMIT so
+            // migration rollback can be verified without altering user data.
+            #[cfg(test)]
+            maybe_inject_migration_failure(SCHEMA_VERSION)?;
             migration.commit().map_err(|e| e.to_string())?;
         }
+        // Recovery can revoke a SuperAgent mandate. Serialize it with the
+        // same cross-process fence that protects a claimed GitHub comment.
+        // An in-memory database has no other process that could share it.
+        let _recovery_fence = if path == Path::new(":memory:") {
+            None
+        } else {
+            Some(crate::superagent::effects::lock_dispatch(path)?)
+        };
         let recovery = db.transaction().map_err(|e| e.to_string())?;
         // Only rows from before typed coordination existed are eligible for the
         // narrowly scoped legacy display projection. New user copies stay user text.
@@ -735,8 +963,10 @@ impl Store {
             WHERE CASE WHEN json_valid(content) THEN json_extract(content,'$.status') END IN ('running','waiting');").map_err(|e|e.to_string())?;
         // Reconcile SuperAgent-owned running assignments without replaying effects.
         recovery.execute_batch(crate::superagent::RECOVER).map_err(|e| e.to_string())?;
+        recovery.execute_batch(crate::superagent::write_grants::RECOVER).map_err(|e| e.to_string())?;
         recovery.execute_batch(crate::superagent::effects::RECOVER).map_err(|e| e.to_string())?;
         recovery.commit().map_err(|e| e.to_string())?;
+        drop(_recovery_fence);
         let ranked: bool = db.query_row("SELECT EXISTS(SELECT 1 FROM sessions WHERE sidebar_order IS NOT NULL)", [], |r| r.get(0)).map_err(|e| e.to_string())?;
         if ranked { rank_published_drafts(&db)?; }
         let store = Self {
@@ -1530,10 +1760,26 @@ impl Store {
         if !path.is_dir() {
             return Err(format!("{kind} folder is unavailable."));
         }
-        if is_worktree && !path.join(".git").is_file() {
+        if is_worktree && !path.join(".git").is_file() && !self.is_council_review_snapshot(&path) {
             return Err("Worktree checkout is unavailable. Its Git metadata is missing.".into());
         }
         Ok(path)
+    }
+
+    fn is_council_review_snapshot(&self, path: &Path) -> bool {
+        let Some(id) = path.file_name().and_then(|name| name.to_str()) else { return false };
+        if id.is_empty() || id.len() > 64
+            || !id.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_')
+        {
+            return false;
+        }
+        let Some(database_parent) = self.path.parent().and_then(|parent| parent.canonicalize().ok()) else {
+            return false;
+        };
+        let Ok(snapshot_parent) = database_parent.join(COUNCIL_REVIEW_SNAPSHOT_DIRECTORY).canonicalize() else {
+            return false;
+        };
+        path.parent() == Some(snapshot_parent.as_path())
     }
 
     pub fn create_worktree_session_on(&self, source: &Session, path: &Path, branch: Option<&str>) -> Result<Session> {
@@ -3684,6 +3930,894 @@ mod tests {
             .max()
             .unwrap();
         assert_eq!(newest, SCHEMA_VERSION, "bump SCHEMA_VERSION with every new migration step");
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct MigrationHistorySnapshot {
+        ticket: (String, String, String, i64),
+        mandate: (String, String, String, i64, String, i64, i64, String, i64, i64),
+        session_task: (
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            Option<i64>,
+        ),
+        assignment: (
+            String,
+            String,
+            String,
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+        ),
+        audit: Vec<(String, String, i64)>,
+        effects: Vec<(String, String, String, Option<String>, Option<String>)>,
+        work_items: Vec<(String, String, String, i64, i64)>,
+        dependencies: Vec<(String, String)>,
+    }
+
+    fn migration_history_snapshot(db: &Connection) -> MigrationHistorySnapshot {
+        let ticket = db
+            .query_row(
+                "SELECT id,objective,state,revision FROM sa_tickets WHERE id='rollback-ticket'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        let mandate = db
+            .query_row(
+                "SELECT ticket_id,actor,authorization_id,policy_revision,project_id,
+                        expires_at,revoked,allowed_tools,allowed_side_effects,created_at
+                 FROM sa_mandates WHERE ticket_id='rollback-ticket'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let session_task = db
+            .query_row(
+                "SELECT s.id,s.project_id,s.title,s.title_origin,s.status,s.task_stage,
+                        s.task_description,s.created_at,s.updated_at,s.completed_at
+                 FROM sessions s
+                 JOIN sa_assignments a ON a.session_id=s.id
+                 WHERE a.id='rollback-assignment'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                        row.get(8)?,
+                        row.get(9)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let assignment = db
+            .query_row(
+                "SELECT id,ticket_id,session_id,state,attempt,result,work_item_id
+                 FROM sa_assignments WHERE id='rollback-assignment'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let audit = {
+            let mut statement = db.prepare(
+                "SELECT kind,detail,at FROM sa_audit WHERE ticket_id='rollback-ticket' ORDER BY id",
+            ).unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let effects = {
+            let mut statement = db
+                .prepare(
+                    "SELECT effect_key,state,payload_sha256,uncertainty_reason,readback_state
+                     FROM sa_effect_receipts WHERE ticket_id='rollback-ticket' ORDER BY effect_key",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let work_items = {
+            let mut statement = db
+                .prepare(
+                    "SELECT id,objective,state,ordinal,updated_at FROM sa_work_items
+                     WHERE ticket_id='rollback-ticket' ORDER BY ordinal",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        let dependencies = {
+            let mut statement = db
+                .prepare(
+                    "SELECT item_id,depends_on FROM sa_work_item_deps
+                     WHERE item_id LIKE 'rollback-work-item-%' ORDER BY item_id,depends_on",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>()
+                .unwrap()
+        };
+        MigrationHistorySnapshot {
+            ticket,
+            mandate,
+            session_task,
+            assignment,
+            audit,
+            effects,
+            work_items,
+            dependencies,
+        }
+    }
+
+    fn database_user_version(db: &Connection) -> i64 {
+        db.pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap()
+    }
+
+    fn assert_migration_integrity(db: &Connection, context: &str) {
+        let result: String = db
+            .pragma_query_value(None, "integrity_check", |row| row.get(0))
+            .unwrap();
+        assert_eq!(result, "ok", "{context}");
+    }
+
+    struct MigrationTempDir(PathBuf);
+
+    impl MigrationTempDir {
+        fn new(label: &str) -> Self {
+            let path = std::env::temp_dir().join(format!("pandacode-{label}-{}", id()));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for MigrationTempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn migration_table_exists(db: &Connection, table: &str) -> bool {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+            [table],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    fn migration_column_exists(db: &Connection, table: &str, column: &str) -> bool {
+        db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info(?1) WHERE name=?2)",
+            params![table, column],
+            |row| row.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Test databases are seeded through the current Store schema. Remove every
+    /// object added by migrations 53–55 to make the on-disk fixture a real v52
+    /// shape before testing the forward migration.
+    fn reconstruct_schema_52(db: &Connection) {
+        db.execute_batch(
+            "DROP TABLE sa_draft_pr_effect_receipts;
+             DROP TABLE sa_draft_pr_effect_grants;
+             ALTER TABLE sa_work_items DROP COLUMN evidence_contract;
+             PRAGMA user_version=52;",
+        )
+        .unwrap();
+    }
+
+    fn assert_schema_52_shape(db: &Connection) {
+        assert_eq!(database_user_version(db), 52);
+        assert!(
+            !migration_column_exists(db, "sa_work_items", "evidence_contract"),
+            "schema 52 predates the WorkItem evidence contract"
+        );
+        assert!(!migration_table_exists(db, "sa_draft_pr_effect_grants"));
+        assert!(!migration_table_exists(db, "sa_draft_pr_effect_receipts"));
+    }
+
+    fn assert_schema_55_shape(db: &Connection) {
+        assert_eq!(database_user_version(db), SCHEMA_VERSION);
+        assert!(migration_column_exists(
+            db,
+            "sa_work_items",
+            "evidence_contract"
+        ));
+        assert!(migration_table_exists(db, "sa_draft_pr_effect_grants"));
+        assert!(migration_table_exists(db, "sa_draft_pr_effect_receipts"));
+        assert!(migration_column_exists(
+            db,
+            "sa_draft_pr_effect_grants",
+            "head_sha"
+        ));
+    }
+
+    fn migration_work_item_contracts(db: &Connection) -> Vec<(String, String)> {
+        let mut statement = db
+            .prepare(
+                "SELECT id,evidence_contract FROM sa_work_items
+                 WHERE ticket_id='rollback-ticket' ORDER BY ordinal",
+            )
+            .unwrap();
+        statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .unwrap()
+    }
+
+    fn checkpoint_database(path: &Path) {
+        let db = Connection::open(path).unwrap();
+        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
+        drop(db);
+        for suffix in ["-wal", "-shm"] {
+            let mut sidecar = path.as_os_str().to_os_string();
+            sidecar.push(suffix);
+            let sidecar = PathBuf::from(sidecar);
+            if sidecar.exists() {
+                std::fs::remove_file(sidecar).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn schema_52_late_migration_failure_rolls_back_and_backup_restores_history() {
+        let temporary_directory = MigrationTempDir::new("db-rollback");
+        let directory = temporary_directory.path();
+        let data_directory = directory.join("app-data");
+        let backup_directory = directory.join("isolated-backup");
+        let project_directory = directory.join("synthetic-project");
+        std::fs::create_dir_all(&data_directory).unwrap();
+        std::fs::create_dir_all(&backup_directory).unwrap();
+        std::fs::create_dir_all(&project_directory).unwrap();
+        let path = data_directory.join("store.sqlite3");
+        let backup_path = backup_directory.join("store.sqlite3");
+        let failed_attempt_path = directory.join("failed-attempt.sqlite3");
+        let timestamp = now();
+
+        {
+            let store = Store::open(&path).unwrap();
+            let project = store.add_project(&project_directory).unwrap();
+            let task = store
+                .create_board_task(
+                    &project.id,
+                    "claude",
+                    "sonnet",
+                    "ask",
+                    "Historical rollback task",
+                    "Completed task retained with the old rollback Ticket.",
+                )
+                .unwrap();
+            store.db.execute(
+                "UPDATE sessions
+                 SET status='idle',task_stage='completed',completed_at=?2,updated_at=?2
+                 WHERE id=?1",
+                params![task.id, timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_orchestrations(id,name,coordinator_bot_id,worker_bot_id,project_id,enabled,policy_revision,created_at,updated_at)
+                 VALUES('rollback-orchestration','Rollback fixture','coordinator','worker',?1,0,1,?2,?2)",
+                params![project.id, timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,project_id,worker_bot_id,policy_revision,state,revision,created_at,updated_at)
+                 VALUES('rollback-ticket','rollback-orchestration','rollback-request','Historical rollback objective','local-user','manual',?1,'worker',1,'completed',9,?2,?2)",
+                params![project.id, timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_mandates(ticket_id,actor,authorization_id,policy_revision,project_id,expires_at,revoked,allowed_tools,allowed_side_effects,created_at)
+                 VALUES('rollback-ticket','local-user','rollback-authorization',1,?1,?2,1,'[\"read_file\",\"list_directory\"]',0,?3)",
+                params![project.id, timestamp + 86_400_000, timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_work_items(id,ticket_id,objective,evidence_contract,state,ordinal,created_at,updated_at)
+                 VALUES('rollback-work-item-1','rollback-ticket','Preserve completed work','Historical contract one','completed',0,?1,?1),
+                       ('rollback-work-item-2','rollback-ticket','Preserve queued work','Historical contract two','queued',1,?1,?1)",
+                [timestamp],
+            ).unwrap();
+            store
+                .db
+                .execute(
+                    "INSERT INTO sa_work_item_deps(item_id,depends_on)
+                 VALUES('rollback-work-item-2','rollback-work-item-1')",
+                    [],
+                )
+                .unwrap();
+            store.db.execute(
+                "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,result,created_at,updated_at,work_item_id)
+                 VALUES('rollback-assignment','rollback-ticket','worker',?1,'finished',2,'Historical assignment result',?2,?2,'rollback-work-item-1')",
+                params![task.id, timestamp],
+            ).unwrap();
+            store
+                .db
+                .execute(
+                    "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES('rollback-ticket','rollback-fixture','Historical audit detail',?1)",
+                    [timestamp],
+                )
+                .unwrap();
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts(ticket_id,effect_key,payload_sha256,state,created_at,updated_at,uncertainty_reason,readback_state)
+                 VALUES('rollback-ticket','rollback-effect','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa','uncertain',?1,?1,'marker_not_found','missing')",
+                [timestamp],
+            ).unwrap();
+            reconstruct_schema_52(&store.db);
+        }
+
+        checkpoint_database(&path);
+        std::fs::copy(&path, &backup_path).unwrap();
+        let expected_history;
+        {
+            let source = Connection::open(&path).unwrap();
+            assert_schema_52_shape(&source);
+            expected_history = migration_history_snapshot(&source);
+        }
+        {
+            let backup = Connection::open(&backup_path).unwrap();
+            assert_schema_52_shape(&backup);
+            assert_eq!(migration_history_snapshot(&backup), expected_history);
+            assert_migration_integrity(&backup, "known-good schema 52 backup before upgrade");
+        }
+
+        MIGRATION_TEST_FAILURE_AFTER.with(|failure_at| failure_at.set(Some(SCHEMA_VERSION)));
+        let migration_error = match Store::open(&path) {
+            Ok(store) => {
+                drop(store);
+                panic!("the injected late migration failure should abort Store::open");
+            }
+            Err(error) => error,
+        };
+        assert!(migration_error.contains(&format!(
+            "injected late migration failure after schema {SCHEMA_VERSION}"
+        )));
+        checkpoint_database(&path);
+        std::fs::copy(&path, &failed_attempt_path).unwrap();
+        {
+            let failed = Connection::open(&path).unwrap();
+            assert_schema_52_shape(&failed);
+            assert_eq!(migration_history_snapshot(&failed), expected_history);
+            assert_migration_integrity(&failed, "failed migration database after rollback");
+        }
+        {
+            let failed_attempt = Connection::open(&failed_attempt_path).unwrap();
+            assert_schema_52_shape(&failed_attempt);
+            assert_eq!(migration_history_snapshot(&failed_attempt), expected_history);
+            assert_migration_integrity(&failed_attempt, "separate failed-attempt copy");
+        }
+
+        // Revalidate the closed-file backup immediately before restoring it.
+        {
+            let backup = Connection::open(&backup_path).unwrap();
+            assert_schema_52_shape(&backup);
+            assert_eq!(migration_history_snapshot(&backup), expected_history);
+            assert_migration_integrity(&backup, "known-good schema 52 backup before restore");
+        }
+        std::fs::copy(&backup_path, &path).unwrap();
+        {
+            let restored = Connection::open(&path).unwrap();
+            assert_schema_52_shape(&restored);
+            assert_eq!(migration_history_snapshot(&restored), expected_history);
+            assert_migration_integrity(&restored, "restored schema 52 database before retry");
+        }
+
+        let retried = Store::open(&path).unwrap();
+        assert_schema_55_shape(&retried.db);
+        assert_eq!(migration_history_snapshot(&retried.db), expected_history);
+        assert_migration_integrity(&retried.db, "schema 55 database after retry");
+        let expected_contracts = vec![
+            (
+                "rollback-work-item-1".into(),
+                crate::superagent::LEGACY_EVIDENCE_CONTRACT.into(),
+            ),
+            (
+                "rollback-work-item-2".into(),
+                crate::superagent::LEGACY_EVIDENCE_CONTRACT.into(),
+            ),
+        ];
+        let contracts = migration_work_item_contracts(&retried.db);
+        assert_eq!(
+            contracts,
+            expected_contracts,
+            "schema 53 backfills both historical WorkItems"
+        );
+        drop(retried);
+
+        let reopened = Store::open(&path).unwrap();
+        assert_schema_55_shape(&reopened.db);
+        assert_eq!(migration_history_snapshot(&reopened.db), expected_history);
+        assert_eq!(migration_work_item_contracts(&reopened.db), expected_contracts);
+        assert_migration_integrity(&reopened.db, "schema 55 database after idempotent reopen");
+        drop(reopened);
+    }
+
+    #[test]
+    fn v52_work_item_evidence_contract_migration_preserves_rows_and_replays() {
+        let temporary_directory = MigrationTempDir::new("work-item-contract-migration");
+        let path = temporary_directory.path().join("store.sqlite3");
+        let timestamp = now();
+        {
+            let store = Store::open(&path).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_orchestrations(id,name,coordinator_bot_id,worker_bot_id,project_id,enabled,policy_revision,created_at,updated_at)
+                 VALUES('legacy-contract-orchestration','Legacy','coordinator','worker','project',0,1,?1,?1)",
+                [timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,project_id,worker_bot_id,policy_revision,state,revision,created_at,updated_at)
+                 VALUES('legacy-contract-ticket','legacy-contract-orchestration','legacy-key','Legacy objective','local-user','manual','project','worker',1,'completed',2,?1,?1)",
+                [timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_work_items(id,ticket_id,objective,evidence_contract,state,ordinal,created_at,updated_at)
+                 VALUES('legacy-contract-a','legacy-contract-ticket','Inspect old behavior','temporary v53 value','completed',0,?1,?1),
+                       ('legacy-contract-b','legacy-contract-ticket','Verify old behavior','temporary v53 value','queued',1,?1,?1)",
+                [timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_work_item_deps(item_id,depends_on) VALUES('legacy-contract-b','legacy-contract-a')",
+                [],
+            ).unwrap();
+            // Reconstruct a populated v52 database with no v53–55 objects.
+            reconstruct_schema_52(&store.db);
+        }
+
+        let migrated = Store::open(&path).unwrap();
+        assert_eq!(
+            migrated.db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION,
+        );
+        let items: Vec<(String,String,String,i64,String)> = {
+            let mut statement = migrated.db.prepare(
+                "SELECT id,objective,state,ordinal,evidence_contract
+                 FROM sa_work_items WHERE ticket_id='legacy-contract-ticket' ORDER BY ordinal",
+            ).unwrap();
+            statement.query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        let fallback = crate::superagent::LEGACY_EVIDENCE_CONTRACT.to_owned();
+        assert_eq!(items, vec![
+            ("legacy-contract-a".into(),"Inspect old behavior".into(),"completed".into(),0,fallback.clone()),
+            ("legacy-contract-b".into(),"Verify old behavior".into(),"queued".into(),1,fallback),
+        ]);
+        let dependency_count: i64 = migrated.db.query_row(
+            "SELECT COUNT(*) FROM sa_work_item_deps WHERE item_id='legacy-contract-b' AND depends_on='legacy-contract-a'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(dependency_count, 1);
+
+        migrated.db.execute(
+            "UPDATE sa_work_items SET evidence_contract='Keep this explicit contract.' WHERE id='legacy-contract-a'",
+            [],
+        ).unwrap();
+        migrated.db.execute_batch("PRAGMA user_version=52;").unwrap();
+        drop(migrated);
+
+        let replayed = Store::open(&path).unwrap();
+        assert_eq!(
+            replayed.db.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0)).unwrap(),
+            SCHEMA_VERSION,
+        );
+        let replayed_items: Vec<(String,String)> = {
+            let mut statement = replayed.db.prepare(
+                "SELECT id,evidence_contract FROM sa_work_items
+                 WHERE ticket_id='legacy-contract-ticket' ORDER BY ordinal",
+            ).unwrap();
+            statement.query_map([], |row| Ok((row.get(0)?,row.get(1)?)))
+                .unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert_eq!(replayed_items, vec![
+            ("legacy-contract-a".into(),"Keep this explicit contract.".into()),
+            ("legacy-contract-b".into(),crate::superagent::LEGACY_EVIDENCE_CONTRACT.into()),
+        ]);
+        assert_eq!(
+            replayed.db.query_row(
+                "SELECT COUNT(*) FROM sa_work_item_deps WHERE item_id='legacy-contract-b' AND depends_on='legacy-contract-a'",
+                [], |row| row.get::<_, i64>(0),
+            ).unwrap(),
+            1,
+        );
+        drop(replayed);
+    }
+
+    #[test]
+    fn v47_adds_receipt_outcome_columns_without_losing_old_rows() {
+        let directory = std::env::temp_dir().join(format!("pandacode-effect-migration-{}", id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.sqlite3");
+        let now = now();
+        {
+            let store = Store::open(&path).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_orchestrations(id,name,coordinator_bot_id,worker_bot_id,project_id,enabled,policy_revision,created_at,updated_at)
+                 VALUES('old-orchestration','Old','coordinator','worker','project',0,1,?1,?1)",
+                [now],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,project_id,worker_bot_id,policy_revision,state,revision,created_at,updated_at)
+                 VALUES('old-ticket','old-orchestration','old-key','old objective','local','manual','project','worker',1,'blocked',3,?1,?1)",
+                [now],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts(ticket_id,effect_key,payload_sha256,state,created_at,updated_at,uncertainty_reason,readback_state)
+                 VALUES('old-ticket','old-key','old-digest','uncertain',?1,?1,'marker_not_found','missing')",
+                [now],
+            ).unwrap();
+            store.db.execute_batch(
+                "ALTER TABLE sa_effect_receipts DROP COLUMN remote_author_login;
+                 ALTER TABLE sa_effect_receipts DROP COLUMN remote_comment_url;
+                 ALTER TABLE sa_effect_receipts DROP COLUMN remote_comment_id;
+                 ALTER TABLE sa_effect_receipts DROP COLUMN readback_state;
+                 ALTER TABLE sa_effect_receipts DROP COLUMN uncertainty_reason;
+                 PRAGMA user_version=46;",
+            ).unwrap();
+        }
+        let migrated = Store::open(&path).unwrap();
+        let receipt: (String, String, Option<String>, Option<String>) = migrated.db.query_row(
+            "SELECT state,payload_sha256,uncertainty_reason,readback_state
+             FROM sa_effect_receipts WHERE ticket_id='old-ticket' AND effect_key='old-key'",
+            [],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?)),
+        ).unwrap();
+        assert_eq!(receipt, ("uncertain".into(),"old-digest".into(),None,None));
+        let version: i64 = migrated.db.pragma_query_value(None,"user_version",|row|row.get(0)).unwrap();
+        assert_eq!(version,SCHEMA_VERSION);
+        let (team_versions,ticket_snapshots): (i64,i64) = migrated.db.query_row(
+            "SELECT (SELECT COUNT(*) FROM sa_team_versions),
+                    (SELECT COUNT(*) FROM sa_ticket_team_snapshots)",
+            [], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        assert_eq!((team_versions,ticket_snapshots),(2,1));
+        let (source_kind,snapshot_json): (String,String) = migrated.db.query_row(
+            "SELECT source_kind,snapshot_json FROM sa_ticket_team_snapshots WHERE ticket_id='old-ticket'",
+            [], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        let snapshot: serde_json::Value = serde_json::from_str(&snapshot_json).unwrap();
+        assert_eq!(source_kind,"legacy-backfill");
+        assert_eq!(snapshot["teamVersion"],1);
+        assert_eq!(snapshot["provenance"],"legacy-unknown");
+        assert!(snapshot["coordinatorBotId"].as_str().unwrap()
+            .starts_with("legacy-unknown-coordinator:"));
+        assert_eq!(snapshot["workerBotIds"],serde_json::json!(["worker"]));
+        assert_eq!(snapshot["projectId"],"project");
+        assert_eq!(snapshot["policy"]["policyRevision"],1);
+        assert_eq!(snapshot["reviewerBotIds"],serde_json::json!([]));
+        assert_eq!(snapshot["policy"]["councilEnabled"],false);
+        drop(migrated);
+        // Replaying v48 over an already populated v48 schema is idempotent and
+        // preserves the original backfill payload and digest.
+        let replay = Connection::open(&path).unwrap();
+        let before: (String,String) = replay.query_row(
+            "SELECT snapshot_json,snapshot_sha256 FROM sa_ticket_team_snapshots WHERE ticket_id='old-ticket'",
+            [], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        replay.execute_batch("PRAGMA user_version=47;").unwrap();
+        drop(replay);
+        let replayed = Store::open(&path).unwrap();
+        let after: (String,String) = replayed.db.query_row(
+            "SELECT snapshot_json,snapshot_sha256 FROM sa_ticket_team_snapshots WHERE ticket_id='old-ticket'",
+            [], |r| Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        assert_eq!(after,before);
+        assert_eq!(replayed.db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),SCHEMA_VERSION);
+        drop(replayed);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn v53_adds_separate_draft_pr_effect_tables_without_changing_comment_tables() {
+        let directory = std::env::temp_dir().join(format!("pandacode-draft-pr-migration-{}",id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.sqlite3");
+        let comment_schema_before;
+        {
+            let store = Store::open(&path).unwrap();
+            comment_schema_before = ["sa_effect_grants","sa_effect_receipts"].map(|table| {
+                store.db.query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],|row| row.get::<_,String>(0),
+                ).unwrap()
+            });
+            store.db.execute_batch(
+                "DROP TABLE sa_draft_pr_effect_receipts;
+                 DROP TABLE sa_draft_pr_effect_grants;
+                 PRAGMA user_version=53;",
+            ).unwrap();
+        }
+        let migrated = Store::open(&path).unwrap();
+        let version: i64 = migrated.db.pragma_query_value(None,"user_version",|row|row.get(0)).unwrap();
+        assert_eq!(version,SCHEMA_VERSION);
+        for table in ["sa_draft_pr_effect_grants","sa_draft_pr_effect_receipts"] {
+            let exists: i64 = migrated.db.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],|row|row.get(0),
+            ).unwrap();
+            assert_eq!(exists,1,"migration must create {table}");
+        }
+        let comment_schema_after = ["sa_effect_grants","sa_effect_receipts"].map(|table| {
+            migrated.db.query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],|row|row.get::<_,String>(0),
+            ).unwrap()
+        });
+        assert_eq!(comment_schema_after,comment_schema_before);
+        drop(migrated);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn v54_adds_head_sha_without_rewriting_existing_draft_pr_grants() {
+        let directory = std::env::temp_dir().join(format!("pandacode-draft-pr-head-sha-{}",id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.sqlite3");
+        {
+            let store = Store::open(&path).unwrap();
+            store.db.execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 ALTER TABLE sa_draft_pr_effect_grants DROP COLUMN head_sha;
+                 INSERT INTO sa_draft_pr_effect_grants
+                   (ticket_id,effect_key,ticket_revision,project_id,assignment_id,session_id,
+                    repository,head_branch,base_branch,title,body,marker,payload_sha256,created_at)
+                 VALUES('legacy-ticket','legacy-effect',4,'project','assignment','session',
+                    'owner/repo','feature','main','Legacy','body','marker',
+                    'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',1);
+                 PRAGMA user_version=54;",
+            ).unwrap();
+        }
+        let migrated = Store::open(&path).unwrap();
+        let version: i64 = migrated.db.pragma_query_value(None,"user_version",|row|row.get(0)).unwrap();
+        assert_eq!(version,SCHEMA_VERSION);
+        let preserved: (String,String,String) = migrated.db.query_row(
+            "SELECT effect_key,head_branch,head_sha FROM sa_draft_pr_effect_grants WHERE ticket_id='legacy-ticket'",
+            [],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        assert_eq!(preserved,("legacy-effect".into(),"feature".into(),String::new()),
+            "v54 grant data stays intact and an unbound legacy grant fails closed");
+        drop(migrated);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn v47_team_migration_preserves_each_ticket_binding_and_replays() {
+        let directory = std::env::temp_dir().join(format!("pandacode-team-migration-{}", id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.sqlite3");
+        let now = now();
+        {
+            let store = Store::open(&path).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_orchestrations(id,name,coordinator_bot_id,worker_bot_id,project_id,enabled,policy_revision,created_at,updated_at)
+                 VALUES('legacy-orchestration','Current team','current-coordinator','current-worker','current-project',1,2,?1,?1)",
+                [now],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,project_id,worker_bot_id,policy_revision,state,revision,created_at,updated_at)
+                 VALUES('legacy-ticket-a','legacy-orchestration','legacy-key-a','first old objective','local','manual','ticket-project-a','ticket-worker-a',5,'blocked',3,?1,?1),
+                       ('legacy-ticket-b','legacy-orchestration','legacy-key-b','second old objective','local','manual','ticket-project-b','ticket-worker-b',7,'blocked',4,?1,?1)",
+                [now],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_mandates(ticket_id,actor,authorization_id,policy_revision,project_id,expires_at,created_at)
+                 VALUES('legacy-ticket-a','local-user','legacy-auth-a',5,'ticket-project-a',?1,?2),
+                       ('legacy-ticket-b','local-user','legacy-auth-b',7,'ticket-project-b',?1,?2)",
+                params![now+60_000,now],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES('legacy-ticket-a','legacy-history','retained audit evidence',?1)",
+                [now],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts(ticket_id,effect_key,payload_sha256,state,created_at,updated_at,uncertainty_reason,readback_state)
+                 VALUES('legacy-ticket-a','legacy-effect','legacy-digest','uncertain',?1,?1,'marker_not_found','missing')",
+                [now],
+            ).unwrap();
+            store.db.execute_batch(
+                "DROP TRIGGER IF EXISTS sa_team_versions_immutable;
+                 DROP TRIGGER IF EXISTS sa_team_version_members_immutable;
+                 DROP TRIGGER IF EXISTS sa_ticket_team_snapshots_immutable;
+                 DROP TRIGGER IF EXISTS sa_ticket_team_snapshots_no_delete;
+                 DROP INDEX IF EXISTS sa_ticket_team_version;
+                 DROP TABLE IF EXISTS sa_ticket_team_snapshots;
+                 DROP TABLE IF EXISTS sa_team_version_members;
+                 DROP TABLE IF EXISTS sa_team_versions;
+                 PRAGMA user_version=47;",
+            ).unwrap();
+        }
+
+        let migrated = Store::open(&path).unwrap();
+        assert_eq!(
+            migrated.db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),
+            SCHEMA_VERSION,
+        );
+        let count: i64 = migrated.db.query_row(
+            "SELECT COUNT(*) FROM sa_team_versions WHERE orchestration_id='legacy-orchestration'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(count,3,"two historical versions plus one current future-facing version");
+
+        for (ticket_id,expected_worker,expected_project,expected_revision) in [
+            ("legacy-ticket-a","ticket-worker-a","ticket-project-a",5),
+            ("legacy-ticket-b","ticket-worker-b","ticket-project-b",7),
+        ] {
+            let snapshot = crate::superagent::ticket_team_snapshot(&migrated,ticket_id).unwrap();
+            assert_eq!(snapshot.provenance,crate::superagent::TeamSnapshotProvenance::LegacyUnknown);
+            assert_eq!(snapshot.worker_bot_ids,vec![expected_worker]);
+            assert_eq!(snapshot.project_id,expected_project);
+            assert_eq!(snapshot.policy.policy_revision,expected_revision);
+            assert!(snapshot.coordinator_bot_id.starts_with("legacy-unknown-coordinator:"));
+            assert!(snapshot.reviewer_bot_ids.is_empty());
+            assert!(snapshot.roles.iter().all(|role|
+                role.effective_config.is_none() && role.effective_config_sha256.is_none()));
+
+            let version_json: String = migrated.db.query_row(
+                "SELECT snapshot_json FROM sa_team_versions
+                 WHERE orchestration_id=?1 AND version=?2",
+                params![snapshot.orchestration_id,snapshot.team_version], |r| r.get(0),
+            ).unwrap();
+            let version: crate::superagent::TeamSnapshot = serde_json::from_str(&version_json).unwrap();
+            assert_eq!(snapshot,version,"the Ticket snapshot must equal its referenced immutable Team version");
+        }
+
+        let current_json: String = migrated.db.query_row(
+            "SELECT snapshot_json FROM sa_team_versions
+             WHERE orchestration_id='legacy-orchestration' AND version=3",
+            [], |r| r.get(0),
+        ).unwrap();
+        let current: crate::superagent::TeamSnapshot = serde_json::from_str(&current_json).unwrap();
+        assert_eq!(current.provenance,crate::superagent::TeamSnapshotProvenance::LegacyCurrent);
+        assert_eq!(current.coordinator_bot_id,"current-coordinator");
+        assert_eq!(current.worker_bot_ids,vec!["current-worker"]);
+        assert_eq!(current.project_id,"current-project");
+
+        let preserved_ticket_state: Vec<(String,i64)> = {
+            let mut stmt = migrated.db.prepare(
+                "SELECT id,revision FROM sa_tickets ORDER BY id",
+            ).unwrap();
+            stmt.query_map([],|r|Ok((r.get(0)?,r.get(1)?))).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert_eq!(preserved_ticket_state,vec![("legacy-ticket-a".into(),3),("legacy-ticket-b".into(),4)]);
+        let preserved_mandates: Vec<(String,i64,String,i64,String,i64)> = {
+            let mut stmt = migrated.db.prepare(
+                "SELECT ticket_id,policy_revision,project_id,revoked,allowed_tools,allowed_side_effects
+                 FROM sa_mandates ORDER BY ticket_id",
+            ).unwrap();
+            stmt.query_map([],|r|Ok((
+                r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,
+            ))).unwrap().collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert_eq!(preserved_mandates,vec![
+            ("legacy-ticket-a".into(),5,"ticket-project-a".into(),0,"[]".into(),0),
+            ("legacy-ticket-b".into(),7,"ticket-project-b".into(),0,"[]".into(),0),
+        ]);
+        let preserved_audit: String = migrated.db.query_row(
+            "SELECT detail FROM sa_audit WHERE ticket_id='legacy-ticket-a' AND kind='legacy-history'",
+            [],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(preserved_audit,"retained audit evidence");
+        let preserved_receipt: (String,String) = migrated.db.query_row(
+            "SELECT state,payload_sha256 FROM sa_effect_receipts WHERE ticket_id='legacy-ticket-a'",
+            [],|r|Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        assert_eq!(preserved_receipt,("uncertain".into(),"legacy-digest".into()));
+
+        let before_snapshots: Vec<(String,i64,String,String)> = {
+            let mut stmt = migrated.db.prepare(
+                "SELECT ticket_id,team_version,snapshot_json,snapshot_sha256
+                 FROM sa_ticket_team_snapshots ORDER BY ticket_id",
+            ).unwrap();
+            stmt.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        let before_versions: Vec<(i64,String,String)> = {
+            let mut stmt = migrated.db.prepare(
+                "SELECT version,snapshot_json,snapshot_sha256 FROM sa_team_versions
+                 WHERE orchestration_id='legacy-orchestration' ORDER BY version",
+            ).unwrap();
+            stmt.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        drop(migrated);
+
+        let replay_marker = Connection::open(&path).unwrap();
+        replay_marker.execute_batch("PRAGMA user_version=47;").unwrap();
+        drop(replay_marker);
+        let replayed = Store::open(&path).unwrap();
+        let after_snapshots: Vec<(String,i64,String,String)> = {
+            let mut stmt = replayed.db.prepare(
+                "SELECT ticket_id,team_version,snapshot_json,snapshot_sha256
+                 FROM sa_ticket_team_snapshots ORDER BY ticket_id",
+            ).unwrap();
+            stmt.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?))).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        let after_versions: Vec<(i64,String,String)> = {
+            let mut stmt = replayed.db.prepare(
+                "SELECT version,snapshot_json,snapshot_sha256 FROM sa_team_versions
+                 WHERE orchestration_id='legacy-orchestration' ORDER BY version",
+            ).unwrap();
+            stmt.query_map([],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?))).unwrap()
+                .collect::<rusqlite::Result<Vec<_>>>().unwrap()
+        };
+        assert_eq!(after_snapshots,before_snapshots);
+        assert_eq!(after_versions,before_versions);
+        assert_eq!(after_versions.len(),3);
+        assert_eq!(
+            replayed.db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),
+            SCHEMA_VERSION,
+        );
+        drop(replayed);
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]

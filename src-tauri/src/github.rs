@@ -2,15 +2,39 @@
 //! runs the signed-in CLI with a null stdin, bounded output, and a deadline, and
 //! only ever from a project's checkout so the repository is the remote's.
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::{path::Path, process::Command, time::Duration};
 
 use crate::workspace::{checked, run_process, Capture};
 
 pub(crate) const OUTPUT_LIMIT: usize = 2 * 1024 * 1024;
+const OBSERVE_OUTPUT_LIMIT: usize = 64 * 1024;
 const BODY_LIMIT: usize = 4 * 1024;
 const IMPORT_BODY_LIMIT: usize = 16 * 1024;
 pub const MAX_REFERENCES: usize = 5;
 pub(crate) const TIMEOUT: Duration = Duration::from_secs(30);
+const OBSERVE_EVENT_KINDS: &[&str] = &[
+    "issues.opened",
+    "issues.edited",
+    "issue_comment.created",
+    "pull_request.opened",
+    "pull_request_review.submitted",
+    "check_run.completed",
+];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ObserveEvent {
+    pub repository: String,
+    pub actor: String,
+    pub event_kind: String,
+    pub subject_key: String,
+    pub delivery_id: String,
+    pub sequence: i64,
+}
+
+pub(crate) fn supports_observe_event(event_kind: &str) -> bool {
+    OBSERVE_EVENT_KINDS.contains(&event_kind)
+}
 
 #[derive(Debug, Serialize, Clone, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -116,7 +140,15 @@ fn gh_command(root: &Path, args: &[&str]) -> Command {
     command
 }
 pub(crate) fn run_gh(root: &Path, args: &[&str], timeout: Duration) -> Result<Capture, String> {
-    checked(run_process(gh_command(root, args), "GitHub CLI", OUTPUT_LIMIT, timeout)?)
+    run_gh_limited(root, args, OUTPUT_LIMIT, timeout)
+}
+fn run_gh_limited(
+    root: &Path,
+    args: &[&str],
+    limit: usize,
+    timeout: Duration,
+) -> Result<Capture, String> {
+    checked(run_process(gh_command(root, args), "GitHub CLI", limit, timeout)?)
 }
 pub(crate) fn json(capture: &Capture) -> Result<serde_json::Value, String> {
     if capture.truncated {
@@ -163,6 +195,292 @@ fn valid_query(query: &str) -> Result<String, String> {
 pub(crate) fn flag(name: &str, value: &str) -> String {
     // The `--flag=value` form keeps user text out of the CLI's option parser.
     format!("--{name}={value}")
+}
+
+fn observe_subject(subject_key: &str) -> Result<(&str, i64), String> {
+    let Some((kind, number)) = subject_key.split_once(':') else {
+        return Err("Choose an exact linked issue or pull request.".into());
+    };
+    if !matches!(kind, "issue" | "pull")
+        || number.is_empty()
+        || number.len() > 12
+        || number.starts_with('0')
+        || !number.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err("Choose an exact linked issue or pull request.".into());
+    }
+    let number = number.parse::<i64>().map_err(|_| "Invalid linked thread number.")?;
+    if number <= 0 {
+        return Err("Invalid linked thread number.".into());
+    }
+    Ok((kind, number))
+}
+
+fn observe_repository(repository: &str) -> Result<(&str, &str), String> {
+    if repository.len() > 200 || repository != repository.to_ascii_lowercase() {
+        return Err("The configured repository is not canonical.".into());
+    }
+    let Some((owner, name)) = repository.split_once('/') else {
+        return Err("The configured repository is incomplete.".into());
+    };
+    let token = |value: &str| {
+        !value.is_empty()
+            && value.len() <= 100
+            && !value.starts_with('.')
+            && !value.contains("..")
+            && value.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+            })
+    };
+    if !token(owner) || !token(name) {
+        return Err("The configured repository is not a valid owner/name.".into());
+    }
+    Ok((owner, name))
+}
+
+fn observe_timestamp(value: &serde_json::Value, field: &str) -> Result<i64, String> {
+    let raw = value
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or("GitHub did not return required event timestamp metadata.")?;
+    let at = chrono::DateTime::parse_from_rfc3339(raw)
+        .map_err(|_| "GitHub returned invalid event timestamp metadata.")?
+        .timestamp_millis();
+    if at <= 0 {
+        return Err("GitHub returned invalid event timestamp metadata.".into());
+    }
+    Ok(at)
+}
+
+fn observe_edit_delivery_id(global_id: &str) -> Result<String, String> {
+    if global_id.is_empty() || global_id.len() > 256 || !global_id.is_ascii() {
+        return Err("GitHub did not return a stable issue edit ID.".into());
+    }
+    let digest = Sha256::digest(global_id.as_bytes());
+    let hex = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(hex[(byte >> 4) as usize] as char);
+        encoded.push(hex[(byte & 0x0f) as usize] as char);
+    }
+    Ok(format!("gh-issues-edited-{encoded}"))
+}
+
+/// Fetch one source-allowlisted event for one exact, already-linked issue/PR.
+/// Queries select only bounded event identity, actor, status and ordering
+/// metadata; they never select issue/PR text, comments, diffs or model content.
+/// `gh auth status` runs first.
+pub(crate) fn observe_event(
+    root: &Path,
+    repository: &str,
+    subject_key: &str,
+    event_kind: &str,
+) -> Result<ObserveEvent, String> {
+    observe_event_with(repository, subject_key, event_kind, |args, limit, timeout| {
+        let borrowed: Vec<&str> = args.iter().map(String::as_str).collect();
+        run_gh_limited(root, &borrowed, limit, timeout)
+    })
+}
+
+/// Injectable CLI boundary for deterministic native tests. Production calls the
+/// user's `gh` with the same bounded arguments and authenticated check.
+pub(crate) fn observe_event_with(
+    repository: &str,
+    subject_key: &str,
+    event_kind: &str,
+    mut run: impl FnMut(&[String], usize, Duration) -> Result<Capture, String>,
+) -> Result<ObserveEvent, String> {
+    let (owner, name) = observe_repository(repository)?;
+    let (subject_kind, number) = observe_subject(subject_key)?;
+    if !supports_observe_event(event_kind) {
+        return Err("This event class is not supported by manual Observe intake.".into());
+    }
+    if matches!(event_kind, "issues.opened" | "issues.edited") && subject_kind != "issue"
+        || matches!(event_kind, "pull_request.opened" | "pull_request_review.submitted" | "check_run.completed")
+            && subject_kind != "pull"
+    {
+        return Err("The linked thread kind does not match the configured event class.".into());
+    }
+
+    let auth_args = vec![
+        "auth".to_string(),
+        "status".to_string(),
+        flag("hostname", "github.com"),
+    ];
+    run(&auth_args, OBSERVE_OUTPUT_LIMIT, Duration::from_secs(10))?;
+
+    let fragments = match event_kind {
+        "issues.opened" | "pull_request.opened" => {
+            "... on Issue { fullDatabaseId number author { login } } \
+             ... on PullRequest { fullDatabaseId number author { login } }"
+        }
+        "issues.edited" => {
+            "... on Issue { number createdAt userContentEdits(last: 1) { nodes { id editedAt editor { login } } } }"
+        }
+        "issue_comment.created" => {
+            "... on Issue { number comments(last: 1) { nodes { fullDatabaseId author { login } } } } \
+             ... on PullRequest { number comments(last: 1) { nodes { fullDatabaseId author { login } } } }"
+        }
+        "pull_request_review.submitted" => {
+            "... on PullRequest { number reviews(last: 1) { nodes { fullDatabaseId submittedAt author { login } } } }"
+        }
+        "check_run.completed" => {
+            "... on PullRequest { number commits(last: 1) { nodes { commit { checkSuites(last: 1) { nodes { checkRuns(last: 1) { nodes { fullDatabaseId status completedAt checkSuite { app { slug } } } } } } } } }"
+        }
+        _ => unreachable!("the supported event list is exhaustive"),
+    };
+    let query = format!(
+        "query($owner: String!, $name: String!, $number: Int!) {{ \
+           repository(owner: $owner, name: $name) {{ nameWithOwner \
+             issueOrPullRequest(number: $number) {{ __typename {fragments} }} \
+           }} \
+         }}"
+    );
+    let args = vec![
+        "api".to_string(),
+        "graphql".to_string(),
+        flag("hostname", "github.com"),
+        flag("raw-field", &format!("owner={owner}")),
+        flag("raw-field", &format!("name={name}")),
+        // `gh api --field` type-converts the validated numeric value so the
+        // GraphQL Int variable is sent as a number rather than a string.
+        flag("field", &format!("number={number}")),
+        flag("raw-field", &format!("query={query}")),
+    ];
+    let capture = run(&args, OBSERVE_OUTPUT_LIMIT, TIMEOUT)?;
+    let response = json(&capture)?;
+    if let Some(errors) = response.get("errors") {
+        if !errors.as_array().is_some_and(Vec::is_empty) {
+            return Err("GitHub returned GraphQL errors for the configured thread.".into());
+        }
+    }
+    let repo_node = response
+        .pointer("/data/repository")
+        .ok_or("GitHub did not return the configured repository metadata.")?;
+    let actual_repository = text(repo_node, "nameWithOwner").to_ascii_lowercase();
+    if actual_repository != repository {
+        return Err("GitHub returned a different repository than the configured source.".into());
+    }
+    let thread = repo_node
+        .get("issueOrPullRequest")
+        .filter(|node| !node.is_null())
+        .ok_or("GitHub did not return the exact linked thread.")?;
+    let actual_kind = match text(thread, "__typename").as_str() {
+        "Issue" => "issue",
+        "PullRequest" => "pull",
+        _ => return Err("GitHub returned an unsupported thread type.".into()),
+    };
+    let actual_number = thread
+        .get("number")
+        .and_then(serde_json::Value::as_i64)
+        .ok_or("GitHub returned an invalid thread number.")?;
+    let actual_subject = format!("{actual_kind}:{actual_number}");
+    if actual_subject != subject_key {
+        return Err("GitHub returned a different thread than the configured link.".into());
+    }
+
+    let (derived_kind, event_node) = match (event_kind, actual_kind) {
+        ("issues.opened", "issue") => ("issues.opened", thread),
+        ("issues.edited", "issue") => (
+            "issues.edited",
+            thread
+                .pointer("/userContentEdits/nodes/0")
+                .filter(|node| !node.is_null())
+                .ok_or("GitHub returned no issue edit metadata for this thread.")?,
+        ),
+        ("pull_request.opened", "pull") => ("pull_request.opened", thread),
+        ("issue_comment.created", "issue" | "pull") => (
+            "issue_comment.created",
+            thread
+                .pointer("/comments/nodes/0")
+                .filter(|node| !node.is_null())
+                .ok_or("GitHub returned no comment metadata for this thread.")?,
+        ),
+        ("pull_request_review.submitted", "pull") => (
+            "pull_request_review.submitted",
+            thread
+                .pointer("/reviews/nodes/0")
+                .filter(|node| !node.is_null())
+                .ok_or("GitHub returned no submitted review metadata for this pull request.")?,
+        ),
+        ("check_run.completed", "pull") => (
+            "check_run.completed",
+            thread
+                .pointer("/commits/nodes/0/commit/checkSuites/nodes/0/checkRuns/nodes/0")
+                .filter(|node| !node.is_null())
+                .ok_or("GitHub returned no check run metadata for this pull request.")?,
+        ),
+        _ => return Err("The linked thread does not match the configured event class.".into()),
+    };
+    if derived_kind == "pull_request_review.submitted"
+        && event_node.get("submittedAt").and_then(serde_json::Value::as_str).is_none()
+    {
+        return Err("GitHub returned a pending review rather than a submitted review.".into());
+    }
+    let sequence = match derived_kind {
+        "issues.edited" => {
+            let edited_at = observe_timestamp(event_node, "editedAt")?;
+            let created_at = observe_timestamp(thread, "createdAt")?;
+            if edited_at <= created_at {
+                return Err("GitHub did not return an issue edit newer than the thread creation.".into());
+            }
+            edited_at
+        }
+        "check_run.completed" => {
+            if text(event_node, "status") != "COMPLETED" {
+                return Err("GitHub returned a check run that has not completed.".into());
+            }
+            let _completed_at = observe_timestamp(event_node, "completedAt")?;
+            event_node
+                .get("fullDatabaseId")
+                .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse::<i64>().ok()))
+                .filter(|id| *id > 0)
+                .ok_or("GitHub did not return a stable check run ID.")?
+        }
+        _ => event_node
+            .get("fullDatabaseId")
+            .and_then(|value| value.as_i64().or_else(|| value.as_str()?.parse::<i64>().ok()))
+            .filter(|id| *id > 0)
+            .ok_or("GitHub did not return a stable event ID.")?,
+    };
+    let actor_path = match derived_kind {
+        "issues.edited" => "/editor/login",
+        // GitHub exposes the Check Suite's owning App in the native response;
+        // its slug is the allowlist identity for this CI event class.
+        "check_run.completed" => "/checkSuite/app/slug",
+        _ => "/author/login",
+    };
+    let actor = event_node
+        .pointer(actor_path)
+        .and_then(serde_json::Value::as_str)
+        .filter(|actor| {
+            !actor.is_empty()
+                && actor.len() <= 80
+                && actor.is_ascii()
+                && actor.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'[' | b']')
+                })
+        })
+        .ok_or("GitHub did not return a usable event actor.")?
+        .to_string();
+    let event_slug = derived_kind.replace('.', "-");
+    let delivery_id = if derived_kind == "issues.edited" {
+        let global_id = event_node
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("GitHub did not return a stable issue edit ID.")?;
+        observe_edit_delivery_id(global_id)?
+    } else {
+        format!("gh-{event_slug}-{sequence}")
+    };
+    Ok(ObserveEvent {
+        repository: actual_repository,
+        actor,
+        event_kind: derived_kind.into(),
+        subject_key: actual_subject,
+        delivery_id,
+        sequence,
+    })
 }
 /// A spawn failure means the CLI is absent; anything else is reported as is.
 fn start_failure(error: &str) -> String {
@@ -484,6 +802,256 @@ pub fn create_pull_request(root: &Path, title: &str, body: &str, base: &str, hea
     })
 }
 
+const DRAFT_PR_BODY_LIMIT: usize = 8 * 1024;
+
+fn valid_draft_pr_repository(repository: &str) -> bool {
+    if repository.len() > 200 {
+        return false;
+    }
+    let mut parts = repository.split('/');
+    let owner = parts.next().unwrap_or_default();
+    let name = parts.next().unwrap_or_default();
+    let valid_component = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+            })
+    };
+    parts.next().is_none() && valid_component(owner) && valid_component(name)
+}
+
+fn valid_draft_pr_branch(branch: &str) -> bool {
+    !branch.is_empty()
+        && branch.len() <= 200
+        && !branch.starts_with('-')
+        && !branch.ends_with('.')
+        && !branch.ends_with('/')
+        && !branch.contains("..")
+        && !branch.contains("//")
+        && !branch.contains("@{")
+        && !branch.bytes().any(|byte| {
+            !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/'))
+        })
+}
+
+fn encode_path_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn branch_sha(
+    root: &Path,
+    repository: &str,
+    branch: &str,
+    run_gh: &mut impl FnMut(&Path, &[&str], Duration) -> Result<Capture, String>,
+) -> Result<String, String> {
+    let endpoint = format!(
+        "repos/{repository}/branches/{}",
+        encode_path_component(branch)
+    );
+    let value = run_gh(root, &["api", &endpoint], TIMEOUT).and_then(|capture| json(&capture))?;
+    let name = text(&value, "name");
+    let sha = value
+        .get("commit")
+        .map(|commit| text(commit, "sha"))
+        .unwrap_or_default();
+    if name != branch
+        || !(40..=64).contains(&sha.len())
+        || !sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("GitHub did not verify the exact branch in the selected repository.".into());
+    }
+    Ok(sha)
+}
+
+/// Revalidate the Ticket project's actual repository and pushed head. The base
+/// must be an existing branch in that same repository. This function only
+/// performs reads; it never pushes or creates a branch.
+pub(crate) fn verify_draft_pull_request_target(
+    root: &Path,
+    repository: &str,
+    head: &str,
+    base: &str,
+) -> Result<String, String> {
+    let mut run_gh = |root: &Path, args: &[&str], timeout| run_gh(root, args, timeout);
+    verify_draft_pull_request_target_with(root, repository, head, base, &mut run_gh)
+}
+
+pub(crate) fn verify_draft_pull_request_target_with(
+    root: &Path,
+    repository: &str,
+    head: &str,
+    base: &str,
+    run_gh: &mut impl FnMut(&Path, &[&str], Duration) -> Result<Capture, String>,
+) -> Result<String, String> {
+    if !valid_draft_pr_branch(head) || !valid_draft_pr_branch(base) || head == base {
+        return Err("Choose distinct valid head and base branches.".into());
+    }
+    if !valid_draft_pr_repository(repository) {
+        return Err("Provide one exact GitHub repository in owner/name form.".into());
+    }
+
+    let status = crate::workspace::git_status(root)?;
+    if !status.is_repo || status.branch != head {
+        return Err("The head must be the active Ticket worker's current repository branch.".into());
+    }
+    if !status.files.is_empty() {
+        return Err("The active Ticket checkout must be clean before creating a draft pull request.".into());
+    }
+    let local_head = crate::workspace::checked(crate::workspace::run_git_bounded(
+        root,
+        &["rev-parse", "HEAD"],
+        256,
+        false,
+        Duration::from_secs(10),
+    )?)?;
+    let local_head = String::from_utf8(local_head.bytes)
+        .map_err(|_| "Git returned an unreadable local head commit.")?;
+    let local_head = local_head.trim();
+    if !(40..=64).contains(&local_head.len())
+        || !local_head.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("Git did not return an exact local head commit.".into());
+    }
+
+    let remote = run_gh(
+        root,
+        &["repo", "view", "--json", "nameWithOwner,defaultBranchRef,url"],
+        TIMEOUT,
+    )
+    .and_then(|capture| json(&capture))?;
+    if text(&remote, "nameWithOwner") != repository {
+        return Err("The repository must match the active Ticket project's GitHub remote.".into());
+    }
+    let pushed_head = branch_sha(root, repository, head, run_gh)?;
+    if pushed_head != local_head {
+        return Err("The active Ticket head is not pushed at its current commit.".into());
+    }
+    branch_sha(root, repository, base, run_gh)?;
+    Ok(pushed_head)
+}
+
+/// Create one draft PR through GitHub's API. Passing a branch name to `gh pr
+/// create` may push it implicitly, so this bounded adapter only invokes the
+/// API after the caller has verified that the head already exists remotely.
+pub(crate) fn create_draft_pull_request(
+    root: &Path,
+    repository: &str,
+    head: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+) -> Result<(), String> {
+    let mut run_gh = |root: &Path, args: &[&str], timeout| run_gh(root, args, timeout);
+    create_draft_pull_request_with(root, repository, head, base, title, body, &mut run_gh)
+}
+
+pub(crate) fn create_draft_pull_request_with(
+    root: &Path,
+    repository: &str,
+    head: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+    run_gh: &mut impl FnMut(&Path, &[&str], Duration) -> Result<Capture, String>,
+) -> Result<(), String> {
+    if !valid_draft_pr_repository(repository)
+        || title.trim().is_empty()
+        || title.trim() != title
+        || title.chars().count() > 256
+        || title.chars().any(char::is_control)
+        || body.len() > DRAFT_PR_BODY_LIMIT
+        || body.contains('\0')
+    {
+        return Err("Provide a draft pull request title and body within the size limits.".into());
+    }
+    if !valid_draft_pr_branch(head) || !valid_draft_pr_branch(base) || head == base {
+        return Err("Choose distinct valid head and base branches.".into());
+    }
+    let endpoint = format!("repos/{repository}/pulls");
+    let title_field = format!("title={title}");
+    let head_field = format!("head={head}");
+    let base_field = format!("base={base}");
+    let body_field = format!("body={body}");
+    let args = [
+        "api",
+        "--method=POST",
+        endpoint.as_str(),
+        "-f",
+        title_field.as_str(),
+        "-f",
+        head_field.as_str(),
+        "-f",
+        base_field.as_str(),
+        "-f",
+        body_field.as_str(),
+        "-F",
+        "draft=true",
+        "-F",
+        "maintainer_can_modify=false",
+    ];
+    let response = run_gh(root, &args, TIMEOUT)?;
+    let value = json(&response)?;
+    if value.get("number").and_then(serde_json::Value::as_i64).is_none() {
+        return Err("GitHub did not return a pull request creation response.".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn read_draft_pull_requests(
+    root: &Path,
+    repository: &str,
+    head: &str,
+    base: &str,
+) -> Result<serde_json::Value, String> {
+    let mut run_gh = |root: &Path, args: &[&str], timeout| run_gh(root, args, timeout);
+    read_draft_pull_requests_with(root, repository, head, base, &mut run_gh)
+}
+
+pub(crate) fn read_draft_pull_requests_with(
+    root: &Path,
+    repository: &str,
+    head: &str,
+    base: &str,
+    run_gh: &mut impl FnMut(&Path, &[&str], Duration) -> Result<Capture, String>,
+) -> Result<serde_json::Value, String> {
+    if !valid_draft_pr_repository(repository)
+        || !valid_draft_pr_branch(head)
+        || !valid_draft_pr_branch(base)
+        || head == base
+    {
+        return Err("Provide one exact repository and distinct valid head and base branches.".into());
+    }
+    let owner = repository
+        .split_once('/')
+        .map(|(owner, _)| owner)
+        .ok_or("Provide one exact GitHub repository in owner/name form.")?;
+    let head_filter = encode_path_component(&format!("{owner}:{head}"));
+    let base_filter = encode_path_component(base);
+    let endpoint = format!(
+        "repos/{repository}/pulls?state=all&head={head_filter}&base={base_filter}&per_page=100"
+    );
+    let response = run_gh(root, &["api", &endpoint], TIMEOUT)?;
+    let value = json(&response)?;
+    let pulls = value
+        .as_array()
+        .ok_or("GitHub did not return a pull request list.")?;
+    if pulls.len() >= 100 {
+        return Err("GitHub returned a full page of matching pull requests; exact read-back is ambiguous.".into());
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -528,6 +1096,119 @@ mod tests {
         assert_eq!(flag("search", "-rf --exec"), "--search=-rf --exec");
         assert!(valid_query(&"x".repeat(201)).is_err());
         assert_eq!(valid_query("  login bug ").unwrap(), "login bug");
+    }
+
+    #[test]
+    fn observe_issues_edited_uses_only_latest_edit_identity_actor_and_time() {
+        let payload = serde_json::json!({
+            "data": { "repository": { "nameWithOwner": "test/fixture",
+                "issueOrPullRequest": { "__typename": "Issue", "number": 42,
+                    "createdAt": "2025-02-03T04:00:00Z",
+                    "userContentEdits": { "nodes": [{
+                        "id": "VXNlckNvbnRlbnRFZGl0OjEyMw==",
+                        "editedAt": "2025-02-03T04:05:06.789Z",
+                        "editor": { "login": "trusted-editor" }
+                    }] }
+                }
+            } }
+        }).to_string();
+        let mut calls = Vec::new();
+        let event = observe_event_with("test/fixture", "issue:42", "issues.edited", |args, limit, timeout| {
+            assert!(limit <= OBSERVE_OUTPUT_LIMIT);
+            assert!(timeout <= TIMEOUT);
+            calls.push(args.to_vec());
+            if args.first().map(String::as_str) == Some("auth") {
+                Ok(Capture { bytes: b"Logged in".to_vec(), truncated: false })
+            } else {
+                Ok(Capture { bytes: payload.as_bytes().to_vec(), truncated: false })
+            }
+        }).unwrap();
+
+        assert!(supports_observe_event("issues.edited"));
+        assert_eq!(event.event_kind, "issues.edited");
+        assert_eq!(event.actor, "trusted-editor");
+        assert_eq!(event.subject_key, "issue:42");
+        assert_eq!(event.sequence,
+            chrono::DateTime::parse_from_rfc3339("2025-02-03T04:05:06.789Z").unwrap().timestamp_millis());
+        assert_eq!(event.delivery_id, observe_edit_delivery_id("VXNlckNvbnRlbnRFZGl0OjEyMw==").unwrap());
+        assert!(event.delivery_id.starts_with("gh-issues-edited-"));
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0], vec!["auth", "status", "--hostname=github.com"]);
+        let query = calls[1].join(" ");
+        assert!(query.contains("userContentEdits") && query.contains("editedAt") && query.contains("editor { login }"));
+        assert!(!query.contains("title") && !query.contains("body") && !query.contains("diff"));
+    }
+
+    #[test]
+    fn observe_check_run_completed_is_pull_bound_and_requires_completed_native_metadata() {
+        let payload = serde_json::json!({
+            "data": { "repository": { "nameWithOwner": "test/fixture",
+                "issueOrPullRequest": { "__typename": "PullRequest", "number": 42,
+                    "commits": { "nodes": [{ "commit": { "checkSuites": { "nodes": [{
+                        "checkRuns": { "nodes": [{
+                            "fullDatabaseId": 9876,
+                            "status": "COMPLETED",
+                            "completedAt": "2025-02-03T04:05:06Z",
+                            "checkSuite": { "app": { "slug": "trusted-checker" } }
+                        }] }
+                    }] } } }] }
+                }
+            } }
+        }).to_string();
+        let mut calls = Vec::new();
+        let event = observe_event_with("test/fixture", "pull:42", "check_run.completed", |args, limit, timeout| {
+            assert!(limit <= OBSERVE_OUTPUT_LIMIT);
+            assert!(timeout <= TIMEOUT);
+            calls.push(args.to_vec());
+            if args.first().map(String::as_str) == Some("auth") {
+                Ok(Capture { bytes: b"Logged in".to_vec(), truncated: false })
+            } else {
+                Ok(Capture { bytes: payload.as_bytes().to_vec(), truncated: false })
+            }
+        }).unwrap();
+
+        assert!(supports_observe_event("check_run.completed"));
+        assert_eq!(event.event_kind, "check_run.completed");
+        assert_eq!(event.actor, "trusted-checker");
+        assert_eq!(event.subject_key, "pull:42");
+        assert_eq!(event.delivery_id, "gh-check_run-completed-9876");
+        assert_eq!(event.sequence, 9876);
+        assert_eq!(calls.len(), 2);
+        let query = calls[1].join(" ");
+        assert!(query.contains("checkSuites") && query.contains("checkRuns") && query.contains("app { slug }"));
+        assert!(!query.contains("title") && !query.contains("body") && !query.contains("conclusion"));
+
+        let pending_payload = serde_json::json!({
+            "data": { "repository": { "nameWithOwner": "test/fixture",
+                "issueOrPullRequest": { "__typename": "PullRequest", "number": 42,
+                    "commits": { "nodes": [{ "commit": { "checkSuites": { "nodes": [{
+                        "checkRuns": { "nodes": [{
+                            "fullDatabaseId": 9877, "status": "IN_PROGRESS",
+                            "completedAt": null,
+                            "checkSuite": { "app": { "slug": "trusted-checker" } }
+                        }] }
+                    }] } } }] }
+                }
+            } }
+        }).to_string();
+        let mut pending_calls = 0;
+        assert!(observe_event_with("test/fixture", "pull:42", "check_run.completed", |args, _, _| {
+            pending_calls += 1;
+            if args.first().map(String::as_str) == Some("auth") {
+                Ok(Capture { bytes: b"Logged in".to_vec(), truncated: false })
+            } else {
+                Ok(Capture { bytes: pending_payload.as_bytes().to_vec(), truncated: false })
+            }
+        }).is_err());
+        assert_eq!(pending_calls, 2, "an unfinished check run is rejected after one bounded read");
+
+        let mut wrong_thread_calls = 0;
+        assert!(observe_event_with("test/fixture", "issue:42", "check_run.completed", |_, _, _| {
+            wrong_thread_calls += 1;
+            Err("unexpected GitHub call".into())
+        }).is_err());
+        assert_eq!(wrong_thread_calls, 0, "a check run source cannot fetch an issue thread");
+        assert!(!supports_observe_event("check_suite.completed"));
     }
 
     /// Read-only check against the real CLI; run with `cargo test -- --ignored github::` when gh is signed in.

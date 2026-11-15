@@ -457,6 +457,7 @@ pub(super) fn current_round_incomplete(team: &TeamSnapshot) -> bool {
     let round = latest_round(team);
     round > 0 && !accepted(team) && !Rounds::of(team, config).complete(round)
 }
+
 #[cfg(test)]
 pub(super) fn complete(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> bool {
     Rounds::of(team, config).complete(round)

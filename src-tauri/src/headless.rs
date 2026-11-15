@@ -6,6 +6,8 @@
 
 use crate::{message_queue, AppState};
 use std::collections::BTreeSet;
+use std::fs::OpenOptions;
+use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
@@ -35,6 +37,20 @@ enum Command {
     AcceptTicket { ticket_id: String, expected_revision: i64 },
     RejectTicket { ticket_id: String, expected_revision: i64, reason: String },
     StopTicket { ticket_id: String },
+    SubmitTicket {
+        orchestration_id: String,
+        request_key: String,
+        objective: String,
+    },
+    IssueComment {
+        ticket_id: String,
+        expected_revision: i64,
+        repository: String,
+        issue_number: i64,
+        effect_key: String,
+        comment: String,
+        confirmation_hash: Option<String>,
+    },
 }
 
 /// `pandacode serve …`: true when the argument was handled; the process then serves until
@@ -102,7 +118,8 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 }
             }
             let ticket_action = matches!(&command,
-                Command::AcceptTicket { .. } | Command::RejectTicket { .. } | Command::StopTicket { .. });
+                Command::AcceptTicket { .. } | Command::RejectTicket { .. } | Command::StopTicket { .. }
+                | Command::IssueComment { .. });
             if ticket_action {
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
@@ -115,6 +132,12 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                                 crate::superagent::headless_reject_ticket(&database, ticket_id, *expected_revision, reason),
                             Command::StopTicket { ticket_id } =>
                                 crate::superagent::headless_stop_ticket(&database, ticket_id),
+                            Command::IssueComment { ticket_id, expected_revision, repository,
+                                issue_number, effect_key, comment, confirmation_hash } =>
+                                crate::superagent::headless_issue_comment(
+                                    &database, ticket_id, *expected_revision, repository,
+                                    *issue_number, effect_key, comment, confirmation_hash.as_deref(),
+                                ),
                             _ => unreachable!(),
                         }
                     });
@@ -148,7 +171,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
     match command {
         // Inspection exits before setup_common and must never reach this branch.
         Command::InspectOrchestrations | Command::ListTickets | Command::InspectTicket { .. }
-        | Command::AcceptTicket { .. } | Command::RejectTicket { .. } | Command::StopTicket { .. } => {
+        | Command::AcceptTicket { .. } | Command::RejectTicket { .. } | Command::StopTicket { .. }
+        | Command::IssueComment { .. } => {
             eprintln!("SuperAgent inspection must use the read-only startup path.");
             std::process::exit(2)
         }
@@ -277,7 +301,51 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
             }
             start_services(app.clone());
         }
+        Command::SubmitTicket { orchestration_id, request_key, objective } => {
+            let app = app.clone();
+            tauri::async_runtime::spawn(async move {
+                let state = app.state::<AppState>();
+                match crate::superagent::headless_submit_ticket(
+                    &app, &state, &orchestration_id, &objective, &request_key,
+                ).await {
+                    Ok(status) => {
+                        println!("{status}");
+                        // This process owns the Store and the running worker. Keep
+                        // it alive just like `serve`; a short-lived CLI could stop
+                        // the provider call immediately after successful admission.
+                        start_services(app);
+                    }
+                    Err(error) => {
+                        eprintln!("SuperAgent submit failed: {error}");
+                        app.exit(1);
+                    }
+                }
+            });
+        }
     }
+}
+
+/// Keeps exactly one current PandaCode runtime on a data directory. Desktop
+/// and headless startup share this lock; Tauri's managed state holds it through
+/// shutdown, before setup_common can open a Store and run restart recovery.
+pub(crate) struct StoreOwnerLock {
+    _file: std::fs::File,
+}
+
+pub(crate) fn acquire_store_owner(data_dir: &Path) -> Result<StoreOwnerLock, String> {
+    std::fs::create_dir_all(data_dir).map_err(|error| error.to_string())?;
+    let path = data_dir.join(".headless-serve.lock");
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)
+        .map_err(|error| format!("could not open the local serve ownership lock: {error}"))?;
+    file.try_lock().map_err(|error| format!(
+        "exclusive ownership of this data directory could not be established ({error}); an existing host may still be active"
+    ))?;
+    Ok(StoreOwnerLock { _file: file })
 }
 
 /// The serve-only services: Ctrl-C/SIGTERM, one status line for journald, native limit
@@ -474,6 +542,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
     let mut name: Option<String> = None;
     let mut import: Option<PathBuf> = None;
     let mut sign_in = false;
+    let mut confirmation_hash: Option<String> = None;
     let mut command = Command::Serve;
     let mut ops = 0;
     let mut index = 0;
@@ -578,6 +647,62 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--submit-ticket" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--submit-ticket needs a preset ID.\n\n{}", help()))?;
+                validate_preset_id(orchestration_id)?;
+                let request_key = args.get(index + 2)
+                    .ok_or_else(|| format!("--submit-ticket needs a stable request key.\n\n{}", help()))?;
+                let objective = args.get(index + 3)
+                    .ok_or_else(|| format!("--submit-ticket needs an objective.\n\n{}", help()))?;
+                crate::superagent::validate_manual_request_fields(objective, request_key)?;
+                command = Command::SubmitTicket {
+                    orchestration_id: orchestration_id.clone(),
+                    request_key: request_key.clone(),
+                    objective: objective.clone(),
+                };
+                ops += 1;
+                index += 3;
+            }
+            "--issue-comment" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or_else(|| format!("--issue-comment needs a Ticket ID.\n\n{}", help()))?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or_else(|| format!("--issue-comment needs an expected revision.\n\n{}", help()))?;
+                let expected_revision = parse_ticket_revision(revision)?;
+                let repository = args.get(index + 3)
+                    .ok_or_else(|| format!("--issue-comment needs an owner/name repository.\n\n{}", help()))?;
+                crate::superagent::effects::validate_repository(repository)?;
+                let issue = args.get(index + 4)
+                    .ok_or_else(|| format!("--issue-comment needs an issue number.\n\n{}", help()))?;
+                let issue_number = parse_issue_number(issue)?;
+                let effect_key = args.get(index + 5)
+                    .ok_or_else(|| format!("--issue-comment needs a stable effect key.\n\n{}", help()))?;
+                crate::superagent::effects::validate_effect_key(effect_key)?;
+                let comment = args.get(index + 6)
+                    .ok_or_else(|| format!("--issue-comment needs the exact comment body.\n\n{}", help()))?;
+                command = Command::IssueComment {
+                    ticket_id: ticket_id.clone(),
+                    expected_revision,
+                    repository: repository.clone(),
+                    issue_number,
+                    effect_key: effect_key.clone(),
+                    comment: comment.clone(),
+                    confirmation_hash: None,
+                };
+                ops += 1;
+                index += 6;
+            }
+            "--confirm-issue-comment" => {
+                if confirmation_hash.is_some() {
+                    return Err("Provide --confirm-issue-comment only once.".into());
+                }
+                let value = args.get(index + 1)
+                    .ok_or_else(|| "--confirm-issue-comment needs the reviewed SHA-256 value.".to_string())?;
+                confirmation_hash = Some(parse_confirmation_hash(value)?);
+                index += 1;
+            }
             "--sync-bots" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--sync-bots needs a source registry path.\n\n{}", help()))?;
@@ -609,6 +734,14 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
             help()
         ));
     }
+    if let Some(confirmation_hash) = confirmation_hash {
+        match &mut command {
+            Command::IssueComment { confirmation_hash: value, .. } => {
+                *value = Some(confirmation_hash);
+            }
+            _ => return Err("--confirm-issue-comment only works with --issue-comment.".into()),
+        }
+    }
     if matches!(command, Command::SyncBots { .. }) && name.is_some() {
         return Err(format!("--device-name only works with --sign-in.\n\n{}", help()));
     }
@@ -636,6 +769,15 @@ fn validate_ticket_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_preset_id(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 128
+        || !value.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+    {
+        return Err("Provide a bounded alphanumeric SuperAgent preset ID.".into());
+    }
+    Ok(())
+}
+
 fn parse_ticket_revision(value: &str) -> Result<i64, String> {
     let revision = value.parse::<i64>()
         .map_err(|_| "Provide a nonnegative expected Ticket revision.".to_string())?;
@@ -645,15 +787,32 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
     Ok(revision)
 }
 
-fn help() -> String {
-    "PandaCode headless host (docs/headless.md)
+fn parse_issue_number(value: &str) -> Result<i64, String> {
+    let number = value.parse::<i64>()
+        .map_err(|_| "Provide a positive GitHub issue number.".to_string())?;
+    if number <= 0 {
+        return Err("Provide a positive GitHub issue number.".into());
+    }
+    Ok(number)
+}
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-ticket <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id>]
+fn parse_confirmation_hash(value: &str) -> Result<String, String> {
+    if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Provide the 64-character SHA-256 value from the issue-comment preview.".into());
+    }
+    Ok(value.to_ascii_lowercase())
+}
+
+fn help() -> String {
+    "PandaCode headless host
+
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --inspect-ticket <id> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --submit-ticket <preset-id> <request-key> <objective> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
 under `xvfb-run -a pandacode serve …` (a display is required to start, none is used).
 
+  --help, -h             Show this help and exit.
   --sign-in              First run: sign in with the GitHub device flow, enable hosting, then serve.
   --sign-out             Forget the Connect sign-in on this server and exit.
   --full-access          Let remote devices pick Full access (no approvals); exits after saving.
@@ -679,7 +838,22 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          Accept current worker evidence at the expected Ticket revision; exit.
   --reject-ticket <id> <revision> <reason>
                          Reject current worker evidence with a required reason; quote it if it has spaces.
-  --stop-ticket <id>    Revoke a Ticket mandate and stop the Ticket; exit."
+  --stop-ticket <id>    Revoke a Ticket mandate and stop the Ticket; exit.
+  --submit-ticket <preset-id> <request-key> <objective>
+                         Admit and dispatch one bounded local manual Ticket for an enabled
+                         preset. This process owns the local runtime and stays open.
+  --issue-comment <id> <revision> <owner/name> <issue> <key> <body>
+                         Authorize and post one exact GitHub issue comment. The first
+                         invocation prints the required confirmation SHA-256; rerun with
+                         --confirm-issue-comment <sha256>. An exact existing grant lets
+                         later invocations reconcile pending or uncertain effects without
+                         requiring a live assignment or replaying the write. Only an
+                         existing exact receipt may be read back after restart/revocation;
+                         JSON reports bounded uncertainty/readback state and verified
+                         remote comment ID, URL and author when GitHub returns them.
+  --confirm-issue-comment <sha256>
+                         Required to create a grant; confirms the exact Ticket revision,
+                         repository, issue, effect key, comment body and marker shown above."
         .into()
 }
 
@@ -737,6 +911,47 @@ mod tests {
         assert_eq!(parsed("--stop-ticket ticket_123"), Ok(Command::StopTicket {
             ticket_id: "ticket_123".into(),
         }));
+        assert_eq!(
+            parse(&["--submit-ticket".into(), "preset_123".into(), "manual-key.1".into(), "  Inspect this project  ".into()]),
+            Ok((Command::SubmitTicket {
+                orchestration_id: "preset_123".into(),
+                request_key: "manual-key.1".into(),
+                objective: "  Inspect this project  ".into(),
+            }, None))
+        );
+        assert!(parsed("--submit-ticket").is_err());
+        assert!(parsed("--submit-ticket preset key").is_err());
+        assert!(parsed("--submit-ticket preset bad/key objective").is_err());
+        let overlong = "x".repeat(crate::superagent::MAX_OBJECTIVE_BYTES + 1);
+        assert!(parse(&["--submit-ticket".into(), "preset".into(), "key".into(), overlong]).is_err());
+        assert!(parsed("--submit-ticket preset key objective --list-tickets").is_err());
+        let confirmation = "a".repeat(64);
+        assert_eq!(
+            parse(&[
+                "--issue-comment".into(),
+                "ticket_123".into(),
+                "4".into(),
+                "owner/repo".into(),
+                "7".into(),
+                "stable-key".into(),
+                "reviewed comment".into(),
+                "--confirm-issue-comment".into(),
+                confirmation.clone(),
+            ]).unwrap().0,
+            Command::IssueComment {
+                ticket_id: "ticket_123".into(),
+                expected_revision: 4,
+                repository: "owner/repo".into(),
+                issue_number: 7,
+                effect_key: "stable-key".into(),
+                comment: "reviewed comment".into(),
+                confirmation_hash: Some(confirmation),
+            }
+        );
+        assert!(parsed("--issue-comment ticket_123 4 owner/repo 7 stable-key body --confirm-issue-comment short").is_err());
+        assert!(parsed("--issue-comment ticket_123 4 owner/repo 0 stable-key body").is_err());
+        assert!(parsed("--issue-comment ticket_123 4 owner/repo/extra 7 stable-key body").is_err());
+        assert!(parsed("--confirm-issue-comment short").is_err());
         assert!(parsed("--accept-ticket ticket_123").is_err());
         assert!(parsed("--accept-ticket ticket_123 nope").is_err());
         assert!(parsed("--accept-ticket ../outside 1").is_err());
@@ -763,6 +978,75 @@ mod tests {
     }
 
     #[test]
+    fn shared_runtime_store_lock_rejects_a_second_process_until_shutdown() {
+        let dir = StoreOwnerTestDir::new();
+        let first = acquire_store_owner(dir.path()).unwrap();
+        assert_child_lock_result(dir.path(), false);
+        drop(first);
+        assert_child_lock_result(dir.path(), true);
+    }
+
+    struct StoreOwnerTestDir(PathBuf);
+
+    impl StoreOwnerTestDir {
+        fn new() -> Self {
+            let path = std::env::temp_dir()
+                .join(format!("pandacode-headless-owner-{}", crate::storage::id()));
+            let dir = Self(path);
+            std::fs::create_dir_all(dir.path()).unwrap();
+            dir
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for StoreOwnerTestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn assert_child_lock_result(dir: &std::path::Path, expected_success: bool) {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("headless::tests::store_owner_lock_child_probe")
+            .arg("--nocapture")
+            .env("PANDACODE_STORE_LOCK_PROBE_DIR", dir)
+            .env(
+                "PANDACODE_STORE_LOCK_PROBE_EXPECT_SUCCESS",
+                expected_success.to_string(),
+            )
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child lock probe failed (expected acquisition: {expected_success}):\nstdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout)
+                .contains("headless::tests::store_owner_lock_child_probe ... ok"),
+            "child lock probe did not run successfully:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+        );
+    }
+
+    #[test]
+    fn store_owner_lock_child_probe() {
+        let Ok(dir) = std::env::var("PANDACODE_STORE_LOCK_PROBE_DIR") else {
+            return;
+        };
+        let expected_success =
+            std::env::var("PANDACODE_STORE_LOCK_PROBE_EXPECT_SUCCESS").unwrap() == "true";
+        let acquired = acquire_store_owner(std::path::Path::new(&dir));
+        assert_eq!(acquired.is_ok(), expected_success);
+        drop(acquired);
+    }
+
+    #[test]
     fn import_bots_is_a_modifier_not_an_op() {
         let (_, import) = parse(&argv("--import-bots bots.json")).unwrap();
         assert_eq!(import, Some(PathBuf::from("bots.json")));
@@ -776,6 +1060,16 @@ mod tests {
     #[test]
     fn help_mentions_every_flag() {
         let text = help();
+        let usage = text
+            .lines()
+            .find(|line| line.starts_with("Usage:"))
+            .unwrap();
+        for alias in ["--help", "-h"] {
+            assert_eq!(parse(&argv(alias)), Err(text.clone()), "{alias} is accepted by parse");
+            assert!(usage.contains(alias), "{alias} is in Usage");
+            assert!(text.lines().any(|line| line.starts_with("  --help, -h") && line.contains(alias)), "{alias} has a help detail");
+        }
+        assert!(usage.contains("--preview-orchestrations <file>"));
         for flag in [
             "--sign-in",
             "--sign-out",
@@ -793,11 +1087,164 @@ mod tests {
             "--accept-ticket",
             "--reject-ticket",
             "--stop-ticket",
+            "--issue-comment",
+            "--confirm-issue-comment",
             "--sync-bots",
             "xvfb-run",
         ] {
             assert!(text.contains(flag), "{flag}");
         }
+    }
+
+    fn issue_comment_fixture() -> (PathBuf, String) {
+        let path = std::env::temp_dir().join(format!(
+            "pandacode-headless-issue-comment-{}.sqlite3",
+            crate::storage::id()
+        ));
+        let store = crate::storage::Store::open(&path).unwrap();
+        let now = crate::storage::now();
+        // If a regression reaches the real dispatcher, this absent checkout fails before `gh`.
+        let workspace = path.with_extension("no-checkout");
+        store
+            .db
+            .execute(
+                "INSERT INTO projects(id,name,path) VALUES('p','P',?1)",
+                [workspace.to_string_lossy().into_owned()],
+            )
+            .unwrap();
+        for (id, name) in [("co", "Coordinator"), ("wo", "Worker")] {
+            store
+                .db
+                .execute(
+                    "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                     VALUES(?1,?2,'p','codex','default','plan',?3,?3)",
+                    rusqlite::params![id, name, crate::storage::now()],
+                )
+                .unwrap();
+        }
+        store
+            .db
+            .execute(
+                "INSERT INTO sa_orchestrations(id,name,coordinator_bot_id,worker_bot_id,project_id,
+                    enabled,policy_revision,created_at,updated_at)
+                 VALUES('orchestration','Headless issue comment test','co','wo','p',1,1,?1,?1)",
+                [now],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,
+                    project_id,worker_bot_id,policy_revision,state,revision,active_assignment_id,
+                    created_at,updated_at)
+                 VALUES('ticket','orchestration','test','Confirm a GitHub comment','local-user',
+                    'manual','p','wo',1,'running',0,'assignment',?1,?1)",
+                [now],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO sa_mandates(ticket_id,actor,authorization_id,policy_revision,
+                    project_id,expires_at,created_at)
+                 VALUES('ticket','local-user','headless-test-auth',1,'p',?1,?2)",
+                rusqlite::params![now + 600_000, now],
+            )
+            .unwrap();
+        store
+            .db
+            .execute(
+                "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,
+                    created_at,updated_at)
+                 VALUES('assignment','ticket','wo','headless-test-session','running',1,?1,?1)",
+                [now],
+            )
+            .unwrap();
+        drop(store);
+        (path, "ticket".into())
+    }
+
+    #[test]
+    fn first_issue_comment_requires_an_exact_confirmation_before_dispatch() {
+        let (path, ticket_id) = issue_comment_fixture();
+        let missing_dispatch_calls = std::cell::Cell::new(0);
+
+        let missing = crate::superagent::headless_issue_comment_with_dispatch(
+            &path,
+            &ticket_id,
+            0,
+            "owner/repo",
+            7,
+            "github:comment:7",
+            "reviewed comment",
+            None,
+            |_, _| {
+                missing_dispatch_calls.set(missing_dispatch_calls.get() + 1);
+                Err("unexpected issue-comment dispatch".into())
+            },
+        )
+        .unwrap_err();
+        assert!(
+            missing.contains("Explicit local confirmation is required"),
+            "{missing}"
+        );
+        assert!(missing.contains("--confirm-issue-comment"), "{missing}");
+        assert_eq!(
+            missing_dispatch_calls.get(),
+            0,
+            "missing confirmation must not invoke the dispatcher"
+        );
+
+        let wrong_confirmation = "0".repeat(64);
+        let mismatched_dispatch_calls = std::cell::Cell::new(0);
+        let mismatched = crate::superagent::headless_issue_comment_with_dispatch(
+            &path,
+            &ticket_id,
+            0,
+            "owner/repo",
+            7,
+            "github:comment:7",
+            "reviewed comment",
+            Some(&wrong_confirmation),
+            |_, _| {
+                mismatched_dispatch_calls.set(mismatched_dispatch_calls.get() + 1);
+                Err("unexpected issue-comment dispatch".into())
+            },
+        )
+        .unwrap_err();
+        assert_eq!(
+            mismatched,
+            "The issue-comment confirmation hash does not match this exact payload."
+        );
+        assert_eq!(
+            mismatched_dispatch_calls.get(),
+            0,
+            "mismatched confirmation must not invoke the dispatcher"
+        );
+
+        let store = crate::superagent::effects::open_effect_store(&path).unwrap();
+        let grants: i64 = store
+            .db
+            .query_row("SELECT COUNT(*) FROM sa_effect_grants", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let receipts: i64 = store
+            .db
+            .query_row("SELECT COUNT(*) FROM sa_effect_receipts", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            grants, 0,
+            "failed confirmation must not create a native grant"
+        );
+        assert_eq!(
+            receipts, 0,
+            "failed confirmation must not reserve a remote effect receipt"
+        );
+        drop(store);
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

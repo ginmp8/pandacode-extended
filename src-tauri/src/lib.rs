@@ -2445,14 +2445,24 @@ async fn launch_operation_admitted(
                 config.reviewer_policy.as_ref(),
                 Some(architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly)
             ) {
-                // Read-only reviewers still need the two task-scoped, native skill
-                // retrieval/verification tools. Never expose Architect or bot tools.
-                let host = team.as_ref().and_then(|admission| {
-                    architect::reviewer_skill_host(
-                        app.clone(), session_id.clone(), stopped.clone(), admission,
-                    )
-                });
-                (host, false, None)
+                match superagent::write_grants::host(
+                    app.clone(),session_id.clone(),stopped.clone(),
+                ) {
+                    Err(error) => (None,false,Some(error)),
+                    // A granted SuperAgent worker receives this one app-owned
+                    // tool only; built-in provider tools remain read-only.
+                    Ok(Some(host)) => (Some(host),false,None),
+                    Ok(None) => {
+                        // Ordinary Council reviewers still receive only their
+                        // task-scoped, read-only skill evidence tools.
+                        let host = team.as_ref().and_then(|admission| {
+                            architect::reviewer_skill_host(
+                                app.clone(), session_id.clone(), stopped.clone(), admission,
+                            )
+                        });
+                        (host,false,None)
+                    }
+                }
             } else {
                 (None, false, None)
             };
@@ -2723,6 +2733,64 @@ async fn launch_operation_admitted(
             architect::completed(&app, &session_id, team.as_ref(), successful, was_stopped, provider_error.as_deref(), registry);
         }
         drop(registry);
+        // Persist a just-finished native Council reviewer result before its
+        // SuperAgent callback inspects the native score and skill receipts.
+        if let Err(error) = superagent::council_adapter::finalize_after_native_run_from_app(&app,&session_id) {
+            eprintln!("SuperAgent Council finalization failed: {error}");
+        }
+        // Settle structured worker items on this shared desktop/serve path so
+        // one dependency-ready continuation can use the native gateway. Keep
+        // the Council fast path too: its exact artifact is frozen before native
+        // reviewers start. Legacy whole-Ticket work stays on the old callback.
+        if successful && !was_stopped {
+            let completion = store.lock().ok().and_then(|db| {
+                let structured =
+                    superagent::active_structured_worker_session(&db, &session_id).ok()?;
+                let required =
+                    superagent::council_adapter::required_worker_session(&db, &session_id).ok()?;
+                (structured || required).then_some((structured, required))
+            });
+            if let Some((structured, required)) = completion {
+                let reply = store.lock().ok().and_then(|db| {
+                    if required {
+                        db.db.query_row(
+                            "SELECT content FROM messages WHERE session_id=?1 AND role='assistant' ORDER BY id DESC LIMIT 1",
+                            [&session_id],
+                            |row| row.get::<_,String>(0),
+                        ).ok()
+                    } else {
+                        superagent::latest_worker_reply(&db, &session_id).ok()
+                    }
+                }).unwrap_or_default();
+                let settled = store
+                    .lock()
+                    .ok()
+                    .and_then(|db| superagent::on_run_finished(&db, &session_id, true, &reply).ok())
+                    .unwrap_or(false);
+                if settled && required {
+                    if let Err(error) = superagent::council_adapter::start_after_worker_completion(
+                        &app,
+                        &session_id,
+                    ) {
+                        eprintln!("SuperAgent Council dispatch failed: {error}");
+                    }
+                }
+                if settled && structured {
+                    let (advance_app, advance_session) = (app.clone(), session_id.clone());
+                    // The gateway launch future is not `Send`; poll it on Tauri's runtime from a blocking worker.
+                    tauri::async_runtime::spawn_blocking(move || {
+                        if let Err(error) = tauri::async_runtime::block_on(
+                            superagent::auto_advance_after_successful_worker(
+                                &advance_app,
+                                &advance_session,
+                            ),
+                        ) {
+                            eprintln!("SuperAgent WorkItem continuation failed: {error}");
+                        }
+                    });
+                }
+            }
+        }
         // A turn's approval requests expire even if Council is still reviewing
         // or the user stopped the run. This must precede deferred final callbacks.
         bots::gateway::turn_ended(&session_id);
@@ -4055,6 +4123,14 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     }
     let dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    // All runtime paths that open the Store (desktop and headless) share this
+    // owner lock. Take it before Store::open can run restart recovery, and keep
+    // it in managed state until this process shuts down. SQL-only/read-only
+    // headless CLI operations intentionally bypass setup_common and this lock.
+    let owner = headless::acquire_store_owner(&dir)?;
+    if !app.manage(owner) {
+        return Err("Could not retain ownership of the PandaCode data directory.".into());
+    }
     secret_store::setup(&dir);
     feature_controls::setup();
     providers::sweep_cline_mcp_settings(&dir);
@@ -4088,6 +4164,9 @@ fn setup_common(app: &tauri::App) -> crate::Result<PathBuf> {
     app.manage(architect::Runtime::default());
     architect::watchdog::watch(app.handle().clone());
     bots::start(app.handle());
+    // Fail closed on starts interrupted before their exact native session was
+    // linked. Startup recovery never replays reviewer dispatch.
+    superagent::council_adapter::recover_starting(app.handle());
     skills::begin_startup_sync(app.handle().clone());
     // Machine threads that settled while PandaCode was closed wake their idle tasks.
     remote::orchestrate::reconcile(app.handle());
@@ -4442,6 +4521,7 @@ pub fn run() {
                 superagent::events::superagent_source_decisions,
                 superagent::events::superagent_source_set_mode,
                 superagent::events::superagent_source_observe,
+                superagent::events::superagent_source_fetch_thread,
                 superagent::events::superagent_source_link_thread,
                 superagent::events::superagent_source_thread_links,
                 superagent::superagent_list,
@@ -4452,14 +4532,21 @@ pub fn run() {
                 superagent::superagent_mandate,
                 superagent::superagent_tickets,
                 superagent::superagent_assignments,
+                superagent::superagent_work_items,
                 superagent::superagent_activity,
                 superagent::superagent_snapshot,
                 superagent::superagent_submit,
                 superagent::superagent_submit_coordinated,
                 superagent::superagent_dispatch_worker,
+                superagent::superagent_dispatch_worker_with_write_grant,
+                superagent::superagent_revoke_worker_write_grant,
                 superagent::superagent_retry,
                 superagent::superagent_accept,
                 superagent::superagent_reject,
+                superagent::superagent_set_side_effects,
+                superagent::superagent_issue_comment,
+                superagent::superagent_verify_draft_pull_request_target,
+                superagent::superagent_create_draft_pull_request,
                 superagent::manifest::superagent_manifest_export,
                 superagent::manifest::superagent_manifest_preview,
                 superagent::manifest::superagent_manifest_import,
@@ -4535,6 +4622,7 @@ pub fn run() {
                 architect::architect_set_council,
                 architect::architect_council_reviewer_options,
                 architect::architect_council_accept,
+                superagent::superagent_accept_council,
                 architect::architect_start,
                 architect::architect_control,
                 architect::architect_worker_messages,

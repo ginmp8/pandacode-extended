@@ -4,18 +4,62 @@ import { escape } from './dom';
 // This interface only invokes native policy/authorization decisions. It cannot
 // grant tools, infer work, start tasks on import or bypass Council review.
 type Call = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-interface Bot { id: string; name: string; paused: boolean }
+interface Bot { id: string; name: string; paused: boolean; projectId: string }
 interface Config {
   id: string; name: string; coordinatorBotId: string; workerBotId: string;
+  workerBotIds?: string[]; reviewerBotIds?: string[]; teamVersion?: number; projectId?: string;
+  // Absent means the native list response did not expose a real boolean.
+  councilRequired?: boolean;
   enabled: boolean; policyRevision: number;
   ticketCount?: number; runningCount?: number; blockedCount?: number; lastActivityAt?: number;
 }
-interface Ticket { id: string; objective: string; state: string; revision: number; evidence: string | null }
+interface Ticket {
+  id: string; objective: string; state: string; revision: number; evidence: string | null;
+  activeAssignmentId?: string | null;
+  orchestrationId?: string; createdAt?: number; updatedAt?: number; actor?: string;
+  provenance?: string;
+}
+interface QueueTicket extends Ticket { orchestrationId: string }
+interface WorkItem {
+  id: string; ticketId: string; objective: string; evidenceContract?: string;
+  state: string; ordinal: number; dependsOnIds?: string[]; readiness?: string;
+  createdAt: number; updatedAt: number;
+}
+interface TeamSnapshot {
+  [key: string]: unknown;
+  snapshotVersion?: unknown; provenance?: unknown; orchestrationId?: unknown;
+  teamVersion?: unknown; name?: unknown; projectId?: unknown; coordinatorBotId?: unknown;
+  workerBotIds?: unknown; reviewerBotIds?: unknown; policy?: unknown; roles?: unknown;
+}
+interface TeamDraft {
+  name: string; coordinatorBotId: string; workerBotIds: string[]; reviewerBotIds: string[];
+  // Absent means the saved native policy did not expose a real boolean. It is
+  // not Off: the edit checkbox shows unchecked, but save must omit the field so
+  // native preserves the current policy instead of rewriting required to Off.
+  councilRequired?: boolean;
+}
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
 interface ImportResult { created: string[]; unchanged: string[]; backupPath?: string }
+interface WorkerWriteDispatchRequest extends Record<string, unknown> {
+  ticketId: string; expectedRevision: number; allowedPaths: string[];
+}
+interface WorkerWriteGrant {
+  id: string; ticketId: string; assignmentId: string; sessionId: string;
+  ticketRevision: number; policyRevision: number; projectId: string; projectRoot: string;
+  allowedPaths: string[]; expiresAt: number; revoked: boolean;
+}
+interface WorkerWriteDispatch { ticket: Ticket; grant: WorkerWriteGrant }
+interface PreviewWorkerWriteDispatch {
+  previewOnly: true; ticket: Ticket; allowedPaths: string[]; message: string;
+}
+type WorkerWriteDispatchResult = WorkerWriteDispatch | PreviewWorkerWriteDispatch;
+function isPreviewWorkerWriteDispatch(result: WorkerWriteDispatchResult): result is PreviewWorkerWriteDispatch {
+  return 'previewOnly' in result && result.previewOnly === true;
+}
 interface Mandate {
   actor: string; authorizationId: string; policyRevision: number; projectId: string;
   expiresAt: number; revoked: boolean; allowedTools: string[]; allowedSideEffects: boolean;
+  sideEffectConsent: boolean;
 }
 interface Assignment { id: string; botId: string; sessionId: string; state: string; attempt: number }
 interface Activity { id: number; kind: string; detail: string; at: number }
@@ -25,60 +69,525 @@ interface CouncilObservation {
 }
 interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
-  activity: Activity[]; council?: CouncilObservation | null;
+  activity: Activity[]; teamSnapshot?: TeamSnapshot | null; council?: CouncilObservation | null;
+}
+interface IssueCommentStatus {
+  ticketId: string; ticketRevision: number; repository: string; issueNumber: number;
+  effectKey: string; payloadSha256: string; state: 'pending' | 'uncertain' | 'applied';
+  reconciliation: string;
+}
+interface PreviewIssueComment { previewOnly: true; message: string }
+type IssueCommentResult = IssueCommentStatus | PreviewIssueComment;
+interface DraftPullRequestStatus {
+  ticketId: string; ticketRevision: number; repository: string; head: string; headSha: string; base: string;
+  title: string; effectKey: string; payloadSha256: string;
+  state: 'pending' | 'uncertain' | 'applied'; reconciliation: string;
+  remotePrNumber?: number | null; remotePrUrl?: string | null;
+}
+interface PreviewDraftPullRequest { previewOnly: true; message: string }
+type DraftPullRequestResult = DraftPullRequestStatus | PreviewDraftPullRequest;
+interface PreviewSideEffectConsent { previewOnly: true; message: string }
+type SideEffectConsentResult = Ticket | PreviewSideEffectConsent;
+interface DraftPullRequestReview {
+  ticketId: string; ticketRevision: number; repository: string; head: string; headSha: string; base: string;
+  title: string; body: string; effectKey: string; marker: string;
 }
 interface EventSource {
   id: string; orchestrationId: string; repository: string; actorFilter: string;
   eventKind: string; mode: 'off' | 'observe'; policyRevision: number; lastSequence: number;
 }
 interface ThreadLink {
-  sourceId: string; ticketId: string; repository: string; subjectKey: string; createdAt: number;
+  sourceId: string; ticketId: string; repository: string; subjectKey: string;
+  actorFilter: string; eventKind: string; mode: 'off' | 'observe'; createdAt: number;
 }
 interface SourceDecision {
-  sourceId: string; deliveryId: string; eventKind: string; subjectKey: string;
+  sourceId: string; deliveryId: string; actor: string; eventKind: string; subjectKey: string;
   decision: string; sequence: number; policyRevision: number; at: number;
+}
+interface ObserveFetchDecision { decision: string; duplicate: boolean }
+interface PreviewObserveFetch { previewOnly: true; message: string }
+const OBSERVE_EVENT_KINDS = [
+  'issues.opened','issues.edited','issue_comment.created','pull_request.opened',
+  'pull_request_review.submitted','check_run.completed',
+] as const;
+const OBSERVE_FETCH_KINDS = new Set<string>(OBSERVE_EVENT_KINDS);
+const MAX_TEAM_WORKERS = 16;
+const MAX_TEAM_REVIEWERS = 8;
+const COUNCIL_REVIEWER_ERROR =
+  'Require native Council review needs between two and eight distinct reviewers.';
+
+async function issueCommentEffectKey(
+  ticketId: string, repository: string, issueNumber: number, comment: string,
+): Promise<string> {
+  const payload = new TextEncoder().encode(JSON.stringify([ticketId, repository, issueNumber, comment]));
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', payload));
+  return 'github-comment:' + Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function draftPullRequestEffectKey(
+  ticketId: string, repository: string, head: string, base: string, title: string, body: string,
+): Promise<string> {
+  const payload = new TextEncoder().encode(JSON.stringify([ticketId, repository, head, base, title, body]));
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', payload));
+  return 'github-draft-pr:' + Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function draftPullRequestMarker(ticketId: string, effectKey: string): string {
+  return '<!-- pandacode-superagent-draft-pr:ticket=' + ticketId + ';key=' + effectKey + ' -->';
 }
 
 export function mountSuperagent(host: HTMLElement, call: Call): void {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
+  let activeSurface: 'teams' | 'runs' = 'teams';
+  let intakeTeamId = '', runTeamFilter = 'all', runStatusFilter = 'all', runQuery = '';
+  let globalTickets: QueueTicket[] = [], globalQueueLoaded = false, globalQueueLoading = false;
+  let globalQueueErrors: Array<{ orchestrationId: string; message: string }> = [];
   let preview: Preview | null = null, inspected: unknown = null;
   let confirm: { message: string; action: () => Promise<void> } | null = null;
   let taskKey = crypto.randomUUID();
+  let writeGrantTicket = '', writeGrantRevision: number | null = null;
+  let writePathsDraft = '', writePathsError = '';
+  let commentRepository = '', commentIssueNumber = '', commentDraft = '';
+  let issueCommentError = '', issueCommentStatus: IssueCommentStatus | null = null;
+  let draftPrRepository = '', draftPrHead = '', draftPrBase = '', draftPrTitle = '', draftPrBody = '';
+  let draftPrError = '', draftPrStatus: DraftPullRequestStatus | null = null;
+  let draftPrReview: DraftPullRequestReview | null = null;
+  function clearDraftPullRequestReview(clearDraft = false): void {
+    draftPrError = ''; draftPrStatus = null; draftPrReview = null;
+    if (clearDraft) {
+      draftPrRepository = ''; draftPrHead = ''; draftPrBase = '';
+      draftPrTitle = ''; draftPrBody = '';
+    }
+  }
   // Persist the user's editable preset draft across asynchronous list refreshes.
-  let draftPresetName = '', draftPresetTemplate = '';
   let rejectingTicket = '', inspectedTicket = '';
   let ticketDetails: TicketDetails | null = null;
+  let ticketDetailsLoading = false, ticketDetailsError = '';
+  // Ordered read-only scheduler rows for the inspected Ticket, loaded with the
+  // other details. A failed read is local to this section, never approval data.
+  let workItems: WorkItem[] = [], workItemsError = '', workItemsLoading = false;
+  let planReadinessExpanded = true;
+  let draftPresetName = '', draftPresetTemplate = '', draftCoordinatorBotId = '';
+  let draftWorkerBotIds = [''], draftReviewerBotIds: string[] = [];
+  let draftCouncilRequired = false, draftCouncilError = '';
+  const editTeamDrafts = new Map<string, TeamDraft>();
+  const editCouncilErrors = new Map<string, string>();
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
+  function captureFocusedControl(): {
+    selector: string; index: number; selectionStart: number | null;
+    selectionEnd: number | null; selectionDirection: 'forward' | 'backward' | 'none' | null;
+  } | null {
+    const focused = document.activeElement;
+    if (!(focused instanceof HTMLElement) || !host.contains(focused)) return null;
+    const dataAttributes = Array.from(focused.attributes)
+      .filter(attribute => attribute.name.startsWith('data-sa-'));
+    const selector = focused.id
+      ? '#' + CSS.escape(focused.id)
+      : focused.tagName.toLowerCase() + dataAttributes
+        .map(attribute => '[' + attribute.name + '="' + CSS.escape(attribute.value) + '"]').join('');
+    if (!focused.id && !dataAttributes.length) return null;
+    const index = Array.from(host.querySelectorAll<HTMLElement>(selector)).indexOf(focused);
+    if (index < 0) return null;
+    let selectionStart: number | null = null, selectionEnd: number | null = null;
+    let selectionDirection: 'forward' | 'backward' | 'none' | null = null;
+    if (focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement) {
+      try {
+        selectionStart = focused.selectionStart;
+        selectionEnd = focused.selectionEnd;
+        selectionDirection = focused.selectionDirection;
+      } catch { /* Some input types do not expose text selection. */ }
+    }
+    return { selector, index, selectionStart, selectionEnd, selectionDirection };
+  }
+  function restoreFocusedControl(snapshot: ReturnType<typeof captureFocusedControl>): void {
+    if (!snapshot) return;
+    const focused = host.querySelectorAll<HTMLElement>(snapshot.selector)[snapshot.index];
+    if (!focused) return;
+    focused.focus({ preventScroll:true });
+    if (snapshot.selectionStart !== null && snapshot.selectionEnd !== null &&
+        (focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement)) {
+      try { focused.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd, snapshot.selectionDirection ?? undefined); }
+      catch { /* A changing control may no longer support a selection range. */ }
+    }
+  }
   const safe = (value: unknown) => escape(String(value ?? ''));
   const current = () => presets.find(item => item.id === selected);
+  const teamName = (id: string) => presets.find(team => team.id === id)?.name ?? 'Unknown Team';
   const botName = (id: string) => bots.find(bot => bot.id === id)?.name ?? 'Missing bot';
+  const botProjectId = (id: string) => bots.find(bot => bot.id === id)?.projectId;
   const activityTime = (timestamp?: number): string => typeof timestamp === 'number' &&
     Number.isFinite(timestamp) && timestamp > 0
     ? new Date(timestamp).toLocaleString() : 'Unavailable';
+  function globalQueueBodyMarkup(): string {
+    const query = runQuery.trim().toLocaleLowerCase();
+    const filteredQueue = globalTickets.filter(ticket => {
+      if (runTeamFilter !== 'all' && ticket.orchestrationId !== runTeamFilter) return false;
+      if (runStatusFilter !== 'all' && ticket.state !== runStatusFilter) return false;
+      if (query && ![ticket.objective, ticket.id, teamName(ticket.orchestrationId)]
+        .some(value => value.toLocaleLowerCase().includes(query))) return false;
+      return true;
+    }).sort((left, right) => {
+      const leftAt = typeof left.createdAt === 'number' ? left.createdAt : 0;
+      const rightAt = typeof right.createdAt === 'number' ? right.createdAt : 0;
+      return rightAt - leftAt || right.id.localeCompare(left.id);
+    });
+    const failedTeam = runTeamFilter === 'all' ? null
+      : globalQueueErrors.find(item => item.orchestrationId === runTeamFilter) ?? null;
+    const queueRows = filteredQueue.map(ticket => '<li class="sa-queue-ticket" data-sa-queue-ticket="' +
+      safe(ticket.id) + '"><div><strong>' + safe(ticket.objective) + '</strong>' +
+      (ticket.provenance === 'preview-fixture'
+        ? '<small class="sa-preview-fixture">Preview fixture · sample data, not native storage</small>' : '') +
+      '<small>Team: ' + safe(teamName(ticket.orchestrationId)) + ' · State: ' +
+      safe(ticket.state.replace(/_/g, ' ')) + '</small><small>Ticket ID: <code>' + safe(ticket.id) +
+      '</code> · Updated: ' + safe(activityTime(ticket.updatedAt)) + '</small></div>' +
+      '<div class="sa-ticket-actions"><button type="button" data-sa-inspect-global-ticket="' +
+      safe(ticket.id) + '" aria-pressed="' + (ticket.id === inspectedTicket) + '">View evidence for ' +
+      safe(ticket.objective) + '</button><button type="button" data-sa-open-team-queue="' +
+      safe(ticket.orchestrationId) + '">Open Team queue</button></div></li>').join('');
+    return globalQueueLoading
+      ? '<p class="sa-empty" role="status" aria-live="polite">Loading native Ticket lists…</p>'
+      : failedTeam
+        ? '<p class="sa-error" role="alert">Tickets for ' + safe(teamName(failedTeam.orchestrationId)) +
+          ' could not be loaded: ' + safe(failedTeam.message) + '</p>'
+        : !presets.length
+          ? '<p class="sa-empty">No Teams yet. Create a Team before assigning a demand.</p>'
+          : !globalQueueLoaded
+            ? '<p class="sa-empty" role="status">Open Demands / Runs to load Team queues.</p>'
+            : !globalTickets.length && !globalQueueErrors.length
+              ? '<p class="sa-empty">No demands yet. Assign a demand to an enabled Team to begin.</p>'
+              : !globalTickets.length && globalQueueErrors.length
+                ? '<p class="sa-empty" role="status">Queue contents are unavailable until the failed Team Ticket lists can be read.</p>'
+                : !filteredQueue.length && globalQueueErrors.length && runTeamFilter === 'all'
+                  ? '<p class="sa-empty" role="status">No demands were found in the available Team queues; unavailable Teams may still have matching Tickets.</p>'
+                  : !filteredQueue.length
+                    ? '<p class="sa-empty">No demands match these filters.</p>'
+                    : '<ul class="sa-tickets sa-run-ticket-list">' + queueRows + '</ul>';
+  }
+  const readTeamDraft = (form: HTMLFormElement): TeamDraft => {
+    const data = new FormData(form);
+    const checked = data.get('councilRequired') !== null;
+    const editId = form.dataset.saForm === 'edit' ? form.dataset.orchestrationId : undefined;
+    // Only a real saved boolean may be sent when the box is unchecked; an
+    // unknown saved state stays unknown unless the user checks the box (true)
+    // or checks and unchecks a previously real value (false).
+    const savedCouncil = editId
+      ? editTeamDrafts.get(editId)?.councilRequired ??
+        presets.find(item => item.id === editId)?.councilRequired
+      : undefined;
+    const councilRequired = checked ? true
+      : editId === undefined || typeof savedCouncil === 'boolean' ? false : undefined;
+    return {
+      name: String(data.get('name') ?? '').trim(),
+      coordinatorBotId: String(data.get('coordinatorBotId') ?? ''),
+      workerBotIds: data.getAll('workerBotIds').map(String),
+      reviewerBotIds: data.getAll('reviewerBotIds').map(String),
+      councilRequired,
+    };
+  };
+  const rememberTeamDraft = (form: HTMLFormElement, draft: TeamDraft): void => {
+    if (form.dataset.saForm === 'create') {
+      draftPresetName = draft.name;
+      draftCoordinatorBotId = draft.coordinatorBotId;
+      draftWorkerBotIds = draft.workerBotIds.length ? draft.workerBotIds : [''];
+      draftReviewerBotIds = draft.reviewerBotIds;
+      draftCouncilRequired = draft.councilRequired === true;
+    } else if (form.dataset.saForm === 'edit' && form.dataset.orchestrationId) {
+      editTeamDrafts.set(form.dataset.orchestrationId, draft);
+    }
+  };
+  // The checkbox is a native Team policy field: off, or a completion-gating
+  // requirement with two to eight distinct reviewers. The same check runs in
+  // validateTeamDraft as a backstop, but the form validates it before saving so
+  // the failure is tied to the field instead of becoming a global error.
+  const councilDraftError = (draft: TeamDraft): string => {
+    if (!draft.councilRequired) return '';
+    const reviewers = draft.reviewerBotIds;
+    return reviewers.length < 2 || reviewers.length > MAX_TEAM_REVIEWERS ||
+      reviewers.some(id => !id) || new Set(reviewers).size !== reviewers.length
+      ? COUNCIL_REVIEWER_ERROR : '';
+  };
+  const councilStatusLabel = (required: boolean | undefined): string =>
+    required === true ? 'Council required'
+      : required === false ? 'Council off' : 'Council state unavailable';
+  const validateTeamDraft = (draft: TeamDraft, expectedProjectId?: string): TeamDraft => {
+    if (!draft.name || !draft.coordinatorBotId || !draft.workerBotIds.length ||
+        draft.workerBotIds.some(id => !id) || draft.reviewerBotIds.some(id => !id)) {
+      throw new Error('Choose a Team name, one coordinator, and at least one worker.');
+    }
+    if (draft.workerBotIds.length > MAX_TEAM_WORKERS || draft.reviewerBotIds.length > MAX_TEAM_REVIEWERS) {
+      throw new Error('A Team supports up to 16 workers and 8 reviewers.');
+    }
+    const councilError = councilDraftError(draft);
+    if (councilError) throw new Error(councilError);
+    const roleIds = [draft.coordinatorBotId, ...draft.workerBotIds, ...draft.reviewerBotIds];
+    if (new Set(roleIds).size !== roleIds.length) throw new Error('A bot can have only one role in a Team.');
+    const projectId = expectedProjectId || botProjectId(draft.coordinatorBotId);
+    if (!projectId || roleIds.some(id => botProjectId(id) !== projectId)) {
+      throw new Error('Choose the Coordinator, Workers, and Reviewers from the same project.');
+    }
+    return draft;
+  };
+  function renderTeamSnapshot(snapshot: TeamSnapshot | null | undefined): string {
+    if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
+      return '<section class="sa-pane sa-team-snapshot" aria-label="Saved Team snapshot">' +
+        '<h5>Saved Team snapshot unavailable</h5><p>The native Ticket response did not include <code>teamSnapshot</code>. The current Team configuration was not substituted.</p></section>';
+    }
+    const rawProvenance = typeof snapshot.provenance === 'string' ? snapshot.provenance : '';
+    const provenance = rawProvenance || 'missing';
+    const provenanceNote = rawProvenance === 'native'
+      ? 'Native: this immutable Team snapshot was captured for this Ticket.'
+      : rawProvenance === 'preview-fixture'
+        ? 'Preview fixture: this is native-shaped example data, not a Ticket read from native storage.'
+      : rawProvenance === 'legacy-current'
+        ? 'Legacy-current: backfilled from the mutable Team configuration observed during upgrade; it may not match the exact historical admission state.'
+        : rawProvenance === 'legacy-unknown'
+          ? 'Legacy-unknown: historical role/profile data was not recorded. Placeholder identities and missing profile evidence are not recovered facts or dispatch authority.'
+          : 'Unrecognized or missing provenance. Treat historical Team details as unverified.';
+    const roles = Array.isArray(snapshot.roles) ? snapshot.roles : [];
+    const roleRows = roles.map((entry: unknown) => {
+      const role = entry && typeof entry === 'object' && !Array.isArray(entry)
+        ? entry as Record<string, unknown> : {};
+      const roleName = typeof role.role === 'string' ? role.role : 'Unknown role';
+      const ordinal = typeof role.ordinal === 'number' && Number.isFinite(role.ordinal)
+        ? ' · ordinal ' + role.ordinal : '';
+      const botId = typeof role.botId === 'string' ? role.botId : 'Unknown bot identity';
+      const digest = typeof role.effectiveConfigSha256 === 'string' && role.effectiveConfigSha256
+        ? ' · profile SHA-256 ' + safe(role.effectiveConfigSha256)
+        : role.effectiveConfig === null ? ' · profile evidence unavailable' : '';
+      return '<li><strong>' + safe(roleName) + '</strong>' + safe(ordinal) + ' · ' +
+        safe(botName(botId)) + ' <code>' + safe(botId) + '</code>' + digest + '</li>';
+    }).join('');
+    let payload = 'Unable to serialize the returned snapshot.';
+    try { payload = JSON.stringify(snapshot, null, 2) ?? 'null'; } catch { /* malformed preview only */ }
+    const policy = snapshot.policy && typeof snapshot.policy === 'object' && !Array.isArray(snapshot.policy)
+      ? snapshot.policy as Record<string, unknown> : null;
+    return '<section class="sa-pane sa-team-snapshot" aria-label="Saved Team snapshot">' +
+      '<h5>Saved Team snapshot</h5><p>Exact immutable <code>teamSnapshot</code> returned with this Ticket; the current Team is never substituted.</p>' +
+      '<dl><dt>Provenance</dt><dd>' + safe(provenance) + '</dd>' +
+      '<dt>Team / version</dt><dd>' + safe(snapshot.name ?? 'Unknown Team') + ' / ' +
+      safe(snapshot.teamVersion ?? 'unknown') + ' · snapshot schema ' + safe(snapshot.snapshotVersion ?? 'unknown') + '</dd>' +
+      (policy ? '<dt>Saved policy</dt><dd>Revision ' + safe(policy.policyRevision ?? 'unknown') +
+        ' · Autonomy ' + safe(policy.autonomy ?? 'unknown') + ' · Council ' +
+        safe(policy.councilEnabled ?? 'unknown') + '</dd>' : '') +
+      '</dl><p role="note">' + safe(provenanceNote) + '</p>' +
+      '<h6>Saved role order</h6><ol>' + (roleRows || '<li>No role entries were returned.</li>') +
+      '</ol><details><summary>Inspect exact saved Team payload</summary><pre>' + safe(payload) +
+      '</pre></details></section>';
+  }
+  type CouncilPolicyMode = 'required' | 'off' | 'unknown';
+  // Only an exact native snapshot proves the policy captured at admission.
+  // Reconstructed legacy snapshots may describe the current Team instead.
+  function councilPolicyMode(snapshot: TeamSnapshot | null | undefined): CouncilPolicyMode {
+    if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot) ||
+        snapshot.provenance !== 'native') return 'unknown';
+    const policy = snapshot.policy;
+    if (!policy || typeof policy !== 'object' || Array.isArray(policy)) return 'unknown';
+    const record = policy as Record<string, unknown>;
+    // Native policy is only off or required. Either recorded flag proves the
+    // completion gate; Off needs both to be explicitly false.
+    if (record.councilRequired === true || record.councilEnabled === true) return 'required';
+    if (record.councilRequired === false && record.councilEnabled === false) return 'off';
+    return 'unknown';
+  }
+  function renderCouncilObservation(details: TicketDetails): string {
+    const mode = councilPolicyMode(details.teamSnapshot);
+    const council = details.council && typeof details.council === 'object' ? details.council : null;
+    // An unavailable observation is only worth surfacing when the saved policy
+    // says Council is required; an Off/Unknown policy with no evidence adds none.
+    if (!council && mode !== 'required') return '';
+    const policy = mode === 'required' ? 'Council required.'
+      : mode === 'off' ? 'Council off in the saved Ticket policy.'
+        : 'Unknown; the saved Team snapshot does not prove whether Council is required.';
+    if (!council) {
+      return '<section class="sa-council-observation" role="note" aria-label="Native Council observation">' +
+        '<h5>Native Council</h5><p>Policy: ' + policy + '</p><p>' +
+        'The native Council observation is unavailable. Required Council gates completion, and without this observation a bound native review target is Unknown.' +
+        '</p></section>';
+    }
+    const binding = council.ticketArtifactBound === true ? 'Bound to this Ticket artifact.'
+      : council.ticketArtifactBound === false ? 'Not proven (Unknown).'
+        : 'Unknown.';
+    const nativeStatus = typeof council.nativeStatus === 'string' && council.nativeStatus.trim()
+      ? council.nativeStatus : 'Unknown';
+    const round = typeof council.nativeRound === 'number' && Number.isFinite(council.nativeRound)
+      ? String(council.nativeRound) : 'Unknown';
+    const stale = council.nativeStale === true ? ' · stale' : '';
+    const verified = council.nativePassVerified === true ? 'Yes'
+      : council.nativePassVerified === false ? 'No' : 'Unknown';
+    const bound = council.ticketArtifactBound === true;
+    const verifiedPass = council.nativePassVerified === true;
+    // A verified Council pass and a frozen review target are separate native
+    // facts. This line never upgrades one into proof of the other.
+    const meaning = mode === 'required'
+      ? (bound && verifiedPass
+        ? 'Required Council gates completion for this Ticket. The artifact is bound as the native review target; a native Council pass is verified.'
+        : bound
+          ? 'Required Council gates completion for this Ticket. The artifact is bound as the native review target; no verified native Council pass authorizes completion.'
+          : verifiedPass
+            ? 'Required Council gates completion for this Ticket. A native Council pass is verified, but this artifact is not proven as its review target, so the pass cannot authorize completion.'
+            : 'Required Council gates completion for this Ticket. Neither a verified native Council pass nor a bound review target is proven, so this observation cannot authorize completion.')
+      : mode === 'off'
+        ? 'The saved Ticket policy says Council is off, so this observation does not authorize completion; its relationship to this Ticket is not proven.'
+        : 'The saved Team snapshot does not prove whether Council is required, so whether this observation gates completion is Unknown; it cannot authorize completion by itself.';
+    return '<section class="sa-council-observation" role="note" aria-label="Native Council observation">' +
+      '<h5>Native Council</h5><p>Policy: ' + policy + ' Review target binding: ' + binding + '</p>' +
+      '<p>Native team status: ' + safe(nativeStatus) + ' · Round ' + safe(round) + stale +
+      '. Verified native pass: ' + verified + '.</p><p>' + meaning + '</p></section>';
+  }
+  function renderWorkItems(): string {
+    const itemsById = new Map(workItems.map(item => [item.id, item]));
+    const rows = workItems.map(item => {
+      const evidenceContract = typeof item.evidenceContract === 'string' && item.evidenceContract.trim()
+        ? item.evidenceContract : 'Unavailable';
+      const readiness = item.readiness === 'ready' ? 'Ready'
+        : item.readiness === 'dependency_blocked' ? 'Dependency blocked'
+          : item.readiness === 'active' ? 'Active'
+            : item.readiness === 'not_ready' ? 'Not ready' : 'Unavailable';
+      const readinessKey = ['ready', 'dependency_blocked', 'active', 'not_ready'].includes(item.readiness ?? '')
+        ? item.readiness! : 'unavailable';
+      const dependencyIds = Array.isArray(item.dependsOnIds)
+        ? item.dependsOnIds.filter(id => typeof id === 'string') : null;
+      const dependencies = dependencyIds === null ? 'Prerequisite links unavailable'
+        : dependencyIds.length === 0 ? 'Prerequisites: none'
+          : 'Depends on: ' + dependencyIds.map(id => {
+            const prerequisite = itemsById.get(id);
+            return (prerequisite ? safe(prerequisite.objective) + ' · ' : '') + 'ID ' + safe(id);
+          }).join(', ');
+      return '<li class="sa-item" data-sa-work-item="' + safe(item.id) + '"><div><strong>' +
+      safe(item.objective) + '</strong><small data-sa-work-readiness="' + safe(readinessKey) + '">Ordinal ' +
+      safe(item.ordinal) + ' · State ' + safe(item.state) + ' · Readiness ' + readiness +
+      '</small><small data-sa-work-dependencies>' + safe(dependencies) +
+      '</small><small>Evidence contract (descriptive only; not verified evidence): ' +
+      safe(evidenceContract) + '</small></div></li>';
+    }).join('');
+    const body = workItemsLoading
+      ? '<p class="sa-empty" role="status" aria-live="polite" data-sa-work-items-loading>Loading WorkItems for this Ticket…</p>'
+      : workItemsError
+        ? '<p class="sa-error" role="alert" data-sa-work-items-error>Work items unavailable: ' +
+          safe(workItemsError) + '</p>'
+        : '<ol class="sa-list sa-work-items-list">' +
+          (rows || '<li class="sa-empty" data-sa-work-items-empty>No WorkItems recorded for this Ticket.</li>') +
+          '</ol>';
+    return '<details class="sa-plan-readiness" role="region" aria-label="Plan / Readiness" data-sa-plan-readiness' +
+      (planReadinessExpanded ? ' open' : '') + '><summary>Plan / Readiness</summary>' +
+      '<div class="sa-plan-readiness-body" data-sa-plan-body><p class="sa-plan-readiness-note">' +
+      'Read-only WorkItem objectives and states, in ordinal order. Prerequisite IDs and readiness come from native dependency rows and the active Assignment binding; absent fields remain unavailable. This list does not authorize or dispatch work. ' +
+      'Evidence contracts are informational descriptions, not proof that work is complete. ' +
+      'This view does not report design-review findings, drift, or Council approval.</p>' +
+      '<h5>WorkItem List</h5>' + body + '</div></details>';
+  }
   function render(): void {
+    const focusedControl = captureFocusedControl();
     if (!host.isConnected) return;
+    const previousPlanReadiness = host.querySelector<HTMLDetailsElement>('[data-sa-plan-readiness]');
+    if (previousPlanReadiness) planReadinessExpanded = previousPlanReadiness.open;
     const list = presets.map(item =>
-      '<li class="sa-item"><div><strong>' + safe(item.name) + '</strong><small>' +
-      safe(botName(item.coordinatorBotId)) + ' / ' + safe(botName(item.workerBotId)) +
-      '</small><small class="sa-counts" aria-label="Task counts">' +
+      {
+      const workerIds = item.workerBotIds?.length ? item.workerBotIds : [item.workerBotId];
+      const reviewerIds = item.reviewerBotIds ?? [];
+      const roles = safe(botName(item.coordinatorBotId)) + ' · Workers: ' +
+        safe(workerIds.map(botName).join(', ')) + (reviewerIds.length
+          ? ' · Reviewers: ' + safe(reviewerIds.map(botName).join(', ')) : '');
+      return '<li class="sa-item"><div><strong>' + safe(item.name) + '</strong><small>' +
+      roles +
+      '</small><small class="sa-council-state" data-sa-council-state>' +
+      safe(councilStatusLabel(item.councilRequired)) + '</small>' +
+      '<small class="sa-counts" aria-label="Task counts">' +
       (item.ticketCount ?? 0) + ' tasks · ' + (item.runningCount ?? 0) +
       ' running · ' + (item.blockedCount ?? 0) + ' blocked</small>' +
       '<small class="sa-last-activity">Last activity: ' + safe(activityTime(item.lastActivityAt)) +
       '</small></div><span>' +
       (item.enabled ? 'Manual' : 'Off') + '</span>' +
       '<button type="button" data-sa-select="' + safe(item.id) + '" aria-current="' +
-      (item.id === selected) + '">Details</button></li>').join('');
-    const optionsFor = (botId: string) => bots.map(bot => '<option value="' + safe(bot.id) + '"' +
-      (bot.paused ? ' disabled' : '') + (bot.id === botId ? ' selected' : '') + '>' + safe(bot.name) +
-      (bot.paused ? ' (paused)' : '') + '</option>').join('');
-    const choices = optionsFor('');
+      (item.id === selected) + '">Details</button>' +
+      '<button type="button" data-sa-assign-demand="' + safe(item.id) + '" aria-label="Assign demand to ' +
+      safe(item.name) + '">Assign demand</button>' +
+      '<button type="button" data-sa-edit-team="' + safe(item.id) + '">Edit Team</button>' +
+      '</li>';
+      }
+    ).join('');
     const chosen = current();
+    const optionsFor = (botId: string, projectId?: string) => bots.map(bot => {
+      const differentProject = !!projectId && bot.projectId !== projectId;
+      return '<option value="' + safe(bot.id) + '"' +
+        (bot.paused || differentProject ? ' disabled' : '') + (bot.id === botId ? ' selected' : '') + '>' +
+        safe(bot.name) + (bot.paused ? ' (paused)' : differentProject ? ' (different project)' : '') + '</option>';
+    }).join('');
+    const roleEditor = (kind: 'worker' | 'reviewer', ids: string[], projectId?: string) => {
+      const title = kind === 'worker' ? 'Workers (ordered)' : 'Reviewers (ordered)';
+      const max = kind === 'worker' ? MAX_TEAM_WORKERS : MAX_TEAM_REVIEWERS;
+      const rows = ids.map((id, index) => {
+        const label = kind === 'worker' ? 'Worker ' + (index + 1) : 'Reviewer ' + (index + 1);
+        const name = kind === 'worker' ? 'workerBotIds' : 'reviewerBotIds';
+        return '<li><label>' + label + '<select name="' + name + '" data-sa-team-role="' + kind + '" required>' +
+          '<option value="">Choose bot</option>' + optionsFor(id, projectId) + '</select></label><div class="sa-actions">' +
+          '<button type="button" data-sa-role-action="up" data-sa-role="' + kind + '" data-sa-role-index="' + index + '" aria-label="Move ' +
+          label.toLowerCase() + ' up"' + (index === 0 ? ' disabled' : '') + '>Move up</button>' +
+          '<button type="button" data-sa-role-action="down" data-sa-role="' + kind + '" data-sa-role-index="' + index + '" aria-label="Move ' +
+          label.toLowerCase() + ' down"' + (index === ids.length - 1 ? ' disabled' : '') + '>Move down</button>' +
+          (kind === 'worker' && ids.length === 1 ? '' : '<button type="button" data-sa-role-action="remove" data-sa-role="' +
+            kind + '" data-sa-role-index="' + index + '" aria-label="Remove ' + label.toLowerCase() + '">Remove</button>') +
+          '</div></li>';
+      }).join('');
+      return '<div class="sa-team-role-editor" role="group" aria-label="' + title + '"><h4>' + title + '</h4><ol>' +
+        (rows || '<li>No reviewers selected.</li>') + '</ol><button type="button" data-sa-role-add="' + kind + '"' +
+        (ids.length >= max ? ' disabled' : '') + '>Add ' + kind + '</button></div>';
+    };
+    const councilField = (id: string, checked: boolean, error: string) =>
+      '<label class="sa-council-choice"><input type="checkbox" name="councilRequired"' +
+      (checked ? ' checked' : '') + (error ? ' aria-invalid="true"' : '') +
+      ' aria-describedby="' + id + '-hint' + (error ? ' ' + id + '-error' : '') +
+      '"> Require native Council review</label>' +
+      '<p class="sa-field-hint" id="' + id + '-hint">Off unless selected. When required, choose two to eight distinct reviewers; a native Council pass then gates completion.</p>' +
+      (error ? '<p class="sa-field-error" id="' + id + '-error" role="alert" data-sa-council-error>' +
+        safe(error) + '</p>' : '');
+    const selectedTeamDraft = chosen ? editTeamDrafts.get(chosen.id) ?? {
+      name: chosen.name,
+      coordinatorBotId: chosen.coordinatorBotId,
+      workerBotIds: chosen.workerBotIds?.length ? chosen.workerBotIds : [chosen.workerBotId],
+      reviewerBotIds: chosen.reviewerBotIds ?? [],
+      councilRequired: chosen.councilRequired,
+    } : null;
+    const editCouncilError = chosen ? editCouncilErrors.get(chosen.id) ?? '' : '';
+    const selectedProjectId = chosen
+      ? chosen.projectId || botProjectId(selectedTeamDraft?.coordinatorBotId ?? '') : undefined;
+    const draftProjectId = botProjectId(draftCoordinatorBotId);
     const inspected = tickets.find(ticket => ticket.id === inspectedTicket);
-    const details = inspected && ticketDetails
+    const writeTicket = tickets.find(ticket => ticket.id === writeGrantTicket);
+    const canManageSideEffects = activeSurface === 'runs' && !!inspected &&
+      ticketDetails?.ticket.id === inspected.id &&
+      ticketDetails.ticket.revision === inspected.revision && inspected.state === 'running' &&
+      ticketDetails.ticket.state === 'running' && !ticketDetails.mandate.revoked &&
+      ticketDetails.mandate.expiresAt > Date.now() &&
+      ticketDetails.assignments.some(assignment => assignment.id === inspected.activeAssignmentId &&
+        assignment.state === 'running');
+    const canComment = !!inspected && ticketDetails?.ticket.id === inspected.id &&
+      inspected.state === 'running' && !ticketDetails.mandate.revoked &&
+      ticketDetails.mandate.sideEffectConsent;
+    const commentStatus = issueCommentStatus && inspected &&
+      issueCommentStatus.ticketId === inspected.id &&
+      issueCommentStatus.ticketRevision === inspected.revision ? issueCommentStatus : null;
+    const draftPrStatusForTicket = draftPrStatus && inspected &&
+      draftPrStatus.ticketId === inspected.id &&
+      draftPrStatus.ticketRevision === inspected.revision ? draftPrStatus : null;
+    const draftPrReviewForTicket = draftPrReview && inspected &&
+      draftPrReview.ticketId === inspected.id &&
+      draftPrReview.ticketRevision === inspected.revision ? draftPrReview : null;
+    const details = inspected && !ticketDetails
       ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
-        '<h4>Ticket evidence</h4><p>Read-only native snapshot. Model output is not task approval.</p>' +
+        '<h4>Ticket evidence</h4><p class="sa-ticket-objective">Objective: ' + safe(inspected.objective) + '</p>' +
+        (ticketDetailsLoading
+          ? '<p role="status" data-sa-ticket-details-loading>Loading Ticket evidence…</p>'
+          : '<p class="sa-error" role="alert">Ticket evidence unavailable: ' +
+            safe(ticketDetailsError || 'The native Ticket snapshot could not be loaded.') + '</p>') +
+        renderWorkItems() + '<button type="button" data-sa-close-details>Close evidence</button></section>'
+      : inspected && ticketDetails
+      ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
+        '<h4>Ticket evidence</h4><p class="sa-ticket-objective">Objective: ' + safe(inspected.objective) +
+        '</p><p>Read-only native snapshot. Model output is not task approval.</p>' +
+        renderTeamSnapshot(ticketDetails.teamSnapshot) +
         '<dl><dt>Ticket ID</dt><dd><code>' + safe(inspected.id) + '</code></dd>' +
         '<dt>State / revision</dt><dd>' + safe(inspected.state) + ' / ' + inspected.revision + '</dd>' +
         '<dt>Actor</dt><dd>' + safe(ticketDetails.mandate.actor) + '</dd>' +
@@ -86,21 +595,97 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         '<dt>Project / policy</dt><dd>' + safe(ticketDetails.mandate.projectId) + ' / ' +
         ticketDetails.mandate.policyRevision + '</dd>' +
         '<dt>Mandate</dt><dd>' + (ticketDetails.mandate.revoked ? 'Revoked' : 'Issued') +
-        ' · ' + (ticketDetails.mandate.allowedSideEffects ? 'Scoped side effects' : 'No side effects allowed') +
         ' · Tools: ' + safe(ticketDetails.mandate.allowedTools.join(', ') || 'none') + '</dd>' +
+        '<dt>GitHub side effects</dt><dd>' +
+        (ticketDetails.mandate.sideEffectConsent ? 'Scoped side effects' : 'No side effects allowed') + '</dd>' +
         '<dt>Expires</dt><dd>' + safe(new Date(ticketDetails.mandate.expiresAt).toLocaleString()) + '</dd></dl>' +
         '<h5>Assignment attempts</h5><ul>' +
         (ticketDetails.assignments.map(item => '<li>Attempt ' + item.attempt + ' · ' +
           safe(item.state) + ' · Bot ' + safe(botName(item.botId)) + ' · Session <code>' +
           safe(item.sessionId) + '</code></li>').join('') || '<li>No worker assigned.</li>') +
-        '</ul><h5>Native activity</h5><ol>' +
+        '</ul>' + renderWorkItems() + '<h5>Native activity</h5><ol>' +
         (ticketDetails.activity.map(entry => '<li>' + safe(activityTime(entry.at)) + ' · ' +
           safe(entry.kind) + ' · ' + safe(entry.detail) + '</li>').join('') ||
           '<li>No activity recorded.</li>') +
-        '</ol><h5>Linked GitHub threads (context references only)</h5><ul class="sa-linked-threads">' +
-        (threadLinks.map(link => '<li>' + safe(link.repository) + ' / ' +
-          safe(link.subjectKey) + '</li>').join('') ||
+        '</ol><h5>Linked GitHub threads</h5><ul class="sa-linked-threads">' +
+        (threadLinks.map(link => '<li><span>' + safe(link.repository) + ' / ' +
+          safe(link.subjectKey) + ' · ' + safe(link.eventKind) + ' · actor ' +
+          safe(link.actorFilter) + '</span>' + (link.mode === 'observe'
+            ? (OBSERVE_FETCH_KINDS.has(link.eventKind)
+              ? '<button type="button" data-sa-fetch-thread="' + safe(link.sourceId) +
+              '" data-sa-subject-key="' + safe(link.subjectKey) + '" aria-label="Fetch one latest matching GitHub event for ' +
+                safe(link.repository) + ' ' + safe(link.subjectKey) + '">Fetch once</button>'
+              : '<small>Manual fetch unavailable for this event class.</small>')
+            : '<small>Off · no GitHub request</small>') + '</li>').join('') ||
           '<li>No threads linked.</li>') + '</ul>' +
+        (canManageSideEffects
+          ? '<section class="sa-effect-editor" aria-label="Ticket GitHub side-effect consent"><h5>Ticket GitHub effects</h5>' +
+            '<p>The operator-controlled scope covers only issue and pull request conversation comments and draft pull request creation. Each effect still requires a separate native confirmation for its exact target and payload. Push is unavailable.</p>' +
+            '<button type="button" data-sa-side-effect-consent="' +
+            (ticketDetails.mandate.sideEffectConsent ? 'revoke' : 'enable') + '" data-sa-ticket-id="' +
+            safe(inspected.id) + '" data-sa-ticket-revision="' + inspected.revision + '"' +
+            (busy ? ' disabled' : '') + '>' +
+            (ticketDetails.mandate.sideEffectConsent ? 'Revoke GitHub effects' : 'Enable bounded GitHub effects') +
+            '</button></section>'
+          : '') +
+        (canComment
+          ? '<section class="sa-effect-editor" aria-label="Explicit GitHub effect"><h5>GitHub issue comment</h5>' +
+            '<p>Available only with this running Ticket’s current mandate and operator consent. The native confirmation shows the exact target and comment.</p>' +
+            '<form data-sa-form="issue-comment"><div class="sa-grid">' +
+            '<label>Repository (owner/name)<input name="repository" maxlength="200" required value="' +
+            safe(commentRepository) + '"></label>' +
+            '<label>Issue number<input name="issueNumber" type="number" min="1" step="1" inputmode="numeric" required value="' +
+            safe(commentIssueNumber) + '"></label></div>' +
+            '<label>Comment<textarea name="comment" rows="4" maxlength="60000" required>' +
+            safe(commentDraft) + '</textarea></label>' +
+            (issueCommentError ? '<p role="alert" data-sa-comment-error class="sa-write-path-error">' + safe(issueCommentError) + '</p>' : '') +
+            (commentStatus ? '<p role="status" data-sa-comment-status>Effect ' + safe(commentStatus.state) +
+              ' · ' + safe(commentStatus.reconciliation) + ' · SHA-256 ' +
+              safe(commentStatus.payloadSha256) + '</p>' : '') +
+            '<button type="submit" class="primary-button">' +
+            (commentStatus?.state === 'applied' ? 'Check existing comment' :
+              commentStatus?.state === 'pending' ? 'Check pending comment' :
+                commentStatus?.state === 'uncertain' ? 'Reconcile comment status' :
+                  'Authorize and post comment') + '</button></form></section>'
+          : '') +
+        (canComment
+          ? '<section class="sa-effect-editor" aria-label="Explicit draft pull request effect"><h5>Draft pull request</h5>' +
+            '<p>This running Ticket needs its current mandate and operator consent to authorize a draft from its already-pushed, clean worker checkout. Review the exact repository, head branch and verified commit SHA, base, title, body marker and effect key before confirming.</p>' +
+            '<form data-sa-form="draft-pull-request"><div class="sa-grid">' +
+            '<label>Repository (owner/name)<input name="repository" maxlength="200" required value="' +
+            safe(draftPrRepository) + '"></label>' +
+            '<label>Head branch<input name="head" maxlength="200" required value="' +
+            safe(draftPrHead) + '"></label>' +
+            '<label>Base branch<input name="base" maxlength="200" required value="' +
+            safe(draftPrBase) + '"></label>' +
+            '<label>Title<input name="title" maxlength="256" required value="' +
+            safe(draftPrTitle) + '"></label></div>' +
+            '<label>Body<textarea name="body" rows="5" maxlength="8192">' +
+            safe(draftPrBody) + '</textarea></label>' +
+            (draftPrError ? '<p role="alert" data-sa-draft-pr-error class="sa-write-path-error">' +
+              safe(draftPrError) + '</p>' : '') +
+            (draftPrStatusForTicket ? '<p role="status" data-sa-draft-pr-status>Draft PR effect ' +
+              safe(draftPrStatusForTicket.state) + ' · ' + safe(draftPrStatusForTicket.reconciliation) +
+              (draftPrStatusForTicket.remotePrNumber ? ' · #' + draftPrStatusForTicket.remotePrNumber : '') +
+              (draftPrStatusForTicket.remotePrUrl ? ' · ' + safe(draftPrStatusForTicket.remotePrUrl) : '') +
+              ' · SHA-256 ' + safe(draftPrStatusForTicket.payloadSha256) + '</p>' : '') +
+            '<button type="submit" class="primary-button">Review exact draft PR details</button></form>' +
+            (draftPrReviewForTicket
+              ? '<section class="sa-pane" role="group" aria-label="Review exact draft pull request">' +
+                '<h6>Confirm this exact draft PR</h6><dl><dt>Repository</dt><dd><code>' +
+                safe(draftPrReviewForTicket.repository) + '</code></dd><dt>Head</dt><dd><code>' +
+                safe(draftPrReviewForTicket.head) + '</code></dd><dt>Verified head SHA</dt><dd><code>' +
+                safe(draftPrReviewForTicket.headSha) + '</code></dd><dt>Base</dt><dd><code>' +
+                safe(draftPrReviewForTicket.base) + '</code></dd><dt>Title</dt><dd>' +
+                safe(draftPrReviewForTicket.title) + '</dd><dt>Effect key</dt><dd><code>' +
+                safe(draftPrReviewForTicket.effectKey) + '</code></dd></dl><h6>Exact body sent to GitHub</h6>' +
+                '<pre>' + safe(draftPrReviewForTicket.body
+                  ? draftPrReviewForTicket.body + '\n\n' + draftPrReviewForTicket.marker
+                  : draftPrReviewForTicket.marker) + '</pre>' +
+                '<button type="button" class="primary-button" data-sa-confirm-draft-pr>' +
+                'Authorize and create draft pull request</button></section>'
+              : '') + '</section>'
+          : '') +
         (sourcesLoaded && sources.length
           ? '<form data-sa-form="thread-link"><label>Event source<select name="sourceId" required>' +
             sources.map(src => '<option value="' + safe(src.id) + '">' +
@@ -109,14 +694,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
             'maxlength="24" placeholder="issue:42 or pull:123"></label>' +
             '<button type="submit">Link thread (context only)</button></form>'
           : '<p>Load event sources below before linking a thread.</p>') +
-        (ticketDetails.council
-          ? '<section class="sa-council-observation" role="note" aria-label="Native Council observation">' +
-            '<h5>Native Council (advisory)</h5><p>Native team status: ' +
-            safe(ticketDetails.council.nativeStatus) + ' · Round ' +
-            safe(ticketDetails.council.nativeRound) +
-            (ticketDetails.council.nativeStale ? ' · stale' : '') +
-            '. Not bound to this ticket artifact; cannot authorize SuperAgent completion.</p></section>'
-          : '') +
+        renderCouncilObservation(ticketDetails) +
         '<button type="button" data-sa-close-details>Close evidence</button></section>'
       : '';
     const sourceRows = sources.map(src =>
@@ -130,14 +708,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '<button type="button" data-sa-source-decisions="' + safe(src.id) +
       '">View decisions</button></li>').join('');
     const sourcePanel = '<section class="sa-event-sources" aria-label="GitHub event sources">' +
-      '<h4>GitHub event sources</h4><p>Off/Observe only. No authenticated GitHub intake, Auto tasks or external writes.</p>' +
+      '<h4>GitHub event sources</h4><p>Off/Observe only. Fetch once is a user-clicked read of one linked thread using your signed-in <code>gh</code> CLI. No polling, Auto tasks or external writes; Off makes no request.</p>' +
       (!sourcesLoaded ? '<button type="button" data-sa-load-sources>Load sources</button>'
         : '<form data-sa-form="source"><div class="sa-grid">' +
           '<label>Repository (owner/name)<input name="repository" maxlength="200" required></label>' +
           '<label>Exact actor<input name="actorFilter" maxlength="80" required></label></div>' +
+          '<p>For <code>check_run.completed</code>, use the owning GitHub App slug as the actor.</p>' +
           '<label>Event class<select name="eventKind">' +
-          ['issues.opened','issues.edited','issue_comment.created','pull_request.opened',
-            'pull_request_review.submitted','check_run.completed']
+          OBSERVE_EVENT_KINDS
             .map(kind => '<option value="' + kind + '">' + kind + '</option>').join('') +
           '</select></label><button type="submit">Add source (Off)</button></form>' +
           '<ul class="sa-tickets sa-source-list">' +
@@ -145,21 +723,24 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
           (decisionSourceId ? '<div role="region" aria-label="Source decisions">' +
             '<h5>Recorded decisions</h5><ol>' +
             (decisions.map(d => '<li>' + safe(activityTime(d.at)) + ' · ' +
-              safe(d.decision) + ' · ' + safe(d.eventKind) + ' · ' +
+              safe(d.decision) + ' · ' + safe(d.eventKind) + ' · actor ' + safe(d.actor) + ' · ' +
               safe(d.subjectKey) + ' · Delivery ' + safe(d.deliveryId) +
               ' · Revision ' + d.policyRevision + '</li>').join('') ||
               '<li>No recorded events.</li>') + '</ol></div>' : '')) + '</section>';
     const active = chosen ? '<section class="sa-pane" aria-label="Selected orchestration"><header><h3>' +
-      safe(chosen.name) + '</h3><div class="sa-actions"><button type="button" data-sa-enable="' +
+      safe(chosen.name) + '</h3><div class="sa-actions"><button type="button" data-sa-assign-demand="' +
+      safe(chosen.id) + '">Assign demand</button><button type="button" data-sa-enable="' +
       safe(chosen.id) + '">' + (chosen.enabled ? 'Disable' : 'Enable manual') +
       '</button><button type="button" data-sa-delete="' + safe(chosen.id) + '"' +
       (chosen.enabled ? ' disabled' : '') + '>Delete unused</button></div></header>' +
-      '<form data-sa-form="edit"><label>Preset title<input name="name" required maxlength="120" value="' + safe(chosen.name) + '"></label>' +
-      '<div class="sa-grid"><label>Edit coordinator<select name="coordinatorBotId" required>' +
-      optionsFor(chosen.coordinatorBotId) + '</select></label>' +
-      '<label>Edit worker<select name="workerBotId" required>' + optionsFor(chosen.workerBotId) +
-      '</select></label></div><button class="primary-button" type="submit"' +
-      (chosen.enabled ? ' disabled' : '') + '>Save preset</button></form>' +
+      '<form data-sa-form="edit" data-orchestration-id="' + safe(chosen.id) + '"><label>Team name<input name="name" required maxlength="120" value="' + safe(selectedTeamDraft?.name) + '"></label>' +
+      '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" required>' +
+      '<option value="">Choose bot</option>' + optionsFor(selectedTeamDraft?.coordinatorBotId ?? '', selectedProjectId) + '</select></label></div>' +
+      roleEditor('worker', selectedTeamDraft?.workerBotIds ?? [], selectedProjectId) +
+      roleEditor('reviewer', selectedTeamDraft?.reviewerBotIds ?? [], selectedProjectId) +
+      councilField('sa-edit-council', selectedTeamDraft?.councilRequired === true, editCouncilError) +
+      '<button class="primary-button" type="submit">Save Team version</button></form>' +
+      '<p>Saving creates a new Team version used by future tasks. Active Tickets keep their saved Team snapshot, grants and roles.</p>' +
       '<p>Policy revision ' + chosen.policyRevision + ' · Native read-only permission until separately authorized.</p>' +
       '<form data-sa-form="run"><label>Task objective<textarea name="objective" rows="3" maxlength="16000" required></textarea></label>' +
       '<label>Dispatch<select name="mode"><option value="coordinated">Coordinator, then worker</option>' +
@@ -170,31 +751,81 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '<ul class="sa-tickets">' + (tickets.map(ticket =>
         '<li><div><strong>' + safe(ticket.objective) + '</strong><small>' + safe(ticket.state) +
         ' · Revision ' + ticket.revision + '</small></div>' +
-        '<button type="button" data-sa-inspect-ticket="' + safe(ticket.id) +
+        '<div class="sa-ticket-actions"><button type="button" data-sa-inspect-ticket="' + safe(ticket.id) +
         '" aria-expanded="' + (ticket.id === inspectedTicket) + '">View evidence</button>' +
         (ticket.state === 'waiting_approval'
           ? '<button type="button" data-sa-accept="' + safe(ticket.id) + '">Accept evidence</button>' +
             '<button type="button" data-sa-reject="' + safe(ticket.id) + '">Reject evidence</button>' : '') +
-        (ticket.state === 'queued' ? '<button type="button" data-sa-dispatch="' + safe(ticket.id) + '">Dispatch worker</button>' : '') +
+        (ticket.state === 'queued' ? '<button type="button" data-sa-dispatch="' + safe(ticket.id) + '">Dispatch worker</button>' +
+          '<button type="button" data-sa-write-request="' + safe(ticket.id) + '">Request file writes</button>' : '') +
         (ticket.state === 'blocked' ? '<button type="button" data-sa-retry="' + safe(ticket.id) + '">Retry manually</button>' : '') +
         (!['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)
           ? '<button type="button" data-sa-stop="' + safe(ticket.id) + '">Stop</button>' : '') +
+        '</div>' +
         '</li>').join('') || '<li class="sa-empty">No tickets yet.</li>') + '</ul>' +
+        (writeTicket && writeGrantRevision !== null
+          ? '<section class="sa-write-editor" role="region" aria-label="Scoped write request"><h4>Request scoped file writes</h4>' +
+            '<p>Ticket <code>' + safe(writeTicket.id) + '</code> · Revision ' + writeGrantRevision +
+            '. Submitting opens a native confirmation that lists these exact files; only that dialog can authorize the worker.</p>' +
+            '<form data-sa-form="write-grant"><label>Exact project-relative file paths<textarea data-sa-write-paths name="allowedPaths" rows="5" spellcheck="false">' +
+            safe(writePathsDraft) + '</textarea></label><small>Enter one normalized relative path per line. Blank lines are ignored; path text is preserved exactly. Up to 16 files.</small>' +
+            (writePathsError ? '<p class="sa-write-path-error" role="alert">' + safe(writePathsError) + '</p>' : '') +
+            '<div class="sa-actions"><button type="submit" class="primary-button">Continue to native confirmation</button>' +
+            '<button type="button" data-sa-write-cancel>Cancel</button></div></form></section>' : '') +
         (rejectingTicket ? '<form data-sa-form="reject"><label>Rejection reason<textarea name="reason" maxlength="500" required></textarea></label>' +
           '<div class="sa-actions"><button type="submit" class="primary-button">Submit rejection</button>' +
           '<button type="button" data-sa-reject-cancel>Cancel</button></div></form>' : '') +
-        details + sourcePanel + '</section>' : '';
-    host.innerHTML = '<div class="sa-ui">' +
-      '<p class="sa-intro">Native SuperAgent uses existing bots. Imported presets stay Off, and all task execution is manual.</p>' +
-      (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
-      (error ? '<p role="alert" class="sa-error">' + safe(error) + '</p>' : '') +
-      (feedback ? '<p role="status" class="sa-feedback">' + safe(feedback) + '</p>' : '') +
-      (confirm ? '<section role="alertdialog" aria-label="Confirm orchestration action" class="sa-confirm"><p>' +
-        safe(confirm.message) + '</p><div class="sa-actions"><button type="button" data-sa-cancel>Cancel</button>' +
-        '<button class="primary-button" type="button" data-sa-confirm>Confirm</button></div></section>' : '') +
-      '<section class="sa-pane"><h3>Orchestrations</h3><ul class="sa-list">' +
+        (activeSurface === 'teams' ? details : '') + sourcePanel + '</section>' : '';
+    const teamOptions = presets.map(team => '<option value="' + safe(team.id) + '"' +
+      (team.id === runTeamFilter ? ' selected' : '') + '>' + safe(team.name) + '</option>').join('');
+    const intakeOptions = presets.map(team => '<option value="' + safe(team.id) + '"' +
+      (team.id === intakeTeamId ? ' selected' : '') + (!team.enabled ? ' disabled' : '') + '>' +
+      safe(team.name) + (team.enabled ? '' : ' · Off') + '</option>').join('');
+    const queueStatuses = [...new Set(globalTickets.map(ticket => ticket.state))].sort();
+    const statusOptions = queueStatuses.map(state => '<option value="' + safe(state) + '"' +
+      (state === runStatusFilter ? ' selected' : '') + '>' + safe(state.replace(/_/g, ' ')) + '</option>').join('');
+    const queuePartialError = globalQueueErrors.length && runTeamFilter === 'all'
+      ? '<p class="sa-error" role="alert">Some Team queues could not be loaded: ' +
+        safe(globalQueueErrors.map(item => teamName(item.orchestrationId) + ': ' + item.message).join('; ')) +
+        '. Results omit those Teams until the next refresh.</p>' : '';
+    const runsPanel = '<section class="sa-surface sa-runs-surface" role="tabpanel" id="sa-runs-panel" aria-labelledby="sa-runs-tab" tabindex="0"' +
+      (activeSurface === 'runs' ? '' : ' hidden') + '><section class="sa-pane" aria-label="Global Demands and Runs">' +
+      '<header><div><h2>Demands / Runs</h2><p>Global work queue backed by each Team’s existing native Ticket list. Manual handoff remains explicit.</p></div>' +
+      '<button type="button" data-sa-refresh-queue' + (globalQueueLoading ? ' disabled' : '') + '>Refresh queue</button></header>' +
+      queuePartialError + '<div class="sa-queue-filters"><label>Filter by Team<select data-sa-queue-team>' +
+      '<option value="all"' + (runTeamFilter === 'all' ? ' selected' : '') + '>All Teams</option>' + teamOptions +
+      '</select></label><label>Filter by status<select data-sa-queue-status><option value="all"' +
+      (runStatusFilter === 'all' ? ' selected' : '') + '>All statuses</option>' + statusOptions +
+      '</select></label><label>Search Ticket<input type="search" data-sa-queue-query aria-label="Search Ticket" value="' +
+      safe(runQuery) + '" placeholder="Objective, Ticket ID or Team"></label></div>' +
+      '<p class="sa-field-hint">Showing up to 200 recent Tickets per Team. Repository filtering is unavailable because the native Ticket list does not expose a repository identity.</p>' +
+      '<div class="sa-global-queue-body">' + globalQueueBodyMarkup() + '</div>' +
+      '<form data-sa-form="global-run" class="sa-global-run"><h3>Assign demand</h3>' +
+      '<p>Choose an existing enabled Team. The current native intake is manual; it does not promise automatic planning, dispatch or delivery.</p>' +
+      '<label>Team<select name="orchestrationId" data-sa-intake-team required>' +
+      '<option value="">Choose an enabled Team</option>' + intakeOptions + '</select></label>' +
+      '<label>Task objective<textarea data-sa-global-objective name="objective" rows="3" maxlength="16000" required></textarea></label>' +
+      '<label>Handoff<select name="mode"><option value="coordinated">Coordinator, then worker</option>' +
+      '<option value="direct">Worker directly</option></select></label>' +
+      '<button class="primary-button" type="submit"' +
+      (!presets.some(team => team.id === intakeTeamId && team.enabled) || globalQueueLoading ? ' disabled' : '') +
+      '>Assign demand manually</button></form></section>' +
+      '<section class="sa-pane sa-run-inspector" aria-label="Selected Run evidence">' +
+      (activeSurface === 'runs' && inspectedTicket && tickets.some(ticket => ticket.id === inspectedTicket)
+        ? details : '<h3>Run inspector</h3><p>Select a Ticket to load its native evidence, mandate, assignments and activity.</p>') +
+      '</section></section>';
+    const tabs = '<nav class="sa-surface-tabs" role="tablist" aria-label="Orchestration surfaces" aria-orientation="horizontal">' +
+      '<button type="button" role="tab" id="sa-teams-tab" aria-controls="sa-teams-panel" data-sa-surface="teams" aria-selected="' +
+      (activeSurface === 'teams') + '" tabindex="' + (activeSurface === 'teams' ? '0' : '-1') +
+      '">Teams</button><button type="button" role="tab" id="sa-runs-tab" aria-controls="sa-runs-panel" data-sa-surface="runs" aria-selected="' +
+      (activeSurface === 'runs') + '" tabindex="' + (activeSurface === 'runs' ? '0' : '-1') +
+      '">Demands / Runs</button></nav>';
+    const teamsPanel = '<section class="sa-surface sa-teams-surface" role="tabpanel" id="sa-teams-panel" aria-labelledby="sa-teams-tab" tabindex="0"' +
+      (activeSurface === 'teams' ? '' : ' hidden') + '><section class="sa-team-surface-content" role="region" aria-label="Teams"><section class="sa-pane"><h3>Orchestrations</h3><ul class="sa-list">' +
       (list || '<li class="sa-empty">No orchestrations created.</li>') + '</ul></section>' +
-      '<section class="sa-pane"><h3>New manual preset</h3><form data-sa-form="create">' +
+      '<section class="sa-pane"><h3>Team Builder</h3>' +
+      '<p>Membership is saved in order. The existing manual dispatch path does not schedule multiple Workers. Native Council reviewer runs start only for a Ticket whose saved policy requires Council; Reviewer membership alone does not start a review.</p>' +
+      '<form data-sa-form="create">' +
       '<label>Example preset<select data-sa-template aria-label="Example preset">' +
       '<option value="">Custom</option>' +
       '<option value="Software Development"' +
@@ -206,12 +837,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '<label>Name<input name="name" maxlength="120" placeholder="Software Development" value="' +
       safe(draftPresetName) + '" required></label>' +
       '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" required>' +
-      '<option value="">Choose bot</option>' + choices + '</select></label>' +
-      '<label>Worker<select name="workerBotId" required><option value="">Choose bot</option>' +
-      choices + '</select></label></div><button class="primary-button" type="submit"' +
+      '<option value="">Choose bot</option>' + optionsFor(draftCoordinatorBotId) + '</select></label></div>' +
+      roleEditor('worker', draftWorkerBotIds, draftProjectId) +
+      roleEditor('reviewer', draftReviewerBotIds, draftProjectId) +
+      councilField('sa-create-council', draftCouncilRequired, draftCouncilError) +
+      '<button class="primary-button" type="submit"' +
       (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' +
-      active +
-      '<section class="sa-pane"><h3>Portable configuration</h3>' +
+      active + '<section class="sa-pane"><h3>Portable configuration</h3>' +
       '<p>Configuration only: no credentials, memories, conversations, approvals or live tasks.</p>' +
       '<label>Companion manifest JSON<textarea data-sa-manifest rows="5" spellcheck="false">' +
       safe(importText) + '</textarea></label>' +
@@ -220,27 +852,100 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       (preview ? '<p role="status">' + preview.wouldCreate.length + ' new; ' +
         preview.unchanged.length + ' unchanged. Imported presets will be disabled.</p>' +
         '<button class="primary-button" type="button" data-sa-import>Confirm import</button>' : '') +
-      '</section></div>';
+        '</section></section></section>';
+    host.innerHTML = '<div class="sa-ui">' +
+      '<p class="sa-intro">Native SuperAgent uses existing bots. Imported presets stay Off, and all task execution is manual.</p>' +
+      (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
+      (error ? '<p role="alert" class="sa-error">' + safe(error) + '</p>' : '') +
+      (feedback ? '<p role="status" class="sa-feedback">' + safe(feedback) + '</p>' : '') +
+      (confirm ? '<section role="alertdialog" aria-label="Confirm orchestration action" class="sa-confirm"><p>' +
+        safe(confirm.message) + '</p><div class="sa-actions"><button type="button" data-sa-cancel>Cancel</button>' +
+        '<button class="primary-button" type="button" data-sa-confirm>Confirm</button></div></section>' : '') +
+      tabs + teamsPanel + runsPanel + '</div>';
     host.setAttribute('aria-busy', String(busy));
+    restoreFocusedControl(focusedControl);
   }
   async function refreshTicketDetails(): Promise<void> {
     const id = inspectedTicket;
     if (!id || !tickets.some(ticket => ticket.id === id)) {
-      inspectedTicket = ''; ticketDetails = null; threadLinks = []; return;
+      inspectedTicket = ''; ticketDetails = null; threadLinks = []; issueCommentStatus = null;
+      clearDraftPullRequestReview(true);
+      ticketDetailsLoading = false; ticketDetailsError = '';
+      workItems = []; workItemsError = ''; workItemsLoading = false; return;
     }
+    ticketDetailsLoading = true; ticketDetailsError = '';
+    workItemsLoading = true; workItemsError = '';
+    const previousRevision = ticketDetails?.ticket.id === id ? ticketDetails.ticket.revision : null;
     // Use existing native read endpoints, not model-generated summaries. A
     // revision change refreshes the snapshot before a later human decision.
-    const [snapshot, links] = await Promise.all([
-      call<TicketDetails>('superagent_snapshot', { ticketId:id, limit:50 }),
-      call<ThreadLink[]>('superagent_source_thread_links', { ticketId:id }),
+    // WorkItems are read in parallel with the other details, but their failure
+    // stays in the Work items section instead of hiding the Ticket evidence.
+    const workItemRead = call<WorkItem[]>('superagent_work_items', { ticketId:id })
+      .then(rows => ({ rows: Array.isArray(rows) ? [...rows] : [], error: '' }))
+      .catch(cause => ({
+        rows: [] as WorkItem[], error: cause instanceof Error ? cause.message : String(cause),
+      }));
+    const snapshotRead = call<TicketDetails>('superagent_snapshot', { ticketId:id, limit:50 })
+      .then(snapshot => ({ snapshot, error: '' }))
+      .catch(cause => ({ snapshot: null, error: cause instanceof Error ? cause.message : String(cause) }));
+    const linkRead = call<ThreadLink[]>('superagent_source_thread_links', { ticketId:id })
+      .then(links => ({ links, error: '' }))
+      .catch(cause => ({ links: null, error: cause instanceof Error ? cause.message : String(cause) }));
+    const [snapshotResult, linkResult, workItemResult] = await Promise.all([
+      snapshotRead,
+      linkRead,
+      workItemRead,
     ]);
     if (inspectedTicket === id) {
+      const snapshot = snapshotResult.snapshot;
+      if (snapshot && previousRevision !== null && previousRevision !== snapshot.ticket.revision) {
+        issueCommentStatus = null; clearDraftPullRequestReview();
+      }
       ticketDetails = snapshot;
-      threadLinks = links;
+      threadLinks = linkResult.links ?? [];
+      workItems = workItemResult.rows.sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id));
+      workItemsError = workItemResult.error;
+      workItemsLoading = false;
+      ticketDetailsError = snapshotResult.error || linkResult.error;
+      ticketDetailsLoading = false;
       // Keep the ticket row and its grant/history pinned to one native revision.
       const index = tickets.findIndex(ticket => ticket.id === id);
-      if (index >= 0) tickets[index] = snapshot.ticket;
+      if (index >= 0 && snapshot) tickets[index] = snapshot.ticket;
     }
+    if (snapshotResult.error) throw new Error(snapshotResult.error);
+    if (linkResult.error) throw new Error(linkResult.error);
+  }
+  async function loadGlobalQueue(shouldRender = true): Promise<void> {
+    if (globalQueueLoading) return;
+    const teams = [...presets];
+    globalQueueLoading = true;
+    globalQueueErrors = [];
+    globalTickets = [];
+    if (shouldRender && activeSurface === 'runs' && !busy) render();
+    const results = await Promise.all(teams.map(async team => {
+      try {
+        // The existing native list is scoped to one Team and bounded to its
+        // newest 200 Tickets. The orchestration id comes from that query scope.
+        const rows = await call<Ticket[]>('superagent_tickets', {
+          orchestrationId:team.id, limit:200,
+        });
+        if (!Array.isArray(rows)) throw new Error('Native Ticket list returned an invalid response.');
+        if (rows.some(ticket => ticket.orchestrationId && ticket.orchestrationId !== team.id)) {
+          throw new Error('Native Ticket list returned a Ticket owned by another Team.');
+        }
+        return { team, rows:rows.map(ticket => ({...ticket, orchestrationId:team.id})), message:'' };
+      } catch (cause) {
+        return { team, rows:[] as QueueTicket[],
+          message:cause instanceof Error ? cause.message : String(cause) };
+      }
+    }));
+    globalTickets = results.flatMap(result => result.rows);
+    globalQueueErrors = results.filter(result => !!result.message).map(result => ({
+      orchestrationId:result.team.id, message:result.message,
+    }));
+    globalQueueLoaded = true;
+    globalQueueLoading = false;
+    if (shouldRender && activeSurface === 'runs' && !busy) render();
   }
   async function reload(): Promise<void> {
     loading = true;
@@ -252,15 +957,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       bots = known; presets = configs;
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
-        inspectedTicket = ''; threadLinks = [];
+        inspectedTicket = ''; ticketDetailsLoading = false; ticketDetailsError = '';
+        threadLinks = []; workItems = []; workItemsError = ''; workItemsLoading = false;
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       }
+      if (!presets.some(config => config.id === runTeamFilter)) runTeamFilter = 'all';
+      if (!presets.some(config => config.id === intakeTeamId)) intakeTeamId = selected;
       // A failed native read must not leave old ticket approval controls
       // visible underneath a newly selected or reloaded preset.
       tickets = [];
-      ticketDetails = null;
+      ticketDetails = null; ticketDetailsLoading = false; ticketDetailsError = '';
+      workItems = []; workItemsError = ''; workItemsLoading = false;
       tickets = selected ? await call<Ticket[]>('superagent_tickets',{ orchestrationId:selected, limit:50 }) : [];
       await refreshTicketDetails();
+      if (activeSurface === 'runs') await loadGlobalQueue(false);
       if (sourcesLoaded && selected) {
         sources = await call<EventSource[]>('superagent_source_list',{ orchestrationId:selected });
         if (!sources.some(item => item.id === decisionSourceId)) {
@@ -291,40 +1001,290 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   // Templates populate editable names only; no bot, tool or task is selected.
   host.addEventListener('change', event => {
     const target = event.target;
-    if (!(target instanceof HTMLSelectElement) || !target.hasAttribute('data-sa-template')) return;
-    draftPresetTemplate = target.value;
-    draftPresetName = target.value;
-    const field = target.form?.querySelector<HTMLInputElement>('input[name="name"]');
-    if (field) field.value = draftPresetName;
+    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-queue-team')) {
+      runTeamFilter = target.value || 'all'; render(); return;
+    }
+    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-queue-status')) {
+      runStatusFilter = target.value || 'all'; render(); return;
+    }
+    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-intake-team')) {
+      intakeTeamId = target.value; render(); return;
+    }
+    if (target instanceof HTMLInputElement && target.name === 'councilRequired') {
+      const form = target.closest<HTMLFormElement>('form[data-sa-form="create"],form[data-sa-form="edit"]');
+      if (!form) return;
+      rememberTeamDraft(form, readTeamDraft(form));
+      if (form.dataset.saForm === 'create') draftCouncilError = '';
+      else if (form.dataset.orchestrationId) editCouncilErrors.delete(form.dataset.orchestrationId);
+      render();
+      return;
+    }
+    if (!(target instanceof HTMLSelectElement)) return;
+    if (target.hasAttribute('data-sa-template')) {
+      draftPresetTemplate = target.value;
+      draftPresetName = target.value;
+      const field = target.form?.querySelector<HTMLInputElement>('input[name="name"]');
+      if (field) field.value = draftPresetName;
+    }
+    const form = target.closest<HTMLFormElement>('form[data-sa-form="create"],form[data-sa-form="edit"]');
+    if (form) {
+      const draft = readTeamDraft(form);
+      rememberTeamDraft(form, draft);
+      const id = form.dataset.orchestrationId;
+      let cleared = false;
+      // Clear a field error as soon as its reviewer requirement is satisfied.
+      if (councilDraftError(draft) === '') {
+        if (form.dataset.saForm === 'create' && draftCouncilError) {
+          draftCouncilError = ''; cleared = true;
+        } else if (form.dataset.saForm === 'edit' && id && editCouncilErrors.delete(id)) cleared = true;
+      }
+      if (target.name === 'coordinatorBotId' || cleared) render();
+    }
   });
   host.addEventListener('input', event => {
     const target = event.target;
-    if (target instanceof HTMLInputElement && target.name === 'name' &&
-        target.closest<HTMLFormElement>('form[data-sa-form="create"]')) {
-      draftPresetName = target.value;
+    if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-queue-query')) {
+      runQuery = target.value;
+      const queueBody = host.querySelector<HTMLElement>('.sa-global-queue-body');
+      if (queueBody) queueBody.innerHTML = globalQueueBodyMarkup();
+      return;
+    }
+    if (target instanceof HTMLInputElement && target.name === 'name') {
+      const form = target.closest<HTMLFormElement>('form[data-sa-form="create"],form[data-sa-form="edit"]');
+      if (form) {
+        const draft = readTeamDraft(form);
+        draft.name = target.value.trim();
+        rememberTeamDraft(form, draft);
+      }
     }
     if (target instanceof HTMLTextAreaElement && target.hasAttribute('data-sa-manifest')) {
       importText = target.value; preview = null; inspected = null;
     }
+    if (target instanceof HTMLTextAreaElement && target.hasAttribute('data-sa-write-paths')) {
+      writePathsDraft = target.value; writePathsError = '';
+    }
+    if (target instanceof HTMLInputElement && target.form?.dataset.saForm === 'issue-comment') {
+      if (target.name === 'repository') commentRepository = target.value;
+      if (target.name === 'issueNumber') commentIssueNumber = target.value;
+      issueCommentError = ''; issueCommentStatus = null;
+      target.form?.querySelector('[data-sa-comment-error]')?.remove();
+      target.form?.querySelector('[data-sa-comment-status]')?.remove();
+    }
+    if (target instanceof HTMLTextAreaElement && target.form?.dataset.saForm === 'issue-comment') {
+      commentDraft = target.value; issueCommentError = ''; issueCommentStatus = null;
+      target.form?.querySelector('[data-sa-comment-error]')?.remove();
+      target.form?.querySelector('[data-sa-comment-status]')?.remove();
+    }
+    if (target instanceof HTMLInputElement && target.form?.dataset.saForm === 'draft-pull-request') {
+      if (target.name === 'repository') draftPrRepository = target.value;
+      if (target.name === 'head') draftPrHead = target.value;
+      if (target.name === 'base') draftPrBase = target.value;
+      if (target.name === 'title') draftPrTitle = target.value;
+      clearDraftPullRequestReview();
+      target.form.querySelector('[data-sa-draft-pr-error]')?.remove();
+      target.form.querySelector('[data-sa-draft-pr-status]')?.remove();
+      host.querySelector('[aria-label="Review exact draft pull request"]')?.remove();
+    }
+    if (target instanceof HTMLTextAreaElement && target.form?.dataset.saForm === 'draft-pull-request') {
+      draftPrBody = target.value;
+      clearDraftPullRequestReview();
+      target.form.querySelector('[data-sa-draft-pr-error]')?.remove();
+      target.form.querySelector('[data-sa-draft-pr-status]')?.remove();
+      host.querySelector('[aria-label="Review exact draft pull request"]')?.remove();
+    }
+  });
+  host.addEventListener('keydown', event => {
+    const target = event.target instanceof HTMLButtonElement && event.target.hasAttribute('data-sa-surface')
+      ? event.target : null;
+    if (!target) return;
+    const tabValues = ['teams', 'runs'] as const;
+    const currentIndex = tabValues.indexOf(target.dataset.saSurface as typeof tabValues[number]);
+    let nextIndex = currentIndex;
+    if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % tabValues.length;
+    else if (event.key === 'ArrowLeft') nextIndex = (currentIndex + tabValues.length - 1) % tabValues.length;
+    else if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = tabValues.length - 1;
+    else return;
+    event.preventDefault();
+    activeSurface = tabValues[nextIndex];
+    render();
+    host.querySelector<HTMLButtonElement>('[data-sa-surface="' + activeSurface + '"]')?.focus();
+    if (activeSurface === 'runs') void loadGlobalQueue();
   });
   host.addEventListener('click', event => {
     const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button') : null;
     if (!target || !host.contains(target) || target.disabled) return;
+    if (target.hasAttribute('data-sa-confirm-draft-pr')) {
+      const review = draftPrReview;
+      if (!review || review.ticketId !== inspectedTicket) return;
+      void work(async () => {
+        await refreshTicketDetails();
+        const currentTicket = tickets.find(item => item.id === review.ticketId);
+        const current = ticketDetails;
+        if (!currentTicket || !current || current.ticket.id !== review.ticketId ||
+            currentTicket.revision !== review.ticketRevision || current.ticket.revision !== review.ticketRevision) {
+          clearDraftPullRequestReview();
+          throw new Error('This Ticket changed. Review its updated evidence before authorizing the draft PR.');
+        }
+        if (current.ticket.state !== 'running' || current.mandate.revoked ||
+            !current.mandate.sideEffectConsent) {
+          clearDraftPullRequestReview();
+          throw new Error('The Ticket no longer has its current mandate and operator side-effect consent.');
+        }
+        const effectKey = await draftPullRequestEffectKey(
+          review.ticketId,review.repository,review.head,review.base,review.title,review.body,
+        );
+        const marker = draftPullRequestMarker(review.ticketId,effectKey);
+        if (effectKey !== review.effectKey || marker !== review.marker || draftPrReview !== review) {
+          clearDraftPullRequestReview();
+          throw new Error('The exact draft PR details changed. Review the current repository, branches, title and body again.');
+        }
+        const result = await call<DraftPullRequestResult>('superagent_create_draft_pull_request', {
+          ticketId:review.ticketId,expectedRevision:review.ticketRevision,
+          repository:review.repository,head:review.head,headSha:review.headSha,
+          base:review.base,title:review.title,
+          body:review.body,effectKey:review.effectKey,
+        });
+        if ('previewOnly' in result) {
+          clearDraftPullRequestReview();
+          feedback = result.message;
+          return;
+        }
+        if (result.ticketId !== review.ticketId || result.ticketRevision !== review.ticketRevision ||
+            result.repository !== review.repository || result.head !== review.head ||
+            result.headSha !== review.headSha ||
+            result.base !== review.base || result.title !== review.title || result.effectKey !== review.effectKey) {
+          throw new Error('The native draft PR result did not match this Ticket and exact request.');
+        }
+        draftPrStatus = result;
+        draftPrReview = null;
+        feedback = result.state === 'applied' && result.reconciliation === 'exact-readback'
+          ? 'Draft pull request applied and verified by exact GitHub read-back.'
+          : 'Draft pull request state: ' + result.state + ' (' + result.reconciliation +
+            '). Repeating these exact details reconciles the saved receipt without blindly creating another PR.';
+      });
+      return;
+    }
+    if (target.dataset.saSurface === 'teams' || target.dataset.saSurface === 'runs') {
+      activeSurface = target.dataset.saSurface;
+      render();
+      if (activeSurface === 'runs') void loadGlobalQueue();
+      return;
+    }
+    if (target.dataset.saAssignDemand) {
+      const team = presets.find(item => item.id === target.dataset.saAssignDemand);
+      if (!team) return;
+      activeSurface = 'runs'; intakeTeamId = team.id; runTeamFilter = team.id;
+      render(); void loadGlobalQueue();
+      host.querySelector<HTMLTextAreaElement>('[data-sa-global-objective]')?.focus();
+      return;
+    }
+    if (target.hasAttribute('data-sa-refresh-queue')) {
+      void loadGlobalQueue(); return;
+    }
+    if (target.dataset.saOpenTeamQueue) {
+      const teamId = target.dataset.saOpenTeamQueue;
+      if (!presets.some(team => team.id === teamId)) return;
+      activeSurface = 'teams'; selected = teamId; intakeTeamId = teamId;
+      tickets = []; inspectedTicket = ''; ticketDetails = null; ticketDetailsLoading = false;
+      ticketDetailsError = ''; threadLinks = []; workItems = []; workItemsError = '';
+      workItemsLoading = false; issueCommentStatus = null;
+      clearDraftPullRequestReview(true);
+      render();
+      void work(async () => {
+        tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:teamId, limit:50 });
+      });
+      return;
+    }
+    if (target.dataset.saInspectGlobalTicket) {
+      const ticket = globalTickets.find(item => item.id === target.dataset.saInspectGlobalTicket);
+      if (!ticket || !presets.some(team => team.id === ticket.orchestrationId)) return;
+      if (inspectedTicket === ticket.id) {
+        inspectedTicket = ''; ticketDetails = null; ticketDetailsLoading = false; ticketDetailsError = '';
+        threadLinks = []; workItems = []; workItemsError = ''; workItemsLoading = false;
+        issueCommentStatus = null; clearDraftPullRequestReview(true); render(); return;
+      }
+      selected = ticket.orchestrationId;
+      tickets = globalTickets.filter(item => item.orchestrationId === ticket.orchestrationId);
+      inspectedTicket = ticket.id; ticketDetails = null; ticketDetailsLoading = true;
+      ticketDetailsError = ''; threadLinks = []; workItems = []; workItemsError = '';
+      workItemsLoading = true; issueCommentStatus = null;
+      commentRepository = ''; commentIssueNumber = ''; commentDraft = ''; issueCommentError = '';
+      clearDraftPullRequestReview(true);
+      render(); void work(refreshTicketDetails); return;
+    }
     if (target.hasAttribute('data-sa-cancel')) { confirm = null; render(); return; }
+    if (target.hasAttribute('data-sa-write-cancel')) {
+      writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = ''; writePathsError = '';
+      render(); return;
+    }
     if (target.hasAttribute('data-sa-confirm')) {
       const action = confirm?.action; confirm = null; if (action) void work(action);
+      return;
+    }
+    if (target.dataset.saRoleAdd || target.dataset.saRoleAction) {
+      const form = target.closest<HTMLFormElement>('form[data-sa-form="create"],form[data-sa-form="edit"]');
+      const kind = target.dataset.saRole ?? target.dataset.saRoleAdd;
+      if (!form || (kind !== 'worker' && kind !== 'reviewer')) return;
+      const draft = readTeamDraft(form);
+      const ids = kind === 'worker' ? draft.workerBotIds : draft.reviewerBotIds;
+      const max = kind === 'worker' ? MAX_TEAM_WORKERS : MAX_TEAM_REVIEWERS;
+      if (target.dataset.saRoleAdd) {
+        if (ids.length < max) ids.push('');
+      } else {
+        const index = Number(target.dataset.saRoleIndex);
+        const action = target.dataset.saRoleAction;
+        if (!Number.isInteger(index) || index < 0 || index >= ids.length) return;
+        if (action === 'remove') {
+          if (kind === 'reviewer' || ids.length > 1) ids.splice(index, 1);
+        } else if (action === 'up' && index > 0) {
+          [ids[index - 1], ids[index]] = [ids[index], ids[index - 1]];
+        } else if (action === 'down' && index < ids.length - 1) {
+          [ids[index + 1], ids[index]] = [ids[index], ids[index + 1]];
+        }
+      }
+      if (kind === 'worker') draft.workerBotIds = ids;
+      else draft.reviewerBotIds = ids;
+      rememberTeamDraft(form, draft);
+      render();
       return;
     }
     if (target.dataset.saSelect) {
       if (busy || loading || selected === target.dataset.saSelect) return;
       const next = target.dataset.saSelect;
-      selected = next;
+      selected = next; intakeTeamId = next;
       tickets = [];
-      inspectedTicket = ''; ticketDetails = null; threadLinks = [];
+      writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = ''; writePathsError = '';
+      inspectedTicket = ''; ticketDetails = null; ticketDetailsLoading = false; ticketDetailsError = '';
+      threadLinks = []; workItems = []; workItemsError = ''; workItemsLoading = false;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 });
       });
+      return;
+    }
+    if (target.dataset.saEditTeam) {
+      const team = presets.find(item => item.id === target.dataset.saEditTeam);
+      if (!team) return;
+      editTeamDrafts.set(team.id, {
+        name: team.name,
+        coordinatorBotId: team.coordinatorBotId,
+        workerBotIds: team.workerBotIds?.length ? [...team.workerBotIds] : [team.workerBotId],
+        reviewerBotIds: [...(team.reviewerBotIds ?? [])],
+        councilRequired: team.councilRequired,
+      });
+      if (selected !== team.id) {
+        selected = team.id;
+        tickets = []; inspectedTicket = ''; ticketDetails = null;
+        ticketDetailsLoading = false; ticketDetailsError = ''; threadLinks = [];
+        workItems = []; workItemsError = ''; workItemsLoading = false;
+        writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = ''; writePathsError = '';
+        sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
+        void work(async () => {
+          tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:team.id, limit:50 });
+          await refreshTicketDetails();
+        });
+      } else render();
       return;
     }
     if (target.dataset.saEnable) {
@@ -370,17 +1330,62 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       });
       return;
     }
+    if (target.dataset.saFetchThread) {
+      const sourceId = target.dataset.saFetchThread;
+      const subjectKey = target.dataset.saSubjectKey ?? '';
+      const link = threadLinks.find(item => item.sourceId === sourceId && item.subjectKey === subjectKey);
+      if (!link || link.mode !== 'observe') {
+        feedback = 'This source is Off or the linked thread is no longer available; no GitHub request was made.';
+        render();
+        return;
+      }
+      void work(async () => {
+        const fetched = await call<ObserveFetchDecision | PreviewObserveFetch>(
+          'superagent_source_fetch_thread', {sourceId,subjectKey});
+        if ('previewOnly' in fetched) {
+          feedback = fetched.message;
+          return;
+        }
+        sources = await call<EventSource[]>('superagent_source_list', {orchestrationId:selected});
+        sourcesLoaded = true;
+        decisionSourceId = sourceId;
+        decisions = await call<SourceDecision[]>('superagent_source_decisions',
+          {sourceId,limit:50});
+        feedback = fetched.duplicate
+          ? 'This GitHub event was already recorded. No Ticket was created or launched.'
+          : 'Recorded ' + fetched.decision + ' for this one linked thread. No Ticket was created or launched.';
+      });
+      return;
+    }
     if (target.hasAttribute('data-sa-refresh')) { void work(reload); return; }
     if (target.hasAttribute('data-sa-close-details')) {
-      inspectedTicket = ''; ticketDetails = null; render(); return;
+      inspectedTicket = ''; ticketDetails = null; ticketDetailsLoading = false; ticketDetailsError = '';
+      issueCommentStatus = null; workItems = []; workItemsError = ''; workItemsLoading = false;
+      clearDraftPullRequestReview(true);
+      render(); return;
     }
     if (target.dataset.saInspectTicket) {
       const id = target.dataset.saInspectTicket;
       if (inspectedTicket === id) {
-        inspectedTicket = ''; ticketDetails = null; render();
+        inspectedTicket = ''; ticketDetails = null; ticketDetailsLoading = false; ticketDetailsError = '';
+        issueCommentStatus = null; clearDraftPullRequestReview(true); workItems = []; workItemsError = ''; workItemsLoading = false; render();
       } else {
-        inspectedTicket = id; ticketDetails = null;
+        inspectedTicket = id; ticketDetails = null; ticketDetailsLoading = true; ticketDetailsError = '';
+        issueCommentStatus = null; workItems = []; workItemsError = ''; workItemsLoading = true;
+        commentRepository = ''; commentIssueNumber = ''; commentDraft = ''; issueCommentError = '';
+        clearDraftPullRequestReview(true);
+        render();
         void work(refreshTicketDetails);
+      }
+      return;
+    }
+    if (target.dataset.saWriteRequest) {
+      const ticket = tickets.find(item => item.id === target.dataset.saWriteRequest);
+      if (ticket?.state === 'queued') {
+        writeGrantTicket = ticket.id; writeGrantRevision = ticket.revision;
+        writePathsDraft = ''; writePathsError = ''; error = ''; feedback = '';
+        render();
+        host.querySelector<HTMLTextAreaElement>('[data-sa-write-paths]')?.focus();
       }
       return;
     }
@@ -416,7 +1421,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     if (target.hasAttribute('data-sa-reject-cancel')) { rejectingTicket = ''; render(); return; }
     if (target.dataset.saDispatch) {
       const t = tickets.find(item => item.id === target.dataset.saDispatch);
-      if (t?.state === 'queued') ask('Dispatch the worker using the original coordinator evidence?', async () => {
+      if (t?.state === 'queued') ask('Dispatch requires an enabled saved Team and current Coordinator evidence containing a plan.', async () => {
         await call('superagent_dispatch_worker',{ ticketId:t.id }); await reload();
       });
       return;
@@ -425,6 +1430,36 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       const t = tickets.find(item => item.id === target.dataset.saRetry);
       if (t?.state === 'blocked') ask('Retry the original mandate with unchanged permissions?', async () => {
         await call('superagent_retry',{ ticketId:t.id }); await reload();
+      });
+      return;
+    }
+    if (target.dataset.saSideEffectConsent === 'enable' ||
+        target.dataset.saSideEffectConsent === 'revoke') {
+      const ticketId = target.dataset.saTicketId ?? '';
+      const ticket = tickets.find(item => item.id === ticketId);
+      const snapshot = ticketDetails;
+      const expectedRevision = Number(target.dataset.saTicketRevision);
+      const enabled = target.dataset.saSideEffectConsent === 'enable';
+      if (activeSurface !== 'runs' || !ticket || ticket.state !== 'running' ||
+          ticket.revision !== expectedRevision || !snapshot || snapshot.ticket.id !== ticketId ||
+          snapshot.ticket.revision !== expectedRevision || snapshot.ticket.state !== 'running' ||
+          snapshot.mandate.revoked || snapshot.mandate.expiresAt <= Date.now() ||
+          !snapshot.assignments.some(assignment => assignment.id === ticket.activeAssignmentId &&
+            assignment.state === 'running') || snapshot.mandate.sideEffectConsent === enabled) return;
+      void work(async () => {
+        const result = await call<SideEffectConsentResult>('superagent_set_side_effects', {
+          ticketId, expectedRevision, enabled,
+        });
+        if ('previewOnly' in result) {
+          feedback = result.message;
+        } else {
+          if (result.id !== ticketId || result.revision !== expectedRevision || result.state !== 'running') {
+            throw new Error('The native side-effect consent response did not match this active Ticket.');
+          }
+          const index = tickets.findIndex(item => item.id === ticketId);
+          if (index >= 0) tickets[index] = result;
+        }
+        await refreshTicketDetails();
       });
       return;
     }
@@ -440,6 +1475,210 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     if (!(form instanceof HTMLFormElement) || !host.contains(form)) return;
     event.preventDefault();
     const data = new FormData(form);
+    if (form.dataset.saForm === 'write-grant') {
+      const ticketId = writeGrantTicket;
+      const expectedRevision = writeGrantRevision;
+      const ticket = tickets.find(item => item.id === ticketId);
+      writePathsDraft = String(data.get('allowedPaths') ?? '');
+      const paths = writePathsDraft.split(/\r\n?|\n/).filter(path => path.length > 0);
+      let pathError = '';
+      if (paths.length === 0 || paths.length > 16) {
+        pathError = 'Enter between 1 and 16 exact file paths.';
+      } else {
+        const unique = new Set<string>();
+        for (const path of paths) {
+          const invalidSegment = path.split('/').some(part => part === '' || part === '.' || part === '..' ||
+            part.toLowerCase() === '.git' || [...part].some(character => {
+              const code = character.codePointAt(0) ?? 0;
+              return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
+            }));
+          if (new TextEncoder().encode(path).length > 4096 || path.includes('\\') || path.includes('\0') ||
+              path.includes(':') || invalidSegment) {
+            pathError = 'Use normalized project-relative paths without traversal, .git, drive prefixes, backslashes, or control characters.';
+            break;
+          }
+          if (unique.has(path)) {
+            pathError = 'A write scope cannot repeat a file path.';
+            break;
+          }
+          unique.add(path);
+        }
+      }
+      if (pathError) {
+        writePathsError = pathError; render(); return;
+      }
+      if (!ticket || ticket.state !== 'queued' || expectedRevision === null ||
+          ticket.revision !== expectedRevision) {
+        writePathsError = 'This Ticket changed after you opened the request. Refresh it and review the paths again.';
+        render(); return;
+      }
+      writePathsError = '';
+      const request: WorkerWriteDispatchRequest = {
+        ticketId, expectedRevision, allowedPaths: paths,
+      };
+      void work(async () => {
+        const result = await call<WorkerWriteDispatchResult>(
+          'superagent_dispatch_worker_with_write_grant', request,
+        );
+        if (isPreviewWorkerWriteDispatch(result)) {
+          writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = '';
+          await reload();
+          feedback = 'Preview only: no native confirmation was shown, no write grant was created, and no worker was dispatched. Requested files for Ticket ' +
+            ticketId + ': ' + paths.join(', ') + '.';
+          return;
+        }
+        if (result.ticket.id !== ticketId || result.grant.ticketId !== ticketId ||
+            result.grant.allowedPaths.length !== paths.length ||
+            result.grant.allowedPaths.some((path, index) => path !== paths[index])) {
+          throw new Error('The native response did not match the requested Ticket and file paths.');
+        }
+        writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = '';
+        await reload();
+        feedback = 'Native confirmation authorized Ticket ' + ticketId + ' at revision ' +
+          expectedRevision + '. Worker state: ' + result.ticket.state + '. Allowed files: ' +
+          result.grant.allowedPaths.join(', ') + '. Grant expires ' + activityTime(result.grant.expiresAt) + '.';
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'issue-comment') {
+      const ticketId = inspectedTicket;
+      const ticket = tickets.find(item => item.id === ticketId);
+      const snapshot = ticketDetails;
+      const repository = String(data.get('repository') ?? '');
+      const issueText = String(data.get('issueNumber') ?? '');
+      const issueNumber = Number(issueText);
+      const comment = String(data.get('comment') ?? '');
+      commentRepository = repository; commentIssueNumber = issueText; commentDraft = comment;
+      const parts = repository.split('/');
+      const validRepository = parts.length === 2 && parts.every(part => part.length > 0 &&
+        part !== '.' && part !== '..' && /^[A-Za-z0-9_.-]+$/.test(part));
+      let validationError = '';
+      if (!validRepository) validationError = 'Enter one exact GitHub repository as owner/name.';
+      else if (!/^[1-9][0-9]*$/.test(issueText) || !Number.isSafeInteger(issueNumber)) {
+        validationError = 'Enter a positive whole issue number.';
+      } else if (!comment.trim() || new TextEncoder().encode(comment).length > 60_000 ||
+          comment.includes('\0') || comment.includes('<!-- pandacode-superagent-effect:')) {
+        validationError = 'Enter a nonempty comment under 60 KB without a PandaCode effect marker.';
+      }
+      if (validationError) {
+        issueCommentError = validationError; render(); return;
+      }
+      if (!ticket || ticket.state !== 'running' || !snapshot || snapshot.ticket.id !== ticketId ||
+          snapshot.ticket.revision !== ticket.revision || snapshot.mandate.revoked ||
+          !snapshot.mandate.sideEffectConsent) {
+        issueCommentError = 'This Ticket has no current side-effect authorization. Refresh evidence before continuing.';
+        render(); return;
+      }
+      const expectedRevision = snapshot.ticket.revision;
+      issueCommentError = '';
+      void work(async () => {
+        await refreshTicketDetails();
+        const refreshed = ticketDetails;
+        const currentTicket = tickets.find(item => item.id === ticketId);
+        if (!refreshed || !currentTicket || refreshed.ticket.revision !== expectedRevision ||
+            currentTicket.revision !== expectedRevision) {
+          throw new Error('This Ticket changed. Review its updated evidence before continuing.');
+        }
+        if (refreshed.ticket.state !== 'running' || refreshed.mandate.revoked ||
+            !refreshed.mandate.sideEffectConsent) {
+          throw new Error('The Ticket no longer has its current mandate and operator side-effect consent.');
+        }
+        const effectKey = await issueCommentEffectKey(ticketId, repository, issueNumber, comment);
+        const result = await call<IssueCommentResult>('superagent_issue_comment', {
+          ticketId, expectedRevision, repository, issueNumber, effectKey, comment,
+        });
+        if ('previewOnly' in result) {
+          issueCommentStatus = null;
+          feedback = result.message;
+          return;
+        }
+        if (result.ticketId !== ticketId || result.ticketRevision !== expectedRevision ||
+            result.repository !== repository || result.issueNumber !== issueNumber ||
+            result.effectKey !== effectKey) {
+          throw new Error('The native effect result did not match this Ticket and exact comment.');
+        }
+        issueCommentStatus = result;
+        feedback = result.state === 'applied' && result.reconciliation === 'exact-readback'
+          ? 'GitHub comment applied and verified by exact read-back.'
+          : 'GitHub comment state: ' + result.state + ' (' + result.reconciliation + '). Repeating the same comment checks its saved receipt and does not blindly post again.';
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'draft-pull-request') {
+      const ticketId = inspectedTicket;
+      const ticket = tickets.find(item => item.id === ticketId);
+      const snapshot = ticketDetails;
+      const repository = String(data.get('repository') ?? '');
+      const head = String(data.get('head') ?? '');
+      const base = String(data.get('base') ?? '');
+      const title = String(data.get('title') ?? '');
+      const body = String(data.get('body') ?? '');
+      draftPrRepository = repository; draftPrHead = head; draftPrBase = base;
+      draftPrTitle = title; draftPrBody = body;
+      const repoParts = repository.split('/');
+      const validRepository = repository.length <= 200 && repoParts.length === 2 && repoParts.every(part => part.length > 0 &&
+        part !== '.' && part !== '..' && /^[A-Za-z0-9_.-]+$/.test(part));
+      const validBranch = (branch: string): boolean => branch.length > 0 && branch.length <= 200 &&
+        !branch.startsWith('-') && !branch.endsWith('.') && !branch.endsWith('/') &&
+        !branch.includes('..') && !branch.includes('//') && !branch.includes('@{') &&
+        /^[A-Za-z0-9_./-]+$/.test(branch);
+      let validationError = '';
+      if (!validRepository) validationError = 'Enter one exact GitHub repository as owner/name.';
+      else if (!validBranch(head) || !validBranch(base) || head === base) {
+        validationError = 'Enter distinct valid head and base branches.';
+      } else if (!title.trim() || title.trim() !== title || [...title].length > 256 ||
+          /[\u0000-\u001f\u007f-\u009f]/.test(title)) {
+        validationError = 'Enter a plain-text pull request title of 1 to 256 characters.';
+      } else if (new TextEncoder().encode(body).length > 8 * 1024 || body.includes('\0') ||
+          body.includes('<!-- pandacode-superagent-draft-pr:')) {
+        validationError = 'Enter a body under 8 KB without a PandaCode draft PR marker.';
+      }
+      if (validationError) {
+        draftPrError = validationError; draftPrReview = null; render(); return;
+      }
+      if (!ticket || ticket.state !== 'running' || !snapshot || snapshot.ticket.id !== ticketId ||
+          snapshot.ticket.revision !== ticket.revision || snapshot.mandate.revoked ||
+          !snapshot.mandate.sideEffectConsent) {
+        draftPrError = 'This Ticket has no current side-effect authorization. Refresh evidence before continuing.';
+        draftPrReview = null; render(); return;
+      }
+      const expectedRevision = snapshot.ticket.revision;
+      draftPrError = '';
+      void work(async () => {
+        await refreshTicketDetails();
+        const refreshed = ticketDetails;
+        const currentTicket = tickets.find(item => item.id === ticketId);
+        if (!refreshed || !currentTicket || refreshed.ticket.revision !== expectedRevision ||
+            currentTicket.revision !== expectedRevision) {
+          draftPrError = 'This Ticket changed. Review its updated evidence before continuing.';
+          draftPrReview = null; render(); return;
+        }
+        if (refreshed.ticket.state !== 'running' || refreshed.mandate.revoked ||
+            !refreshed.mandate.sideEffectConsent) {
+          draftPrError = 'The Ticket no longer has its current mandate and operator side-effect consent.';
+          draftPrReview = null; render(); return;
+        }
+        const headSha = await call<string>('superagent_verify_draft_pull_request_target', {
+          ticketId,expectedRevision,repository,head,base,
+        });
+        if (!/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/.test(headSha)) {
+          throw new Error('Native verification did not return an exact GitHub head SHA.');
+        }
+        const effectKey = await draftPullRequestEffectKey(
+          ticketId,repository,head,base,title,body,
+        );
+        const marker = draftPullRequestMarker(ticketId,effectKey);
+        const exactBody = body ? body + '\n\n' + marker : marker;
+        if (new TextEncoder().encode(exactBody).length > 8 * 1024) {
+          draftPrError = 'Shorten the body to leave room for PandaCode’s effect marker.';
+          draftPrReview = null; render(); return;
+        }
+        draftPrReview = {
+          ticketId,ticketRevision:expectedRevision,repository,head,headSha,base,title,body,effectKey,marker,
+        };
+      });
+      return;
+    }
     if (form.dataset.saForm === 'thread-link') {
       const ticketId = inspectedTicket;
       const sourceId = String(data.get('sourceId') ?? '');
@@ -467,28 +1706,53 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     }
     if (form.dataset.saForm === 'edit') {
       const existing = current();
-      if (!existing || existing.enabled) return;
-      const input = {
-        name:String(data.get('name') ?? '').trim(),
-        coordinatorBotId:String(data.get('coordinatorBotId') ?? ''),
-        workerBotId:String(data.get('workerBotId') ?? ''),
-      };
+      if (!existing) return;
+      const draft = readTeamDraft(form);
+      const councilError = councilDraftError(draft);
+      if (councilError) {
+        editCouncilErrors.set(existing.id, councilError);
+        rememberTeamDraft(form, draft);
+        render();
+        host.querySelector<HTMLInputElement>(
+          'form[data-sa-form="edit"] input[name="councilRequired"]')?.focus();
+        return;
+      }
+      editCouncilErrors.delete(existing.id);
       void work(async () => {
+        const team = validateTeamDraft(draft, existing.projectId || botProjectId(existing.coordinatorBotId));
+        const { councilRequired, ...roles } = team;
+        // Absent saved state stays absent: native preserves the current policy.
+        const input = { ...roles, workerBotId:team.workerBotIds[0],
+          ...(councilRequired === undefined ? {} : { councilRequired }) };
         await call('superagent_update',{ orchestrationId:existing.id, expectedRevision:existing.policyRevision, input });
+        editTeamDrafts.delete(existing.id);
+        editCouncilErrors.delete(existing.id);
         await reload();
       });
+      return;
     }
     if (form.dataset.saForm === 'create') {
-      const input = { name:String(data.get('name') ?? '').trim(),
-        coordinatorBotId:String(data.get('coordinatorBotId') ?? ''),
-        workerBotId:String(data.get('workerBotId') ?? '') };
+      const draft = readTeamDraft(form);
+      const councilError = councilDraftError(draft);
+      if (councilError) {
+        draftCouncilError = councilError;
+        rememberTeamDraft(form, draft);
+        render();
+        host.querySelector<HTMLInputElement>(
+          'form[data-sa-form="create"] input[name="councilRequired"]')?.focus();
+        return;
+      }
+      draftCouncilError = '';
       void work(async () => {
-        if (!input.name || !input.coordinatorBotId || !input.workerBotId ||
-          input.coordinatorBotId === input.workerBotId) throw new Error('Choose two different existing bots.');
+        const team = validateTeamDraft(draft);
+        const input = { ...team, workerBotId:team.workerBotIds[0],
+          councilRequired: team.councilRequired === true };
         const created = await call<Config>('superagent_create',{ input });
-        draftPresetName = ''; draftPresetTemplate = '';
+        draftPresetName = ''; draftPresetTemplate = ''; draftCoordinatorBotId = '';
+        draftWorkerBotIds = ['']; draftReviewerBotIds = []; draftCouncilRequired = false;
         selected = created.id; await reload();
       });
+      return;
     }
     if (form.dataset.saForm === 'reject') {
       const ticket = tickets.find(item => item.id === rejectingTicket);
@@ -499,10 +1763,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         rejectingTicket = ''; await reload();
       });
     }
-    if (form.dataset.saForm === 'run') {
-      const selectedConfig = current(), objective = String(data.get('objective') ?? '').trim();
+    if (form.dataset.saForm === 'run' || form.dataset.saForm === 'global-run') {
+      const selectedConfig = form.dataset.saForm === 'global-run'
+        ? presets.find(team => team.id === String(data.get('orchestrationId') ?? ''))
+        : current();
+      const objective = String(data.get('objective') ?? '').trim();
       const command = data.get('mode') === 'direct' ? 'superagent_submit' : 'superagent_submit_coordinated';
       if (!selectedConfig?.enabled || !objective) return;
+      selected = selectedConfig.id; intakeTeamId = selectedConfig.id;
       const key = taskKey;
       void work(async () => {
         await call(command,{ orchestrationId:selectedConfig.id, objective, requestKey:key });

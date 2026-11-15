@@ -4473,6 +4473,100 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
     assert!(!verified_council_pass(&store, &saved));
 }
 
+
+#[test]
+fn nested_m4_forced_s2_passes_only_after_two_authenticated_child_waves() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["security-child", "architecture-child"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.strategy = council::CouncilExecutionStrategy::Escalated;
+        config.force_escalation = true;
+        config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
+            .map(|bot| council::CouncilNestedReviewer {
+                bot_id: (*bot).into(), child_reviewers: 2,
+                child_target: 9.5, child_max_rounds: 2,
+            }).collect();
+        assert_eq!(config.mode(), "m4");
+        config.validate().unwrap();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid,
+        "Review with two independent child Council waves", None, None).unwrap();
+    let (pending, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Admit first child review wave"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(pending["completed"], false);
+    for _ in 0..4 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                "Fresh first-wave child evidence.\nCouncil score: 9.6/10").unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    }
+    let (pending, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Admit second child review wave"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(pending["completed"], false);
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let children = child_council::inspect(&store, &root).unwrap();
+        assert_eq!(children.len(), 2);
+        assert!(children.iter().all(|child|
+            child.leaf_attempts.len() == 4
+                && child.verified_child_receipt.is_some()
+                && child.verified_escalation_receipt.is_none()));
+        assert!(!verified_council_pass(&store, &root));
+    }
+    for _ in 0..4 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                "Fresh second-wave child evidence.\nCouncil score: 9.7/10").unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    }
+    let (complete, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Two native child waves passed"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(complete["completed"], true,
+        "a child-only M4 Council must not require an invented root reviewer");
+    let store = state.store.lock().unwrap();
+    let saved = load(&store, &sid).unwrap().unwrap();
+    assert_eq!(saved.council_status.as_ref().unwrap().state, "passed");
+    assert_eq!(saved.council_status.as_ref().unwrap().round, 2);
+    assert_eq!(saved.council_status.as_ref().unwrap().lowest, Some(9.6));
+    assert!(verified_council_pass(&store, &saved));
+    let inspection = council_inspection_state(&store, &sid).unwrap().unwrap();
+    assert_eq!(inspection.usage.unique_attempts, 0,
+        "composite children are not synthetic independent root workers");
+    assert_eq!(inspection.composed_usage.unwrap().unique_attempts, 8);
+    assert!(child_council::verified_s2_receipts(&store, &saved).unwrap().is_some());
+    let key = format!("native-council-child-s2-receipt:{}:security-child", saved.council_since);
+    store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, key],
+    ).unwrap();
+    assert!(!verified_council_pass(&store, &saved),
+        "removing one authenticated child receipt must revoke the final S2 verdict");
+}
+
 #[test]
 fn nested_m6_direct_bot_and_child_require_independent_native_callbacks() {
     assert_nested_mixed_root_callbacks(false);

@@ -1936,11 +1936,15 @@ pub(super) fn status_for_authenticated_children_s2(
     if config.strategy != CouncilExecutionStrategy::Escalated
         || !config.force_escalation || config.nested_bot_reviewers.is_empty()
         || accepted(team) || team.council_since <= 0
-        || latest_round(team) != 2
+        // M4 has no independent root reviewers: its two waves consist
+        // exclusively of authenticated children, not phantom root rounds.
+        || (config.reviewer_bot_ids.len() + config.automatic_reviewers > 0
+            && (latest_round(team) != 2 || stale(team, 2)))
+        || (config.reviewer_bot_ids.is_empty() && config.automatic_reviewers == 0
+            && latest_round(team) != 0)
         || children.len() != config.nested_bot_reviewers.len()
         || second_children.len() != children.len()
         || team.workers.iter().any(|w| !w.read_only && unsettled(&w.status))
-        || stale(team, 2)
     {
         return None;
     }

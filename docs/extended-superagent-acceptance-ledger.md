@@ -247,3 +247,11 @@ Normative source for every row: NS addendum acceptance checks. The row number eq
 - Authenticated source delivery with Auto gated behind grants and effect reconciliation.
 - A complete headless lifecycle and process-level restart, stop and effect tests.
 - Real before and after screenshots and a refreshed, non-stale source map and status document.
+
+## Checkpoint delta — 2026-11-15
+
+**Exact SHA.** `d0b6e78c531e48b13960e7ac00e50bb9667f0162` (`d0b6e78c`), pushed to `origin/feat/issue-148-pe`.
+
+**Scope.** This is a delta only; the historical snapshot rows and claims above remain unchanged. At this SHA, preview coordinated submission fails closed before creating synthetic Ticket, Coordinator Assignment or WorkItem state. Direct preview submission is unaffected, and the UI shows the submission error. This does not establish issue completion.
+
+**Evidence and provenance.** CI run `43677545775` for this exact SHA completed with 18 of 19 jobs passing. `SuperAgent Orchestrations UI (Playwright)` passed (job `132700878643`). `Rust check and tests (Linux)` failed (job `132700878705`): 2 failed, 2,935 passed and 97 ignored. The failing fixture tests violate the existing active-assignment project lease, making this a test-setup failure on `d0b6e78c`; the native fixture repair remains local and uncommitted. This run does not establish that the PR passes. The worker reported `git diff --check` and the Node adapter smoke as passing. Playwright was unavailable locally because dependencies were absent. Preview rejection still depends on adapter-synthesized in-memory `human_rejected` activity, so the adapter smoke does not establish native rejection parity or a completed rejection journey.

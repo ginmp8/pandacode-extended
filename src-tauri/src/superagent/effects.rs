@@ -565,10 +565,7 @@ pub(crate) fn has_exact_grant(store: &Store, intent: &IssueCommentIntent) -> Res
         .optional()
         .map_err(|e| e.to_string())?;
     let present = match existing {
-        None => {
-            active_scope(&tx, intent)?;
-            false
-        }
+        None => false,
         Some(digest) if digest == intent.payload_sha256 => {
             let grant_project = exact_grant_payload(&tx, intent)?;
             match active_scope_if_current(&tx, intent)? {

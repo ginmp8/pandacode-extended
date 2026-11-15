@@ -105,6 +105,14 @@ pub struct CouncilNestedReviewer {
 fn no_extra_reviewers(count: &usize) -> bool {
     *count == 0
 }
+/// This native receipt can prove only the exact check that the host executed.
+/// Pinned-input integrity is not a test result or proof of project correctness.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct CouncilCriterionNativeEvidence {
+    pub kind: String,
+    pub skill_id: String,
+}
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CouncilCriterion {
@@ -115,6 +123,9 @@ pub struct CouncilCriterion {
     pub target: f64,
     #[serde(default)]
     pub evidence_required: bool,
+    /// Unsupported evidence checks remain unverified and block approval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_evidence: Option<CouncilCriterionNativeEvidence>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -227,6 +238,18 @@ impl CouncilConfig {
             }
             if criterion.evidence_required && !criterion.required {
                 return Err("Council required evidence cannot be assigned to an optional criterion.".into());
+            }
+            if let Some(check) = &criterion.native_evidence {
+                // A methodology-input check cannot satisfy an arbitrary
+                // criterion such as security, test coverage or correctness.
+                if !criterion.evidence_required
+                    || check.kind != "pinned_input_integrity"
+                    || !super::valid_id(&check.skill_id)
+                    || !self.required_check_skill_ids.contains(&check.skill_id)
+                    || !same_lens(&criterion.lens, &format!("Pinned input integrity: {}", check.skill_id))
+                {
+                    return Err("Council native criterion evidence must name a required pinned-input integrity check and its exact lens.".into());
+                }
             }
             if !criterion.target.is_finite() || !(1.0..=10.0).contains(&criterion.target) {
                 return Err("Each Council criterion target must be between 1 and 10.".into());
@@ -516,7 +539,7 @@ pub struct CouncilCriterionObservation {
     pub root_scored_seats: usize,
     pub lowest_root_score: Option<f64>,
     /// optional | awaiting_review | missing_root_score | below_target |
-    /// native_evidence_unverified | root_scores_observed
+    /// native_evidence_unverified | pinned_input_integrity_verified | root_scores_observed
     pub state: &'static str,
 }
 fn criterion_observations(
@@ -536,7 +559,11 @@ fn criterion_observations(
             else if round == 0 { "awaiting_review" }
             else if lowest.is_none() { "missing_root_score" }
             else if lowest.is_some_and(|score| score < criterion.target.max(config.target)) { "below_target" }
-            else if criterion.evidence_required { "native_evidence_unverified" }
+            else if criterion.evidence_required {
+                if native_criterion_check_verified(team, criterion, round) {
+                    "pinned_input_integrity_verified"
+                } else { "native_evidence_unverified" }
+            }
             else { "root_scores_observed" };
         CouncilCriterionObservation {
             id: criterion.id.clone(), round, root_scored_seats: scores.len(),
@@ -1183,6 +1210,39 @@ fn missing_required_criteria(team: &TeamSnapshot, config: &CouncilConfig, round:
         .collect()
 }
 
+/// Validate a native tool's pinned-input integrity receipt for every matching
+/// completed read-only seat. This narrowly scoped check cannot prove that the
+/// reviewer performed project tests or that another user criterion is satisfied.
+fn native_criterion_check_verified(
+    team: &TeamSnapshot, criterion: &CouncilCriterion, round: usize,
+) -> bool {
+    let Some(check) = criterion.native_evidence.as_ref() else { return false };
+    if check.kind != "pinned_input_integrity"
+        || !same_lens(&criterion.lens, &format!("Pinned input integrity: {}", check.skill_id))
+    {
+        return false;
+    }
+    let reviewers = in_round(team, round)
+        .filter(|(worker, seat)| counts(worker, seat)
+            && worker.status == "completed" && seat.score.is_some()
+            && same_lens(&seat.lens, &criterion.lens))
+        .collect::<Vec<_>>();
+    !reviewers.is_empty() && reviewers.into_iter().all(|(worker, _)| {
+        if !worker.read_only || worker.abandoned || worker.wrote_at != 0
+            || !worker.files.is_empty()
+        {
+            return false;
+        }
+        let Some(binding) = worker.reviewer_binding.as_ref() else { return false };
+        binding.validate(team, worker).is_ok()
+            && binding.snapshot.skills.as_ref().is_some_and(|skills| skills.pins.iter().any(|pin| {
+                pin.id == check.skill_id && pin.required_for_acceptance
+                    && pin.check_required && pin.eligible && pin.supplied
+                    && binding.skill_evidence.get(&pin.id).is_some_and(|receipt|
+                        receipt.valid_for(pin, &binding.artifact_revision))
+            }))
+    })
+}
 /// Every matching seat must meet the stricter per-criterion target (never the mean).
 fn criterion_blockers(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> Vec<String> {
     config.criteria.iter().filter(|criterion| criterion.required)
@@ -1197,9 +1257,9 @@ fn criterion_blockers(team: &TeamSnapshot, config: &CouncilConfig, round: usize)
             if score < target {
                 return Some(format!("criterion {} scored {score}, below {target}", criterion.id));
             }
-            if criterion.evidence_required {
-                // Per-criterion native evidence receipts are not yet implemented.
-                // Never allow a model's claim to satisfy a required native gate.
+            if criterion.evidence_required
+                && !native_criterion_check_verified(team, criterion, round)
+            {
                 return Some(format!("criterion {} requires independently verified native evidence", criterion.id));
             }
             None

@@ -16,7 +16,8 @@ export type CouncilExecutionStrategy = 'parallel' | 'escalated' | 'two_phase';
 export interface CouncilNestedReviewer {
   botId: string; childReviewers: number; childTarget: number; childMaxRounds: number;
 }
-export interface CouncilCriterion { id: string; lens: string; required: boolean; target: number; evidenceRequired?: boolean }
+export interface CouncilCriterionNativeEvidence { kind: 'pinned_input_integrity'; skillId: string }
+export interface CouncilCriterion { id: string; lens: string; required: boolean; target: number; evidenceRequired?: boolean; nativeEvidence?: CouncilCriterionNativeEvidence }
 export interface CouncilConfig {
   target: number;
   maxRounds: number;
@@ -121,7 +122,7 @@ export interface CouncilInspection {
   criterionObservations?: {
     id: string; round: number; rootScoredSeats: number; lowestRootScore: number | null;
     state: 'optional' | 'awaiting_review' | 'missing_root_score' | 'below_target' |
-      'native_evidence_unverified' | 'root_scores_observed';
+      'native_evidence_unverified' | 'pinned_input_integrity_verified' | 'root_scores_observed';
   }[];
   attempts: CouncilInspectionAttempt[];
   /** Optional for older native builds / existing preview fixtures. */

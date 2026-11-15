@@ -434,7 +434,7 @@ fn required_native_criterion_lens_and_target_are_not_averaged_away() {
     config.criteria_source = council::CouncilCriteriaSource::User;
     config.criteria = vec![council::CouncilCriterion {
         id: "security".into(), lens: "Security".into(),
-        required: true, target: 9.8, evidence_required: false,
+        required: true, target: 9.8, evidence_required: false, native_evidence: None,
     }];
     assert!(config.validate().is_ok());
     let mut reviewers = vec![
@@ -470,7 +470,7 @@ fn native_criterion_inspector_never_converts_scored_reports_to_required_evidence
     config.criteria_source = council::CouncilCriteriaSource::User;
     config.criteria = vec![council::CouncilCriterion {
         id: "security".into(), lens: "Security".into(),
-        required: true, target: 9.8, evidence_required: true,
+        required: true, target: 9.8, evidence_required: true, native_evidence: None,
     }];
     let mut workers = vec![
         seat("reviewer-a", 1, Some(9.9), SINCE + 1),
@@ -506,7 +506,7 @@ fn criterion_failures_cannot_complete_by_exhausting_round_limit() {
     config.criteria_source = council::CouncilCriteriaSource::User;
     config.criteria = vec![council::CouncilCriterion {
         id: "security".into(), lens: "Security".into(),
-        required: true, target: 9.8, evidence_required: false,
+        required: true, target: 9.8, evidence_required: false, native_evidence: None,
     }];
     let mut reviewers = vec![
         seat("reviewer-a", 1, Some(9.6), SINCE + 1),
@@ -526,7 +526,7 @@ fn user_defined_criteria_reject_unreviewable_rosters() {
     config.criteria_source = council::CouncilCriteriaSource::User;
     config.criteria = (0..3).map(|i| council::CouncilCriterion {
         id: format!("criterion-{i}"), lens: format!("Criterion {i}"),
-        required: true, target: 9.0, evidence_required: false,
+        required: true, target: 9.0, evidence_required: false, native_evidence: None,
     }).collect();
     assert!(config.validate().unwrap_err().contains("available reviewer seats"));
     config.criteria.truncate(1);
@@ -541,7 +541,7 @@ fn automatic_council_reserves_real_native_seats_for_every_required_criterion() {
     config.criteria_source = council::CouncilCriteriaSource::User;
     config.criteria = (0..3).map(|i| council::CouncilCriterion {
         id: format!("required-{i}"), lens: format!("Requirement {i}"),
-        required: true, target: 9.4, evidence_required: false,
+        required: true, target: 9.4, evidence_required: false, native_evidence: None,
     }).collect();
     assert_eq!(config.needed(), 3);
     assert!(config.validate().is_ok());
@@ -706,6 +706,91 @@ fn native_skill_tools_observe_retrieval_and_integrity_without_model_self_reports
     persisted.workers[0].reviewer_binding.as_mut().unwrap().skill_evidence
         .get_mut("native-check").unwrap().content_sha256 = "stale".into();
     assert_eq!(council::status(&persisted).unwrap().state, "fixing");
+}
+
+
+#[test]
+fn criterion_pinned_input_integrity_requires_native_receipts_and_denies_replay() {
+    let mut config = on(9.0, 3, 0);
+    config.reviewer_bot_ids = vec!["bot-a".into(), "bot-b".into()];
+    config.required_check_skill_ids = vec!["pinned-check".into()];
+    config.criteria_source = council::CouncilCriteriaSource::User;
+    config.criteria = vec![council::CouncilCriterion {
+        id: "pinned-check".into(), lens: "Pinned input integrity: pinned-check".into(),
+        required: true, target: 9.5, evidence_required: true,
+        native_evidence: Some(council::CouncilCriterionNativeEvidence {
+            kind: "pinned_input_integrity".into(), skill_id: "pinned-check".into(),
+        }),
+    }];
+    assert!(config.validate().is_ok());
+    let encoded = serde_json::to_value(&config).unwrap();
+    assert_eq!(encoded["criteria"][0]["nativeEvidence"]["kind"], "pinned_input_integrity");
+    let mut unsupported = config.clone();
+    unsupported.criteria[0].lens = "Security".into();
+    assert!(unsupported.validate().unwrap_err().contains("exact lens"),
+        "pinned input integrity cannot substitute for a security check");
+    unsupported.criteria[0].lens = config.criteria[0].lens.clone();
+    unsupported.criteria[0].native_evidence.as_mut().unwrap().kind = "project_tests".into();
+    assert!(unsupported.validate().unwrap_err().contains("required pinned-input"));
+
+    let mut workers = vec![
+        seat("integrity-a", 1, Some(9.8), SINCE + 1),
+        seat("integrity-b", 1, Some(9.9), SINCE + 2),
+    ];
+    for worker in &mut workers {
+        worker.council.as_mut().unwrap().lens = config.criteria[0].lens.clone();
+    }
+    let mut team = team_with(config, workers);
+    for index in 0..team.workers.len() {
+        let worker = &team.workers[index];
+        let mut binding = reviewer_security::ReviewerBinding::native(
+            &team, &worker.id, worker.created_at, &worker.provider, &worker.model,
+            worker.council.as_ref().unwrap(),
+        );
+        binding.snapshot.skills = Some(crate::skills::reviewer::ReviewerSkills {
+            pins: vec![crate::skills::reviewer::SkillPin {
+                id: "pinned-check".into(), source_kind: "folder".into(),
+                source_location: "test".into(), source_ref: None, source_commit: None,
+                content_sha256: "f".repeat(64), file_sha256: Default::default(),
+                dependencies: vec![], required_for_acceptance: true, check_required: true,
+                delivery_mode: "bounded_prompt".into(), staged_path: None,
+                imported: true, bot_assigned: true, eligible: true, supplied: true,
+                invoked: false, check_executed: false, evidence_verified: false,
+            }],
+            prompt: String::new(), skipped: vec![],
+        });
+        team.workers[index].reviewer_binding = Some(binding);
+    }
+    assert_eq!(council::status(&team).unwrap().state, "fixing",
+        "a score and a pinned skill without a host check cannot pass");
+    assert_eq!(council::inspection(&team, false).unwrap()
+        .criterion_observations[0].state, "native_evidence_unverified");
+    for index in 0..team.workers.len() {
+        let binding = team.workers[index].reviewer_binding.as_mut().unwrap();
+        binding.skill_evidence.insert("pinned-check".into(),
+            reviewer_skill_evidence::ObservedSkillEvidence {
+                content_sha256: "f".repeat(64),
+                artifact_revision: binding.artifact_revision.clone(),
+                invoked: true, check_executed: true, evidence_verified: true,
+                check_kind: Some("pinned_input_integrity".into()),
+            });
+    }
+    assert_eq!(council::inspection(&team, false).unwrap()
+        .criterion_observations[0].state, "pinned_input_integrity_verified");
+    assert_eq!(council::status(&team).unwrap().state, "passed",
+        "only the precisely named pinned-input criterion may use this native check");
+
+    let mut stale = team.clone();
+    stale.workers[1].reviewer_binding.as_mut().unwrap().skill_evidence
+        .get_mut("pinned-check").unwrap().artifact_revision = "old-cycle".into();
+    assert_eq!(council::status(&stale).unwrap().state, "fixing");
+    let mut tainted = team.clone();
+    tainted.workers[0].wrote_at = SINCE + 5;
+    assert_eq!(council::status(&tainted).unwrap().state, "fixing");
+    let mut forged = team;
+    forged.workers[0].reviewer_binding.as_mut().unwrap().skill_evidence
+        .get_mut("pinned-check").unwrap().check_kind = Some("reviewer_claim".into());
+    assert_eq!(council::status(&forged).unwrap().state, "fixing");
 }
 
 #[test]
@@ -3876,7 +3961,7 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
             lens: "Security requirements".into(),
             required: true,
             target: 9.0,
-            evidence_required: false,
+            evidence_required: false, native_evidence: None,
         });
         assert!(config.validate().is_ok());
     }
@@ -4056,7 +4141,7 @@ fn nested_child_required_criteria_are_proved_by_native_scored_leaf_lenses() {
         config.criteria.push(council::CouncilCriterion {
             id: "security-review".into(),
             lens: "Security requirements".into(),
-            required: true, target: 9.5, evidence_required: false,
+            required: true, target: 9.5, evidence_required: false, native_evidence: None,
         });
         config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
             .map(|bot| council::CouncilNestedReviewer {
@@ -4157,15 +4242,15 @@ fn nested_child_required_criteria_take_priority_over_optional_suggestions() {
         config.criteria = vec![
             council::CouncilCriterion {
                 id: "optional".into(), lens: "Optional architecture detail".into(),
-                required: false, target: 9.0, evidence_required: false,
+                required: false, target: 9.0, evidence_required: false, native_evidence: None,
             },
             council::CouncilCriterion {
                 id: "security".into(), lens: "Security requirements".into(),
-                required: true, target: 9.5, evidence_required: false,
+                required: true, target: 9.5, evidence_required: false, native_evidence: None,
             },
             council::CouncilCriterion {
                 id: "reliability".into(), lens: "Reliability requirements".into(),
-                required: true, target: 9.5, evidence_required: false,
+                required: true, target: 9.5, evidence_required: false, native_evidence: None,
             },
         ];
         config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()

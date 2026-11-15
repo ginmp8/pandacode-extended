@@ -91,13 +91,14 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     missing_root_score: 'No settled scored root reviewer for this lens',
     below_target: 'Observed root reviewer score below required target',
     native_evidence_unverified: 'Independent native criterion evidence not verified; approval blocked',
+    pinned_input_integrity_verified: 'Native pinned-input integrity verified for this criterion; this does not prove project tests, artifact correctness or Council approval',
     root_scores_observed: 'Root reviewer scores observed; not independently verified artifact evidence',
   };
   const nativeCriterionObservations = inspection.criterionObservations ?? [];
   const observedCriteriaHtml = nativeCriterionObservations.length
     ? '<section aria-label="Native criterion observations" class="council-criterion-observations">' +
       '<h4>Native criterion observations (not approvals)</h4>' +
-      '<p>Root reviewer reports only; child Council receipts are inspected separately. No score proves a mandatory artifact check.</p><ul>' +
+      '<p>Root reviewer scores are reports, not artifact verification. A host-verified pinned-input check covers only that named check; child Council receipts are inspected separately. Neither is a Council approval.</p><ul>' +
       nativeCriterionObservations.map(item => '<li><strong>' + escape(item.id) + '</strong> · Round ' +
         escape(String(item.round)) + ' · Scored root reports ' +
         escape(String(item.rootScoredSeats)) + ' · Lowest root score ' +

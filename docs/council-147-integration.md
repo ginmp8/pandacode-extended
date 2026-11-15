@@ -332,3 +332,10 @@ Frozen source PR #149: `71177114787da3e7d8b1cb9bc7f85aad9e1b21ae`; previous unif
 - Native events and read commands expose at most 32 historical claims; the source's strict JSON parsing and score correlation reject unscored, oversized and spoofed newer reports.
 - The current-cycle UI labels and HTML-escapes every historical claim, and keeps it out of verified findings, escalation, native receipts, usage, scores and terminal approval.
 - Added parser, cycle-isolation and inert-rendering tests. Exact-HEAD CI and broad issue #147 parity remain unverified.
+## November 15: source #149 current reported claims
+
+Source commit `71177114787da3e7d8b1cb9bc7f85aad9e1b21ae`.
+- Added strict read-only, current-scored-reviewer reported claims from the source's existing JSON contract; old and current claims have separate native projection fields and accessible UI sections.
+- The report must match the native persisted score and be more recent than user/coordination messages; invalid, oversized, unscored, forged or foreign-cycle claims do not appear.
+- Claims never enter the typed native finding ledger, verified criterion receipts, S2/S3 escalation, pass or acceptance gates. All text is escaped and no UI claim is presented as verified evidence.
+- Added focused cross-task/cycle JavaScript and Playwright XSS-safe rendering regressions. All exact-HEAD validations remain pending until GitHub Actions finishes.

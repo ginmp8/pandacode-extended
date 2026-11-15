@@ -1612,3 +1612,32 @@ test('historical claims render inertly and never claim verified native approval'
   await expect(history.locator('img')).toHaveCount(0);
   await expect(page.locator('#council-historical-proof')).not.toContainText('Verified native pass');
 });
+test('current scored reviewer claims stay unverified and HTML inert', async ({ page }) => {
+  await open(page, '/?council=composition');
+  const html = await page.evaluate(async () => {
+    const { councilReadOnlyPresenterHtml } = await import('/src/council-panel.ts');
+    return councilReadOnlyPresenterHtml({
+      cycleId: 'task:9',
+      reportedFindings: [{
+        schemaVersion: 1, id: 'task:9:seat:99:0', cycleId: 'task:9', round: 2,
+        workerId: 'seat-1', reportMessageId: 99, lens: 'Authorization',
+        severity: 'critical', category: 'security',
+        title: '<img src=x onerror=alert(1)>',
+        explanation: 'Reported but not independently verified',
+        artifactRevision: 'revision:2',
+        verifiedEvidenceRefs: [], evidenceVerified: false, locationVerified: false,
+      }],
+    });
+  });
+  await page.evaluate(html => {
+    const host = document.createElement('div');
+    host.id = 'council-claims-proof';
+    host.innerHTML = html;
+    document.body.append(host);
+  }, html);
+  const section = page.locator('#council-claims-proof').getByRole('region', { name: 'Current reviewer-reported findings' });
+  await expect(section).toContainText('<img src=x onerror=alert(1)>');
+  await expect(section).toContainText('not independently verified');
+  await expect(section.locator('img')).toHaveCount(0);
+  await expect(page.locator('#council-claims-proof')).not.toContainText('Verified native pass');
+});

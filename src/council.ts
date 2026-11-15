@@ -158,6 +158,7 @@ export interface CouncilLedgerProjection {
   cycleId: string;
   findings?: CouncilFinding[];
   historicalReportedFindings?: CouncilHistoricalReportedFinding[];
+  reportedFindings?: CouncilHistoricalReportedFinding[];
   findingDispositions?: CouncilFindingDisposition[];
   childReceipts?: ChildCouncilReceipt[];
   childLeaves?: CouncilChildLeafProjection[];
@@ -169,7 +170,7 @@ export interface CouncilLedgerProjection {
 /** Keep the UI bounded to native's projected root cycle and its correlated child cycles. RootCycleId is native's
  *  `<sessionId>:<councilSince>`; child cycles are admitted only by current-root child receipts or usage records. */
 export function councilLedgerForCurrentCycle(
-  team: Pick<TeamSnapshot, 'sessionId' | 'councilSince' | 'councilFindings' | 'councilHistoricalReportedFindings' | 'councilFindingDispositions' | 'councilChildReceipts' | 'councilChildLeaves' | 'councilCriterionOutcomes' | 'councilReviewReceipts' | 'councilUsage'>,
+  team: Pick<TeamSnapshot, 'sessionId' | 'councilSince' | 'councilFindings' | 'councilHistoricalReportedFindings' | 'councilReportedFindings' | 'councilFindingDispositions' | 'councilChildReceipts' | 'councilChildLeaves' | 'councilCriterionOutcomes' | 'councilReviewReceipts' | 'councilUsage'>,
 ): CouncilLedgerProjection {
   const cycleId = councilCycleId(team);
   const childReceipts = team.councilChildReceipts?.filter(receipt => receipt.rootCycleId === cycleId);
@@ -184,6 +185,8 @@ export function councilLedgerForCurrentCycle(
   const findings = team.councilFindings?.filter(finding => allowedCycleIds.has(finding.cycleId));
   const historicalReportedFindings = team.councilHistoricalReportedFindings
     ?.filter(claim => claim.cycleId === cycleId).slice(-32);
+  const reportedFindings = team.councilReportedFindings
+    ?.filter(claim => claim.cycleId === cycleId).slice(-32);
   const findingIds = new Set((findings ?? []).map(finding => finding.id));
   const criterionOutcomes = team.councilCriterionOutcomes?.filter(receipt =>
     receipt.rootCycleId === cycleId && allowedCycleIds.has(receipt.taskCycleId) &&
@@ -192,6 +195,7 @@ export function councilLedgerForCurrentCycle(
     cycleId,
     ...(findings === undefined ? {} : { findings }),
     ...(historicalReportedFindings === undefined ? {} : { historicalReportedFindings }),
+    ...(reportedFindings === undefined ? {} : { reportedFindings }),
     ...(team.councilFindingDispositions === undefined ? {} : { findingDispositions: team.councilFindingDispositions.filter(item => findingIds.has(item.findingId)) }),
     ...(childReceipts === undefined ? {} : { childReceipts }),
     ...(childLeaves === undefined ? {} : { childLeaves }),

@@ -355,3 +355,14 @@ test('old reviewer claims are projected only for the current root Council cycle'
   };
   assert.deepEqual(councilLedgerForCurrentCycle(team).historicalReportedFindings?.map(item => item.id), ['old-claim']);
 });
+test('current unverified reviewer reports do not leak across task cycles', () => {
+  const team = {
+    sessionId: 'task-A', councilSince: 75,
+    councilReportedFindings: [
+      { cycleId: 'task-A:75', id: 'current-claim', title: 'Claim' },
+      { cycleId: 'task-B:75', id: 'other-task', title: 'Foreign' },
+      { cycleId: 'task-A:74', id: 'old-cycle', title: 'Stale' },
+    ],
+  };
+  assert.deepEqual(councilLedgerForCurrentCycle(team).reportedFindings?.map(claim => claim.id), ['current-claim']);
+});

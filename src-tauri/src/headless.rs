@@ -133,10 +133,17 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
             if let Command::InspectTicketEffects { ticket_id, before_created_at, before_key, unresolved_only } = &command {
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
-                    .and_then(|dir| crate::superagent::inspect_headless_effect_receipts_page(
-                        &dir.join("kingcode.sqlite3"), ticket_id,
-                        *before_created_at, before_key.as_deref(), *unresolved_only,
-                    ));
+                    .and_then(|dir| {
+                        let database = dir.join("kingcode.sqlite3");
+                        if before_created_at.is_none() && !unresolved_only {
+                            crate::superagent::inspect_headless_effect_receipts(&database, ticket_id)
+                        } else {
+                            crate::superagent::inspect_headless_effect_receipts_page(
+                                &database, ticket_id, *before_created_at,
+                                before_key.as_deref(), *unresolved_only,
+                            )
+                        }
+                    });
                 match result {
                     Ok(receipts) => { println!("{receipts}"); std::process::exit(0) }
                     Err(error) => {

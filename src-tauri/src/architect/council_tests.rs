@@ -2954,8 +2954,11 @@ fn usage_aggregate_value<T>(status: council::CouncilUsageValueStatus, value: Opt
     council::CouncilUsageValue { status, value }
 }
 
-fn usage_aggregate_record(root: &str, cycle: &str, child: Option<&str>, seat: &str, reviewer: &str, round: usize,
-    attempt: usize, start: Option<u64>, finish: Option<u64>) -> council::CouncilUsageRecord {
+fn usage_aggregate_record(
+    root: &str, cycle: &str, child: Option<&str>, seat: &str, reviewer: &str,
+    (round, attempt): (usize, usize),
+    (start, finish): (Option<u64>, Option<u64>),
+) -> council::CouncilUsageRecord {
     use council::{CouncilReviewVerdict as Verdict, CouncilUsageScope as Scope, CouncilUsageValueStatus as Status};
     let unknown = || usage_aggregate_value::<u64>(Status::Unknown, None);
     council::CouncilUsageRecord {
@@ -2982,9 +2985,12 @@ fn usage_aggregate_child_receipt(parent: &str, child: &str) -> council::ChildCou
     }
 }
 
-fn set_usage_aggregate_metrics(record: &mut council::CouncilUsageRecord, status: council::CouncilUsageValueStatus,
-    input: Option<u64>, output: Option<u64>, queue: Option<u64>, elapsed: Option<u64>, cost: Option<u64>,
-    provenance: Option<(&str, &str, &str, u64)>) {
+fn set_usage_aggregate_metrics(
+    record: &mut council::CouncilUsageRecord,
+    status: council::CouncilUsageValueStatus,
+    (input, output, queue, elapsed, cost): (Option<u64>, Option<u64>, Option<u64>, Option<u64>, Option<u64>),
+    provenance: Option<(&str, &str, &str, u64)>,
+) {
     record.input_tokens = usage_aggregate_value(status, input);
     record.output_tokens = usage_aggregate_value(status, output);
     record.queue_wait_ms = usage_aggregate_value(status, queue);
@@ -3019,17 +3025,17 @@ fn usage_total(metric: &council::CouncilUsageMetricAggregate, status: council::C
 #[test]
 fn council_usage_aggregation_correlates_hierarchy_and_excludes_child_composites_at_root() {
     use council::CouncilUsageValueStatus as Status;
-    let mut direct = usage_aggregate_record("root-cycle", "root-cycle", None, "direct-seat", "direct-reviewer", 1, 1, Some(100), Some(200));
-    set_usage_aggregate_metrics(&mut direct, Status::Measured, Some(100), Some(40), Some(4), Some(100), Some(500), Some(("USD", "provider-meter", "v1", 150)));
+    let mut direct = usage_aggregate_record("root-cycle", "root-cycle", None, "direct-seat", "direct-reviewer", (1, 1), (Some(100), Some(200)));
+    set_usage_aggregate_metrics(&mut direct, Status::Measured, (Some(100), Some(40), Some(4), Some(100), Some(500)), Some(("USD", "provider-meter", "v1", 150)));
     set_usage_aggregate_counters(&mut direct, Status::Measured, Some(2), Some(1), Some(0), Some(2), Some(3));
-    let mut parent = usage_aggregate_record("root-cycle", "root-cycle", None, "parent-seat", "nested-bot", 1, 1, Some(90), Some(290));
-    set_usage_aggregate_metrics(&mut parent, Status::Measured, Some(30), Some(20), Some(99), Some(200), Some(999), Some(("USD", "parent-composite", "v1", 200)));
+    let mut parent = usage_aggregate_record("root-cycle", "root-cycle", None, "parent-seat", "nested-bot", (1, 1), (Some(90), Some(290)));
+    set_usage_aggregate_metrics(&mut parent, Status::Measured, (Some(30), Some(20), Some(99), Some(200), Some(999)), Some(("USD", "parent-composite", "v1", 200)));
     set_usage_aggregate_counters(&mut parent, Status::Measured, Some(50), Some(20), Some(0), Some(8), Some(99));
-    let mut leaf = usage_aggregate_record("root-cycle", "child-cycle", Some("child-cycle"), "leaf-seat", "leaf-reviewer", 1, 1, Some(120), Some(270));
+    let mut leaf = usage_aggregate_record("root-cycle", "child-cycle", Some("child-cycle"), "leaf-seat", "leaf-reviewer", (1, 1), (Some(120), Some(270)));
     leaf.phase = council::CouncilUsagePhase::Escalation;
     leaf.strategy = council::CouncilStrategy::Escalated;
     leaf.decision_ids = vec!["child-trigger".into()];
-    set_usage_aggregate_metrics(&mut leaf, Status::CalculatedEstimated, Some(30), Some(10), Some(6), Some(150), Some(200), Some(("USD", "child-card", "2026-01", 250)));
+    set_usage_aggregate_metrics(&mut leaf, Status::CalculatedEstimated, (Some(30), Some(10), Some(6), Some(150), Some(200)), Some(("USD", "child-card", "2026-01", 250)));
     set_usage_aggregate_counters(&mut leaf, Status::CalculatedEstimated, Some(3), Some(2), Some(1), Some(4), Some(5));
     let aggregate = council::aggregate_usage_records("root-cycle", &[direct, parent, leaf], &[usage_aggregate_child_receipt("parent-seat", "child-cycle")]).unwrap();
     assert_eq!(aggregate.root.record_count, 2);
@@ -3072,9 +3078,8 @@ fn council_usage_aggregation_keeps_unknown_mixed_statuses_and_pricing_provenance
         ("unknown", Status::Unknown, None, None)];
     let rows = cases.into_iter().map(|(seat, status, amount, price)| {
         let timing = (status != Status::Unknown).then_some((10, 20));
-        let mut record = usage_aggregate_record("root-cycle", "root-cycle", None, seat, seat, 1, 1,
-            timing.map(|item| item.0), timing.map(|item| item.1));
-        set_usage_aggregate_metrics(&mut record, status, amount, amount, amount, amount, amount, price);
+        let mut record = usage_aggregate_record("root-cycle", "root-cycle", None, seat, seat, (1, 1), (timing.map(|item| item.0), timing.map(|item| item.1)));
+        set_usage_aggregate_metrics(&mut record, status, (amount, amount, amount, amount, amount), price);
         let escalation_count = amount.map(|value| value as u32);
         if let Some(count) = escalation_count.filter(|count| *count > 0) {
             record.phase = council::CouncilUsagePhase::Escalation;
@@ -3115,22 +3120,22 @@ fn council_usage_aggregation_keeps_unknown_mixed_statuses_and_pricing_provenance
 #[test]
 fn council_usage_aggregation_is_idempotent_for_retries_rows_and_child_receipts() {
     use council::CouncilUsageValueStatus as Status;
-    let mut first = usage_aggregate_record("root-cycle", "root-cycle", None, "retry-seat", "reviewer", 1, 1, Some(10), Some(20));
-    let mut second = usage_aggregate_record("root-cycle", "root-cycle", None, "retry-seat", "reviewer", 1, 2, Some(20), Some(30));
-    let mut third = usage_aggregate_record("root-cycle", "root-cycle", None, "retry-seat", "reviewer", 1, 3, Some(30), Some(40));
-    set_usage_aggregate_metrics(&mut first, Status::Measured, Some(5), Some(2), Some(1), Some(10), Some(10), Some(("USD", "meter", "v1", 20)));
-    set_usage_aggregate_metrics(&mut second, Status::Measured, Some(7), Some(3), Some(2), Some(10), Some(20), Some(("USD", "meter", "v1", 30)));
-    set_usage_aggregate_metrics(&mut third, Status::Measured, Some(8), Some(4), Some(3), Some(10), Some(30), Some(("USD", "meter", "v1", 40)));
+    let mut first = usage_aggregate_record("root-cycle", "root-cycle", None, "retry-seat", "reviewer", (1, 1), (Some(10), Some(20)));
+    let mut second = usage_aggregate_record("root-cycle", "root-cycle", None, "retry-seat", "reviewer", (1, 2), (Some(20), Some(30)));
+    let mut third = usage_aggregate_record("root-cycle", "root-cycle", None, "retry-seat", "reviewer", (1, 3), (Some(30), Some(40)));
+    set_usage_aggregate_metrics(&mut first, Status::Measured, (Some(5), Some(2), Some(1), Some(10), Some(10)), Some(("USD", "meter", "v1", 20)));
+    set_usage_aggregate_metrics(&mut second, Status::Measured, (Some(7), Some(3), Some(2), Some(10), Some(20)), Some(("USD", "meter", "v1", 30)));
+    set_usage_aggregate_metrics(&mut third, Status::Measured, (Some(8), Some(4), Some(3), Some(10), Some(30)), Some(("USD", "meter", "v1", 40)));
     for record in [&mut first, &mut second, &mut third] {
         record.phase = council::CouncilUsagePhase::Escalation;
         record.strategy = council::CouncilStrategy::Escalated;
         record.decision_ids = vec!["same-escalation-decision".into()];
         record.escalations = usage_aggregate_value(Status::Measured, Some(1));
     }
-    let mut parent = usage_aggregate_record("root-cycle", "root-cycle", None, "parent-seat", "nested", 1, 1, Some(5), Some(35));
-    set_usage_aggregate_metrics(&mut parent, Status::Measured, Some(50), Some(20), Some(0), Some(30), Some(100), Some(("USD", "composite", "v1", 35)));
-    let mut leaf = usage_aggregate_record("root-cycle", "child-cycle", Some("child-cycle"), "leaf", "leaf-reviewer", 1, 1, Some(10), Some(20));
-    set_usage_aggregate_metrics(&mut leaf, Status::Measured, Some(2), Some(1), Some(1), Some(10), Some(3), Some(("USD", "meter", "v1", 25)));
+    let mut parent = usage_aggregate_record("root-cycle", "root-cycle", None, "parent-seat", "nested", (1, 1), (Some(5), Some(35)));
+    set_usage_aggregate_metrics(&mut parent, Status::Measured, (Some(50), Some(20), Some(0), Some(30), Some(100)), Some(("USD", "composite", "v1", 35)));
+    let mut leaf = usage_aggregate_record("root-cycle", "child-cycle", Some("child-cycle"), "leaf", "leaf-reviewer", (1, 1), (Some(10), Some(20)));
+    set_usage_aggregate_metrics(&mut leaf, Status::Measured, (Some(2), Some(1), Some(1), Some(10), Some(3)), Some(("USD", "meter", "v1", 25)));
     let receipt = usage_aggregate_child_receipt("parent-seat", "child-cycle");
     let aggregate = council::aggregate_usage_records("root-cycle", &[first.clone(), first, second, third, parent, leaf], &[receipt.clone(), receipt]).unwrap();
     assert_eq!(aggregate.root.record_count, 4);
@@ -3145,12 +3150,12 @@ fn council_usage_aggregation_is_idempotent_for_retries_rows_and_child_receipts()
 #[test]
 fn council_usage_aggregation_separates_concurrent_work_from_wall_elapsed_time() {
     use council::CouncilUsageValueStatus as Status;
-    let mut parent = usage_aggregate_record("root-cycle", "root-cycle", None, "parent-seat", "nested", 1, 1, Some(0), Some(400));
-    set_usage_aggregate_metrics(&mut parent, Status::Measured, Some(100), Some(50), Some(0), Some(400), Some(1000), Some(("USD", "composite", "v1", 400)));
-    let mut first = usage_aggregate_record("root-cycle", "child-cycle", Some("child-cycle"), "leaf-a", "reviewer-a", 1, 1, Some(100), Some(300));
-    let mut second = usage_aggregate_record("root-cycle", "child-cycle", Some("child-cycle"), "leaf-b", "reviewer-b", 1, 1, Some(150), Some(250));
-    set_usage_aggregate_metrics(&mut first, Status::Measured, Some(10), Some(5), Some(2), Some(200), Some(100), Some(("USD", "meter", "v1", 300)));
-    set_usage_aggregate_metrics(&mut second, Status::Measured, Some(20), Some(10), Some(3), Some(100), Some(150), Some(("USD", "meter", "v1", 300)));
+    let mut parent = usage_aggregate_record("root-cycle", "root-cycle", None, "parent-seat", "nested", (1, 1), (Some(0), Some(400)));
+    set_usage_aggregate_metrics(&mut parent, Status::Measured, (Some(100), Some(50), Some(0), Some(400), Some(1000)), Some(("USD", "composite", "v1", 400)));
+    let mut first = usage_aggregate_record("root-cycle", "child-cycle", Some("child-cycle"), "leaf-a", "reviewer-a", (1, 1), (Some(100), Some(300)));
+    let mut second = usage_aggregate_record("root-cycle", "child-cycle", Some("child-cycle"), "leaf-b", "reviewer-b", (1, 1), (Some(150), Some(250)));
+    set_usage_aggregate_metrics(&mut first, Status::Measured, (Some(10), Some(5), Some(2), Some(200), Some(100)), Some(("USD", "meter", "v1", 300)));
+    set_usage_aggregate_metrics(&mut second, Status::Measured, (Some(20), Some(10), Some(3), Some(100), Some(150)), Some(("USD", "meter", "v1", 300)));
     set_usage_aggregate_counters(&mut first, Status::Measured, Some(1), Some(0), Some(0), Some(2), Some(6));
     set_usage_aggregate_counters(&mut second, Status::Measured, Some(1), Some(0), Some(0), Some(3), Some(6));
     let aggregate = council::aggregate_usage_records("root-cycle", &[parent, first, second], &[usage_aggregate_child_receipt("parent-seat", "child-cycle")]).unwrap();
@@ -3166,9 +3171,9 @@ fn council_usage_aggregation_separates_concurrent_work_from_wall_elapsed_time() 
 #[test]
 fn council_usage_aggregation_rejects_invalid_child_and_attempt_correlation() {
     use council::CouncilCompositionError as Error;
-    let parent = usage_aggregate_record("root-cycle", "root-cycle", None, "parent-seat", "nested", 1, 1, Some(0), Some(100));
-    let child = usage_aggregate_record("root-cycle", "child-cycle", Some("child-cycle"), "leaf", "leaf-reviewer", 1, 1, Some(10), Some(50));
-    assert!(matches!(council::aggregate_usage_records("root-cycle", &[child.clone()], &[]), Err(Error::CorrelationMismatch("childUsage.childReceipt"))));
+    let parent = usage_aggregate_record("root-cycle", "root-cycle", None, "parent-seat", "nested", (1, 1), (Some(0), Some(100)));
+    let child = usage_aggregate_record("root-cycle", "child-cycle", Some("child-cycle"), "leaf", "leaf-reviewer", (1, 1), (Some(10), Some(50)));
+    assert!(matches!(council::aggregate_usage_records("root-cycle", std::slice::from_ref(&child), &[]), Err(Error::CorrelationMismatch("childUsage.childReceipt"))));
     assert!(matches!(council::aggregate_usage_records("root-cycle", &[parent.clone(), child.clone()], &[usage_aggregate_child_receipt("missing-parent", "child-cycle")]), Err(Error::CorrelationMismatch("childReceipt.parentSeatId"))));
     let mut bad_round = child.clone();
     bad_round.round_id = "root-cycle:1".into();
@@ -3184,14 +3189,14 @@ fn council_usage_aggregation_rejects_invalid_child_and_attempt_correlation() {
 #[test]
 fn council_usage_aggregation_correlates_a_stable_nested_seat_across_root_rounds() {
     use council::CouncilUsageValueStatus as Status;
-    let mut parent_round_one = usage_aggregate_record("root-cycle", "root-cycle", None, "stable-parent", "nested-bot", 1, 1, Some(0), Some(100));
-    let mut parent_round_two = usage_aggregate_record("root-cycle", "root-cycle", None, "stable-parent", "nested-bot", 2, 2, Some(100), Some(250));
-    let mut leaf_round_one = usage_aggregate_record("root-cycle", "child-cycle-one", Some("child-cycle-one"), "leaf-one", "reviewer-one", 1, 1, Some(10), Some(50));
-    let mut leaf_round_two = usage_aggregate_record("root-cycle", "child-cycle-two", Some("child-cycle-two"), "leaf-two", "reviewer-two", 1, 1, Some(110), Some(200));
-    set_usage_aggregate_metrics(&mut parent_round_one, Status::Measured, Some(100), Some(10), Some(0), Some(100), Some(900), None);
-    set_usage_aggregate_metrics(&mut parent_round_two, Status::Measured, Some(200), Some(20), Some(0), Some(150), Some(800), None);
-    set_usage_aggregate_metrics(&mut leaf_round_one, Status::Measured, Some(5), Some(2), Some(1), Some(40), Some(50), None);
-    set_usage_aggregate_metrics(&mut leaf_round_two, Status::Measured, Some(7), Some(3), Some(1), Some(90), Some(100), None);
+    let mut parent_round_one = usage_aggregate_record("root-cycle", "root-cycle", None, "stable-parent", "nested-bot", (1, 1), (Some(0), Some(100)));
+    let mut parent_round_two = usage_aggregate_record("root-cycle", "root-cycle", None, "stable-parent", "nested-bot", (2, 2), (Some(100), Some(250)));
+    let mut leaf_round_one = usage_aggregate_record("root-cycle", "child-cycle-one", Some("child-cycle-one"), "leaf-one", "reviewer-one", (1, 1), (Some(10), Some(50)));
+    let mut leaf_round_two = usage_aggregate_record("root-cycle", "child-cycle-two", Some("child-cycle-two"), "leaf-two", "reviewer-two", (1, 1), (Some(110), Some(200)));
+    set_usage_aggregate_metrics(&mut parent_round_one, Status::Measured, (Some(100), Some(10), Some(0), Some(100), Some(900)), None);
+    set_usage_aggregate_metrics(&mut parent_round_two, Status::Measured, (Some(200), Some(20), Some(0), Some(150), Some(800)), None);
+    set_usage_aggregate_metrics(&mut leaf_round_one, Status::Measured, (Some(5), Some(2), Some(1), Some(40), Some(50)), None);
+    set_usage_aggregate_metrics(&mut leaf_round_two, Status::Measured, (Some(7), Some(3), Some(1), Some(90), Some(100)), None);
     let receipts = [
         usage_aggregate_child_receipt("stable-parent", "child-cycle-one"),
         usage_aggregate_child_receipt("stable-parent", "child-cycle-two"),

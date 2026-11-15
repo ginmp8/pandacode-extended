@@ -1156,9 +1156,12 @@ impl UsageMetricAccumulator {
     }
 }
 
+type UsageRetryAssignmentKey = (String, String, String, u8);
+type UsageRetryAssignmentStats = (CouncilUsageValueStatus, u64, usize);
+
 #[derive(Default)]
 struct UsageRetryAccumulator {
-    by_assignment: BTreeMap<(String, String, String, u8), (CouncilUsageValueStatus, u64, usize)>,
+    by_assignment: BTreeMap<UsageRetryAssignmentKey, UsageRetryAssignmentStats>,
     unknown_records: usize,
 }
 
@@ -1226,9 +1229,12 @@ fn usage_status_rank(status: CouncilUsageValueStatus) -> u8 {
         CouncilUsageValueStatus::CalculatedEstimated => 2, CouncilUsageValueStatus::Unknown => 3 }
 }
 
+type UsageCostGroupKey = (u8, Option<String>, Option<String>, Option<String>);
+type UsageCostGroupStats = (Option<u64>, usize, HashSet<u64>);
+
 #[derive(Default)]
 struct UsageCostAccumulator {
-    totals: BTreeMap<(u8, Option<String>, Option<String>, Option<String>), (Option<u64>, usize, HashSet<u64>)>,
+    totals: BTreeMap<UsageCostGroupKey, UsageCostGroupStats>,
 }
 
 impl UsageCostAccumulator {
@@ -1349,6 +1355,7 @@ pub(super) struct CouncilUsageParentRound {
 /// Aggregate projected rows for one root. Duplicate replays are idempotent; conflicting IDs or
 /// child links fail closed. When child usage exists, its parent composite stays in detail but is
 /// excluded from root totals so the leaf records are counted once.
+#[cfg(test)]
 pub fn aggregate_usage_records(root_cycle_id: &str, records: &[CouncilUsageRecord], child_receipts: &[ChildCouncilReceipt])
     -> std::result::Result<CouncilUsageAggregation, CouncilCompositionError> {
     aggregate_usage_records_with_parent_rounds(root_cycle_id, records, child_receipts, &[])

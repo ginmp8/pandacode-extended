@@ -9262,7 +9262,7 @@ fn artifact_epoch_tracks_recorded_writes_not_dispatch_scheduling() {
 }
 
 #[test]
-fn selected_source_two_phase_rounds_dispatch_after_settlement_and_reach_the_s3_terminal_pass() {
+fn selected_source_two_phase_rounds_require_verified_nested_receipts_for_s3_terminal_pass() {
     use council::SelectedReviewerMode as Mode;
     let cases = [
         ("M2", 0usize, vec![("direct-a", Mode::Direct), ("direct-b", Mode::Direct)]),
@@ -9370,11 +9370,24 @@ fn selected_source_two_phase_rounds_dispatch_after_settlement_and_reach_the_s3_t
         persist_direct_round_outcomes(&state, &root_id, 2);
         let store = state.store.lock().unwrap();
         let team = load(&store, &root_id).unwrap().unwrap();
+        // Synthetic settlement records direct reviewer callbacks, not child
+        // Council completion. A nested root must therefore remain blocked
+        // until its independently verified child receipts are persisted.
+        let nested_unfinished = selected.iter().any(|(_, source)| *source == Mode::Nested);
         assert_eq!(
             team.council_status.as_ref().map(|status| status.state.as_str()),
-            Some("passed"),
-            "{mode} S3 must reach its terminal pass after both phases",
+            Some(if nested_unfinished { "blocked" } else { "passed" }),
+            "{mode} S3 must never treat a synthetic nested parent score as a child Council pass",
         );
+        if nested_unfinished {
+            assert!(!verified_council_pass(&store, &team),
+                "{mode} cannot approve unverified nested child Councils");
+            assert!(native_council_finish_refusal(&store, &team).is_some(),
+                "{mode} must reject finish_team without child review receipts");
+        } else {
+            assert!(verified_council_pass(&store, &team),
+                "{mode} direct-only S3 phase 2 must remain an authenticated pass");
+        }
         assert!(
             s3_phase2_decisions_proven(&store, &team, 2),
             "{mode} every phase-2 seat must retain a native challenge decision",

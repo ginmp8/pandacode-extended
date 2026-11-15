@@ -4338,26 +4338,66 @@ fn nested_m5_s3_admits_native_first_phase_but_denies_premature_approval() {
         &std::sync::atomic::AtomicBool::new(false)).unwrap();
     assert_eq!(pending["completed"], false,
         "S3 cannot pass using only first-phase native root and child callbacks");
+    {
+        let store = state.store.lock().unwrap();
+        let saved = load(&store, &sid).unwrap().unwrap();
+        let children = child_council::inspect(&store, &saved).unwrap();
+        assert_eq!(children.len(), 1);
+        assert_eq!(children[0].leaf_attempts.len(), 4,
+            "M5 must issue a fresh child challenge only after root and child phase one");
+        assert_eq!(children[0].leaf_attempts.iter().filter(|leaf| leaf.round == 2).count(), 2);
+        assert!(children[0].verified_child_receipt.is_some(),
+            "first-wave child results require native callback evidence");
+        assert!(children[0].verified_challenge_receipt.is_none(),
+            "pending S3 challenger sessions cannot form a verified receipt");
+        assert!(children[0].verified_escalation_receipt.is_none(),
+            "an S3 first-wave receipt is never an S2 escalation receipt");
+        assert!(council::status_for_authenticated_children(
+            &saved, &child_council::verified_parent_seats(&store, &saved).unwrap().unwrap()
+        ).is_none(), "S3 must not reuse the S1 terminal gate");
+        assert!(!verified_council_pass(&store, &saved));
+        let second = CouncilSeat { round: 2, lens: "correctness".into(), score: None,
+            started_at: 0, closed_by_selection: false, reported_severe_finding: false,
+            reported_conflict: false };
+        assert!(council::reviewer_source_for(&saved, &second, None, None)
+            .unwrap_err().contains("child_council_unavailable"),
+            "unimplemented root S3 challengers stay denied");
+    }
+    let (replayed, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"M5 challengers still running"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(replayed["completed"], false);
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        assert_eq!(child_council::inspect(&store, &root).unwrap()[0].leaf_attempts.len(), 4,
+            "a reentrant finish cannot dispatch duplicate second-phase leaves");
+    }
+    for _ in 0..2 {
+        let leaf = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&leaf.sid, "assistant",
+                "Independent fresh child challenge.\nCouncil score: 9.6/10").unwrap();
+        }
+        completed_state(&state, &leaf.sid, Some(&leaf.admission), true, false, &mut |_| {});
+    }
+    let (still_pending, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Verify M5 child challenge"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(still_pending["completed"], false,
+        "an M5 child challenge cannot replace missing root S3 challengers");
     let store = state.store.lock().unwrap();
     let saved = load(&store, &sid).unwrap().unwrap();
     let children = child_council::inspect(&store, &saved).unwrap();
-    assert_eq!(children.len(), 1);
-    assert_eq!(children[0].leaf_attempts.len(), 2);
-    assert!(children[0].verified_child_receipt.is_some(),
-        "S3 first-wave children must carry authentic native callback evidence");
-    assert!(children[0].verified_escalation_receipt.is_none(),
-        "an S3 first-wave receipt is never a second-phase challenge receipt");
-    assert!(council::status_for_authenticated_children(
-        &saved, &child_council::verified_parent_seats(&store, &saved).unwrap().unwrap()
-    ).is_none(), "S3 must not reuse the S1 single-phase terminal gate");
-    assert!(!verified_council_pass(&store, &saved));
-    let second = CouncilSeat { round: 2, lens: "correctness".into(), score: None,
-        started_at: 0, closed_by_selection: false, reported_severe_finding: false,
-        reported_conflict: false };
-    assert!(council::reviewer_source_for(&saved, &second, None, None)
-        .unwrap_err().contains("child_council_unavailable"),
-        "unimplemented nested phase-two challenger admission stays denied");
-}
+    assert_eq!(children[0].leaf_attempts.len(), 4);
+    let receipt = children[0].verified_challenge_receipt.as_ref()
+        .expect("S3 child challenge must persist authentic second-wave callbacks");
+    assert_eq!(receipt.phase_two.leaf_worker_ids.len(), 2);
+    assert!(receipt.phase_two.lowest_score >= 9.5);
+    assert!(!verified_council_pass(&store, &saved),
+        "child challenge evidence is not an independent root phase-two verdict");
+
 
 #[test]
 fn nested_m5_parallel_terminal_requires_real_root_and_child_callbacks() {

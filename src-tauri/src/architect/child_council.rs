@@ -797,7 +797,7 @@ fn challenge_receipt(
 ) -> Result<Option<VerifiedChildChallengeReceipt>> {
     let Some(config) = root.config.council.as_ref() else { return Ok(None) };
     if config.strategy != super::council::CouncilExecutionStrategy::TwoPhase
-        || config.mode() != "m4"
+        || !matches!(config.mode(), "m4" | "m5" | "m6" | "m7")
         || !root_artifact_revision(store, root, false)?
         || !super::council_evidence_is_current(store, root)
         || !super::council_evidence_is_current(store, child)
@@ -1366,6 +1366,28 @@ pub(super) fn fresh_s2_root_reviewers(store: &Store, root: &TeamSnapshot, config
     direct.len() == config.reviewer_bot_ids.len() && automatic == config.automatic_reviewers
 }
 
+/// Admit S3 child challenges only after every explicitly enabled root and child
+/// source has passed its native, independently authenticated first phase.
+/// A read-only S1 projection never changes the stored S3 policy or issues a
+/// terminal verdict; phase-two root challenges remain separately gated.
+fn eligible_s3_child_challenge(store: &Store, root: &TeamSnapshot) -> Result<bool> {
+    let Some(config) = root.config.council.as_ref() else { return Ok(false) };
+    if config.strategy != super::council::CouncilExecutionStrategy::TwoPhase
+        || config.nested_bot_reviewers.is_empty()
+        || !super::council_evidence_is_current(store, root)
+    {
+        return Ok(false);
+    }
+    let Some(children) = verified_parent_seats(store, root)? else { return Ok(false) };
+    let mut first_phase = root.clone();
+    first_phase.config.council.as_mut()
+        .ok_or("child_council_stale: S3 root policy is missing.")?
+        .strategy = super::council::CouncilExecutionStrategy::Parallel;
+    Ok(super::council::status_for_authenticated_children(&first_phase, &children)
+        .is_some_and(|status| status.state == "passed" && !status.stale)
+        && super::mixed_native_authority_current(store, &first_phase))
+}
+
 /// Trusted root-only transition: allocate fresh read-only reviewer sessions
 /// after the root's actual writing workers settle. No bot conversation, prompt
 /// claim or persisted child reservation can request this operation.
@@ -1478,13 +1500,10 @@ pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
             created = true;
         }
     }
-    // M4/S3 has no root reviewer source to fabricate. Once both child
-    // composite first-phase seats are authenticated, admit fresh leaf sessions
-    // in those same selected child Councils. This is admission only: no
-    // second-phase score or pending worker can authorize terminal acceptance.
-    if config.strategy == super::council::CouncilExecutionStrategy::TwoPhase
-        && config.mode() == "m4"
-        && verified_parent_seats(store, root)?.is_some()
+    // Hierarchical S3 creates fresh challengers only inside already selected
+    // child Councils, after the real root and child first phase has passed.
+    // This never adds a reviewer source, a grandchild, or a phantom root vote.
+    if eligible_s3_child_challenge(store, root)?
     {
         for choice in &config.nested_bot_reviewers {
             let record = read(store, root, choice)?

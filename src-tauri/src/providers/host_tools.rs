@@ -175,6 +175,37 @@ impl HostTools {
         });
     }
 }
+
+/// The native read-only provider boundary may carry this one app-owned
+/// SuperAgent executor tool. Its handler independently rechecks the durable
+/// user grant before every write; no shell, MCP or other host tool can share
+/// this exception.
+pub(super) fn is_superagent_write_only(host: &ToolHost) -> bool {
+    if host.tools.len() != 1 || !host.approval_tools.is_empty() {
+        return false;
+    }
+    let spec = &host.tools[0];
+    let properties = &spec["inputSchema"]["properties"];
+    let required = spec["inputSchema"]["required"].as_array();
+    let names = required.map(|items| {
+        items.iter().filter_map(Value::as_str).collect::<HashSet<_>>()
+    });
+    let grant_ids = properties["grantId"]["enum"].as_array();
+    let paths = properties["path"]["enum"].as_array();
+    spec["type"] == "function"
+        && spec["name"] == crate::superagent::write_grants::TOOL_NAME
+        && spec["inputSchema"]["type"] == "object"
+        && spec["inputSchema"]["additionalProperties"] == false
+        && properties["grantId"]["type"] == "string"
+        && grant_ids.is_some_and(|ids| ids.len() == 1 && ids[0].as_str().is_some_and(|id| !id.is_empty()))
+        && properties["path"]["type"] == "string"
+        && paths.is_some_and(|paths| !paths.is_empty() && paths.len() <= crate::superagent::write_grants::MAX_PATHS
+            && paths.iter().all(|path| path.as_str().is_some_and(|value| !value.is_empty())))
+        && properties["content"]["type"] == "string"
+        && properties["content"]["maxLength"] == crate::superagent::write_grants::MAX_CONTENT_BYTES
+        && names.as_ref().is_some_and(|names| names.len() == 3
+            && names.contains("grantId") && names.contains("path") && names.contains("content"))
+}
 /// Only app-owned callbacks create this envelope. Keep image bytes out of tool
 /// activity text and render them as protocol image blocks, not a base64 transcript.
 pub(super) fn image_content(value: &Value) -> Result<Option<(String, String, String)>, String> {

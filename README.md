@@ -271,8 +271,7 @@ Voice dictation inserts a draft without sending it. Transcribe on your computer 
   Claude Code also stops fetching remote feature flags (it uses its defaults)
   and can't take sessions started remotely on this computer.
 
-A few automatic checks send no personal data — just plain requests for public
-information:
+These requests include automatic checks and optional user-triggered features:
 
 | What | Where | How often |
 | --- | --- | --- |
@@ -286,6 +285,7 @@ information:
 | Cloud agents (optional): the task's checkout, prompt and harness login go to the machine you chose; PandaCode checks on its active runs | The cloud provider you connected | Only for tasks you start on a cloud provider; while a run is active and at launch to re-attach |
 | Model routing profiler (optional): `model.int8.onnx` and `tokenizer.json`, from a pinned commit, verified by SHA-256 | `raw.githubusercontent.com` | Once, the first time you turn on a team (with routing on) or click Download or Route in Settings → Agents → Model routing; never at launch, and never on macOS older than 13.4 or on Intel Mac, x86_64 Linux and x86_64 Windows builds |
 | PandaCode Connect (optional): GitHub sign-in, then the relay that forwards your devices' end-to-end encrypted messages | `github.com`, the PandaCode relay | Only after you sign in under Settings → Connections → Remote access; nothing before |
+| SuperAgent GitHub Observe (optional): your signed-in `gh` CLI requests the exact repository and issue/PR number. GitHub returns thread identity, event actor and stable event ID; for pull request reviews, `submittedAt` is checked transiently to exclude pending drafts. Titles, bodies, comment text and review text are not requested or retained. A local SQLite receipt keeps repository, actor, event kind, exact thread, ID/cursor, decision, source revision and record time (up to 10,000 receipts per source; removed with app data) | `api.github.com/graphql`, through your local `gh` CLI | Only when you click **Fetch once** beside an already-linked thread whose source is in Observe; one latest matching event per click, no polling. Off/revoked sources make no request |
 | Push notifications (optional, mobile app): the relay sends a generic alert ("A task finished") with a `pandacode://inbox` link to your phone's device token, never task content | Apple Push Notification service, Firebase Cloud Messaging (sent by the PandaCode relay) | Only after you allow notifications in the mobile app while signed in to Connect |
 | Voice input with a speech service (optional): recorded audio, selected model and optional language, authenticated with your speech key | The transcription endpoint you configure (OpenAI, Groq, Mistral or your local/custom server) | Only when a recording stops with that service chosen: Stop, Enter, Transcribe recording, Retry, switching threads, or anything else that closes the prompt box while PandaCode keeps running; with **This device**, audio never leaves your computer |
 | Local speech models (optional): the model file you pick and, with the first one, the Silero voice-activity model (about 1 MB), from a pinned revision, verified by SHA-256 | `huggingface.co`, `*.huggingface.co` and the download CDN `*.hf.co` | Only when you click Download in Settings → Voice; nothing at launch, while browsing models or while dictating |

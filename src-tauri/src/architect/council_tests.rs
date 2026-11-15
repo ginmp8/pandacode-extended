@@ -3942,6 +3942,96 @@ fn nested_child_required_criteria_are_proved_by_native_scored_leaf_lenses() {
 
 
 #[test]
+fn nested_child_required_criteria_take_priority_over_optional_suggestions() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["security-child", "architecture-child"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.criteria_source = council::CouncilCriteriaSource::Hybrid;
+        config.criteria = vec![
+            council::CouncilCriterion {
+                id: "optional".into(), lens: "Optional architecture detail".into(),
+                required: false, target: 9.0, evidence_required: false,
+            },
+            council::CouncilCriterion {
+                id: "security".into(), lens: "Security requirements".into(),
+                required: true, target: 9.5, evidence_required: false,
+            },
+            council::CouncilCriterion {
+                id: "reliability".into(), lens: "Reliability requirements".into(),
+                required: true, target: 9.5, evidence_required: false,
+            },
+        ];
+        config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
+            .map(|bot| council::CouncilNestedReviewer {
+                bot_id: (*bot).into(), child_reviewers: 2,
+                child_target: 9.5, child_max_rounds: 2,
+            }).collect();
+        config.validate().unwrap();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid,
+        "Review every required criterion before optional suggestions", None, None).unwrap();
+    let (pending, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Admit native child reviewers for both required criteria"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let children = child_council::inspect(&store, &root).unwrap();
+        assert_eq!(children.len(), 2);
+        for child in children {
+            let lenses = child.leaf_attempts.iter()
+                .map(|attempt| attempt.lens.as_str()).collect::<Vec<_>>();
+            assert_eq!(lenses, ["Security requirements", "Reliability requirements"],
+                "optional criteria may not consume seats reserved for required criteria");
+        }
+    }
+    for _ in 0..4 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                "Fresh independent criterion review.\nCouncil score: 9.6/10").unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    }
+    let (finished, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Every required child criterion settled"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(finished["completed"], true);
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    assert!(verified_council_pass(&store, &root));
+    let children = child_council::verified_parent_seats(&store, &root).unwrap().unwrap();
+    assert_eq!(children.len(), 2);
+    for child in children {
+        let covered = child.criterion_evidence.iter()
+            .map(|criterion| criterion.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(covered, ["security", "reliability"]);
+        assert!(child.criterion_evidence.iter().all(|criterion|
+            criterion.lowest_score == 9.6 && criterion.leaf_worker_ids.len() == 1));
+    }
+}
+
+#[test]
 fn child_only_parallel_root_finishes_from_real_revalidated_composite_seats() {
     let (state, sid) = state_fixture();
     {

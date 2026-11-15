@@ -996,7 +996,12 @@ fn issue_leaf_wave(
     let config = root.config.council.as_ref().ok_or("Council is off.")?;
     let session = store.session(&record.child_session_id)?;
     super::validate_worker_role(&session.provider, true)?;
-    let lenses: Vec<String> = config.criteria.iter().map(|criterion| criterion.lens.clone()).collect();
+    // A valid child may have only enough seats for the required criteria.
+    // Optional suggestions must never displace an immutable user-required lens.
+    let lenses: Vec<String> = config.criteria.iter()
+        .filter(|criterion| criterion.required)
+        .chain(config.criteria.iter().filter(|criterion| !criterion.required))
+        .map(|criterion| criterion.lens.clone()).collect();
     for index in 0..choice.child_reviewers {
         let lens = lenses.get(index).cloned().unwrap_or_else(|| format!("Child review {}", index + 1));
         let mut assignment = format!(

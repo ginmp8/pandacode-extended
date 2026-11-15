@@ -15,6 +15,8 @@ type TeamSnapshot = {
 };
 type Activity = { id:number; kind:string; detail:string; at:number };
 type Assignment = { id:string; botId:string; sessionId:string; attempt:number; state:string };
+type ManifestPreset = { name:string; coordinatorBotId:string; workerBotId:string;
+  workerBotIds:string[]; reviewerBotIds:string[]; projectId:string; councilRequired:boolean };
 const activity = new Map<string,Activity[]>(), assignments = new Map<string,Assignment[]>();
 const PREVIEW_OBSERVE_EVENT_KINDS = [
   'issues.opened','issues.edited','issue_comment.created','pull_request.opened',
@@ -64,6 +66,56 @@ export async function invokeSuperagent<T>(
   const validCouncilReviewers=(reviewerBotIds:string[],councilRequired:boolean):void=>{
     if(councilRequired&&(reviewerBotIds.length<2||reviewerBotIds.length>8))
       throw Error('Council-required Teams need between two and eight selected native reviewers.');
+  };
+  // Portable names resolve to exactly one live Bot, like the native manifest.
+  const portableBot=(name:unknown):Bot=>{
+    if(typeof name!=='string'||!name.trim())throw Error('Invalid portable bot reference.');
+    const matches=bots.filter(bot=>bot.name.toLowerCase()===name.toLowerCase());
+    if(matches.length!==1)throw Error('Invalid portable bot reference.');
+    return matches[0];
+  };
+  const manifestV1Preset=(preset:any):ManifestPreset=>{
+    if(!preset||typeof preset!=='object')throw Error('Invalid manifest.');
+    if(preset?.autonomy!=='off'||preset?.council?.enabled||preset?.maxConcurrentTasks!==1)
+      throw Error('Unsupported policy.');
+    const coordinator=portableBot(preset.coordinatorBot),worker=portableBot(preset.workerBot);
+    if(coordinator.id===worker.id)throw Error('Invalid portable bot reference.');
+    return {name:preset.name,coordinatorBotId:coordinator.id,workerBotId:worker.id,
+      workerBotIds:[worker.id],reviewerBotIds:[],projectId:worker.projectId,councilRequired:false};
+  };
+  const optionalBoolean=(value:unknown):boolean=>{
+    if(value===undefined)return false;
+    if(typeof value!=='boolean')throw Error('Invalid manifest policy.');
+    return value;
+  };
+  const manifestV2Preset=(preset:any):ManifestPreset=>{
+    if(!preset||typeof preset!=='object')throw Error('Invalid manifest.');
+    const policy=preset.policy;
+    if(!policy||typeof policy!=='object'||policy.autonomy!=='off'||
+      policy.maxConcurrentTasks!==1||policy.maxAttemptsPerAssignment!==2)
+      throw Error('Unsupported policy.');
+    // Native normalizes either wire flag to the required Council gate.
+    const councilRequired=optionalBoolean(policy.councilRequired)||
+      optionalBoolean(policy.councilEnabled);
+    const workerNames=preset.workers,reviewerNames=preset.reviewers??[];
+    if(!Array.isArray(workerNames)||workerNames.length<1||workerNames.length>16)
+      throw Error('A Team needs 1–16 workers.');
+    if(!Array.isArray(reviewerNames)||reviewerNames.length>8)
+      throw Error('A Team needs at most 8 reviewers.');
+    const coordinator=portableBot(preset.coordinatorBot);
+    const workers=(workerNames as unknown[]).map(portableBot);
+    const reviewers=(reviewerNames as unknown[]).map(portableBot);
+    const ids=[coordinator.id,...workers.map(bot=>bot.id),...reviewers.map(bot=>bot.id)];
+    if(new Set(ids).size!==ids.length)throw Error('A bot can have only one role in a Team.');
+    const projectId=workers[0].projectId;
+    if(workers.some(bot=>bot.projectId!==projectId))
+      throw Error('All Team workers must share the same project.');
+    const distinctReviewers=new Set(reviewers.map(bot=>bot.id)).size;
+    if(councilRequired&&(distinctReviewers<2||distinctReviewers>8))
+      throw Error(`Council-required Team '${String(preset.name)}' needs between two and eight distinct reviewers.`);
+    return {name:preset.name,coordinatorBotId:coordinator.id,workerBotId:workers[0].id,
+      workerBotIds:workers.map(bot=>bot.id),reviewerBotIds:reviewers.map(bot=>bot.id),
+      projectId,councilRequired};
   };
   const makeTeamSnapshot=(config:Config):TeamSnapshot=>({
     snapshotVersion:1,provenance:'native',orchestrationId:config.id,teamVersion:config.teamVersion,
@@ -219,37 +271,61 @@ export async function invokeSuperagent<T>(
       break;
     }
     case 'superagent_manifest_export':{
-      value={schemaVersion:1,orchestrations:[...configs.values()].map(c=>({
-        name:c.name,coordinatorBot:find(c.coordinatorBotId).name,workerBot:find(c.workerBotId).name,
-        enabled:c.enabled,autonomy:'off',maxConcurrentTasks:1,maxAttemptsPerAssignment:2,
-        council:{enabled:false}
-      }))};break;
+      const presets=[...configs.values()];
+      // Native v2 is required to carry a required Council gate truthfully.
+      // All-off stores keep the original v1 shape, which never enables Council.
+      value=presets.some(c=>c.councilRequired)
+        ? {schemaVersion:2,orchestrations:presets.map(c=>({
+            name:c.name,coordinatorBot:find(c.coordinatorBotId).name,
+            workers:c.workerBotIds.map(id=>find(id).name),
+            reviewers:c.reviewerBotIds.map(id=>find(id).name),
+            policy:{autonomy:'off',maxConcurrentTasks:1,maxAttemptsPerAssignment:2,
+              councilEnabled:c.councilRequired,councilRequired:c.councilRequired},
+          }))}
+        : {schemaVersion:1,orchestrations:presets.map(c=>({
+            name:c.name,coordinatorBot:find(c.coordinatorBotId).name,
+            workerBot:find(c.workerBotId).name,enabled:c.enabled,
+            autonomy:'off',maxConcurrentTasks:1,maxAttemptsPerAssignment:2,
+            council:{enabled:false},
+          }))};
+      break;
     }
     case 'superagent_manifest_preview':
     case 'superagent_manifest_import':{
-      const doc=args.document;if(doc?.schemaVersion!==1||!Array.isArray(doc.orchestrations))throw Error('Invalid manifest.');
-      const pending:string[]=[],unchanged:string[]=[];
-      for(const preset of doc.orchestrations){
+      const doc=args.document;
+      if(!doc||typeof doc!=='object'||!Array.isArray(doc.orchestrations)||
+        (doc.schemaVersion!==1&&doc.schemaVersion!==2))throw Error('Invalid manifest.');
+      const presets:ManifestPreset[]=doc.orchestrations.map((preset:any)=>
+        doc.schemaVersion===1?manifestV1Preset(preset):manifestV2Preset(preset));
+      const pending:ManifestPreset[]=[],unchanged:string[]=[],names=new Set<string>();
+      for(const preset of presets){
+        if(typeof preset.name!=='string'||!preset.name.trim()||names.has(preset.name.toLowerCase()))
+          throw Error('Invalid or duplicate orchestration name in manifest.');
+        names.add(preset.name.toLowerCase());
         const found=configName(preset.name);
-        if(preset.autonomy!=='off'||preset.council?.enabled||preset.maxConcurrentTasks!==1)throw Error('Unsupported policy.');
-        const a=bots.filter(b=>b.name.toLowerCase()===String(preset.coordinatorBot).toLowerCase());
-        const b=bots.filter(b=>b.name.toLowerCase()===String(preset.workerBot).toLowerCase());
-        if(a.length!==1||b.length!==1||a[0].id===b[0].id)throw Error('Invalid portable bot reference.');
-        if(found){if(found.coordinatorBotId!==a[0].id||found.workerBotId!==b[0].id)throw Error('Conflicting preset.');
+        if(found){
+          const sameRoles=found.coordinatorBotId===preset.coordinatorBotId&&
+            found.workerBotIds.length===preset.workerBotIds.length&&
+            found.workerBotIds.every((id,index)=>id===preset.workerBotIds[index])&&
+            found.reviewerBotIds.length===preset.reviewerBotIds.length&&
+            found.reviewerBotIds.every((id,index)=>id===preset.reviewerBotIds[index]);
+          if(!sameRoles||found.councilRequired!==preset.councilRequired)
+            throw Error('Conflicting preset.');
           unchanged.push(preset.name);
-        }else pending.push(preset.name);
+        }else pending.push(preset);
       }
       if(command==='superagent_manifest_import'){
         if(args.confirmed!==true)throw Error('Confirmation required.');
-        for(const name of pending){
-          const preset=doc.orchestrations.find((item:any)=>item.name===name);
-          const a=bots.find(b=>b.name===preset.coordinatorBot)!,b=bots.find(b=>b.name===preset.workerBot)!;
-          const c:Config={id:crypto.randomUUID(),name,coordinatorBotId:a.id,workerBotId:b.id,
-            workerBotIds:[b.id],reviewerBotIds:[],teamVersion:1,
-            projectId:b.projectId,enabled:false,policyRevision:1,councilRequired:false};configs.set(c.id,c);
+        for(const preset of pending){
+          const c:Config={id:crypto.randomUUID(),name:preset.name,
+            coordinatorBotId:preset.coordinatorBotId,workerBotId:preset.workerBotId,
+            workerBotIds:[...preset.workerBotIds],reviewerBotIds:[...preset.reviewerBotIds],
+            teamVersion:1,projectId:preset.projectId,enabled:false,policyRevision:1,
+            councilRequired:preset.councilRequired};configs.set(c.id,c);
         }
-        value={created:pending,unchanged};
-      }else value={wouldCreate:pending,unchanged,importedPresetsDisabled:true};
+        value={created:pending.map(preset=>preset.name),unchanged};
+      }else value={wouldCreate:pending.map(preset=>preset.name),unchanged,
+        importedPresetsDisabled:true};
       break;
     }
     default: throw Error('Unknown preview SuperAgent command: '+command);

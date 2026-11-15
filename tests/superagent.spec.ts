@@ -440,7 +440,7 @@ test('Team Builder saves a future-only Team version for an enabled Team with Tic
 
   const selected=host.getByRole('region',{name:'Selected orchestration',exact:true});
   await expect(host.locator('.sa-list .sa-item .sa-counts')).toHaveText('1 tasks · 1 running · 0 blocked');
-  await expect(host.getByText('Active Ticket')).toBeVisible();
+  await expect(host.getByText('Active Ticket', {exact:true})).toBeVisible();
   await expect(host.getByRole('button',{name:'Edit Team'})).toBeVisible();
   await host.getByRole('button',{name:'Edit Team'}).click();
   const edit=selected.locator('form[data-sa-form="edit"]');
@@ -463,7 +463,7 @@ test('Team Builder saves a future-only Team version for an enabled Team with Tic
       workerBotId:'worker-one',councilRequired:false,
     },
   }}]);
-  await expect(host.getByText('Active Ticket')).toBeVisible();
+  await expect(host.getByText('Active Ticket', {exact:true})).toBeVisible();
 });
 
 test('native SuperAgent clears tickets when switching presets after a failed read', async ({ page }) => {
@@ -1580,4 +1580,93 @@ test('Preview SuperAgent round-trips required and off Council policies with revi
   expect(result.tooFewOnUpdate).toContain('between two and eight');
   expect(result.offPolicy).toMatchObject({councilRequired:false,councilEnabled:false});
   expect(result.requiredPolicy).toMatchObject({councilRequired:true,councilEnabled:true});
+});
+
+test('Preview manifest round-trip preserves required Council and reviewer roles', async ({page}) => {
+  await page.goto('/?bots=sample');
+  const bots=[
+    {id:'coordinator',name:'Coordinator',paused:false,projectId:'preview-project'},
+    {id:'worker',name:'Worker',paused:false,projectId:'preview-project'},
+    {id:'reviewer-one',name:'Reviewer One',paused:false,projectId:'preview-project'},
+    {id:'reviewer-two',name:'Reviewer Two',paused:false,projectId:'preview-project'},
+  ];
+  const v1=await page.evaluate(async bots=>{
+    const {invokeSuperagent}=await import('/src/preview-superagent.ts');
+    const listBots=async()=>bots;
+    await invokeSuperagent('superagent_create',{input:{name:'Preview Council Off',
+      coordinatorBotId:'coordinator',workerBotId:'worker',workerBotIds:['worker'],
+      reviewerBotIds:['reviewer-one'],councilRequired:false}},listBots);
+    return await invokeSuperagent<Record<string,any>>('superagent_manifest_export',{},listBots);
+  },bots);
+  expect(v1.schemaVersion).toBe(1);
+  expect(v1.orchestrations).toEqual([{name:'Preview Council Off',coordinatorBot:'Coordinator',
+    workerBot:'Worker',enabled:false,autonomy:'off',maxConcurrentTasks:1,
+    maxAttemptsPerAssignment:2,council:{enabled:false}}]);
+
+  const exported=await page.evaluate(async bots=>{
+    const {invokeSuperagent}=await import('/src/preview-superagent.ts');
+    const listBots=async()=>bots;
+    await invokeSuperagent('superagent_create',{input:{name:'Preview Council Required',
+      coordinatorBotId:'coordinator',workerBotId:'worker',workerBotIds:['worker'],
+      reviewerBotIds:['reviewer-one','reviewer-two'],councilRequired:true}},listBots);
+    return await invokeSuperagent<Record<string,any>>('superagent_manifest_export',{},listBots);
+  },bots);
+  expect(exported.schemaVersion).toBe(2);
+  const presets=exported.orchestrations as Array<Record<string,any>>;
+  expect(presets.find(preset=>preset.name==='Preview Council Required')).toEqual({
+    name:'Preview Council Required',coordinatorBot:'Coordinator',workers:['Worker'],
+    reviewers:['Reviewer One','Reviewer Two'],
+    policy:{autonomy:'off',maxConcurrentTasks:1,maxAttemptsPerAssignment:2,
+      councilEnabled:true,councilRequired:true},
+  });
+  expect(presets.find(preset=>preset.name==='Preview Council Off')).toEqual({
+    name:'Preview Council Off',coordinatorBot:'Coordinator',workers:['Worker'],
+    reviewers:['Reviewer One'],
+    policy:{autonomy:'off',maxConcurrentTasks:1,maxAttemptsPerAssignment:2,
+      councilEnabled:false,councilRequired:false},
+  });
+
+  // Reloading discards the in-memory preview store, so the import is a fresh store.
+  await page.reload();
+  const restored=await page.evaluate(async ({bots,exported})=>{
+    const {invokeSuperagent}=await import('/src/preview-superagent.ts');
+    const listBots=async()=>bots;
+    const preview=await invokeSuperagent<Record<string,any>>('superagent_manifest_preview',
+      {document:exported},listBots);
+    const imported=await invokeSuperagent<Record<string,any>>('superagent_manifest_import',
+      {document:exported,confirmed:true},listBots);
+    const configs=await invokeSuperagent<Array<Record<string,any>>>('superagent_list',{},listBots);
+    const requiredConfig=configs.find(config=>config.name==='Preview Council Required')!;
+    await invokeSuperagent('superagent_set_enabled',{orchestrationId:requiredConfig.id,
+      expectedRevision:requiredConfig.policyRevision,enabled:true},listBots);
+    const ticket=await invokeSuperagent<{id:string}>('superagent_submit',{
+      orchestrationId:requiredConfig.id,objective:'Preview restored Council'},listBots);
+    const snapshot=await invokeSuperagent<Record<string,any>>('superagent_snapshot',
+      {ticketId:ticket.id},listBots);
+    const invalid=structuredClone(exported);
+    const required=(invalid.orchestrations as Array<Record<string,any>>)
+      .find(preset=>preset.name==='Preview Council Required')!;
+    required.reviewers=['Reviewer One'];
+    let error='';
+    try {
+      await invokeSuperagent('superagent_manifest_preview',{document:invalid},listBots);
+    } catch(cause) { error=cause instanceof Error?cause.message:String(cause); }
+    return {preview,imported,configs,error,
+      requiredPolicy:snapshot.teamSnapshot.policy,
+      requiredReviewers:snapshot.teamSnapshot.reviewerBotIds};
+  },{bots,exported});
+  expect(restored.preview).toEqual({wouldCreate:['Preview Council Off','Preview Council Required'],
+    unchanged:[],importedPresetsDisabled:true});
+  expect(restored.imported).toEqual({created:['Preview Council Off','Preview Council Required'],
+    unchanged:[]});
+  const requiredConfig=restored.configs.find(config=>config.name==='Preview Council Required')!;
+  expect(requiredConfig).toMatchObject({coordinatorBotId:'coordinator',workerBotId:'worker',
+    workerBotIds:['worker'],reviewerBotIds:['reviewer-one','reviewer-two'],
+    councilRequired:true,enabled:false});
+  const offConfig=restored.configs.find(config=>config.name==='Preview Council Off')!;
+  expect(offConfig).toMatchObject({coordinatorBotId:'coordinator',workerBotId:'worker',
+    workerBotIds:['worker'],reviewerBotIds:['reviewer-one'],councilRequired:false,enabled:false});
+  expect(restored.requiredPolicy).toMatchObject({councilEnabled:true,councilRequired:true});
+  expect(restored.requiredReviewers).toEqual(['reviewer-one','reviewer-two']);
+  expect(restored.error).toContain('between two and eight distinct reviewers');
 });

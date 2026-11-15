@@ -802,6 +802,253 @@ pub fn create_pull_request(root: &Path, title: &str, body: &str, base: &str, hea
     })
 }
 
+const DRAFT_PR_BODY_LIMIT: usize = 8 * 1024;
+
+fn valid_draft_pr_repository(repository: &str) -> bool {
+    if repository.len() > 200 {
+        return false;
+    }
+    let mut parts = repository.split('/');
+    let owner = parts.next().unwrap_or_default();
+    let name = parts.next().unwrap_or_default();
+    let valid_component = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+            })
+    };
+    parts.next().is_none() && valid_component(owner) && valid_component(name)
+}
+
+fn valid_draft_pr_branch(branch: &str) -> bool {
+    !branch.is_empty()
+        && branch.len() <= 200
+        && !branch.starts_with('-')
+        && !branch.ends_with('.')
+        && !branch.ends_with('/')
+        && !branch.contains("..")
+        && !branch.contains("//")
+        && !branch.contains("@{")
+        && !branch.bytes().any(|byte| {
+            !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/'))
+        })
+}
+
+fn encode_path_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn branch_sha(
+    root: &Path,
+    repository: &str,
+    branch: &str,
+    run_gh: &mut impl FnMut(&Path, &[&str], Duration) -> Result<Capture, String>,
+) -> Result<String, String> {
+    let endpoint = format!(
+        "repos/{repository}/branches/{}",
+        encode_path_component(branch)
+    );
+    let value = run_gh(root, &["api", &endpoint], TIMEOUT).and_then(|capture| json(&capture))?;
+    let name = text(&value, "name");
+    let sha = value
+        .get("commit")
+        .map(|commit| text(commit, "sha"))
+        .unwrap_or_default();
+    if name != branch
+        || !(40..=64).contains(&sha.len())
+        || !sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("GitHub did not verify the exact branch in the selected repository.".into());
+    }
+    Ok(sha)
+}
+
+/// Revalidate the Ticket project's actual repository and pushed head. The base
+/// must be an existing branch in that same repository. This function only
+/// performs reads; it never pushes or creates a branch.
+pub(crate) fn verify_draft_pull_request_target(
+    root: &Path,
+    repository: &str,
+    head: &str,
+    base: &str,
+) -> Result<(), String> {
+    let mut run_gh = |root: &Path, args: &[&str], timeout| run_gh(root, args, timeout);
+    verify_draft_pull_request_target_with(root, repository, head, base, &mut run_gh)
+}
+
+pub(crate) fn verify_draft_pull_request_target_with(
+    root: &Path,
+    repository: &str,
+    head: &str,
+    base: &str,
+    run_gh: &mut impl FnMut(&Path, &[&str], Duration) -> Result<Capture, String>,
+) -> Result<(), String> {
+    if !valid_draft_pr_branch(head) || !valid_draft_pr_branch(base) || head == base {
+        return Err("Choose distinct valid head and base branches.".into());
+    }
+    if !valid_draft_pr_repository(repository) {
+        return Err("Provide one exact GitHub repository in owner/name form.".into());
+    }
+
+    let status = crate::workspace::git_status(root)?;
+    if !status.is_repo || status.branch != head {
+        return Err("The head must be the active Ticket worker's current repository branch.".into());
+    }
+    let local_head = crate::workspace::checked(crate::workspace::run_git_bounded(
+        root,
+        &["rev-parse", "HEAD"],
+        256,
+        false,
+        Duration::from_secs(10),
+    )?)?;
+    let local_head = String::from_utf8(local_head.bytes)
+        .map_err(|_| "Git returned an unreadable local head commit.")?;
+    let local_head = local_head.trim();
+    if !(40..=64).contains(&local_head.len())
+        || !local_head.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("Git did not return an exact local head commit.".into());
+    }
+
+    let remote = run_gh(
+        root,
+        &["repo", "view", "--json", "nameWithOwner,defaultBranchRef,url"],
+        TIMEOUT,
+    )
+    .and_then(|capture| json(&capture))?;
+    if text(&remote, "nameWithOwner") != repository {
+        return Err("The repository must match the active Ticket project's GitHub remote.".into());
+    }
+    let pushed_head = branch_sha(root, repository, head, run_gh)?;
+    if pushed_head != local_head {
+        return Err("The active Ticket head is not pushed at its current commit.".into());
+    }
+    branch_sha(root, repository, base, run_gh)?;
+    Ok(())
+}
+
+/// Create one draft PR through GitHub's API. Passing a branch name to `gh pr
+/// create` may push it implicitly, so this bounded adapter only invokes the
+/// API after the caller has verified that the head already exists remotely.
+pub(crate) fn create_draft_pull_request(
+    root: &Path,
+    repository: &str,
+    head: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+) -> Result<(), String> {
+    let mut run_gh = |root: &Path, args: &[&str], timeout| run_gh(root, args, timeout);
+    create_draft_pull_request_with(root, repository, head, base, title, body, &mut run_gh)
+}
+
+pub(crate) fn create_draft_pull_request_with(
+    root: &Path,
+    repository: &str,
+    head: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+    run_gh: &mut impl FnMut(&Path, &[&str], Duration) -> Result<Capture, String>,
+) -> Result<(), String> {
+    if !valid_draft_pr_repository(repository)
+        || title.trim().is_empty()
+        || title.trim() != title
+        || title.chars().count() > 256
+        || title.chars().any(char::is_control)
+        || body.len() > DRAFT_PR_BODY_LIMIT
+        || body.contains('\0')
+    {
+        return Err("Provide a draft pull request title and body within the size limits.".into());
+    }
+    if !valid_draft_pr_branch(head) || !valid_draft_pr_branch(base) || head == base {
+        return Err("Choose distinct valid head and base branches.".into());
+    }
+    let endpoint = format!("repos/{repository}/pulls");
+    let title_field = format!("title={title}");
+    let head_field = format!("head={head}");
+    let base_field = format!("base={base}");
+    let body_field = format!("body={body}");
+    let args = [
+        "api",
+        "--method=POST",
+        endpoint.as_str(),
+        "-f",
+        title_field.as_str(),
+        "-f",
+        head_field.as_str(),
+        "-f",
+        base_field.as_str(),
+        "-f",
+        body_field.as_str(),
+        "-F",
+        "draft=true",
+        "-F",
+        "maintainer_can_modify=false",
+    ];
+    let response = run_gh(root, &args, TIMEOUT)?;
+    let value = json(&response)?;
+    if value.get("number").and_then(serde_json::Value::as_i64).is_none() {
+        return Err("GitHub did not return a pull request creation response.".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn read_draft_pull_requests(
+    root: &Path,
+    repository: &str,
+    head: &str,
+    base: &str,
+) -> Result<serde_json::Value, String> {
+    let mut run_gh = |root: &Path, args: &[&str], timeout| run_gh(root, args, timeout);
+    read_draft_pull_requests_with(root, repository, head, base, &mut run_gh)
+}
+
+pub(crate) fn read_draft_pull_requests_with(
+    root: &Path,
+    repository: &str,
+    head: &str,
+    base: &str,
+    run_gh: &mut impl FnMut(&Path, &[&str], Duration) -> Result<Capture, String>,
+) -> Result<serde_json::Value, String> {
+    if !valid_draft_pr_repository(repository)
+        || !valid_draft_pr_branch(head)
+        || !valid_draft_pr_branch(base)
+        || head == base
+    {
+        return Err("Provide one exact repository and distinct valid head and base branches.".into());
+    }
+    let owner = repository
+        .split_once('/')
+        .map(|(owner, _)| owner)
+        .ok_or("Provide one exact GitHub repository in owner/name form.")?;
+    let head_filter = encode_path_component(&format!("{owner}:{head}"));
+    let base_filter = encode_path_component(base);
+    let endpoint = format!(
+        "repos/{repository}/pulls?state=all&head={head_filter}&base={base_filter}&per_page=100"
+    );
+    let response = run_gh(root, &["api", &endpoint], TIMEOUT)?;
+    let value = json(&response)?;
+    let pulls = value
+        .as_array()
+        .ok_or("GitHub did not return a pull request list.")?;
+    if pulls.len() >= 100 {
+        return Err("GitHub returned a full page of matching pull requests; exact read-back is ambiguous.".into());
+    }
+    Ok(value)
+}
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]

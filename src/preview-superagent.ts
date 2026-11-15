@@ -437,6 +437,10 @@ export async function invokeSuperagent<T>(
       value={previewOnly:true,message:'Preview only. No GitHub comment was sent.'};
       break;
     }
+    case 'superagent_create_draft_pull_request':{
+      value={previewOnly:true,message:'Preview only. No GitHub pull request was created.'};
+      break;
+    }
     case 'superagent_manifest_export':{
       const presets=[...configs.values()];
       // Native v2 is required to carry a required Council gate truthfully.

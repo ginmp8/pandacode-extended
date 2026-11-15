@@ -76,6 +76,18 @@ interface IssueCommentStatus {
 }
 interface PreviewIssueComment { previewOnly: true; message: string }
 type IssueCommentResult = IssueCommentStatus | PreviewIssueComment;
+interface DraftPullRequestStatus {
+  ticketId: string; ticketRevision: number; repository: string; head: string; base: string;
+  title: string; effectKey: string; payloadSha256: string;
+  state: 'pending' | 'uncertain' | 'applied'; reconciliation: string;
+  remotePrNumber?: number | null; remotePrUrl?: string | null;
+}
+interface PreviewDraftPullRequest { previewOnly: true; message: string }
+type DraftPullRequestResult = DraftPullRequestStatus | PreviewDraftPullRequest;
+interface DraftPullRequestReview {
+  ticketId: string; ticketRevision: number; repository: string; head: string; base: string;
+  title: string; body: string; effectKey: string; marker: string;
+}
 interface EventSource {
   id: string; orchestrationId: string; repository: string; actorFilter: string;
   eventKind: string; mode: 'off' | 'observe'; policyRevision: number; lastSequence: number;
@@ -108,6 +120,18 @@ async function issueCommentEffectKey(
   return 'github-comment:' + Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
+async function draftPullRequestEffectKey(
+  ticketId: string, repository: string, head: string, base: string, title: string, body: string,
+): Promise<string> {
+  const payload = new TextEncoder().encode(JSON.stringify([ticketId, repository, head, base, title, body]));
+  const digest = new Uint8Array(await crypto.subtle.digest('SHA-256', payload));
+  return 'github-draft-pr:' + Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function draftPullRequestMarker(ticketId: string, effectKey: string): string {
+  return '<!-- pandacode-superagent-draft-pr:ticket=' + ticketId + ';key=' + effectKey + ' -->';
+}
+
 export function mountSuperagent(host: HTMLElement, call: Call): void {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
@@ -122,6 +146,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   let writePathsDraft = '', writePathsError = '';
   let commentRepository = '', commentIssueNumber = '', commentDraft = '';
   let issueCommentError = '', issueCommentStatus: IssueCommentStatus | null = null;
+  let draftPrRepository = '', draftPrHead = '', draftPrBase = '', draftPrTitle = '', draftPrBody = '';
+  let draftPrError = '', draftPrStatus: DraftPullRequestStatus | null = null;
+  let draftPrReview: DraftPullRequestReview | null = null;
+  function clearDraftPullRequestReview(clearDraft = false): void {
+    draftPrError = ''; draftPrStatus = null; draftPrReview = null;
+    if (clearDraft) {
+      draftPrRepository = ''; draftPrHead = ''; draftPrBase = '';
+      draftPrTitle = ''; draftPrBody = '';
+    }
+  }
   // Persist the user's editable preset draft across asynchronous list refreshes.
   let rejectingTicket = '', inspectedTicket = '';
   let ticketDetails: TicketDetails | null = null;
@@ -524,6 +558,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     const commentStatus = issueCommentStatus && inspected &&
       issueCommentStatus.ticketId === inspected.id &&
       issueCommentStatus.ticketRevision === inspected.revision ? issueCommentStatus : null;
+    const draftPrStatusForTicket = draftPrStatus && inspected &&
+      draftPrStatus.ticketId === inspected.id &&
+      draftPrStatus.ticketRevision === inspected.revision ? draftPrStatus : null;
+    const draftPrReviewForTicket = draftPrReview && inspected &&
+      draftPrReview.ticketId === inspected.id &&
+      draftPrReview.ticketRevision === inspected.revision ? draftPrReview : null;
     const details = inspected && !ticketDetails
       ? '<section class="sa-pane" role="region" aria-label="Ticket evidence">' +
         '<h4>Ticket evidence</h4><p class="sa-ticket-objective">Objective: ' + safe(inspected.objective) + '</p>' +
@@ -585,6 +625,43 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
               commentStatus?.state === 'pending' ? 'Check pending comment' :
                 commentStatus?.state === 'uncertain' ? 'Reconcile comment status' :
                   'Authorize and post comment') + '</button></form></section>'
+          : '') +
+        (canComment
+          ? '<section class="sa-effect-editor" aria-label="Explicit draft pull request effect"><h5>Draft pull request</h5>' +
+            '<p>Only this running Ticket’s active side-effect mandate can authorize a draft from its already-pushed worker branch. Review the exact repository, head, base, title, body marker and effect key before confirming.</p>' +
+            '<form data-sa-form="draft-pull-request"><div class="sa-grid">' +
+            '<label>Repository (owner/name)<input name="repository" maxlength="200" required value="' +
+            safe(draftPrRepository) + '"></label>' +
+            '<label>Head branch<input name="head" maxlength="200" required value="' +
+            safe(draftPrHead) + '"></label>' +
+            '<label>Base branch<input name="base" maxlength="200" required value="' +
+            safe(draftPrBase) + '"></label>' +
+            '<label>Title<input name="title" maxlength="256" required value="' +
+            safe(draftPrTitle) + '"></label></div>' +
+            '<label>Body<textarea name="body" rows="5" maxlength="8192">' +
+            safe(draftPrBody) + '</textarea></label>' +
+            (draftPrError ? '<p role="alert" data-sa-draft-pr-error class="sa-write-path-error">' +
+              safe(draftPrError) + '</p>' : '') +
+            (draftPrStatusForTicket ? '<p role="status" data-sa-draft-pr-status>Draft PR effect ' +
+              safe(draftPrStatusForTicket.state) + ' · ' + safe(draftPrStatusForTicket.reconciliation) +
+              (draftPrStatusForTicket.remotePrNumber ? ' · #' + draftPrStatusForTicket.remotePrNumber : '') +
+              (draftPrStatusForTicket.remotePrUrl ? ' · ' + safe(draftPrStatusForTicket.remotePrUrl) : '') +
+              ' · SHA-256 ' + safe(draftPrStatusForTicket.payloadSha256) + '</p>' : '') +
+            '<button type="submit" class="primary-button">Review exact draft PR details</button></form>' +
+            (draftPrReviewForTicket
+              ? '<section class="sa-pane" role="group" aria-label="Review exact draft pull request">' +
+                '<h6>Confirm this exact draft PR</h6><dl><dt>Repository</dt><dd><code>' +
+                safe(draftPrReviewForTicket.repository) + '</code></dd><dt>Head</dt><dd><code>' +
+                safe(draftPrReviewForTicket.head) + '</code></dd><dt>Base</dt><dd><code>' +
+                safe(draftPrReviewForTicket.base) + '</code></dd><dt>Title</dt><dd>' +
+                safe(draftPrReviewForTicket.title) + '</dd><dt>Effect key</dt><dd><code>' +
+                safe(draftPrReviewForTicket.effectKey) + '</code></dd></dl><h6>Exact body sent to GitHub</h6>' +
+                '<pre>' + safe(draftPrReviewForTicket.body
+                  ? draftPrReviewForTicket.body + '\n\n' + draftPrReviewForTicket.marker
+                  : draftPrReviewForTicket.marker) + '</pre>' +
+                '<button type="button" class="primary-button" data-sa-confirm-draft-pr>' +
+                'Authorize and create draft pull request</button></section>'
+              : '') + '</section>'
           : '') +
         (sourcesLoaded && sources.length
           ? '<form data-sa-form="thread-link"><label>Event source<select name="sourceId" required>' +
@@ -769,6 +846,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     const id = inspectedTicket;
     if (!id || !tickets.some(ticket => ticket.id === id)) {
       inspectedTicket = ''; ticketDetails = null; threadLinks = []; issueCommentStatus = null;
+      clearDraftPullRequestReview(true);
       ticketDetailsLoading = false; ticketDetailsError = '';
       workItems = []; workItemsError = ''; workItemsLoading = false; return;
     }
@@ -797,7 +875,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     ]);
     if (inspectedTicket === id) {
       const snapshot = snapshotResult.snapshot;
-      if (snapshot && previousRevision !== null && previousRevision !== snapshot.ticket.revision) issueCommentStatus = null;
+      if (snapshot && previousRevision !== null && previousRevision !== snapshot.ticket.revision) {
+        issueCommentStatus = null; clearDraftPullRequestReview();
+      }
       ticketDetails = snapshot;
       threadLinks = linkResult.links ?? [];
       workItems = workItemResult.rows.sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id));
@@ -972,6 +1052,23 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       target.form?.querySelector('[data-sa-comment-error]')?.remove();
       target.form?.querySelector('[data-sa-comment-status]')?.remove();
     }
+    if (target instanceof HTMLInputElement && target.form?.dataset.saForm === 'draft-pull-request') {
+      if (target.name === 'repository') draftPrRepository = target.value;
+      if (target.name === 'head') draftPrHead = target.value;
+      if (target.name === 'base') draftPrBase = target.value;
+      if (target.name === 'title') draftPrTitle = target.value;
+      clearDraftPullRequestReview();
+      target.form.querySelector('[data-sa-draft-pr-error]')?.remove();
+      target.form.querySelector('[data-sa-draft-pr-status]')?.remove();
+      host.querySelector('[aria-label="Review exact draft pull request"]')?.remove();
+    }
+    if (target instanceof HTMLTextAreaElement && target.form?.dataset.saForm === 'draft-pull-request') {
+      draftPrBody = target.value;
+      clearDraftPullRequestReview();
+      target.form.querySelector('[data-sa-draft-pr-error]')?.remove();
+      target.form.querySelector('[data-sa-draft-pr-status]')?.remove();
+      host.querySelector('[aria-label="Review exact draft pull request"]')?.remove();
+    }
   });
   host.addEventListener('keydown', event => {
     const target = event.target instanceof HTMLButtonElement && event.target.hasAttribute('data-sa-surface')
@@ -994,6 +1091,55 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   host.addEventListener('click', event => {
     const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button') : null;
     if (!target || !host.contains(target) || target.disabled) return;
+    if (target.hasAttribute('data-sa-confirm-draft-pr')) {
+      const review = draftPrReview;
+      if (!review || review.ticketId !== inspectedTicket) return;
+      void work(async () => {
+        await refreshTicketDetails();
+        const currentTicket = tickets.find(item => item.id === review.ticketId);
+        const current = ticketDetails;
+        if (!currentTicket || !current || current.ticket.id !== review.ticketId ||
+            currentTicket.revision !== review.ticketRevision || current.ticket.revision !== review.ticketRevision) {
+          clearDraftPullRequestReview();
+          throw new Error('This Ticket changed. Review its updated evidence before authorizing the draft PR.');
+        }
+        if (current.ticket.state !== 'running' || current.mandate.revoked ||
+            !current.mandate.allowedSideEffects) {
+          clearDraftPullRequestReview();
+          throw new Error('The Ticket is no longer running under an active side-effect mandate.');
+        }
+        const effectKey = await draftPullRequestEffectKey(
+          review.ticketId,review.repository,review.head,review.base,review.title,review.body,
+        );
+        const marker = draftPullRequestMarker(review.ticketId,effectKey);
+        if (effectKey !== review.effectKey || marker !== review.marker || draftPrReview !== review) {
+          clearDraftPullRequestReview();
+          throw new Error('The exact draft PR details changed. Review the current repository, branches, title and body again.');
+        }
+        const result = await call<DraftPullRequestResult>('superagent_create_draft_pull_request', {
+          ticketId:review.ticketId,expectedRevision:review.ticketRevision,
+          repository:review.repository,head:review.head,base:review.base,title:review.title,
+          body:review.body,effectKey:review.effectKey,
+        });
+        if ('previewOnly' in result) {
+          clearDraftPullRequestReview();
+          feedback = result.message;
+          return;
+        }
+        if (result.ticketId !== review.ticketId || result.ticketRevision !== review.ticketRevision ||
+            result.repository !== review.repository || result.head !== review.head ||
+            result.base !== review.base || result.title !== review.title || result.effectKey !== review.effectKey) {
+          throw new Error('The native draft PR result did not match this Ticket and exact request.');
+        }
+        draftPrStatus = result;
+        draftPrReview = null;
+        feedback = result.state === 'applied' && result.reconciliation === 'exact-readback'
+          ? 'Draft pull request applied and verified by exact GitHub read-back.'
+          : 'Draft pull request state: ' + result.state + ' (' + result.reconciliation +
+            '). Repeating these exact details reconciles the saved receipt without blindly creating another PR.';
+      });
+      return;
+    }
     if (target.dataset.saSurface === 'teams' || target.dataset.saSurface === 'runs') {
       activeSurface = target.dataset.saSurface;
       render();
@@ -1018,6 +1164,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       tickets = []; inspectedTicket = ''; ticketDetails = null; ticketDetailsLoading = false;
       ticketDetailsError = ''; threadLinks = []; workItems = []; workItemsError = '';
       workItemsLoading = false; issueCommentStatus = null;
+      clearDraftPullRequestReview(true);
       render();
       void work(async () => {
         tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:teamId, limit:50 });
@@ -1030,7 +1177,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       if (inspectedTicket === ticket.id) {
         inspectedTicket = ''; ticketDetails = null; ticketDetailsLoading = false; ticketDetailsError = '';
         threadLinks = []; workItems = []; workItemsError = ''; workItemsLoading = false;
-        issueCommentStatus = null; render(); return;
+        issueCommentStatus = null; clearDraftPullRequestReview(true); render(); return;
       }
       selected = ticket.orchestrationId;
       tickets = globalTickets.filter(item => item.orchestrationId === ticket.orchestrationId);
@@ -1038,6 +1185,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       ticketDetailsError = ''; threadLinks = []; workItems = []; workItemsError = '';
       workItemsLoading = true; issueCommentStatus = null;
       commentRepository = ''; commentIssueNumber = ''; commentDraft = ''; issueCommentError = '';
+      clearDraftPullRequestReview(true);
       render(); void work(refreshTicketDetails); return;
     }
     if (target.hasAttribute('data-sa-cancel')) { confirm = null; render(); return; }
@@ -1188,17 +1336,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     if (target.hasAttribute('data-sa-close-details')) {
       inspectedTicket = ''; ticketDetails = null; ticketDetailsLoading = false; ticketDetailsError = '';
       issueCommentStatus = null; workItems = []; workItemsError = ''; workItemsLoading = false;
+      clearDraftPullRequestReview(true);
       render(); return;
     }
     if (target.dataset.saInspectTicket) {
       const id = target.dataset.saInspectTicket;
       if (inspectedTicket === id) {
         inspectedTicket = ''; ticketDetails = null; ticketDetailsLoading = false; ticketDetailsError = '';
-        issueCommentStatus = null; workItems = []; workItemsError = ''; workItemsLoading = false; render();
+        issueCommentStatus = null; clearDraftPullRequestReview(true); workItems = []; workItemsError = ''; workItemsLoading = false; render();
       } else {
         inspectedTicket = id; ticketDetails = null; ticketDetailsLoading = true; ticketDetailsError = '';
         issueCommentStatus = null; workItems = []; workItemsError = ''; workItemsLoading = true;
         commentRepository = ''; commentIssueNumber = ''; commentDraft = ''; issueCommentError = '';
+        clearDraftPullRequestReview(true);
         render();
         void work(refreshTicketDetails);
       }
@@ -1396,6 +1546,73 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         feedback = result.state === 'applied' && result.reconciliation === 'exact-readback'
           ? 'GitHub comment applied and verified by exact read-back.'
           : 'GitHub comment state: ' + result.state + ' (' + result.reconciliation + '). Repeating the same comment checks its saved receipt and does not blindly post again.';
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'draft-pull-request') {
+      const ticketId = inspectedTicket;
+      const ticket = tickets.find(item => item.id === ticketId);
+      const snapshot = ticketDetails;
+      const repository = String(data.get('repository') ?? '');
+      const head = String(data.get('head') ?? '');
+      const base = String(data.get('base') ?? '');
+      const title = String(data.get('title') ?? '');
+      const body = String(data.get('body') ?? '');
+      draftPrRepository = repository; draftPrHead = head; draftPrBase = base;
+      draftPrTitle = title; draftPrBody = body;
+      const repoParts = repository.split('/');
+      const validRepository = repository.length <= 200 && repoParts.length === 2 && repoParts.every(part => part.length > 0 &&
+        part !== '.' && part !== '..' && /^[A-Za-z0-9_.-]+$/.test(part));
+      const validBranch = (branch: string): boolean => branch.length > 0 && branch.length <= 200 &&
+        !branch.startsWith('-') && !branch.endsWith('.') && !branch.endsWith('/') &&
+        !branch.includes('..') && !branch.includes('//') && !branch.includes('@{') &&
+        /^[A-Za-z0-9_./-]+$/.test(branch);
+      let validationError = '';
+      if (!validRepository) validationError = 'Enter one exact GitHub repository as owner/name.';
+      else if (!validBranch(head) || !validBranch(base) || head === base) {
+        validationError = 'Enter distinct valid head and base branches.';
+      } else if (!title.trim() || title.trim() !== title || [...title].length > 256 ||
+          /[\u0000-\u001f\u007f-\u009f]/.test(title)) {
+        validationError = 'Enter a plain-text pull request title of 1 to 256 characters.';
+      } else if (new TextEncoder().encode(body).length > 8 * 1024 || body.includes('\0') ||
+          body.includes('<!-- pandacode-superagent-draft-pr:')) {
+        validationError = 'Enter a body under 8 KB without a PandaCode draft PR marker.';
+      }
+      if (validationError) {
+        draftPrError = validationError; draftPrReview = null; render(); return;
+      }
+      if (!ticket || ticket.state !== 'running' || !snapshot || snapshot.ticket.id !== ticketId ||
+          snapshot.ticket.revision !== ticket.revision || snapshot.mandate.revoked ||
+          !snapshot.mandate.allowedSideEffects) {
+        draftPrError = 'This Ticket has no current side-effect authorization. Refresh evidence before continuing.';
+        draftPrReview = null; render(); return;
+      }
+      const expectedRevision = snapshot.ticket.revision;
+      draftPrError = '';
+      void work(async () => {
+        await refreshTicketDetails();
+        const refreshed = ticketDetails;
+        const currentTicket = tickets.find(item => item.id === ticketId);
+        if (!refreshed || !currentTicket || refreshed.ticket.revision !== expectedRevision ||
+            currentTicket.revision !== expectedRevision) {
+          draftPrError = 'This Ticket changed. Review its updated evidence before continuing.';
+          draftPrReview = null; render(); return;
+        }
+        if (refreshed.ticket.state !== 'running' || refreshed.mandate.revoked ||
+            !refreshed.mandate.allowedSideEffects) {
+          draftPrError = 'The Ticket is no longer running under an active side-effect mandate.';
+          draftPrReview = null; render(); return;
+        }
+        const effectKey = await draftPullRequestEffectKey(ticketId,repository,head,base,title,body);
+        const marker = draftPullRequestMarker(ticketId,effectKey);
+        const exactBody = body ? body + '\n\n' + marker : marker;
+        if (new TextEncoder().encode(exactBody).length > 8 * 1024) {
+          draftPrError = 'Shorten the body to leave room for PandaCode’s effect marker.';
+          draftPrReview = null; render(); return;
+        }
+        draftPrReview = {
+          ticketId,ticketRevision:expectedRevision,repository,head,base,title,body,effectKey,marker,
+        };
       });
       return;
     }

@@ -9,7 +9,11 @@ use std::{
 };
 
 const EFFECT_MARKER: &str = "<!-- pandacode-superagent-effect:";
+const DRAFT_PR_MARKER: &str = "<!-- pandacode-superagent-draft-pr:";
 const MAX_COMMENT_BYTES: usize = 60_000;
+// The body is passed to `gh` as an argv value. Keep it comfortably below the
+// platform command-line limit after quoting and the other command arguments.
+const MAX_DRAFT_PR_BODY_BYTES: usize = 8 * 1024;
 
 pub(crate) const SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sa_effect_receipts (
@@ -52,8 +56,49 @@ CREATE TABLE IF NOT EXISTS sa_effect_grants (
 );
 "#;
 
+/// PR authority and receipts have their own tables. Issue-comment payloads and
+/// reconciliation fields remain unchanged, and no Git operation is recorded
+/// as part of a PR grant.
+pub(crate) const DRAFT_PR_SCHEMA: &str = r#"
+CREATE TABLE IF NOT EXISTS sa_draft_pr_effect_grants (
+ ticket_id TEXT NOT NULL REFERENCES sa_tickets(id) ON DELETE RESTRICT,
+ effect_key TEXT NOT NULL,
+ ticket_revision INTEGER NOT NULL,
+ project_id TEXT NOT NULL,
+ assignment_id TEXT NOT NULL,
+ session_id TEXT NOT NULL,
+ repository TEXT NOT NULL,
+ head_branch TEXT NOT NULL,
+ base_branch TEXT NOT NULL,
+ title TEXT NOT NULL,
+ body TEXT NOT NULL,
+ marker TEXT NOT NULL,
+ payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256)=64),
+ created_at INTEGER NOT NULL,
+ PRIMARY KEY(ticket_id,effect_key)
+);
+CREATE TABLE IF NOT EXISTS sa_draft_pr_effect_receipts (
+ ticket_id TEXT NOT NULL,
+ effect_key TEXT NOT NULL,
+ payload_sha256 TEXT NOT NULL CHECK(length(payload_sha256)=64),
+ state TEXT NOT NULL CHECK(state IN ('pending','uncertain','applied')),
+ uncertainty_reason TEXT CHECK(uncertainty_reason IS NULL OR length(uncertainty_reason)<=64),
+ readback_state TEXT CHECK(readback_state IS NULL OR readback_state IN ('not_attempted','exact','missing','conflict','unavailable')),
+ remote_pr_number INTEGER CHECK(remote_pr_number IS NULL OR remote_pr_number>0),
+ remote_pr_url TEXT CHECK(remote_pr_url IS NULL OR length(remote_pr_url)<=2048),
+ created_at INTEGER NOT NULL,
+ updated_at INTEGER NOT NULL,
+ PRIMARY KEY(ticket_id,effect_key),
+ FOREIGN KEY(ticket_id,effect_key)
+   REFERENCES sa_draft_pr_effect_grants(ticket_id,effect_key) ON DELETE RESTRICT
+);
+CREATE INDEX IF NOT EXISTS sa_draft_pr_effect_unresolved
+ ON sa_draft_pr_effect_receipts(ticket_id,state) WHERE state!='applied';
+"#;
+
 pub(crate) const RECOVER: &str =
-    "UPDATE sa_effect_receipts SET state='uncertain',uncertainty_reason='process_restarted_before_settlement',readback_state='not_attempted',updated_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE state='pending';";
+    "UPDATE sa_effect_receipts SET state='uncertain',uncertainty_reason='process_restarted_before_settlement',readback_state='not_attempted',updated_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE state='pending';
+     UPDATE sa_draft_pr_effect_receipts SET state='uncertain',uncertainty_reason='process_restarted_before_settlement',readback_state='not_attempted',updated_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE state='pending';";
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Reservation {
@@ -173,6 +218,21 @@ pub(crate) struct IssueCommentIntent {
     pub payload_sha256: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct DraftPullRequestIntent {
+    pub ticket_id: String,
+    pub expected_revision: i64,
+    pub repository: String,
+    pub head: String,
+    pub base: String,
+    pub title: String,
+    /// Complete GitHub body, including the PandaCode marker.
+    pub body: String,
+    pub marker: String,
+    pub effect_key: String,
+    pub payload_sha256: String,
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EffectStatus {
@@ -189,6 +249,25 @@ pub(crate) struct EffectStatus {
     pub remote_comment_id: Option<String>,
     pub remote_comment_url: Option<String>,
     pub remote_comment_author: Option<String>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DraftPullRequestEffectStatus {
+    pub ticket_id: String,
+    pub ticket_revision: i64,
+    pub repository: String,
+    pub head: String,
+    pub base: String,
+    pub title: String,
+    pub effect_key: String,
+    pub payload_sha256: String,
+    pub state: String,
+    pub reconciliation: String,
+    pub uncertainty_reason: Option<String>,
+    pub readback_state: Option<String>,
+    pub remote_pr_number: Option<i64>,
+    pub remote_pr_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -289,6 +368,126 @@ pub(crate) fn prepare_issue_comment(
         effect_key: effect_key.into(),
         comment_body,
         payload_sha256,
+    })
+}
+
+fn draft_pr_key(
+    ticket_id: &str,
+    repository: &str,
+    head: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+) -> Result<String> {
+    // Keep this as the same ordered JSON tuple used by superagent-ui.ts.
+    let bytes = serde_json::to_vec(&[ticket_id, repository, head, base, title, body])
+        .map_err(|error| error.to_string())?;
+    Ok(format!("github-draft-pr:{:x}", Sha256::digest(bytes)))
+}
+
+fn valid_branch_ref(branch: &str) -> bool {
+    !branch.is_empty()
+        && branch.len() <= 200
+        && !branch.starts_with('-')
+        && !branch.ends_with('.')
+        && !branch.ends_with('/')
+        && !branch.contains("..")
+        && !branch.contains("//")
+        && !branch.contains("@{")
+        && branch.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/')
+        })
+}
+
+pub(crate) fn prepare_draft_pull_request(
+    ticket_id: &str,
+    expected_revision: i64,
+    repository: &str,
+    head: &str,
+    base: &str,
+    title: &str,
+    body: &str,
+    effect_key: &str,
+) -> Result<DraftPullRequestIntent> {
+    if ticket_id.is_empty()
+        || ticket_id.len() > 128
+        || !ticket_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        || expected_revision < 0
+    {
+        return Err("Provide a valid Ticket ID and nonnegative Ticket revision.".into());
+    }
+    if repository.len() > 200 {
+        return Err("Provide one exact GitHub repository in owner/name form.".into());
+    }
+    validate_repository(repository)?;
+    validate_effect_key(effect_key)?;
+    if !valid_branch_ref(head) || !valid_branch_ref(base) || head == base {
+        return Err("Choose distinct valid head and base branches.".into());
+    }
+    if title.trim().is_empty()
+        || title.trim() != title
+        || title.chars().count() > 256
+        || title.chars().any(char::is_control)
+    {
+        return Err("Provide a plain-text pull request title of 1 to 256 characters.".into());
+    }
+    if body.len() > MAX_DRAFT_PR_BODY_BYTES
+        || body.contains('\0')
+        || body.contains(DRAFT_PR_MARKER)
+    {
+        return Err("Provide a pull request body within the size limit and without a PandaCode effect marker.".into());
+    }
+    let expected_key = draft_pr_key(ticket_id, repository, head, base, title, body)?;
+    if effect_key != expected_key {
+        return Err("The draft pull request effect key does not match this exact Ticket and payload.".into());
+    }
+    let marker = format!("{DRAFT_PR_MARKER}ticket={ticket_id};key={effect_key} -->");
+    let full_body = if body.is_empty() {
+        marker.clone()
+    } else {
+        format!("{body}\n\n{marker}")
+    };
+    if full_body.len() > MAX_DRAFT_PR_BODY_BYTES {
+        return Err("Shorten the pull request body to leave room for PandaCode's effect marker.".into());
+    }
+    #[derive(Serialize)]
+    #[serde(rename_all = "camelCase")]
+    struct Payload<'a> {
+        ticket_id: &'a str,
+        expected_revision: i64,
+        repository: &'a str,
+        head: &'a str,
+        base: &'a str,
+        title: &'a str,
+        body: &'a str,
+        marker: &'a str,
+        effect_key: &'a str,
+    }
+    let bytes = serde_json::to_vec(&Payload {
+        ticket_id,
+        expected_revision,
+        repository,
+        head,
+        base,
+        title,
+        body: &full_body,
+        marker: &marker,
+        effect_key,
+    })
+    .map_err(|error| error.to_string())?;
+    Ok(DraftPullRequestIntent {
+        ticket_id: ticket_id.into(),
+        expected_revision,
+        repository: repository.into(),
+        head: head.into(),
+        base: base.into(),
+        title: title.into(),
+        body: full_body,
+        marker,
+        effect_key: effect_key.into(),
+        payload_sha256: format!("{:x}", Sha256::digest(bytes)),
     })
 }
 
@@ -1047,11 +1246,591 @@ fn status(store: &Store, intent: &IssueCommentIntent, reconciliation: &str) -> R
     })
 }
 
+fn active_draft_pr_scope_if_current(
+    db: &Connection,
+    intent: &DraftPullRequestIntent,
+) -> Result<Option<ActiveScope>> {
+    if crate::feature_controls::get().bots_paused {
+        return Ok(None);
+    }
+    db.query_row(
+        "SELECT t.project_id,a.id,a.session_id FROM sa_tickets t
+         JOIN sa_mandates m ON m.ticket_id=t.id
+         JOIN sa_orchestrations o ON o.id=t.orchestration_id
+         JOIN sa_assignments a ON a.id=t.active_assignment_id
+           AND a.ticket_id=t.id AND a.state='running' AND a.bot_id=t.worker_bot_id
+         JOIN bots b ON b.id=a.bot_id
+         WHERE t.id=?1 AND t.revision=?2 AND t.state='running' AND m.revoked=0
+           AND m.expires_at>?3 AND m.allowed_side_effects=1
+           AND t.policy_revision=m.policy_revision
+           AND m.policy_revision=o.policy_revision AND t.project_id=m.project_id
+           AND m.project_id=o.project_id AND t.actor=m.actor AND m.authorization_id<>''
+           AND b.project_id=t.project_id AND b.paused=0 AND o.enabled=1",
+        params![intent.ticket_id, intent.expected_revision, storage::now()],
+        |row| Ok(ActiveScope {
+            project_id: row.get(0)?,
+            assignment_id: row.get(1)?,
+            session_id: row.get(2)?,
+        }),
+    )
+    .optional()
+    .map_err(|error| error.to_string())
+}
+
+fn active_draft_pr_scope(
+    db: &Connection,
+    intent: &DraftPullRequestIntent,
+) -> Result<ActiveScope> {
+    if crate::feature_controls::get().bots_paused {
+        return Err("Native draft pull request authorization is unavailable while Bots are paused.".into());
+    }
+    active_draft_pr_scope_if_current(db, intent)?.ok_or_else(|| {
+        "The Ticket, revision, mandate, or active worker no longer permits this effect.".into()
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DraftPrGrantBinding {
+    project_id: String,
+    assignment_id: String,
+    session_id: String,
+}
+
+fn exact_draft_pr_grant_binding(
+    db: &Connection,
+    intent: &DraftPullRequestIntent,
+) -> Result<DraftPrGrantBinding> {
+    let grant: Option<(i64,String,String,String,String,String,String,String,String,String,String)> = db
+        .query_row(
+            "SELECT ticket_revision,project_id,assignment_id,session_id,repository,
+                    head_branch,base_branch,title,body,marker,payload_sha256
+             FROM sa_draft_pr_effect_grants WHERE ticket_id=?1 AND effect_key=?2",
+            params![intent.ticket_id,intent.effect_key],
+            |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?,
+                row.get(5)?,row.get(6)?,row.get(7)?,row.get(8)?,row.get(9)?,row.get(10)?)),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let Some((revision,project_id,assignment_id,session_id,repository,head,base,title,body,marker,digest)) = grant else {
+        return Err("The exact native draft pull request grant is missing.".into());
+    };
+    if revision != intent.expected_revision
+        || repository != intent.repository
+        || head != intent.head
+        || base != intent.base
+        || title != intent.title
+        || body != intent.body
+        || marker != intent.marker
+        || digest != intent.payload_sha256
+    {
+        return Err("The native draft pull request grant does not match this exact Ticket, target, key, and payload.".into());
+    }
+    if assignment_id.is_empty() || assignment_id.len() > 128 || session_id.is_empty() || session_id.len() > 128 {
+        return Err("The exact native draft pull request assignment binding is invalid.".into());
+    }
+    let audit: Option<String> = db
+        .query_row(
+            "SELECT detail FROM sa_audit
+             WHERE ticket_id=?1 AND kind='draft_pull_request_granted'
+               AND json_extract(detail,'$.effectKey')=?2
+               AND json_extract(detail,'$.payloadSha256')=?3
+             ORDER BY id DESC LIMIT 1",
+            params![intent.ticket_id,intent.effect_key,intent.payload_sha256],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let detail: serde_json::Value = serde_json::from_str(
+        audit.as_deref().ok_or_else(|| "The exact native draft pull request grant audit is missing.".to_string())?,
+    )
+    .map_err(|error| error.to_string())?;
+    let audit_matches = detail.get("ticketRevision").and_then(serde_json::Value::as_i64)
+            == Some(intent.expected_revision)
+        && detail.get("projectId").and_then(serde_json::Value::as_str) == Some(project_id.as_str())
+        && detail.get("assignmentId").and_then(serde_json::Value::as_str) == Some(assignment_id.as_str())
+        && detail.get("sessionId").and_then(serde_json::Value::as_str) == Some(session_id.as_str())
+        && detail.get("repository").and_then(serde_json::Value::as_str) == Some(intent.repository.as_str())
+        && detail.get("head").and_then(serde_json::Value::as_str) == Some(intent.head.as_str())
+        && detail.get("base").and_then(serde_json::Value::as_str) == Some(intent.base.as_str())
+        && detail.get("effectKey").and_then(serde_json::Value::as_str) == Some(intent.effect_key.as_str())
+        && detail.get("payloadSha256").and_then(serde_json::Value::as_str) == Some(intent.payload_sha256.as_str());
+    if !audit_matches {
+        return Err("The native draft pull request grant audit does not match this exact intent.".into());
+    }
+    let assignment_exists: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE id=?1 AND ticket_id=?2 AND session_id=?3)",
+        params![assignment_id,intent.ticket_id,session_id],|row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    let ticket_project: Option<String> = db.query_row(
+        "SELECT project_id FROM sa_tickets WHERE id=?1",[&intent.ticket_id],|row| row.get(0),
+    ).optional().map_err(|error| error.to_string())?;
+    if !assignment_exists || ticket_project.as_deref() != Some(project_id.as_str()) {
+        return Err("The native draft pull request grant no longer matches its original assignment and project.".into());
+    }
+    let session_project: Option<String> = db.query_row(
+        "SELECT project_id FROM sessions WHERE id=?1",[&session_id],|row| row.get(0),
+    ).optional().map_err(|error| error.to_string())?;
+    if session_project.as_deref().is_some_and(|value| value != project_id) {
+        return Err("The native draft pull request session has moved outside its granted project.".into());
+    }
+    Ok(DraftPrGrantBinding { project_id, assignment_id, session_id })
+}
+
+fn exact_draft_pr_grant_scope(
+    db: &Connection,
+    intent: &DraftPullRequestIntent,
+    scope: &ActiveScope,
+) -> Result<bool> {
+    let binding = exact_draft_pr_grant_binding(db,intent)?;
+    Ok(binding.project_id == scope.project_id
+        && binding.assignment_id == scope.assignment_id
+        && binding.session_id == scope.session_id)
+}
+
+fn exact_draft_pr_grant(db: &Connection, intent: &DraftPullRequestIntent) -> Result<ActiveScope> {
+    let scope = active_draft_pr_scope(db,intent)?;
+    if !exact_draft_pr_grant_scope(db,intent,&scope)? {
+        return Err("The native draft pull request grant does not match this exact Ticket, assignment, session, target, key, and payload.".into());
+    }
+    Ok(scope)
+}
+
+pub(crate) fn has_exact_draft_pr_grant(
+    store: &Store,
+    intent: &DraftPullRequestIntent,
+) -> Result<bool> {
+    let tx = store.db.unchecked_transaction().map_err(|error| error.to_string())?;
+    let existing: Option<String> = tx.query_row(
+        "SELECT payload_sha256 FROM sa_draft_pr_effect_grants WHERE ticket_id=?1 AND effect_key=?2",
+        params![intent.ticket_id,intent.effect_key],|row| row.get(0),
+    ).optional().map_err(|error| error.to_string())?;
+    let present = match existing {
+        None => { active_draft_pr_scope(&tx,intent)?; false }
+        Some(digest) if digest == intent.payload_sha256 => {
+            let binding = exact_draft_pr_grant_binding(&tx,intent)?;
+            match active_draft_pr_scope_if_current(&tx,intent)? {
+                Some(scope) if scope.project_id == binding.project_id
+                    && exact_draft_pr_grant_scope(&tx,intent,&scope)? => true,
+                _ => {
+                    let receipt_state: Option<String> = tx.query_row(
+                        "SELECT state FROM sa_draft_pr_effect_receipts
+                         WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3",
+                        params![intent.ticket_id,intent.effect_key,intent.payload_sha256],|row| row.get(0),
+                    ).optional().map_err(|error| error.to_string())?;
+                    if matches!(receipt_state.as_deref(),Some("pending"|"uncertain")) { true }
+                    else { exact_draft_pr_grant(&tx,intent)?; true }
+                }
+            }
+        }
+        Some(_) => return Err("Effect key already has a draft pull request grant for a different exact payload.".into()),
+    };
+    tx.commit().map_err(|error| error.to_string())?;
+    Ok(present)
+}
+
+pub(crate) fn authorize_draft_pull_request(
+    store: &Store,
+    intent: &DraftPullRequestIntent,
+) -> Result<()> {
+    authorize_draft_pull_request_with(store,intent,|root,intent| {
+        github::verify_draft_pull_request_target(
+            root,&intent.repository,&intent.head,&intent.base,
+        )
+    })
+}
+
+fn authorize_draft_pull_request_with(
+    store: &Store,
+    intent: &DraftPullRequestIntent,
+    mut verify_target: impl FnMut(&Path,&DraftPullRequestIntent)->Result<()>,
+) -> Result<()> {
+    let _dispatch_fence = lock_dispatch(&store.path)?;
+    let initial_scope = {
+        let tx = store.db.unchecked_transaction().map_err(|error| error.to_string())?;
+        let scope = active_draft_pr_scope(&tx,intent)?;
+        tx.commit().map_err(|error| error.to_string())?;
+        scope
+    };
+    let root = store.workspace_root(&initial_scope.project_id,Some(&initial_scope.session_id))?;
+    verify_target(&root,intent)?;
+    let tx = store.db.unchecked_transaction().map_err(|error| error.to_string())?;
+    let current_scope = active_draft_pr_scope(&tx,intent)?;
+    if current_scope != initial_scope {
+        return Err("The active Ticket worker changed during draft pull request authorization.".into());
+    }
+    let existing: Option<String> = tx.query_row(
+        "SELECT payload_sha256 FROM sa_draft_pr_effect_grants WHERE ticket_id=?1 AND effect_key=?2",
+        params![intent.ticket_id,intent.effect_key],|row| row.get(0),
+    ).optional().map_err(|error| error.to_string())?;
+    match existing {
+        Some(digest) if digest == intent.payload_sha256 => {
+            exact_draft_pr_grant(&tx,intent)?;
+            tx.commit().map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+        Some(_) => return Err("Effect key already has a draft pull request grant for a different exact payload.".into()),
+        None => {}
+    }
+    let now = storage::now();
+    tx.execute(
+        "INSERT INTO sa_draft_pr_effect_grants(ticket_id,effect_key,ticket_revision,project_id,
+         assignment_id,session_id,repository,head_branch,base_branch,title,body,marker,
+         payload_sha256,created_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14)",
+        params![intent.ticket_id,intent.effect_key,intent.expected_revision,current_scope.project_id,
+            current_scope.assignment_id,current_scope.session_id,intent.repository,intent.head,
+            intent.base,intent.title,intent.body,intent.marker,intent.payload_sha256,now],
+    ).map_err(|error| error.to_string())?;
+    let detail = serde_json::json!({
+        "effectKey":intent.effect_key,"ticketRevision":intent.expected_revision,
+        "projectId":current_scope.project_id,"assignmentId":current_scope.assignment_id,
+        "sessionId":current_scope.session_id,"repository":intent.repository,
+        "head":intent.head,"base":intent.base,"title":intent.title,
+        "marker":intent.marker,"payloadSha256":intent.payload_sha256,
+    }).to_string();
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'draft_pull_request_granted',?2,?3)",
+        params![intent.ticket_id,detail,now],
+    ).map_err(|error| error.to_string())?;
+    tx.commit().map_err(|error| error.to_string())
+}
+
+fn reserve_draft_pull_request(
+    store: &Store,
+    intent: &DraftPullRequestIntent,
+) -> Result<Reservation> {
+    let tx = store.db.unchecked_transaction().map_err(|error| error.to_string())?;
+    let existing: Option<(String,String)> = tx.query_row(
+        "SELECT payload_sha256,state FROM sa_draft_pr_effect_receipts
+         WHERE ticket_id=?1 AND effect_key=?2",
+        params![intent.ticket_id,intent.effect_key],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(|error| error.to_string())?;
+    let result = match existing {
+        Some((digest,_)) if digest != intent.payload_sha256 => {
+            return Err("Effect key already used for a different draft pull request payload.".into());
+        }
+        Some((_,state)) => {
+            let binding = exact_draft_pr_grant_binding(&tx,intent)?;
+            match state.as_str() {
+                "pending" => match active_draft_pr_scope_if_current(&tx,intent)? {
+                    Some(scope) if scope.project_id == binding.project_id
+                        && exact_draft_pr_grant_scope(&tx,intent,&scope)? => Reservation::AlreadyPending,
+                    _ => Reservation::RequiresReconciliation,
+                },
+                "uncertain" => Reservation::RequiresReconciliation,
+                "applied" => Reservation::AlreadyApplied,
+                _ => return Err("Invalid draft pull request effect state.".into()),
+            }
+        }
+        None => {
+            exact_draft_pr_grant(&tx,intent)?;
+            let now = storage::now();
+            tx.execute(
+                "INSERT INTO sa_draft_pr_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,readback_state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'pending','not_attempted',?4,?4)",
+                params![intent.ticket_id,intent.effect_key,intent.payload_sha256,now],
+            ).map_err(|error| error.to_string())?;
+            Reservation::Reserved
+        }
+    };
+    tx.commit().map_err(|error| error.to_string())?;
+    Ok(result)
+}
+
+fn validate_pending_draft_pr_dispatch(
+    store: &Store,
+    intent: &DraftPullRequestIntent,
+) -> Result<ActiveScope> {
+    let tx = store.db.unchecked_transaction().map_err(|error| error.to_string())?;
+    let scope = exact_draft_pr_grant(&tx,intent)?;
+    let state: Option<String> = tx.query_row(
+        "SELECT state FROM sa_draft_pr_effect_receipts
+         WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3",
+        params![intent.ticket_id,intent.effect_key,intent.payload_sha256],|row| row.get(0),
+    ).optional().map_err(|error| error.to_string())?;
+    if state.as_deref() != Some("pending") {
+        return Err("The draft pull request receipt is no longer pending; dispatch was not attempted.".into());
+    }
+    tx.commit().map_err(|error| error.to_string())?;
+    Ok(scope)
+}
+
+fn mark_draft_pr_uncertain(
+    store: &Store,
+    intent: &DraftPullRequestIntent,
+    reason: &str,
+    readback_state: &str,
+) -> Result<()> {
+    let changed = store.db.execute(
+        "UPDATE sa_draft_pr_effect_receipts SET state='uncertain',uncertainty_reason=?4,
+         readback_state=?5,remote_pr_number=NULL,remote_pr_url=NULL,updated_at=?6
+         WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3
+           AND state IN ('pending','uncertain')",
+        params![intent.ticket_id,intent.effect_key,intent.payload_sha256,reason,readback_state,storage::now()],
+    ).map_err(|error| error.to_string())?;
+    if changed == 1 { return Ok(()); }
+    let state: Option<String> = store.db.query_row(
+        "SELECT state FROM sa_draft_pr_effect_receipts
+         WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3",
+        params![intent.ticket_id,intent.effect_key,intent.payload_sha256],|row| row.get(0),
+    ).optional().map_err(|error| error.to_string())?;
+    if matches!(state.as_deref(),Some("uncertain"|"applied")) { Ok(()) }
+    else { Err("No unresolved matching draft pull request receipt.".into()) }
+}
+
+#[derive(Debug,Clone,PartialEq,Eq)]
+struct DraftPullRequestEvidence {
+    number: Option<i64>,
+    url: Option<String>,
+}
+
+#[derive(Debug,Clone,PartialEq,Eq)]
+enum DraftPullRequestReadback {
+    Exact(DraftPullRequestEvidence),
+    Missing,
+    Conflict,
+}
+
+fn bounded_pr_text(value: Option<&serde_json::Value>, max_bytes: usize) -> Option<String> {
+    let value = value?.as_str()?;
+    (!value.is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control))
+        .then(|| value.to_string())
+}
+
+fn draft_pr_readback_state(
+    value: &serde_json::Value,
+    intent: &DraftPullRequestIntent,
+) -> Result<DraftPullRequestReadback> {
+    let pulls = value.as_array().ok_or("GitHub did not return pull requests.")?;
+    let mut exact = Vec::new();
+    let mut conflict = false;
+    for pull in pulls {
+        // Blank-body PRs are ordinary unrelated results. They cannot carry our
+        // marker, so treat them as non-matches and keep the scan fail-closed.
+        let body = pull.get("body").and_then(serde_json::Value::as_str).unwrap_or("");
+        if !body.contains(&intent.marker) { continue; }
+        let head = pull.get("head");
+        let base = pull.get("base");
+        let target_matches = head.and_then(|value| value.get("ref"))
+                .and_then(serde_json::Value::as_str) == Some(intent.head.as_str())
+            && base.and_then(|value| value.get("ref"))
+                .and_then(serde_json::Value::as_str) == Some(intent.base.as_str())
+            && head.and_then(|value| value.get("repo"))
+                .and_then(|value| value.get("full_name"))
+                .and_then(serde_json::Value::as_str) == Some(intent.repository.as_str())
+            && base.and_then(|value| value.get("repo"))
+                .and_then(|value| value.get("full_name"))
+                .and_then(serde_json::Value::as_str) == Some(intent.repository.as_str());
+        let number = pull.get("number").and_then(serde_json::Value::as_i64);
+        let url = bounded_pr_text(pull.get("html_url"),2048)
+            .filter(|value| value.starts_with("https://github.com/"));
+        if target_matches
+            && body == intent.body
+            && pull.get("title").and_then(serde_json::Value::as_str) == Some(intent.title.as_str())
+            && pull.get("draft").and_then(serde_json::Value::as_bool) == Some(true)
+            && number.is_some_and(|number| number > 0)
+            && url.is_some()
+        {
+            exact.push(DraftPullRequestEvidence { number, url });
+        } else {
+            conflict = true;
+        }
+    }
+    Ok(match (exact.len(),conflict) {
+        (0,false) => DraftPullRequestReadback::Missing,
+        (1,false) => DraftPullRequestReadback::Exact(exact.pop().expect("one exact PR readback")),
+        _ => DraftPullRequestReadback::Conflict,
+    })
+}
+
+fn settle_draft_pr_applied(
+    store: &Store,
+    intent: &DraftPullRequestIntent,
+    evidence: &DraftPullRequestEvidence,
+) -> Result<()> {
+    let tx = store.db.unchecked_transaction().map_err(|error| error.to_string())?;
+    exact_draft_pr_grant_binding(&tx,intent)?;
+    let changed = tx.execute(
+        "UPDATE sa_draft_pr_effect_receipts SET state='applied',uncertainty_reason=NULL,
+         readback_state='exact',remote_pr_number=?4,remote_pr_url=?5,updated_at=?6
+         WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3
+           AND state IN ('pending','uncertain')",
+        params![intent.ticket_id,intent.effect_key,intent.payload_sha256,evidence.number,evidence.url,storage::now()],
+    ).map_err(|error| error.to_string())?;
+    if changed != 1 {
+        let state: Option<String> = tx.query_row(
+            "SELECT state FROM sa_draft_pr_effect_receipts
+             WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3",
+            params![intent.ticket_id,intent.effect_key,intent.payload_sha256],|row| row.get(0),
+        ).optional().map_err(|error| error.to_string())?;
+        if state.as_deref() == Some("applied") {
+            tx.commit().map_err(|error| error.to_string())?;
+            return Ok(());
+        }
+        return Err("Missing unresolved matching draft pull request receipt.".into());
+    }
+    let detail = serde_json::json!({
+        "effectKey":intent.effect_key,"ticketRevision":intent.expected_revision,
+        "repository":intent.repository,"head":intent.head,"base":intent.base,
+        "payloadSha256":intent.payload_sha256,"pullRequestNumber":evidence.number,
+    }).to_string();
+    tx.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'draft_pull_request_applied',?2,?3)",
+        params![intent.ticket_id,detail,storage::now()],
+    ).map_err(|error| error.to_string())?;
+    tx.commit().map_err(|error| error.to_string())
+}
+
+fn draft_pr_status(
+    store: &Store,
+    intent: &DraftPullRequestIntent,
+    reconciliation: &str,
+) -> Result<DraftPullRequestEffectStatus> {
+    let row: Option<(String,Option<String>,Option<String>,Option<i64>,Option<String>)> = store.db.query_row(
+        "SELECT state,uncertainty_reason,readback_state,remote_pr_number,remote_pr_url
+         FROM sa_draft_pr_effect_receipts
+         WHERE ticket_id=?1 AND effect_key=?2 AND payload_sha256=?3",
+        params![intent.ticket_id,intent.effect_key,intent.payload_sha256],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+    ).optional().map_err(|error| error.to_string())?;
+    let Some((state,uncertainty_reason,readback_state,remote_pr_number,remote_pr_url)) = row else {
+        return Err("The exact draft pull request receipt disappeared during reconciliation.".into());
+    };
+    Ok(DraftPullRequestEffectStatus {
+        ticket_id:intent.ticket_id.clone(),ticket_revision:intent.expected_revision,
+        repository:intent.repository.clone(),head:intent.head.clone(),base:intent.base.clone(),
+        title:intent.title.clone(),effect_key:intent.effect_key.clone(),
+        payload_sha256:intent.payload_sha256.clone(),state,reconciliation:reconciliation.into(),
+        uncertainty_reason,readback_state,remote_pr_number,remote_pr_url,
+    })
+}
+
+fn reconcile_draft_pr_unresolved(
+    store: &Store,
+    intent: &DraftPullRequestIntent,
+    root: &Path,
+    run_gh: &mut impl FnMut(&Path,&[&str],Duration)->std::result::Result<crate::workspace::Capture,String>,
+) -> Result<DraftPullRequestEffectStatus> {
+    let tx = store.db.unchecked_transaction().map_err(|error| error.to_string())?;
+    exact_draft_pr_grant_binding(&tx,intent)?;
+    let receipt: Option<(String,String)> = tx.query_row(
+        "SELECT state,payload_sha256 FROM sa_draft_pr_effect_receipts
+         WHERE ticket_id=?1 AND effect_key=?2",
+        params![intent.ticket_id,intent.effect_key],|row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(|error| error.to_string())?;
+    let Some((state,digest)) = receipt else { return Err("No draft pull request receipt exists to reconcile.".into()); };
+    if digest != intent.payload_sha256 { return Err("Draft pull request receipt does not match this exact payload.".into()); }
+    if state == "applied" {
+        tx.commit().map_err(|error| error.to_string())?;
+        return draft_pr_status(store,intent,"already-applied");
+    }
+    if !matches!(state.as_str(),"pending"|"uncertain") { return Err("Invalid draft pull request effect state.".into()); }
+    tx.commit().map_err(|error| error.to_string())?;
+
+    let observed = github::read_draft_pull_requests_with(
+        root,&intent.repository,&intent.head,&intent.base,run_gh,
+    ).and_then(|value| draft_pr_readback_state(&value,intent));
+    let reconciliation = {
+        let _settlement_fence = lock_dispatch(&store.path)?;
+        match observed {
+            Ok(DraftPullRequestReadback::Exact(evidence)) => {
+                if let Err(error) = settle_draft_pr_applied(store,intent,&evidence) {
+                    let _ = mark_draft_pr_uncertain(store,intent,"readback_settlement_failed","exact");
+                    return Err(error);
+                }
+                "exact-readback"
+            }
+            Ok(DraftPullRequestReadback::Missing) => {
+                mark_draft_pr_uncertain(store,intent,"marker_not_found","missing")?;
+                "marker-not-found"
+            }
+            Ok(DraftPullRequestReadback::Conflict) => {
+                mark_draft_pr_uncertain(store,intent,"marker_conflict","conflict")?;
+                "marker-conflict"
+            }
+            Err(_) => {
+                mark_draft_pr_uncertain(store,intent,"readback_unavailable","unavailable")?;
+                "readback-unavailable"
+            }
+        }
+    };
+    draft_pr_status(store,intent,reconciliation)
+}
+
+pub(crate) fn create_draft_pull_request(
+    database_path: &Path,
+    intent: &DraftPullRequestIntent,
+) -> Result<DraftPullRequestEffectStatus> {
+    let mut run_gh = |root:&Path,args:&[&str],timeout| github::run_gh(root,args,timeout);
+    create_draft_pull_request_with(database_path,intent,&mut run_gh)
+}
+
+fn create_draft_pull_request_with(
+    database_path: &Path,
+    intent: &DraftPullRequestIntent,
+    run_gh: &mut impl FnMut(&Path,&[&str],Duration)->std::result::Result<crate::workspace::Capture,String>,
+) -> Result<DraftPullRequestEffectStatus> {
+    let store = open_effect_store(database_path)?;
+    let binding = {
+        let tx = store.db.unchecked_transaction().map_err(|error| error.to_string())?;
+        let binding = exact_draft_pr_grant_binding(&tx,intent)?;
+        tx.commit().map_err(|error| error.to_string())?;
+        binding
+    };
+    let root = store.workspace_root(&binding.project_id,Some(&binding.session_id))?;
+    match reserve_draft_pull_request(&store,intent)? {
+        Reservation::AlreadyApplied => draft_pr_status(&store,intent,"already-applied"),
+        Reservation::AlreadyPending => draft_pr_status(&store,intent,"dispatch-in-progress"),
+        Reservation::RequiresReconciliation => reconcile_draft_pr_unresolved(&store,intent,&root,run_gh),
+        Reservation::Reserved => {
+            let mut attempted = false;
+            let dispatch = (|| -> Result<std::result::Result<(),String>> {
+                let _fence = lock_dispatch(database_path)?;
+                let scope = validate_pending_draft_pr_dispatch(&store,intent)?;
+                let dispatch_root = store.workspace_root(&scope.project_id,Some(&scope.session_id))?;
+                github::verify_draft_pull_request_target_with(
+                    &dispatch_root,&intent.repository,&intent.head,&intent.base,run_gh,
+                )?;
+                attempted = true;
+                let remote_result = github::create_draft_pull_request_with(
+                    &dispatch_root,&intent.repository,&intent.head,&intent.base,
+                    &intent.title,&intent.body,run_gh,
+                );
+                mark_draft_pr_uncertain(&store,intent,"write_result_unverified","not_attempted")?;
+                Ok(remote_result)
+            })();
+            match dispatch {
+                Err(error) => {
+                    let reason = if attempted { "write_result_unverified" } else { "dispatch_not_started" };
+                    {
+                        let _fence = lock_dispatch(database_path).ok();
+                        let _ = mark_draft_pr_uncertain(&store,intent,reason,"not_attempted");
+                    }
+                    if attempted {
+                        reconcile_draft_pr_unresolved(&store,intent,&root,run_gh)
+                    } else {
+                        let _ = error;
+                        draft_pr_status(&store,intent,"dispatch-not-started")
+                    }
+                }
+                Ok(_remote_result) => reconcile_draft_pr_unresolved(&store,intent,&root,run_gh),
+            }
+        }
+    }
+}
+
 pub(crate) fn unresolved_count(store: &Store, ticket_id: &str) -> Result<i64> {
     store
         .db
         .query_row(
-            "SELECT COUNT(*) FROM sa_effect_receipts WHERE ticket_id=?1 AND state!='applied'",
+            "SELECT (SELECT COUNT(*) FROM sa_effect_receipts
+                      WHERE ticket_id=?1 AND state!='applied')
+                  + (SELECT COUNT(*) FROM sa_draft_pr_effect_receipts
+                      WHERE ticket_id=?1 AND state!='applied')",
             [ticket_id],
             |row| row.get(0),
         )
@@ -1124,6 +1903,89 @@ mod tests {
             comment,
         )
         .unwrap()
+    }
+
+    fn git_test(root: &Path, args: &[&str]) -> String {
+        let output = crate::workspace::run_git_bounded(
+            root,args,16*1024,true,Duration::from_secs(15),
+        ).unwrap();
+        assert!(output.status.success(),"git {:?}: {}",args,String::from_utf8_lossy(&output.stderr.bytes));
+        String::from_utf8_lossy(&output.stdout.bytes).trim().to_string()
+    }
+
+    fn draft_pr_fixture() -> (Store,String,std::path::PathBuf,String,String) {
+        let (store,ticket_id) = fixture();
+        let root = std::env::temp_dir().join(format!("sa-draft-pr-worktree-{}",storage::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        git_test(&root,&["init"]);
+        git_test(&root,&["config","user.name","PandaCode Test"]);
+        git_test(&root,&["config","user.email","pandacode@example.invalid"]);
+        git_test(&root,&["checkout","-b","main"]);
+        git_test(&root,&["commit","--allow-empty","-m","base"]);
+        let base_sha = git_test(&root,&["rev-parse","HEAD"]);
+        git_test(&root,&["checkout","-b","feature/ticket-pr"]);
+        git_test(&root,&["commit","--allow-empty","-m","pushed head"]);
+        let head_sha = git_test(&root,&["rev-parse","HEAD"]);
+        store.db.execute("UPDATE projects SET path=?1 WHERE id='p'",[root.to_string_lossy().as_ref()]).unwrap();
+        store.db.execute("UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",[&ticket_id]).unwrap();
+        (store,ticket_id,root,head_sha,base_sha)
+    }
+
+    fn make_draft_pr_intent(ticket_id:&str,head:&str,base:&str,body:&str)->DraftPullRequestIntent {
+        let title = "Draft effect fixture";
+        let key = draft_pr_key(ticket_id,"owner/repo",head,base,title,body).unwrap();
+        prepare_draft_pull_request(ticket_id,0,"owner/repo",head,base,title,body,&key).unwrap()
+    }
+
+    fn exact_draft_pr_readback(intent:&DraftPullRequestIntent)->crate::workspace::Capture {
+        capture_json(serde_json::json!([{
+            "number":86,"html_url":"https://github.com/owner/repo/pull/86",
+            "title":intent.title,"body":intent.body,"draft":true,
+            "head":{"ref":intent.head,"repo":{"full_name":intent.repository}},
+            "base":{"ref":intent.base,"repo":{"full_name":intent.repository}},
+        }]))
+    }
+
+    fn fake_draft_pr_gh(
+        intent:DraftPullRequestIntent,
+        head_sha:String,
+        base_sha:String,
+        readbacks:Vec<serde_json::Value>,
+        writes:Arc<AtomicUsize>,
+        read_count:Arc<AtomicUsize>,
+        fail_create:bool,
+    ) -> impl FnMut(&Path,&[&str],Duration)->std::result::Result<crate::workspace::Capture,String> {
+        let mut next_readback = 0usize;
+        move |_:&Path,args:&[&str],timeout:Duration| {
+            assert!(timeout<=TIMEOUT);
+            if args.first()==Some(&"repo") && args.get(1)==Some(&"view") {
+                return Ok(capture_json(serde_json::json!({"nameWithOwner":"owner/repo"})));
+            }
+            if args.first()==Some(&"api") && args.get(1).is_some_and(|path|path.contains("/branches/")) {
+                let path=args[1];
+                let (name,sha)=if path.ends_with("/branches/main") { ("main",base_sha.as_str()) }
+                    else { (intent.head.as_str(),head_sha.as_str()) };
+                return Ok(capture_json(serde_json::json!({"name":name,"commit":{"sha":sha}})));
+            }
+            if args.first()==Some(&"api") && args.get(1).is_some_and(|path|path.ends_with("/pulls")) {
+                writes.fetch_add(1,Ordering::SeqCst);
+                assert!(args.contains(&"--method=POST"));
+                assert!(args.windows(2).any(|pair|pair==["-F","draft=true"]));
+                assert!(args.contains(&"maintainer_can_modify=false"));
+                assert!(args.contains(&format!("head={}",intent.head).as_str()));
+                assert!(args.contains(&format!("base={}",intent.base).as_str()));
+                assert!(args.contains(&format!("body={}",intent.body).as_str()));
+                if fail_create { return Err("GitHub request timed out after dispatch".into()); }
+                return Ok(capture_json(serde_json::json!({"number":86})));
+            }
+            if args.first()==Some(&"api") && args.get(1).is_some_and(|path|path.contains("/pulls?")) {
+                read_count.fetch_add(1,Ordering::SeqCst);
+                let result=readbacks.get(next_readback).cloned().unwrap_or_else(||serde_json::json!([]));
+                next_readback+=1;
+                return Ok(capture_json(result));
+            }
+            panic!("unexpected fake gh command: {args:?}");
+        }
     }
 
     fn capture_json(value: serde_json::Value) -> crate::workspace::Capture {
@@ -1669,5 +2531,205 @@ mod tests {
         ] {
             assert_ne!(base.payload_sha256, variant.payload_sha256);
         }
+    }
+
+    #[test]
+    fn draft_pr_intent_binds_ticket_repository_head_base_title_body_marker_and_key() {
+        let intent=make_draft_pr_intent("ticket_1","feature/topic","main","Draft text");
+        assert!(intent.body.ends_with(&intent.marker));
+        assert!(intent.marker.contains("ticket=ticket_1"));
+        assert!(intent.marker.contains(&intent.effect_key));
+        let changed_head=make_draft_pr_intent("ticket_1","feature/other","main","Draft text");
+        let changed_base=make_draft_pr_intent("ticket_1","feature/topic","release","Draft text");
+        let changed_body=make_draft_pr_intent("ticket_1","feature/topic","main","Changed text");
+        assert_ne!(intent.effect_key,changed_head.effect_key);
+        assert_ne!(intent.effect_key,changed_base.effect_key);
+        assert_ne!(intent.effect_key,changed_body.effect_key);
+        assert_ne!(intent.payload_sha256,changed_head.payload_sha256);
+        assert!(prepare_draft_pull_request(
+            "ticket_1",0,"owner/repo","feature/topic","main","Draft effect fixture",
+            "Draft text","github-draft-pr:wrong",
+        ).is_err());
+        assert!(prepare_draft_pull_request(
+            "ticket_1",0,"owner/repo","feature/topic","feature/topic","Draft effect fixture",
+            "Draft text",&intent.effect_key,
+        ).is_err());
+        let confirmation=crate::superagent::draft_pull_request_confirmation(&intent);
+        for exact in ["Ticket ticket_1","Repository: owner/repo","Head (already-pushed branch): feature/topic",
+            "Base: main","Title: Draft effect fixture","Effect key: ",&intent.marker] {
+            assert!(confirmation.contains(exact),"confirmation must show {exact}");
+        }
+    }
+
+    #[test]
+    fn draft_pr_authorization_rechecks_mandate_policy_after_target_validation() {
+        let (store,ticket_id,root,_,_)=draft_pr_fixture();
+        let intent=make_draft_pr_intent(&ticket_id,"feature/ticket-pr","main","Policy check");
+        let error=authorize_draft_pull_request_with(&store,&intent,|checked_root,_| {
+            assert_eq!(checked_root,root);
+            store.db.execute(
+                "UPDATE sa_mandates SET policy_revision=policy_revision+1 WHERE ticket_id=?1",
+                [&ticket_id],
+            ).unwrap();
+            Ok(())
+        }).unwrap_err();
+        assert!(error.contains("no longer permits"));
+        let grants:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_draft_pr_effect_grants WHERE ticket_id=?1",
+            [&ticket_id],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(grants,0,"a policy change during target validation must leave no grant");
+        drop(store);
+        let _=std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn draft_pr_authorization_requires_explicit_side_effect_mandate() {
+        let (store,ticket_id,root,_,_)=draft_pr_fixture();
+        let intent=make_draft_pr_intent(&ticket_id,"feature/ticket-pr","main","Mandate check");
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=0 WHERE ticket_id=?1",
+            [&ticket_id],
+        ).unwrap();
+        let mut target_verified=false;
+        let error=authorize_draft_pull_request_with(&store,&intent,|_,_| {
+            target_verified=true;
+            Ok(())
+        }).unwrap_err();
+        assert!(error.contains("no longer permits"));
+        assert!(!target_verified,"the explicit native side-effect mandate must be checked before target verification");
+        let grants:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_draft_pr_effect_grants WHERE ticket_id=?1",
+            [&ticket_id],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(grants,0,"a missing side-effect mandate must leave no PR grant");
+        drop(store);
+        let _=std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn draft_pr_target_refuses_another_repository_head_or_missing_base() {
+        let (_store,ticket_id,root,head_sha,base_sha)=draft_pr_fixture();
+        let intent=make_draft_pr_intent(&ticket_id,"feature/ticket-pr","main","Target checks");
+        let writes=Arc::new(AtomicUsize::new(0));
+        let reads=Arc::new(AtomicUsize::new(0));
+        let mut fake_gh=fake_draft_pr_gh(intent.clone(),head_sha,base_sha,vec![],
+            writes,reads,false);
+        assert!(github::verify_draft_pull_request_target_with(
+            &root,"owner/repo","feature/ticket-pr","main",&mut fake_gh,
+        ).is_ok());
+        assert!(github::verify_draft_pull_request_target_with(
+            &root,"other/repo","feature/ticket-pr","main",&mut fake_gh,
+        ).is_err());
+        assert!(github::verify_draft_pull_request_target_with(
+            &root,"owner/repo","unrelated-branch","main",&mut fake_gh,
+        ).is_err());
+        assert!(github::verify_draft_pull_request_target_with(
+            &root,"owner/repo","feature/ticket-pr","missing-base",&mut fake_gh,
+        ).is_err());
+        drop(_store);
+        let _=std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn draft_pr_uncertain_write_reconciles_exact_readback_without_replay() {
+        let (store,ticket_id,root,head_sha,base_sha)=draft_pr_fixture();
+        let intent=make_draft_pr_intent(&ticket_id,"feature/ticket-pr","main","Reconcile the PR");
+        let writes=Arc::new(AtomicUsize::new(0));
+        let reads=Arc::new(AtomicUsize::new(0));
+        let missing=serde_json::json!([]);
+        let exact:serde_json::Value=serde_json::from_slice(&exact_draft_pr_readback(&intent).bytes).unwrap();
+        let mut fake_gh=fake_draft_pr_gh(intent.clone(),head_sha,base_sha,vec![missing,exact],
+            Arc::clone(&writes),Arc::clone(&reads),true);
+        authorize_draft_pull_request_with(&store,&intent,|root,intent|
+            github::verify_draft_pull_request_target_with(
+                root,&intent.repository,&intent.head,&intent.base,&mut fake_gh,
+            )
+        ).unwrap();
+        let path=store.path.clone();
+        let first=create_draft_pull_request_with(&path,&intent,&mut fake_gh).unwrap();
+        assert_eq!(first.state,"uncertain");
+        assert_eq!(first.reconciliation,"marker-not-found");
+        assert_eq!(first.readback_state.as_deref(),Some("missing"));
+        assert_eq!(writes.load(Ordering::SeqCst),1);
+        let reconciled=create_draft_pull_request_with(&path,&intent,&mut fake_gh).unwrap();
+        assert_eq!(reconciled.state,"applied");
+        assert_eq!(reconciled.reconciliation,"exact-readback");
+        assert_eq!(reconciled.remote_pr_number,Some(86));
+        assert_eq!(reconciled.remote_pr_url.as_deref(),Some("https://github.com/owner/repo/pull/86"));
+        assert_eq!(writes.load(Ordering::SeqCst),1,"uncertain receipts reconcile by readback and never replay the POST");
+        assert_eq!(reads.load(Ordering::SeqCst),2);
+        drop(store);
+        let _=std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn restart_marks_pending_draft_pr_uncertain_and_reconciles_by_readback_only() {
+        let (store,ticket_id,root,head_sha,base_sha)=draft_pr_fixture();
+        let intent=make_draft_pr_intent(&ticket_id,"feature/ticket-pr","main","Restart PR receipt");
+        authorize_draft_pull_request_with(&store,&intent,|_,_|Ok(())).unwrap();
+        assert_eq!(reserve_draft_pull_request(&store,&intent).unwrap(),Reservation::Reserved);
+        let path=store.path.clone();
+        drop(store);
+        let reopened=Store::open(&path).unwrap();
+        let recovered:(String,Option<String>,Option<String>)=reopened.db.query_row(
+            "SELECT state,uncertainty_reason,readback_state FROM sa_draft_pr_effect_receipts
+             WHERE ticket_id=?1 AND effect_key=?2",
+            params![intent.ticket_id,intent.effect_key],
+            |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        assert_eq!(recovered,("uncertain".into(),Some("process_restarted_before_settlement".into()),Some("not_attempted".into())));
+        drop(reopened);
+        let writes=Arc::new(AtomicUsize::new(0));
+        let reads=Arc::new(AtomicUsize::new(0));
+        let exact:serde_json::Value=serde_json::from_slice(&exact_draft_pr_readback(&intent).bytes).unwrap();
+        let mut fake_gh=fake_draft_pr_gh(intent.clone(),head_sha,base_sha,vec![exact],
+            Arc::clone(&writes),Arc::clone(&reads),false);
+        let status=create_draft_pull_request_with(&path,&intent,&mut fake_gh).unwrap();
+        assert_eq!(status.state,"applied");
+        assert_eq!(status.reconciliation,"exact-readback");
+        assert_eq!(writes.load(Ordering::SeqCst),0,"restart recovery must not call the PR create endpoint");
+        assert_eq!(reads.load(Ordering::SeqCst),1);
+        let _=std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn stop_before_draft_pr_dispatch_allows_only_readback() {
+        let (store,ticket_id,root,head_sha,base_sha)=draft_pr_fixture();
+        let intent=make_draft_pr_intent(&ticket_id,"feature/ticket-pr","main","Stop before PR");
+        authorize_draft_pull_request_with(&store,&intent,|_,_|Ok(())).unwrap();
+        assert_eq!(reserve_draft_pull_request(&store,&intent).unwrap(),Reservation::Reserved);
+        assert_eq!(superagent::stop(&store,&ticket_id).unwrap().0.state,"stopped");
+        let path=store.path.clone();
+        drop(store);
+        let writes=Arc::new(AtomicUsize::new(0));
+        let reads=Arc::new(AtomicUsize::new(0));
+        let mut fake_gh=fake_draft_pr_gh(intent.clone(),head_sha,base_sha,vec![serde_json::json!([])],
+            Arc::clone(&writes),Arc::clone(&reads),false);
+        let status=create_draft_pull_request_with(&path,&intent,&mut fake_gh).unwrap();
+        assert_eq!(status.state,"uncertain");
+        assert_eq!(status.reconciliation,"marker-not-found");
+        assert_eq!(writes.load(Ordering::SeqCst),0,"a stopped Ticket must not reach GitHub's PR creation endpoint");
+        assert_eq!(reads.load(Ordering::SeqCst),1,"a stopped Ticket may only reconcile the existing receipt");
+        let _=std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn draft_pr_readback_skips_unrelated_pull_requests_with_empty_bodies() {
+        let intent=make_draft_pr_intent("ticket_1","feature/topic","main","Readback body");
+        let value=serde_json::json!([
+            {"number":12,"body":null},
+            {"number":13,"body":"","title":"Unrelated"},
+            {
+                "number":86,
+                "html_url":"https://github.com/owner/repo/pull/86",
+                "title":intent.title,
+                "body":intent.body,
+                "draft":true,
+                "head":{"ref":intent.head,"repo":{"full_name":intent.repository}},
+                "base":{"ref":intent.base,"repo":{"full_name":intent.repository}}
+            }
+        ]);
+        assert!(matches!(draft_pr_readback_state(&value,&intent).unwrap(),DraftPullRequestReadback::Exact(_)));
     }
 }

@@ -4779,6 +4779,85 @@ async fn confirm_issue_comment(
     receiver.await.unwrap_or(false)
 }
 
+fn draft_pull_request_confirmation(intent: &effects::DraftPullRequestIntent) -> String {
+    format!(
+        "Authorize one draft GitHub pull request for SuperAgent Ticket {} at revision {}?\n\nRepository: {}\nHead (already-pushed branch): {}\nBase: {}\nTitle: {}\nEffect key: {}\nPayload SHA-256: {}\n\nExact pull request body (including PandaCode's idempotency marker):\n{}",
+        intent.ticket_id,
+        intent.expected_revision,
+        intent.repository,
+        intent.head,
+        intent.base,
+        intent.title,
+        intent.effect_key,
+        intent.payload_sha256,
+        intent.body,
+    )
+}
+
+async fn confirm_draft_pull_request(
+    window: &tauri::WebviewWindow,
+    intent: &effects::DraftPullRequestIntent,
+) -> bool {
+    use tauri_plugin_dialog::{DialogExt, MessageDialogButtons};
+    let dialog = window
+        .dialog()
+        .message(draft_pull_request_confirmation(intent))
+        .title("Authorize draft GitHub pull request")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Authorize this draft PR".into(),
+            "Cancel".into(),
+        ));
+    #[cfg(desktop)]
+    let dialog = dialog.parent(window);
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    dialog.show(move |confirmed| {
+        let _ = sender.send(confirmed);
+    });
+    receiver.await.unwrap_or(false)
+}
+
+#[tauri::command]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "Tauri binds the exact draft PR request from the Ticket-bound grant surface"
+)]
+pub async fn superagent_create_draft_pull_request(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    ticket_id: String,
+    expected_revision: i64,
+    repository: String,
+    head: String,
+    base: String,
+    title: String,
+    body: String,
+    effect_key: String,
+) -> Result<effects::DraftPullRequestEffectStatus> {
+    require_main_window(&window)?;
+    let intent = effects::prepare_draft_pull_request(
+        &ticket_id,
+        expected_revision,
+        &repository,
+        &head,
+        &base,
+        &title,
+        &body,
+        &effect_key,
+    )?;
+    let database_path = state.store.lock().map_err(|error| error.to_string())?.path.clone();
+    let existing = effects::open_effect_store(&database_path)?;
+    let already_authorized = effects::has_exact_draft_pr_grant(&existing,&intent)?;
+    drop(existing);
+    if !already_authorized {
+        if !confirm_draft_pull_request(&window,&intent).await {
+            return Err("Draft GitHub pull request authorization was not confirmed by the local user.".into());
+        }
+        let store = effects::open_effect_store(&database_path)?;
+        effects::authorize_draft_pull_request(&store,&intent)?;
+    }
+    effects::create_draft_pull_request(&database_path,&intent)
+}
+
 #[tauri::command]
 #[expect(
     clippy::too_many_arguments,

@@ -4543,6 +4543,7 @@ pub fn run() {
                 superagent::superagent_accept,
                 superagent::superagent_reject,
                 superagent::superagent_issue_comment,
+                superagent::superagent_create_draft_pull_request,
                 superagent::manifest::superagent_manifest_export,
                 superagent::manifest::superagent_manifest_preview,
                 superagent::manifest::superagent_manifest_import,

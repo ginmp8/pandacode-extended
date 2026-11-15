@@ -635,7 +635,12 @@ test('Preview scoped-write adapter is deterministic and creates no grant',async 
       ticketId:ticket.id,expectedRevision:ticket.revision,repository:'owner/repo',
       issueNumber:42,effectKey:'github-comment:preview',comment:'Preview only',
     },listBots);
-    return {first,second,effect};
+    const draftPr=await invokeSuperagent('superagent_create_draft_pull_request',{
+      ticketId:ticket.id,expectedRevision:ticket.revision,repository:'owner/repo',
+      head:'feature',base:'main',title:'Preview only',body:'No external write',
+      effectKey:'github-draft-pr:preview',
+    },listBots);
+    return {first,second,effect,draftPr};
   });
   expect(results.first).toEqual(results.second);
   expect(results.first).toMatchObject({previewOnly:true,
@@ -643,6 +648,8 @@ test('Preview scoped-write adapter is deterministic and creates no grant',async 
     message:'Preview only. No native authorization or worker dispatch occurred.'});
   expect(results.first).not.toHaveProperty('grant');
   expect(results.effect).toEqual({previewOnly:true,message:'Preview only. No GitHub comment was sent.'});
+  expect(results.draftPr).toEqual({previewOnly:true,
+    message:'Preview only. No GitHub pull request was created.'});
 });
 
 test('Preview adapter snapshots ordered Team roles at Ticket admission',async ({page})=>{
@@ -771,6 +778,90 @@ test('SuperAgent issue comments use a stable receipt and report uncertain state 
   expect(calls[0].args?.effectKey).toMatch(/^github-comment:[0-9a-f]{64}$/);
   expect(calls[1].args?.effectKey).toBe(calls[0].args?.effectKey);
   expect(calls[1].args).toEqual(calls[0].args);
+});
+
+test('Draft pull request effect requires review of exact Ticket-bound details before native authorization',async ({page})=>{
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  const host=await openOrchestrationWorkspace(page);
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const previous=document.querySelector<HTMLElement>('#superagent-host')!;
+    const host=document.createElement('div');host.id='superagent-host';previous.replaceWith(host);
+    const ticket={id:'ticket-draft-pr',objective:'Prepare a draft for the pushed branch',
+      state:'running',revision:6,evidence:null};
+    const snapshot={ticket,teamSnapshot:{snapshotVersion:1,provenance:'native',orchestrationId:'preset-one',
+      teamVersion:2,name:'PR Team',projectId:'project-one',coordinatorBotId:'coordinator',
+      workerBotIds:['worker'],reviewerBotIds:[],
+      policy:{policyRevision:3,autonomy:'off',maxConcurrentTasks:1,maxAttemptsPerAssignment:2,councilEnabled:false},
+      roles:[{role:'coordinator',ordinal:0,botId:'coordinator',effectiveConfig:null,effectiveConfigSha256:null},
+        {role:'worker',ordinal:0,botId:'worker',effectiveConfig:null,effectiveConfigSha256:null}]},
+      mandate:{actor:'local-user',authorizationId:'auth-pr',policyRevision:3,projectId:'project-one',
+        expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:true},
+      assignments:[{id:'assignment-pr',botId:'worker',sessionId:'session-pr',state:'running',attempt:1}],
+      activity:[]};
+    const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [{id:'preset-one',name:'Fixture',
+        coordinatorBotId:'coordinator',workerBotId:'worker',enabled:true,policyRevision:3}] as never;
+      if(command==='superagent_tickets')return [ticket] as never;
+      if(command==='superagent_snapshot')return snapshot as never;
+      if(command==='superagent_source_thread_links')return [] as never;
+      if(command==='superagent_work_items')return [] as never;
+      if(command==='superagent_create_draft_pull_request'){
+        calls.push({command,args:{...args}});
+        return {ticketId:'ticket-draft-pr',ticketRevision:6,repository:args?.repository,
+          head:args?.head,base:args?.base,title:args?.title,effectKey:args?.effectKey,
+          payloadSha256:'b'.repeat(64),state:'applied',reconciliation:'exact-readback',
+          remotePrNumber:86,remotePrUrl:'https://github.com/acme/widget/pull/86'} as never;
+      }
+      throw new Error('Unexpected command: '+command);
+    });
+    (window as unknown as {saDraftPrCalls:typeof calls}).saDraftPrCalls=calls;
+  });
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const details=host.getByRole('region',{name:'Ticket evidence'});
+  const form=details.locator('form[data-sa-form="draft-pull-request"]');
+  await expect(form).toBeVisible();
+  await form.getByRole('textbox',{name:'Repository (owner/name)'}).fill('acme/widget');
+  await form.getByRole('textbox',{name:'Head branch'}).fill('feature/ticket-148');
+  await form.getByRole('textbox',{name:'Base branch'}).fill('main');
+  await form.getByRole('textbox',{name:'Title'}).fill('Fix the focused regression');
+  await form.getByRole('textbox',{name:'Body'}).fill('Validated on the already-pushed branch.');
+  await form.getByRole('button',{name:'Review exact draft PR details'}).click();
+  const review=details.getByRole('group',{name:'Review exact draft pull request'});
+  await expect(review).toBeVisible();
+  await expect(review).toContainText('acme/widget');
+  await expect(review).toContainText('feature/ticket-148');
+  await expect(review).toContainText('main');
+  await expect(review).toContainText('Fix the focused regression');
+  await expect(review).toContainText('github-draft-pr:');
+  await expect(review).toContainText('<!-- pandacode-superagent-draft-pr:ticket=ticket-draft-pr;key=github-draft-pr:');
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {saDraftPrCalls:Array<unknown>}).saDraftPrCalls.length))
+    .toBe(0);
+  await form.locator('[name="body"]').fill('Changed after review; confirmation must be invalidated.');
+  await expect(details.getByRole('group',{name:'Review exact draft pull request'})).toHaveCount(0);
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {saDraftPrCalls:Array<unknown>}).saDraftPrCalls.length))
+    .toBe(0);
+  await form.getByRole('button',{name:'Review exact draft PR details'}).click();
+  const secondReview=details.getByRole('group',{name:'Review exact draft pull request'});
+  await expect(secondReview).toBeVisible();
+  await secondReview.getByRole('button',{name:'Authorize and create draft pull request'}).click();
+  await expect(details.getByRole('status').filter({hasText:'Draft PR effect applied'})).toBeVisible();
+  const calls=await page.evaluate(()=>(window as unknown as {
+    saDraftPrCalls:Array<{command:string;args?:Record<string,unknown>}>
+  }).saDraftPrCalls);
+  expect(calls).toHaveLength(1);
+  expect(calls[0]).toMatchObject({command:'superagent_create_draft_pull_request',args:{
+    ticketId:'ticket-draft-pr',expectedRevision:6,repository:'acme/widget',
+    head:'feature/ticket-148',base:'main',title:'Fix the focused regression',
+    body:'Changed after review; confirmation must be invalidated.',
+  }});
+  expect(calls[0].args?.effectKey).toMatch(/^github-draft-pr:[0-9a-f]{64}$/);
 });
 
 

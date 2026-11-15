@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 53;
+pub const SCHEMA_VERSION: i64 = 54;
 
 #[cfg(test)]
 std::thread_local! {
@@ -880,6 +880,14 @@ impl Store {
                     )).map_err(|e| e.to_string())?;
                 }
                 migration.execute_batch("PRAGMA user_version=53;")
+                    .map_err(|e| e.to_string())?;
+            }
+            if version < 54 {
+                // Draft pull request grants and receipts have a separate
+                // durable identity from issue-comment grants and receipts.
+                migration.execute_batch(crate::superagent::effects::DRAFT_PR_SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=54;")
                     .map_err(|e| e.to_string())?;
             }
             // Test-only fault injection models a late error before COMMIT so
@@ -4141,7 +4149,7 @@ mod tests {
             }
             Err(error) => error,
         };
-        assert!(migration_error.contains("injected late migration failure after schema 53"));
+        assert!(migration_error.contains("injected late migration failure after schema 54"));
         {
             let failed = Connection::open(&path).unwrap();
             assert_eq!(database_user_version(&failed), 52);
@@ -4373,6 +4381,47 @@ mod tests {
         assert_eq!(after,before);
         assert_eq!(replayed.db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),SCHEMA_VERSION);
         drop(replayed);
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn v53_adds_separate_draft_pr_effect_tables_without_changing_comment_tables() {
+        let directory = std::env::temp_dir().join(format!("pandacode-draft-pr-migration-{}",id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("store.sqlite3");
+        let comment_schema_before;
+        {
+            let store = Store::open(&path).unwrap();
+            comment_schema_before = ["sa_effect_grants","sa_effect_receipts"].map(|table| {
+                store.db.query_row(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+                    [table],|row| row.get::<_,String>(0),
+                ).unwrap()
+            });
+            store.db.execute_batch(
+                "DROP TABLE sa_draft_pr_effect_receipts;
+                 DROP TABLE sa_draft_pr_effect_grants;
+                 PRAGMA user_version=53;",
+            ).unwrap();
+        }
+        let migrated = Store::open(&path).unwrap();
+        let version: i64 = migrated.db.pragma_query_value(None,"user_version",|row|row.get(0)).unwrap();
+        assert_eq!(version,54);
+        for table in ["sa_draft_pr_effect_grants","sa_draft_pr_effect_receipts"] {
+            let exists: i64 = migrated.db.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],|row|row.get(0),
+            ).unwrap();
+            assert_eq!(exists,1,"migration must create {table}");
+        }
+        let comment_schema_after = ["sa_effect_grants","sa_effect_receipts"].map(|table| {
+            migrated.db.query_row(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name=?1",
+                [table],|row|row.get::<_,String>(0),
+            ).unwrap()
+        });
+        assert_eq!(comment_schema_after,comment_schema_before);
+        drop(migrated);
         let _ = std::fs::remove_dir_all(directory);
     }
 

@@ -1009,22 +1009,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       }
       ask('Create a disabled copy of ' + source.name +
         ' with its existing role roster? Tickets, source subscriptions, permissions and approvals are not copied.', async () => {
-        // Recheck native identity and revision before creation. The native
-        // create-with-roster transaction validates every bot and stays Off.
-        const roster = await call<TeamRoster>('superagent_roster', {orchestrationId:source.id});
-        const latest = (await call<Config[]>('superagent_list'))
-          .find(item => item.id === source.id);
-        if (!latest || latest.policyRevision !== source.policyRevision ||
-            latest.coordinatorBotId !== source.coordinatorBotId ||
-            latest.workerBotId !== source.workerBotId ||
-            roster.policyRevision !== source.policyRevision ||
-            roster.coordinatorBotId !== source.coordinatorBotId ||
-            roster.workerBotIds[0] !== source.workerBotId) {
-          throw new Error('Source Team changed. Reload before duplicating.');
-        }
-        const created = await call<Config>('superagent_create', {
-          input:{name,coordinatorBotId:source.coordinatorBotId,workerBotId:source.workerBotId},
-          roster:{workerBotIds:roster.workerBotIds,reviewerBotIds:roster.reviewerBotIds},
+        // Native transaction freezes the source revision and ordered roles;
+        // no renderer-side read/create gap can silently change the copied Team.
+        const created = await call<Config>('superagent_duplicate', {
+          sourceId:source.id, expectedRevision:source.policyRevision, name,
         });
         if (created.enabled) throw new Error('New Team did not remain disabled.');
         selected = created.id; workspaceView = 'teams';

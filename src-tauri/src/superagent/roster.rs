@@ -542,6 +542,37 @@ pub(super) fn create_with_roster(
     configuration(store,&cfg.id)
 }
 
+/// Clone one versioned Team policy and its ordered native roles in the same
+/// SQLite transaction. A stale source revision, malformed stored roster, or
+/// ineligible bot rolls back the entire disabled copy. No Tickets, source
+/// subscriptions, grants, Council cycles, or historical evidence are copied.
+pub(super) fn duplicate_with_roster(
+    store: &Store, source_id: &str, expected_revision: i64, name: String,
+) -> Result<Orchestration> {
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let source = configuration(store, source_id)?;
+    if source.policy_revision != expected_revision {
+        return Err("Source Team policy revision changed; reload before duplicating.".into());
+    }
+    let source_roles = read(store, source_id)?;
+    if source_roles.policy_revision != expected_revision {
+        return Err("Source Team roster changed; reload before duplicating.".into());
+    }
+    let created = create_configuration(store, NewOrchestration {
+        name,
+        coordinator_bot_id: source.coordinator_bot_id,
+        worker_bot_id: source.worker_bot_id,
+    })?;
+    let roster = RosterInput {
+        worker_bot_ids: source_roles.worker_bot_ids,
+        reviewer_bot_ids: source_roles.reviewer_bot_ids,
+    };
+    validate_member_ids(store, &created, &roster)?;
+    insert_member_roles(store, &created.id, &roster)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    configuration(store, &created.id)
+}
+
 fn set(store:&Store,id:&str,expected:i64,input:&RosterInput)->Result<TeamRoster> {
     let cfg=configuration(store,id)?;
     if cfg.enabled || cfg.policy_revision!=expected {
@@ -1100,6 +1131,69 @@ mod tests {
         }).unwrap();
         assert!(read(&store,&legacy.id).unwrap().execution_ready);
     }
+    #[test]
+    fn duplicate_team_is_atomic_revision_guarded_and_never_copies_runtime_authority() {
+        let path=std::env::temp_dir().join(format!("sa-clone-{}.sqlite3",storage::id()));
+        let store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('p','Team','/tmp/sa-team-clone')",[]
+        ).unwrap();
+        for id in ["lead","primary","second","reviewer"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'p','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let source=create_with_roster(&store,NewOrchestration {
+            name:"Source Team".into(),coordinator_bot_id:"lead".into(),
+            worker_bot_id:"primary".into(),
+        },RosterInput {
+            worker_bot_ids:vec!["primary".into(),"second".into()],
+            reviewer_bot_ids:vec!["reviewer".into()],
+        }).unwrap();
+        let count=||store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations",[],|row|row.get::<_,i64>(0),
+        ).unwrap();
+        assert!(duplicate_with_roster(&store,&source.id,source.policy_revision+1,
+            "Stale copy".into()).unwrap_err().contains("revision changed"));
+        assert_eq!(count(),1);
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='reviewer'",[]).unwrap();
+        assert!(duplicate_with_roster(&store,&source.id,source.policy_revision,
+            "Unavailable copy".into()).unwrap_err().contains("Paused bots"));
+        assert_eq!(count(),1,"bot ineligibility must roll back the new Team");
+        store.db.execute("UPDATE bots SET paused=0 WHERE id='reviewer'",[]).unwrap();
+        let cloned=duplicate_with_roster(&store,&source.id,source.policy_revision,
+            "Source Team copy".into()).unwrap();
+        assert_eq!(count(),2);
+        assert!(!cloned.enabled);
+        assert_eq!(cloned.policy_revision,1);
+        assert_ne!(cloned.id,source.id);
+        assert_eq!(cloned.coordinator_bot_id,source.coordinator_bot_id);
+        let roles=read(&store,&cloned.id).unwrap();
+        assert_eq!(roles.worker_bot_ids,vec!["primary","second"]);
+        assert_eq!(roles.reviewer_bot_ids,vec!["reviewer"]);
+        assert!(!roles.execution_ready);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets WHERE orchestration_id=?1",
+            [&cloned.id],|row|row.get::<_,i64>(0),
+        ).unwrap(),0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_event_sources WHERE orchestration_id=?1",
+            [&cloned.id],|row|row.get::<_,i64>(0),
+        ).unwrap(),0);
+        store.db.execute(
+            "UPDATE sa_team_roles SET position=9 WHERE orchestration_id=?1 AND role='worker'",
+            [&source.id],
+        ).unwrap();
+        assert!(duplicate_with_roster(&store,&source.id,source.policy_revision,
+            "Malformed copy".into()).unwrap_err().contains("Malformed Team role metadata"));
+        assert_eq!(count(),2);
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert_eq!(read(&reopened,&cloned.id).unwrap().reviewer_bot_ids,
+            vec!["reviewer"]);
+    }
+
     #[test]
     fn malformed_persisted_roster_positions_and_primary_aliases_fail_closed() {
         let path=std::env::temp_dir().join(format!("sa-roster-integrity-{}.sqlite3",storage::id()));

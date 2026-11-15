@@ -173,6 +173,8 @@ pub struct EffectReceiptView {
     pub updated_at: i64,
 }
 
+pub(crate) type ReceiptPage = (Vec<EffectReceiptView>, Option<(i64, String)>);
+
 pub(crate) fn receipt_history(
     store: &Store, ticket_id: &str, limit: i64,
 ) -> Result<Vec<EffectReceiptView>> {
@@ -184,7 +186,7 @@ pub(crate) fn receipt_history(
 pub(crate) fn receipt_history_page(
     store: &Store, ticket_id: &str, limit: i64,
     before: Option<(i64, &str)>, unresolved_only: bool,
-) -> Result<(Vec<EffectReceiptView>, Option<(i64, String)>)> {
+) -> Result<ReceiptPage> {
     if !(1..=100).contains(&limit) {
         return Err("Effect receipt page size must be between 1 and 100.".into());
     }

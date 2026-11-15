@@ -1501,6 +1501,46 @@ test('duplicate Team uses native atomic roster creation without copying source a
     .toContainText('0 tasks · 0 running · 0 blocked');
 });
 
+test('Team duplication rejects a stale native revision without creating a preset', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-duplicate-stale';
+    document.body.appendChild(host);
+    const calls: Array<{command:string;args?:Record<string,unknown>}>=[];
+    (window as unknown as {saDuplicateCalls:typeof calls}).saDuplicateCalls=calls;
+    mountSuperagent(host,async (command,args) => {
+      calls.push({command,args});
+      if(command==='bots_list') return [
+        {id:'lead',name:'Lead',paused:false},{id:'worker',name:'Worker',paused:false}
+      ] as never;
+      if(command==='superagent_list') return [{
+        id:'source',name:'Existing Team',coordinatorBotId:'lead',
+        workerBotId:'worker',enabled:false,policyRevision:7
+      }] as never;
+      if(command==='superagent_tickets') return [] as never;
+      if(command==='superagent_duplicate') {
+        if(args?.sourceId!=='source'||args?.expectedRevision!==7||
+            args?.name!=='Existing Team copy') throw Error('Incorrect native CAS input');
+        throw Error('Source Team policy revision changed; reload before duplicating.');
+      }
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-duplicate-stale');
+  await host.getByRole('button',{name:'Duplicate as new Team'}).click();
+  await host.getByRole('alertdialog',{name:'Confirm orchestration action'})
+    .getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(host.getByRole('alert')).toContainText('Source Team policy revision changed');
+  await expect(host.locator('.sa-list .sa-item')).toHaveCount(1);
+  const calls=await page.evaluate(() =>
+    (window as unknown as {saDuplicateCalls:Array<{command:string;args?:Record<string,unknown>}>})
+      .saDuplicateCalls);
+  expect(calls.filter(item=>item.command==='superagent_duplicate')).toHaveLength(1);
+  expect(calls.every(item=>item.command!=='superagent_create'&&
+    item.command!=='superagent_roster_update')).toBe(true);
+});
+
 test('new Team persists optional reviewers as one disabled role configuration', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

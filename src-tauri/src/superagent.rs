@@ -2909,6 +2909,20 @@ pub async fn superagent_create(
     }
 }
 
+/// A single native, revision-checked Team duplication boundary. Do not
+/// reconstruct a roster from separate renderer reads: it can change between
+/// inspection and creation, and an enabled source never grants the new Team
+/// any execution authority.
+#[tauri::command]
+pub async fn superagent_duplicate(
+    window: tauri::WebviewWindow, state: State<'_,AppState>,
+    source_id: String, expected_revision: i64, name: String,
+) -> Result<Orchestration> {
+    require_main_window(&window)?;
+    let store=state.store.lock().map_err(|e|e.to_string())?;
+    roster::duplicate_with_roster(&store,&source_id,expected_revision,name)
+}
+
 #[tauri::command]
 pub async fn superagent_list(window: tauri::WebviewWindow, state: State<'_,AppState>) -> Result<Vec<OrchestrationOverview>> {
     require_main_window(&window)?;

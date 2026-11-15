@@ -6,6 +6,13 @@ each independent Demand is a durable Ticket bound to exactly one Team.
 
 ## Native-backed surfaces
 
+- **Duplicate Team:** the native `superagent_duplicate` command checks the source
+  Team's exact policy revision and clones its ordered Worker/Reviewer roles
+  within one SQLite transaction. A stale source, invalid roster or paused bot
+  aborts without leaving a partial Team. The new Team is disabled and never
+  copies Tickets, Mandates, source subscriptions, Council results or grants.
+  The renderer does not attempt to assemble authority from separate reads.
+
 - **Teams:** saved policy revisions, coordinator/worker bot identity and native task counters.
   The read-only effective policy inspector shows each member's configured provider,
   model, mode and reasoning effort alongside Skill Library status; these are

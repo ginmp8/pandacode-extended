@@ -2166,6 +2166,49 @@ fn headless_ticket_status(ticket: &Ticket) -> Result<String> {
     })).map_err(|e| e.to_string())
 }
 
+/// Read-only, paginated audit metadata for a single native Ticket. Never
+/// expose private event details, objectives, provider output or rejection text.
+pub(crate) fn list_headless_ticket_activity(
+    database_path: &std::path::Path, ticket_id: &str, before_id: Option<i64>,
+) -> Result<String> {
+    if before_id.is_some_and(|id| id <= 0) {
+        return Err("Activity cursor must be a positive audit ID.".into());
+    }
+    let store = Store::open_read_only(database_path)?;
+    get_ticket(&store, ticket_id)?;
+    let mut stmt = store.db.prepare(
+        "SELECT id,kind,at FROM sa_audit
+         WHERE ticket_id=?1 AND (?2 IS NULL OR id < ?2)
+         ORDER BY id DESC LIMIT 101",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![ticket_id, before_id], |row| {
+        Ok(serde_json::json!({
+            "id": row.get::<_, i64>(0)?,
+            "kind": row.get::<_, String>(1)?,
+            "at": row.get::<_, i64>(2)?,
+        }))
+    }).map_err(|e| e.to_string())?;
+    let mut items = rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    let has_more = items.len() > 100;
+    items.truncate(100);
+    let next_cursor = if has_more {
+        items.last().and_then(|entry| entry["id"].as_i64())
+    } else {
+        None
+    };
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket_id,
+        "pageLimit": 100,
+        "hasMore": has_more,
+        "nextCursor": next_cursor,
+        "items": items,
+        "redacted": true,
+        "observationalOnly": true,
+        "recoveryPerformed": false,
+    })).map_err(|e| e.to_string())
+}
+
 /// An operator-issued headless Demand is durable and idempotent but deliberately
 /// blocked: no provider session, inferred launch, additional tools or effects.
 /// The existing native manual retry must independently recheck all admission
@@ -2295,6 +2338,17 @@ pub(crate) fn headless_disable_orchestration(
 pub(crate) fn headless_stop_ticket(database_path: &std::path::Path, ticket_id: &str) -> Result<String> {
     let store = open_headless_transition_store(database_path)?;
     let (ticket, _session) = stop(&store, ticket_id)?;
+    headless_ticket_status(&ticket)
+}
+
+/// Revocation at an observed revision is atomic under the same external-effect
+/// fence as emergency Stop. A changed Ticket is never revoked by stale input.
+pub(crate) fn headless_stop_ticket_at_revision(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let (ticket, _session) =
+        stop_with_lock_observer_at_revision(&store, ticket_id, Some(expected_revision), || {})?;
     headless_ticket_status(&ticket)
 }
 
@@ -3882,9 +3936,21 @@ fn stop_with_lock_observer(
     ticket_id: &str,
     before_wait: impl FnOnce(),
 ) -> Result<(Ticket,Option<String>)> {
+    stop_with_lock_observer_at_revision(store, ticket_id, None, before_wait)
+}
+
+fn stop_with_lock_observer_at_revision(
+    store: &Store,
+    ticket_id: &str,
+    expected_revision: Option<i64>,
+    before_wait: impl FnOnce(),
+) -> Result<(Ticket,Option<String>)> {
     let _dispatch_fence = effects::lock_dispatch_before_wait(&store.path, before_wait)?;
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let ticket = get_ticket(store,ticket_id)?;
+    if expected_revision.is_some_and(|expected| expected != ticket.revision) {
+        return Err("SuperAgent Ticket revision changed before Stop; inspect the current Ticket.".into());
+    }
     if matches!(ticket.state.as_str(),"completed"|"failed"|"stopped"|"interrupted"|"inconclusive") {
         return Err("Task is already terminal.".into());
     }
@@ -5678,6 +5744,102 @@ mod tests {
         assert!(capped.truncated_attempts);
         assert_eq!(capped.nodes[1].attempt, Some(2));
         assert_eq!(capped.nodes[50].attempt, Some(51));
+    }
+
+    #[test]
+    fn headless_activity_is_paginated_and_redacted_across_reopen() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, admitted) = admit(
+            &mut store, &cfg.id, "Private activity objective",
+            "activity-page-native", false,
+        ).unwrap();
+        assert!(admitted);
+        for index in 0..205 {
+            store.db.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES(?1,'activity_test',?2,?3)",
+                params![&ticket.id,format!("private-marker-{index}"),storage::now()],
+            ).unwrap();
+        }
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let mut cursor = None;
+        let mut previous = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let raw = list_headless_ticket_activity(&store.path,&ticket.id,cursor).unwrap();
+            assert!(!raw.contains("private-marker"));
+            assert!(!raw.contains("Private activity objective"));
+            let page: serde_json::Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(page["ticketId"],ticket.id);
+            assert_eq!(page["redacted"],true);
+            assert_eq!(page["observationalOnly"],true);
+            assert_eq!(page["recoveryPerformed"],false);
+            let items = page["items"].as_array().unwrap();
+            assert!(items.len() <= 100);
+            for row in items {
+                let id=row["id"].as_i64().unwrap();
+                assert!(previous.is_none_or(|last| id<last));
+                assert!(seen.insert(id));
+                assert!(row.get("detail").is_none());
+                previous=Some(id);
+            }
+            if page["hasMore"] == false {
+                assert!(page["nextCursor"].is_null());
+                break;
+            }
+            cursor=page["nextCursor"].as_i64();
+            assert!(cursor.is_some());
+        }
+        assert_eq!(seen.len() as i64,count);
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"running");
+        assert!(list_headless_ticket_activity(&store.path,&ticket.id,Some(0)).is_err());
+        assert!(list_headless_ticket_activity(&store.path,"missing-ticket",None).is_err());
+        let path=store.path.clone();
+        drop(store);
+        let reopened: serde_json::Value=serde_json::from_str(
+            &list_headless_ticket_activity(&path,&ticket.id,None).unwrap(),
+        ).unwrap();
+        assert_eq!(reopened["items"].as_array().unwrap().len(),100);
+    }
+
+    #[test]
+    fn headless_revision_bound_stop_rejects_stale_observation_without_side_effects() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let (ticket, admitted) = admit(
+            &mut store, &config.id, "Revocation with stale observer",
+            "headless-stop-revision", false,
+        ).unwrap();
+        assert!(admitted);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let audit_before = history(&store, &ticket.id, 20).unwrap().len();
+        assert!(headless_stop_ticket_at_revision(
+            &store.path, &ticket.id, ticket.revision + 1,
+        ).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().len(), audit_before);
+
+        let stopped: serde_json::Value = serde_json::from_str(
+            &headless_stop_ticket_at_revision(&store.path, &ticket.id, ticket.revision).unwrap(),
+        ).unwrap();
+        assert_eq!(stopped["state"], "stopped");
+        assert_eq!(stopped["revision"], ticket.revision + 1);
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().len(), audit_before + 1);
+        assert!(headless_stop_ticket_at_revision(
+            &store.path, &ticket.id, ticket.revision,
+        ).is_err());
+        assert!(!on_run_finished(&store, &session, true, "Late worker result").unwrap());
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "stopped");
+        assert!(mandate(&reopened, &ticket.id).unwrap().revoked);
     }
 
     #[test]

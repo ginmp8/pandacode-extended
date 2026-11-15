@@ -368,7 +368,7 @@ fn snapshot_base_for_database(database_path: &Path) -> Result<PathBuf> {
     {
         if created {
             let mut permissions = fs::metadata(&base).map_err(|_| "Council review snapshot storage is unavailable.")?.permissions();
-            permissions.set_readonly(false);
+            make_writable_permissions(&mut permissions);
             fs::set_permissions(&base,permissions)
                 .map_err(|_| "Council review snapshot storage permissions could not be restricted.")?;
         }
@@ -428,6 +428,21 @@ fn private_directory(path: &Path) -> Result<()> {
         return Err("Council review snapshot directory is unavailable.".into());
     }
     Ok(())
+}
+
+// Snapshot cleanup and verified tampering tests must not elevate unrelated
+// Unix mode bits. Windows exposes only a read-only attribute through std::fs.
+fn make_writable_permissions(permissions: &mut fs::Permissions) {
+    #[cfg(unix)]
+    permissions.set_mode(permissions.mode() | 0o200);
+    #[cfg(not(unix))]
+    {
+        #[allow(
+            clippy::permissions_set_readonly_false,
+            reason = "On Windows this clears the file read-only attribute; there are no Unix mode bits"
+        )]
+        permissions.set_readonly(false);
+    }
 }
 
 fn make_read_only(path: &Path) -> Result<()> {
@@ -633,10 +648,7 @@ fn make_snapshot_writable_for_cleanup(path: &Path) -> Result<()> {
         }
     }
     let mut permissions = metadata.permissions();
-    #[cfg(unix)]
-    permissions.set_mode(permissions.mode() | 0o200);
-    #[cfg(not(unix))]
-    permissions.set_readonly(false);
+    make_writable_permissions(&mut permissions);
     fs::set_permissions(path,permissions).map_err(|_| "Council review snapshot cleanup failed.".into())
 }
 
@@ -2232,10 +2244,7 @@ mod tests {
         complete_native_reviewers(&state,&native_session_id,"9.5");
         let tampered=snapshot_root.join("reviewed.md");
         let mut writable=std::fs::metadata(&tampered).unwrap().permissions();
-        #[cfg(unix)]
-        writable.set_mode(writable.mode() | 0o200);
-        #[cfg(not(unix))]
-        writable.set_readonly(false);
+        make_writable_permissions(&mut writable);
         std::fs::set_permissions(&tampered,writable).unwrap();
         std::fs::write(&tampered,"tampered reviewer bytes").unwrap();
         make_read_only(&tampered).unwrap();
@@ -2319,10 +2328,7 @@ mod tests {
         architect::accept_superagent_review_for_test(&state,&native_session_id).unwrap();
         let tampered=snapshot_root.join("reviewed.md");
         let mut writable=std::fs::metadata(&tampered).unwrap().permissions();
-        #[cfg(unix)]
-        writable.set_mode(writable.mode() | 0o200);
-        #[cfg(not(unix))]
-        writable.set_readonly(false);
+        make_writable_permissions(&mut writable);
         std::fs::set_permissions(&tampered,writable).unwrap();
         std::fs::write(&tampered,"tampered reviewer bytes").unwrap();
         make_read_only(&tampered).unwrap();

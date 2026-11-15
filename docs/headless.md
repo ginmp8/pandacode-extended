@@ -590,6 +590,26 @@ exception remain unimplemented; Council-Off Tickets retain normal manual
 acceptance.
 
 
+### Redacted Ticket audit pagination
+
+`pandacode serve --list-ticket-activity <ticket-id>` returns up to 100 native
+Ticket audit events, including only event IDs, kinds and timestamps. Follow
+`nextCursor` with `--before <audit-id>` to reach older events. Event details,
+task objectives, credentials, provider output and private evidence are never
+included. This inspector never executes provider recovery or a remote action,
+and a missing Ticket or invalid cursor exits nonzero. Pages are bounded
+point-in-time observations, not an atomic snapshot across concurrent writers.
+
+### Revision-bound headless Stop
+
+Operators can use `pandacode serve --stop-ticket-at-revision <ticket-id> <expected-revision>`
+after inspecting the Ticket revision. A stale revision fails atomically without
+revoking the Mandate, altering the Ticket, or writing an audit entry. The command
+uses the same native external-effect dispatch fence and headless permission
+checks as emergency Stop. Unconditional `--stop-ticket` remains available for
+emergency revocation and is not disabled by the optional revision check.
+Neither command asserts that a separate serve-owned process was forcibly killed.
+
 ### Cross-process Stop propagation to the serve-owned provider
 
 `pandacode serve --stop-ticket <ticket-id>` is a separate one-shot CLI

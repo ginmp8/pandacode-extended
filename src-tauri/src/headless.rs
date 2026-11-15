@@ -36,6 +36,7 @@ enum Command {
     InspectTeamStrategy { orchestration_id: String },
     InspectDelivery { ticket_id: String },
     ListTickets,
+    ListTicketActivity { ticket_id: String, before_id: Option<i64> },
     ListReviewInbox,
     ListRecoveryInbox,
     ListDemands {
@@ -64,6 +65,7 @@ enum Command {
     RetryTicket { ticket_id: String, expected_revision: i64 },
     InspectRetryRequest { ticket_id: String, expected_revision: i64 },
     StopTicket { ticket_id: String },
+    StopTicketAtRevision { ticket_id: String, expected_revision: i64 },
     QuarantineTerminalOrphan { ticket_id: String, expected_revision: i64 },
     DisableOrchestration { orchestration_id: String, expected_revision: i64 },
     RenameOrchestration { orchestration_id: String, expected_revision: i64, name: String },
@@ -298,6 +300,22 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::ListTicketActivity { ticket_id, before_id } = &command {
+                // Only metadata for the explicitly requested Ticket is returned.
+                // Store::open_read_only never performs restart recovery.
+                let result=app.path().app_data_dir()
+                    .map_err(|e|e.to_string())
+                    .and_then(|dir|crate::superagent::list_headless_ticket_activity(
+                        &dir.join("kingcode.sqlite3"),ticket_id,*before_id,
+                    ));
+                match result {
+                    Ok(activity)=>{println!("{activity}");std::process::exit(0)}
+                    Err(error)=>{
+                        eprintln!("SuperAgent Ticket activity inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             if matches!(&command, Command::ListRecoveryInbox) {
                 // Recovery planning is read-only even beside a live serve host:
                 // no restart settlement, provider replay, or effect acknowledgment.
@@ -451,7 +469,8 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
             }
             let native_action = matches!(&command,
                 Command::EnableOrchestration { .. } | Command::RetryTicket { .. } | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
-                | Command::StopTicket { .. } | Command::QuarantineTerminalOrphan { .. }
+                | Command::StopTicket { .. } | Command::StopTicketAtRevision { .. }
+                | Command::QuarantineTerminalOrphan { .. }
                 | Command::DisableOrchestration { .. }
                 | Command::RenameOrchestration { .. } | Command::IssueComment { .. });
             if native_action {
@@ -474,6 +493,10 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                                 crate::superagent::headless_reject_ticket(&database, ticket_id, *expected_revision, reason),
                             Command::StopTicket { ticket_id } =>
                                 crate::superagent::headless_stop_ticket(&database, ticket_id),
+                            Command::StopTicketAtRevision { ticket_id, expected_revision } =>
+                                crate::superagent::headless_stop_ticket_at_revision(
+                                    &database, ticket_id, *expected_revision,
+                                ),
                             Command::QuarantineTerminalOrphan { ticket_id, expected_revision } =>
                                 crate::superagent::headless_quarantine_terminal_orphan(
                                     &database, ticket_id, *expected_revision,
@@ -525,7 +548,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
     match command {
         // Inspection exits before setup_common and must never reach this branch.
         Command::InspectOrchestrations | Command::InspectTeamStrategy { .. }
-        | Command::ListTickets | Command::ListReviewInbox
+        | Command::ListTickets | Command::ListTicketActivity { .. }
+        | Command::ListReviewInbox
         | Command::ListRecoveryInbox | Command::ListDemands { .. }
         | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
@@ -541,7 +565,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::CreateOrchestration { .. } | Command::ConfigureTeamRoles { .. }
         | Command::EnableOrchestration { .. }
         | Command::RetryTicket { .. } | Command::InspectRetryRequest { .. }
-        | Command::StopTicket { .. } | Command::QuarantineTerminalOrphan { .. }
+        | Command::StopTicket { .. } | Command::StopTicketAtRevision { .. }
+        | Command::QuarantineTerminalOrphan { .. }
         | Command::DisableOrchestration { .. }
         | Command::RenameOrchestration { .. } | Command::IssueComment { .. } => {
             eprintln!("SuperAgent inspection must use the read-only startup path.");
@@ -1016,6 +1041,24 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 command = Command::ListTickets;
                 ops += 1;
             }
+            "--list-ticket-activity" => {
+                let ticket_id=args.get(index+1)
+                    .ok_or("--list-ticket-activity needs a Ticket ID.")?;
+                validate_ticket_id(ticket_id)?;
+                let before_id=if args.get(index+2).map(String::as_str)==Some("--before") {
+                    let value=args.get(index+3)
+                        .ok_or("--before needs a positive audit event ID.")?;
+                    let cursor=value.parse::<i64>().ok().filter(|id|*id>0)
+                        .ok_or("--before needs a positive audit event ID.")?;
+                    index+=2;
+                    Some(cursor)
+                } else {None};
+                command=Command::ListTicketActivity{
+                    ticket_id:ticket_id.clone(),before_id,
+                };
+                ops+=1;
+                index+=1;
+            }
             "--list-recovery-inbox" => {
                 command = Command::ListRecoveryInbox;
                 ops += 1;
@@ -1316,6 +1359,19 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops+=1;
                 index+=2;
             }
+            "--stop-ticket-at-revision" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or("--stop-ticket-at-revision needs a Ticket ID and expected revision.")?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--stop-ticket-at-revision needs an expected Ticket revision.")?;
+                command = Command::StopTicketAtRevision {
+                    ticket_id: ticket_id.clone(),
+                    expected_revision: parse_ticket_revision(revision)?,
+                };
+                ops += 1;
+                index += 2;
+            }
             "--stop-ticket" => {
                 let ticket_id = args.get(index + 1)
                     .ok_or_else(|| format!("--stop-ticket needs a ticket ID.\n\n{}", help()))?;
@@ -1482,7 +1538,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-review-inbox | --list-recovery-inbox | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-delivery <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --create-orchestration <file> | --configure-team-roles <id> <revision> <file> | --enable-orchestration <id> <revision> | --retry-ticket <id> <revision> | --inspect-retry-request <id> <revision> | --stop-ticket <id> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox | --list-recovery-inbox | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-delivery <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> | --inspect-ticket-source <id> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --create-orchestration <file> | --configure-team-roles <id> <revision> <file> | --enable-orchestration <id> <revision> | --retry-ticket <id> <revision> | --inspect-retry-request <id> <revision> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1514,6 +1570,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          Inspect receipt-backed progress and sanitized local Git hashes;
                          never claim actual delivery without test/CI/publication proof.
   --list-tickets         List up to 200 redacted native SuperAgent tickets; exit.
+  --list-ticket-activity <id> [--before <audit-id>]
+                         Page up to 100 redacted audit event metadata rows by ID.
+                         No private details or provider/restart actions are exposed.
   --list-review-inbox    List up to 200 pending human/Council decisions across Teams;
                          redact objectives, never approve or run a reviewer; exit.
   --list-recovery-inbox  Prioritize up to 200 actual recovery/decision Tickets across Teams;
@@ -1568,7 +1627,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          Persist a read-only retry intent; live serve owns dispatch.
   --inspect-retry-request <id> <revision>
                          Inspect the native retry receipt without process recovery.
-  --stop-ticket <id>    Revoke a Ticket mandate and stop the Ticket; exit.
+  --stop-ticket <id>    Emergency revoke of a Ticket mandate without prior revision.
+  --stop-ticket-at-revision <id> <revision>
+                         Revoke only the observed Ticket revision; stale input cannot revoke.
   --quarantine-terminal-orphan <id> <revision>
                          Quarantine a running assignment on a terminal Ticket;
                          revoke its mandate, preserve uncertain effects and never replay.
@@ -1700,6 +1761,24 @@ mod tests {
             assert!(parsed(invalid).is_err(),"{invalid}");
         }
         assert_eq!(parsed("--list-tickets"), Ok(Command::ListTickets));
+        assert_eq!(parsed("--list-ticket-activity ticket_123"),
+            Ok(Command::ListTicketActivity {
+                ticket_id:"ticket_123".into(),before_id:None,
+            }));
+        assert_eq!(parsed("--list-ticket-activity ticket_123 --before 55"),
+            Ok(Command::ListTicketActivity {
+                ticket_id:"ticket_123".into(),before_id:Some(55),
+            }));
+        for invalid in [
+            "--list-ticket-activity",
+            "--list-ticket-activity ../unsafe",
+            "--list-ticket-activity ticket_123 --before",
+            "--list-ticket-activity ticket_123 --before 0",
+            "--list-ticket-activity ticket_123 --before bad",
+            "--list-ticket-activity ticket_123 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert_eq!(parsed("--list-review-inbox"), Ok(Command::ListReviewInbox));
         assert_eq!(parsed("--list-recovery-inbox"), Ok(Command::ListRecoveryInbox));
         assert_eq!(parsed("--inspect-demand-plan ticket_123"),
@@ -1873,6 +1952,20 @@ mod tests {
         assert_eq!(parsed("--stop-ticket ticket_123"), Ok(Command::StopTicket {
             ticket_id: "ticket_123".into(),
         }));
+        assert_eq!(parsed("--stop-ticket-at-revision ticket_123 4"),
+            Ok(Command::StopTicketAtRevision {
+                ticket_id: "ticket_123".into(), expected_revision: 4,
+            }));
+        for invalid in [
+            "--stop-ticket-at-revision",
+            "--stop-ticket-at-revision ticket_123",
+            "--stop-ticket-at-revision ../unsafe 4",
+            "--stop-ticket-at-revision ticket_123 nope",
+            "--stop-ticket-at-revision ticket_123 -1",
+            "--stop-ticket-at-revision ticket_123 4 --stop-ticket ticket_123",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
         assert!(parsed("--accept-ticket ticket_123").is_err());
         assert!(parsed("--accept-ticket ticket_123 nope").is_err());
         assert!(parsed("--accept-ticket ../outside 1").is_err());

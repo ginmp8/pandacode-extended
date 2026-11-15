@@ -337,6 +337,9 @@ test('active Team title edit preserves immutable saved role IDs in future-only I
     const {mountSuperagent}=await import('/src/superagent-ui.ts');
     const host=document.createElement('div');
     host.id='sa-future-only-edit';
+    // The main app fills the viewport with body scrolling disabled. Keep this
+    // isolated native-IPC fixture in view for real browser pointer clicks.
+    host.style.cssText='position:fixed;inset:0;z-index:10000;overflow:auto;background:var(--bg)';
     document.body.appendChild(host);
     const cfg={
       id:'team-pinned',name:'Pinned Team',coordinatorBotId:'lead',workerBotId:'primary',
@@ -1873,7 +1876,10 @@ test('Demand WorkItem inspector explains native dependency blockers without laun
   await page.evaluate(async()=>{
     const {mountSuperagent}=await import('/src/superagent-ui.ts');
     const host=document.createElement('div');
-    host.id='sa-workitem-blockers-test';document.body.appendChild(host);
+    host.id='sa-workitem-blockers-test';
+    // The app disables body scrolling; offscreen fixtures cannot be clicked reliably.
+    host.style.cssText='position:fixed;inset:0;z-index:10000;overflow:auto;background:var(--bg)';
+    document.body.appendChild(host);
     const calls:string[]=[];
     (window as unknown as {workItemReadCalls:()=>string[]}).workItemReadCalls=()=>calls;
     const ticket={id:'root',orchestrationId:'team',objective:'Complete native DAG',

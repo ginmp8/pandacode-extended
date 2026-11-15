@@ -16,6 +16,7 @@ interface Config {
 interface Ticket {
   id: string; objective: string; state: string; revision: number; evidence: string | null;
   orchestrationId?: string; createdAt?: number; updatedAt?: number; actor?: string;
+  provenance?: string;
 }
 interface QueueTicket extends Ticket { orchestrationId: string }
 interface WorkItem {
@@ -136,13 +137,96 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
   const editCouncilErrors = new Map<string, string>();
   let sources: EventSource[] = [], sourcesLoaded = false, decisionSourceId = '';
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
+  function captureFocusedControl(): {
+    selector: string; index: number; selectionStart: number | null;
+    selectionEnd: number | null; selectionDirection: 'forward' | 'backward' | 'none' | null;
+  } | null {
+    const focused = document.activeElement;
+    if (!(focused instanceof HTMLElement) || !host.contains(focused)) return null;
+    const dataAttributes = Array.from(focused.attributes)
+      .filter(attribute => attribute.name.startsWith('data-sa-'));
+    const selector = focused.id
+      ? '#' + CSS.escape(focused.id)
+      : focused.tagName.toLowerCase() + dataAttributes
+        .map(attribute => '[' + attribute.name + '="' + CSS.escape(attribute.value) + '"]').join('');
+    if (!focused.id && !dataAttributes.length) return null;
+    const index = Array.from(host.querySelectorAll<HTMLElement>(selector)).indexOf(focused);
+    if (index < 0) return null;
+    let selectionStart: number | null = null, selectionEnd: number | null = null;
+    let selectionDirection: 'forward' | 'backward' | 'none' | null = null;
+    if (focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement) {
+      try {
+        selectionStart = focused.selectionStart;
+        selectionEnd = focused.selectionEnd;
+        selectionDirection = focused.selectionDirection;
+      } catch { /* Some input types do not expose text selection. */ }
+    }
+    return { selector, index, selectionStart, selectionEnd, selectionDirection };
+  }
+  function restoreFocusedControl(snapshot: ReturnType<typeof captureFocusedControl>): void {
+    if (!snapshot) return;
+    const focused = host.querySelectorAll<HTMLElement>(snapshot.selector)[snapshot.index];
+    if (!focused) return;
+    focused.focus({ preventScroll:true });
+    if (snapshot.selectionStart !== null && snapshot.selectionEnd !== null &&
+        (focused instanceof HTMLInputElement || focused instanceof HTMLTextAreaElement)) {
+      try { focused.setSelectionRange(snapshot.selectionStart, snapshot.selectionEnd, snapshot.selectionDirection ?? undefined); }
+      catch { /* A changing control may no longer support a selection range. */ }
+    }
+  }
   const safe = (value: unknown) => escape(String(value ?? ''));
   const current = () => presets.find(item => item.id === selected);
+  const teamName = (id: string) => presets.find(team => team.id === id)?.name ?? 'Unknown Team';
   const botName = (id: string) => bots.find(bot => bot.id === id)?.name ?? 'Missing bot';
   const botProjectId = (id: string) => bots.find(bot => bot.id === id)?.projectId;
   const activityTime = (timestamp?: number): string => typeof timestamp === 'number' &&
     Number.isFinite(timestamp) && timestamp > 0
     ? new Date(timestamp).toLocaleString() : 'Unavailable';
+  function globalQueueBodyMarkup(): string {
+    const query = runQuery.trim().toLocaleLowerCase();
+    const filteredQueue = globalTickets.filter(ticket => {
+      if (runTeamFilter !== 'all' && ticket.orchestrationId !== runTeamFilter) return false;
+      if (runStatusFilter !== 'all' && ticket.state !== runStatusFilter) return false;
+      if (query && ![ticket.objective, ticket.id, teamName(ticket.orchestrationId)]
+        .some(value => value.toLocaleLowerCase().includes(query))) return false;
+      return true;
+    }).sort((left, right) => {
+      const leftAt = typeof left.createdAt === 'number' ? left.createdAt : 0;
+      const rightAt = typeof right.createdAt === 'number' ? right.createdAt : 0;
+      return rightAt - leftAt || right.id.localeCompare(left.id);
+    });
+    const failedTeam = runTeamFilter === 'all' ? null
+      : globalQueueErrors.find(item => item.orchestrationId === runTeamFilter) ?? null;
+    const queueRows = filteredQueue.map(ticket => '<li class="sa-queue-ticket" data-sa-queue-ticket="' +
+      safe(ticket.id) + '"><div><strong>' + safe(ticket.objective) + '</strong>' +
+      (ticket.provenance === 'preview-fixture'
+        ? '<small class="sa-preview-fixture">Preview fixture · sample data, not native storage</small>' : '') +
+      '<small>Team: ' + safe(teamName(ticket.orchestrationId)) + ' · State: ' +
+      safe(ticket.state.replace(/_/g, ' ')) + '</small><small>Ticket ID: <code>' + safe(ticket.id) +
+      '</code> · Updated: ' + safe(activityTime(ticket.updatedAt)) + '</small></div>' +
+      '<div class="sa-ticket-actions"><button type="button" data-sa-inspect-global-ticket="' +
+      safe(ticket.id) + '" aria-pressed="' + (ticket.id === inspectedTicket) + '">View evidence for ' +
+      safe(ticket.objective) + '</button><button type="button" data-sa-open-team-queue="' +
+      safe(ticket.orchestrationId) + '">Open Team queue</button></div></li>').join('');
+    return globalQueueLoading
+      ? '<p class="sa-empty" role="status" aria-live="polite">Loading native Ticket lists…</p>'
+      : failedTeam
+        ? '<p class="sa-error" role="alert">Tickets for ' + safe(teamName(failedTeam.orchestrationId)) +
+          ' could not be loaded: ' + safe(failedTeam.message) + '</p>'
+        : !presets.length
+          ? '<p class="sa-empty">No Teams yet. Create a Team before assigning a demand.</p>'
+          : !globalQueueLoaded
+            ? '<p class="sa-empty" role="status">Open Demands / Runs to load Team queues.</p>'
+            : !globalTickets.length && !globalQueueErrors.length
+              ? '<p class="sa-empty">No demands yet. Assign a demand to an enabled Team to begin.</p>'
+              : !globalTickets.length && globalQueueErrors.length
+                ? '<p class="sa-empty" role="status">Queue contents are unavailable until the failed Team Ticket lists can be read.</p>'
+                : !filteredQueue.length && globalQueueErrors.length && runTeamFilter === 'all'
+                  ? '<p class="sa-empty" role="status">No demands were found in the available Team queues; unavailable Teams may still have matching Tickets.</p>'
+                  : !filteredQueue.length
+                    ? '<p class="sa-empty">No demands match these filters.</p>'
+                    : '<ul class="sa-tickets sa-run-ticket-list">' + queueRows + '</ul>';
+  }
   const readTeamDraft = (form: HTMLFormElement): TeamDraft => {
     const data = new FormData(form);
     const checked = data.get('councilRequired') !== null;
@@ -357,6 +441,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '<h5>WorkItem List</h5>' + body + '</div></details>';
   }
   function render(): void {
+    const focusedControl = captureFocusedControl();
     if (!host.isConnected) return;
     const previousPlanReadiness = host.querySelector<HTMLDetailsElement>('[data-sa-plan-readiness]');
     if (previousPlanReadiness) planReadinessExpanded = previousPlanReadiness.open;
@@ -590,62 +675,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         (rejectingTicket ? '<form data-sa-form="reject"><label>Rejection reason<textarea name="reason" maxlength="500" required></textarea></label>' +
           '<div class="sa-actions"><button type="submit" class="primary-button">Submit rejection</button>' +
           '<button type="button" data-sa-reject-cancel>Cancel</button></div></form>' : '') +
-        details + sourcePanel + '</section>' : '';
+        (activeSurface === 'teams' ? details : '') + sourcePanel + '</section>' : '';
     const teamOptions = presets.map(team => '<option value="' + safe(team.id) + '"' +
       (team.id === runTeamFilter ? ' selected' : '') + '>' + safe(team.name) + '</option>').join('');
     const intakeOptions = presets.map(team => '<option value="' + safe(team.id) + '"' +
       (team.id === intakeTeamId ? ' selected' : '') + (!team.enabled ? ' disabled' : '') + '>' +
       safe(team.name) + (team.enabled ? '' : ' · Off') + '</option>').join('');
-    const teamName = (id: string) => presets.find(team => team.id === id)?.name ?? 'Unknown Team';
     const queueStatuses = [...new Set(globalTickets.map(ticket => ticket.state))].sort();
     const statusOptions = queueStatuses.map(state => '<option value="' + safe(state) + '"' +
       (state === runStatusFilter ? ' selected' : '') + '>' + safe(state.replace(/_/g, ' ')) + '</option>').join('');
-    const query = runQuery.trim().toLocaleLowerCase();
-    const filteredQueue = globalTickets.filter(ticket => {
-      if (runTeamFilter !== 'all' && ticket.orchestrationId !== runTeamFilter) return false;
-      if (runStatusFilter !== 'all' && ticket.state !== runStatusFilter) return false;
-      if (query && ![ticket.objective, ticket.id, teamName(ticket.orchestrationId)]
-        .some(value => value.toLocaleLowerCase().includes(query))) return false;
-      return true;
-    }).sort((left, right) => {
-      const leftAt = typeof left.createdAt === 'number' ? left.createdAt : 0;
-      const rightAt = typeof right.createdAt === 'number' ? right.createdAt : 0;
-      return rightAt - leftAt || right.id.localeCompare(left.id);
-    });
-    const failedTeam = runTeamFilter === 'all' ? null
-      : globalQueueErrors.find(item => item.orchestrationId === runTeamFilter) ?? null;
     const queuePartialError = globalQueueErrors.length && runTeamFilter === 'all'
       ? '<p class="sa-error" role="alert">Some Team queues could not be loaded: ' +
         safe(globalQueueErrors.map(item => teamName(item.orchestrationId) + ': ' + item.message).join('; ')) +
         '. Results omit those Teams until the next refresh.</p>' : '';
-    const queueRows = filteredQueue.map(ticket => '<li class="sa-queue-ticket" data-sa-queue-ticket="' +
-      safe(ticket.id) + '"><div><strong>' + safe(ticket.objective) + '</strong>' +
-      '<small>Team: ' + safe(teamName(ticket.orchestrationId)) + ' · State: ' +
-      safe(ticket.state.replace(/_/g, ' ')) + '</small><small>Ticket ID: <code>' + safe(ticket.id) +
-      '</code> · Updated: ' + safe(activityTime(ticket.updatedAt)) + '</small></div>' +
-      '<div class="sa-ticket-actions"><button type="button" data-sa-inspect-global-ticket="' +
-      safe(ticket.id) + '" aria-pressed="' + (ticket.id === inspectedTicket) + '">View evidence for ' +
-      safe(ticket.objective) + '</button><button type="button" data-sa-open-team-queue="' +
-      safe(ticket.orchestrationId) + '">Open Team queue</button></div></li>').join('');
-    const queueBody = globalQueueLoading
-      ? '<p class="sa-empty" role="status" aria-live="polite">Loading native Ticket lists…</p>'
-      : failedTeam
-        ? '<p class="sa-error" role="alert">Tickets for ' + safe(teamName(failedTeam.orchestrationId)) +
-          ' could not be loaded: ' + safe(failedTeam.message) + '</p>'
-        : !presets.length
-          ? '<p class="sa-empty">No Teams yet. Create a Team before assigning a demand.</p>'
-          : !globalQueueLoaded
-            ? '<p class="sa-empty" role="status">Open Demands / Runs to load Team queues.</p>'
-            : !globalTickets.length && !globalQueueErrors.length
-              ? '<p class="sa-empty">No demands yet. Assign a demand to an enabled Team to begin.</p>'
-              : !globalTickets.length && globalQueueErrors.length
-                ? '<p class="sa-empty" role="status">Queue contents are unavailable until the failed Team Ticket lists can be read.</p>'
-                : !filteredQueue.length && globalQueueErrors.length && runTeamFilter === 'all'
-                  ? '<p class="sa-empty" role="status">No demands were found in the available Team queues; unavailable Teams may still have matching Tickets.</p>'
-                  : !filteredQueue.length
-                    ? '<p class="sa-empty">No demands match these filters.</p>'
-                    : '<ul class="sa-tickets sa-run-ticket-list">' + queueRows + '</ul>';
-    const runsPanel = '<section class="sa-surface sa-runs-surface" role="tabpanel" id="sa-runs-panel"' +
+    const runsPanel = '<section class="sa-surface sa-runs-surface" role="tabpanel" id="sa-runs-panel" aria-labelledby="sa-runs-tab" tabindex="0"' +
       (activeSurface === 'runs' ? '' : ' hidden') + '><section class="sa-pane" aria-label="Global Demands and Runs">' +
       '<header><div><h2>Demands / Runs</h2><p>Global work queue backed by each Team’s existing native Ticket list. Manual handoff remains explicit.</p></div>' +
       '<button type="button" data-sa-refresh-queue' + (globalQueueLoading ? ' disabled' : '') + '>Refresh queue</button></header>' +
@@ -656,7 +699,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       '</select></label><label>Search Ticket<input type="search" data-sa-queue-query aria-label="Search Ticket" value="' +
       safe(runQuery) + '" placeholder="Objective, Ticket ID or Team"></label></div>' +
       '<p class="sa-field-hint">Showing up to 200 recent Tickets per Team. Repository filtering is unavailable because the native Ticket list does not expose a repository identity.</p>' +
-      '<div class="sa-global-queue-body">' + queueBody + '</div>' +
+      '<div class="sa-global-queue-body">' + globalQueueBodyMarkup() + '</div>' +
       '<form data-sa-form="global-run" class="sa-global-run"><h3>Assign demand</h3>' +
       '<p>Choose an existing enabled Team. The current native intake is manual; it does not promise automatic planning, dispatch or delivery.</p>' +
       '<label>Team<select name="orchestrationId" data-sa-intake-team required>' +
@@ -668,15 +711,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       (!presets.some(team => team.id === intakeTeamId && team.enabled) || globalQueueLoading ? ' disabled' : '') +
       '>Assign demand manually</button></form></section>' +
       '<section class="sa-pane sa-run-inspector" aria-label="Selected Run evidence">' +
-      (inspectedTicket && tickets.some(ticket => ticket.id === inspectedTicket)
+      (activeSurface === 'runs' && inspectedTicket && tickets.some(ticket => ticket.id === inspectedTicket)
         ? details : '<h3>Run inspector</h3><p>Select a Ticket to load its native evidence, mandate, assignments and activity.</p>') +
       '</section></section>';
-    const tabs = '<nav class="sa-surface-tabs" aria-label="Orchestration surfaces">' +
-      '<button type="button" data-sa-surface="teams" aria-pressed="' + (activeSurface === 'teams') +
-      '">Teams</button><button type="button" data-sa-surface="runs" aria-pressed="' +
-      (activeSurface === 'runs') + '">Demands / Runs</button></nav>';
-    const teamsPanel = '<section class="sa-surface sa-teams-surface" role="region" aria-label="Teams"' +
-      (activeSurface === 'teams' ? '' : ' hidden') + '><section class="sa-pane"><h3>Orchestrations</h3><ul class="sa-list">' +
+    const tabs = '<nav class="sa-surface-tabs" role="tablist" aria-label="Orchestration surfaces" aria-orientation="horizontal">' +
+      '<button type="button" role="tab" id="sa-teams-tab" aria-controls="sa-teams-panel" data-sa-surface="teams" aria-selected="' +
+      (activeSurface === 'teams') + '" tabindex="' + (activeSurface === 'teams' ? '0' : '-1') +
+      '">Teams</button><button type="button" role="tab" id="sa-runs-tab" aria-controls="sa-runs-panel" data-sa-surface="runs" aria-selected="' +
+      (activeSurface === 'runs') + '" tabindex="' + (activeSurface === 'runs' ? '0' : '-1') +
+      '">Demands / Runs</button></nav>';
+    const teamsPanel = '<section class="sa-surface sa-teams-surface" role="tabpanel" id="sa-teams-panel" aria-labelledby="sa-teams-tab" tabindex="0"' +
+      (activeSurface === 'teams' ? '' : ' hidden') + '><section class="sa-team-surface-content" role="region" aria-label="Teams"><section class="sa-pane"><h3>Orchestrations</h3><ul class="sa-list">' +
       (list || '<li class="sa-empty">No orchestrations created.</li>') + '</ul></section>' +
       '<section class="sa-pane"><h3>Team Builder</h3>' +
       '<p>Membership is saved in order. The existing manual dispatch path does not schedule multiple Workers. Native Council reviewer runs start only for a Ticket whose saved policy requires Council; Reviewer membership alone does not start a review.</p>' +
@@ -707,7 +752,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       (preview ? '<p role="status">' + preview.wouldCreate.length + ' new; ' +
         preview.unchanged.length + ' unchanged. Imported presets will be disabled.</p>' +
         '<button class="primary-button" type="button" data-sa-import>Confirm import</button>' : '') +
-      '</section></section>';
+        '</section></section></section>';
     host.innerHTML = '<div class="sa-ui">' +
       '<p class="sa-intro">Native SuperAgent uses existing bots. Imported presets stay Off, and all task execution is manual.</p>' +
       (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
@@ -718,6 +763,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
         '<button class="primary-button" type="button" data-sa-confirm>Confirm</button></div></section>' : '') +
       tabs + teamsPanel + runsPanel + '</div>';
     host.setAttribute('aria-busy', String(busy));
+    restoreFocusedControl(focusedControl);
   }
   async function refreshTicketDetails(): Promise<void> {
     const id = inspectedTicket;
@@ -861,9 +907,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-intake-team')) {
       intakeTeamId = target.value; render(); return;
     }
-    if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-queue-query')) {
-      runQuery = target.value; render(); return;
-    }
     if (target instanceof HTMLInputElement && target.name === 'councilRequired') {
       const form = target.closest<HTMLFormElement>('form[data-sa-form="create"],form[data-sa-form="edit"]');
       if (!form) return;
@@ -899,6 +942,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
     const target = event.target;
     if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-queue-query')) {
       runQuery = target.value;
+      const queueBody = host.querySelector<HTMLElement>('.sa-global-queue-body');
+      if (queueBody) queueBody.innerHTML = globalQueueBodyMarkup();
+      return;
     }
     if (target instanceof HTMLInputElement && target.name === 'name') {
       const form = target.closest<HTMLFormElement>('form[data-sa-form="create"],form[data-sa-form="edit"]');
@@ -926,6 +972,24 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
       target.form?.querySelector('[data-sa-comment-error]')?.remove();
       target.form?.querySelector('[data-sa-comment-status]')?.remove();
     }
+  });
+  host.addEventListener('keydown', event => {
+    const target = event.target instanceof HTMLButtonElement && event.target.hasAttribute('data-sa-surface')
+      ? event.target : null;
+    if (!target) return;
+    const tabValues = ['teams', 'runs'] as const;
+    const currentIndex = tabValues.indexOf(target.dataset.saSurface as typeof tabValues[number]);
+    let nextIndex = currentIndex;
+    if (event.key === 'ArrowRight') nextIndex = (currentIndex + 1) % tabValues.length;
+    else if (event.key === 'ArrowLeft') nextIndex = (currentIndex + tabValues.length - 1) % tabValues.length;
+    else if (event.key === 'Home') nextIndex = 0;
+    else if (event.key === 'End') nextIndex = tabValues.length - 1;
+    else return;
+    event.preventDefault();
+    activeSurface = tabValues[nextIndex];
+    render();
+    host.querySelector<HTMLButtonElement>('[data-sa-surface="' + activeSurface + '"]')?.focus();
+    if (activeSurface === 'runs') void loadGlobalQueue();
   });
   host.addEventListener('click', event => {
     const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button') : null;

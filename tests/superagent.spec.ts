@@ -95,13 +95,43 @@ test('Orchestrations stays in the workspace across view navigation and reloads',
 test('Demands / Runs aggregates native-shaped Team queues, filters, inspects Tickets and preserves Team actions', async ({page}) => {
   test.setTimeout(60_000);
   const host=await openOrchestrationWorkspace(page,'/?bots=sample&superagent=sample');
-  await expect(host.getByRole('button',{name:'Teams',exact:true})).toHaveAttribute('aria-pressed','true');
-  await host.getByRole('button',{name:'Demands / Runs',exact:true}).click();
+  await expect(host.getByRole('tab',{name:'Teams',exact:true})).toHaveAttribute('aria-selected','true');
+  await host.getByRole('tab',{name:'Demands / Runs',exact:true}).click();
   const queue=host.getByRole('region',{name:'Global Demands and Runs'});
   await expect(queue.getByRole('heading',{name:'Demands / Runs'})).toBeVisible();
   await expect(queue.locator('[data-sa-queue-ticket]')).toHaveCount(4);
   await expect(queue).toContainText('Web Delivery');
   await expect(queue).toContainText('Issue Resolution');
+
+  const fixtureRow=queue.locator('[data-sa-queue-ticket="preview-ticket-web-104"]');
+  await expect(fixtureRow.getByText('Preview fixture · sample data, not native storage')).toBeVisible();
+  const search=queue.getByRole('searchbox',{name:'Search Ticket'});
+  await search.focus();
+  await search.press('f');
+  await expect(search).toBeFocused();
+  await expect.poll(()=>search.evaluate(input=>input.selectionStart)).toBe(1);
+  await expect(queue.locator('[data-sa-queue-ticket]')).toHaveCount(2);
+  await search.press('l');
+  await expect(search).toBeFocused();
+  await expect.poll(()=>search.evaluate(input=>input.selectionStart)).toBe(2);
+  await search.press('a');
+  await search.press('k');
+  await search.press('y');
+  await expect(search).toHaveValue('flaky');
+  await expect(search).toBeFocused();
+  await expect(queue.locator('[data-sa-queue-ticket]')).toHaveCount(1);
+  await expect(queue.locator('[data-sa-queue-ticket="preview-ticket-issue-203"]')).toBeVisible();
+  await search.evaluate(input=>input.setSelectionRange(2,2));
+  await page.keyboard.type('X');
+  await expect(search).toHaveValue('flXaky');
+  await expect(search).toBeFocused();
+  await expect.poll(()=>search.evaluate(input=>input.selectionStart)).toBe(3);
+  await expect(queue.locator('[data-sa-queue-ticket]')).toHaveCount(0);
+  await page.keyboard.press('Backspace');
+  await expect(search).toHaveValue('flaky');
+  await expect(queue.locator('[data-sa-queue-ticket]')).toHaveCount(1);
+  await search.fill('');
+  await expect(queue.locator('[data-sa-queue-ticket]')).toHaveCount(4);
 
   await queue.locator('[data-sa-queue-team]').selectOption('preview-team-issues');
   await expect(queue.locator('[data-sa-queue-ticket]')).toHaveCount(2);
@@ -121,8 +151,8 @@ test('Demands / Runs aggregates native-shaped Team queues, filters, inspects Tic
 
   await queue.locator('[data-sa-queue-ticket="preview-ticket-issue-202"]')
     .getByRole('button',{name:'Open Team queue'}).click();
-  const teamTab=host.getByRole('button',{name:'Teams',exact:true});
-  await expect(teamTab).toHaveAttribute('aria-pressed','true');
+  const teamTab=host.getByRole('tab',{name:'Teams',exact:true});
+  await expect(teamTab).toHaveAttribute('aria-selected','true');
   const teamSurface=host.getByRole('region',{name:'Teams',exact:true});
   const queued=teamSurface.locator('.sa-tickets li',{hasText:'Fix issue 73: preserve filters after refresh'});
   const blocked=teamSurface.locator('.sa-tickets li',{hasText:'Investigate the flaky sidebar assertion'});
@@ -131,16 +161,43 @@ test('Demands / Runs aggregates native-shaped Team queues, filters, inspects Tic
   await queued.getByRole('button',{name:'View evidence'}).click();
   await expect(host.getByRole('region',{name:'Ticket evidence'})).toContainText('preview-ticket-issue-202');
   await teamSurface.getByRole('button',{name:'Assign demand to Issue Resolution'}).click();
-  await expect(host.getByRole('button',{name:'Demands / Runs',exact:true})).toHaveAttribute('aria-pressed','true');
+  await expect(host.getByRole('tab',{name:'Demands / Runs',exact:true})).toHaveAttribute('aria-selected','true');
   await expect(host.locator('form[data-sa-form="global-run"]').getByRole('combobox',{name:'Team'}))
     .toHaveValue('preview-team-issues');
+});
+
+test('Demands / Runs renders Ticket evidence only in the active surface', async ({page}) => {
+  test.setTimeout(60_000);
+  const host=await openOrchestrationWorkspace(page,'/?bots=sample&superagent=sample');
+  await host.getByRole('tab',{name:'Demands / Runs',exact:true}).click();
+  const queue=host.getByRole('region',{name:'Global Demands and Runs'});
+  await expect(queue.locator('[data-sa-queue-ticket]')).toHaveCount(4);
+  await queue.getByRole('button',{name:'View evidence for Add keyboard navigation to the search panel'}).click();
+  const inspector=host.getByRole('region',{name:'Selected Run evidence'});
+  await expect(inspector.getByRole('region',{name:'Ticket evidence'})).toBeVisible();
+
+  // Regression: while Runs is selected, the hidden Teams panel must not retain a
+  // duplicate Ticket evidence/details surface or its controls/text.
+  const teamsPanel=host.locator('#sa-teams-panel');
+  await expect(teamsPanel).toBeHidden();
+  await expect(teamsPanel.getByRole('region',{name:'Ticket evidence'})).toHaveCount(0);
+  await expect(teamsPanel.getByText('No threads linked.')).toHaveCount(0);
+  await expect(inspector.getByRole('region',{name:'Ticket evidence'})).toHaveCount(1);
+  await expect(inspector.getByRole('region',{name:'Ticket evidence'})).toContainText('No threads linked.');
+
+  // Switching back to Teams surfaces the same details exactly once there.
+  await host.getByRole('tab',{name:'Teams',exact:true}).click();
+  await expect(teamsPanel).toBeVisible();
+  await expect(teamsPanel.getByRole('region',{name:'Ticket evidence'})).toHaveCount(1);
+  await expect(teamsPanel.getByText('No threads linked.')).toHaveCount(1);
+  await expect(host.locator('#sa-runs-panel').getByRole('region',{name:'Ticket evidence'})).toHaveCount(0);
 });
 
 test('Demands / Runs gives an honest empty state when no Teams exist', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
-  await host.getByRole('button',{name:'Demands / Runs',exact:true}).click();
+  await host.getByRole('tab',{name:'Demands / Runs',exact:true}).click();
   await expect(host.getByRole('region',{name:'Global Demands and Runs'}))
     .toContainText('No Teams yet. Create a Team before assigning a demand.');
 });
@@ -169,13 +226,54 @@ test('Demands / Runs reports loading and per-Team Ticket-list failures', async (
   });
   const host=page.locator('#sa-queue-error-test');
   await expect(host).toHaveAttribute('aria-busy','false');
-  await host.getByRole('button',{name:'Demands / Runs',exact:true}).click();
+  await host.getByRole('tab',{name:'Demands / Runs',exact:true}).click();
   const queue=host.getByRole('region',{name:'Global Demands and Runs'});
   await expect(queue.getByRole('status')).toContainText('Loading native Ticket lists');
   await page.evaluate(()=>(window as unknown as {saQueueRelease?:()=>void}).saQueueRelease?.());
   await expect(queue.getByRole('status')).toContainText('Queue contents are unavailable');
   const failure=queue.getByRole('alert').filter({hasText:'Some Team queues could not be loaded'});
   await expect(failure).toContainText('Team One: Team ticket store is unavailable.');
+});
+
+test('Demands / Runs tabs are labelled, keyboard accessible and fit a narrow viewport', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.setViewportSize({width:360,height:780});
+  const host=await openOrchestrationWorkspace(page,'/?bots=sample&superagent=sample');
+  const tabs=host.getByRole('tablist',{name:'Orchestration surfaces'});
+  const teamsTab=tabs.getByRole('tab',{name:'Teams',exact:true});
+  const runsTab=tabs.getByRole('tab',{name:'Demands / Runs',exact:true});
+  const teamsPanel=host.locator('#sa-teams-panel');
+  const runsPanel=host.locator('#sa-runs-panel');
+  await expect(teamsTab).toHaveAttribute('aria-controls','sa-teams-panel');
+  await expect(runsTab).toHaveAttribute('aria-controls','sa-runs-panel');
+  await expect(teamsPanel).toHaveAttribute('aria-labelledby','sa-teams-tab');
+  await expect(runsPanel).toHaveAttribute('aria-labelledby','sa-runs-tab');
+  await expect(teamsPanel).toBeVisible();
+  await expect(runsPanel).toBeHidden();
+
+  await teamsTab.focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(runsTab).toHaveAttribute('aria-selected','true');
+  await expect(runsTab).toBeFocused();
+  await expect(teamsPanel).toBeHidden();
+  await expect(runsPanel).toBeVisible();
+  const queue=host.getByRole('region',{name:'Global Demands and Runs'});
+  await expect(queue.locator('[data-sa-queue-ticket]')).toHaveCount(4);
+  await expect.poll(()=>host.locator('.sa-ui').evaluate(element=>element.scrollWidth-element.clientWidth))
+    .toBeLessThanOrEqual(1);
+
+  await queue.getByRole('button',{name:'View evidence for Add keyboard navigation to the search panel'}).click();
+  const inspector=host.getByRole('region',{name:'Selected Run evidence'});
+  await expect(inspector.getByRole('region',{name:'Ticket evidence'})).toBeVisible();
+  await expect.poll(()=>host.locator('.sa-ui').evaluate(element=>element.scrollWidth-element.clientWidth))
+    .toBeLessThanOrEqual(1);
+
+  await runsTab.focus();
+  await page.keyboard.press('ArrowLeft');
+  await expect(teamsTab).toHaveAttribute('aria-selected','true');
+  await expect(teamsTab).toBeFocused();
+  await expect(teamsPanel).toBeVisible();
+  await expect(runsPanel).toBeHidden();
 });
 
 test('native SuperAgent preset UI stays manual and imports disabled portable configurations', async ({page}) => {
@@ -1813,7 +1911,7 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
   await host.getByRole('button',{name:'Link thread (context only)'}).click();
   await expect(host.locator('.sa-linked-threads')).toContainText('test/fixture / issue:42');
   await expect(host.getByRole('status')).toContainText('no task or authorization created');
-  await expect(host.getByText('Private fixture')).toBeVisible();
+  await expect(host.getByText('Private fixture',{exact:true})).toBeVisible();
   await expect(host.getByText('Off · no GitHub request')).toBeVisible();
   await expect(host.getByRole('button',{name:/Fetch one latest matching GitHub event/})).toHaveCount(0);
   await expect.poll(()=>page.evaluate(

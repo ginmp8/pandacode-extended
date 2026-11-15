@@ -5,7 +5,7 @@ type Config = { id:string; name:string; coordinatorBotId:string; workerBotId:str
   projectId:string; enabled:boolean; policyRevision:number; councilRequired:boolean };
 type Ticket = { id:string; orchestrationId:string; objective:string;
   requestKey:string; actor:string; state:string; revision:number; activeAssignmentId:string|null;
-  evidence:string|null; createdAt:number; updatedAt:number };
+  evidence:string|null; createdAt:number; updatedAt:number; provenance?:string };
 type WorkItem = { id:string; ticketId:string; objective:string; state:string;
   evidenceContract:string; ordinal:number; dependsOnIds?:string[]; readiness?:string;
   createdAt:number; updatedAt:number };
@@ -60,7 +60,8 @@ function seedDemandRunsSample(bots:Bot[]):void {
     const ticket:Ticket={id:input.id,orchestrationId:config.id,
       requestKey:`preview-request-${input.id}`,objective:input.objective,actor:'local-user',
       state:input.state,revision:input.revision,
-      activeAssignmentId:assignment?.id??null,evidence:input.evidence,createdAt,updatedAt};
+      activeAssignmentId:assignment?.id??null,evidence:input.evidence,createdAt,updatedAt,
+      provenance:'preview-fixture'};
     tickets.set(config.id,[...(tickets.get(config.id)||[]),ticket]);
     const roleIds=[config.coordinatorBotId,...config.workerBotIds,...config.reviewerBotIds];
     teamSnapshots.set(ticket.id,{snapshotVersion:1,provenance:'preview-fixture',

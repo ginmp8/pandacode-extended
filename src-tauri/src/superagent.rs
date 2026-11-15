@@ -6249,7 +6249,7 @@ mod tests {
         ).unwrap();
         assert!(launched);
         let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
-        let state = architect::test_app_state(store);
+        let state = crate::architect::test_app_state(store);
 
         // Admission reserves the assignment before an agent appears in the
         // runtime registry. Task deletion must still fail closed in that gap.
@@ -6388,6 +6388,109 @@ mod tests {
     }
 
     #[test]
+    fn removing_a_coordinator_revokes_live_and_planned_authority_without_losing_history() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let plan = serde_json::json!({
+            "version": 1,
+            "workItems": [{
+                "ordinal": 0,
+                "objective": "Inspect the change",
+                "evidenceContract": "Show the evidence",
+                "dependsOn": [],
+            }],
+        })
+        .to_string();
+        let (planned, launched) = admit_role(
+            &mut store,
+            &config.id,
+            "Plan before coordinator removal",
+            "coordinator-remove-planned",
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(launched);
+        let planned_session = assignment_session(&store, &planned.id).unwrap().unwrap();
+        assert!(on_run_finished(&store, &planned_session, true, &plan).unwrap());
+        let planned_before = get_ticket(&store, &planned.id).unwrap();
+        assert_eq!(planned_before.state, "queued");
+        assert_eq!(planned_before.evidence.as_deref(), Some(plan.as_str()));
+        let planned_assignment_id = assignments(&store, &planned.id, 10).unwrap()[0].id.clone();
+        let planned_audit = history(&store, &planned.id, 100)
+            .unwrap()
+            .into_iter()
+            .map(|event| (event.id, event.kind, event.detail))
+            .collect::<Vec<_>>();
+        assert!(planned_audit
+            .iter()
+            .any(|(_, kind, _)| kind == "coordinator_plan_ingested"));
+
+        let (active, launched) = admit_role(
+            &mut store,
+            &config.id,
+            "Plan active work before coordinator removal",
+            "coordinator-remove-active",
+            false,
+            true,
+        )
+        .unwrap();
+        assert!(launched);
+        let active_session = assignment_session(&store, &active.id).unwrap().unwrap();
+        let active_assignment_id = assignments(&store, &active.id, 10).unwrap()[0].id.clone();
+        let active_audit = history(&store, &active.id, 100)
+            .unwrap()
+            .into_iter()
+            .map(|event| (event.id, event.kind, event.detail))
+            .collect::<Vec<_>>();
+
+        bots::delete(&store, "router").unwrap();
+
+        let retained_plan = get_ticket(&store, &planned.id).unwrap();
+        assert_eq!(retained_plan.state, "blocked");
+        assert_eq!(retained_plan.evidence.as_deref(), Some(plan.as_str()));
+        assert!(mandate(&store, &planned.id).unwrap().revoked);
+        let planned_assignments = assignments(&store, &planned.id, 10).unwrap();
+        assert_eq!(planned_assignments.len(), 1);
+        assert_eq!(planned_assignments[0].id, planned_assignment_id);
+        assert_eq!(planned_assignments[0].state, "finished");
+        assert!(prepare_coordinated_worker(&mut store, &planned.id, false).is_err());
+        assert!(!on_run_finished(&store, &planned_session, true, "late coordinator plan").unwrap());
+        let retained_plan_audit = history(&store, &planned.id, 100).unwrap();
+        for (id, kind, detail) in planned_audit {
+            assert!(retained_plan_audit
+                .iter()
+                .any(|event| event.id == id && event.kind == kind && event.detail == detail));
+        }
+        assert!(retained_plan_audit
+            .iter()
+            .any(|event| event.kind == "bot_removed"));
+
+        let interrupted = get_ticket(&store, &active.id).unwrap();
+        assert_eq!(interrupted.state, "interrupted");
+        assert!(mandate(&store, &active.id).unwrap().revoked);
+        let active_assignments = assignments(&store, &active.id, 10).unwrap();
+        assert_eq!(active_assignments.len(), 1);
+        assert_eq!(active_assignments[0].id, active_assignment_id);
+        assert_eq!(active_assignments[0].state, "interrupted");
+        assert!(store.session(&active_session).is_err());
+        assert!(
+            !on_run_finished(&store, &active_session, true, "late coordinator callback").unwrap()
+        );
+        let retained_active_audit = history(&store, &active.id, 100).unwrap();
+        for (id, kind, detail) in active_audit {
+            assert!(retained_active_audit
+                .iter()
+                .any(|event| event.id == id && event.kind == kind && event.detail == detail));
+        }
+        assert!(retained_active_audit
+            .iter()
+            .any(|event| event.kind == "bot_removed"));
+        assert!(store.session(&planned_session).is_err());
+        assert!(!configuration(&store, &config.id).unwrap().enabled);
+    }
+
+    #[test]
     fn ticket_history_survives_bot_and_session_deletion_and_reopen() {
         let mut store = fixture();
         let config = enabled(&store);
@@ -6425,7 +6528,7 @@ mod tests {
 
         // The ordinary task-deletion path removes the bot-owned session only
         // after the run settled; native Ticket evidence has no session FK.
-        let state = architect::test_app_state(reopened);
+        let state = crate::architect::test_app_state(reopened);
         let deleted = crate::task_deletion::delete_state(&state, &session).unwrap();
         assert_eq!(deleted.deleted_session_ids, vec![session.clone()]);
         {
@@ -6479,7 +6582,7 @@ mod tests {
         let config = enabled_required_council(&store, "Reset reviewer owner");
         let (ticket, worker_session) = admit_required_worker(&mut store, &config.id, "reviewer-reset");
         assert_eq!(ticket.state, "waiting_review");
-        let state = architect::test_app_state(store);
+        let state = crate::architect::test_app_state(store);
 
         {
             let store = state.store.lock().unwrap();
@@ -6525,7 +6628,7 @@ mod tests {
         ).unwrap();
         let config = enabled_required_council(&store, "Remove reviewer owner");
         let (ticket, worker_session) = admit_required_worker(&mut store, &config.id, "reviewer-remove");
-        let state = architect::test_app_state(store);
+        let state = crate::architect::test_app_state(store);
         assert!(council_adapter::start_after_worker_completion_for_test(
             &state, &worker_session,
         ).unwrap());
@@ -6536,7 +6639,7 @@ mod tests {
                 "SELECT native_session_id,workspace_snapshot_id FROM sa_council_requests WHERE ticket_id=?1",
                 [&ticket.id], |row| Ok((row.get(0)?, row.get(1)?)),
             ).unwrap();
-            let team = architect::load(&store, &native_session).unwrap().unwrap();
+            let team = crate::architect::load(&store, &native_session).unwrap().unwrap();
             let reviewer_session = team.workers.iter()
                 .find(|worker| worker.council.is_some()).unwrap().session_id.clone();
             (native_session, reviewer_session, snapshot_id)
@@ -6580,7 +6683,7 @@ mod tests {
                 std::fs::remove_dir_all(frozen).unwrap();
             }
         }
-        assert_eq!(native_session, architect::parent_of(&state.store.lock().unwrap(), &reviewer_session)
+        assert_eq!(native_session, crate::architect::parent_of(&state.store.lock().unwrap(), &reviewer_session)
             .unwrap().unwrap());
         drop(state);
         let _ = std::fs::remove_dir_all(workspace);

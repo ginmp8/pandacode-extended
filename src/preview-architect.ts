@@ -473,6 +473,7 @@ export function createPreviewArchitect(host: PreviewHost) {
       finished: [[8.3, 9.1, 8.8]],
       asking: [[8.3, 9.1, 8.8]],
       accepted: [[8.3, 9.1, 8.8]],
+      blocked: [[8.7, 9.1, 9.4]],
       passed: [[8.3, 9.1, 8.8], [9.5, 9.6, 9.7]],
       limit: [[8.3, 9.1, 8.8], [8.7, 9.6, 9]],
       ledger: [[9.6, 9.8]],
@@ -482,6 +483,7 @@ export function createPreviewArchitect(host: PreviewHost) {
     // What native reports for each scenario.
     const reported: Record<string, Partial<CouncilStatus>> = {
       fixing: { state: 'fixing', round: 1, lowest: 8.3, stale: true }, finished: { state: 'fixing', round: 1, lowest: 8.3 }, asking: { state: 'fixing', round: 1, lowest: 8.3 },
+      blocked: { state: 'blocked', round: 1, lowest: 8.7, notice: 'council_required_nested_branch_failed: required nested Council branches failed: preview-reviewer.' },
       passed: { state: 'passed', round: 2, lowest: 9.5 }, limit: { state: 'limit', round: 2, lowest: 8.7 },
       accepted: { state: 'accepted', round: 1, lowest: 8.3 }, cycle: { state: 'reviewing', round: 1, lowest: 9.2 },
       ledger: { state: 'passed', round: 1, lowest: 9.6 },

@@ -147,6 +147,17 @@ test('state text reads as the design says', () => {
   assert.doesNotMatch(edited, /9\.5 of 9\.5/);
 });
 
+test('blocked Council status is terminal and hides its machine notice', () => {
+  const blocked = native({
+    state: 'blocked', round: 1, lowest: 8.7,
+    notice: 'council_required_nested_branch_failed: required nested Council branches failed: reviewer-1.',
+  }, [seat(1, 8.7)]);
+  assert.equal(councilStateText(blocked), 'Blocked · Council cannot pass');
+  assert.equal(councilNotice({ councilStatus: blocked.status }), 'Council cannot pass in its current state.');
+  assert.equal(provisional(blocked, blocked.rounds[0]), false, 'a blocked round is no longer provisional');
+  assert.equal(finishedBelow(blocked, { status: 'completed' }), false, 'blocked is not a below-target fix loop');
+});
+
 test('a team that is not running never reads as reviewing or fixing', () => {
   const text = (status, run) => councilStateText(native(status), run);
   const open = { state: 'dispatch', round: 2, lowest: 8.3 };

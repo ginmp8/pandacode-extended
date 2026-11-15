@@ -921,7 +921,7 @@ const architect = createPreviewArchitect({
   agent,
 });
 
-// `?council` seeds a council partway through; `?council=passed|fixing|limit|finished|cycle|asking|accepted` shows that state.
+// `?council` seeds a council partway through; `?council=passed|fixing|limit|finished|cycle|asking|accepted|blocked` shows that state.
 if (typeof location !== 'undefined' && new URLSearchParams(location.search).has('council')) {
   architect.seedCouncil('session-1', new URLSearchParams(location.search).get('council') ?? '');
   // Tests score or add a seat, as a reviewer finishing would.

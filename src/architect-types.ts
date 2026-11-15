@@ -112,10 +112,10 @@ export interface CouncilConfig {
 /** A worker's seat on the council: the round it reviews, what it looks at, and its score once given. */
 export interface CouncilSeat { round: number; lens: string; score?: number | null; /** First launch; a round begins with its earliest seat. */ startedAt?: number }
 /** `dispatch`: the latest round is open but no seat is live, so it waits on the lead; `asking`: the team rests for the user. */
-export type CouncilState = 'waiting' | 'reviewing' | 'dispatch' | 'fixing' | 'passed' | 'limit' | 'asking' | 'accepted';
+export type CouncilState = 'waiting' | 'reviewing' | 'dispatch' | 'fixing' | 'passed' | 'limit' | 'asking' | 'accepted' | 'blocked';
 /** Native's own reading of the council, which also sees edits the webview cannot (the lead's own). `stale`: the latest round passed, then the work changed. */
-/** `accepted`: the user accepted this cycle's result (Council stays on). `notice`: a plain sentence for the user whenever `team.error`
- *  holds a Council refusal written for the lead (asking or paused), which is then never shown; null otherwise. */
+/** `accepted`: the user accepted this cycle's result (Council stays on). `notice`: optional native context; the webview uses a
+ *  safe summary for `blocked` instead of exposing its raw reason. */
 export interface CouncilStatus { state: CouncilState; round: number; lowest: number | null; target: number; stale: boolean; notice?: string | null }
 export interface TeamConfig {
   /** The task's own model leads and picks each worker's model (from `workers`, a roster of

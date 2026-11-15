@@ -3,7 +3,7 @@ import { reducedMotion, springKeyframes, trackSegment } from './motion';
 import { hidePopover, showPopover } from './popover-motion';
 import { teamActive, type ChildCouncilLeafScore, type CouncilComposition, type CouncilConfig, type CouncilStrategy, type NestedCouncilConfig, type SelectedCouncilReviewer, type TeamSnapshot, type TeamWorker } from './architect-types';
 import type { ProviderId } from './types';
-import { COUNCIL_COMPOSITION_MODES, COUNCIL_REVIEWERS, COUNCIL_ROUNDS, COUNCIL_TARGETS, councilCompositionMode, councilCompositionValidationIssues, councilDefaults, councilForNewThreads, councilLedgerForCurrentCycle, criterionSourceFor, newCouncilComposition, setCouncilForNewThreads, validateCouncilComposition, withCouncilComposition, councilAsking, councilNotice, councilProgress, councilStateText, firstAndFinal, finishedBelow, formatScore, outOfTen, provisional, saveCouncilDefaults, seatScore, type CouncilLedgerProjection, type CouncilProgress, type CouncilRound, type CouncilSeatWorker } from './council';
+import { COUNCIL_COMPOSITION_MODES, COUNCIL_REVIEWERS, COUNCIL_ROUNDS, COUNCIL_TARGETS, councilCompositionMode, councilCompositionValidationIssues, councilDefaults, councilForNewThreads, councilLedgerForCurrentCycle, criterionSourceFor, newCouncilComposition, setCouncilForNewThreads, validateCouncilComposition, withCouncilComposition, councilAsking, councilNotice, councilProgress, councilStateText, firstAndFinal, finishedBelow, formatScore, outOfTen, provisional, saveCouncilDefaults, seatScore, type CouncilLedgerProjection, type CouncilProgress, type CouncilRound, type CouncilSeatWorker, type CouncilState } from './council';
 
 /* Council in the composer: the tray's settings button and panel, and one compact strip inside the prompt box (its state,
  * the reviewers on demand, and what to do next). The Agents flyout shows the same state line and rows. */
@@ -308,7 +308,7 @@ function shownTeam(team: TeamSnapshot): TeamSnapshot {
   if (team.councilStatus?.state !== 'asking' || !actions.get(team.sessionId)?.sent) return team;
   return { ...team, status: 'running', error: null, councilStatus: { ...team.councilStatus, state: 'fixing', notice: null } };
 }
-const settled = (state: string): boolean => state === 'passed' || state === 'accepted' || state === 'limit';
+const settled = (state: CouncilState): boolean => state === 'passed' || state === 'accepted' || state === 'limit' || state === 'blocked';
 /** The tray button is settings only: on or off, and a cue while asking or once the cycle has settled (not accepted). */
 function face(native: TeamSnapshot | null): { label: string; on: boolean; cue: '' | 'asking' | 'settled' } {
   const team = native && shownTeam(native), progress = team && councilProgress(team);
@@ -1240,7 +1240,7 @@ function stripHtml(native: TeamSnapshot): string {
     : finished ? '<span class="council-strip-hint">Send a message to continue, or lower the target.</span>'
     : halted ? '<span class="council-strip-hint">Send a message to continue.</span>' : '';
   const close = ended ? '<button type="button" class="icon-button council-strip-dismiss" data-action="council-dismiss" aria-label="Dismiss Council result" data-tip="Dismiss">' + icon('close') + '</button>' : '';
-  const tone = asks || progress.state === 'limit' || finished ? 'full' : progress.state === 'passed' ? 'success' : '';
+  const tone = asks || progress.state === 'limit' || progress.state === 'blocked' || finished ? 'full' : progress.state === 'passed' ? 'success' : '';
   return `<section class="council-strip" data-session-id="${escape(id)}" data-state="${progress.state}" aria-label="Council"><div class="council-strip-head"><button type="button" class="council-strip-toggle" data-action="council-strip-toggle" aria-expanded="${open}" aria-controls="council-rows-${escape(id)}"><span class="council-glyph" aria-hidden="true">${COUNCIL_ICON}</span><span class="council-strip-state"${tone ? ` data-state-tone="${tone}"` : ''}>${escape(text)}</span><span class="council-strip-score">${score}</span>${icon('chevron')}</button>${next || close ? `<span class="council-strip-end">${next}${close}</span>` : ''}</div>${error ? `<p class="council-strip-error" role="alert">${escape(error)}</p>` : ''}<div class="council-rows" id="council-rows-${escape(id)}"${open ? '' : ' hidden'}>${open ? rowsHtml(progress, team) : ''}</div></section>`;
 }
 const STRIP_EXIT_MS = 120;

@@ -223,10 +223,10 @@ export const provisional = ({ status }: CouncilProgress, round: CouncilRound): b
 /** The team rests for the user: native's state, nothing else. */
 export const councilAsking = (status: CouncilStatus): boolean => status.state === 'asking';
 
-/** What the user reads in place of a Council refusal in `team.error` (written for the lead, never shown raw): native's notice,
- *  set whenever there is one (asking or paused). */
+/** What the user reads in place of a Council refusal in `team.error` (written for the lead, never shown raw). */
 export function councilNotice(team: Pick<TeamSnapshot, 'councilStatus'>): string | null {
   const status = team.councilStatus;
+  if (status?.state === 'blocked') return 'Council cannot pass in its current state.';
   return status?.notice || (status && councilAsking(status) ? 'The lead is asking how to continue.' : null);
 }
 
@@ -260,6 +260,7 @@ export function councilStateText({ council, status, rounds: cycle }: CouncilProg
     case 'waiting': return 'Waiting for reviewers';
     case 'reviewing': return `Round ${status.round}${rounds} · reviewing`;
     case 'dispatch': return `Round ${status.round}${rounds} · waiting for the lead`;
+    case 'blocked': return 'Blocked · Council cannot pass';
     // The score is in native's notice, shown with the card's actions.
     case 'asking': return 'Needs you';
     // The card's footer (round history, target) carries the scores.

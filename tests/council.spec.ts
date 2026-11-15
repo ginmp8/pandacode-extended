@@ -1171,6 +1171,7 @@ for (const [kind, state, score, extra] of [
   ['asking', 'Needs you', '8.3 / 9.5', 'actions'],
   ['passed', 'Passed at 9.5', '9.5 / 9.5', 'dismiss'],
   ['accepted', 'Accepted at 8.3', '8.3 / 9.5', 'dismiss'],
+  ['blocked', 'Blocked · Council cannot pass', '8.7 / 9.5', 'dismiss'],
   ['limit', 'Stopped at round limit (2 of 2)', '8.7 / 9.5', 'raise'],
   ['finished', 'Finished below target', '8.3 / 9.5', 'hint'],
 ] as const) {
@@ -1190,6 +1191,21 @@ for (const [kind, state, score, extra] of [
     await expect(page.locator('.council-card')).toHaveCount(0);
   });
 }
+
+test('a blocked branch result is terminal, warning toned, and dismissible without its machine notice', async ({ page }) => {
+  await open(page, '/?council=blocked');
+  const state = strip(page).locator('.council-strip-state');
+  await expect(state).toHaveText('Blocked · Council cannot pass');
+  await expect(state).toHaveAttribute('data-state-tone', 'full');
+  await expect(strip(page).getByRole('button', { name: 'Keep fixing' })).toHaveCount(0);
+  await expect(strip(page).getByRole('button', { name: 'Lower target' })).toHaveCount(0);
+  await expect(strip(page).getByRole('button', { name: 'Accept and finish' })).toHaveCount(0);
+  await expect(strip(page).getByRole('button', { name: 'Raise max rounds' })).toHaveCount(0);
+  await expect(strip(page).getByRole('button', { name: 'Dismiss Council result' })).toHaveCount(1);
+  await expect(page.locator('body')).not.toContainText('council_required_nested_branch_failed');
+  await strip(page).getByRole('button', { name: 'Dismiss Council result' }).click();
+  await expect(strip(page)).toHaveCount(0);
+});
 
 test('no strip while Council is off, or on with no round yet', async ({ page }) => {
   await open(page, '/');

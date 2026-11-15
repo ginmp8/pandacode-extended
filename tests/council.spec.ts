@@ -1403,6 +1403,10 @@ test('the tray button is settings only: no score badge, a cue dot when asking or
   await expect(button(page)).toHaveAccessibleName('Council needs you');
   await expect.poll(dot).toBe(true);
   await open(page, '/?council=passed');
+  // Page navigation only confirms the composer has mounted. Wait for the
+  // native Council snapshot and its cue before checking the painted dot.
+  await expect(strip(page)).toHaveAttribute('data-state', 'passed', { timeout: 15_000 });
+  await expect(button(page).locator('.council-glyph')).toHaveAttribute('data-cue', 'settled');
   await expect.poll(dot).toBe(true);
   await open(page, '/?council=accepted');
   await expect(button(page)).toHaveAccessibleName(/^Council: Accepted/);

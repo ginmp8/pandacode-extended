@@ -50,7 +50,13 @@ struct TeamPolicy {
     autonomy: String,
     max_concurrent_tasks: u8,
     max_attempts_per_assignment: u8,
+    /// Legacy v2 flag normalized to the mandatory native Council gate.
+    #[serde(default)]
     council_enabled: bool,
+    /// V2 manifests may explicitly pin required Council. Older exports omit it;
+    /// importing either true flag must never silently disable reviewer approval.
+    #[serde(default)]
+    council_required: bool,
     #[serde(default)]
     strategy: super::strategy::StrategySettings,
 }
@@ -169,7 +175,8 @@ fn policy_from_snapshot(snapshot: &super::TeamSnapshot) -> TeamPolicy {
         autonomy: snapshot.policy.autonomy.clone(),
         max_concurrent_tasks: snapshot.policy.max_concurrent_tasks,
         max_attempts_per_assignment: snapshot.policy.max_attempts_per_assignment,
-        council_enabled: snapshot.policy.council_enabled,
+        council_enabled: snapshot.policy.council_required,
+        council_required: snapshot.policy.council_required,
         strategy: snapshot.policy.strategy.clone(),
     }
 }
@@ -191,6 +198,11 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
             if manifest.schema_version != 1 {
                 return Err("Unsupported SuperAgent manifest schema.".into());
             }
+            // Schema v1 has no reviewer seats. Never coerce an enabled legacy
+            // Council into an ungated imported Team.
+            if manifest.orchestrations.iter().any(|preset| preset.council.enabled) {
+                return Err("Schema-v1 Council-enabled Teams require a schema-v2 re-export with reviewer seats.".into());
+            }
             manifest
                 .orchestrations
                 .into_iter()
@@ -203,7 +215,8 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
                         autonomy: preset.autonomy,
                         max_concurrent_tasks: preset.max_concurrent_tasks,
                         max_attempts_per_assignment: preset.max_attempts_per_assignment,
-                        council_enabled: preset.council.enabled,
+                        council_enabled: false,
+                        council_required: false,
                         strategy: Default::default(),
                     },
                     bot_profiles: None,
@@ -219,13 +232,21 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
             manifest
                 .orchestrations
                 .into_iter()
-                .map(|preset| PortablePreset {
-                    name: preset.name,
-                    coordinator_bot: preset.coordinator_bot,
-                    workers: preset.workers,
-                    reviewers: preset.reviewers,
-                    policy: preset.policy,
-                    bot_profiles: None,
+                .map(|preset| {
+                    let mut policy = preset.policy;
+                    // Legacy v2 councilEnabled and explicit councilRequired
+                    // are the same native completion gate, not two optional
+                    // policies whose disagreement could downgrade a Team.
+                    policy.council_required |= policy.council_enabled;
+                    policy.council_enabled = policy.council_required;
+                    PortablePreset {
+                        name: preset.name,
+                        coordinator_bot: preset.coordinator_bot,
+                        workers: preset.workers,
+                        reviewers: preset.reviewers,
+                        policy,
+                        bot_profiles: None,
+                    }
                 })
                 .collect()
         }
@@ -262,6 +283,7 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
                     max_concurrent_tasks: preset.max_concurrent_tasks,
                     max_attempts_per_assignment: preset.max_attempts_per_assignment,
                     council_enabled: preset.council.enabled,
+                    council_required: preset.council.enabled,
                     strategy: preset.strategy.unwrap_or_default(),
                 },
                 bot_profiles: Some(preset.bot_profiles),
@@ -291,9 +313,15 @@ fn parse_manifest(document: &serde_json::Value) -> Result<Vec<PortablePreset>> {
             || !(1..=8).contains(&preset.policy.max_attempts_per_assignment) {
             return Err("Unsupported SuperAgent autonomy or unbounded worker limits.".into());
         }
-        if preset.policy.council_enabled
-            && !(2..=super::MAX_REVIEWERS_PER_TEAM).contains(&preset.reviewers.len()) {
-            return Err("Native Council requires two to eight selected independent reviewers.".into());
+        if preset.policy.council_required {
+            let distinct_reviewers: HashSet<_> = preset.reviewers.iter()
+                .map(|name| name.to_ascii_lowercase())
+                .collect();
+            if !(2..=super::MAX_REVIEWERS_PER_TEAM).contains(&distinct_reviewers.len())
+                || distinct_reviewers.len() != preset.reviewers.len()
+            {
+                return Err("Native Council requires two to eight distinct selected reviewers.".into());
+            }
         }
         let strategy = &preset.policy.strategy;
         if !matches!(strategy.priority.as_str(),
@@ -502,7 +530,7 @@ fn apply(store: &Store, document: &serde_json::Value, confirmed: bool) -> Result
             &candidate.coordinator_id,
             &candidate.worker_ids,
             &candidate.reviewer_ids,
-            candidate.policy.council_enabled,
+            candidate.policy.council_required,
             super::TeamSnapshotProvenance::Native,
         )?;
         // Imported policy is a future-only immutable Team version; no
@@ -607,7 +635,7 @@ fn export(store: &Store) -> Result<serde_json::Value> {
             autonomy: policy.autonomy,
             max_concurrent_tasks: policy.max_concurrent_tasks,
             max_attempts_per_assignment: policy.max_attempts_per_assignment,
-            council: Council { enabled: policy.council_enabled },
+            council: Council { enabled: policy.council_required },
             strategy: Some(policy.strategy),
         });
     }
@@ -717,19 +745,24 @@ mod tests {
     ) -> Store {
         let path = std::env::temp_dir().join(format!("pandacode-sa-manifest-{}.db", storage::id()));
         let store = Store::open(&path).unwrap();
+        // Two worker bots intentionally share a project: insert each project
+        // once rather than allowing a duplicate primary key to fail fixtures.
+        for (project, name) in [
+            ("router-project", "Router project"),
+            ("worker-project", "Worker project"),
+            ("reviewer-project", "Reviewer project"),
+        ] {
+            store.db.execute(
+                "INSERT INTO projects(id,name,path) VALUES(?1,?2,?3)",
+                params![project,name,format!("/tmp/pandacode-manifest-{project}")],
+            ).unwrap();
+        }
         for (id, name, project) in [
             (router_id, "Router", "router-project"),
             (worker_id, "Builder", "worker-project"),
             (worker_two_id, "Builder Two", "worker-project"),
             (reviewer_id, "Reviewer", "reviewer-project"),
         ] {
-            store
-                .db
-                .execute(
-                    "INSERT INTO projects(id,name,path) VALUES(?1,?2,?3)",
-                    params![project, name, format!("/tmp/pandacode-manifest-{project}")],
-                )
-                .unwrap();
             store
                 .db
                 .execute(
@@ -886,6 +919,63 @@ mod tests {
         assert_eq!(restored.worker_bot_ids, vec!["fresh-worker"]);
         assert!(restored.reviewer_bot_ids.is_empty());
         assert_eq!(restored.team_version, 1);
+    }
+
+    #[test]
+    fn v2_required_council_manifest_round_trips_without_downgrade() {
+        let store = fixture();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('reviewer-two','Reviewer Two','reviewer-project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        let mut legacy = document_v2("Required Council Team");
+        legacy["orchestrations"][0]["reviewers"] = json!(["Reviewer","Reviewer Two"]);
+        // Existing v2 exports may have only councilEnabled; an explicit
+        // councilRequired=true with enabled=false is also a required gate.
+        legacy["orchestrations"][0]["policy"]["councilEnabled"] = json!(false);
+        legacy["orchestrations"][0]["policy"]["councilRequired"] = json!(true);
+        assert_eq!(apply(&store,&legacy,true).unwrap().created,vec!["Required Council Team"]);
+        let id = orchestration_id(&store,"Required Council Team");
+        let team = super::super::configuration(&store,&id).unwrap();
+        assert!(!team.enabled);
+        assert!(team.council_required);
+        assert_eq!(team.reviewer_bot_ids,vec!["reviewer","reviewer-two"]);
+        let snapshot = super::super::load_team_version_snapshot(
+            &store.db,&id,team.team_version
+        ).unwrap();
+        assert!(snapshot.policy.council_required);
+        assert!(snapshot.policy.council_enabled);
+
+        let exported = export(&store).unwrap();
+        assert_eq!(exported["schemaVersion"],5);
+        assert_eq!(exported["orchestrations"][0]["council"]["enabled"],true);
+        assert_eq!(apply(&store,&exported,true).unwrap().unchanged,vec!["Required Council Team"]);
+
+        let fresh = fixture_with_ids("fresh-router","fresh-worker","fresh-worker-two","fresh-reviewer");
+        fresh.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('fresh-reviewer-two','Reviewer Two','reviewer-project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        assert_eq!(apply(&fresh,&exported,true).unwrap().created,vec!["Required Council Team"]);
+        let fresh_id = orchestration_id(&fresh,"Required Council Team");
+        let restored=super::super::configuration(&fresh,&fresh_id).unwrap();
+        assert!(!restored.enabled);
+        assert!(restored.council_required);
+        assert_eq!(restored.reviewer_bot_ids,vec!["fresh-reviewer","fresh-reviewer-two"]);
+
+        let mut missing_seat = legacy.clone();
+        missing_seat["orchestrations"][0]["name"] = json!("Required Council one reviewer");
+        missing_seat["orchestrations"][0]["reviewers"] = json!(["Reviewer"]);
+        assert!(preview(&fresh,&missing_seat).unwrap_err().contains("two to eight distinct"));
+        let mut v1 = document("Unsupported v1 Council");
+        v1["orchestrations"][0]["council"]["enabled"] = json!(true);
+        assert!(preview(&fresh,&v1).unwrap_err().contains("schema-v2 re-export"));
+        let count: i64 = fresh.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations",[],|row|row.get(0)
+        ).unwrap();
+        assert_eq!(count,1,"Rejected Council manifests must not persist a Team");
     }
 
     #[test]

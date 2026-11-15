@@ -3456,6 +3456,7 @@ fn m4_nested_child_verdicts_settle_as_verified_root_composite_seats() {
     .unwrap();
     mark_council_round_waiting(&state, &root_id, 1);
 
+    let state = std::sync::Arc::new(state);
     let runtime = tokio::runtime::Runtime::new().unwrap();
     dispatch_nested_child_leaves_for_root_round(&state, &root_id, 1, &runtime, "M4", strategy);
     complete_nested_children_for_root_round(&state, &root_id, 1, &runtime, "M4", strategy);

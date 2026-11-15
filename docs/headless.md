@@ -401,6 +401,7 @@ execute an external effect.
 ```sh
 pandacode serve --list-tickets
 pandacode serve --list-review-inbox
+pandacode serve --list-review-inbox --before <updated-at-ms> <ticket-id>
 pandacode serve --list-recovery-inbox
 pandacode serve --list-team-demands <team-id> blocked
 pandacode serve --accept-ticket <ticket-id> <expected-revision>
@@ -438,12 +439,17 @@ commands above to verify the final native state.
 
 ### Cross-Team headless review inbox (read-only)
 
-`pandacode serve --list-review-inbox` returns up to 200 actual pending
+`pandacode serve --list-review-inbox` returns pages of up to 200 actual pending
 `waiting_approval` and `waiting_review` Tickets from the same native query as
 Bots → Orchestrations. Its bounded JSON includes Team ID, Ticket ID, revision,
 state, update time and a distinct next operator action, **not** objective,
-private evidence, worker result, Mandate or review contents. `mayHaveMore` only
-indicates that the cap was reached; it does not certify an additional page.
+private evidence, worker result, Mandate or review contents. When `mayHaveMore`
+is true, use `nextCursor.updatedAt` and `nextCursor.ticketId` in
+`pandacode serve --list-review-inbox --before <updated-at-ms> <ticket-id>`.
+The pair preserves reviews with identical timestamps across pages; missing or
+invalid cursor values are rejected. `mayHaveMore` checks an actual subsequent
+native row instead of assuming another page exists whenever 200 rows are found.
+Each page is a read-only snapshot, not a frozen history while Tickets change.
 A pending native Council review is never represented as a pass. This command
 opens existing SQLite read-only and cannot perform provider dispatch, recovery,
 review acceptance, external effects or policy grants. Use a separate current

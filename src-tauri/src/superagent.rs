@@ -3838,6 +3838,86 @@ pub async fn superagent_create(window: tauri::WebviewWindow, state: State<'_,App
     create_configuration_roles_with_policy(&store,legacy,workers,reviewers,council_required.unwrap_or(false))
 }
 
+/// Clone only the saved versioned Team configuration. Read the source revision,
+/// resolve its immutable native role snapshot and create the disabled target
+/// under one SQLite transaction; concurrent source edits cannot introduce a
+/// time-of-check/time-of-use gap. No Ticket, mandate, grant or event subscription
+/// is transferred to the new Team.
+fn duplicate_configuration(
+    store: &Store, source_id: &str, expected_revision: i64, name: String,
+) -> Result<Orchestration> {
+    let name = name.trim();
+    if name.is_empty() || name.len() > 120 || name.chars().any(char::is_control) {
+        return Err("Choose an orchestration name of at most 120 characters.".into());
+    }
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let source = configuration(store, source_id)?;
+    if source.policy_revision != expected_revision {
+        return Err("Source Team policy revision changed; reload before duplicating.".into());
+    }
+    let pinned = load_team_version_snapshot(&tx, source_id, source.team_version)?;
+    if pinned.provenance == TeamSnapshotProvenance::LegacyUnknown
+        || pinned.team_version != source.team_version
+        || pinned.policy.policy_revision != source.policy_revision
+        || pinned.coordinator_bot_id != source.coordinator_bot_id
+        || pinned.worker_bot_ids != source.worker_bot_ids
+        || pinned.reviewer_bot_ids != source.reviewer_bot_ids
+        || pinned.policy.council_required != source.council_required
+    {
+        return Err("Source Team has no consistent versioned native roster.".into());
+    }
+    let duplicate_name: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_orchestrations WHERE name=?1 COLLATE NOCASE)",
+        [name], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if duplicate_name {
+        return Err("Choose a unique Team name before duplicating.".into());
+    }
+    valid_team_roles(&source.coordinator_bot_id,&source.worker_bot_ids,&source.reviewer_bot_ids)?;
+    if source.council_required
+        && !(2..=MAX_REVIEWERS_PER_TEAM).contains(&source.reviewer_bot_ids.len())
+    {
+        return Err("Council-required Teams need between two and eight reviewers.".into());
+    }
+    let coordinator = bots::get(store, &source.coordinator_bot_id)?;
+    let workers = source.worker_bot_ids.iter()
+        .map(|id| bots::get(store,id)).collect::<Result<Vec<_>>>()?;
+    let reviewers = source.reviewer_bot_ids.iter()
+        .map(|id| bots::get(store,id)).collect::<Result<Vec<_>>>()?;
+    if coordinator.paused || workers.iter().any(|bot| bot.paused)
+        || reviewers.iter().any(|bot| bot.paused)
+        || workers.iter().any(|bot| bot.project_id != workers[0].project_id)
+    {
+        return Err("Source Team members are no longer eligible for one worker project scope.".into());
+    }
+    let id = storage::id();
+    let now = storage::now();
+    let project_id = &workers[0].project_id;
+    tx.execute(
+        "INSERT INTO sa_orchestrations(id,name,coordinator_bot_id,worker_bot_id,project_id,created_at,updated_at)
+         VALUES(?1,?2,?3,?4,?5,?6,?6)",
+        params![id,name,coordinator.id,source.worker_bot_ids[0],project_id,now],
+    ).map_err(|e| e.to_string())?;
+    let snapshot = make_team_snapshot(
+        &tx,&id,1,name,project_id,1,&source.coordinator_bot_id,
+        &source.worker_bot_ids,&source.reviewer_bot_ids,source.council_required,
+        TeamSnapshotProvenance::Native,
+    )?;
+    insert_team_version(&tx,&snapshot)?;
+    tx.commit().map_err(|e| e.to_string())?;
+    configuration(store,&id)
+}
+
+#[tauri::command]
+pub async fn superagent_duplicate(
+    window: tauri::WebviewWindow, state: State<'_,AppState>,
+    source_id: String, expected_revision: i64, name: String,
+) -> Result<Orchestration> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    duplicate_configuration(&store,&source_id,expected_revision,name)
+}
+
 #[tauri::command]
 pub async fn superagent_list(window: tauri::WebviewWindow, state: State<'_,AppState>) -> Result<Vec<OrchestrationOverview>> {
     require_main_window(&window)?;
@@ -7459,6 +7539,54 @@ mod tests {
              VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
             params![id,storage::now()],
         ).unwrap();
+    }
+
+    #[test]
+    fn native_team_duplication_is_atomic_and_never_copies_execution_authority() {
+        let store=fixture();
+        for id in ["worker-two","reviewer-one","reviewer-two"] {
+            add_worker(&store,id);
+        }
+        let source=create_configuration_roles_with_policy(
+            &store,NewOrchestration {
+                name:"Original Team".into(),
+                coordinator_bot_id:"router".into(),
+                worker_bot_id:"worker".into(),
+            },
+            vec!["worker".into(),"worker-two".into()],
+            vec!["reviewer-one".into(),"reviewer-two".into()],true,
+        ).unwrap();
+        let copy=duplicate_configuration(
+            &store,&source.id,source.policy_revision,"Independent Team".into(),
+        ).unwrap();
+        assert_ne!(source.id,copy.id);
+        assert!(!copy.enabled);
+        assert_eq!(copy.policy_revision,1);
+        assert_eq!(copy.team_version,1);
+        assert_eq!(copy.worker_bot_ids,source.worker_bot_ids);
+        assert_eq!(copy.reviewer_bot_ids,source.reviewer_bot_ids);
+        assert!(copy.council_required);
+        let count: i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets WHERE orchestration_id=?1",
+            [&copy.id],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(count,0);
+        let sources: i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_event_sources WHERE orchestration_id=?1",
+            [&copy.id],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(sources,0);
+        assert!(duplicate_configuration(
+            &store,&source.id,source.policy_revision+1,"Stale Copy".into(),
+        ).is_err());
+        assert!(duplicate_configuration(
+            &store,&source.id,source.policy_revision,"Independent Team".into(),
+        ).is_err());
+        let copies: i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations WHERE name LIKE '%Copy' OR name='Independent Team'",
+            [],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(copies,1,"rejected duplicates must leave no orphan Team rows");
     }
 
     #[test]

@@ -1633,29 +1633,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       }
       ask('Create a disabled copy of ' + source.name +
         ' with its existing role roster? Tickets, source subscriptions, permissions and approvals are not copied.', async () => {
-        // Read both authoritative native views again before creating a new
-        // versioned Team. Neither view is an execution grant.
-        const [roster, current] = await Promise.all([
-          call<TeamRoster>('superagent_roster',{orchestrationId:source.id}),
-          call<Config[]>('superagent_list').then(items => items.find(item => item.id === source.id)),
-        ]);
-        if (!current || current.policyRevision !== source.policyRevision ||
-            current.coordinatorBotId !== source.coordinatorBotId ||
-            current.workerBotId !== source.workerBotId ||
-            roster.orchestrationId !== source.id ||
-            roster.policyRevision !== source.policyRevision ||
-            roster.coordinatorBotId !== source.coordinatorBotId ||
-            roster.workerBotIds[0] !== source.workerBotId ||
-            !roster.workerBotIds.length) {
-          throw new Error('Source Team changed. Reload before duplicating.');
-        }
-        const created = await call<Config>('superagent_create', {input:{
-          name, coordinatorBotId:roster.coordinatorBotId,
-          workerBotId:roster.workerBotIds[0],
-          workerBotIds:[...roster.workerBotIds],
-          reviewerBotIds:[...roster.reviewerBotIds],
-          councilRequired:roster.councilRequired ?? source.councilRequired ?? false,
-        }});
+        // Source revision and frozen role snapshot are checked inside one
+        // native transaction. Renderer reads cannot grant or duplicate authority.
+        const created = await call<Config>('superagent_duplicate', {
+          sourceId:source.id, expectedRevision:source.policyRevision, name,
+        });
         if (created.enabled || created.id === source.id) {
           throw new Error('Native duplication failed to create an independent disabled Team.');
         }

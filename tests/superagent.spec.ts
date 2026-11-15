@@ -250,6 +250,8 @@ test('guided SuperAgent Team Builder validates five native-backed stages and sav
 });
 
 test('guided Team Builder scopes Workers to the primary checkout without restricting reviewers', async ({page}) => {
+  // A separate native setup and shadow-root remount regularly exceeds the 20s default on CI.
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   await openOrchestrationWorkspace(page);
   await page.evaluate(async () => {
@@ -1813,6 +1815,8 @@ test('SuperAgent scoped-write request validates paths and reports native error a
 });
 
 test('SuperAgent issue comments use a stable receipt and report uncertain state without blind replay',async ({page})=>{
+  // Two independent native receipt reads and confirmation cycles run serially in CI.
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
   await page.evaluate(async()=>{

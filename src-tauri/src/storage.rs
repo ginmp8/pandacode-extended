@@ -162,6 +162,22 @@ type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
 pub const SCHEMA_VERSION: i64 = 59;
+
+// Fail a migration at the final pre-commit boundary in one test thread only.
+// Production builds never carry this hook or change migration behavior.
+#[cfg(test)]
+std::thread_local! {
+    static MIGRATION_TEST_FAILURE_AFTER: std::cell::Cell<Option<i64>> = std::cell::Cell::new(None);
+}
+
+#[cfg(test)]
+fn maybe_inject_migration_failure(version: i64) -> Result<()> {
+    if MIGRATION_TEST_FAILURE_AFTER.with(|at| at.replace(None)) == Some(version) {
+        return Err(format!("injected late migration failure after schema {version}"));
+    }
+    Ok(())
+}
+
 pub(crate) const COUNCIL_REVIEW_SNAPSHOT_DIRECTORY: &str = "council-review-snapshots";
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
@@ -949,6 +965,10 @@ impl Store {
                 migration.execute_batch("PRAGMA user_version=59;")
                     .map_err(|e| e.to_string())?;
             }
+            // Verify a failed late upgrade rolls back the entire transaction,
+            // including newly created tables and the schema version.
+            #[cfg(test)]
+            maybe_inject_migration_failure(SCHEMA_VERSION)?;
             migration.commit().map_err(|e| e.to_string())?;
         }
         // Recovery can revoke a SuperAgent mandate. Serialize it with the
@@ -4185,6 +4205,138 @@ mod tests {
             .max()
             .unwrap();
         assert_eq!(newest, SCHEMA_VERSION, "bump SCHEMA_VERSION with every new migration step");
+    }
+
+
+    #[test]
+    fn v59_late_failure_rolls_back_without_losing_ticket_effect_or_work_item_history() {
+        let root=std::env::temp_dir().join(format!("pandacode-v59-rollback-{}",id()));
+        let data=root.join("app-data");
+        let backup=root.join("isolated-pre-upgrade");
+        let project_dir=root.join("project");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::create_dir_all(&backup).unwrap();
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let path=data.join("store.sqlite3");
+        let backup_path=backup.join("store.sqlite3");
+        let timestamp=now();
+        {
+            let store=Store::open(&path).unwrap();
+            let project=store.add_project(&project_dir).unwrap();
+            let session=store.create_session(&project.id,"claude","sonnet","ask").unwrap();
+            store.db.execute(
+                "INSERT INTO sa_orchestrations(id,name,coordinator_bot_id,worker_bot_id,
+                   project_id,enabled,policy_revision,created_at,updated_at)
+                 VALUES('rollback-team','Rollback team','coordinator','worker',?1,0,1,?2,?2)",
+                params![project.id,timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,
+                   project_id,worker_bot_id,policy_revision,state,revision,created_at,updated_at)
+                 VALUES('rollback-ticket','rollback-team','stable-key','Keep historical evidence',
+                   'local-user','manual',?1,'worker',1,'completed',9,?2,?2)",
+                params![project.id,timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,result,created_at,updated_at)
+                 VALUES('rollback-attempt','rollback-ticket','worker',?1,'finished',2,
+                   'Historical evidence',?2,?2)",
+                params![session.id,timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES('rollback-ticket','rollback-fixture','Original audit',?1)",
+                [timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts(ticket_id,effect_key,payload_sha256,state,
+                   created_at,updated_at,uncertainty_reason,readback_state)
+                 VALUES('rollback-ticket','rollback-effect',
+                   'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                   'uncertain',?1,?1,'marker_not_found','missing')",
+                [timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_work_plans(ticket_id,ticket_revision,plan_sha256,source,created_at)
+                 VALUES('rollback-ticket',9,
+                   'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                   'local-user',?1)",
+                [timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_work_items(ticket_id,item_key,ordinal,title,acceptance,created_at)
+                 VALUES('rollback-ticket','first',0,'First WorkItem','Verify first criterion',?1),
+                       ('rollback-ticket','second',1,'Second WorkItem','Verify second criterion',?1)",
+                [timestamp],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_work_item_dependencies(ticket_id,item_key,depends_on_key)
+                 VALUES('rollback-ticket','second','first')",
+                [],
+            ).unwrap();
+            // Reconstruct the final prior version without destroying
+            // upstream history: the new numeric-ID table is the only v59 DDL.
+            store.db.execute_batch(
+                "DROP TABLE sa_source_repository_identity;
+                 PRAGMA user_version=58;",
+            ).unwrap();
+        }
+        // With all SQLite writers closed, checkpoint and preserve a known-good
+        // backup before injecting the upgrade failure.
+        let db=Connection::open(&path).unwrap();
+        db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        drop(db);
+        std::fs::copy(&path,&backup_path).unwrap();
+        let snapshot=|db:&Connection| -> (i64,String,String,String,String,String,i64,i64,i64) {
+            let version=db.pragma_query_value(None,"user_version",|r|r.get(0)).unwrap();
+            let ticket=db.query_row(
+                "SELECT objective FROM sa_tickets WHERE id='rollback-ticket'",
+                [],|r|r.get(0)).unwrap();
+            let assignment=db.query_row(
+                "SELECT result FROM sa_assignments WHERE id='rollback-attempt'",
+                [],|r|r.get(0)).unwrap();
+            let audit=db.query_row(
+                "SELECT detail FROM sa_audit WHERE ticket_id='rollback-ticket' AND kind='rollback-fixture'",
+                [],|r|r.get(0)).unwrap();
+            let effect=db.query_row(
+                "SELECT state FROM sa_effect_receipts WHERE ticket_id='rollback-ticket' AND effect_key='rollback-effect'",
+                [],|r|r.get(0)).unwrap();
+            let work=db.query_row(
+                "SELECT title FROM sa_work_items WHERE ticket_id='rollback-ticket' AND item_key='first'",
+                [],|r|r.get(0)).unwrap();
+            let deps=db.query_row(
+                "SELECT COUNT(*) FROM sa_work_item_dependencies WHERE ticket_id='rollback-ticket'",
+                [],|r|r.get(0)).unwrap();
+            let plans=db.query_row(
+                "SELECT COUNT(*) FROM sa_work_plans WHERE ticket_id='rollback-ticket'",
+                [],|r|r.get(0)).unwrap();
+            let identity=db.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='sa_source_repository_identity'",
+                [],|r|r.get(0)).unwrap();
+            (version,ticket,assignment,audit,effect,work,deps,plans,identity)
+        };
+        let expected=snapshot(&Connection::open(&backup_path).unwrap());
+        assert_eq!(expected.0,58);
+        assert_eq!(expected.8,0);
+        MIGRATION_TEST_FAILURE_AFTER.with(|at|at.set(Some(SCHEMA_VERSION)));
+        let failure=Store::open(&path).err().expect("late v59 failure must abort opening");
+        assert!(failure.contains("injected late migration failure after schema 59"));
+        let failed=Connection::open(&path).unwrap();
+        assert_eq!(snapshot(&failed),expected,"late schema failure must roll back all history and DDL");
+        drop(failed);
+        // Restore from the immutable pre-upgrade backup, not the failed copy.
+        std::fs::copy(&backup_path,&path).unwrap();
+        let restored=Connection::open(&path).unwrap();
+        assert_eq!(snapshot(&restored),expected);
+        drop(restored);
+        let reopened=Store::open(&path).unwrap();
+        let mut successful=expected.clone();
+        successful.0=SCHEMA_VERSION;
+        successful.8=1;
+        assert_eq!(snapshot(&reopened.db),successful);
+        assert_eq!(reopened.db.query_row("PRAGMA integrity_check",[],|r|r.get::<_,String>(0)).unwrap(),"ok");
+        drop(reopened);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

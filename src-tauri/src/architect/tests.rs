@@ -9521,7 +9521,7 @@ fn automatic_only_two_phase_council_keeps_s3_coexistence() {
 
 #[test]
 fn council_usage_leaf_reviews_project_the_current_root_round_total_for_root_and_child_seats() {
-    use council::CouncilUsageValueStatus::CalculatedEstimated;
+    use council::CouncilUsageValueStatus::Measured;
 
     let (state, root_id, child_id, link) = nested_child_lifecycle_fixture();
     let store = state.store.lock().unwrap();
@@ -9678,7 +9678,7 @@ fn council_usage_leaf_reviews_project_the_current_root_round_total_for_root_and_
     for record in &projected.council_usage {
         assert_eq!(
             record.budget_consumption.leaf_reviews.status,
-            CalculatedEstimated
+            Measured
         );
         assert_eq!(record.budget_consumption.leaf_reviews.value, Some(4));
     }
@@ -9688,7 +9688,7 @@ fn council_usage_leaf_reviews_project_the_current_root_round_total_for_root_and_
         .leaf_reviews
         .totals
         .iter()
-        .find(|total| total.status == CalculatedEstimated)
+        .find(|total| total.status == Measured)
         .unwrap();
     assert_eq!(root_max.value, 4);
     let child_max = aggregation
@@ -9699,7 +9699,7 @@ fn council_usage_leaf_reviews_project_the_current_root_round_total_for_root_and_
         .leaf_reviews
         .totals
         .iter()
-        .find(|total| total.status == CalculatedEstimated)
+        .find(|total| total.status == Measured)
         .unwrap();
     assert_eq!(child_max.value, 4);
 }
@@ -9919,6 +9919,12 @@ fn complete_nested_children_for_root_round(
             dispatch_child_round(state, &child_id, 2, "priced-micro", runtime,
                 &format!("{mode}-{strategy:?}-root-round-{root_round}-{parent_id}"));
             settle_native_council_round(state, &child_id, 2, "completed", Some(9.6));
+            // The synthetic callback persists receipts after the initial save.
+            // Refresh the native terminal status from those durable receipts
+            // before exercising the same final approval gate as production.
+            let store = state.store.lock().unwrap();
+            let mut child = load(&store, &child_id).unwrap().unwrap();
+            save(&store, &mut child).unwrap();
         }
         {
             let store = state.store.lock().unwrap();

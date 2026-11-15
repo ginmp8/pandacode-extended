@@ -607,7 +607,7 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
         Ok(at) => team.changed_at = at,
         Err(error) => eprintln!("Reading team {} changes: {error}", team.session_id),
     }
-    team.council_status = if team.config.council.as_ref()
+    let mut projected = if team.config.council.as_ref()
         .is_some_and(|config| !config.nested_bot_reviewers.is_empty())
     {
         authenticated_hierarchical_status(store, team)
@@ -615,6 +615,21 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
     } else {
         council::status(team)
     };
+    // The M3 structural scorer can see plausible in-memory scores before
+    // their native grants have been persisted (or after grant revocation).
+    // Do not publish a user-visible Passed snapshot from those claims: the
+    // existing terminal gate already reauthenticates them independently.
+    if team.config.council.as_ref().is_some_and(|config| config.mode() == "m3")
+        && projected.as_ref().is_some_and(|status| status.state == "passed")
+        && !mixed_native_authority_current(store, team)
+    {
+        if let Some(status) = &mut projected {
+            status.state = "blocked".into();
+            status.stale = true;
+            status.notice = Some("Native reviewer authority is missing or revoked; scored claims cannot approve this Council.".into());
+        }
+    }
+    team.council_status = projected;
 }
 /// A stored verdict cannot approve writes recorded after the last native
 /// snapshot. Compare the persisted change index at the final admission boundary.

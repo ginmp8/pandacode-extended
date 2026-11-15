@@ -1451,6 +1451,43 @@ fn seven_native_source_combinations_have_distinct_modes_without_unsafe_child_dis
 }
 
 
+
+#[test]
+fn s2_preflight_reserves_independent_escalation_rounds_in_all_seven_modes() {
+    let nested = |bot: &str| council::CouncilNestedReviewer {
+        bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
+    };
+    for (mode, direct, children, automatic) in [
+        ("m1", 0, 0, 0), ("m2", 2, 0, 0), ("m3", 1, 0, 1),
+        ("m4", 0, 2, 0), ("m5", 0, 1, 1), ("m6", 1, 1, 0),
+        ("m7", 1, 1, 1),
+    ] {
+        let mut config = on(9.0, 1, 0);
+        config.reviewer_bot_ids = (0..direct).map(|i| format!("direct-{i}")).collect();
+        config.nested_bot_reviewers = (0..children)
+            .map(|i| nested(&format!("child-{i}"))).collect();
+        config.automatic_reviewers = automatic;
+        assert_eq!(config.mode(), mode);
+        assert!(config.validate().is_ok(), "{mode} S1 with one round remains valid");
+        config.strategy = council::CouncilExecutionStrategy::Escalated;
+        for forced in [false, true] {
+            config.force_escalation = forced;
+            assert!(config.validate().unwrap_err().contains("two bounded root review rounds"),
+                "{mode} S2 must reserve a root escalation round even when on-trigger");
+            config.max_rounds = 2;
+            assert!(config.validate().is_ok(), "{mode} S2 two-round admission");
+            if !config.nested_bot_reviewers.is_empty() {
+                config.nested_bot_reviewers[0].child_max_rounds = 1;
+                assert!(config.validate().unwrap_err().contains("two child Council rounds"),
+                    "{mode} S2 must reserve independent child escalation leaves");
+                config.nested_bot_reviewers[0].child_max_rounds = 2;
+                assert!(config.validate().is_ok(), "{mode} S2 restored child capacity");
+            }
+            config.max_rounds = 1;
+        }
+    }
+}
+
 #[test]
 fn nested_parallel_root_admits_only_enabled_native_sources_with_separate_quotas() {
     let child = council::CouncilNestedReviewer {
@@ -1736,6 +1773,12 @@ fn mixed_root_terminal_gate_requires_recorded_native_reviewer_authority() {
         "the in-memory gate alone is not a persisted authority receipt");
     assert!(!mixed_native_authority_current(&store, &team),
         "plausible scored workers cannot approve without native grants");
+    let mut projected = team.clone();
+    refresh_council(&store, &mut projected);
+    assert_eq!(projected.council_status.as_ref().unwrap().state, "blocked",
+        "M3 snapshots must not display a score-only pass as native approval");
+    assert!(projected.council_status.as_ref().unwrap().notice.as_deref()
+        .unwrap_or_default().contains("Native reviewer authority"));
 
     reviewer_security::record_native_authority(
         &store, &sid, team.workers[0].reviewer_binding.as_ref().unwrap(),
@@ -1747,6 +1790,9 @@ fn mixed_root_terminal_gate_requires_recorded_native_reviewer_authority() {
     ).unwrap();
     assert!(mixed_native_authority_current(&store, &team),
         "both recorded, distinct completed read-only native seats qualify");
+    refresh_council(&store, &mut projected);
+    assert_eq!(projected.council_status.as_ref().unwrap().state, "passed",
+        "only reauthenticated native reviewer authority can restore visible approval");
 
     let mut forged = team.clone();
     forged.workers[0].reviewer_binding.as_mut().unwrap().roster_bot_ids.push("forged".into());
@@ -1757,6 +1803,9 @@ fn mixed_root_terminal_gate_requires_recorded_native_reviewer_authority() {
     ).unwrap();
     assert!(!mixed_native_authority_current(&store, &team),
         "revoking even an automatic native authority blocks composed approval");
+    refresh_council(&store, &mut projected);
+    assert_eq!(projected.council_status.as_ref().unwrap().state, "blocked",
+        "revoked native authority must also revoke the displayed passing status");
 
     let mut legacy = team.clone();
     legacy.config.council.as_mut().unwrap().automatic_reviewers = 0;

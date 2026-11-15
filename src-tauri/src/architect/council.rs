@@ -191,8 +191,11 @@ impl CouncilConfig {
         if self.force_escalation && self.strategy != CouncilExecutionStrategy::Escalated {
             return Err("Forced escalation requires the escalated Council strategy.".into());
         }
-        if self.force_escalation && self.max_rounds < 2 {
-            return Err("Forced Council escalation requires at least two bounded review rounds.".into());
+        // S2 may escalate after a low score, missing evidence or reported conflict,
+        // even without a user-forced trigger. Reserve the second native round
+        // before starting any reviewers rather than creating an impossible gate.
+        if self.strategy == CouncilExecutionStrategy::Escalated && self.max_rounds < 2 {
+            return Err("S2 escalation requires at least two bounded root review rounds.".into());
         }
         if self.reviewers > MAX_REVIEWERS || self.automatic_reviewers > MAX_REVIEWERS {
             return Err(format!("Council allows at most {MAX_REVIEWERS} reviewers."));
@@ -312,10 +315,11 @@ impl CouncilConfig {
                 if !super::valid_id(&child.bot_id) || !ids.insert(&child.bot_id) {
                     return Err("Nested Council bot IDs must be valid, unique and distinct from direct reviewers.".into());
                 }
-                if self.strategy == CouncilExecutionStrategy::Escalated
-                    && self.force_escalation && child.child_max_rounds < 2
-                {
-                    return Err("Forced nested S2 requires at least two child Council rounds.".into());
+                // A deterministic S2 trigger can arise after a preliminary
+                // child review even when force_escalation is false. Never
+                // admit a child that cannot run independent escalation leaves.
+                if self.strategy == CouncilExecutionStrategy::Escalated && child.child_max_rounds < 2 {
+                    return Err("Nested S2 requires at least two child Council rounds.".into());
                 }
                 if self.strategy == CouncilExecutionStrategy::TwoPhase && child.child_max_rounds < 2 {
                     return Err("Nested S3 requires two independent child Council phases.".into());

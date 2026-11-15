@@ -523,7 +523,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::PreflightDemand { .. }
         | Command::InspectTicketEffects { .. }
         | Command::InspectTicketSource { .. } | Command::InspectSourceHealth { .. }
-        | Command::UnlinkSourceThread { .. }
+        | Command::LinkSourceThread { .. } | Command::UnlinkSourceThread { .. }
         | Command::ObserveSource { .. } | Command::ObserveCheckRun { .. }
         | Command::QueueDemand { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }

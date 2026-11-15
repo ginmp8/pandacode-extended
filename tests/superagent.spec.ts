@@ -849,7 +849,8 @@ test('cross-Team Demands index is native-backed and opens only the original Team
       }] as never;
       if(command==='superagent_snapshot') {
         if(args?.ticketId!==run.id)throw Error('Cross-Team Ticket leak');
-        return {ticket:run,mandate:{actor:'local-user',authorizationId:'native',
+        const wrongOwner=(window as unknown as {saCrossWrongOwner?:boolean}).saCrossWrongOwner;
+        return {ticket:wrongOwner?{...run,orchestrationId:'team-a'}:run,mandate:{actor:'local-user',authorizationId:'native',
           projectId:'project-b',policyRevision:3,expiresAt:1800000000000,
           revoked:false,allowedTools:[],allowedSideEffects:false},
           assignments:[],activity:[],council:null} as never;
@@ -881,6 +882,22 @@ test('cross-Team Demands index is native-backed and opens only the original Team
   const calls=await page.evaluate(()=>(window as unknown as {saCrossCalls:string[]}).saCrossCalls);
   expect(calls.filter(value=>value==='superagent_all_demands')).toHaveLength(1);
   expect(calls.filter(value=>value==='superagent_accept'||value==='superagent_submit')).toHaveLength(0);
+  // A full native refresh must not evict an opened Run outside the Team's
+  // bounded latest-50 page, or silently discard its revision-bound inspector.
+  const team=host.getByRole('region',{name:'Selected orchestration'});
+  await team.getByRole('button',{name:'Refresh'}).click();
+  await expect(host.getByRole('region',{name:'Ticket evidence'})).toContainText('demand-b');
+  await expect(team.getByRole('button',{name:'Accept evidence'})).toBeVisible();
+  // A same-ID snapshot owned by another Team is never a valid substitute.
+  await page.evaluate(() => {
+    (window as unknown as {saCrossWrongOwner:boolean}).saCrossWrongOwner=true;
+  });
+  await team.getByRole('button',{name:'Refresh'}).click();
+  await expect(host.getByRole('alert')).toContainText('Native demand ownership changed');
+  await expect(host.getByRole('region',{name:'Ticket evidence'})).toHaveCount(0);
+  await expect(team.getByRole('button',{name:'Accept evidence'})).toHaveCount(0);
+  const after=await page.evaluate(()=>(window as unknown as {saCrossCalls:string[]}).saCrossCalls);
+  expect(after.filter(value=>value==='superagent_accept'||value==='superagent_submit')).toHaveLength(0);
 });
 
 test('cross-Team native Demand pages load older Tickets without inferring new work', async ({page}) => {

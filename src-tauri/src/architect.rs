@@ -586,6 +586,12 @@ fn authenticated_hierarchical_status(
         let second = child_council::verified_s2_receipts(store, team).ok().flatten()?;
         council::status_for_authenticated_children_s2(team, &children, &second)
     } else if config.strategy == council::CouncilExecutionStrategy::TwoPhase {
+        // Do not display a passing native Council status for a plausible
+        // snapshot whose root callbacks or grants have been revoked. For M4
+        // this remains a no-root-seat check; child receipts are still required.
+        if !mixed_native_authority_current(store, team) {
+            return None;
+        }
         // The full enabled root source mix (if any) and every child require
         // separate, independently authenticated phase-two challenge receipts.
         let challenges = child_council::verified_s3_receipts(store, team).ok().flatten()?;

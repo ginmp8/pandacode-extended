@@ -4456,6 +4456,20 @@ fn nested_m5_s3_admits_native_first_phase_but_denies_premature_approval() {
     assert_eq!(root_reviewers.len(), 2);
     assert_ne!(root_reviewers[0].id, root_reviewers[1].id);
     assert_ne!(root_reviewers[0].session_id, root_reviewers[1].session_id);
+    // Neither a modified score nor a revoked second-phase native grant may
+    // remain a passing status after a read-only terminal revalidation.
+    let mut forged = root.clone();
+    let altered = forged.workers.iter_mut()
+        .find(|worker| worker.id == root_reviewers[1].id).unwrap();
+    altered.council.as_mut().unwrap().score = Some(10.0);
+    assert!(authenticated_hierarchical_status(&store, &forged).is_none());
+    let key = format!("native-reviewer-authority:{}", root_reviewers[1].id);
+    store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, key],
+    ).unwrap();
+    assert!(authenticated_hierarchical_status(&store, &root).is_none());
+    assert!(!verified_council_pass(&store, &root));
 }
 
 #[test]

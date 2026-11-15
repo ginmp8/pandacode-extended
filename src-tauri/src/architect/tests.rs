@@ -8933,6 +8933,7 @@ fn council_usage_leaf_reviews_project_the_current_root_round_total_for_root_and_
         review.read_only = true;
         review.created_at = created_at;
         review.updated_at = created_at + 3;
+        review.result_revision = index as u64 + 2;
         review.council = Some(CouncilSeat {
             round: 1,
             lens: format!("child-{id}"),

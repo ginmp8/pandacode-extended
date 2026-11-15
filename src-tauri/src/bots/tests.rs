@@ -1,7 +1,7 @@
 use super::channels::{self, discord, http, slack, telegram, web, whatsapp};
 use super::shared_channels::Running;
 use super::{brief, gateway, guard, schedule, *};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::params;
 use serde_json::json;
 #[cfg(target_os = "windows")]
 use tauri::Manager;
@@ -179,8 +179,7 @@ fn set_council_root(
     root_status: &str,
     verdict: Option<&str>,
     council_since: i64,
-    accepted: bool,
-    completed_child: bool,
+    (accepted, completed_child): (bool, bool),
 ) {
     let mut team = crate::architect::load(store, session_id).unwrap().unwrap();
     team.status = root_status.into();
@@ -1217,8 +1216,7 @@ async fn run_finished_settles_only_an_approved_council_root_and_delivers_one_par
         "running",
         None,
         base,
-        false,
-        true,
+        (false, true),
     );
     set_council_root(
         &store,
@@ -1227,8 +1225,7 @@ async fn run_finished_settles_only_an_approved_council_root_and_delivers_one_par
         "running",
         None,
         base + 100,
-        false,
-        false,
+        (false, false),
     );
     set_council_root(
         &store,
@@ -1237,8 +1234,7 @@ async fn run_finished_settles_only_an_approved_council_root_and_delivers_one_par
         "completed",
         Some("limit"),
         base + 200,
-        false,
-        false,
+        (false, false),
     );
     set_council_root(
         &store,
@@ -1247,8 +1243,7 @@ async fn run_finished_settles_only_an_approved_council_root_and_delivers_one_par
         "completed",
         Some("fixing"),
         base + 300,
-        false,
-        false,
+        (false, false),
     );
     set_council_root(
         &store,
@@ -1257,8 +1252,7 @@ async fn run_finished_settles_only_an_approved_council_root_and_delivers_one_par
         "completed",
         Some("accepted"),
         base + 400,
-        true,
-        false,
+        (true, false),
     );
     assert_eq!(
         channel_council_outcome(&store, &child_session).unwrap(),
@@ -1525,8 +1519,7 @@ fn channel_council_fanout_and_repeat_messages_keep_cycles_transcripts_and_approv
         "completed",
         Some("accepted"),
         base,
-        true,
-        false,
+        (true, false),
     );
     set_council_root(
         &f.store,
@@ -1535,8 +1528,7 @@ fn channel_council_fanout_and_repeat_messages_keep_cycles_transcripts_and_approv
         "completed",
         Some("accepted"),
         base + 100,
-        false,
-        false,
+        (false, false),
     );
     set_council_root(
         &f.store,
@@ -1545,8 +1537,7 @@ fn channel_council_fanout_and_repeat_messages_keep_cycles_transcripts_and_approv
         "completed",
         Some("accepted"),
         base + 200,
-        true,
-        false,
+        (true, false),
     );
     set_council_root(
         &f.store,
@@ -1555,8 +1546,7 @@ fn channel_council_fanout_and_repeat_messages_keep_cycles_transcripts_and_approv
         "completed",
         Some("accepted"),
         base + 300,
-        false,
-        false,
+        (false, false),
     );
 
     let cycles: Vec<String> = {
@@ -1850,8 +1840,7 @@ async fn run_finished_council_fanout_and_repeat_deliveries_keep_parent_callback_
         "completed",
         Some("accepted"),
         base,
-        true,
-        false,
+        (true, false),
     );
     set_council_root(
         &f.store,
@@ -1860,8 +1849,7 @@ async fn run_finished_council_fanout_and_repeat_deliveries_keep_parent_callback_
         "completed",
         Some("fixing"),
         base + 100,
-        false,
-        false,
+        (false, false),
     );
     set_council_root(
         &f.store,
@@ -1870,8 +1858,7 @@ async fn run_finished_council_fanout_and_repeat_deliveries_keep_parent_callback_
         "completed",
         Some("accepted"),
         base + 200,
-        true,
-        false,
+        (true, false),
     );
     set_council_root(
         &f.store,
@@ -1880,8 +1867,7 @@ async fn run_finished_council_fanout_and_repeat_deliveries_keep_parent_callback_
         "completed",
         Some("fixing"),
         base + 300,
-        false,
-        false,
+        (false, false),
     );
 
     assert_eq!(
@@ -1980,7 +1966,7 @@ async fn run_finished_council_fanout_and_repeat_deliveries_keep_parent_callback_
             "each approved delivery gets one result claim and denied siblings get none"
         );
 
-        let mut expected_callbacks = vec![
+        let expected_callbacks = vec![
             format!(
                 "Update from {} in #{} (request {}):\n\nFirst reviewer final response",
                 first.name, channel.name, fanout_message

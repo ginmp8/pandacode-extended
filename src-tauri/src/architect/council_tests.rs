@@ -4706,7 +4706,7 @@ fn council_usage_aggregation_keeps_unknown_mixed_statuses_and_pricing_provenance
                 root: "root-cycle",
                 cycle: "root-cycle",
                 child: None,
-                seat: seat,
+                seat,
                 reviewer: seat,
                 round: 1,
                 attempt: 1,
@@ -4716,7 +4716,7 @@ fn council_usage_aggregation_keeps_unknown_mixed_statuses_and_pricing_provenance
             set_usage_aggregate_metrics(
                 &mut record,
                 UsageAggregateMetrics {
-                    status: status,
+                    status,
                     input: amount,
                     output: amount,
                     queue: amount,

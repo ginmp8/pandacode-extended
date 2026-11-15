@@ -887,6 +887,41 @@ fn concurrent_roots_freeze_the_same_nested_bot_and_keep_child_approval_task_scop
         for leaf in &child.workers {
             super::super::super::persist_council_terminal_receipts(&store, &child, leaf).unwrap();
         }
+        for leaf in &child.workers {
+            for criterion in &child.config.council.as_ref().unwrap().composition.as_ref().unwrap().criteria {
+                let outcome = council::CouncilCriterionOutcomeReceipt {
+                    schema_version: 1,
+                    root_cycle_id: root_cycle_id.clone(),
+                    task_id: child.session_id.clone(),
+                    task_cycle_id: link.child_council_cycle_id.clone(),
+                    child_cycle_id: Some(link.child_council_cycle_id.clone()),
+                    round: 1,
+                    seat_id: leaf.id.clone(),
+                    parent_seat_id: Some(task.parent_seat_id.clone()),
+                    attempt: leaf.attempt,
+                    artifact_revision: link.root_artifact_revision.clone(),
+                    outcome: council::CouncilCriterionOutcome {
+                        criterion_id: criterion.id.clone(),
+                        score: leaf.council.as_ref().unwrap().score.unwrap(),
+                        verified_evidence_refs: Vec::new(),
+                    },
+                };
+                outcome.validate().unwrap();
+                let key = format!(
+                    "native-council-criterion:{}:1:{}:{}",
+                    root_cycle_id, leaf.id, criterion.id
+                );
+                super::super::persist_council_record(
+                    &store,
+                    &root.session_id,
+                    &key,
+                    "council_criterion_outcome",
+                    &outcome,
+                    &leaf.id,
+                )
+                .unwrap();
+            }
+        }
         let child_status = super::super::super::native_council_status(&store, &child).unwrap();
         assert_eq!(
             child_status.state,
@@ -1227,7 +1262,7 @@ fn native_concurrent_roots_dispatch_and_settle_the_same_bot_without_state_leakag
     let root_worker_ids_b = super::super::dispatch_council_round(
         &state,
         &root_b_id,
-        vec![root_assignment_b.clone(), root_auto_assignment_b],
+        vec![root_assignment_b.clone(), root_auto_assignment_b.clone()],
     )
     .unwrap();
     assert_eq!(root_worker_ids_a.len(), 2);
@@ -1625,7 +1660,11 @@ fn native_concurrent_roots_dispatch_and_settle_the_same_bot_without_state_leakag
     // Replaying task B's dispatch after A completes still resolves to B's
     // existing seat and leaves its in-flight child cycle untouched.
     let replayed_ids_b =
-        super::super::dispatch_council_round(&state, &task_b.root_id, vec![root_assignment_b])
+        super::super::dispatch_council_round(
+            &state,
+            &task_b.root_id,
+            vec![root_assignment_b, root_auto_assignment_b],
+        )
             .unwrap();
     assert_eq!(replayed_ids_b, root_worker_ids_b);
     assert_eq!(saved(&state, &task_b.root_id).workers.len(), 2);

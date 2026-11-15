@@ -2238,7 +2238,10 @@ mod tests {
             assert!(parsed(invalid).is_err(), "{invalid}");
         }
         assert_eq!(parsed("--inspect-ticket-effects ticket_123"),
-            Ok(Command::InspectTicketEffects { ticket_id: "ticket_123".into() }));
+            Ok(Command::InspectTicketEffects {
+                ticket_id: "ticket_123".into(), before_created_at: None,
+                before_key: None, unresolved_only: false,
+            }));
         assert!(parsed("--inspect-ticket-effects").is_err());
         assert!(parsed("--inspect-ticket-effects ../unsafe").is_err());
         assert!(parsed("--inspect-ticket-effects ticket_123 --stop-ticket ticket_123").is_err());

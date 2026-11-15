@@ -2582,8 +2582,8 @@ pub(crate) fn headless_quarantine_terminal_orphan(
     })).map_err(|e| e.to_string())
 }
 
-pub(crate) #[expect(clippy::too_many_arguments, reason = "The existing CLI accepts these independently validated issue-comment fields by position.")]
-fn headless_issue_comment(
+#[expect(clippy::too_many_arguments, reason = "The existing CLI accepts these independently validated issue-comment fields by position.")]
+pub(crate) fn headless_issue_comment(
     database_path: &std::path::Path,
     ticket_id: &str,
     expected_revision: i64,
@@ -2606,8 +2606,8 @@ fn headless_issue_comment(
     )
 }
 
-pub(crate) #[expect(clippy::too_many_arguments, reason = "The CLI seam adds an injected dispatcher while preserving the existing invocation contract.")]
-fn headless_issue_comment_with_dispatch(
+#[expect(clippy::too_many_arguments, reason = "The CLI seam adds an injected dispatcher while preserving the existing invocation contract.")]
+pub(crate) fn headless_issue_comment_with_dispatch(
     database_path: &std::path::Path,
     ticket_id: &str,
     expected_revision: i64,

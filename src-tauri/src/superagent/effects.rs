@@ -63,7 +63,7 @@ pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Res
            AND t.policy_revision=m.policy_revision
            AND m.policy_revision=o.policy_revision
            AND t.project_id=m.project_id AND m.project_id=o.project_id
-           AND t.actor=m.actor AND m.authorization_id<>''
+           AND t.actor=m.actor AND length(trim(m.authorization_id))>0
            AND b.project_id=t.project_id AND b.paused=0
            AND a.bot_id<>o.coordinator_bot_id
            AND a.created_at>0 AND a.created_at<=?2
@@ -489,6 +489,8 @@ mod tests{
     fn effect_reservation_denies_stale_or_mismatched_mandate_scope(){
         for (change, expected) in [
             ("UPDATE sa_mandates SET actor='other' WHERE ticket_id=?1", "actor"),
+            ("UPDATE sa_mandates SET authorization_id='' WHERE ticket_id=?1", "empty authorization"),
+            ("UPDATE sa_mandates SET authorization_id='   ' WHERE ticket_id=?1", "blank authorization"),
             ("UPDATE sa_mandates SET project_id='other' WHERE ticket_id=?1", "project"),
             ("UPDATE sa_mandates SET policy_revision=policy_revision+1 WHERE ticket_id=?1", "revision"),
             ("UPDATE sa_orchestrations SET policy_revision=policy_revision+1 WHERE id=(SELECT orchestration_id FROM sa_tickets WHERE id=?1)", "policy"),

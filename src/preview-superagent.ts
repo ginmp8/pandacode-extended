@@ -17,7 +17,7 @@ export async function invokeSuperagent<T>(
 ):Promise<T> {
   // Pure listing must not race the preview's first bots_list seed. Only
   // commands that actually resolve portable bot identities may load bots.
-  const needsBots=['superagent_create','superagent_update',
+  const needsBots=['superagent_create','superagent_update','superagent_duplicate',
     'superagent_manifest_export','superagent_manifest_preview','superagent_manifest_import'].includes(command);
   const bots=needsBots?await listBots():[];
   const find=(id:string)=>{ const b=bots.find(b=>b.id===id); if(!b)throw Error('Bot no longer exists.'); return b; };
@@ -88,6 +88,42 @@ export async function invokeSuperagent<T>(
       configs.set(c.id,c);
       rosters.set(c.id,{workerBotIds:[...workers],reviewerBotIds:[...reviewers]});
       value=c;break;
+    }
+    case 'superagent_duplicate':{
+      // The browser fixture mirrors the native single-transaction CAS API;
+      // it is never an authorization or a substitute for Rust acceptance.
+      const source=get(args.sourceId);
+      if(source.policyRevision!==args.expectedRevision)
+        throw Error('Source Team policy revision changed; reload before duplicating.');
+      if(typeof args.name!=='string'||!args.name.trim()||
+          new TextEncoder().encode(args.name).length>120||configName(args.name))
+        throw Error('Invalid or duplicate Team name.');
+      const members=rosters.get(source.id)??{
+        workerBotIds:[source.workerBotId],reviewerBotIds:[],
+      };
+      const workers=[...members.workerBotIds],reviewers=[...members.reviewerBotIds];
+      const coordinator=find(source.coordinatorBotId),primary=find(source.workerBotId);
+      if(coordinator.paused||primary.paused||
+          workers[0]!==primary.id||workers.length<1||workers.length>8||
+          reviewers.length>4||
+          new Set([coordinator.id,...workers,...reviewers]).size!==1+workers.length+reviewers.length)
+        throw Error('Source Team roles are no longer eligible for duplication.');
+      for(const id of workers){
+        const member=find(id);
+        if(member.paused||member.projectId!==primary.projectId)
+          throw Error('Source Worker project or availability changed.');
+      }
+      for(const id of reviewers)if(find(id).paused)
+        throw Error('Source Reviewer is paused.');
+      const copy:Config={
+        id:crypto.randomUUID(),name:args.name,coordinatorBotId:coordinator.id,
+        workerBotId:primary.id,projectId:primary.projectId,
+        enabled:false,policyRevision:1,
+        workerCount:workers.length,reviewerCount:reviewers.length,
+      };
+      configs.set(copy.id,copy);
+      rosters.set(copy.id,{workerBotIds:workers,reviewerBotIds:reviewers});
+      value=copy;break;
     }
     case 'superagent_update':{
       const c=get(args.orchestrationId),input=args.input;

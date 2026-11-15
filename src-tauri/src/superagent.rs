@@ -3777,6 +3777,23 @@ pub(crate) fn active_structured_worker_session(store: &Store, session_id: &str) 
     ).map_err(|error| error.to_string())
 }
 
+/// Collect the entire current Worker turn rather than only its last
+/// assistant fragment. Historic messages and user instructions are never
+/// evidence attributed to this completion.
+pub(crate) fn latest_worker_reply(store: &Store, session_id: &str) -> Result<String> {
+    let mut stmt=store.db.prepare(
+        "SELECT content FROM messages WHERE session_id=?1 AND role='assistant'
+         AND id > COALESCE((SELECT MAX(id) FROM messages
+                             WHERE session_id=?1 AND role='user'),0)
+         ORDER BY id",
+    ).map_err(|error|error.to_string())?;
+    let parts=stmt.query_map([session_id],|row|row.get::<_,String>(0))
+        .map_err(|error|error.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error|error.to_string())?;
+    Ok(parts.join("\n\n").trim().to_owned())
+}
+
 /// A provider turn is evidence for a task, not its approval. The only successful
 /// transition here is running -> waiting_approval; native human acceptance is separate.
 pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool, text: &str) -> Result<bool> {
@@ -5601,6 +5618,22 @@ mod tests {
             "Bot edits may not silently alter a live Ticket permission boundary");
         assert!(on_run_finished(&store,&session_id,true,"Stale apparent success").unwrap());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+    }
+
+    #[test]
+    fn latest_worker_reply_excludes_prior_user_turn_and_retains_all_current_fragments() {
+        let store=fixture();
+        let session=store.create_session("project","claude","sonnet","ask").unwrap();
+        store.db.execute(
+            "INSERT INTO messages(session_id,role,content,created_at)
+             VALUES(?1,'assistant','stale result',1),
+                   (?1,'user','new work request',2),
+                   (?1,'assistant','first fragment',3),
+                   (?1,'assistant','final fragment',4)",
+            [&session.id],
+        ).unwrap();
+        assert_eq!(latest_worker_reply(&store,&session.id).unwrap(),
+            "first fragment\n\nfinal fragment");
     }
 
     #[test]

@@ -2753,10 +2753,16 @@ async fn launch_operation_admitted(
                 (structured || required).then_some(required)
             });
             if let Some(required) = completion {
-                let reply = store.lock().ok().and_then(|db| db.db.query_row(
-                    "SELECT content FROM messages WHERE session_id=?1 AND role='assistant' ORDER BY id DESC LIMIT 1",
-                    [&session_id],|row| row.get::<_,String>(0),
-                ).ok()).unwrap_or_default();
+                let reply = store.lock().ok().and_then(|db| {
+                    if required {
+                        db.db.query_row(
+                            "SELECT content FROM messages WHERE session_id=?1 AND role='assistant' ORDER BY id DESC LIMIT 1",
+                            [&session_id],|row| row.get::<_,String>(0),
+                        ).ok()
+                    } else {
+                        superagent::latest_worker_reply(&db,&session_id).ok()
+                    }
+                }).unwrap_or_default();
                 let settled = store.lock().ok().and_then(|db| {
                     superagent::on_run_finished(&db,&session_id,true,&reply).ok()
                 }).unwrap_or(false);

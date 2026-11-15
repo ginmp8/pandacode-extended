@@ -1628,6 +1628,23 @@ pub(crate) fn headless_link_thread(
     })).map_err(|e| e.to_string())
 }
 
+/// Headless/Desktop parity for an operator-asserted Issue-to-PR association.
+/// Delegate to the existing native transaction; the correlation is context,
+/// not an authenticated issue-closing relationship or permission to dispatch.
+pub(crate) fn headless_link_issue_pull(
+    path: &std::path::Path, source_id: &str, ticket_id: &str,
+    issue_key: &str, pull_key: &str,
+) -> Result<String> {
+    let store = super::open_headless_transition_store(path)?;
+    let link = link_issue_to_pull(&store, source_id, ticket_id, issue_key, pull_key)?;
+    serde_json::to_string(&serde_json::json!({
+        "sourceId":link.source_id, "ticketId":link.ticket_id,
+        "issueKey":issue_key, "pullKey":link.subject_key,
+        "linked":true, "operatorAsserted":true,
+        "authenticatedRelationship":false, "authorizationIssued":false
+    })).map_err(|e| e.to_string())
+}
+
 /// Trusted local operator revocation of an exact context association without
 /// opening Store::open, running startup recovery, or touching a live provider.
 /// Desktop and headless use the same native transaction and immutable receipts.
@@ -3201,6 +3218,60 @@ mod tests {
         assert_eq!(list_thread_links(&reopened, "headless-one").unwrap().len(), 1);
         assert_eq!(linked_decisions(&reopened, "headless-one", 50).unwrap()[0].delivery_id,
             "headless-linked");
+    }
+
+    #[test]
+    fn headless_issue_pull_association_is_operator_scoped_idempotent_and_restart_safe() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "ticket-one", "orch");
+        insert_manual_ticket(&store, "ticket-two", "orch");
+        let issue = create_source(&store, "orch", "test/fixture",
+            "trusted-bot", "issues.opened").unwrap();
+        let pull = create_source(&store, "orch", "test/fixture",
+            "trusted-bot", "pull_request.opened").unwrap();
+        let foreign = create_source(&store, "orch", "elsewhere/repo",
+            "trusted-bot", "pull_request.opened").unwrap();
+        assert!(headless_link_issue_pull(&path, &pull.id, "ticket-one",
+            "issue:42", "pull:99").is_err());
+        link_thread(&store, &issue.id, "ticket-one", "issue:42").unwrap();
+        assert!(headless_link_issue_pull(&path, &pull.id, "ticket-two",
+            "issue:42", "pull:99").is_err());
+        assert!(headless_link_issue_pull(&path, &foreign.id, "ticket-one",
+            "issue:42", "pull:99").is_err());
+        assert!(headless_link_issue_pull(&path, &pull.id, "ticket-one",
+            "pull:42", "issue:99").is_err());
+        assert_eq!(list_thread_links(&store, "ticket-one").unwrap().len(), 1);
+
+        let first: serde_json::Value = serde_json::from_str(
+            &headless_link_issue_pull(&path, &pull.id, "ticket-one",
+                "issue:42", "pull:99").unwrap(),
+        ).unwrap();
+        assert_eq!(first["linked"], true);
+        assert_eq!(first["operatorAsserted"], true);
+        assert_eq!(first["authenticatedRelationship"], false);
+        assert_eq!(first["authorizationIssued"], false);
+        assert_eq!(list_thread_links(&store, "ticket-one").unwrap().len(), 2);
+        let repeated: serde_json::Value = serde_json::from_str(
+            &headless_link_issue_pull(&path, &pull.id, "ticket-one",
+                "issue:42", "pull:99").unwrap(),
+        ).unwrap();
+        assert_eq!(repeated, first);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE ticket_id='ticket-one' AND kind='source_issue_pull_associated'",
+            [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_mandates", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 0);
+        assert_eq!(source(&store, &pull.id).unwrap().mode, "off");
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(list_thread_links(&reopened, "ticket-one").unwrap().len(), 2);
+        assert!(list_thread_links(&reopened, "ticket-two").unwrap().is_empty());
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE ticket_id='ticket-one' AND kind='source_issue_pull_associated'",
+            [], |row| row.get::<_, i64>(0)).unwrap(), 1);
     }
 
     #[test]

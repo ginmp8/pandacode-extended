@@ -680,7 +680,20 @@ pandacode serve --link-source-thread <source-id> <ticket-id> pull:123
 This command validates the exact Team/Ticket/source/thread relationship and
 repository identity ownership, writes one durable audit row, and is idempotent.
 It is not evidence that GitHub linked the issue and PR; use the separate
-explicit issue-to-PR association when required. No provider or GitHub request,
+explicit issue-to-PR association when required. Headless operators can make
+that same native, audited association after explicitly linking the Issue:
+
+```sh
+pandacode serve --link-source-thread <issue-source-id> <ticket-id> issue:42
+pandacode serve --link-issue-pull <pr-source-id> <ticket-id> issue:42 pull:123
+```
+
+The Issue and PR source IDs must resolve to the same Team, Ticket, and
+repository identity. A conflicting, missing or terminal Ticket, unlinked
+Issue, or wrong key is rejected atomically. Replays are idempotent. The JSON
+receipt explicitly marks `operatorAsserted: true`,
+`authenticatedRelationship: false` and `authorizationIssued: false`.
+No GitHub API call, provider session, task authority or grant is issued. No provider or GitHub request,
 Ticket admission, authorization grant or remote effect occurs. Invalid,
 ambiguous, cross-Team, terminal or conflicting links fail before the native
 transaction commits. The bounded JSON reports `linked` and

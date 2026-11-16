@@ -8813,6 +8813,14 @@ fn team_action<'a>(
     notify: &mut impl FnMut(&TeamSnapshot),
 ) -> Result<Option<Launch>> {
     let mut team = original.clone();
+    // A child can remain runnable after its root is paused or settled.
+    // Revalidate the root before any scheduler reservation or state write,
+    // not only when its worker host eventually attempts to start.
+    if load_council_child_link(store, &team.session_id)?.is_some()
+        && !native_child_coordinator_admitted(store, &team.session_id)?
+    {
+        return Ok(None);
+    }
     if expire_composed_council_if_due(store, agents, &mut team, notify)? {
         return Ok(None);
     }

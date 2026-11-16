@@ -7688,6 +7688,59 @@ fn child_dispatch_rejects_paused_or_archived_root_without_consuming_leaf() {
 }
 
 #[test]
+fn nested_child_scheduler_does_not_reserve_leaves_after_root_revocation() {
+    for root_state in ["paused", "archived", "completed"] {
+        let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();
+        let store = state.store.lock().unwrap();
+        let mut child = load(&store, &child_id).unwrap().unwrap();
+        child.status = "running".into();
+        child.pending_turn = None;
+        child.workers[0].read_only = true;
+        child.workers[0].council = Some(CouncilSeat {
+            round: 1, ..CouncilSeat::default()
+        });
+        assert!(eligible(&child, 0), "the fixture must have a runnable leaf");
+        save(&store, &mut child).unwrap();
+        assert!(native_child_coordinator_admitted(&store, &child_id).unwrap());
+
+        match root_state {
+            "paused" => {
+                let mut root = load(&store, &root_id).unwrap().unwrap();
+                root.status = "paused".into();
+                save(&store, &mut root).unwrap();
+            }
+            "archived" => {
+                store.db.execute(
+                    "UPDATE sessions SET archived=1 WHERE id=?1", [&root_id],
+                ).unwrap();
+            }
+            "completed" => {
+                store.db.execute(
+                    "UPDATE sessions SET task_stage='completed' WHERE id=?1", [&root_id],
+                ).unwrap();
+            }
+            _ => unreachable!(),
+        }
+        assert!(!native_child_coordinator_admitted(&store, &child_id).unwrap());
+        let original = load(&store, &child_id).unwrap().unwrap();
+        let before = serde_json::to_value(&original).unwrap();
+        let candidates = vec![original];
+        let agents = std::collections::HashMap::new();
+        let roots = std::cell::OnceCell::new();
+        let launch = team_action(
+            &store, &agents, &candidates, &roots, &candidates[0], &mut |_| {},
+        ).unwrap();
+        assert!(launch.is_none(),
+            "{root_state}: scheduler must not reserve a native child leaf");
+        let after = serde_json::to_value(
+            load(&store, &child_id).unwrap().unwrap(),
+        ).unwrap();
+        assert_eq!(after, before,
+            "{root_state}: denied launch must not mutate queued child work");
+    }
+}
+
+#[test]
 fn stale_nested_council_callback_cannot_mutate_child_after_parent_revocation() {
     let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();
     assert!(nested_council_callback_current(&state.store.lock().unwrap(), &root_id),

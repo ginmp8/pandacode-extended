@@ -288,7 +288,8 @@ pub struct ReviewerPermissionSelection {
 
 impl ReviewerCapabilityGrant {
     fn clone_key(&self) -> String {
-        format!("{}:{}:{}:{}", self.tool, self.action, self.resource_argument, self.resource)
+        format!("{}:{}:{}:{}:{}", self.tool, self.action,
+            self.action_argument.as_deref().unwrap_or(""), self.resource_argument, self.resource)
     }
 }
 
@@ -791,6 +792,22 @@ mod tests {
         assert!(ReviewerToolPolicy::from_user_grants(ReviewerPhase::Review, "user-1", std::slice::from_ref(&grant), &[grant.clone(), grant.clone()]).is_err());
         assert!(ReviewerToolPolicy::from_user_grants(ReviewerPhase::Review, "user-1", std::slice::from_ref(&grant), std::slice::from_ref(&grant)).is_ok());
     }
+    #[test]
+    fn scoped_grants_with_distinct_action_argument_names_remain_distinct() {
+        let grant = issue_grant();
+        let mut other = grant.clone();
+        other.action_argument = Some("operation".into());
+        let configured = vec![grant.clone(), other.clone()];
+        let policy = ReviewerToolPolicy::from_user_grants(
+            ReviewerPhase::Review, "user-1", &configured, &configured,
+        ).unwrap();
+        assert!(matches!(policy, ReviewerToolPolicy::Scoped(ref policy) if policy.grants.len() == 2),
+            "two explicitly authorized argument contracts must remain independently scoped");
+        assert!(ReviewerToolPolicy::from_user_grants(
+            ReviewerPhase::Review, "user-1", &configured, &[grant.clone(), grant],
+        ).is_err(), "the same exact grant must still be rejected as duplicate");
+    }
+
     #[tokio::test]
     async fn scoped_host_rejects_escalation_calls_before_handler() {
         let grant = issue_grant();

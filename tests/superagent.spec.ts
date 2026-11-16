@@ -171,13 +171,14 @@ test('versioned Team strategy is saved future-only with native unsupported-budge
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
+  await host.locator('details.sa-legacy-create summary').click();
   const create=host.locator('form[data-sa-form="create"]');
   await create.getByRole('textbox',{name:'Name',exact:true}).fill('Economy Team');
   await create.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await create.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
   await create.getByRole('button',{name:'Create disabled preset'}).click();
-  // Creation opens Demands / Runs; inspect future-Team policy on Teams.
-  await host.getByRole('button',{name:'Teams',exact:true}).click();
+  // Creation opens Team overview; execution strategy is a separate Team section.
+  await host.getByRole('button',{name:'Execution policy'}).click();
   const pane=host.getByRole('region',{name:'Team runtime strategy'});
   await pane.getByRole('button',{name:'Inspect native policy'}).click();
   await expect(pane).toContainText('Native executable parallel Workers: 1');
@@ -206,7 +207,7 @@ test('guided SuperAgent Team Builder validates five native-backed stages and sav
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
-  await host.getByRole('button',{name:'Guided Team setup (five steps)'}).click();
+  await host.locator('.sa-native-header [data-sa-builder-open]').click();
   const builder=host.getByRole('region',{name:'Guided Team Builder'});
   await expect(builder).toContainText('Step 1 of 5');
   await builder.getByRole('button',{name:'Next'}).click();
@@ -236,6 +237,7 @@ test('provider child hierarchy never fabricates native seats or grants',async ({
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
+  await host.locator('details.sa-legacy-create summary').click();
   const create=host.locator('form[data-sa-form="create"]');
   await create.getByRole('textbox',{name:'Name',exact:true}).fill('Observed Children');
   await create.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
@@ -244,6 +246,7 @@ test('provider child hierarchy never fabricates native seats or grants',async ({
   await host.getByRole('button',{name:'Enable manual'}).click();
   await host.getByRole('alertdialog',{name:'Confirm orchestration action'})
     .getByRole('button',{name:'Confirm',exact:true}).click();
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
   await host.getByRole('textbox',{name:'Task objective'}).fill('Inspect child history');
   await host.getByRole('combobox',{name:'Dispatch'}).selectOption('direct');
   await host.getByRole('button',{name:'Dispatch manually'}).click();
@@ -263,6 +266,7 @@ test('delivery inspector distinguishes observed native work from verified softwa
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
+  await host.locator('details.sa-legacy-create summary').click();
   const create=host.locator('form[data-sa-form="create"]');
   await create.getByRole('textbox',{name:'Name',exact:true}).fill('Evidence Team');
   await create.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
@@ -272,6 +276,7 @@ test('delivery inspector distinguishes observed native work from verified softwa
   await host.getByRole('button',{name:'Enable manual'}).click();
   await host.getByRole('alertdialog',{name:'Confirm orchestration action'})
     .getByRole('button',{name:'Confirm',exact:true}).click();
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
   await host.getByRole('textbox',{name:'Task objective'}).fill('Inspect a test fixture');
   await host.getByRole('combobox',{name:'Dispatch'}).selectOption('direct');
   await host.getByRole('button',{name:'Dispatch manually'}).click();
@@ -299,6 +304,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await sidebar.getByRole('button',{name:'Bot actions'}).click();
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
   const dialog=page.getByRole('region',{name:'Orchestrations'});
+  await dialog.locator('details.sa-legacy-create summary').click();
   await dialog.getByRole('textbox',{name:'Name'}).fill('Issue Resolution');
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
@@ -308,6 +314,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await expect(dialog.locator('#superagent-host')).toHaveAttribute('aria-busy','false', {timeout:30_000});
   await expect(dialog.getByRole('alert')).toHaveCount(0);
   await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Issue Resolution', {timeout:15_000});
+  await dialog.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(dialog.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await dialog.getByRole('button',{name:'Enable manual'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();

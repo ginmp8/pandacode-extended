@@ -3,7 +3,7 @@
 //! The current native runner remains single-worker until scoped role admission exists.
 use super::{configuration,create_configuration,require_main_window,NewOrchestration,Orchestration};
 use crate::{bots,storage::{self,Store},AppState,Result};
-use rusqlite::params;
+use rusqlite::{params,OptionalExtension};
 use serde::{Deserialize,Serialize};
 use std::collections::{HashMap,HashSet};
 use tauri::State;
@@ -29,6 +29,20 @@ CREATE TABLE IF NOT EXISTS sa_ticket_profiles(
     captured_at INTEGER NOT NULL
 );
 "#;
+
+ // Additive policy, never a provider grant. Historic tickets are backfilled
+ // with the original two-attempt ceiling in the v49 migration.
+pub(crate) const ATTEMPT_POLICY_SCHEMA:&str=r#"
+CREATE TABLE IF NOT EXISTS sa_team_attempt_limits(
+    orchestration_id TEXT PRIMARY KEY REFERENCES sa_orchestrations(id) ON DELETE CASCADE,
+    max_worker_attempts INTEGER NOT NULL CHECK(max_worker_attempts BETWEEN 1 AND 4)
+);
+CREATE TABLE IF NOT EXISTS sa_ticket_attempt_limits(
+    ticket_id TEXT PRIMARY KEY REFERENCES sa_tickets(id) ON DELETE RESTRICT,
+    policy_revision INTEGER NOT NULL CHECK(policy_revision > 0),
+    max_worker_attempts INTEGER NOT NULL CHECK(max_worker_attempts BETWEEN 1 AND 4)
+);
+"#;
 const MAX_WORKERS:usize=8;
 const MAX_REVIEWERS:usize=4;
 
@@ -46,6 +60,7 @@ pub struct TeamRoster {
     pub coordinator_bot_id:String,
     pub worker_bot_ids:Vec<String>,
     pub reviewer_bot_ids:Vec<String>,
+    pub max_worker_attempts:i64,
     pub execution_ready:bool,
 }
 /// A bounded, configuration-only snapshot of actual Team member profiles.
@@ -156,6 +171,18 @@ pub(super) fn capture_ticket_profile(
     if inserted!=1 {
         return Err("Task profile could not be pinned to the admitted Team revision.".into());
     }
+    // Freeze the actual retry ceiling before the first Assignment can launch.
+    // Editing this reusable Team must never retroactively widen a live Ticket.
+    let max_attempts=team_worker_attempt_limit(store,&configuration.id)?;
+    let pinned=store.db.execute(
+        "INSERT INTO sa_ticket_attempt_limits(ticket_id,policy_revision,max_worker_attempts)
+         SELECT ?1,?2,?3 FROM sa_tickets
+         WHERE id=?1 AND orchestration_id=?4 AND policy_revision=?2",
+        params![ticket_id,configuration.policy_revision,max_attempts,configuration.id],
+    ).map_err(|e|e.to_string())?;
+    if pinned!=1 {
+        return Err("Task worker-attempt budget could not be frozen.".into());
+    }
     Ok(())
 }
 
@@ -262,6 +289,33 @@ pub(super) fn has_additional_members(store:&Store,id:&str)->Result<bool> {
     ).map_err(|e|e.to_string())?;
     Ok(count>0)
 }
+/// A missing Team row represents the original fixed policy, not permission
+/// to retry without limits. SQLite checks reject corrupted values.
+fn team_worker_attempt_limit(store:&Store,id:&str)->Result<i64> {
+    let value:Option<i64>=store.db.query_row(
+        "SELECT max_worker_attempts FROM sa_team_attempt_limits WHERE orchestration_id=?1",
+        [id],|row|row.get(0),
+    ).optional().map_err(|e|e.to_string())?;
+    let limit=value.unwrap_or(2);
+    if !(1..=4).contains(&limit) {
+        return Err("Invalid persisted Team worker-attempt limit.".into());
+    }
+    Ok(limit)
+}
+
+/// Fail closed if a new or migrated Ticket lost its immutable attempt budget.
+/// The migration explicitly pins the legacy two-attempt policy for old Tickets.
+pub(super) fn ticket_worker_attempt_limit(store:&Store,ticket_id:&str)->Result<i64> {
+    store.db.query_row(
+        "SELECT l.max_worker_attempts FROM sa_ticket_attempt_limits l
+         JOIN sa_tickets t ON t.id=l.ticket_id AND t.policy_revision=l.policy_revision
+         WHERE t.id=?1",
+        [ticket_id],|row|row.get(0),
+    ).optional().map_err(|e|e.to_string())?
+    .filter(|limit| (1..=4).contains(limit))
+    .ok_or_else(||"Missing or invalid task-effective worker-attempt budget.".into())
+}
+
 pub(crate) fn read(store:&Store,id:&str)->Result<TeamRoster> {
     let config=configuration(store,id)?;
     let mut workers=vec![config.worker_bot_id.clone()];
@@ -304,6 +358,7 @@ pub(crate) fn read(store:&Store,id:&str)->Result<TeamRoster> {
         coordinator_bot_id:config.coordinator_bot_id,
         worker_bot_ids:workers,
         reviewer_bot_ids:reviewers,
+        max_worker_attempts:team_worker_attempt_limit(store,id)?,
         execution_ready:ready,
     })
 }
@@ -569,6 +624,12 @@ pub(super) fn duplicate_with_roster(
     };
     validate_member_ids(store, &created, &roster)?;
     insert_member_roles(store, &created.id, &roster)?;
+    // Duplicate durable policy, never task grants or source subscriptions.
+    tx.execute(
+        "INSERT INTO sa_team_attempt_limits(orchestration_id,max_worker_attempts)
+         VALUES(?1,?2)",
+        params![created.id,source_roles.max_worker_attempts],
+    ).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     configuration(store, &created.id)
 }
@@ -617,6 +678,60 @@ fn set(store:&Store,id:&str,expected:i64,input:&RosterInput)->Result<TeamRoster>
     tx.commit().map_err(|e|e.to_string())?;
     read(store,id)
 }
+/// A trusted local-user edit of a reusable retry budget. Active/reviewable
+/// work and unresolved effects pin their current Team policy; atomic SQL
+/// rechecks those dependencies before the revision can change.
+pub(super) fn set_worker_attempt_limit(
+    store:&Store,id:&str,expected_revision:i64,limit:i64,
+)->Result<TeamRoster> {
+    if !(1..=4).contains(&limit) {
+        return Err("Worker-attempt limit must be between 1 and 4.".into());
+    }
+    let current=read(store,id)?;
+    let cfg=configuration(store,id)?;
+    if cfg.enabled || current.policy_revision!=expected_revision {
+        return Err("Disable the Team and reload its policy revision before changing budgets.".into());
+    }
+    if current.max_worker_attempts==limit {
+        return Ok(current);
+    }
+    let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
+    let changed=tx.execute(
+        "UPDATE sa_orchestrations SET policy_revision=policy_revision+1,updated_at=?3
+         WHERE id=?1 AND enabled=0 AND policy_revision=?2
+           AND NOT EXISTS(
+              SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
+                AND (t.state NOT IN ('completed','failed','stopped','interrupted','inconclusive')
+                  OR EXISTS(SELECT 1 FROM sa_assignments a
+                            WHERE a.ticket_id=t.id AND a.state='running')
+                  OR EXISTS(SELECT 1 FROM sa_effect_receipts e
+                            WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain')))
+           )",
+        params![id,expected_revision,storage::now()],
+    ).map_err(|e|e.to_string())?;
+    if changed!=1 {
+        return Err("Team policy or unsettled Demand changed before the budget edit.".into());
+    }
+    tx.execute(
+        "INSERT INTO sa_team_attempt_limits(orchestration_id,max_worker_attempts)
+         VALUES(?1,?2) ON CONFLICT(orchestration_id)
+         DO UPDATE SET max_worker_attempts=excluded.max_worker_attempts",
+        params![id,limit],
+    ).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;
+    read(store,id)
+}
+
+#[tauri::command]
+pub async fn superagent_worker_attempt_limit_update(
+    window:tauri::WebviewWindow,state:State<'_,AppState>,
+    orchestration_id:String,expected_revision:i64,max_worker_attempts:i64,
+)->Result<TeamRoster> {
+    require_main_window(&window)?;
+    let store=state.store.lock().map_err(|e|e.to_string())?;
+    set_worker_attempt_limit(&store,&orchestration_id,expected_revision,max_worker_attempts)
+}
+
 #[tauri::command]
 pub async fn superagent_roster(window:tauri::WebviewWindow,state:State<'_,AppState>,
     orchestration_id:String)->Result<TeamRoster> {

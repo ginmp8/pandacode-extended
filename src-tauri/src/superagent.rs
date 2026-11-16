@@ -3617,7 +3617,9 @@ fn retry_blocked(
          FROM sa_assignments WHERE ticket_id=?1",
         params![ticket_id,worker.id], |r| Ok((r.get(0)?,r.get(1)?)),
     ).map_err(|e| e.to_string())?;
-    if worker_attempts >= 2 {
+    // This is an immutable, admission-time ceiling, not the Team's editable
+    // current preference. Missing snapshots deny retries rather than widening.
+    if worker_attempts >= roster::ticket_worker_attempt_limit(store,ticket_id)? {
         return Err("Manual worker retry limit reached; create a new authorized ticket.".into());
     }
     // Reuse the same native lease probe as initial admission: a concurrent
@@ -3923,6 +3925,58 @@ mod tests {
             &store, &ticket.id, Some(ticket.revision),
         ).is_err(), "a repeated stop must not duplicate the audit");
         assert!(!on_run_finished(&store, &session, true, "Late result").unwrap());
+    }
+
+    #[test]
+    fn configured_worker_budget_is_immutable_for_a_demand_and_denies_extra_retry() {
+        let mut store=fixture();
+        let enabled_config=enabled(&store);
+        let disabled=change_enabled(&store,&enabled_config.id,enabled_config.policy_revision,false).unwrap();
+        let first=roster::read(&store,&disabled.id).unwrap();
+        assert_eq!(first.max_worker_attempts,2);
+        assert!(roster::set_worker_attempt_limit(&store,&disabled.id,disabled.policy_revision,0).is_err());
+        assert!(roster::set_worker_attempt_limit(&store,&disabled.id,disabled.policy_revision,5).is_err());
+        let configured=roster::set_worker_attempt_limit(&store,&disabled.id,disabled.policy_revision,1).unwrap();
+        assert_eq!(configured.max_worker_attempts,1);
+        assert_eq!(configured.policy_revision,disabled.policy_revision+1);
+        assert!(roster::set_worker_attempt_limit(&store,&disabled.id,disabled.policy_revision,3).is_err());
+        let reenabled=change_enabled(&store,&disabled.id,configured.policy_revision,true).unwrap();
+        assert!(roster::set_worker_attempt_limit(&store,&disabled.id,reenabled.policy_revision,4).is_err());
+        let (ticket,started)=admit(&mut store,&disabled.id,"Budgeted Worker","worker-attempt-budget-one",false).unwrap();
+        assert!(started);
+        assert_eq!(roster::ticket_worker_attempt_limit(&store,&ticket.id).unwrap(),1);
+        fail_launch(&store,&ticket.id,"test provider unavailable").unwrap();
+        let sessions_before:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sessions",[],|r|r.get(0),
+        ).unwrap();
+        assert!(retry_blocked(&mut store,&ticket.id,false).unwrap_err().contains("limit reached"));
+        let sessions_after:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sessions",[],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(sessions_before,sessions_after);
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().state,"blocked");
+        let path=store.path.clone();
+        drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert_eq!(roster::ticket_worker_attempt_limit(&reopened,&ticket.id).unwrap(),1);
+        assert_eq!(roster::read(&reopened,&disabled.id).unwrap().max_worker_attempts,1);
+    }
+
+    #[test]
+    fn new_team_budget_copy_is_disabled_and_never_copies_task_authority() {
+        let store=fixture();
+        let original=enabled(&store);
+        let disabled=change_enabled(&store,&original.id,original.policy_revision,false).unwrap();
+        let cap=roster::set_worker_attempt_limit(&store,&original.id,disabled.policy_revision,3).unwrap();
+        let copy=roster::duplicate_with_roster(&store,&original.id,cap.policy_revision,
+            "Bounded copy".into()).unwrap();
+        assert!(!copy.enabled);
+        assert_eq!(roster::read(&store,&copy.id).unwrap().max_worker_attempts,3);
+        assert_eq!(roster::read(&store,&original.id).unwrap().max_worker_attempts,3);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets WHERE orchestration_id=?1",[copy.id],
+            |r|r.get::<_,i64>(0),
+        ).unwrap(),0);
     }
 
     #[test]

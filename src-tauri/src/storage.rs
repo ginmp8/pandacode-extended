@@ -734,6 +734,17 @@ impl Store {
                 migration.execute_batch("PRAGMA user_version=48;")
                     .map_err(|e| e.to_string())?;
             }
+            if version < 49 {
+                // Configurable native worker-attempt ceiling, never an implicit grant.
+                // Existing Tickets retain the original fixed two-attempt budget.
+                migration.execute_batch(crate::superagent::roster::ATTEMPT_POLICY_SCHEMA)
+                    .map_err(|e|e.to_string())?;
+                migration.execute_batch(
+                    "INSERT OR IGNORE INTO sa_ticket_attempt_limits(ticket_id,policy_revision,max_worker_attempts)
+                     SELECT id,policy_revision,2 FROM sa_tickets;
+                     PRAGMA user_version=49;",
+                ).map_err(|e|e.to_string())?;
+            }
             migration.commit().map_err(|e| e.to_string())?;
         }
         let recovery = db.transaction().map_err(|e| e.to_string())?;

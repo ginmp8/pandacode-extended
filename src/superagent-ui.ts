@@ -12,7 +12,7 @@ interface Config {
   workerCount?: number; reviewerCount?: number;
 }
 interface TeamRoster { orchestrationId:string; policyRevision:number; coordinatorBotId:string;
-  workerBotIds:string[]; reviewerBotIds:string[]; executionReady:boolean }
+  workerBotIds:string[]; reviewerBotIds:string[]; maxWorkerAttempts:number; executionReady:boolean }
 interface EffectiveSkill {
   id:string; libraryStatus:string; safetyStatus:string;
   harnessEligibility:string; invocationEvidence:string;
@@ -638,6 +638,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               '<button class="primary-button" type="submit"' +
                 (chosen.enabled || tickets.some(ticket => !['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)) ? ' disabled' : '') +
                 '>Save configured roles</button></form>' +
+              '<form data-sa-form="attempt-budget">' +
+                '<label>Maximum Worker attempts per Demand<select name="maxWorkerAttempts">' +
+                [1,2,3,4].map(limit => '<option value="' + limit + '"' +
+                  (roleRoster?.maxWorkerAttempts === limit ? ' selected' : '') +
+                  '>' + limit + '</option>').join('') + '</select></label>' +
+                '<p>Native hard cap, including the first Worker attempt. Requires a disabled Team; future Demands only. No automatic retry is enabled.</p>' +
+                '<button type="submit"' + (chosen.enabled ? ' disabled' : '') +
+                  '>Save Worker attempt budget</button></form>' +
               '<p role="status">' + (roleRoster.executionReady ?
                 'Single-worker manual execution available after explicit enable.' :
                 'Multi-member execution is disabled until native scoped admission is available.') + '</p>' +
@@ -1561,6 +1569,22 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         roleRoster=await call<TeamRoster>('superagent_roster_update',{
           orchestrationId:cfg.id, expectedRevision:cfg.policyRevision,
           input:{workerBotIds,reviewerBotIds},
+        });
+        await reload();
+        workspaceView='teams';
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'attempt-budget') {
+      const cfg=current();
+      if (!cfg || !roleRoster || roleRoster.orchestrationId!==cfg.id ||
+          roleRoster.policyRevision!==cfg.policyRevision || cfg.enabled) return;
+      const maxWorkerAttempts=Number(data.get('maxWorkerAttempts'));
+      if (!Number.isInteger(maxWorkerAttempts) ||
+          maxWorkerAttempts<1 || maxWorkerAttempts>4) return;
+      void work(async () => {
+        roleRoster=await call<TeamRoster>('superagent_worker_attempt_limit_update',{
+          orchestrationId:cfg.id,expectedRevision:cfg.policyRevision,maxWorkerAttempts,
         });
         await reload();
         workspaceView='teams';

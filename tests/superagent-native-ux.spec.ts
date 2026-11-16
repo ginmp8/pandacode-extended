@@ -22,6 +22,7 @@ test('native Orchestrations first use prioritizes one guided Team creation path'
   await expect(host.getByRole('navigation', {name:'Orchestration views'})).toBeVisible();
   await expect(host.locator('details.sa-legacy-create')).not.toHaveAttribute('open', '');
   await expect(host.getByRole('complementary', {name:'Orchestrations navigation'})).toBeVisible();
+  await page.screenshot({path:'test-results/superagent-native-first-use.png'});
   await host.locator('.sa-native-header [data-sa-builder-open]').click();
   const builder = host.getByRole('region', { name:'Guided Team Builder' });
   await expect(builder).toContainText('Step 1 of 5');
@@ -39,6 +40,7 @@ test('native Orchestrations first use prioritizes one guided Team creation path'
   const overview = host.getByRole('region', { name:'Team overview' });
   await expect(overview).toBeVisible({timeout:20_000});
   await expect(overview).toContainText('Native UX Team');
+  await page.screenshot({path:'test-results/superagent-native-team-overview.png'});
   await expect(overview).toContainText('Coordinator');
   await expect(overview).toContainText('Worker 1');
   await expect(overview).toContainText('task needs native admission');
@@ -73,6 +75,7 @@ test('native team member inspector and global views use existing read-only data'
   await expect(host.getByRole('region',{name:'Team runtime strategy'})).toBeVisible();
   await host.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(host.getByRole('region',{name:'All Demands across Teams'})).toBeVisible();
+  await page.screenshot({path:'test-results/superagent-native-demand-board.png'});
   await host.getByRole('button',{name:'Review inbox'}).click();
   await expect(host.getByRole('region',{name:'Cross-Team native review inbox'})).toBeVisible();
   await host.getByRole('button',{name:'Sources'}).click();

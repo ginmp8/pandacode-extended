@@ -155,7 +155,7 @@ test('duplicating a native Team retains its roles but never its saved runtime au
   await expect(prompt).toContainText('Tickets, source subscriptions, permissions and approvals are not copied');
   await prompt.getByRole('button',{name:'Confirm',exact:true}).click();
   await expect(host.locator('.sa-list .sa-item')).toHaveCount(2);
-  await expect(host.locator('.sa-list')).toContainText('Source Team copy');
+  await expect(host.locator('.sa-team-picker .sa-list')).toContainText('Source Team copy');
   await expect(host.getByRole('status').filter({hasText:'Disabled Team duplicated.'})).toBeVisible();
   await expect(host.getByRole('button',{name:'Enable manual'})).toBeVisible();
   await expect(host).toContainText('Every task needs native admission');
@@ -890,7 +890,7 @@ test('Bots Orchestrations is a persistent main workspace with native-backed Team
   await workspace.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await workspace.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
   await workspace.getByRole('button',{name:'Create disabled preset'}).click();
-  await expect(workspace.locator('.sa-list')).toContainText('Persistent Team');
+  await expect(workspace.locator('.sa-team-picker .sa-list')).toContainText('Persistent Team');
   await workspace.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(workspace.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await workspace.getByRole('button',{name:'Back to Bots'}).click();
@@ -900,7 +900,7 @@ test('Bots Orchestrations is a persistent main workspace with native-backed Team
   await expect(orchestrationItem).toBeVisible();
   await orchestrationItem.click();
   await expect(workspace).toBeVisible();
-  await expect(workspace.locator('.sa-list')).toContainText('Persistent Team');
+  await expect(workspace.locator('.sa-team-picker .sa-list')).toContainText('Persistent Team');
   await expect(workspace.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
 });
 
@@ -1099,6 +1099,7 @@ test('multi-member Team Builder updates settled history safely without launching
     });
   });
   const host=page.locator('#sa-configured-roster');
+  await host.getByRole('button',{name:'Members and Skills'}).click();
   await host.getByRole('button',{name:'Load native members'}).click();
   const form=host.locator('form[data-sa-form="roster"]');
   await form.locator('select[name="additionalWorkers"]').selectOption(['worker-b','worker-c']);
@@ -1775,6 +1776,7 @@ test('Team effective policy view is native-backed and never grants or launches t
     });
   });
   const host=page.locator('#sa-effective-test');
+  await host.getByRole('button',{name:'Members and Skills'}).click();
   const roles=host.getByRole('region',{name:'Configured Team roles'});
   await roles.getByRole('button',{name:'Load native members'}).click();
   await roles.getByRole('button',{name:'Inspect effective policy and Skills'}).click();

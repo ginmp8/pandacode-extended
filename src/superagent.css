@@ -327,3 +327,13 @@
   .sa-native-ui .sa-team-picker{grid-template-columns:minmax(0,1fr)}
   .sa-native-ui .sa-team-picker .sa-list,.sa-native-ui .sa-team-picker>p{grid-column:1}
 }
+
+
+/* The roster uses the same actual bot avatar renderer as Bots, never a synthetic identity. */
+.sa-native-ui .sa-member-native-avatar{width:35px;height:35px;border-radius:50%;display:inline-grid;
+  place-items:center;overflow:hidden;flex:none;background:var(--ds-fill-hover);
+  border:1px solid var(--ds-border);font-size:var(--ds-text-head);font-weight:var(--weight-strong)}
+.sa-native-ui .sa-member-native-avatar>svg,.sa-native-ui .sa-member-native-avatar>img{
+  width:100%;height:100%;object-fit:cover}
+.sa-native-ui .sa-navigation button>.icon{width:16px;height:16px;flex:none;color:var(--muted)}
+.sa-native-ui .sa-native-header-actions .primary-button>.icon{width:15px;height:15px}

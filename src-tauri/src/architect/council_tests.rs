@@ -5700,6 +5700,45 @@ fn run_nested_mixed_root_callbacks(include_automatic: bool) {
         "a revoked real direct-bot grant invalidates the composed terminal verdict");
 }
 
+#[test]
+fn hierarchical_s2_root_worker_and_session_identities_are_unique_across_waves() {
+    let mut config = on(9.0, 2, 0);
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    config.force_escalation = true;
+    config.automatic_reviewers = 1;
+    config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+        bot_id: "security-child".into(), child_reviewers: 2,
+        child_target: 9.0, child_max_rounds: 2,
+    });
+    config.validate().unwrap();
+    let mut first = seat("root-first", 1, Some(9.6), SINCE + 1);
+    first.session_id = "root-native-session-one".into();
+    let mut second = seat("root-second", 2, Some(9.6), SINCE + 2);
+    second.session_id = "root-native-session-two".into();
+    let root = team_with(config, vec![first, second]);
+    assert!(council::independent_s2_root_identities(&root),
+        "two different native workers and sessions are eligible for S2");
+    let mut duplicate_worker = root.clone();
+    let first_id = duplicate_worker.workers[0].id.clone();
+    duplicate_worker.workers[1].id = first_id;
+    assert!(!council::independent_s2_root_identities(&duplicate_worker),
+        "a new session with a reused worker ID cannot supply an independent S2 vote");
+    let mut duplicate_session = root.clone();
+    let first_session = duplicate_session.workers[0].session_id.clone();
+    duplicate_session.workers[1].session_id = first_session;
+    assert!(!council::independent_s2_root_identities(&duplicate_session),
+        "renaming a worker cannot turn the original native session into a new S2 vote");
+    let mut empty_identity = root.clone();
+    empty_identity.workers[1].session_id.clear();
+    assert!(!council::independent_s2_root_identities(&empty_identity));
+    let mut old_cycle = root.clone();
+    let mut historical = old_cycle.workers[0].clone();
+    historical.created_at = SINCE - 1;
+    old_cycle.workers.push(historical);
+    assert!(council::independent_s2_root_identities(&old_cycle),
+        "earlier Council cycles cannot contaminate the current wave's identity set");
+}
+
 /// Forced hierarchical S2 can issue genuinely new root callbacks only after
 /// the first-wave child has produced a verified composite seat. Phase-two
 /// root scores alone must never substitute for a new child Council receipt.

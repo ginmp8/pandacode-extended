@@ -2314,6 +2314,23 @@ pub(super) fn status_for_authenticated_children(
     })
 }
 
+/// A fresh hierarchical S2 wave must not reuse any root Council worker ID
+/// or native session from its original wave, including abandoned attempts.
+/// This is a structural gate; persisted grants and callbacks are checked
+/// independently by the native admission and terminal paths.
+pub(super) fn independent_s2_root_identities(team: &TeamSnapshot) -> bool {
+    let mut worker_ids = std::collections::HashSet::new();
+    let mut session_ids = std::collections::HashSet::new();
+    team.workers.iter().filter(|worker| {
+        worker.created_at >= team.council_since
+            && worker.council.as_ref().is_some_and(|seat| seat.round == 1 || seat.round == 2)
+    }).all(|worker| {
+        !worker.id.is_empty() && !worker.session_id.is_empty()
+            && worker_ids.insert(worker.id.as_str())
+            && session_ids.insert(worker.session_id.as_str())
+    })
+}
+
 /// A forced hierarchical S2 needs both complete, independent native waves.
 /// Callers must revalidate persisted reviewer grants and child receipts before
 /// invoking this structural gate. No composite score supplies a phantom vote.
@@ -2326,6 +2343,7 @@ pub(super) fn status_for_authenticated_children_s2(
     if config.strategy != CouncilExecutionStrategy::Escalated
         || !config.force_escalation || config.nested_bot_reviewers.is_empty()
         || accepted(team) || team.council_since <= 0
+        || !independent_s2_root_identities(team)
         // M4 has no independent root reviewers: its two waves consist
         // exclusively of authenticated children, not phantom root rounds.
         || (config.reviewer_bot_ids.len() + config.automatic_reviewers > 0

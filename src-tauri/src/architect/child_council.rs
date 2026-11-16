@@ -1387,6 +1387,8 @@ fn issue_leaf_wave(
 /// completed, authentically scored root reviewers from the same enabled
 /// sources, with fresh native sessions and no severe or conflicting findings.
 pub(super) fn fresh_s2_root_reviewers(store: &Store, root: &TeamSnapshot, config: &CouncilConfig) -> bool {
+    // A session swap must not turn an existing Council seat into a fresh vote.
+    if !super::council::independent_s2_root_identities(root) { return false; }
     let expected = config.reviewer_bot_ids.len() + config.automatic_reviewers;
     if expected == 0 { return true; }
     let first_sessions: HashSet<&str> = root.workers.iter()

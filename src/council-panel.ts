@@ -89,6 +89,7 @@ export function createCouncil(host: CouncilHost) {
   const reviewerDraft = new Map<string, ReviewerSelection>();
   // Strategy is task-scoped; a pre-enable selection must not become a global default.
   const strategyDraft = new Map<string, 'parallel' | 'escalated' | 'two_phase'>();
+  const escalationDraft = new Map<string, boolean>();
   const selection = (sessionId: string): ReviewerSelection => {
     let draft = reviewerDraft.get(sessionId);
     const persisted = shownConfig(sessionId);
@@ -120,7 +121,8 @@ export function createCouncil(host: CouncilHost) {
   function selectionConfig(sessionId: string): CouncilConfig {
     const draft = selection(sessionId), pendingStrategy = strategyDraft.get(sessionId);
     const council = { ...(shownConfig(sessionId) ?? councilDefaults()), ...(pendingStrategy ? {
-      strategy: pendingStrategy, forceEscalation: pendingStrategy === 'escalated',
+      strategy: pendingStrategy, forceEscalation: pendingStrategy === 'escalated'
+        ? (escalationDraft.get(sessionId) ?? true) : false,
     } : {}) };
     if (!draft.selected) return { ...council, automaticReviewers: undefined, reviewerBotIds: undefined, nestedBotReviewers: undefined, optionalSkillIds: undefined, requiredCheckSkillIds: undefined, reviewPermissions: undefined };
     const extras = draft.automaticReviewers ?? 0;
@@ -336,7 +338,14 @@ export function createCouncil(host: CouncilHost) {
     const lowestLine = panel.querySelector<HTMLElement>('.council-lowest')!;
     if (lowestLine.textContent !== lowestNote) lowestLine.textContent = lowestNote;
     const strategySelect = panel.querySelector<HTMLSelectElement>('[data-council-strategy]');
-    if (strategySelect) strategySelect.value = strategyDraft.get(sessionId) ?? values.strategy ?? 'parallel';
+    const effectiveStrategy = strategyDraft.get(sessionId) ?? values.strategy ?? 'parallel';
+    if (strategySelect) strategySelect.value = effectiveStrategy;
+    for (const option of panel.querySelectorAll<HTMLElement>('.council-s2-trigger-policy')) {
+      option.hidden = effectiveStrategy !== 'escalated';
+    }
+    const escalationToggle = panel.querySelector<HTMLInputElement>('[data-council-force-escalation]');
+    if (escalationToggle) escalationToggle.checked = escalationDraft.get(sessionId)
+      ?? (values.strategy === 'escalated' ? values.forceEscalation !== false : true);
     panel.querySelector<HTMLInputElement>('.council-new-threads')!.checked = councilForNewThreads();
     // The switch is busy while an automatic team starts for it.
     const sw = panel.querySelector<HTMLInputElement>('.council-switch')!, starting = pending.has(sessionId) && !host.team(sessionId);
@@ -430,6 +439,7 @@ export function createCouncil(host: CouncilHost) {
         // A rejected optimistic selected roster must not remain as though it were persisted.
         reviewerDraft.delete(sessionId);
         strategyDraft.delete(sessionId);
+        escalationDraft.delete(sessionId);
         if (reason) {
           failures.set(sessionId, reason);
           // Closed since: say it now, and show it when the panel opens again for this thread.
@@ -466,7 +476,7 @@ export function createCouncil(host: CouncilHost) {
     if (anchor.closest('.council-strip')) panel.dataset.compact = focusField ?? 'target';
     panel.setAttribute('role', 'dialog');
     panel.setAttribute('aria-labelledby', 'council-title');
-    panel.innerHTML = `<div class="council-panel-head"><label id="council-title" for="council-switch">Council</label><input id="council-switch" class="ds-toggle council-switch" type="checkbox" role="switch" tabindex="0" aria-describedby="council-about"></div><p id="council-about">${ABOUT}</p><p class="council-idle" role="status" hidden>No changes to review yet</p>${FIELDS.map(({ key, label, options, name }) => `<div class="council-field" data-field-row="${key}"><span id="council-${key}">${label}${key === 'target' ? '<small class="council-lowest"></small>' : ''}</span><div class="ds-seg" role="group" aria-labelledby="council-${key}" data-field="${key}">${options.map(value => `<button type="button" data-value="${value}" aria-pressed="false"${key === 'reviewers' && !value ? ` aria-label="${AUTO}" data-tip="${AUTO}"` : ''}>${name(value)}</button>`).join('')}${key === 'reviewers' ? '<button type="button" data-reviewers-source="selected" aria-label="Selected bots" data-tip="Review with existing configured bots" aria-pressed="false">Bots</button>' : ''}</div></div>`).join('')}${!panel.dataset.compact ? '<div class="council-strategy-field"><label>Review strategy<select data-council-strategy aria-label="Review strategy"><option value="parallel">Parallel (original)</option><option value="escalated">Escalated — require two fresh rounds</option><option value="two_phase">Two-phase — independent challenge round</option></select></label><small>Two-phase uses fresh native read-only reviewers; nested Councils still require child execution support.</small></div>' : ''}<div class="council-bots" role="group" aria-label="Selected reviewer bots" hidden></div><p class="council-error" role="alert" hidden></p><div class="council-foot"><label class="council-new"><input type="checkbox" class="council-new-threads" tabindex="0"><span>Start new threads with Council on</span></label></div>`;
+    panel.innerHTML = `<div class="council-panel-head"><label id="council-title" for="council-switch">Council</label><input id="council-switch" class="ds-toggle council-switch" type="checkbox" role="switch" tabindex="0" aria-describedby="council-about"></div><p id="council-about">${ABOUT}</p><p class="council-idle" role="status" hidden>No changes to review yet</p>${FIELDS.map(({ key, label, options, name }) => `<div class="council-field" data-field-row="${key}"><span id="council-${key}">${label}${key === 'target' ? '<small class="council-lowest"></small>' : ''}</span><div class="ds-seg" role="group" aria-labelledby="council-${key}" data-field="${key}">${options.map(value => `<button type="button" data-value="${value}" aria-pressed="false"${key === 'reviewers' && !value ? ` aria-label="${AUTO}" data-tip="${AUTO}"` : ''}>${name(value)}</button>`).join('')}${key === 'reviewers' ? '<button type="button" data-reviewers-source="selected" aria-label="Selected bots" data-tip="Review with existing configured bots" aria-pressed="false">Bots</button>' : ''}</div></div>`).join('')}${!panel.dataset.compact ? '<div class="council-strategy-field"><label>Review strategy<select data-council-strategy aria-label="Review strategy"><option value="parallel">Parallel (original)</option><option value="escalated">Escalated — on demand / two rounds</option><option value="two_phase">Two-phase — independent challenge round</option></select></label><small>Two-phase uses fresh native read-only reviewers; nested Councils still require child execution support.</small><label class="council-s2-trigger-policy" hidden><input type="checkbox" data-council-force-escalation> Require immediate S2 escalation</label><small class="council-s2-trigger-policy" hidden>Unchecked: escalate only on native score, critical finding, missing evidence or conflict triggers. No extra reviewer sources are enabled.</small></div>' : ''}<div class="council-bots" role="group" aria-label="Selected reviewer bots" hidden></div><p class="council-error" role="alert" hidden></p><div class="council-foot"><label class="council-new"><input type="checkbox" class="council-new-threads" tabindex="0"><span>Start new threads with Council on</span></label></div>`;
     document.body.append(panel);
     if (!panel.dataset.compact) {
       const editor = createCouncilCriteriaEditor(
@@ -538,11 +548,22 @@ export function createCouncil(host: CouncilHost) {
           return;
         }
         failures.delete(sessionId);
-        if (current) void apply(sessionId, { ...current, strategy, forceEscalation: strategy === 'escalated' }, remember);
+        if (current) void apply(sessionId, { ...current, strategy,
+          forceEscalation: strategy === 'escalated' ? (current.strategy === 'escalated' ? current.forceEscalation !== false : true) : false }, remember);
         else {
           strategyDraft.set(sessionId, strategy);
+          escalationDraft.delete(sessionId);
           paint(sessionId);
         }
+        return;
+      }
+      if (input.hasAttribute('data-council-force-escalation')) {
+        const current = shownConfig(sessionId);
+        if ((strategyDraft.get(sessionId) ?? current?.strategy ?? 'parallel') !== 'escalated') return;
+        escalationDraft.set(sessionId, input.checked);
+        failures.delete(sessionId);
+        if (current) void apply(sessionId, { ...current, strategy: 'escalated', forceEscalation: input.checked }, remember);
+        else paint(sessionId);
         return;
       }
       if (input.hasAttribute('data-council-bot-role') || input.hasAttribute('data-council-child-reviewers')

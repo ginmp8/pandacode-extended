@@ -710,6 +710,51 @@ test('existing Council modal sends only the explicit native S2 strategy and pres
   await expect(strategy).toHaveValue('two_phase');
 });
 
+
+test('S2 on-demand trigger policy is task-scoped, keyboard accessible and does not add reviewer sources', async ({ page }) => {
+  await open(page, '/');
+  await button(page).click();
+  const strategy = panel(page).getByLabel('Review strategy');
+  const immediate = panel(page).getByRole('checkbox', { name: 'Require immediate S2 escalation' });
+  await expect(immediate).toBeHidden();
+  await strategy.selectOption('escalated');
+  await expect(immediate).toBeChecked();
+  await immediate.focus();
+  await page.keyboard.press('Space');
+  await expect(immediate).not.toBeChecked();
+  expect(await calls(page)).toEqual([]);
+  await toggle(page).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  expect((await calls(page))[0]).toMatchObject({
+    strategy: 'escalated', forceEscalation: false, reviewers: 0,
+    reviewerBotIds: undefined, nestedBotReviewers: undefined,
+  });
+  await expect(immediate).not.toBeChecked();
+  await strategy.selectOption('parallel');
+  await expect.poll(async () => (await calls(page)).length).toBe(2);
+  expect((await calls(page))[1]).toMatchObject({ strategy: 'parallel', forceEscalation: false });
+  await expect(immediate).toBeHidden();
+});
+
+test('S2 persisted on-demand selection survives reopening and switches to explicit escalation', async ({ page }) => {
+  await open(page, '/?council');
+  await button(page).click();
+  const strategy = panel(page).getByLabel('Review strategy');
+  await strategy.selectOption('escalated');
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  const immediate = panel(page).getByRole('checkbox', { name: 'Require immediate S2 escalation' });
+  await immediate.uncheck();
+  await expect.poll(async () => (await calls(page)).length).toBe(2);
+  expect((await calls(page))[1]).toMatchObject({ strategy: 'escalated', forceEscalation: false });
+  await page.keyboard.press('Escape');
+  await button(page).click();
+  const restored = panel(page).getByRole('checkbox', { name: 'Require immediate S2 escalation' });
+  await expect(restored).not.toBeChecked();
+  await restored.check();
+  await expect.poll(async () => (await calls(page)).length).toBe(3);
+  expect((await calls(page))[2]).toMatchObject({ strategy: 'escalated', forceEscalation: true });
+});
+
 test('task-scoped S2 strategy composes with M3 bot seats on a narrow keyboard-accessible modal', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 640 });
   const bots = [

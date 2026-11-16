@@ -597,6 +597,29 @@ pub(super) fn create_with_roster(
     configuration(store,&cfg.id)
 }
 
+/// Atomically create a disabled Team with a locally chosen retry policy.
+/// Configuration is not a grant; invalid policies/roles must leave no partial Team.
+pub(super) fn create_with_attempt_policy(
+    store:&Store,input:NewOrchestration,roster:Option<RosterInput>,limit:i64,
+)->Result<Orchestration> {
+    if !(1..=4).contains(&limit) {
+        return Err("Worker-attempt limit must be between 1 and 4.".into());
+    }
+    let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
+    let cfg=create_configuration(store,input)?;
+    if let Some(members)=roster {
+        validate_member_ids(store,&cfg,&members)?;
+        insert_member_roles(store,&cfg.id,&members)?;
+    }
+    tx.execute(
+        "INSERT INTO sa_team_attempt_limits(orchestration_id,max_worker_attempts)
+         VALUES(?1,?2)",
+        params![&cfg.id,limit],
+    ).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;
+    configuration(store,&cfg.id)
+}
+
 /// Clone one versioned Team policy and its ordered native roles in the same
 /// SQLite transaction. A stale source revision, malformed stored roster, or
 /// ineligible bot rolls back the entire disabled copy. No Tickets, source
@@ -1245,6 +1268,57 @@ mod tests {
             name:"Legacy".into(),coordinator_bot_id:"lead".into(),worker_bot_id:"primary".into(),
         }).unwrap();
         assert!(read(&store,&legacy.id).unwrap().execution_ready);
+    }
+    #[test]
+    fn configured_attempt_budget_is_atomic_disabled_and_survives_restart() {
+        let path=std::env::temp_dir().join(format!("sa-new-budget-{}.sqlite3",storage::id()));
+        let store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('p','Team','/tmp/sa-budget')",[]
+        ).unwrap();
+        for id in ["lead","primary","second"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'p','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let input=||NewOrchestration {
+            name:"Budget Team".into(),coordinator_bot_id:"lead".into(),
+            worker_bot_id:"primary".into(),
+        };
+        let roles=RosterInput {
+            worker_bot_ids:vec!["primary".into(),"second".into()],
+            reviewer_bot_ids:vec![],
+        };
+        for limit in [0,5] {
+            assert!(create_with_attempt_policy(&store,input(),Some(roles.clone()),limit)
+                .unwrap_err().contains("between 1 and 4"));
+        }
+        assert!(create_with_attempt_policy(&store,input(),Some(RosterInput {
+            worker_bot_ids:vec!["primary".into(),"lead".into()],
+            reviewer_bot_ids:vec![],
+        }),2).unwrap_err().contains("multiple Team roles"));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations",[],|r|r.get::<_,i64>(0),
+        ).unwrap(),0,"invalid policies or roles must never leave a Team");
+        let multi=create_with_attempt_policy(&store,input(),Some(roles),3).unwrap();
+        assert!(!multi.enabled);
+        assert_eq!(multi.policy_revision,1);
+        assert_eq!(read(&store,&multi.id).unwrap().max_worker_attempts,3);
+        assert!(!read(&store,&multi.id).unwrap().execution_ready);
+        let single=create_with_attempt_policy(&store,input(),None,1).unwrap();
+        assert!(!single.enabled);
+        assert_eq!(read(&store,&single.id).unwrap().max_worker_attempts,1);
+        let legacy=super::super::create_configuration(&store,input()).unwrap();
+        assert_eq!(read(&store,&legacy.id).unwrap().max_worker_attempts,2);
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert_eq!(read(&reopened,&multi.id).unwrap().max_worker_attempts,3);
+        assert_eq!(read(&reopened,&single.id).unwrap().max_worker_attempts,1);
+        assert_eq!(read(&reopened,&legacy.id).unwrap().max_worker_attempts,2);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0),
+        ).unwrap(),0,"configuration must never infer work");
     }
     #[test]
     fn duplicate_team_is_atomic_revision_guarded_and_never_copies_runtime_authority() {

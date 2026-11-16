@@ -3199,12 +3199,16 @@ pub(crate) fn invalidate_bot(store: &Store, bot_id: &str, removed: bool) -> Resu
 pub async fn superagent_create(
     window: tauri::WebviewWindow, state: State<'_,AppState>,
     input: NewOrchestration, roster: Option<roster::RosterInput>,
+    max_worker_attempts: Option<i64>,
 ) -> Result<Orchestration> {
     require_main_window(&window)?;
     let store=state.store.lock().map_err(|e|e.to_string())?;
-    match roster {
-        Some(members) => roster::create_with_roster(&store,input,members),
-        None => create_configuration(&store,input),
+    match max_worker_attempts {
+        Some(limit) => roster::create_with_attempt_policy(&store,input,roster,limit),
+        None => match roster {
+            Some(members) => roster::create_with_roster(&store,input,members),
+            None => create_configuration(&store,input),
+        },
     }
 }
 

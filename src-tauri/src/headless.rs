@@ -65,6 +65,7 @@ enum Command {
     PreflightDemand { orchestration_id: String, coordinated: bool, objective_file: PathBuf },
     InspectTeamRoster { orchestration_id: String },
     ObserveSource { source_id: String },
+    ObserveTeamSources { orchestration_id: String },
     ObserveCheckRun { source_id: String, check_run_id: i64 },
     QueueDemand { orchestration_id: String, request_key: String, objective_file: PathBuf },
     AcceptTicket { ticket_id: String, expected_revision: i64 },
@@ -528,6 +529,22 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::ObserveTeamSources { orchestration_id } = &command {
+                // Each GitHub Events Observe source uses its own native
+                // authentication, policy recheck, cursor and immutable receipts.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_observe_team_sources(
+                        &dir.join("kingcode.sqlite3"), orchestration_id,
+                    ));
+                match result {
+                    Ok(receipt) => { println!("{receipt}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Team source observation failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             if let Command::ObserveCheckRun { source_id, check_run_id } = &command {
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
@@ -698,7 +715,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::InspectSourceDecisions { .. }
         | Command::LinkSourceThread { .. } | Command::LinkIssuePull { .. }
         | Command::UnlinkSourceThread { .. }
-        | Command::ObserveSource { .. } | Command::ObserveCheckRun { .. }
+        | Command::ObserveSource { .. } | Command::ObserveTeamSources { .. }
+        | Command::ObserveCheckRun { .. }
         | Command::QueueDemand { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
         | Command::CreateOrchestration { .. } | Command::ConfigureTeamRoles { .. }
@@ -1458,6 +1476,14 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--observe-team-sources" => {
+                let value = args.get(index + 1)
+                    .ok_or_else(|| format!("--observe-team-sources needs a Team ID.\n\n{}", help()))?;
+                validate_orchestration_id(value)?;
+                command = Command::ObserveTeamSources { orchestration_id: value.clone() };
+                ops += 1;
+                index += 1;
+            }
             "--observe-check-run" => {
                 let source_id = args.get(index + 1)
                     .ok_or_else(|| format!("--observe-check-run needs a source ID and Check Run ID.\n\n{}", help()))?;
@@ -1968,7 +1994,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-recovery-inbox | --list-unresolved-effects [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-delivery <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --create-orchestration <file> | --configure-team-roles <id> <revision> <file> | --enable-orchestration <id> <revision> | --retry-ticket <id> <revision> | --inspect-retry-request <id> <revision> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-recovery-inbox | --list-unresolved-effects [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-delivery <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --create-orchestration <file> | --configure-team-roles <id> <revision> <file> | --enable-orchestration <id> <revision> | --retry-ticket <id> <revision> | --inspect-retry-request <id> <revision> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -2036,6 +2062,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          No GitHub polling, startup recovery, worker admission or writes; exit.
   --observe-source <id> Authenticated one-shot GitHub Observe poll for an activated source; exit.
                          No Auto, inferred task, webhook or external write.
+  --observe-team-sources <team-id>
+                         Observe each enabled GitHub Events source of a Team once.
+                         Off and Checks-only sources make no requests; failure is nonzero.
   --observe-check-run <id> <check-run-id>
                          Verify one completed GitHub Checks API result for an Observe source;
                          record a durable receipt, never approve a Ticket or invoke Auto.
@@ -2479,6 +2508,13 @@ mod tests {
         assert!(parsed("--observe-source").is_err());
         assert!(parsed("--observe-source ../untrusted").is_err());
         assert!(parsed("--observe-source source_123 --stop-ticket ticket_123").is_err());
+        assert_eq!(parsed("--observe-team-sources team_123"),
+            Ok(Command::ObserveTeamSources { orchestration_id:"team_123".into() }));
+        for invalid in [
+            "--observe-team-sources",
+            "--observe-team-sources ../unsafe",
+            "--observe-team-sources team_123 --stop-ticket ticket_123",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
         assert_eq!(parsed("--observe-check-run source_123 456"),
             Ok(Command::ObserveCheckRun { source_id:"source_123".into(), check_run_id:456 }));
         for invalid in [

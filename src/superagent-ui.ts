@@ -1435,6 +1435,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       } else if (target.name === 'reviewers') {
         draftReviewerBotIds = [...target.selectedOptions].map(option => option.value);
       } else return;
+      // DOM replacement can precede the asynchronous <details> toggle event.
+      // Capture the live disclosure state before replacing the roster inputs.
+      const members = target.closest<HTMLDetailsElement>('details.sa-new-members');
+      if (members) draftMembersExpanded = members.open;
       render();
       return;
     }
@@ -1521,7 +1525,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   });
   host.addEventListener('toggle', event => {
     const target = event.target;
-    if (target instanceof HTMLDetailsElement && target.classList.contains('sa-new-members')) {
+    if (target instanceof HTMLDetailsElement && target.classList.contains('sa-new-members')
+        && host.contains(target)) {
+      // Ignore stale queued toggle events from a disclosure replaced by render().
       draftMembersExpanded = target.open;
     }
   }, true);

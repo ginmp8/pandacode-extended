@@ -70,6 +70,7 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
   await host.getByRole('combobox',{name:'Worker',exact:true}).selectOption('worker');
   await host.locator('details.sa-new-members summary').click();
   await host.locator('select[name="additionalWorkers"]').selectOption(['worker-b']);
+  await expect(host.locator('details.sa-new-members')).toHaveAttribute('open','');
   await host.locator('select[name="reviewers"]').selectOption(['reviewer']);
   await host.getByRole('combobox',{name:'Team status'}).selectOption('enabled');
   await host.getByRole('searchbox',{name:'Search Teams'}).fill('another Team');
@@ -504,6 +505,8 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
   await sidebar.getByRole('button',{name:'Bot actions'}).click();
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
   const dialog=page.getByRole('region',{name:'Orchestrations'});
+  // A Team create must run only after native list/bot hydration is complete.
+  await expect(dialog).toHaveAttribute('aria-busy','false',{timeout:30_000});
   await dialog.getByRole('textbox',{name:'Name'}).fill('Safe default');
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});

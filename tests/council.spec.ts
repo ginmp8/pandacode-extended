@@ -487,6 +487,10 @@ test('"Turn on for new threads" starts Council with the first send of a new thre
   await page.keyboard.press('Escape');
   await page.locator('.new-task-button').click();
   await composerSettled(page);
+  // The composer may stabilize before the new thread finishes loading.
+  // This class reflects an empty, not-running, fully loaded local task.
+  await expect(page.locator('.conversation-pane')).toHaveClass(/new-task-page/);
+  await expect(page.getByRole('textbox', { name: 'Message your coding agent' })).toBeEnabled();
   await page.getByRole('textbox', { name: 'Message your coding agent' }).fill('Add a search box');
   await page.getByRole('textbox', { name: 'Message your coding agent' }).press('Enter');
   await expect.poll(() => calls(page)).toEqual([{ target: 9, maxRounds: 10, reviewers: 0 }]);

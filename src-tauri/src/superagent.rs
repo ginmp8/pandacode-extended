@@ -4718,9 +4718,10 @@ fn change_enabled(
     configuration(store,orchestration_id)
 }
 
-/// A Team edit appends a version only while disabled and before its first
-/// Ticket. Existing Ticket snapshots and grants remain bound to their admitted
-/// roles and effective profiles.
+/// A Team edit appends a future-only version. Primary role rotation after
+/// historical Demands requires a disabled Team with fully verified, settled
+/// native snapshots and no unresolved effects or Team-scoped GitHub sources.
+/// Existing Ticket snapshots and grants stay bound to their admitted roles.
 fn update_configuration(store: &Store, id: &str, expected_revision: i64, input: &NewOrchestration) -> Result<Orchestration> {
     update_configuration_roles(store,id,expected_revision,input,
         vec![input.worker_bot_id.clone()],vec![])
@@ -4774,11 +4775,13 @@ fn update_configuration_roles_with_policy(
         "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
         [id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
-    if has_history && (current.coordinator_bot_id != coordinator.id
-        || current.worker_bot_id != worker_bot_ids[0]
-        || current.project_id != project_id)
-    {
-        return Err("Historical Tickets prevent changing primary Team identities.".into());
+    let primary_changed = current.coordinator_bot_id != coordinator.id
+        || current.worker_bot_id != worker_bot_ids[0];
+    if has_history && current.project_id != project_id {
+        return Err("Historical Tickets prevent changing the Team's checkout project.".into());
+    }
+    if has_history && primary_changed && current.enabled {
+        return Err("Disable the Team before changing primary roles for future Demands.".into());
     }
     if current.name==name && current.coordinator_bot_id==coordinator.id
         && current.worker_bot_ids==worker_bot_ids && current.reviewer_bot_ids==reviewer_bot_ids
@@ -4791,6 +4794,50 @@ fn update_configuration_roles_with_policy(
     let next_revision = current.policy_revision.saturating_add(1);
     let next_version = current.team_version.saturating_add(1);
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    if has_history && primary_changed {
+        // Only settled, explicitly disabled Teams may rotate primary roles.
+        // Every historical Demand must retain a digest-verified native Team
+        // snapshot; older unknown-profile Tickets cannot prove safe isolation.
+        let historical_ids: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM sa_tickets WHERE orchestration_id=?1 ORDER BY id",
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?
+        };
+        for ticket_id in historical_ids {
+            let pinned = load_ticket_team_snapshot(&tx, &ticket_id)?;
+            if pinned.provenance != TeamSnapshotProvenance::Native {
+                return Err("Legacy Team history lacks verified native role profiles; duplicate the Team.".into());
+            }
+        }
+        let has_sources: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_event_sources WHERE orchestration_id=?1)",
+            [id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if has_sources {
+            return Err("Team has GitHub sources; duplicate it to change primary roles.".into());
+        }
+        let unsettled: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_tickets t
+             WHERE t.orchestration_id=?1
+               AND (t.state NOT IN ('completed','failed','stopped','inconclusive')
+                 OR EXISTS(SELECT 1 FROM sa_assignments a
+                           WHERE a.ticket_id=t.id AND a.state='running')
+                 OR EXISTS(SELECT 1 FROM sa_effect_receipts e
+                           WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
+                 OR EXISTS(SELECT 1 FROM sa_mandates m
+                           WHERE m.ticket_id=t.id AND m.revoked=0)
+                 OR EXISTS(SELECT 1 FROM sa_work_items w
+                           WHERE w.ticket_id=t.id AND w.state!='completed')))",
+            [id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if unsettled {
+            return Err("Team has unsettled Demand, mandate, WorkItem or external effect; duplicate it to change primary roles.".into());
+        }
+    }
     let changed = tx.execute(
         "UPDATE sa_orchestrations SET name=?2,coordinator_bot_id=?3,worker_bot_id=?4,
             project_id=?5,policy_revision=?6,updated_at=?7
@@ -4798,9 +4845,22 @@ fn update_configuration_roles_with_policy(
            AND COALESCE((SELECT MAX(version) FROM sa_team_versions
                          WHERE orchestration_id=?1),0)=?9
            AND (NOT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)
-             OR (coordinator_bot_id=?3 AND worker_bot_id=?4 AND project_id=?5))",
+             OR (?10=0 AND coordinator_bot_id=?3 AND worker_bot_id=?4 AND project_id=?5)
+             OR (?10=1 AND enabled=0 AND project_id=?5
+               AND NOT EXISTS(SELECT 1 FROM sa_event_sources WHERE orchestration_id=?1)
+               AND NOT EXISTS(SELECT 1 FROM sa_tickets t
+                 WHERE t.orchestration_id=?1
+                   AND (t.state NOT IN ('completed','failed','stopped','inconclusive')
+                     OR EXISTS(SELECT 1 FROM sa_assignments a
+                               WHERE a.ticket_id=t.id AND a.state='running')
+                     OR EXISTS(SELECT 1 FROM sa_effect_receipts e
+                               WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain'))
+                     OR EXISTS(SELECT 1 FROM sa_mandates m
+                               WHERE m.ticket_id=t.id AND m.revoked=0)
+                     OR EXISTS(SELECT 1 FROM sa_work_items w
+                               WHERE w.ticket_id=t.id AND w.state!='completed')))))",
         params![id,name,coordinator.id,worker_bot_ids[0],project_id,next_revision,
-            storage::now(),expected_revision,current.team_version],
+            storage::now(),expected_revision,current.team_version,primary_changed],
     ).map_err(|e| e.to_string())?;
     if changed!=1 { return Err("Team changed concurrently; reload before editing future-only policy.".into()); }
     let previous_snapshot = load_team_version_snapshot(&tx,id,current.team_version)?;
@@ -8956,7 +9016,7 @@ mod tests {
     }
 
     #[test]
-    fn settled_ticket_allows_future_role_policy_but_not_primary_rebinding() {
+    fn unsettled_effect_blocks_primary_rebinding_even_after_ticket_stop() {
         let mut store = fixture();
         let enabled_team = enabled(&store);
         let (ticket, _) = admit(&mut store, &enabled_team.id,
@@ -8966,6 +9026,12 @@ mod tests {
             &store, &enabled_team.id, enabled_team.policy_revision, false,
         ).unwrap();
         add_worker(&store, "worker-two");
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'unresolved-rotation','digest','uncertain',?2,?2)",
+            params![&ticket.id,storage::now()],
+        ).unwrap();
         let proposed = NewOrchestration {
             name: "Updated future Team".into(),
             coordinator_bot_id: "router".into(),
@@ -8975,7 +9041,7 @@ mod tests {
             &store, &disabled.id, disabled.policy_revision, &proposed,
             vec!["worker-two".into()], Vec::new(), false,
         ).unwrap_err();
-        assert!(err.contains("Historical Tickets prevent changing primary"));
+        assert!(err.contains("unsettled Demand"), "{err}");
         assert_eq!(configuration(&store, &disabled.id).unwrap().worker_bot_id, "worker");
 
         let rename = NewOrchestration {
@@ -8991,6 +9057,75 @@ mod tests {
         assert_eq!(changed.name, "Updated future Team");
         assert_eq!(ticket_team_snapshot(&store, &ticket.id).unwrap().worker_bot_ids,
             vec!["worker"]);
+    }
+
+    #[test]
+    fn settled_native_history_can_rotate_future_roles_without_rebinding_old_ticket() {
+        let mut store = fixture();
+        add_worker(&store, "worker-two");
+        let initial = enabled(&store);
+        let (old_ticket, launched) = admit(&mut store, &initial.id,
+            "Original Demand", "settled-role-original", false).unwrap();
+        assert!(launched);
+        let historical = ticket_team_snapshot(&store, &old_ticket.id).unwrap();
+        stop(&store, &old_ticket.id).unwrap();
+        let proposed = NewOrchestration {
+            name: "Rotated reusable Team".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker-two".into(),
+        };
+        assert!(update_configuration_roles_with_policy(
+            &store, &initial.id, initial.policy_revision, &proposed,
+            vec!["worker-two".into()], Vec::new(), false,
+        ).unwrap_err().contains("Disable the Team"));
+        let disabled = change_enabled(&store, &initial.id, initial.policy_revision, false).unwrap();
+
+        // Even an Observe-only source must not be rebound to a new role.
+        store.db.execute(
+            "INSERT INTO sa_event_sources(
+                id,orchestration_id,repository,actor_filter,event_kind,
+                mode,policy_revision,created_at,updated_at)
+             VALUES('role-rotation-source',?1,'owner/repo','actor',
+                'issues.opened','observe',1,?2,?2)",
+            params![&initial.id,storage::now()],
+        ).unwrap();
+        assert!(update_configuration_roles_with_policy(
+            &store, &initial.id, disabled.policy_revision, &proposed,
+            vec!["worker-two".into()], Vec::new(), false,
+        ).unwrap_err().contains("GitHub sources"));
+        store.db.execute(
+            "DELETE FROM sa_event_sources WHERE id='role-rotation-source'",[],
+        ).unwrap();
+
+        let updated = update_configuration_roles_with_policy(
+            &store, &initial.id, disabled.policy_revision, &proposed,
+            vec!["worker-two".into()], Vec::new(), false,
+        ).unwrap();
+        assert!(!updated.enabled);
+        assert_eq!(updated.project_id, initial.project_id);
+        assert_eq!(updated.worker_bot_ids, vec!["worker-two"]);
+        assert_eq!(updated.team_version, disabled.team_version + 1);
+        assert_eq!(updated.policy_revision, disabled.policy_revision + 1);
+        assert_eq!(ticket_team_snapshot(&store, &old_ticket.id).unwrap(), historical);
+        assert!(update_configuration_roles_with_policy(
+            &store, &initial.id, disabled.policy_revision, &proposed,
+            vec!["worker-two".into()], Vec::new(), false,
+        ).is_err(), "stale role edits must never overwrite a version");
+
+        let path = store.path.clone();
+        drop(store);
+        let mut reopened = Store::open(&path).unwrap();
+        assert_eq!(ticket_team_snapshot(&reopened, &old_ticket.id).unwrap(), historical);
+        let live = change_enabled(
+            &reopened, &updated.id, updated.policy_revision, true,
+        ).unwrap();
+        assert!(live.enabled);
+        let (new_ticket, dispatched) = admit(&mut reopened, &live.id,
+            "Subsequent Demand", "settled-role-next", true).unwrap();
+        assert!(!dispatched, "a busy worker must not start an external runtime");
+        let admitted = ticket_team_snapshot(&reopened, &new_ticket.id).unwrap();
+        assert_eq!(admitted.worker_bot_ids[0], "worker-two");
+        assert_eq!(ticket_team_snapshot(&reopened, &old_ticket.id).unwrap(), historical);
     }
 
     #[test]

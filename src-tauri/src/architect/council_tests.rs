@@ -263,6 +263,87 @@ fn composed_root_authority_denies_unissued_tampered_and_revoked_seats() {
 }
 
 #[test]
+fn recorded_native_reviewer_authority_pins_round_lens_provider_and_model() {
+    let (state, sid) = council_state(on(9.0, 3, 2));
+    let store = state.store.lock().unwrap();
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    team.council_since = SINCE;
+    let mut reviewer = seat("pinned-native", 1, Some(9.8), SINCE + 1);
+    let binding = reviewer_security::ReviewerBinding::native(
+        &team, &reviewer.id, reviewer.created_at, &reviewer.provider,
+        &reviewer.model, reviewer.council.as_ref().unwrap(),
+    );
+    reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+    reviewer.reviewer_binding = Some(binding);
+    team.workers.push(reviewer);
+    assert!(reviewer_security::validate_recorded_authority(
+        &store, &sid, team.workers[0].reviewer_binding.as_ref().unwrap()).is_ok());
+
+    for changed in ["round", "lens", "provider", "model"] {
+        let mut altered = team.clone();
+        let worker = &mut altered.workers[0];
+        match changed {
+            "round" => {
+                worker.council.as_mut().unwrap().round = 2;
+                worker.reviewer_binding.as_mut().unwrap().round = 2;
+            }
+            "lens" => {
+                worker.council.as_mut().unwrap().lens = "different lens".into();
+                worker.reviewer_binding.as_mut().unwrap().snapshot.lens = "different lens".into();
+            }
+            "provider" => {
+                worker.provider = "different-provider".into();
+                worker.reviewer_binding.as_mut().unwrap().snapshot.provider = worker.provider.clone();
+            }
+            "model" => {
+                worker.model = "different-model".into();
+                worker.reviewer_binding.as_mut().unwrap().snapshot.model = worker.model.clone();
+            }
+            _ => unreachable!(),
+        }
+        let worker = &altered.workers[0];
+        let changed_binding = worker.reviewer_binding.as_ref().unwrap();
+        assert!(changed_binding.validate(&altered, worker).is_ok(),
+            "{changed}: mutable worker and binding agree");
+        assert!(reviewer_security::validate_recorded_authority(
+            &store, &sid, changed_binding).is_err(),
+            "{changed}: independent native seat context must reject substitution");
+    }
+}
+
+#[test]
+fn historical_reviewer_grants_do_not_gain_composed_council_authority() {
+    let (state, sid) = council_state(on(9.0, 3, 2));
+    let store = state.store.lock().unwrap();
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    team.council_since = SINCE;
+    let reviewer = seat("legacy-seat", 1, Some(9.8), SINCE + 1);
+    let binding = reviewer_security::ReviewerBinding::native(
+        &team, &reviewer.id, reviewer.created_at, &reviewer.provider,
+        &reviewer.model, reviewer.council.as_ref().unwrap(),
+    );
+    reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+    let key = "native-reviewer-authority:legacy-seat";
+    let raw: String = store.db.query_row(
+        "SELECT content FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, key], |row| row.get(0),
+    ).unwrap();
+    let mut original: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(original.as_object_mut().unwrap().remove("seatContext").is_some());
+    store.db.execute(
+        "UPDATE architect_requests SET content=?1 WHERE parent_session_id=?2 AND key=?3",
+        rusqlite::params![original.to_string(), sid, key],
+    ).unwrap();
+    assert!(reviewer_security::validate_recorded_authority(&store, &sid, &binding).is_ok(),
+        "original M1/M2 parallel authority remains compatible");
+    team.config.council.as_mut().unwrap().composition =
+        Some(composition(true, council::AutomaticReviewerCount::Fixed(2), vec![]));
+    save(&store, &mut team).unwrap();
+    assert!(reviewer_security::validate_recorded_authority(&store, &sid, &binding).is_err(),
+        "historical grants cannot be promoted to composed Council authority");
+}
+
+#[test]
 fn composed_s2_s3_terminal_authority_rechecks_each_scored_native_round() {
     use council::{AutomaticReviewerCount as Count, CouncilStrategy};
     for strategy in [CouncilStrategy::Escalated, CouncilStrategy::TwoPhase] {

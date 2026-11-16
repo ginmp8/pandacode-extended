@@ -293,6 +293,27 @@ impl ReviewerCapabilityGrant {
     }
 }
 
+/// Reviewer identity independently frozen at native admission. A worker and its
+/// mutable binding cannot change both sides of the round/lens/model check.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReviewerSeatContext {
+    round: usize,
+    lens: String,
+    provider: String,
+    model: String,
+}
+impl ReviewerSeatContext {
+    fn from_binding(binding: &ReviewerBinding) -> Self {
+        Self {
+            round: binding.round,
+            lens: binding.snapshot.lens.clone(),
+            provider: binding.snapshot.provider.clone(),
+            model: binding.snapshot.model.clone(),
+        }
+    }
+}
+
 /// Authenticated native-issued identity, independent of the mutable worker snapshot.
 /// User-scope authorization (S2/S4) must update this via trusted native code.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,6 +321,10 @@ impl ReviewerCapabilityGrant {
 struct ReviewerAuthority {
     council_cycle_id: String,
     seat_id: String,
+    /// Historical grants had no independently pinned seat context. Only the
+    /// original non-composed Council can consume those records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seat_context: Option<ReviewerSeatContext>,
     artifact_revision: String,
     tool_policy: ReviewerToolPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -324,6 +349,7 @@ pub(crate) fn record_native_authority(store: &Store, parent: &str, binding: &Rev
     let record = ReviewerAuthority {
         council_cycle_id: binding.council_cycle_id.clone(),
         seat_id: binding.seat_id.clone(),
+        seat_context: Some(ReviewerSeatContext::from_binding(binding)),
         artifact_revision: binding.artifact_revision.clone(),
         tool_policy: binding.snapshot.tool_policy.clone(),
         delivery_id: binding.delivery_id.clone(),
@@ -366,6 +392,22 @@ pub(crate) fn validate_issued_authority(store: &Store, parent: &str, binding: &R
                 || original.required_reviewers != binding.required_reviewers
             {
                 return Err("reviewer_session_mismatch: saved review revision or grant differs from native authorization.".into());
+            }
+            match original.seat_context.as_ref() {
+                Some(context) if context == &ReviewerSeatContext::from_binding(binding) => {}
+                None => {
+                    // A historical grant must never acquire composed, phase-2,
+                    // criterion-bound or child reviewer authority after recovery.
+                    let legacy = binding.composition_mode.is_none()
+                        && binding.parent_council.is_none()
+                        && super::load(store, parent)?
+                            .and_then(|team| team.config.council)
+                            .is_some_and(|config| config.composition.is_none());
+                    if !legacy {
+                        return Err("reviewer_session_mismatch: legacy grant cannot authorize composed Council review.".into());
+                    }
+                }
+                _ => return Err("reviewer_session_mismatch: native reviewer round, lens or model was changed.".into()),
             }
             Ok(())
         }
@@ -415,6 +457,7 @@ pub(crate) fn authorize_user_grants(
     let old = ReviewerAuthority {
         council_cycle_id: binding.council_cycle_id.clone(),
         seat_id: binding.seat_id.clone(),
+        seat_context: Some(ReviewerSeatContext::from_binding(binding)),
         artifact_revision: binding.artifact_revision.clone(),
         tool_policy: binding.snapshot.tool_policy.clone(),
         delivery_id: binding.delivery_id.clone(),

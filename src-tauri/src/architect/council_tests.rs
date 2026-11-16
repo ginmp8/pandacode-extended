@@ -4894,6 +4894,12 @@ fn assert_nested_m5_root_and_child_callbacks(strategy: council::CouncilExecution
     ).unwrap();
     assert!(!verified_council_pass(&store, &saved),
         "revoking a root native grant after completion must revoke the composite pass");
+    assert!(authenticated_hierarchical_status(&store, &saved).is_none(),
+        "read-only S1/S2 status must not display Passed for a revoked root grant");
+    let mut projected = saved.clone();
+    refresh_council(&store, &mut projected);
+    assert_eq!(projected.council_status.as_ref().unwrap().state, "blocked",
+        "the visible native status must fail closed when a root grant is revoked");
     // A forged persisted score cannot replace the original native callback.
     reviewer_security::record_native_authority(
         &store, &sid, root_worker.reviewer_binding.as_ref().unwrap(),
@@ -5405,6 +5411,28 @@ fn nested_m5_forced_s2_admits_fresh_root_review_only_after_child_receipts() {
     assert_eq!(saved.council_status.as_ref().unwrap().lowest, Some(9.5));
     assert!(verified_council_pass(&store, &saved),
         "the separate root and child waves must both pass the native S2 terminal gate");
+    // Even a fully verified second wave cannot conceal revocation of the
+    // first root reviewer's authority after the terminal snapshot was saved.
+    let first_root = saved.workers.iter()
+        .find(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 1))
+        .unwrap();
+    store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, format!("native-reviewer-authority:{}", first_root.id)],
+    ).unwrap();
+    assert!(authenticated_hierarchical_status(&store, &saved).is_none(),
+        "a later native wave must never conceal a revoked first-wave root grant");
+    let mut projected = saved.clone();
+    refresh_council(&store, &mut projected);
+    assert_eq!(projected.council_status.as_ref().unwrap().state, "blocked",
+        "the read-only Council status must never display an unverified Passed verdict");
+    assert!(!verified_council_pass(&store, &saved));
+    reviewer_security::record_native_authority(
+        &store, &sid, first_root.reviewer_binding.as_ref().unwrap(),
+    ).unwrap();
+    assert!(authenticated_hierarchical_status(&store, &saved).is_some());
+    assert!(verified_council_pass(&store, &saved),
+        "restoring the exact grant may restore independently verified approval");
 
     let key = format!("native-council-child-s2-receipt:{}:security-child", saved.council_since);
     let original: String = store.db.query_row(

@@ -1225,6 +1225,76 @@ fn fetch_authenticated_github_window(
     Ok((signed_in, response, pages.len(), repository_id))
 }
 
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TeamObserveBatch {
+    pub orchestration_id: String,
+    pub observed: Vec<AuthenticatedPoll>,
+    pub skipped_off: usize,
+    pub skipped_check_runs: usize,
+    pub observational_only: bool,
+}
+
+/// An operator may inspect several enabled event classes with one bounded
+/// headless command. Each source retains its own durable transaction/cursor:
+/// an error stops the batch, but previously committed receipts remain valid.
+/// Retry is safe through the existing immutable delivery-id deduplication.
+fn observe_team_sources_with<F>(
+    store: &Store, orchestration_id: &str, mut fetch: F,
+) -> Result<TeamObserveBatch>
+where
+    F: FnMut(&EventSource, i64) -> Result<(String, serde_json::Value, usize, u64)>,
+{
+    let sources = list_sources(store, orchestration_id)?;
+    let mut observed = Vec::new();
+    let mut skipped_off = 0;
+    let mut skipped_check_runs = 0;
+    for selected in sources {
+        if selected.mode != "observe" {
+            skipped_off += 1;
+            continue;
+        }
+        if selected.event_kind == "check_run.completed" {
+            skipped_check_runs += 1;
+            continue;
+        }
+        let since: i64 = store.db.query_row(
+            "SELECT updated_at FROM sa_event_sources WHERE id=?1",
+            [&selected.id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        // No network call for Off or Checks-only sources. Native source policy,
+        // pinned repository identity and exact sequence are rechecked after
+        // every authenticated response, immediately before durable mutation.
+        let (signed_in, response, pages, repository_id) = fetch(&selected, since)?;
+        observed.push(poll_authenticated_events_with_repository_id(
+            store, &selected, since, &response, &signed_in, pages, repository_id,
+        )?);
+    }
+    if observed.is_empty() {
+        return Err("Team has no enabled GitHub Events Observe sources; no network request made.".into());
+    }
+    Ok(TeamObserveBatch {
+        orchestration_id: orchestration_id.to_owned(),
+        observed, skipped_off, skipped_check_runs, observational_only: true,
+    })
+}
+
+/// One explicit local-operator batch; no scheduler, Auto, webhook, provider
+/// dispatch or inferred Ticket. Reuse the no-recovery headless store and each
+/// source's independent authenticated GitHub Events/policy transaction.
+pub(crate) fn headless_observe_team_sources(
+    database_path: &std::path::Path, orchestration_id: &str,
+) -> Result<String> {
+    let store = super::open_headless_transition_store(database_path)?;
+    let batch = observe_team_sources_with(&store, orchestration_id, |selected, since| {
+        fetch_authenticated_github_window(
+            &selected.repository, since, selected.last_sequence,
+        )
+    })?;
+    serde_json::to_string_pretty(&batch).map_err(|e| e.to_string())
+}
+
 /// One explicitly operator-requested, authenticated Observe poll from a
 /// headless host. Open the existing schema without Store::open restart recovery:
 /// a separate CLI must not interrupt a healthy concurrent serve owner.
@@ -3192,6 +3262,96 @@ mod tests {
             sequence:seq,
         }
     }
+
+    #[test]
+    fn team_observe_batch_is_source_scoped_idempotent_and_partial_failure_safe() {
+        let (store, path) = fixture();
+        let opened = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let comments = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issue_comment.created").unwrap();
+        let checks = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "check_run.completed").unwrap();
+        let off = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.edited").unwrap();
+        for selected in [&opened, &comments, &checks] {
+            set_mode(&store, &selected.id, selected.policy_revision, "observe").unwrap();
+            store.db.execute(
+                "UPDATE sa_event_sources SET updated_at=0 WHERE id=?1",
+                [&selected.id],
+            ).unwrap();
+        }
+        let mut called = Vec::new();
+        let mut provider = |selected: &EventSource, _since: i64| {
+            called.push(selected.id.clone());
+            let (kind, id, payload) = match selected.event_kind.as_str() {
+                "issues.opened" => ("IssuesEvent", "5000098001",
+                    serde_json::json!({"action":"opened","issue":{"number":42}})),
+                "issue_comment.created" => ("IssueCommentEvent", "5000098002",
+                    serde_json::json!({"action":"created","issue":{"number":42}})),
+                _ => panic!("Off and Checks sources must not contact GitHub"),
+            };
+            Ok(("operator".into(), serde_json::json!([{
+                "id":id, "created_at":chrono::Utc::now().to_rfc3339(),
+                "type":kind, "repo":{"name":"test/fixture","id":101},
+                "actor":{"login":"trusted-bot"}, "payload":payload
+            }]), 1, 101))
+        };
+        let first = observe_team_sources_with(&store, "orch", &mut provider).unwrap();
+        assert_eq!(first.observed.len(), 2);
+        assert!(first.observational_only);
+        assert_eq!((first.skipped_off, first.skipped_check_runs), (1, 1));
+        assert!(first.observed.iter().all(|result| result.recorded == 1));
+        let replay = observe_team_sources_with(&store, "orch", &mut provider).unwrap();
+        assert!(replay.observed.iter().all(|result| result.duplicates == 1));
+        drop(provider);
+        assert_eq!(called.len(), 4);
+        assert!(!called.contains(&off.id));
+        assert!(!called.contains(&checks.id));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_event_decisions", [], |r| r.get::<_,i64>(0),
+        ).unwrap(), 2);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |r| r.get::<_,i64>(0),
+        ).unwrap(), 0);
+
+        let pull = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request.opened").unwrap();
+        set_mode(&store, &pull.id, pull.policy_revision, "observe").unwrap();
+        store.db.execute(
+            "UPDATE sa_event_sources SET updated_at=0 WHERE id=?1",
+            [&pull.id],
+        ).unwrap();
+        // Failing on the third source never creates a partial receipt for it
+        // and cannot erase previously committed source decisions.
+        let error = observe_team_sources_with(&store, "orch", |selected, _| {
+            if selected.id == pull.id { return Err("simulated provider outage".into()); }
+            let (kind, id, payload) = if selected.id == opened.id {
+                ("IssuesEvent","5000098001",serde_json::json!({"action":"opened","issue":{"number":42}}))
+            } else {
+                ("IssueCommentEvent","5000098002",serde_json::json!({"action":"created","issue":{"number":42}}))
+            };
+            Ok(("operator".into(),serde_json::json!([{
+                "id":id, "created_at":chrono::Utc::now().to_rfc3339(),
+                "type":kind, "repo":{"name":"test/fixture","id":101},
+                "actor":{"login":"trusted-bot"}, "payload":payload
+            }]),1,101))
+        }).unwrap_err();
+        assert!(error.contains("simulated provider outage"));
+        assert_eq!(source(&store, &pull.id).unwrap().last_sequence, 0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_event_decisions", [], |r| r.get::<_,i64>(0),
+        ).unwrap(), 2);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(list_decisions(&reopened, &opened.id, 10).unwrap().len(), 1);
+        assert_eq!(list_decisions(&reopened, &comments.id, 10).unwrap().len(), 1);
+        assert!(list_decisions(&reopened, &pull.id, 10).unwrap().is_empty());
+        assert!(observe_team_sources_with(&reopened, "not-a-team", |_, _| {
+            panic!("Unknown Team must fail before GitHub access");
+        }).is_err());
+    }
+
     #[test]
     fn off_and_observe_are_durable_deduplicated_and_never_launch_tasks() {
         let (store,path) = fixture();

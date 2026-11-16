@@ -434,6 +434,7 @@ not mark a healthy worker as interrupted.
 
 ```sh
 pandacode serve --observe-source <source-id>
+pandacode serve --observe-team-sources <team-id>
 pandacode serve --observe-check-run <source-id> <check-run-id>
 ```
 
@@ -453,6 +454,18 @@ Run is rejected rather than treated as approval. Both commands return redacted
 receipts and never expose event bodies. They do **not** register a subscription,
 run continuously, enable Auto, launch a Worker, approve a Council review or
 execute an external effect.
+
+
+The explicit `--observe-team-sources` command processes every enabled GitHub
+Events source configured for one Team using the same individual authenticated
+adapter and native policy checks. Off sources and Observe Check Run sources
+are skipped without making requests; Check Runs still require an exact ID
+through `--observe-check-run`. Each source commits its own immutable receipts
+and cursor. On a provider error or source-policy change, the batch exits
+nonzero; earlier successfully committed source observations are retained.
+Re-running is idempotent for unchanged provider delivery IDs, and there is no
+batch-wide promise of atomic rollback or a gap-free live subscription.
+This command does not register a background poller or enable Auto.
 
 ### Ticket review and stop commands
 

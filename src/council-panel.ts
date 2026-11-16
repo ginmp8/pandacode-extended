@@ -301,7 +301,7 @@ function councilHierarchyHtml(value: CouncilLedgerView): string {
 /** Render native's projected Council records as inert text; workspace references are decorated by the bound file view. */
 export function councilReadOnlyPresenterHtml(value: CouncilLedgerView): string {
   if (value.unavailableMessage) return `<section class="council-ledger"><p class="council-ledger-unavailable">${escape(value.unavailableMessage)}</p></section>`;
-  const findings = value.findings ?? [], history = value.historicalReportedFindings ?? [], currentReports = value.reportedFindings ?? [], dispositions = value.findingDispositions ?? [], receipts = value.reviewReceipts ?? [], children = value.childReceipts ?? [], usage = value.usage ?? [];
+  const findings = value.findings ?? [], history = value.historicalReportedFindings ?? [], currentReports = value.reportedFindings ?? [], dispositions = value.findingDispositions ?? [], receipts = value.reviewReceipts ?? [], children = value.childReceipts ?? [], usage = (value.usage ?? []).filter(record => record.rootCycleId === value.cycleId);
   if (!value.findings && !value.historicalReportedFindings && !value.reportedFindings && !value.findingDispositions && !value.reviewReceipts && !value.childReceipts && !value.childLeaves && !value.councilChildLeafScores && !value.criterionOutcomes && !value.usage) {
     return '<section class="council-ledger"><p class="council-ledger-unavailable">This host snapshot does not include Council ledger records.</p></section>';
   }
@@ -371,12 +371,35 @@ export function councilReadOnlyPresenterHtml(value: CouncilLedgerView): string {
       + '<p>Native decision IDs are read-only evidence references, not proof that the Council or a child has passed. A terminal pass requires separate current native authority, scores, criteria and receipts.</p>'
       + `<ul>${strategyDecisionMarkup}</ul></details>`
     : '';
+  // Show only correlated native reviewer attempts, never synthetic parent votes or
+  // child coordinators. This is a view of the existing native ledger, not a new engine.
+  const usageByRoundSource = new Map<string, { source: string; roundId: string; records: typeof usage }>();
+  for (const record of usage) {
+    const source = record.scope === 'child' ? 'Nested child' : 'Root reviewer';
+    const key = JSON.stringify([record.childCycleId ?? null, record.roundId, source]);
+    let group = usageByRoundSource.get(key);
+    if (!group) {
+      group = { source, roundId: record.roundId, records: [] };
+      usageByRoundSource.set(key, group);
+    }
+    group.records.push(record);
+  }
+  const byRoundSourceMarkup = [...usageByRoundSource.values()].map(group => {
+    const totals = summarizeCouncilUsage(group.records);
+    return `<li><strong>${group.source}</strong> · Round ${escape(group.roundId)} · ${totals.attempts} unique native attempts · Reviewer time ${usageValue(totals.reviewerElapsedMs)}${totals.duplicateAttempts ? ` · ${totals.duplicateAttempts} duplicate attempt records ignored` : ''}${totals.conflictingAttempts ? ' · Conflicting native attempts: metric totals Unknown' : ''}</li>`;
+  }).join('');
+  const byRoundSourceSection = byRoundSourceMarkup
+    ? '<section aria-label="Root and child native usage by round" class="council-ledger-usage-source">' +
+      '<h5>Native reviewer usage by round and source</h5>' +
+      '<p>Only native-projected reviewer attempts are counted. Child coordinators and composite parent seats are not additional reviews. Provider billing is not inferred.</p><ul>' +
+      byRoundSourceMarkup + '</ul></section>'
+    : '';
   const usageTotals = summarizeCouncilUsage(usage);
   const costLabel = usageTotals.estimatedCostMicros.value == null
     ? 'Unknown' : `${(usageTotals.estimatedCostMicros.value / 1_000_000).toFixed(4)} ${usageTotals.currency ?? 'Unknown currency'} · estimate only`;
   const usageTotalsMarkup = `<section class="council-ledger-usage-summary" aria-label="Council aggregate usage"><h5>Usage summary · ${usageTotals.attempts} unique reviewer attempts</h5><dl><div><dt>Root attempts</dt><dd>${usageTotals.rootAttempts}</dd></div><div><dt>Child attempts</dt><dd>${usageTotals.childAttempts}</dd></div><div><dt>Reviewer time (sum, not elapsed root time)</dt><dd>${usageValue(usageTotals.reviewerElapsedMs)}</dd></div><div><dt>Input tokens</dt><dd>${usageValue(usageTotals.inputTokens)}</dd></div><div><dt>Output tokens</dt><dd>${usageValue(usageTotals.outputTokens)}</dd></div><div><dt>Requests</dt><dd>${usageValue(usageTotals.requestCount)}</dd></div><div><dt>Estimated cost</dt><dd>${escape(costLabel)}</dd></div></dl>${usageTotals.duplicateAttempts ? `<p>Duplicate native attempt records ignored: ${usageTotals.duplicateAttempts}.${usageTotals.conflictingAttempts ? ` Conflicting records: ${usageTotals.conflictingAttempts}; totals are Unknown.` : ''}</p>` : ''}<p>Pricing provenance: ${usageTotals.pricingProvenance.length ? escape(usageTotals.pricingProvenance.join('; ')) : 'Unknown'}. Estimates are not billed amounts.</p></section>`;
   const usageMarkup = usage.map(record => `<article class="council-ledger-usage"><header><strong>${escape(record.scope)} ${escape(record.phase)} · ${escape(record.terminalStatus)}</strong><span>${escape(record.reviewerId)}</span></header><p>Round ${escape(record.roundId)} · attempt ${escape(record.attemptId)} · ${escape(record.strategy)} · ${escape(record.model ?? 'Unknown')} · ${escape(record.provider ?? 'Unknown')}</p><dl><div><dt>Elapsed</dt><dd>${usageValue(record.elapsedMs)}</dd></div><div><dt>Queue wait</dt><dd>${usageValue(record.queueWaitMs)}</dd></div><div><dt>Input tokens</dt><dd>${usageValue(record.inputTokens)}</dd></div><div><dt>Output tokens</dt><dd>${usageValue(record.outputTokens)}</dd></div><div><dt>Retries</dt><dd>${usageValue(record.retries)}</dd></div><div><dt>Escalations</dt><dd>${usageValue(record.escalations)}</dd></div><div><dt>Concurrent leaves</dt><dd>${usageValue(record.budgetConsumption.concurrentLeaves)}</dd></div><div><dt>Leaf reviews</dt><dd>${usageValue(record.budgetConsumption.leafReviews)}</dd></div><div><dt>Estimated cost</dt><dd>${usageValue(record.budgetConsumption.estimatedCostMicros)}</dd></div></dl>${record.costEstimate ? `<p>${escape(record.costEstimate.currency)} cost estimate · estimate only · ${escape(record.costEstimate.pricingSource)} ${escape(record.costEstimate.pricingVersion)}</p>` : ''}</article>`).join('');
-  return `<section class="council-ledger" data-cycle-id="${escape(value.cycleId)}">${stale}${accepted}${councilHierarchyHtml(value)}${exceptions.length ? `<details class="council-ledger-exception"><summary>Authorized finding exceptions · ${exceptions.length}</summary><ul>${exceptions.map(item => `<li>${escape(item.findingId)} · ${escape(item.actorId)}: ${escape(item.rationale)}${ledgerRefs(item.artifactLinks)}</li>`).join('')}</ul></details>` : ''}<details><summary>Findings and dispositions · ${findings.length}</summary>${findingMarkup || '<p class="council-ledger-empty">No findings.</p>'}</details>${reportedSection}${historicalSection}<details><summary>Review receipts · ${receipts.length}</summary>${reviewMarkup || '<p class="council-ledger-empty">No review receipts.</p>'}</details><details><summary>Child Council receipts · ${children.length}</summary>${childMarkup || '<p class="council-ledger-empty">No child Council receipts.</p>'}</details>${strategyDecisionsSection}<details><summary>Usage and hard-limit records · ${usage.length}</summary><p class="council-ledger-usage-note">Measured values are reported as recorded; estimated values are marked estimate only.</p>${usage.length ? usageTotalsMarkup : ''}${usageMarkup || '<p class="council-ledger-empty">No usage records.</p>'}</details></section>`;
+  return `<section class="council-ledger" data-cycle-id="${escape(value.cycleId)}">${stale}${accepted}${councilHierarchyHtml(value)}${exceptions.length ? `<details class="council-ledger-exception"><summary>Authorized finding exceptions · ${exceptions.length}</summary><ul>${exceptions.map(item => `<li>${escape(item.findingId)} · ${escape(item.actorId)}: ${escape(item.rationale)}${ledgerRefs(item.artifactLinks)}</li>`).join('')}</ul></details>` : ''}<details><summary>Findings and dispositions · ${findings.length}</summary>${findingMarkup || '<p class="council-ledger-empty">No findings.</p>'}</details>${reportedSection}${historicalSection}<details><summary>Review receipts · ${receipts.length}</summary>${reviewMarkup || '<p class="council-ledger-empty">No review receipts.</p>'}</details><details><summary>Child Council receipts · ${children.length}</summary>${childMarkup || '<p class="council-ledger-empty">No child Council receipts.</p>'}</details>${strategyDecisionsSection}<details><summary>Usage and hard-limit records · ${usage.length}</summary><p class="council-ledger-usage-note">Measured values are reported as recorded; estimated values are marked estimate only.</p>${usage.length ? usageTotalsMarkup + byRoundSourceSection : ''}${usageMarkup || '<p class="council-ledger-empty">No usage records.</p>'}</details></section>`;
 }
 
 

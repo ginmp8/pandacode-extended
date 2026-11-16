@@ -322,6 +322,47 @@ test('plan preview explains nested reviewer branches and invalid fields have loc
   await expect(editor.getByRole('button', { name: 'Apply composition' })).toBeEnabled();
 });
 
+test('Council inspector attributes native root and child usage by round without phantom or foreign attempts', async ({ page }) => {
+  await open(page, '/?council=composition');
+  const html = await page.evaluate(async () => {
+    const { councilReadOnlyPresenterHtml } = await import('/src/council-panel.ts');
+    const record = (id: string, scope: 'root' | 'child', rootCycleId: string, childCycleId: string | null) => ({
+      id: 'usage-' + id, rootCycleId, childCycleId, attemptId: id, reviewerId: id, seatId: id,
+      roundId: (childCycleId ?? rootCycleId) + ':1', scope, phase: 'review', strategy: 'parallel',
+      terminalStatus: 'passed', queueWaitMs: { status: 'measured', value: 10 },
+      elapsedMs: { status: 'measured', value: 100 }, retries: { status: 'measured', value: 0 },
+      escalations: { status: 'measured', value: 0 }, inputTokens: { status: 'unknown' },
+      outputTokens: { status: 'unknown' }, requestCount: { status: 'unknown' },
+      budgetConsumption: {
+        concurrentLeaves: { status: 'measured', value: 1 },
+        leafReviews: { status: 'measured', value: 1 },
+        estimatedCostMicros: { status: 'unknown' },
+      },
+    });
+    const root = record('root-reviewer', 'root', 'root:group', null);
+    const leaf = record('nested-leaf', 'child', 'root:group', 'child:group');
+    const foreign = record('foreign-reviewer', 'root', 'foreign:group', null);
+    return councilReadOnlyPresenterHtml({
+      cycleId: 'root:group', usage: [root, leaf, { ...leaf }, foreign],
+    } as any);
+  });
+  await page.evaluate(markup => {
+    const host = document.createElement('section');
+    host.id = 'native-usage-groups-test'; host.innerHTML = markup; document.body.append(host);
+  }, html);
+  const ledger = page.locator('#native-usage-groups-test .council-ledger');
+  const groups = ledger.getByRole('region', { name: 'Root and child native usage by round' });
+  await expect(groups.locator('li')).toHaveCount(2);
+  await expect(groups.locator('li').nth(0)).toContainText('Root reviewer · Round root:group:1 · 1 unique native attempts');
+  await expect(groups.locator('li').nth(1)).toContainText('Nested child · Round child:group:1 · 1 unique native attempts');
+  await expect(groups).toContainText('1 duplicate attempt records ignored');
+  await expect(groups).toContainText('composite parent seats are not additional reviews');
+  await expect(groups).not.toContainText('foreign:group');
+  await expect(ledger).toContainText('Usage summary · 2 unique reviewer attempts');
+  await expect(ledger).toContainText('Estimated cost');
+  await expect(ledger).toContainText('Pricing provenance: Unknown');
+});
+
 test('read-only inspector renders supplied findings, receipts, usage, stale state and accepted exceptions', async ({ page }) => {
   await open(page, '/?council=composition');
   const html = await page.evaluate(async () => {

@@ -3655,7 +3655,7 @@ mod tests {
         ).unwrap();
         assert!(audit_detail.contains("issue:42"));
         assert!(!audit_detail.contains("Private objective"));
-        assert_eq!(get_ticket_state(&store, "context-ticket"), "queued");
+        assert_eq!(super::super::get_ticket(&store, "context-ticket").unwrap().state, "queued");
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_mandates", [],
             |r| r.get::<_, i64>(0),

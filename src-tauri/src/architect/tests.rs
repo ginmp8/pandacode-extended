@@ -6677,6 +6677,74 @@ fn interrupted_child_native_session_blocks_root_resume_without_requeuing() {
 }
 
 #[test]
+fn reopened_paused_root_rejects_interrupted_child_without_requeue() {
+    let path = std::env::temp_dir().join(format!(
+        "pandacode-nested-interrupted-{}.db", storage::id()
+    ));
+    let (root_id, child_id, link) = {
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(&std::env::temp_dir()).unwrap();
+        let root_id = store
+            .create_session(&project.id, "claude", "default", "ask")
+            .unwrap()
+            .id;
+        let mut root = new_team(root_id.clone(), config());
+        save(&store, &mut root).unwrap();
+        let state = AppState {
+            store: Arc::new(std::sync::Mutex::new(store)),
+            agents: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            terminals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            shutdown: std::sync::atomic::AtomicU8::new(0),
+        };
+        let (state, root_id, child_id, link) =
+            nested_child_lifecycle_fixture_for_root(state, root_id);
+        assert_eq!(control_state(&state, &root_id, "pause").unwrap().status, "paused");
+        {
+            let store = state.store.lock().unwrap();
+            // A crash can leave a paused root with a child session still running.
+            store
+                .db
+                .execute(
+                    "UPDATE sessions SET status='running' WHERE id=?1",
+                    [&child_id],
+                )
+                .unwrap();
+        }
+        drop(state);
+        (root_id, child_id, link)
+    };
+
+    // Store::open physically reopens SQLite and invalidates interrupted hosts.
+    let reopened = Store::open(&path).unwrap();
+    assert_eq!(reopened.session(&child_id).unwrap().status, "interrupted");
+    let root_before = serde_json::to_value(load(&reopened, &root_id).unwrap().unwrap()).unwrap();
+    let child_before = serde_json::to_value(load(&reopened, &child_id).unwrap().unwrap()).unwrap();
+    assert_eq!(load_council_child_link(&reopened, &child_id).unwrap(), Some(link.clone()));
+    let state = AppState {
+        store: Arc::new(std::sync::Mutex::new(reopened)),
+        agents: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        terminals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        shutdown: std::sync::atomic::AtomicU8::new(0),
+    };
+    let denied = control_state(&state, &root_id, "resume").unwrap_err();
+    assert!(denied.contains("child_council_revoked"), "{denied}");
+    {
+        let store = state.store.lock().unwrap();
+        assert_eq!(
+            serde_json::to_value(load(&store, &root_id).unwrap().unwrap()).unwrap(),
+            root_before,
+        );
+        assert_eq!(
+            serde_json::to_value(load(&store, &child_id).unwrap().unwrap()).unwrap(),
+            child_before,
+        );
+        assert_eq!(load_council_child_link(&store, &child_id).unwrap(), Some(link));
+    }
+    drop(state);
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
 fn nested_child_tracks_root_pause_resume_and_cancel_with_idempotent_recovery() {
     let (state, root_id, child_id, link) = nested_child_lifecycle_fixture();
 

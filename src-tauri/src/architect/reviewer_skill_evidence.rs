@@ -2,6 +2,62 @@
 use super::*;
 const INTEGRITY: &str = "pinned_input_integrity";
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct NativeCriterionEvidenceReceipt {
+    pub schema_version: u32,
+    pub cycle_id: String,
+    pub criterion_id: String,
+    pub criterion_lens: String,
+    pub round: usize,
+    pub worker_id: String,
+    pub reviewer_session_id: String,
+    pub artifact_revision: String,
+    pub content_sha256: String,
+    pub check_kind: String,
+}
+impl NativeCriterionEvidenceReceipt {
+    /// Only the native pinned-input check may issue this narrow receipt.
+    /// It does not attest arbitrary project tests or correctness criteria.
+    pub(super) fn from_host_check(
+        team: &TeamSnapshot, worker: &Worker, criterion: &council::CouncilCriterion,
+        skill_id: &str, content_sha256: &str,
+    ) -> Option<Self> {
+        let binding = worker.reviewer_binding.as_ref()?;
+        let seat = worker.council.as_ref()?;
+        let check = criterion.native_evidence.as_ref()?;
+        if !worker.read_only || worker.abandoned || worker.wrote_at != 0
+            || !worker.files.is_empty() || !criterion.required || !criterion.evidence_required
+            || check.kind != INTEGRITY || check.skill_id != skill_id
+            || criterion.lens.trim().to_lowercase() != format!("Pinned input integrity: {skill_id}").to_lowercase()
+            || seat.lens.trim().to_lowercase() != criterion.lens.trim().to_lowercase()
+            || binding.validate(team, worker).is_err()
+        {
+            return None;
+        }
+        Some(Self {
+            schema_version: 1,
+            cycle_id: binding.council_cycle_id.clone(),
+            criterion_id: criterion.id.clone(),
+            criterion_lens: criterion.lens.clone(),
+            round: seat.round,
+            worker_id: worker.id.clone(),
+            reviewer_session_id: worker.session_id.clone(),
+            artifact_revision: binding.artifact_revision.clone(),
+            content_sha256: content_sha256.to_owned(),
+            check_kind: INTEGRITY.into(),
+        })
+    }
+
+    pub(super) fn valid_for(
+        &self, team: &TeamSnapshot, worker: &Worker, criterion: &council::CouncilCriterion,
+        skill_id: &str, content_sha256: &str,
+    ) -> bool {
+        Self::from_host_check(team, worker, criterion, skill_id, content_sha256)
+            .as_ref() == Some(self)
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct ObservedSkillEvidence {
@@ -12,6 +68,8 @@ pub(crate) struct ObservedSkillEvidence {
     pub evidence_verified: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub criterion_receipt: Option<NativeCriterionEvidenceReceipt>,
 }
 impl ObservedSkillEvidence {
     pub fn valid_for(&self, pin: &crate::skills::reviewer::SkillPin, revision: &str) -> bool {
@@ -84,10 +142,14 @@ pub(super) fn dispatch_state(
     let mode = pin.delivery_mode.clone();
     let staged_path = pin.staged_path.clone();
     let lower_trust_instructions = frozen.prompt.clone();
+    let criterion = team.config.council.as_ref().and_then(|config| config.criteria.iter()
+        .find(|criterion| criterion.native_evidence.as_ref().is_some_and(|check|
+            check.kind == INTEGRITY && check.skill_id == request.skill_id))).cloned();
     let previous = binding.skill_evidence.get(&request.skill_id).cloned();
     let mut observed = previous.clone().unwrap_or_else(|| ObservedSkillEvidence {
         content_sha256: sha.clone(), artifact_revision: revision.clone(),
         invoked: false, check_executed: false, evidence_verified: false, check_kind: None,
+        criterion_receipt: None,
     });
     if observed.content_sha256 != sha || observed.artifact_revision != revision {
         return Err("reviewer_skill_drift: stale native evidence cannot be reused.".into());
@@ -103,6 +165,9 @@ pub(super) fn dispatch_state(
             observed.check_executed = true;
             observed.evidence_verified = true;
             observed.check_kind = Some(INTEGRITY.into());
+            observed.criterion_receipt = criterion.as_ref().and_then(|criterion|
+                NativeCriterionEvidenceReceipt::from_host_check(
+                    &team, &team.workers[index], criterion, &request.skill_id, &sha));
         }
         _ => return Err("Unknown reviewer skill tool.".into()),
     }
@@ -120,6 +185,7 @@ pub(super) fn dispatch_state(
         "lowerTrustInstructions": (name == "pandacode_reviewer_skill_open").then_some(lower_trust_instructions),
         "nativeRetrievalRecorded": observed.invoked,
         "pinnedInputIntegrityVerified": observed.check_executed && observed.evidence_verified,
+        "criterionEvidenceBound": observed.criterion_receipt.is_some(),
         "note": "A native input-integrity check is not proof of project tests or methodological adherence."
     }), changed.then_some(team)))
 }

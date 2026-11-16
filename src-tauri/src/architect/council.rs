@@ -1271,7 +1271,10 @@ fn native_criterion_check_verified(
                 pin.id == check.skill_id && pin.required_for_acceptance
                     && pin.check_required && pin.eligible && pin.supplied
                     && binding.skill_evidence.get(&pin.id).is_some_and(|receipt|
-                        receipt.valid_for(pin, &binding.artifact_revision))
+                        receipt.valid_for(pin, &binding.artifact_revision)
+                            && receipt.criterion_receipt.as_ref().is_some_and(|native|
+                                native.valid_for(team, worker, criterion,
+                                    &pin.id, &pin.content_sha256)))
             }))
     })
 }

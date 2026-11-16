@@ -814,7 +814,18 @@ fn criterion_pinned_input_integrity_requires_native_receipts_and_denies_replay()
                 artifact_revision: binding.artifact_revision.clone(),
                 invoked: true, check_executed: true, evidence_verified: true,
                 check_kind: Some("pinned_input_integrity".into()),
+                criterion_receipt: None,
             });
+    }
+    assert_eq!(council::status(&team).unwrap().state, "fixing",
+        "old skill checks without task-bound criterion receipts do not satisfy required evidence");
+    for index in 0..team.workers.len() {
+        let receipt = reviewer_skill_evidence::NativeCriterionEvidenceReceipt::from_host_check(
+            &team, &team.workers[index], &team.config.council.as_ref().unwrap().criteria[0],
+            "pinned-check", &"f".repeat(64),
+        ).unwrap();
+        team.workers[index].reviewer_binding.as_mut().unwrap().skill_evidence
+            .get_mut("pinned-check").unwrap().criterion_receipt = Some(receipt);
     }
     assert_eq!(council::inspection(&team, false).unwrap()
         .criterion_observations[0].state, "pinned_input_integrity_verified");
@@ -828,6 +839,26 @@ fn criterion_pinned_input_integrity_requires_native_receipts_and_denies_replay()
     let mut tainted = team.clone();
     tainted.workers[0].wrote_at = SINCE + 5;
     assert_eq!(council::status(&tainted).unwrap().state, "fixing");
+    for mutated in ["cycle", "criterion", "lens", "round", "worker", "session", "artifact", "digest", "kind"] {
+        let mut altered = team.clone();
+        let record = altered.workers[0].reviewer_binding.as_mut().unwrap()
+            .skill_evidence.get_mut("pinned-check").unwrap()
+            .criterion_receipt.as_mut().unwrap();
+        match mutated {
+            "cycle" => record.cycle_id = "other-cycle".into(),
+            "criterion" => record.criterion_id = "other-criterion".into(),
+            "lens" => record.criterion_lens = "Other criterion".into(),
+            "round" => record.round += 1,
+            "worker" => record.worker_id = "foreign-worker".into(),
+            "session" => record.reviewer_session_id = "foreign-session".into(),
+            "artifact" => record.artifact_revision = "other-revision".into(),
+            "digest" => record.content_sha256 = "0".repeat(64),
+            "kind" => record.check_kind = "model_report".into(),
+            _ => unreachable!(),
+        }
+        assert_eq!(council::status(&altered).unwrap().state, "fixing",
+            "a task-bound native evidence receipt cannot be replayed across {mutated}");
+    }
     let mut forged = team;
     forged.workers[0].reviewer_binding.as_mut().unwrap().skill_evidence
         .get_mut("pinned-check").unwrap().check_kind = Some("reviewer_claim".into());
@@ -1166,6 +1197,7 @@ fn native_s2_missing_mandatory_skill_evidence_requires_a_fresh_verified_review()
                     artifact_revision: binding.artifact_revision.clone(),
                     invoked: true, check_executed: true, evidence_verified: true,
                     check_kind: Some("pinned_input_integrity".into()),
+                    criterion_receipt: None,
                 });
         }
         team.workers[index].reviewer_binding = Some(binding);

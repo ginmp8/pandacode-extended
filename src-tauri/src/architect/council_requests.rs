@@ -426,6 +426,13 @@ pub(crate) fn admit_native_task(
     if team.status != "running" {
         return Err("council_task_denied: new requests require an active root Council execution.".into());
     }
+    // The team snapshot can remain "running" after the session is stopped,
+    // archived or completed. Do not mint new task authority from stale state.
+    // Identical requests above remain idempotently readable after settlement.
+    let session = store.session(session_id)?;
+    if session.archived || session.task_stage == "completed" || session.status == "interrupted" {
+        return Err("council_task_denied: new requests require a live root session.".into());
+    }
     if team.workers.iter().any(|worker|
         worker.created_at >= team.council_since && worker.council.is_some())
     {

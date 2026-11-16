@@ -4173,6 +4173,55 @@ fn non_channel_native_task_review_request_is_idempotent_and_requires_real_counci
 }
 
 #[test]
+fn native_task_admission_revokes_new_requests_after_root_session_settlement() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        team.status = "ready".into();
+        team.round = 0;
+        save(&store, &mut team).unwrap();
+    }
+    council::set(&state, &sid, Some(on(9.0, 3, 2))).unwrap();
+    start_state(&state, &sid, "Review the frozen task", None, None).unwrap();
+    let store = state.store.lock().unwrap();
+    let session = store.session(&sid).unwrap();
+    let project = session.project_id;
+    let original_status = session.status;
+    let original_stage = session.task_stage;
+    let artifact = "d".repeat(64);
+    let original = council_requests::admit_native_task(
+        &store, &sid, &project, "original-task", &artifact,
+    ).unwrap();
+
+    for (status, stage, archived) in [
+        ("interrupted", original_stage.as_str(), false),
+        (original_status.as_str(), "completed", false),
+        (original_status.as_str(), original_stage.as_str(), true),
+    ] {
+        store.db.execute(
+            "UPDATE sessions SET status=?2,task_stage=?3,archived=?4 WHERE id=?1",
+            rusqlite::params![sid, status, stage, archived],
+        ).unwrap();
+        // Even with a stale running native team, no new task request is issued.
+        assert_eq!(load(&store, &sid).unwrap().unwrap().status, "running");
+        let denial = council_requests::admit_native_task(
+            &store, &sid, &project, "new-task", &artifact,
+        ).unwrap_err();
+        assert!(denial.contains("live root session"), "{denial}");
+        assert_eq!(council_requests::admit_native_task(
+            &store, &sid, &project, "original-task", &artifact,
+        ).unwrap(), original, "already admitted task identity remains idempotent");
+        let requests: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests
+             WHERE parent_session_id=?1 AND kind='council_native_task'",
+            [&sid], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(requests, 1, "revocation cannot create another authority record");
+    }
+}
+
+#[test]
 fn native_task_terminal_requires_real_completed_reviewer_callbacks() {
     // Exercise the existing worker admission, read-only execution and score
     // extraction, not fabricated scores or a second Council verdict engine.

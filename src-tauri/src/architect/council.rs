@@ -525,6 +525,10 @@ pub struct CouncilInspection {
     /// contributes to at most one group; unexecuted child reservations contribute nothing.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub usage_by_round_source: Vec<CouncilUsageGroup>,
+    /// Deduplicated root and child leaf observations, attributed by round and native source.
+    /// Child coordinators and composite parent seats are not reviewer attempts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub composed_usage_by_round_source: Vec<CouncilUsageGroup>,
     /// Attributed excerpts from durable reviewer messages. Claims are NOT verified evidence.
     pub reported_findings: Vec<CouncilReportedFinding>,
     /// Older scored claims in this cycle; not current triggers, check receipts or approval.
@@ -643,6 +647,22 @@ pub(super) fn composed_usage(
         attempts.extend(child.leaf_attempts.iter().cloned());
     }
     usage_totals(&attempts)
+}
+/// Report actual child leaves separately from root automatic reviewers; the
+/// child coordinator and composite parent seat never count as attempts.
+pub(super) fn composed_usage_by_round_source(
+    roots: &[CouncilInspectionAttempt],
+    children: &[super::child_council::ChildReservationView],
+) -> Vec<CouncilUsageGroup> {
+    let mut attempts = roots.to_vec();
+    for child in children {
+        for leaf in &child.leaf_attempts {
+            let mut attempt = leaf.clone();
+            attempt.reviewer_source = "nested_child";
+            attempts.push(attempt);
+        }
+    }
+    usage_by_round_source(&attempts)
 }
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -996,6 +1016,7 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
         criterion_observations: criterion_observations(team, config, status.round),
         status, verified_pass, verified_completion, criteria: config.criteria.clone(),
         usage_by_round_source: usage_by_round_source(&attempts),
+        composed_usage_by_round_source: Vec::new(),
         usage: usage_totals(&attempts), attempts, composed_usage: None,
         reserved_children: Vec::new(), reported_findings: Vec::new(),
         historical_reported_findings: Vec::new(),

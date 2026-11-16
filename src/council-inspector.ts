@@ -313,6 +313,18 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
         ' (' + escape(String(group.usage.spanMeasuredAttempts)) + ' measured)</li>').join('') +
       '</ul></section>'
     : '';
+  const allGroups = inspection.composedUsageByRoundSource ?? [];
+  const allGroupsHtml = children.length && allGroups.length
+    ? '<section aria-label="Root and child usage by round and source" class="council-usage-breakdown">' +
+      '<h4>Root and child native usage by round and source</h4>' +
+      '<p>Each admitted native leaf or root reviewer is counted once. Child coordinators, composite parent seats and unadmitted reservations are excluded; provider billing remains unknown.</p><ul>' +
+      allGroups.map(group => '<li>Round ' + escape(String(group.round)) + ' · ' +
+        escape(group.reviewerSource.replace('_', ' ')) +
+        ' · Native attempts ' + escape(String(group.usage.uniqueAttempts)) +
+        ' · Queue ' + escape(observedDuration('', group.usage.cumulativeQueueWaitMs).trim()) +
+        ' · Observed span ' + escape(observedDuration('', group.usage.cumulativeObservedSpanMs).trim()) + '</li>').join('') +
+      '</ul></section>'
+    : '';
   const completion = verified && inspection.verifiedCompletion
     ? '<p class="council-verified-completion"><strong>Completed native review cycle</strong> · ' +
       escape(inspection.verifiedCompletion.cycleId) + ' · round ' +
@@ -321,7 +333,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     '</strong> · ' + (inspection.status.stale ? 'Stale revision' : 'Current native status') +
     ': ' + escape(inspection.status.state) + ' · Revision ' + escape(String(inspection.teamRevision)) +
     '</p>' + criteriaHtml + observedCriteriaHtml +
-    completion + sourceBreakdown + strategyHtml + usageHtml + composedHtml + groupHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
+    completion + sourceBreakdown + strategyHtml + usageHtml + composedHtml + groupHtml + allGroupsHtml + (hidden ? '<p>' + hidden + ' older attempts are not shown.</p>' : '') +
     (attempts || '<p>No reviewer attempts have been admitted.</p>') + childHtml + findingTriageHtml + findingsHtml + historicalHtml + '</div>';
 }
 

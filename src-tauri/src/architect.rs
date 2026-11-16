@@ -1274,6 +1274,9 @@ pub(crate) fn council_inspection_state(
             result.composed_usage = Some(council::composed_usage(
                 &result.attempts, &result.reserved_children,
             ));
+            result.composed_usage_by_round_source = council::composed_usage_by_round_source(
+                &result.attempts, &result.reserved_children,
+            );
         }
     }
     if issued_seats_are_valid {

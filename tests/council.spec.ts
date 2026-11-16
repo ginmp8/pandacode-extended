@@ -328,6 +328,12 @@ test('child Council drill-down shows actual native leaves without root votes or 
     composedUsage: { uniqueAttempts: 2, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
       cumulativeQueueWaitMs: 250, cumulativeObservedSpanMs: 800,
       tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+    composedUsageByRoundSource: [{
+      round: 1, reviewerSource: 'nested_child',
+      usage: { uniqueAttempts: 2, queueMeasuredAttempts: 1, spanMeasuredAttempts: 1,
+        cumulativeQueueWaitMs: 250, cumulativeObservedSpanMs: 800,
+        tokenCount: null, costAmount: null, costCurrency: null, usageProvenance: 'unknown' },
+    }],
     reservedChildren: [{
       botId: 'security-child', childSessionId: 'child-session', rootCycleId: 'task:1000',
       requiredLeafReviewers: 2, status: 'reviewing',
@@ -363,6 +369,10 @@ test('child Council drill-down shows actual native leaves without root votes or 
   await expect(combined).toContainText('Root + child native attempts: 2');
   await expect(combined).toContainText('Provider tokens unknown');
   await expect(combined).toContainText('Cost unknown');
+  const grouped = panel(page).getByRole('region', { name: 'Root and child usage by round and source' });
+  await expect(grouped.locator('li')).toHaveCount(1);
+  await expect(grouped.locator('li')).toContainText('Round 1 · nested child · Native attempts 2');
+  await expect(grouped).toContainText('composite parent seats and unadmitted reservations are excluded');
   await expect(combined).toContainText('parent composite seats excluded');
   await expect(children).toContainText('No verified child receipt is available; no parent vote');
   await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();

@@ -83,7 +83,7 @@ export interface CouncilUsageTotals {
 }
 /** Root-only native usage; groups have disjoint attempt IDs and exclude child reservations. */
 export interface CouncilUsageGroup {
-  round: number; reviewerSource: 'automatic' | 'direct_bot'; usage: CouncilUsageTotals;
+  round: number; reviewerSource: 'automatic' | 'direct_bot' | 'nested_child'; usage: CouncilUsageTotals;
 }
 /** Native evidence derived from fresh independently admitted child leaves, not a root approval. */
 export interface CouncilVerifiedChildReceipt {
@@ -131,6 +131,8 @@ export interface CouncilInspection {
   composedUsage?: CouncilUsageTotals | null;
   /** Absent in older builds; all groups together count each root worker ID at most once. */
   usageByRoundSource?: CouncilUsageGroup[];
+  /** Root and actual child leaves grouped by round/source; no composite votes or inferred billing. */
+  composedUsageByRoundSource?: CouncilUsageGroup[];
   reportedFindings?: CouncilReportedFinding[];
   /** Prior scored claims from this cycle, never verified fixes or native approval. */
   historicalReportedFindings?: CouncilReportedFinding[];

@@ -4703,11 +4703,19 @@ fn child_only_parallel_root_finishes_from_real_revalidated_composite_seats() {
     assert_eq!(composed.unique_attempts, 4, "two child Councils issue four real leaves, not two votes");
     assert_eq!(composed.queue_measured_attempts, 4);
     assert!(composed.token_count.is_none() && composed.cost_amount.is_none());
+    assert_eq!(inspect.composed_usage_by_round_source.len(), 1);
+    let group = &inspect.composed_usage_by_round_source[0];
+    assert_eq!(group.round, 1);
+    assert_eq!(group.reviewer_source, "nested_child");
+    assert_eq!(group.usage.unique_attempts, 4);
+    assert_eq!(group.usage.usage_provenance, "unknown");
     let mut duplicate_leaf_id = inspect.reserved_children.clone();
     duplicate_leaf_id[1].leaf_attempts[0].worker_id =
         duplicate_leaf_id[0].leaf_attempts[0].worker_id.clone();
     assert_eq!(council::composed_usage(&inspect.attempts, &duplicate_leaf_id).unique_attempts, 3,
         "a replayed worker ID cannot be double-billed or counted twice");
+    assert_eq!(council::composed_usage_by_round_source(&inspect.attempts, &duplicate_leaf_id)[0]
+        .usage.unique_attempts, 3, "replayed leaf identities cannot inflate per-source usage");
     assert_eq!(inspect.verified_completion.unwrap().lowest, 9.5);
     assert_eq!(inspect.reserved_children.len(), 2);
     let child_id = inspect.reserved_children[0].child_session_id.clone();
@@ -4809,6 +4817,14 @@ fn assert_nested_m5_root_and_child_callbacks(strategy: council::CouncilExecution
     let composed = inspected.composed_usage.expect("native hierarchical usage");
     assert_eq!(composed.unique_attempts, 3, "one automatic root reviewer and two child leaves");
     assert!(composed.token_count.is_none() && composed.cost_amount.is_none());
+    let groups = &inspected.composed_usage_by_round_source;
+    assert_eq!(groups.len(), 2, "root and nested leaves must be separately attributed");
+    assert!(groups.iter().any(|group| group.round == 1
+        && group.reviewer_source == "automatic" && group.usage.unique_attempts == 1));
+    assert!(groups.iter().any(|group| group.round == 1
+        && group.reviewer_source == "nested_child" && group.usage.unique_attempts == 2));
+    assert_eq!(groups.iter().map(|group| group.usage.unique_attempts).sum::<usize>(),
+        composed.unique_attempts, "group totals must not double-count child composite seats");
     if strategy == council::CouncilExecutionStrategy::Escalated {
         let children = child_council::verified_parent_seats(&store, &saved)
             .unwrap().unwrap();

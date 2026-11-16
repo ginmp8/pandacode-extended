@@ -3772,7 +3772,8 @@ fn settled_or_archived_root_revokes_native_child_launch_and_callback_after_admis
         ).unwrap();
         for denied in [
             child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap_err(),
-            child_council::next_leaf_launch(&store, &std::collections::HashMap::new(), &root).unwrap_err(),
+            child_council::next_leaf_launch(&store, &std::collections::HashMap::new(), &root)
+                .err().expect("a closed root must revoke native child launch"),
             child_council::admit_leaves(&store, &root).unwrap_err(),
         ] {
             assert!(denied.contains("child_council_revoked"), "{denied}");

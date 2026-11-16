@@ -3727,6 +3727,65 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
 }
 
 #[test]
+fn settled_or_archived_root_revokes_native_child_launch_and_callback_after_admission() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["security-child", "architecture-child"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut team = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
+            .map(|bot| council::CouncilNestedReviewer {
+                bot_id: (*bot).into(), child_reviewers: 2,
+                child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        team.config.council = Some(config);
+        team.status = "ready".into();
+        team.round = 0;
+        save(&store, &mut team).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid, "Review immutable task evidence", None, None).unwrap();
+    dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Begin independent nested reviews."}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
+    let previous_stage = store.session(&sid).unwrap().task_stage;
+    let child_before = serde_json::to_value(
+        load(&store, &launch.admission.parent).unwrap().unwrap()
+    ).unwrap();
+    for (archive, stage) in [(true, previous_stage.as_str()), (false, "completed")] {
+        store.db.execute(
+            "UPDATE sessions SET archived=?2,task_stage=?3 WHERE id=?1",
+            rusqlite::params![sid, archive, stage],
+        ).unwrap();
+        for denied in [
+            child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap_err(),
+            child_council::next_leaf_launch(&store, &std::collections::HashMap::new(), &root).unwrap_err(),
+            child_council::admit_leaves(&store, &root).unwrap_err(),
+        ] {
+            assert!(denied.contains("child_council_revoked"), "{denied}");
+        }
+        assert_eq!(serde_json::to_value(
+            load(&store, &launch.admission.parent).unwrap().unwrap()
+        ).unwrap(), child_before, "a revoked root cannot mutate an admitted child team");
+        assert_ne!(council::status(&root).unwrap().state, "passed",
+            "a closed root must not gain a synthetic child approval");
+    }
+}
+
+#[test]
 fn child_council_revocation_and_project_isolation_fail_closed() {
     let (state, sid) = state_fixture();
     {

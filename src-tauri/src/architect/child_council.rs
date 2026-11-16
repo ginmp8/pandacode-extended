@@ -240,6 +240,16 @@ fn read(store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer) -> Re
 
 // NATIVE LEAF RUNTIME
 
+/// A settled or archived root session revokes child admission even if an old
+/// TeamSnapshot still says "running" after a crash or storage transition.
+fn require_live_root_session(store: &Store, root_id: &str) -> Result<()> {
+    let session = store.session(root_id)?;
+    if session.archived || session.task_stage == "completed" {
+        return Err("child_council_revoked: root task is archived or completed.".into());
+    }
+    Ok(())
+}
+
 /// Resolve task descendants through native ownership, never a bot's editable
 /// roster or self-reported parent. This is deliberately limited to depth two.
 fn leaf_sessions(store: &Store, root: &str) -> Result<Vec<String>> {
@@ -1415,6 +1425,7 @@ pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
     {
         return Err("child_council_denied: root work must be settled before native child review.".into());
     }
+    require_live_root_session(store, &root.session_id)?;
     crate::bots::shared_channels::validate_delivery_council(store, &root.session_id, config)?;
     root_artifact_revision(store, root, true)?;
     let mut created = false;
@@ -1619,6 +1630,7 @@ pub(super) fn authorize_leaf(store: &Store, sid: &str, admission: &Admission) ->
     if !super::active(&root.status) {
         return Err("child_council_revoked: root task is no longer active.".into());
     }
+    require_live_root_session(store, &root_sid)?;
     let config = root.config.council.as_ref().ok_or("Council is off.")?;
     let mut authorized = false;
     for choice in &config.nested_bot_reviewers {
@@ -1651,6 +1663,7 @@ pub(super) fn next_leaf_launch(
 ) -> Result<Option<Launch>> {
     let Some(config) = root.config.council.as_ref() else { return Ok(None) };
     if config.nested_bot_reviewers.is_empty() { return Ok(None) }
+    require_live_root_session(store, &root.session_id)?;
     let mut global_running = root.workers.iter().filter(|w|
         super::active(&w.status) || agents.contains_key(&w.session_id)).count();
     let mut children = Vec::new();

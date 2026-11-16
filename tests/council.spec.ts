@@ -913,7 +913,12 @@ test('the tray button is settings only: no score badge, a cue dot when asking or
   await open(page, '/?council');
   await expect(button(page).locator('b')).toHaveCount(0);
   await expect(button(page)).toHaveAccessibleName('Council: Round 2 of 10 · reviewing');
-  const dot = () => button(page).locator('.council-glyph').evaluate(node => getComputedStyle(node, '::after').content !== 'none');
+  const dot = () => button(page).locator('.council-glyph').evaluate(node => {
+    const marker = getComputedStyle(node, '::after');
+    // "normal" and "none" are both unrendered CSS content values.
+    // Require the six-pixel cue itself, not merely a non-"none" style.
+    return marker.content === '""' && marker.width === '6px' && marker.height === '6px';
+  });
   await expect.poll(dot).toBe(false);
   await open(page, '/?council=asking');
   await expect(button(page)).toHaveAccessibleName('Council needs you');

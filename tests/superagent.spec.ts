@@ -349,8 +349,12 @@ test('native orchestration loading remains busy until the Team list is hydrated'
   const host=page.locator('#sa-native-load-readiness');
   await expect(host).toHaveAttribute('aria-busy','true');
   await expect(host.getByText('Loading orchestrations…')).toBeVisible();
+  await expect(host.getByRole('button',{name:'Demands / Runs'})).toBeDisabled();
+  await expect(host.getByRole('searchbox',{name:'Search Teams'})).toBeDisabled();
   await page.evaluate(() => (window as unknown as {completeNativeTeamLoad:()=>void}).completeNativeTeamLoad());
   await expect(host).toHaveAttribute('aria-busy','false');
+  await expect(host.getByRole('button',{name:'Demands / Runs'})).toBeEnabled();
+  await expect(host.getByRole('searchbox',{name:'Search Teams'})).toBeEnabled();
   await expect(host.getByRole('navigation',{name:'Orchestration views'})).toBeVisible();
   await expect(host.getByRole('alert')).toHaveCount(0);
 });

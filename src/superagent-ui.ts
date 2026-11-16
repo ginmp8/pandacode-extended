@@ -1289,7 +1289,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             '<button class="primary-button" type="button" data-sa-import>Confirm import</button>' : '') +
           '</section>' : '') +
       '</div></div></div>';
-    // Include native list hydration: mutation busy alone does not signal readiness.
+    // Keep stale Team and Demand controls inert until native hydration finishes.
+    // A busy indicator alone does not prevent actions against an old snapshot.
+    if (loading) {
+      host.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+        'button, input, select, textarea',
+      ).forEach(control => { control.disabled = true; });
+    }
     host.setAttribute('aria-busy', String(busy || loading));
     restoreFocusedControl(focusedControl);
   }

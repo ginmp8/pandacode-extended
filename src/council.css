@@ -12,6 +12,7 @@
 .council-glyph>.icon{grid-area:1/1;--icon-size:var(--ds-icon-tray)}
 .council-glyph:is([data-cue="asking"],[data-cue="settled"])::after{content:"";position:absolute;top:-1px;right:-2px;width:6px;height:6px;border-radius:50%;background:var(--muted);box-shadow:0 0 0 1.5px var(--panel-surface,var(--bg))}
 .council-glyph[data-cue="asking"]::after{background:var(--ds-tone-full)}
+.council-glyph[data-cue=""]::after{content:none}
 
 /* Compact enough to fit above the composer in a 420px-tall window without scrolling. */
 .council-panel{z-index:90;max-height:min(560px,calc(100dvh - 90px));overflow:auto;padding:10px 12px;gap:10px;font-size:var(--ds-text-ui)}

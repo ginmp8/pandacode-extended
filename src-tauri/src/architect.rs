@@ -895,9 +895,28 @@ fn composed_native_authority_current(
     let Some(config) = team.config.council.as_ref() else {
         return false;
     };
-    if config.composition.is_none() {
+    let Some(composition) = config.composition.as_ref() else {
         return true;
-    }
+    };
+    // S2/S3 approval must retain the native grants of earlier scored waves,
+    // not only those of the final qualifying round. Parallel keeps its legacy
+    // terminal-round authority contract.
+    let first_round = if round > 1 && composition.strategy != council::CouncilStrategy::Parallel {
+        1
+    } else {
+        round
+    };
+    (first_round..=round).all(|candidate_round| {
+        composed_native_authority_round_current(store, team, config, candidate_round)
+    })
+}
+
+fn composed_native_authority_round_current(
+    store: &Store,
+    team: &TeamSnapshot,
+    config: &council::CouncilConfig,
+    round: usize,
+) -> bool {
     // A scored seat still counts after abandonment. It must be revalidated,
     // not silently dropped so another review can replace its evidence.
     let seats = team.workers.iter().filter(|worker| {

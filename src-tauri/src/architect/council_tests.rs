@@ -263,6 +263,50 @@ fn composed_root_authority_denies_unissued_tampered_and_revoked_seats() {
 }
 
 #[test]
+fn composed_s2_s3_terminal_authority_rechecks_each_scored_native_round() {
+    use council::{AutomaticReviewerCount as Count, CouncilStrategy};
+    for strategy in [CouncilStrategy::Escalated, CouncilStrategy::TwoPhase] {
+        let (state, sid) = state_fixture();
+        let store = state.store.lock().unwrap();
+        let mut plan = composition(true, Count::Fixed(2), vec![]);
+        plan.strategy = strategy;
+        let mut team = team_with(config_for_composition(plan), vec![]);
+        team.session_id = sid.clone();
+        let project = store.session(&sid).unwrap().project_id;
+        for round in 1..=2 {
+            for index in 0..2 {
+                let id = format!("wave-{round}-{index}");
+                let mut reviewer = seat(
+                    &id, round, Some(9.7), SINCE + 10 * round as i64 + index as i64,
+                );
+                let mut binding = reviewer_security::ReviewerBinding::native(
+                    &team, &reviewer.id, reviewer.created_at, &reviewer.provider,
+                    &reviewer.model, reviewer.council.as_ref().unwrap(),
+                );
+                binding.composition_mode = Some("direct".into());
+                reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+                reviewer.reviewer_binding = Some(binding);
+                store.db.execute(
+                    "INSERT INTO sessions(id,project_id,title,provider,model,mode,status,created_at,updated_at,archived)
+                     VALUES(?1,?2,'Native reviewer',?3,?4,'plan','completed',1,1,0)",
+                    rusqlite::params![reviewer.session_id, project, reviewer.provider, reviewer.model],
+                ).unwrap();
+                store.message(&reviewer.session_id, "assistant", "Council score: 9.7/10").unwrap();
+                team.workers.push(reviewer);
+            }
+        }
+        assert!(composed_native_authority_current(&store, &team, 2),
+            "{strategy:?}: both independently authorized waves should qualify");
+        assert_eq!(store.db.execute(
+            "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+            rusqlite::params![sid, "native-reviewer-authority:wave-1-0"],
+        ).unwrap(), 1);
+        assert!(!composed_native_authority_current(&store, &team, 2),
+            "{strategy:?}: revoking an earlier scored wave must deny terminal approval");
+    }
+}
+
+#[test]
 fn composed_terminal_receipt_selector_rejects_duplicates_and_replays() {
     assert_eq!(unique_council_receipt(&[1], |item| *item == 1), Some(&1));
     assert_eq!(unique_council_receipt(&[1, 2], |item| *item == 2), Some(&2));

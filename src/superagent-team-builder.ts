@@ -32,6 +32,9 @@ export class GuidedTeamBuilder {
   private reviewers: string[] = [];
   private councilRequired = false;
 
+  /** Exposes presentation state only; native actions remain independently guarded. */
+  isOpen(): boolean { return this.visible; }
+
   reset(): void {
     this.visible = false;
     this.step = 1;
@@ -278,12 +281,15 @@ export class GuidedTeamBuilder {
       '<header><h3>New Team · Guided setup</h3>' +
       '<button type="button" data-sa-builder-cancel>Close builder</button></header>' +
       '<p role="status">Step ' + this.step + ' of 5 · ' + safe(steps[this.step-1]) + '</p>' +
-      '<form data-sa-form="guided-builder"><section aria-label="Team setup step">' +
+      '<div class="sa-builder-layout"><ol class="sa-builder-step-list" aria-label="Team setup progress">' +
+      steps.map((label,index) => '<li class="' + (index + 1 === this.step ? 'current' : '') +
+        '"><span>' + (index + 1) + '</span>' + safe(label) + '</li>').join('') +
+      '</ol><form data-sa-form="guided-builder"><section aria-label="Team setup step">' +
       '<h4 tabindex="-1">' + safe(steps[this.step-1]) + '</h4>' + content + '</section>' +
       (this.error ? '<p role="alert" class="sa-builder-error">' + safe(this.error) + '</p>' : '') +
       '<div class="sa-actions">' +
       (this.step > 1 ? '<button type="button" data-sa-builder-prev>Back</button>' : '') +
       (this.step < 5 ? '<button type="button" data-sa-builder-next>Next</button>' : '') +
-      '</div></form></section>';
+      '</div></form></div></section>';
   }
 }

@@ -535,6 +535,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '</select></label></div><button class="primary-button" type="submit"' +
       (chosen.enabled ? ' disabled' : '') + '>Save preset</button></form>' +
       '<p>Policy revision ' + chosen.policyRevision + ' · Native read-only permission until separately authorized.</p>' +
+      '<p>Disabled Teams may change primary roles after settled Demands only when historical native role snapshots are complete and no extra members or GitHub sources remain. Otherwise duplicate the Team.</p>' +
       '<form data-sa-form="run"><label>Task objective<textarea name="objective" rows="3" maxlength="16000" required>' +
       safe(demandObjective) + '</textarea></label>' +
       '<label>Dispatch<select name="mode"><option value="coordinated"' +

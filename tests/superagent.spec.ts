@@ -175,6 +175,56 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
   await expect(dialog.getByText('No orchestrations created.')).toBeVisible();
 });
 
+test('settled Team role edit uses one native revision-bound mutation without dispatch', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-team-role-reuse';
+    document.body.appendChild(host);
+    const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
+    (window as unknown as {saRoleReuseCalls:typeof calls}).saRoleReuseCalls=calls;
+    const cfg={id:'reusable',name:'Existing Team',coordinatorBotId:'coordinator',
+      workerBotId:'worker',policyRevision:4,enabled:false,ticketCount:1};
+    mountSuperagent(host,async(command,args)=>{
+      calls.push({command,args});
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [{...cfg}] as never;
+      if(command==='superagent_tickets')return [
+        {id:'past',orchestrationId:'reusable',objective:'Finished Demand',state:'stopped',revision:3}
+      ] as never;
+      if(command==='superagent_update') {
+        if(args?.orchestrationId!=='reusable'||args?.expectedRevision!==4)
+          throw Error('Native policy revision was not preserved');
+        const input=args?.input as {name:string;coordinatorBotId:string;workerBotId:string};
+        if(input.name!=='Rotated Team'||input.coordinatorBotId!=='worker'||
+            input.workerBotId!=='coordinator')throw Error('Invalid role mutation payload');
+        Object.assign(cfg,input,{policyRevision:5});
+        return {...cfg} as never;
+      }
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-team-role-reuse');
+  await expect(host.getByText('Disabled Teams may change primary roles', {exact:false})).toBeVisible();
+  await host.getByRole('textbox',{name:'Preset title'}).fill('Rotated Team');
+  await host.getByRole('combobox',{name:'Edit coordinator'}).selectOption('worker');
+  await host.getByRole('combobox',{name:'Edit worker'}).selectOption('coordinator');
+  await host.getByRole('button',{name:'Save preset'}).click();
+  await expect(host.locator('.sa-list .sa-item strong')).toHaveText('Rotated Team');
+  await expect(host.getByRole('region',{name:'Selected orchestration'}))
+    .toContainText('Policy revision 5');
+  const calls=await page.evaluate(() =>
+    (window as unknown as {saRoleReuseCalls:Array<{command:string;args?:Record<string,unknown>}>})
+      .saRoleReuseCalls);
+  expect(calls.filter(item=>item.command==='superagent_update')).toHaveLength(1);
+  expect(calls.filter(item=>item.command==='superagent_submit'||
+    item.command==='superagent_set_enabled'||item.command==='superagent_dispatch_worker'))
+    .toHaveLength(0);
+});
+
 test('native SuperAgent clears tickets when switching presets after a failed read', async ({ page }) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

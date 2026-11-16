@@ -3304,12 +3304,32 @@ fn update_configuration(store: &Store, id: &str, expected_revision: i64, input: 
         if roster::has_additional_members(store,id)? {
             return Err("Clear additional Team roles before changing primary bot identities.".into());
         }
-        let used: bool = store.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
+        // Existing Demands must keep their admitted roles after the reusable
+        // Team changes. Legacy history without immutable v46 profiles cannot
+        // safely recover the original Coordinator; clone that Team instead.
+        let historical_ids: Vec<String> = {
+            let mut stmt = store.db.prepare(
+                "SELECT id FROM sa_tickets WHERE orchestration_id=?1 ORDER BY id",
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([id], |row| row.get::<_, String>(0))
+                .map_err(|e| e.to_string())?;
+            rows.collect::<rusqlite::Result<Vec<_>>>()
+                .map_err(|e| e.to_string())?
+        };
+        for ticket_id in &historical_ids {
+            if roster::ticket_profile(store, ticket_id)?.is_none() {
+                return Err("Legacy Ticket history has no immutable Team profile; duplicate the Team to change primary roles.".into());
+            }
+        }
+        // Source configuration is Team-scoped rather than Ticket-snapshotted.
+        // Do not silently change its effective project/actor authority when
+        // rotating primary roles, even while sources are Off or Observe-only.
+        let has_sources: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_event_sources WHERE orchestration_id=?1)",
             [id], |r| r.get(0),
         ).map_err(|e| e.to_string())?;
-        if used {
-            return Err("Ticket history pins primary bot identities; only a settled Team name may change.".into());
+        if has_sources {
+            return Err("Team has GitHub sources; duplicate the Team to change primary roles or project.".into());
         }
     }
     if current.name==name && !identity_changed { return Ok(current); }
@@ -3324,13 +3344,19 @@ fn update_configuration(store: &Store, id: &str, expected_revision: i64, input: 
          WHERE id=?1 AND policy_revision=?7 AND enabled=0
            AND NOT EXISTS(
              SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
-               AND (?8=1
+               AND ((?8=1 AND NOT EXISTS(
+                     SELECT 1 FROM sa_ticket_profiles p
+                     WHERE p.ticket_id=t.id AND p.policy_revision=t.policy_revision))
                  OR t.state NOT IN ('completed','failed','stopped','interrupted','inconclusive')
                  OR EXISTS(SELECT 1 FROM sa_assignments a
                            WHERE a.ticket_id=t.id AND a.state='running')
                  OR EXISTS(SELECT 1 FROM sa_effect_receipts e
                            WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain')))
-           )",
+           )
+           AND (?8=0 OR (
+             NOT EXISTS(SELECT 1 FROM sa_event_sources WHERE orchestration_id=?1)
+             AND NOT EXISTS(SELECT 1 FROM sa_team_roles WHERE orchestration_id=?1)
+           ))",
         params![id,name,coordinator.id,worker.id,worker.project_id,
                 storage::now(),expected_revision,identity_changed],
     ).map_err(|e| e.to_string())?;
@@ -6928,6 +6954,100 @@ mod tests {
         assert_eq!(update_configuration(&store,&config.id,2,&input).unwrap().policy_revision,2);
         delete_configuration(&store,&config.id,2).unwrap();
         assert!(configuration(&store,&config.id).is_err());
+    }
+
+    #[test]
+    fn settled_profiled_demands_allow_safe_primary_role_rotation_and_new_admission() {
+        let mut store=fixture();
+        let config=enabled(&store);
+        let (previous,launched)=admit(&mut store,&config.id,
+            "Original bounded task","rotation-original",false).unwrap();
+        assert!(launched);
+        let original=roster::ticket_profile(&store,&previous.id).unwrap().unwrap();
+        assert_eq!(original.members[0].bot_id,"router");
+        assert_eq!(original.members[1].bot_id,"worker");
+        stop(&store,&previous.id).unwrap();
+        let disabled=change_enabled(&store,&config.id,config.policy_revision,false).unwrap();
+        let swap=NewOrchestration {
+            name:"Reused Team".into(),coordinator_bot_id:"worker".into(),
+            worker_bot_id:"router".into(),
+        };
+
+        // An unresolved effect or a Team-scoped GitHub source must not be
+        // silently rebound by the new Team policy.
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts(
+                ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'unresolved','fixture','uncertain',?2,?2)",
+            params![previous.id,storage::now()],
+        ).unwrap();
+        assert!(update_configuration(&store,&config.id,disabled.policy_revision,&swap)
+            .unwrap_err().contains("unsettled work"));
+        store.db.execute(
+            "DELETE FROM sa_effect_receipts WHERE ticket_id=?1",[&previous.id],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_event_sources(
+                id,orchestration_id,repository,actor_filter,event_kind,created_at,updated_at)
+             VALUES('rotation-source',?1,'owner/repo','actor','issues.opened',?2,?2)",
+            params![config.id,storage::now()],
+        ).unwrap();
+        assert!(update_configuration(&store,&config.id,disabled.policy_revision,&swap)
+            .unwrap_err().contains("GitHub sources"));
+        store.db.execute(
+            "DELETE FROM sa_event_sources WHERE id='rotation-source'",[],
+        ).unwrap();
+
+        // Valid JSON with an invalid role shape cannot prove that historical
+        // identity remains recoverable.
+        let snapshot_json:String=store.db.query_row(
+            "SELECT profiles_json FROM sa_ticket_profiles WHERE ticket_id=?1",
+            [&previous.id],|row|row.get(0),
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_ticket_profiles SET profiles_json='{}' WHERE ticket_id=?1",
+            [&previous.id],
+        ).unwrap();
+        assert!(update_configuration(&store,&config.id,disabled.policy_revision,&swap)
+            .unwrap_err().contains("Invalid persisted task-effective Team profile"));
+        store.db.execute(
+            "UPDATE sa_ticket_profiles SET profiles_json=?2 WHERE ticket_id=?1",
+            params![previous.id,snapshot_json],
+        ).unwrap();
+
+        let updated=update_configuration(&store,&config.id,disabled.policy_revision,&swap)
+            .unwrap();
+        assert!(!updated.enabled);
+        assert_eq!(updated.policy_revision,disabled.policy_revision+1);
+        assert_eq!(updated.coordinator_bot_id,"worker");
+        assert_eq!(updated.worker_bot_id,"router");
+        assert!(update_configuration(&store,&config.id,disabled.policy_revision,&swap).is_err());
+        assert_eq!(roster::ticket_profile(&store,&previous.id).unwrap().unwrap()
+            .members[1].bot_id,"worker");
+        let original_ticket:(i64,String,String)=store.db.query_row(
+            "SELECT policy_revision,worker_bot_id,project_id FROM sa_tickets WHERE id=?1",
+            [&previous.id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        assert_eq!(original_ticket,(config.policy_revision,"worker".into(),"project".into()));
+        assert!(mandate(&store,&previous.id).unwrap().revoked);
+
+        let path=store.path.clone();
+        drop(store);
+        let mut reopened=Store::open(&path).unwrap();
+        assert_eq!(roster::ticket_profile(&reopened,&previous.id).unwrap().unwrap()
+            .members[0].bot_id,"router");
+        let resumed=change_enabled(&reopened,&config.id,updated.policy_revision,true).unwrap();
+        assert!(resumed.enabled);
+        // Stage a new busy request without starting a provider. It must pin
+        // the new roles, not silently adopt the historical role selection.
+        let (next,launched)=admit(&mut reopened,&config.id,
+            "New bounded task","rotation-next",true).unwrap();
+        assert!(!launched);
+        let new_profile=roster::ticket_profile(&reopened,&next.id).unwrap().unwrap();
+        assert_eq!(new_profile.members[0].bot_id,"worker");
+        assert_eq!(new_profile.members[1].bot_id,"router");
+        assert_eq!(get_ticket(&reopened,&previous.id).unwrap().state,"stopped");
+        assert_ne!(previous.id,next.id);
     }
 
     #[test]

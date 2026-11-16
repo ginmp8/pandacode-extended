@@ -802,6 +802,144 @@ pub fn create_pull_request(root: &Path, title: &str, body: &str, base: &str, hea
     })
 }
 
+fn valid_draft_pr_repository(repository: &str) -> bool {
+    if repository.len() > 200 {
+        return false;
+    }
+    let mut parts = repository.split('/');
+    let owner = parts.next().unwrap_or_default();
+    let name = parts.next().unwrap_or_default();
+    let valid_component = |part: &str| {
+        !part.is_empty()
+            && part != "."
+            && part != ".."
+            && part.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.')
+            })
+    };
+    parts.next().is_none() && valid_component(owner) && valid_component(name)
+}
+
+fn valid_draft_pr_branch(branch: &str) -> bool {
+    !branch.is_empty()
+        && branch.len() <= 200
+        && !branch.starts_with('-')
+        && !branch.ends_with('.')
+        && !branch.ends_with('/')
+        && !branch.contains("..")
+        && !branch.contains("//")
+        && !branch.contains("@{")
+        && !branch.bytes().any(|byte| {
+            !(byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'/'))
+        })
+}
+
+fn encode_path_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push_str(&format!("{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn branch_sha(
+    root: &Path,
+    repository: &str,
+    branch: &str,
+    run_gh: &mut impl FnMut(&Path, &[&str], Duration) -> Result<Capture, String>,
+) -> Result<String, String> {
+    let endpoint = format!(
+        "repos/{repository}/branches/{}",
+        encode_path_component(branch)
+    );
+    let value = run_gh(root, &["api", &endpoint], TIMEOUT).and_then(|capture| json(&capture))?;
+    let name = text(&value, "name");
+    let sha = value
+        .get("commit")
+        .map(|commit| text(commit, "sha"))
+        .unwrap_or_default();
+    if name != branch
+        || !(40..=64).contains(&sha.len())
+        || !sha.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("GitHub did not verify the exact branch in the selected repository.".into());
+    }
+    Ok(sha)
+}
+
+/// Revalidate the Ticket project's actual repository and pushed head. The base
+/// must be an existing branch in that same repository. This function only
+/// performs reads; it never pushes or creates a branch.
+pub(crate) fn verify_draft_pull_request_target(
+    root: &Path,
+    repository: &str,
+    head: &str,
+    base: &str,
+) -> Result<String, String> {
+    let mut run_gh = |root: &Path, args: &[&str], timeout| run_gh(root, args, timeout);
+    verify_draft_pull_request_target_with(root, repository, head, base, &mut run_gh)
+}
+
+pub(crate) fn verify_draft_pull_request_target_with(
+    root: &Path,
+    repository: &str,
+    head: &str,
+    base: &str,
+    run_gh: &mut impl FnMut(&Path, &[&str], Duration) -> Result<Capture, String>,
+) -> Result<String, String> {
+    if !valid_draft_pr_branch(head) || !valid_draft_pr_branch(base) || head == base {
+        return Err("Choose distinct valid head and base branches.".into());
+    }
+    if !valid_draft_pr_repository(repository) {
+        return Err("Provide one exact GitHub repository in owner/name form.".into());
+    }
+
+    let status = crate::workspace::git_status(root)?;
+    if !status.is_repo || status.branch != head {
+        return Err("The head must be the active Ticket worker's current repository branch.".into());
+    }
+    if !status.files.is_empty() {
+        return Err("The active Ticket checkout must be clean before creating a draft pull request.".into());
+    }
+    let local_head = crate::workspace::checked(crate::workspace::run_git_bounded(
+        root,
+        &["rev-parse", "HEAD"],
+        256,
+        false,
+        Duration::from_secs(10),
+    )?)?;
+    let local_head = String::from_utf8(local_head.bytes)
+        .map_err(|_| "Git returned an unreadable local head commit.")?;
+    let local_head = local_head.trim();
+    if !(40..=64).contains(&local_head.len())
+        || !local_head.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err("Git did not return an exact local head commit.".into());
+    }
+
+    let remote = run_gh(
+        root,
+        &["repo", "view", "--json", "nameWithOwner,defaultBranchRef,url"],
+        TIMEOUT,
+    )
+    .and_then(|capture| json(&capture))?;
+    if text(&remote, "nameWithOwner") != repository {
+        return Err("The repository must match the active Ticket project's GitHub remote.".into());
+    }
+    let pushed_head = branch_sha(root, repository, head, run_gh)?;
+    if pushed_head != local_head {
+        return Err("The active Ticket head is not pushed at its current commit.".into());
+    }
+    branch_sha(root, repository, base, run_gh)?;
+    Ok(pushed_head)
+}
+
+
 #[cfg(test)]
 mod tests {
     #[cfg(unix)]
@@ -817,6 +955,59 @@ mod tests {
     }
 
     use super::*;
+
+
+    #[test]
+    fn draft_pr_target_validation_rejects_unsafe_inputs_without_processes() {
+        for repository in ["", "owner", "owner/repo/extra", "../repo", "owner/ bad", "owner/repo\\n"] {
+            assert!(!valid_draft_pr_repository(repository), "{repository:?}");
+        }
+        for branch in ["", "-rf", "a..b", "a//b", "a@{1", "a.lock!", "with space", "trailing."] {
+            assert!(!valid_draft_pr_branch(branch), "{branch:?}");
+        }
+        for (repo, head, base) in [
+            ("owner/repo", "-invalid", "main"),
+            ("owner/repo", "feat/test", "feat/test"),
+            ("owner/repo/other", "feat/test", "main"),
+        ] {
+            let result = verify_draft_pull_request_target_with(
+                Path::new("."), repo, head, base,
+                &mut |_, _, _| panic!("invalid draft PR target invoked GitHub"),
+            );
+            assert!(result.is_err(), "{repo:?}/{head:?}/{base:?}");
+        }
+    }
+
+    #[test]
+    fn draft_pr_branch_readback_requires_exact_branch_and_valid_commit() {
+        let sha = "0123456789abcdef0123456789abcdef01234567";
+        let mut calls = 0;
+        let result = branch_sha(
+            Path::new("."), "owner/repo", "feat/test",
+            &mut |_, args, timeout| {
+                assert_eq!(timeout, TIMEOUT);
+                assert_eq!(args, ["api", "repos/owner/repo/branches/feat%2Ftest"]);
+                calls += 1;
+                Ok(Capture {
+                    bytes: serde_json::json!({"name":"feat/test","commit":{"sha":sha}})
+                        .to_string().into_bytes(),
+                    truncated: false,
+                })
+            },
+        ).unwrap();
+        assert_eq!(result, sha);
+        assert_eq!(calls, 1);
+        for response in [
+            serde_json::json!({"name":"feat/other","commit":{"sha":sha}}),
+            serde_json::json!({"name":"feat/test","commit":{"sha":"not-a-sha"}}),
+        ] {
+            assert!(branch_sha(Path::new("."), "owner/repo", "feat/test",
+                &mut |_, _, _| Ok(Capture {
+                    bytes: response.to_string().into_bytes(),
+                    truncated: false,
+                })).is_err());
+        }
+    }
 
     #[test]
     fn excerpts_cut_on_character_boundaries_and_flag_truncation() {

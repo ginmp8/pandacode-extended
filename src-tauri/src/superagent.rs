@@ -5517,6 +5517,25 @@ pub async fn superagent_reject(window: tauri::WebviewWindow,
     reject(&store, &ticket_id, expected_revision, &reason)
 }
 
+/// Verify a clean, already-pushed worker branch without creating any GitHub effect.
+#[tauri::command]
+pub async fn superagent_verify_draft_pull_request_target(
+    window: tauri::WebviewWindow,
+    state: State<'_, AppState>,
+    ticket_id: String,
+    expected_revision: i64,
+    repository: String,
+    head: String,
+    base: String,
+) -> Result<String> {
+    require_main_window(&window)?;
+    let database_path = state.store.lock().map_err(|e| e.to_string())?.path.clone();
+    let store = effects::open_effect_store(&database_path)?;
+    effects::verify_draft_pull_request_target(
+        &store, &ticket_id, expected_revision, &repository, &head, &base,
+    )
+}
+
 async fn confirm_issue_comment(
     window: &tauri::WebviewWindow,
     intent: &effects::IssueCommentIntent,

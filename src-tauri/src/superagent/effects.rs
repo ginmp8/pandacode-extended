@@ -338,6 +338,14 @@ fn active_scope_if_current(
     db: &Connection,
     intent: &IssueCommentIntent,
 ) -> Result<Option<ActiveScope>> {
+    active_scope_for_ticket(db, &intent.ticket_id, intent.expected_revision)
+}
+
+fn active_scope_for_ticket(
+    db: &Connection,
+    ticket_id: &str,
+    expected_revision: i64,
+) -> Result<Option<ActiveScope>> {
     if crate::feature_controls::get().bots_paused {
         return Ok(None);
     }
@@ -359,7 +367,7 @@ fn active_scope_if_current(
            AND a.bot_id<>o.coordinator_bot_id
            AND (SELECT COUNT(*) FROM sa_assignments other
                 WHERE other.ticket_id=t.id AND other.state='running')=1",
-        params![intent.ticket_id, intent.expected_revision, storage::now()],
+        params![ticket_id, expected_revision, storage::now()],
         |row| Ok(ActiveScope {
             project_id: row.get(0)?,
             assignment_id: row.get(1)?,
@@ -384,8 +392,17 @@ fn active_scope(db: &Connection, intent: &IssueCommentIntent) -> Result<ActiveSc
 /// An effect grant is not a provider-session grant. Recheck the original
 /// task-owned worker thread, admitted role and frozen model before any write.
 fn effect_worker_session_current(store: &Store, intent: &IssueCommentIntent) -> Result<bool> {
-    let scope = active_scope(&store.db, intent)?;
-    let pinned=super::ticket_team_snapshot(store,&intent.ticket_id)?;
+    effect_worker_session_current_for_ticket(store, &intent.ticket_id, intent.expected_revision)
+}
+
+fn effect_worker_session_current_for_ticket(
+    store: &Store,
+    ticket_id: &str,
+    expected_revision: i64,
+) -> Result<bool> {
+    let scope = active_scope_for_ticket(&store.db, ticket_id, expected_revision)?
+        .ok_or_else(|| "The Ticket, revision, mandate, or active worker no longer permits this effect.".to_string())?;
+    let pinned=super::ticket_team_snapshot(store,&ticket_id)?;
     let attempt_timeout=pinned.policy.strategy.attempt_timeout_ms;
     // A persisted effect grant does not renew an expired provider attempt.
     // Ambiguous concurrent running assignments cannot authorize a remote write.
@@ -396,17 +413,50 @@ fn effect_worker_session_current(store: &Store, intent: &IssueCommentIntent) -> 
            AND created_at>0 AND created_at<=?4 AND (?4-created_at)<?5
            AND (SELECT COUNT(*) FROM sa_assignments other
                 WHERE other.ticket_id=?2 AND other.state='running')=1",
-        params![scope.assignment_id,intent.ticket_id,scope.session_id,
+        params![scope.assignment_id,ticket_id,scope.session_id,
             now,attempt_timeout],
         |row| Ok((row.get(0)?,row.get(1)?)),
     ).map_err(|e| e.to_string())?;
     let session = store.session(&scope.session_id)?;
     Ok(session.project_id == scope.project_id
-        && super::assignment_thread_current(store,&scope.session_id,&intent.ticket_id)?
-        && super::assignment_role_authorized(store,&intent.ticket_id,&bot_id,attempt)?
+        && super::assignment_thread_current(store,&scope.session_id,&ticket_id)?
+        && super::assignment_role_authorized(store,&ticket_id,&bot_id,attempt)?
         && super::admitted_session_matches_profile(
-            store,&intent.ticket_id,&bot_id,"worker",&session,
+            store,&ticket_id,&bot_id,"worker",&session,
         )?)
+}
+
+/// Read-only first stage of native draft-PR authorization. No branch is pushed
+/// and no PR, effect receipt, or grant is created. Recheck native Ticket authority
+/// after remote reads, since stop/revocation may race the GitHub CLI.
+pub(crate) fn verify_draft_pull_request_target(
+    store: &Store,
+    ticket_id: &str,
+    expected_revision: i64,
+    repository: &str,
+    head: &str,
+    base: &str,
+) -> Result<String> {
+    validate_repository(repository)?;
+    if expected_revision < 0 {
+        return Err("Provide a nonnegative Ticket revision.".into());
+    }
+    let initial_scope = active_scope_for_ticket(&store.db, ticket_id, expected_revision)?
+        .ok_or_else(|| "The Ticket, revision, mandate, or active worker no longer permits this effect.".to_string())?;
+    if !effect_worker_session_current_for_ticket(store, ticket_id, expected_revision)? {
+        return Err("The Ticket worker session is no longer authorized.".into());
+    }
+    let root = store.workspace_root(&initial_scope.project_id, Some(&initial_scope.session_id))?;
+    let verified_sha = github::verify_draft_pull_request_target(
+        root.as_path(), repository, head, base,
+    )?;
+    if active_scope_for_ticket(&store.db, ticket_id, expected_revision)?.as_ref()
+        != Some(&initial_scope)
+        || !effect_worker_session_current_for_ticket(store, ticket_id, expected_revision)?
+    {
+        return Err("The active Ticket worker changed during draft PR target verification.".into());
+    }
+    Ok(verified_sha)
 }
 
 // Keep durable consent separate from current execution authority. A stored

@@ -436,6 +436,42 @@ test('child reviewer reported scores remain pending until the native child termi
   await expect(ledger).toContainText('root approval is not yet available');
   await expect(ledger).not.toContainText('Child Council · passed');
 });
+test('read-only hierarchy excludes foreign-root child receipts and pending leaf attempts', async ({ page }) => {
+  await open(page, '/?council=composition');
+  const markup = await page.evaluate(async () => {
+    const { councilReadOnlyPresenterHtml } = await import('/src/council-panel.ts');
+    const reviewer = { id: 'parent', name: 'Nested bot reviewer', status: 'waiting', council: { round: 1, lens: 'Security', score: null }, reviewerBinding: { reviewerBotId: 'nested-bot' } };
+    const leaf = (rootCycleId: string, childCycleId: string, seatId: string, score: number) => ({
+      rootCycleId, parentSeatId: 'parent', childCycleId, roundId: childCycleId + ':1',
+      seatId, reviewerId: seatId, attempt: 1, status: 'completed', score,
+    });
+    return councilReadOnlyPresenterHtml({
+      cycleId: 'root:77', findings: [], reviewReceipts: [], usage: [],
+      childReceipts: [{
+        rootCycleId: 'root:76', parentSeatId: 'parent', childCycleId: 'child:foreign-receipt',
+        botId: 'foreign-bot', artifactRevision: 'old', policyFingerprint: 'old',
+        status: 'passed', minScore: 10, leafScoreRefs: [], findingsRefs: [],
+        evidenceRefs: [], snapshotFingerprint: 'old',
+      }],
+      childLeaves: [
+        leaf('root:77', 'child:current', 'current-leaf', 8.6),
+        leaf('root:76', 'child:foreign-pending', 'foreign-leaf', 9.9),
+        leaf('root:76', 'child:current', 'old-leaf', 9.8),
+      ],
+      progress: { status: { target: 9, round: 1 }, council: { composition: { selected: [{ botId: 'nested-bot', mode: 'nested' }] } }, rounds: [{ number: 1, seats: [reviewer] }] },
+      status: { state: 'reviewing', round: 1, lowest: null, target: 9, stale: false },
+    } as any);
+  });
+  await page.evaluate(html => { const host = document.createElement('section'); host.id = 'child-cycle-isolation-test'; host.innerHTML = html; document.body.append(host); }, markup);
+  const ledger = page.locator('#child-cycle-isolation-test');
+  await expect(ledger.locator('[data-level="child-council"]')).toHaveCount(1);
+  await expect(ledger).toContainText('current-leaf');
+  await expect(ledger).not.toContainText('foreign-leaf');
+  await expect(ledger).not.toContainText('old-leaf');
+  await expect(ledger).not.toContainText('foreign-receipt');
+  await expect(ledger).not.toContainText('Child Council · passed');
+});
+
 test('verified nested leaf scores require current complete child receipt references', async ({ page }) => {
   await open(page, '/?council=composition');
   const result = await page.evaluate(async () => {

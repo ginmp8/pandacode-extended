@@ -253,7 +253,7 @@ function childCouncilHierarchyHtml(value: CouncilLedgerView, receipt: NonNullabl
 
 /** A child can be inspected while working, without synthesizing a passing receipt. */
 function pendingChildCouncilHtml(value: CouncilLedgerView, parentSeatId: string, cycleId: string): string {
-  const leaves = (value.childLeaves ?? []).filter(item => item.parentSeatId === parentSeatId && item.childCycleId === cycleId);
+  const leaves = (value.childLeaves ?? []).filter(item => item.rootCycleId === value.cycleId && item.parentSeatId === parentSeatId && item.childCycleId === cycleId);
   const rows = leaves.map(item => {
     const score = item.score == null || !Number.isFinite(item.score) ? 'Score Unknown' : `Reported score ${formatScore(item.score)} / 10`;
     return `<li><strong>${escape(item.reviewerId)} · ${escape(item.seatId)}</strong><span>${escape(item.roundId)} · ${escape(item.status)} · ${escape(score)}</span></li>`;
@@ -266,7 +266,7 @@ function councilHierarchyHtml(value: CouncilLedgerView): string {
   const lowest = status?.lowest ?? progress?.latest?.lowest ?? null, state = status?.state ?? 'Unknown';
   const score = lowest === null ? 'lowest score Unknown' : `lowest score ${formatScore(lowest)} / ${target == null ? '10' : formatScore(target)}`;
   const current = progress?.rounds.flatMap(item => item.seats) ?? [];
-  const childReceipts = value.childReceipts ?? [];
+  const childReceipts = (value.childReceipts ?? []).filter(item => item.rootCycleId === value.cycleId);
   const linkedReceipts = new Set<NonNullable<CouncilLedgerView['childReceipts']>[number]>();
   const bots = current.map(seat => {
     const botId = seat.reviewerBinding?.reviewerBotId;
@@ -280,7 +280,7 @@ function councilHierarchyHtml(value: CouncilLedgerView): string {
     ])];
     const receipts = childReceipts.filter(item => item.parentSeatId === seat.id);
     for (const receipt of receipts) linkedReceipts.add(receipt);
-    const pendingCycles = new Set((value.childLeaves ?? []).filter(item => item.parentSeatId === seat.id).map(item => item.childCycleId));
+    const pendingCycles = new Set((value.childLeaves ?? []).filter(item => item.rootCycleId === value.cycleId && item.parentSeatId === seat.id).map(item => item.childCycleId));
     for (const receipt of receipts) pendingCycles.delete(receipt.childCycleId);
     const selected = progress?.council.composition?.selected.find(item => item.botId === botId && item.mode === 'nested');
     const children = [

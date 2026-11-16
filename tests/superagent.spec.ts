@@ -351,6 +351,12 @@ test('native orchestration loading remains busy until the Team list is hydrated'
   await expect(host.getByText('Loading orchestrations…')).toBeVisible();
   await expect(host.getByRole('button',{name:'Demands / Runs'})).toBeDisabled();
   await expect(host.getByRole('searchbox',{name:'Search Teams'})).toBeDisabled();
+  await expect(host.getByRole('button',{name:'Create disabled preset'})).toBeDisabled();
+  await expect(host.getByRole('combobox',{name:'Example preset'})).toBeEnabled();
+  await expect(host.getByRole('textbox',{name:'Name',exact:true})).toBeEnabled();
+  // Dispatch an actual submit event while hydration is blocked; no native write may begin.
+  await host.locator('form[data-sa-form="create"]').dispatchEvent('submit');
+  await expect(host.getByRole('alert')).toHaveCount(0);
   await page.evaluate(() => (window as unknown as {completeNativeTeamLoad:()=>void}).completeNativeTeamLoad());
   await expect(host).toHaveAttribute('aria-busy','false');
   await expect(host.getByRole('button',{name:'Demands / Runs'})).toBeEnabled();
@@ -799,6 +805,9 @@ test('SuperAgent preset draft survives an asynchronous native list reload', asyn
     });
   });
   const host = page.locator('#sa-preset-draft-test');
+  await expect(host).toHaveAttribute('aria-busy','true');
+  await expect(host.getByRole('button',{name:'Create disabled preset'})).toBeDisabled();
+  await expect(host.getByRole('combobox',{name:'Example preset'})).toBeEnabled();
   await host.getByRole('combobox',{name:'Example preset'}).selectOption('Software Development');
   const name = host.getByRole('textbox',{name:'Name',exact:true});
   await expect(name).toHaveValue('Software Development');

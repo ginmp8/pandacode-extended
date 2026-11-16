@@ -2857,9 +2857,18 @@ pub(crate) fn headless_cancelled_assignments(
         "SELECT EXISTS(
             SELECT 1 FROM sa_assignments a
             JOIN sa_tickets t ON t.id=a.ticket_id
+            LEFT JOIN sa_mandates m ON m.ticket_id=t.id
             WHERE a.session_id=?1
               AND (a.state IN ('stopped','interrupted')
-                   OR t.state IN ('stopped','interrupted'))
+                   OR t.state IN ('stopped','interrupted')
+                   OR (a.state='running' AND (
+                       t.state!='running'
+                       OR t.active_assignment_id IS NULL
+                       OR t.active_assignment_id!=a.id
+                       OR m.ticket_id IS NULL
+                       OR m.revoked!=0
+                       OR m.policy_revision!=t.policy_revision
+                   )))
         )",
     ).map_err(|e| e.to_string())?;
     let mut cancelled = Vec::new();
@@ -6666,6 +6675,59 @@ mod tests {
         assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(
             &store, &ordinary,
         ).is_ok(), "normal bot paths cannot inherit task revocation");
+    }
+
+    #[test]
+    fn headless_poll_cancels_orphaned_or_revoked_running_native_sessions() {
+        for scenario in ["detached", "revoked", "policy-drift", "blocked"] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, admitted) = admit(
+                &mut store, &cfg.id, "Recover task-owned provider",
+                "headless-authority-loss", false,
+            ).unwrap();
+            assert!(admitted, "{scenario}");
+            let assigned = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            let worker = bots::get(&store, "worker").unwrap();
+            let ordinary = bots::thread_session(
+                &store, &worker, "desktop", "unrelated-normal-chat",
+                "Unrelated ordinary chat",
+            ).unwrap().0;
+            let active = vec![ordinary.clone(), assigned.clone(), assigned.clone()];
+            assert!(headless_cancelled_assignments(&store, &active).unwrap().is_empty());
+
+            match scenario {
+                "detached" => store.db.execute(
+                    "UPDATE sa_tickets SET active_assignment_id=NULL WHERE id=?1",
+                    [&ticket.id],
+                ).unwrap(),
+                "revoked" => store.db.execute(
+                    "UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",
+                    [&ticket.id],
+                ).unwrap(),
+                "policy-drift" => store.db.execute(
+                    "UPDATE sa_mandates SET policy_revision=policy_revision+1 WHERE ticket_id=?1",
+                    [&ticket.id],
+                ).unwrap(),
+                "blocked" => store.db.execute(
+                    "UPDATE sa_tickets SET state='blocked' WHERE id=?1",
+                    [&ticket.id],
+                ).unwrap(),
+                _ => unreachable!(),
+            };
+            assert!(read_only_policy(&store, &assigned).is_err(), "{scenario}");
+            assert_eq!(
+                headless_cancelled_assignments(&store, &active).unwrap(),
+                vec![assigned.clone()], "{scenario}",
+            );
+            assert_eq!(
+                headless_cancelled_assignments(&store, &active).unwrap(),
+                vec![assigned], "polling is read-only and idempotent: {scenario}",
+            );
+            assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(
+                &store, &ordinary,
+            ).is_ok(), "ordinary chats must not inherit task revocation: {scenario}");
+        }
     }
 
     #[test]

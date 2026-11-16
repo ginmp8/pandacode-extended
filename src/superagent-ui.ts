@@ -1289,12 +1289,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             '<button class="primary-button" type="button" data-sa-import>Confirm import</button>' : '') +
           '</section>' : '') +
       '</div></div></div>';
-    // Keep stale Team and Demand controls inert until native hydration finishes.
-    // A busy indicator alone does not prevent actions against an old snapshot.
+    // During native hydration, local-only draft fields remain editable.
+    // Stateful commands and controls must stay inert until the snapshot loads.
     if (loading) {
       host.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
         'button, input, select, textarea',
-      ).forEach(control => { control.disabled = true; });
+      ).forEach(control => {
+        const localDraft = control.matches(
+          'form[data-sa-form="create"] [data-sa-template], form[data-sa-form="create"] input[name="name"]',
+        );
+        control.disabled = !localDraft;
+      });
     }
     host.setAttribute('aria-busy', String(busy || loading));
     restoreFocusedControl(focusedControl);
@@ -2185,6 +2190,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const form = event.target;
     if (!(form instanceof HTMLFormElement) || !host.contains(form)) return;
     event.preventDefault();
+    // A synthetic submit or Enter must never bypass native hydration or busy gates.
+    if (loading || busy) return;
     const data = new FormData(form);
     if (form.dataset.saForm === 'auto-authorization') {
       const status=autoStatus;

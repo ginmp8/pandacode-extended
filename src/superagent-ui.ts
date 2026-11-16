@@ -258,7 +258,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let demandPreflight: ManualPreflight | null = null;
   let preflightObjective = '', preflightMode: 'coordinated' | 'direct' = 'coordinated';
   // Persist the user's editable preset draft across asynchronous list refreshes.
-  let draftPresetName = '', draftPresetTemplate = '';
+  let draftPresetName = '', draftPresetTemplate = '', draftWorkerAttemptLimit = 2;
   // Unsaved native Team roster; never treated as execution authority.
   let draftCoordinatorBotId = '', draftWorkerBotId = '';
   let draftAdditionalWorkerIds: string[] = [], draftReviewerBotIds: string[] = [];
@@ -1253,7 +1253,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '>Software Development</option>' +
           '<option value="Issue Resolution"' +
           (draftPresetTemplate === 'Issue Resolution' ? ' selected' : '') +
-          '>Issue Resolution</option></select></label>' +
+          '>Issue Resolution</option>' +
+          ['Economy','Balanced','Performance','Security-critical'].map(name =>
+            '<option value="' + name + '"' +
+            (draftPresetTemplate === name ? ' selected' : '') + '>' + name + '</option>'
+          ).join('') + '</select></label>' +
           '<label>Name<input name="name" maxlength="120" placeholder="Software Development" value="' +
           safe(draftPresetName) + '" required></label>' +
           '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" data-sa-create-coordinator required>' +
@@ -1268,6 +1272,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           createRoleOptions(draftAdditionalWorkerIds, true) + '</select></label>' +
           '<label>Optional Reviewers (up to 8)<select name="reviewers" data-sa-create-reviewers multiple size="5">' +
           createRoleOptions(draftReviewerBotIds, false) + '</select></label></details>' +
+          '<label>Maximum Worker attempts per Demand<select name="maxWorkerAttempts">' +
+          Array.from({length:8},(_,i)=>i+1).map(limit =>
+            '<option value="' + limit + '"' +
+            (draftWorkerAttemptLimit === limit ? ' selected' : '') + '>' +
+            limit + '</option>').join('') + '</select></label>' +
+          '<p>This cap includes the first Worker attempt. Templates suggest a cap, ' +
+          'not tools, bot assignments or automatic retries. Native strategy can ' +
+          'change it later only for a disabled, settled Team.</p>' +
           '<button class="primary-button" type="submit"' +
           (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' +
            guidedBuilder.render(bots) + overview + teamRoles + strategyPane
@@ -1296,7 +1308,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         'button, input, select, textarea',
       ).forEach(control => {
         const localDraft = control.matches(
-          'form[data-sa-form="create"] [data-sa-template], form[data-sa-form="create"] input[name="name"]',
+          'form[data-sa-form="create"] [data-sa-template], form[data-sa-form="create"] input[name="name"], form[data-sa-form="create"] select[name="maxWorkerAttempts"]',
         );
         control.disabled = !localDraft;
       });
@@ -1423,11 +1435,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     confirm = { message, action }; render();
     host.querySelector<HTMLButtonElement>('[data-sa-cancel]')?.focus();
   }
-  // Templates populate editable names only; no bot, tool or task is selected.
+  // Templates suggest a name and attempt cap, never a bot, tool or task.
   host.addEventListener('change', event => {
     const target = event.target;
     if (target instanceof HTMLSelectElement && target.closest('form[data-sa-form="create"]') &&
         !target.hasAttribute('data-sa-template')) {
+      if (target.name === 'maxWorkerAttempts') {
+        const limit = Number(target.value);
+        if (Number.isInteger(limit) && limit >= 1 && limit <= 8)
+          draftWorkerAttemptLimit = limit;
+        return;
+      }
       if (target.name === 'coordinatorBotId') draftCoordinatorBotId = target.value;
       else if (target.name === 'workerBotId') draftWorkerBotId = target.value;
       else if (target.name === 'additionalWorkers') {
@@ -1520,8 +1538,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (!(target instanceof HTMLSelectElement) || !target.hasAttribute('data-sa-template')) return;
     draftPresetTemplate = target.value;
     draftPresetName = target.value;
+    draftWorkerAttemptLimit = ['Economy','Security-critical'].includes(target.value) ? 1 :
+      ['Performance','Software Development'].includes(target.value) ? 3 : 2;
     const field = target.form?.querySelector<HTMLInputElement>('input[name="name"]');
     if (field) field.value = draftPresetName;
+    const budget = target.form?.querySelector<HTMLSelectElement>('select[name="maxWorkerAttempts"]');
+    if (budget) budget.value = String(draftWorkerAttemptLimit);
   });
   host.addEventListener('toggle', event => {
     const target = event.target;
@@ -2662,7 +2684,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         reviewerBotIds:[...draftReviewerBotIds],
         councilRequired:false,
       };
+      const maxAttemptsPerAssignment=Number(data.get('maxWorkerAttempts'));
       void work(async () => {
+        if (!Number.isInteger(maxAttemptsPerAssignment) ||
+            maxAttemptsPerAssignment < 1 || maxAttemptsPerAssignment > 8)
+          throw new Error('Choose a Worker attempt limit between 1 and 8.');
         const all=[input.coordinatorBotId,...input.workerBotIds,...input.reviewerBotIds];
         if (!input.name || all.some(id => !id) || new Set(all).size !== all.length ||
             input.workerBotIds.length > 16 || input.reviewerBotIds.length > 8) {
@@ -2673,8 +2699,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           const bot=bots.find(candidate => candidate.id === id);
           return !bot || bot.paused || (!!project && bot.projectId !== project);
         })) throw new Error('Additional Workers must be active in the primary Worker project.');
-        const created = await call<Config>('superagent_create',{ input });
-        draftPresetName=''; draftPresetTemplate='';
+        const created = await call<Config>('superagent_create',{ input,maxAttemptsPerAssignment });
+        draftPresetName=''; draftPresetTemplate=''; draftWorkerAttemptLimit=2;
         draftCoordinatorBotId=''; draftWorkerBotId='';
         draftAdditionalWorkerIds=[]; draftReviewerBotIds=[]; draftMembersExpanded=false;
         selected = created.id; workspaceView = 'runs'; await reload();

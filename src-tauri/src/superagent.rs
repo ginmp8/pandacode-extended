@@ -1209,6 +1209,24 @@ fn create_configuration_roles_with_policy(
     reviewer_bot_ids: Vec<String>,
     council_required: bool,
 ) -> Result<Orchestration> {
+    create_configuration_roles_with_attempt_policy(
+        store,input,worker_bot_ids,reviewer_bot_ids,council_required,None,
+    )
+}
+
+// Initial retry policy shares the canonical, digest-validated Team snapshot;
+// creating a Team cannot create a second policy table or runnable mandate.
+fn create_configuration_roles_with_attempt_policy(
+    store: &Store,
+    input: NewOrchestration,
+    worker_bot_ids: Vec<String>,
+    reviewer_bot_ids: Vec<String>,
+    council_required: bool,
+    max_attempts_per_assignment: Option<u8>,
+) -> Result<Orchestration> {
+    if max_attempts_per_assignment.is_some_and(|count| !(1..=8).contains(&count)) {
+        return Err("Worker attempt limit must be between 1 and 8.".into());
+    }
     let name = input.name.trim();
     if name.is_empty() || name.len() > 120 || name.chars().any(char::is_control) {
         return Err("Choose an orchestration name of at most 120 characters.".into());
@@ -1247,9 +1265,12 @@ fn create_configuration_roles_with_policy(
          VALUES(?1,?2,?3,?4,?5,?6,?6)",
         params![id,name,coordinator.id,worker_bot_ids[0],project_id,now],
     ).map_err(|e| e.to_string())?;
-    let snapshot = make_team_snapshot(&tx,&id,1,name,project_id,1,
+    let mut snapshot = make_team_snapshot(&tx,&id,1,name,project_id,1,
         &coordinator.id,&worker_bot_ids,&reviewer_bot_ids,council_required,
         TeamSnapshotProvenance::Native)?;
+    if let Some(attempts) = max_attempts_per_assignment {
+        snapshot.policy.max_attempts_per_assignment = attempts;
+    }
     insert_team_version(&tx,&snapshot)?;
     tx.commit().map_err(|e| e.to_string())?;
     configuration(store, &id)
@@ -4516,11 +4537,17 @@ pub(crate) fn invalidate_bot(
 
 
 #[tauri::command]
-pub async fn superagent_create(window: tauri::WebviewWindow, state: State<'_,AppState>, input: OrchestrationInput) -> Result<Orchestration> {
+pub async fn superagent_create(
+    window: tauri::WebviewWindow, state: State<'_,AppState>,
+    input: OrchestrationInput, max_attempts_per_assignment: Option<u8>,
+) -> Result<Orchestration> {
     require_main_window(&window)?;
     let store=state.store.lock().map_err(|e|e.to_string())?;
     let (legacy,workers,reviewers,council_required) = input.into_parts()?;
-    create_configuration_roles_with_policy(&store,legacy,workers,reviewers,council_required.unwrap_or(false))
+    create_configuration_roles_with_attempt_policy(
+        &store,legacy,workers,reviewers,council_required.unwrap_or(false),
+        max_attempts_per_assignment,
+    )
 }
 
 /// Clone only the saved versioned Team configuration. Read the source revision,
@@ -9461,6 +9488,44 @@ mod tests {
             },
             vec!["worker".into()],vec!["reviewer-a".into()],true,
         ).is_err());
+    }
+
+    #[test]
+    fn new_team_attempt_limit_is_atomic_versioned_and_disabled() {
+        let store=fixture();
+        let input=|| NewOrchestration {
+            name:"Bounded Team".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        };
+        for invalid in [0,9] {
+            assert!(create_configuration_roles_with_attempt_policy(
+                &store,input(),vec!["worker".into()],vec![],false,Some(invalid),
+            ).unwrap_err().contains("between 1 and 8"));
+        }
+        let before:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations",[],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(before,0,"invalid limits must not create a Team");
+        let team=create_configuration_roles_with_attempt_policy(
+            &store,input(),vec!["worker".into()],vec![],false,Some(3),
+        ).unwrap();
+        assert!(!team.enabled);
+        assert_eq!(team.team_version,1);
+        assert_eq!(team.policy_revision,1);
+        let snapshot=load_team_version_snapshot(&store.db,&team.id,1).unwrap();
+        assert_eq!(snapshot.policy.max_attempts_per_assignment,3);
+        assert_eq!(snapshot.policy.max_concurrent_tasks,1);
+        assert_eq!(snapshot.policy.autonomy,"off");
+        assert!(!snapshot.policy.council_required);
+        let legacy=create_configuration(&store,input()).unwrap();
+        assert_eq!(load_team_version_snapshot(&store.db,&legacy.id,1).unwrap()
+            .policy.max_attempts_per_assignment,2);
+        let reopened=Store::open_read_only(&store.path).unwrap();
+        assert_eq!(load_team_version_snapshot(&reopened.db,&team.id,1).unwrap()
+            .policy.max_attempts_per_assignment,3);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|row|row.get::<_,i64>(0),
+        ).unwrap(),0,"configuration must not create authorized work");
     }
 
     #[test]

@@ -288,3 +288,19 @@ A provider claiming to have started or completed a child cannot create a
 native assignment, expand permissions, cast a Council vote or satisfy an
 independent WorkItem acceptance. The view contains no prompts/responses or
 provider credentials. Read-only inspection does not launch any subagents.
+
+
+### Atomic initial Worker attempt limit (source PR #150, adapted)
+
+The manual Team creation form offers example strategies (Economy, Balanced,
+Performance and Security-critical) with editable suggested attempt caps.
+The native `superagent_create` command accepts optional
+`maxAttemptsPerAssignment` (1–8), retaining the legacy default of two
+when omitted. The cap is saved **inside the authoritative versioned Team
+snapshot in the same SQLite transaction** as the disabled Team and its ordered
+roles. There is no second attempt-budget table. Invalid caps or roles roll
+back without creating a Team. Template changes cannot assign bots, grant
+tools, enable Auto, dispatch an Assignment or alter previously admitted
+Demand snapshots. Follow-up changes use the existing disabled-Team strategy
+revision gate; the UI makes no promises of autonomous retry without native
+authorization.

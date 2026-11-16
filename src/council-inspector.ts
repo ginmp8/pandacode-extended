@@ -10,8 +10,16 @@ function observedDuration(label: string, ms: number | null | undefined): string 
 /** Safe read-only native projection, reusable without the task orchestrator. */
 export function councilInspectionHtml(inspection: CouncilInspection | null): string {
   if (!inspection) return '<p>No task-owned Council is available.</p>';
-  // An informational hint never overrides a stale or non-passing native state.
-  const verified = inspection.verifiedPass && inspection.status.state === 'passed' && !inspection.status.stale;
+  // Display-only hints are not approval. Require a matching native completion
+  // for this exact session/cycle, revision, round and minimum score.
+  const proof = inspection.verifiedCompletion;
+  const verified = inspection.verifiedPass && inspection.status.state === 'passed' && !inspection.status.stale
+    && proof != null && typeof proof.sessionId === 'string' && proof.sessionId.length > 0
+    && proof.cycleId === `${proof.sessionId}:${inspection.cycleStartedAt}`
+    && proof.teamRevision === inspection.teamRevision
+    && proof.round === inspection.status.round
+    && Number.isFinite(proof.lowest) && proof.lowest === inspection.status.lowest
+    && proof.lowest >= inspection.status.target;
   const verdict = inspection.status.state === 'accepted'
     ? 'Accepted by user (not a native pass)'
     : verified ? 'Verified native pass' : 'Native pass not verified';

@@ -2438,9 +2438,10 @@ fn escalated_strategy_requires_fresh_round_sessions_and_frozen_round_ceiling() {
     replay.workers[2].session_id = incomplete.workers[0].session_id.clone();
     assert_ne!(state(&replay), "passed",
         "a late high-score round cannot reuse a prior reviewer session");
-    assert!(council::finish_refusal_with_criterion_outcomes(&replay, &receipts)
-        .unwrap().contains("council_s2_terminal_blocked"),
-        "terminal completion must reject the same reused session");
+    let refusal = council::finish_refusal_with_criterion_outcomes(&replay, &receipts)
+        .expect("replayed S2 reviewer session must produce a terminal refusal");
+    assert!(refusal.contains("council_s2_terminal_blocked"),
+        "terminal completion must identify the reused session: {refusal}");
 
     let mut over_budget = team.clone();
     over_budget.config.council.as_mut().unwrap().max_rounds = 1;

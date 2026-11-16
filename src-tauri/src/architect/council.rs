@@ -2804,6 +2804,17 @@ fn composed_verdict_in(
             unverified.join(", ")
         ), false));
     }
+    // A restored final S2 round must not reuse a native reviewer session or
+    // exceed its pinned ceiling. Report this terminal authority failure before
+    // evaluating criterion/trigger data, which may be stale after recovery.
+    if config.composition.as_ref().is_some_and(|composition| {
+        composition.strategy == CouncilStrategy::Escalated
+    }) && !s2_terminal_rounds_valid(team, config, view, round) {
+        return Some((
+            "council_s2_terminal_blocked: the terminal review reused an earlier native session or exceeded its frozen round limit.".into(),
+            false,
+        ));
+    }
     let escalations = s2_escalation_signals(team, round, outcomes, findings);
     if let Some(signal) = escalations.first() {
         return Some((format!(

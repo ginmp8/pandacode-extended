@@ -64,6 +64,7 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
     });
   });
   const host = page.locator('#sa-new-team-draft');
+  await host.locator('details.sa-legacy-create summary').click();
   await expect(host.getByRole('button',{name:'Create disabled preset'})).toBeEnabled();
   await host.getByRole('textbox',{name:'Name',exact:true}).fill('Persisted roles');
   await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
@@ -71,15 +72,15 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
   await host.locator('details.sa-new-members summary').click();
   await host.locator('select[name="additionalWorkers"]').selectOption(['worker-b']);
   await host.locator('select[name="reviewers"]').selectOption(['reviewer']);
-  await host.getByRole('combobox',{name:'Team status'}).selectOption('enabled');
-  await host.getByRole('searchbox',{name:'Search Teams'}).fill('another Team');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'Teams',exact:true}).click();
   await expect(host.locator('details.sa-new-members')).toHaveAttribute('open','');
   await expect(host.locator('select[name="additionalWorkers"]')).toHaveValues(['worker-b']);
   await expect(host.locator('select[name="reviewers"]')).toHaveValues(['reviewer']);
   await expect(host.locator('select[name="coordinatorBotId"]')).toHaveValue('coordinator');
   await expect(host.locator('select[name="workerBotId"]')).toHaveValue('worker');
   await host.getByRole('button',{name:'Create disabled preset'}).click();
-  await expect(host.getByRole('button',{name:'Demands / Runs'})).toHaveAttribute('aria-current','page');
+  await expect(host.getByRole('button',{name:'Teams',exact:true})).toHaveAttribute('aria-current','page');
   const payload = await page.evaluate(() =>
     (window as unknown as {saCreateTeamPayload: Record<string, unknown>}).saCreateTeamPayload);
   expect(payload).toEqual({
@@ -101,7 +102,8 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
   const dialog=page.getByRole('region',{name:'Orchestrations'});
   await expect(dialog).toBeVisible();
-  await expect(dialog.getByText('No orchestrations created.')).toBeVisible();
+  await expect(dialog.getByRole('heading',{name:'Your first SuperAgent starts with a Team'})).toBeVisible();
+  await dialog.locator('details.sa-legacy-create summary').click();
   await dialog.getByRole('textbox',{name:'Name'}).fill('Software Development');
   const coordinator=dialog.getByRole('combobox',{name:'Coordinator'});
   const worker=dialog.getByRole('combobox',{name:'Worker'});
@@ -113,6 +115,7 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   await expect(dialog.locator('.sa-list .sa-last-activity')).toContainText('Last activity: ');
   await expect(dialog.locator('.sa-list .sa-last-activity')).not.toContainText('Unavailable');
   await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
+  await dialog.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(dialog.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await dialog.getByRole('button',{name:'Portable configuration'}).click();
   await dialog.getByRole('button',{name:'Export'}).click();
@@ -131,6 +134,7 @@ test('duplicating a native Team retains its roles but never its saved runtime au
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
+  await host.locator('details.sa-legacy-create summary').click();
   const create=host.locator('form[data-sa-form="create"]');
   await create.getByRole('textbox',{name:'Name',exact:true}).fill('Source Team');
   await create.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption({label:'Scout'});
@@ -138,6 +142,7 @@ test('duplicating a native Team retains its roles but never its saved runtime au
   await create.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(host.locator('.sa-list .sa-item')).toHaveCount(1);
 
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
   await host.getByRole('button',{name:'Duplicate as new Team'}).click();
   const prompt=host.getByRole('alertdialog',{name:'Confirm orchestration action'});
   await expect(prompt).toContainText('Tickets, source subscriptions, permissions and approvals are not copied');
@@ -146,12 +151,13 @@ test('duplicating a native Team retains its roles but never its saved runtime au
   await expect(host.locator('.sa-list')).toContainText('Source Team copy');
   await expect(host.getByRole('status').filter({hasText:'Disabled Team duplicated.'})).toBeVisible();
   await expect(host.getByRole('button',{name:'Enable manual'})).toBeVisible();
-  await expect(host).toContainText('Authenticated GitHub Auto is available only for an explicitly granted source');
+  await expect(host).toContainText('Every task needs native admission');
   await expect(host.locator('.sa-list .sa-counts')).toHaveText([
     '0 tasks · 0 running · 0 blocked',
     '0 tasks · 0 running · 0 blocked',
   ]);
 
+  await host.getByRole('button',{name:'Members and Skills'}).click();
   await host.getByRole('button',{name:'Load native members'}).click();
   await expect(host.getByRole('region',{name:'Configured Team roles'}))
     .toContainText('Scout');

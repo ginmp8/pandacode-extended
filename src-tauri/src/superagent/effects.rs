@@ -18,8 +18,21 @@ CREATE TABLE IF NOT EXISTS sa_effect_receipts (
 CREATE INDEX IF NOT EXISTS sa_effect_unresolved ON sa_effect_receipts(ticket_id,state)
  WHERE state!='applied';
 "#;
-pub(crate) const RECOVER: &str =
-    "UPDATE sa_effect_receipts SET state='uncertain',updated_at=CAST(strftime('%s','now') AS INTEGER)*1000 WHERE state='pending';";
+/// Called inside Store::open's native restart transaction. Write one
+/// attribution event per Ticket *before* quarantining pending effects, so
+/// failed audit insertion rolls back the quarantine and retry remains safe.
+/// Distinct receipt identities and payload digests stay in sa_effect_receipts;
+/// never persist raw payload or imply a remote failure/success here.
+pub(crate) const RECOVER: &str = r#"
+INSERT INTO sa_audit(ticket_id,kind,detail,at)
+ SELECT DISTINCT ticket_id,'restart_effect_uncertain',
+   'Pending external effects quarantined on restart; verify remotely before reconciliation',
+   CAST(strftime('%s','now') AS INTEGER)*1000
+ FROM sa_effect_receipts WHERE state='pending';
+UPDATE sa_effect_receipts SET state='uncertain',
+ updated_at=CAST(strftime('%s','now') AS INTEGER)*1000
+ WHERE state='pending';
+"#;
 
 #[derive(Debug, PartialEq, Eq)]
 #[cfg_attr(not(test), expect(dead_code, reason = "Reserved for authenticated external effects; native production grants remain read-only."))]
@@ -805,6 +818,97 @@ mod tests{
             params![&id,key], |r| Ok((r.get(0)?,r.get(1)?)),
         ).unwrap();
         assert_eq!(persisted, applied);
+    }
+
+    #[test]
+    fn restart_effect_quarantine_records_one_durable_audit_per_ticket_without_replay() {
+        let (store,id)=fixture();
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",[&id],
+        ).unwrap();
+        for key in ["github:issue:alpha","github:issue:beta"] {
+            assert_eq!(reserve(&store,&id,key,b"private payload never audited").unwrap(),
+                Reservation::Reserved);
+        }
+        let path=store.path.clone();
+        drop(store);
+
+        let first=Store::open(&path).unwrap();
+        let (pending,uncertain):(i64,i64)=first.db.query_row(
+            "SELECT SUM(state='pending'),SUM(state='uncertain')
+             FROM sa_effect_receipts WHERE ticket_id=?1",
+            [&id],|r|Ok((r.get(0)?,r.get(1)?)),
+        ).unwrap();
+        assert_eq!((pending,uncertain),(0,2));
+        let audit_count:i64=first.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE ticket_id=?1 AND kind='restart_effect_uncertain'",
+            [&id],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(audit_count,1,"one crash quarantine record per Ticket");
+        let details:String=first.db.query_row(
+            "SELECT detail FROM sa_audit
+             WHERE ticket_id=?1 AND kind='restart_effect_uncertain'",
+            [&id],|r|r.get(0),
+        ).unwrap();
+        assert!(details.contains("verify remotely"));
+        assert!(!details.contains("private payload"));
+        assert!(!details.contains("alpha"));
+        assert_eq!(unresolved_count(&first,&id).unwrap(),2);
+        drop(first);
+        let again=Store::open(&path).unwrap();
+        let second_count:i64=again.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE ticket_id=?1 AND kind='restart_effect_uncertain'",
+            [&id],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(second_count,1,"subsequent restarts cannot duplicate evidence");
+        assert_eq!(unresolved_count(&again,&id).unwrap(),2);
+    }
+
+    #[test]
+    fn restart_effect_audit_failure_rolls_back_quarantine_and_recovers_once() {
+        let (store,id)=fixture();
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",[&id],
+        ).unwrap();
+        assert_eq!(reserve(&store,&id,"github:issue:rollback",b"payload").unwrap(),
+            Reservation::Reserved);
+        store.db.execute_batch(
+            "CREATE TRIGGER sa_reject_restart_effect_audit
+             BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='restart_effect_uncertain'
+             BEGIN SELECT RAISE(ABORT,'test audit write denied'); END;",
+        ).unwrap();
+        let path=store.path.clone();
+        drop(store);
+        assert!(Store::open(&path).is_err(),
+            "failed audit must prevent restart quarantine from committing");
+        let read=Store::open_read_only(&path).unwrap();
+        let state:String=read.db.query_row(
+            "SELECT state FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND effect_key='github:issue:rollback'",
+            [&id],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(state,"pending","failed transaction cannot hide uncertain work");
+        let count:i64=read.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE ticket_id=?1 AND kind='restart_effect_uncertain'",
+            [&id],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(count,0);
+        drop(read);
+        let connection=rusqlite::Connection::open(&path).unwrap();
+        connection.execute_batch("DROP TRIGGER sa_reject_restart_effect_audit;").unwrap();
+        drop(connection);
+        let recovered=Store::open(&path).unwrap();
+        assert_eq!(receipt_history(&recovered,&id,10).unwrap()[0].state,"uncertain");
+        let count:i64=recovered.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE ticket_id=?1 AND kind='restart_effect_uncertain'",
+            [&id],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(count,1);
     }
 
     #[test]

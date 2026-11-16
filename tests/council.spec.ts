@@ -531,6 +531,48 @@ test('read-only hierarchy excludes foreign-root child receipts and pending leaf 
   await expect(ledger).not.toContainText('Child Council · passed');
 });
 
+test('read-only child hierarchy excludes foreign-root usage with a matching child cycle ID', async ({ page }) => {
+  await open(page, '/?council=composition');
+  const html = await page.evaluate(async () => {
+    const { councilReadOnlyPresenterHtml } = await import('/src/council-panel.ts');
+    const usage = (rootCycleId: string, reviewerId: string) => ({
+      id: rootCycleId + ':' + reviewerId, rootCycleId, childCycleId: 'child:6',
+      attemptId: reviewerId, reviewerId, seatId: reviewerId, roundId: 'child:6:1',
+      scope: 'child', phase: 'review', strategy: 'parallel', terminalStatus: 'fixing',
+      queueWaitMs: { status: 'unknown' }, elapsedMs: { status: 'unknown' },
+      retries: { status: 'unknown' }, escalations: { status: 'unknown' },
+      inputTokens: { status: 'unknown' }, outputTokens: { status: 'unknown' },
+      requestCount: { status: 'unknown' },
+      budgetConsumption: {
+        concurrentLeaves: { status: 'unknown' }, leafReviews: { status: 'unknown' },
+        estimatedCostMicros: { status: 'unknown' },
+      },
+    });
+    return councilReadOnlyPresenterHtml({
+      cycleId: 'root:9',
+      childReceipts: [{
+        rootCycleId: 'root:9', parentSeatId: 'nested-seat', childCycleId: 'child:6',
+        botId: 'nested-bot', artifactRevision: 'current', policyFingerprint: 'current',
+        status: 'fixing', minScore: null, leafScoreRefs: [], findingsRefs: [],
+        evidenceRefs: [], snapshotFingerprint: 'current',
+      }],
+      usage: [usage('root:9', 'current-leaf'), usage('foreign:8', 'foreign-leaf')],
+    } as any);
+  });
+  await page.evaluate(markup => {
+    const host = document.createElement('section');
+    host.id = 'child-usage-root-isolation';
+    host.innerHTML = markup;
+    document.body.append(host);
+  }, html);
+  const ledger = page.locator('#child-usage-root-isolation');
+  const hierarchy = ledger.locator('.council-inspector-hierarchy');
+  await expect(hierarchy).toContainText('current-leaf');
+  await expect(hierarchy).not.toContainText('foreign-leaf');
+  await expect(ledger).toContainText('Usage and hard-limit records · 1');
+  await expect(ledger).not.toContainText('foreign:8');
+});
+
 test('verified nested leaf scores require current complete child receipt references', async ({ page }) => {
   await open(page, '/?council=composition');
   const result = await page.evaluate(async () => {

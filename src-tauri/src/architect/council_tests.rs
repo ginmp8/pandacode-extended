@@ -342,6 +342,8 @@ fn native_completed_council_projection_requires_a_verified_terminal_pass() {
     assert!(council::inspection(&team, false).unwrap().verified_completion.is_none());
     let inspected = council::inspection(&team, true).unwrap();
     assert!(inspected.verified_pass);
+    assert_eq!(inspected.session_id, team.session_id);
+    assert_eq!(serde_json::to_value(&inspected).unwrap()["sessionId"], team.session_id);
     let completed = inspected.verified_completion.unwrap();
     assert_eq!(completed.session_id, team.session_id);
     assert_eq!(completed.cycle_id, format!("{}:{}", team.session_id, SINCE));

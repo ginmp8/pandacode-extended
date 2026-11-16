@@ -650,7 +650,7 @@ test('native inspector attributes reported findings to the exact reviewer and ro
 
 test('Council inspector discloses only a correlated native terminal completion', async ({ page }) => {
   const inspection = {
-    cycleStartedAt: 1000, teamRevision: 17,
+    sessionId: 'task-1', cycleStartedAt: 1000, teamRevision: 17,
     status: { state: 'passed', round: 1, lowest: 9.4, target: 9, stale: false },
     verifiedPass: true,
     verifiedCompletion: { sessionId: 'task-1', cycleId: 'task-1:1000', teamRevision: 17, round: 1, lowest: 9.4 },
@@ -667,6 +667,7 @@ test('Council inspector discloses only a correlated native terminal completion',
 for (const [tamper, receipt] of [
   ['foreign cycle', { cycleId: '<foreign-cycle>' }],
   ['foreign session', { sessionId: 'other-task' }],
+  ['foreign self-consistent task proof', { sessionId: 'other-task', cycleId: 'other-task:1000' }],
   ['foreign revision', { teamRevision: 18 }],
   ['foreign round', { round: 2 }],
   ['different minimum score', { lowest: 9.5 }],
@@ -674,7 +675,7 @@ for (const [tamper, receipt] of [
 ] as const) {
   test(`Council inspector rejects a claimed native pass with ${tamper}`, async ({ page }) => {
     const inspection = {
-      cycleStartedAt: 1000, teamRevision: 17,
+      sessionId: 'task-1', cycleStartedAt: 1000, teamRevision: 17,
       status: { state: 'passed', round: 1, lowest: 9.4, target: 9, stale: false },
       verifiedPass: true,
       verifiedCompletion: {
@@ -691,6 +692,20 @@ for (const [tamper, receipt] of [
     await expect(panel(page).locator('img')).toHaveCount(0);
   });
 }
+test('Council inspector never promotes a legacy pass without a root task identity', async ({ page }) => {
+  const inspection = {
+    cycleStartedAt: 1000, teamRevision: 17,
+    status: { state: 'passed', round: 1, lowest: 9.4, target: 9, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: { sessionId: 'task-1', cycleId: 'task-1:1000', teamRevision: 17, round: 1, lowest: 9.4 },
+    criteria: [], attempts: [],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
 test('Council inspector never promotes an unverified terminal hint', async ({ page }) => {
   const inspection = {
     cycleStartedAt: 1000, teamRevision: 17,

@@ -112,6 +112,8 @@ export interface CouncilChildReservation {
   verifiedChallengeReceipt?: CouncilVerifiedChildChallengeReceipt | null;
 }
 export interface CouncilInspection {
+  /** Native root task identity. Older builds may omit it; that disables verified-pass display. */
+  sessionId?: string;
   mode: 'm1' | 'm2' | 'm3' | 'm4' | 'm5' | 'm6' | 'm7';
   /** Configured native policy, not proof that escalation or challenge work ran. */
   strategy?: CouncilExecutionStrategy; forceEscalation?: boolean; criteriaSource?: CouncilCriteriaSource;

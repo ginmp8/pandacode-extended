@@ -496,6 +496,8 @@ pub struct CouncilVerifiedCompletion {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CouncilInspection {
+    /// Root task identity is part of the read-only inspection contract.
+    pub session_id: String,
     /// Derived root reviewer sources. A non-running nested configuration is never a pass.
     pub mode: &'static str,
     /// Configuration observed from the same native task, not proof that a phase ran.
@@ -1010,6 +1012,7 @@ pub(super) fn inspection(team: &TeamSnapshot, verified_pass: bool) -> Option<Cou
         usage_provenance: "unknown",
     }).collect();
     Some(CouncilInspection {
+        session_id: team.session_id.clone(),
         mode: config.mode(), strategy: config.strategy,
         force_escalation: config.force_escalation, criteria_source: config.criteria_source,
         cycle_started_at: team.council_since, team_revision: team.revision,

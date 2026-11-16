@@ -14,7 +14,8 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
   // for this exact session/cycle, revision, round and minimum score.
   const proof = inspection.verifiedCompletion;
   const verified = inspection.verifiedPass && inspection.status.state === 'passed' && !inspection.status.stale
-    && proof != null && typeof proof.sessionId === 'string' && proof.sessionId.length > 0
+    && proof != null && typeof inspection.sessionId === 'string' && inspection.sessionId.length > 0
+    && proof.sessionId === inspection.sessionId
     && proof.cycleId === `${proof.sessionId}:${inspection.cycleStartedAt}`
     && proof.teamRevision === inspection.teamRevision
     && proof.round === inspection.status.round

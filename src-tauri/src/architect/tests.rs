@@ -7657,6 +7657,37 @@ fn archived_or_completed_root_revokes_live_child_admission_policy_and_callback()
 }
 
 #[test]
+fn child_dispatch_rejects_paused_or_archived_root_without_consuming_leaf() {
+    for root_state in ["paused", "archived"] {
+        let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();
+        let (generation, before) = {
+            let store = state.store.lock().unwrap();
+            let child = load(&store, &child_id).unwrap().unwrap();
+            assert!(native_child_coordinator_admitted(&store, &child_id).unwrap());
+            if root_state == "paused" {
+                let mut root = load(&store, &root_id).unwrap().unwrap();
+                root.status = "paused".into();
+                save(&store, &mut root).unwrap();
+            } else {
+                store.db.execute(
+                    "UPDATE sessions SET archived=1 WHERE id=?1", [&root_id],
+                ).unwrap();
+            }
+            (child.generation, serde_json::to_value(&child).unwrap())
+        };
+        let denied = dispatch_state_runtime_test(
+            &state, &child_id, generation, "pandacode_dispatch_workers",
+            json!({"assignments":[]}),
+        ).unwrap_err();
+        assert!(denied.contains("nested Council root or parent seat is no longer active"),
+            "{root_state}: {denied}");
+        let store = state.store.lock().unwrap();
+        let after = serde_json::to_value(load(&store, &child_id).unwrap().unwrap()).unwrap();
+        assert_eq!(after, before, "{root_state}: rejected dispatch must not change child state");
+    }
+}
+
+#[test]
 fn stale_nested_council_callback_cannot_mutate_child_after_parent_revocation() {
     let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();
     assert!(nested_council_callback_current(&state.store.lock().unwrap(), &root_id),

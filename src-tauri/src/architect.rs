@@ -7600,6 +7600,11 @@ fn dispatch_as_inner(
     } else {
         team.clone()
     };
+    // A root pause or revocation must block child dispatch before preflight or
+    // any new native leaf admission. This also covers resumed stale tool calls.
+    if nested_child_link.is_some() && !native_child_coordinator_admitted(&store, sid)? {
+        return Err("reviewer_session_mismatch: nested Council root or parent seat is no longer active.".into());
+    }
     if council::composition_deadline_exceeded(&composition_root, storage::now()) {
         return Err("council_deadline_exceeded: the root Council composition deadline has elapsed; dispatch is closed.".into());
     }

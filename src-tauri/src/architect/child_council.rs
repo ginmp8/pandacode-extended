@@ -1663,7 +1663,23 @@ pub(super) fn next_leaf_launch(
 ) -> Result<Option<Launch>> {
     let Some(config) = root.config.council.as_ref() else { return Ok(None) };
     if config.nested_bot_reviewers.is_empty() { return Ok(None) }
+    // The scheduler must check the persisted root before changing a queued leaf
+    // to running. authorize_leaf checks again, but it is called after save.
+    // A paused or superseded root must never leave a launch side effect.
     require_live_root_session(store, &root.session_id)?;
+    let persisted = super::load(store, &root.session_id)?
+        .ok_or("child_council_stale: root task no longer exists.")?;
+    if !super::active(&root.status) || !super::active(&persisted.status) {
+        return Err("child_council_revoked: root task is no longer active.".into());
+    }
+    if persisted.generation != root.generation
+        || persisted.revision != root.revision
+        || persisted.council_since != root.council_since
+        || persisted.objective != root.objective
+        || persisted.config.council.as_ref() != root.config.council.as_ref()
+    {
+        return Err("child_council_stale: root snapshot changed before child launch.".into());
+    }
     let mut global_running = root.workers.iter().filter(|w|
         super::active(&w.status) || agents.contains_key(&w.session_id)).count();
     let mut children = Vec::new();

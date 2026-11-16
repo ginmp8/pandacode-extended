@@ -3784,6 +3784,42 @@ fn settled_or_archived_root_revokes_native_child_launch_and_callback_after_admis
         assert_ne!(council::status(&root).unwrap().state, "passed",
             "a closed root must not gain a synthetic child approval");
     }
+
+    // Simulate a persisted root pause while an older scheduler snapshot and
+    // a queued sibling leaf still exist. No leaf may be marked running before
+    // the native authority check, even if a caller holds the old root snapshot.
+    store.db.execute(
+        "UPDATE sessions SET archived=0,task_stage=?2 WHERE id=?1",
+        rusqlite::params![sid, previous_stage],
+    ).unwrap();
+    let mut paused = load(&store, &sid).unwrap().unwrap();
+    paused.status = "paused".into();
+    save(&store, &mut paused).unwrap();
+    let child_before_pause = serde_json::to_value(
+        load(&store, &launch.admission.parent).unwrap().unwrap()
+    ).unwrap();
+    for candidate in [&root, &paused] {
+        let denied = child_council::next_leaf_launch(
+            &store, &std::collections::HashMap::new(), candidate,
+        ).err().expect("a paused root cannot schedule a child leaf");
+        assert!(denied.contains("child_council_revoked"), "{denied}");
+        assert_eq!(serde_json::to_value(
+            load(&store, &launch.admission.parent).unwrap().unwrap()
+        ).unwrap(), child_before_pause, "denied launch must not consume a queued leaf");
+    }
+
+    // Even after resuming, an older root snapshot cannot issue reviewers:
+    // replay after a restart must load the current generation and revision.
+    let mut resumed = load(&store, &sid).unwrap().unwrap();
+    resumed.status = "running".into();
+    save(&store, &mut resumed).unwrap();
+    let denied = child_council::next_leaf_launch(
+        &store, &std::collections::HashMap::new(), &root,
+    ).err().expect("superseded root snapshots cannot dispatch child leaves");
+    assert!(denied.contains("child_council_stale"), "{denied}");
+    assert_eq!(serde_json::to_value(
+        load(&store, &launch.admission.parent).unwrap().unwrap()
+    ).unwrap(), child_before_pause, "stale snapshot cannot mutate child state");
 }
 
 #[test]

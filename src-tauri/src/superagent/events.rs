@@ -843,6 +843,19 @@ fn require_authenticated_feed_repository(raw: &serde_json::Value, repository_id:
     Ok(())
 }
 
+/// Validate a GitHub Events timestamp even for an unsupported event class.
+/// A future-dated feed item must not advance a durable Observe cursor or
+/// fabricate authenticated activity for a task-linked thread.
+fn verified_github_event_timestamp(stamp: &str) -> Result<i64> {
+    let at = chrono::DateTime::parse_from_rfc3339(stamp)
+        .map_err(|_| "Authenticated GitHub Event timestamp is invalid.")?
+        .timestamp_millis();
+    if at > storage::now().saturating_add(5 * 60 * 1000) {
+        return Err("Authenticated GitHub Event timestamp is in the future; cursor unchanged.".into());
+    }
+    Ok(at)
+}
+
 /// Verify descending GitHub event identities within a finite pagination window.
 /// The first poll may use a short page or a pre-activation timestamp as its
 /// boundary. Once a cursor is persisted, the exact prior event identity must
@@ -870,9 +883,7 @@ fn github_page_complete(
         *previous_id = Some(sequence);
         let stamp = item.get("created_at").and_then(|v| v.as_str())
             .ok_or("Authenticated GitHub Event has no timestamp.")?;
-        let at = chrono::DateTime::parse_from_rfc3339(stamp)
-            .map_err(|_| "Authenticated GitHub Event timestamp is invalid.")?
-            .timestamp_millis();
+        let at = verified_github_event_timestamp(stamp)?;
         // GitHub event IDs are sparse: an older ID proves ordering but not
         // that the persisted cursor itself was still within the fetched feed.
         // Once crossed, later pages cannot recover that exact identity.
@@ -966,8 +977,7 @@ fn github_feed_watermark(events: &[serde_json::Value], repository: &str) -> Resu
         }
         let stamp = item.get("created_at").and_then(|v| v.as_str())
             .ok_or("GitHub Events feed has no timestamp.")?;
-        chrono::DateTime::parse_from_rfc3339(stamp)
-            .map_err(|_| "GitHub Events feed timestamp is invalid.")?;
+        verified_github_event_timestamp(stamp)?;
         if newest.is_none() { newest = Some(sequence); }
         previous = Some(sequence);
     }
@@ -1051,9 +1061,7 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
     }
     let created_at = raw.get("created_at").and_then(|v| v.as_str())
         .ok_or("Authenticated GitHub event has no event timestamp.")?;
-    let at = chrono::DateTime::parse_from_rfc3339(created_at)
-        .map_err(|_| "Authenticated GitHub event timestamp is invalid.")?
-        .timestamp_millis();
+    let at = verified_github_event_timestamp(created_at)?;
     // GitHub represents comments on pull requests as IssueCommentEvents.
     // The typed issue.pull_request marker, never a title/body heuristic,
     // distinguishes PR threads from issue threads sharing the same number.
@@ -1960,6 +1968,56 @@ mod tests {
         assert_eq!(inspect_source_integrity(&reopened, &observed.id).unwrap().repository_id, None);
         assert_eq!(list_decisions(&reopened, &observed.id, 10).unwrap().len(), 1);
         assert_eq!(source(&reopened, &observed.id).unwrap().last_sequence, 5_000_072_001);
+    }
+
+    #[test]
+    fn future_dated_unmatched_github_event_cannot_advance_source_cursor() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "future-event-ticket", "orch");
+        let off = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let observed = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        link_thread(&store, &observed.id, "future-event-ticket", "issue:42").unwrap();
+        let future = (chrono::Utc::now() + chrono::Duration::minutes(10)).to_rfc3339();
+        let mut feed = serde_json::json!([
+            { "id": "5000099002", "created_at": future,
+              "type": "PushEvent", "repo": { "name": "test/fixture", "id": 101 },
+              "actor": { "login": "other-bot" }, "payload": {} },
+            { "id": "5000099001", "created_at": "2026-11-12T09:00:00Z",
+              "type": "IssuesEvent", "repo": { "name": "test/fixture", "id": 101 },
+              "actor": { "login": "trusted-bot" },
+              "payload": { "action": "opened", "issue": { "number": 42 } } }
+        ]);
+        assert!(combine_github_pages(&[feed.clone()], 0, 0).is_err());
+        assert!(poll_authenticated_events_with_repository_id(
+            &store, &observed, 0, &feed, "operator", 1, 101,
+        ).is_err(), "future unmatched events must not silently skip a source window");
+        assert_eq!(source(&store, &observed.id).unwrap().last_sequence, 0);
+        assert!(list_decisions(&store, &observed.id, 10).unwrap().is_empty());
+        assert_eq!(inspect_source_integrity(&store, &observed.id).unwrap().repository_id, None);
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id='future-event-ticket'
+             AND kind='source_context_observed'", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 0, "unverified feed must not append task context");
+
+        feed[0]["created_at"] = serde_json::json!("2026-11-12T09:00:00Z");
+        assert!(combine_github_pages(&[feed.clone()], 0, 0).is_ok());
+        let result = poll_authenticated_events_with_repository_id(
+            &store, &observed, 0, &feed, "operator", 1, 101,
+        ).unwrap();
+        assert_eq!(result.recorded, 1);
+        assert_eq!(result.last_sequence, 5_000_099_002);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(list_decisions(&reopened, &observed.id, 10).unwrap().len(), 1);
+        assert_eq!(source(&reopened, &observed.id).unwrap().last_sequence, 5_000_099_002);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id='future-event-ticket'
+             AND kind='source_context_observed'", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_mandates", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 0);
     }
 
     #[test]

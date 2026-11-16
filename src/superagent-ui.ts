@@ -262,6 +262,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let draftCoordinatorBotId = '', draftWorkerBotId = '';
   let draftAdditionalWorkerIds: string[] = [], draftReviewerBotIds: string[] = [];
   let draftMembersExpanded = false;
+  let legacySetupExpanded = false;
   const guidedBuilder = new GuidedTeamBuilder();
   let rejectingTicket = '', inspectedTicket = '';
   let inspectedAssignmentId = '';
@@ -1289,7 +1290,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '</ul></section>' : '');
     // The original manual form remains in a collapsed compatibility section.
     // The guided builder is the primary creation path and never grants authority.
-    const legacyCreate = '<details class="sa-legacy-create"><summary>Advanced: legacy manual setup</summary>' +
+    const legacyCreate = '<details class="sa-legacy-create"' +
+      (legacySetupExpanded ? ' open' : '') +
+      '><summary>Advanced: legacy manual setup</summary>' +
 '<section class="sa-pane"><h3>New manual preset</h3><form data-sa-form="create">' +
           '<label>Example preset<select data-sa-template aria-label="Example preset">' +
           '<option value="">Custom</option>' +
@@ -1580,6 +1583,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   });
   host.addEventListener('toggle', event => {
     const target = event.target;
+    if (target instanceof HTMLDetailsElement && target.classList.contains('sa-legacy-create')) {
+      legacySetupExpanded = target.open;
+    }
     if (target instanceof HTMLDetailsElement && target.classList.contains('sa-new-members')) {
       draftMembersExpanded = target.open;
     }

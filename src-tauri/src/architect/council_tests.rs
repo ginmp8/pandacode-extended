@@ -1011,6 +1011,46 @@ fn native_s2_score_trigger_requires_a_fresh_independent_review_from_the_enabled_
 }
 
 
+
+#[test]
+fn s2_incomplete_original_evidence_requires_independent_replacement_and_bounded_rounds() {
+    let mut config = on(9.0, 2, 2);
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    let mut fresh_a = seat("fresh-a", 2, Some(9.8), SINCE + 3);
+    fresh_a.council.as_mut().unwrap().lens = "lens original-a".into();
+    let mut fresh_b = seat("fresh-b", 2, Some(9.7), SINCE + 4);
+    fresh_b.council.as_mut().unwrap().lens = "lens original-b".into();
+    let team = team_with(config, vec![
+        seat("original-a", 1, Some(9.6), SINCE + 1),
+        seat("original-b", 1, Some(9.7), SINCE + 2),
+        fresh_a, fresh_b,
+    ]);
+    assert_eq!(council::status(&team).unwrap().state, "passed",
+        "a fully independent, bounded review must remain eligible");
+
+    let mut missing = team.clone();
+    missing.workers[1].council.as_mut().unwrap().score = None;
+    assert_eq!(council::status(&missing).unwrap().state, "passed",
+        "a fresh complete wave may replace incomplete original evidence");
+    let mut reused = missing.clone();
+    reused.workers[2].session_id = missing.workers[0].session_id.clone();
+    assert_ne!(council::status(&reused).unwrap().state, "passed",
+        "missing first-wave evidence must trigger fresh native session verification");
+    assert!(finish_refusal(&reused).unwrap().contains("S2 escalation reached the round limit"));
+
+    let mut over_budget = team.clone();
+    let mut excess_a = seat("excess-a", 3, Some(9.9), SINCE + 5);
+    excess_a.council.as_mut().unwrap().lens = "lens original-a".into();
+    let mut excess_b = seat("excess-b", 3, Some(9.9), SINCE + 6);
+    excess_b.council.as_mut().unwrap().lens = "lens original-b".into();
+    over_budget.workers.extend([excess_a, excess_b]);
+    assert_ne!(council::status(&over_budget).unwrap().state, "passed",
+        "restored S2 rounds beyond max_rounds cannot authorize approval");
+    over_budget.config.council.as_mut().unwrap().force_escalation = true;
+    assert_ne!(council::status(&over_budget).unwrap().state, "passed",
+        "forced S2 uses the same immutable root-round ceiling");
+}
+
 #[test]
 fn native_s2_scored_conflict_claim_triggers_fresh_independent_review() {
     let mut config = on(9.0, 3, 2);

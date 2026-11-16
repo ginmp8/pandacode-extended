@@ -1747,6 +1747,10 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
     if config.strategy != CouncilExecutionStrategy::Escalated || !config.force_escalation {
         return true;
     }
+    // A restored round beyond the frozen ceiling cannot authorize a terminal pass.
+    if view.latest > config.max_rounds {
+        return false;
+    }
     // Forced escalation is not an exception to severe-finding correction.
     // Scored severe rounds cannot count as either of the two clean passes.
     if latest_severe_report(team, view.latest)
@@ -1793,6 +1797,10 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
     if config.strategy != CouncilExecutionStrategy::Escalated || config.force_escalation {
         return true;
     }
+    // An extra persisted round cannot bypass the frozen S2 attempt budget.
+    if view.latest > config.max_rounds {
+        return false;
+    }
     // Even when no escalation was triggered, a writable, abandoned or
     // subsequently modified reviewer cannot supply native S2 approval.
     if !view.complete(view.latest) || !in_round(team, view.latest)
@@ -1803,7 +1811,11 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
         return false;
     }
     let last_trigger = (1..=view.latest).rev().find(|&round| {
-        in_round(team, round).any(|(worker, seat)| counts(worker, seat)
+        // Missing or stale original proof is itself an escalation trigger.
+        // Otherwise a later high-score wave could conceal an incomplete first
+        // review and evade the cross-round worker/session independence gate.
+        !view.complete(round) || stale(team, round)
+            || in_round(team, round).any(|(worker, seat)| counts(worker, seat)
             && seat.score.is_some_and(|score| score < config.target))
             || !criterion_blockers(team, config, round).is_empty()
             || !unverified_required_skill_checks(team, round).is_empty()

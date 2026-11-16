@@ -2125,12 +2125,15 @@ pub(super) fn parse_reported_findings(report: &str) -> Vec<ReportedFindingDraft>
 
 /// Reports are never authorization evidence. A native-bound reviewer may only
 /// display text from the exact task-owned session that received its frozen grant.
-/// Legacy unbound Council snapshots retain their original read-only projection.
+/// Only legacy automatic Council snapshots retain their original unbound projection.
+/// Selected bots (even without composition) need their task-issued native identity.
 fn current_finding_origin_is_authorized(
     store: &storage::Store, team: &TeamSnapshot, worker: &Worker,
 ) -> bool {
     let Some(binding) = worker.reviewer_binding.as_ref() else {
-        return team.config.council.as_ref().is_none_or(|config| config.composition.is_none());
+        return team.config.council.as_ref().is_none_or(|config| {
+            config.composition.is_none() && config.reviewer_bot_ids.is_empty()
+        });
     };
     if !worker.read_only || binding.validate(team, worker).is_err() {
         return false;

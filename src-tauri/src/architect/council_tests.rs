@@ -3383,6 +3383,39 @@ fn scored_report_claims_become_unverified_history_without_mutating_native_approv
 }
 
 #[test]
+fn unbound_legacy_selected_reviewers_cannot_project_foreign_session_findings() {
+    let (state, sid) = state_fixture();
+    let store = state.store.lock().unwrap();
+    let project = store.session(&sid).unwrap().project_id;
+    let foreign = store.create_session(&project, "codex", "", "full").unwrap();
+    let report = concat!(
+        r#"Council findings JSON: [{"severity":"high","category":"security","title":"Foreign report","explanation":"Another session"}]"#,
+        "\nCouncil score: 7/10",
+    );
+    store.message(&foreign.id, "assistant", report).unwrap();
+
+    let mut legacy = team_with(
+        on(9.0, 3, 2),
+        vec![seat("unbound-reviewer", 1, Some(7.0), SINCE + 1)],
+    );
+    legacy.session_id = sid;
+    legacy.workers[0].session_id = foreign.id.clone();
+    assert_eq!(council::reported_findings(&store, &legacy).len(), 1,
+        "legacy automatic Council retains its historical unbound report projection");
+
+    let mut selected = legacy.clone();
+    let config = selected.config.council.as_mut().unwrap();
+    config.reviewer_bot_ids = vec!["selected-a".into(), "selected-b".into()];
+    assert!(config.validate().is_ok(), "legacy M2 roster is still valid");
+    assert!(council::reported_findings(&store, &selected).is_empty(),
+        "an unbound selected reviewer cannot read another session's findings");
+
+    store.message(&foreign.id, "coordination", "The foreign session advanced.").unwrap();
+    assert!(council::historical_reported_findings(&store, &selected).is_empty(),
+        "the same unbound selected reviewer cannot replay foreign findings as history");
+}
+
+#[test]
 fn native_current_and_same_cycle_history_never_read_foreign_reviewer_sessions() {
     let (state, sid) = council_state(on(9.0, 3, 2));
     let store = state.store.lock().unwrap();

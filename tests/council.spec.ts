@@ -911,16 +911,25 @@ for (const used of [25, 30]) test(`at ${used} used rounds there is no empty Rais
 
 test('the tray button is settings only: no score badge, a cue dot when asking or settled', async ({ page }) => {
   await open(page, '/?council');
+  await composerSettled(page);
   await expect(button(page).locator('b')).toHaveCount(0);
   await expect(button(page)).toHaveAccessibleName('Council: Round 2 of 10 · reviewing');
-  const dot = () => button(page).locator('.council-glyph').evaluate(node => getComputedStyle(node, '::after').content !== 'none');
+  const dot = () => page.evaluate(() => {
+    const glyph = document.querySelector('.composer-council-button .council-glyph');
+    if (!glyph) return false;
+    const content = getComputedStyle(glyph, '::after').content;
+    return content !== 'none' && content !== 'normal' && content !== '';
+  });
   await expect.poll(dot).toBe(false);
   await open(page, '/?council=asking');
+  await composerSettled(page);
   await expect(button(page)).toHaveAccessibleName('Council needs you');
   await expect.poll(dot).toBe(true);
   await open(page, '/?council=passed');
+  await composerSettled(page);
   await expect.poll(dot).toBe(true);
   await open(page, '/?council=accepted');
+  await composerSettled(page);
   await expect(button(page)).toHaveAccessibleName(/^Council: Accepted/);
   await expect.poll(dot).toBe(false);
 });

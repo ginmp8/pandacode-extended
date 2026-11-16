@@ -128,3 +128,202 @@
 .sa-team-builder .sa-builder-error { color: var(--text-danger, #bb3333); }
 .sa-team-builder form dl { display: grid; grid-template-columns: minmax(7rem, 1fr) 2fr; gap: 0.4rem 1rem; }
 .sa-team-builder form dd { margin: 0; overflow-wrap: anywhere; }
+
+
+/* Native Orchestrations workspace: follows Customize's page/nav hierarchy and
+   the shared PandaCode design-system tokens. No local UI state grants authority. */
+#superagent-workspace .sa-workspace-header{padding:12px 26px 6px;border-bottom:0}
+#superagent-workspace .sa-workspace-header p{display:none}
+#superagent-workspace .sa-native-ui{max-width:1600px;margin-inline:auto;gap:0;padding:12px clamp(16px,2.3vw,38px) 40px}
+.sa-native-ui .sa-native-header{display:flex;justify-content:space-between;align-items:flex-start;
+  gap:20px;border-bottom:1px solid var(--ds-border);padding-bottom:24px}
+.sa-native-ui .sa-native-header h2{font-size:clamp(23px,2vw,32px);letter-spacing:-.035em;
+  font-weight:var(--weight-strong);line-height:1.2;margin:4px 0 8px}
+.sa-native-ui .sa-native-header p{margin:0;color:var(--muted);font-size:var(--ds-text-meta);line-height:1.5}
+.sa-native-ui .sa-eyebrow{display:block;font-size:var(--ds-text-chip);font-weight:var(--weight-medium);
+  letter-spacing:.095em;text-transform:uppercase;color:var(--muted)}
+.sa-native-ui .sa-native-header-actions{display:flex;gap:8px;align-items:center;flex-shrink:0}
+.sa-native-ui .sa-native-header-actions .primary-button{padding:0 15px;min-height:var(--ds-btn-primary-h);
+  border-radius:var(--ds-radius-control);background:var(--ds-primary-bg);color:var(--ds-primary-fg);
+  font-size:var(--ds-text-ui);font-weight:var(--weight-medium);box-shadow:var(--ds-primary-shadow)}
+.sa-native-ui .sa-native-layout{display:grid;grid-template-columns:minmax(150px,196px) minmax(0,1fr);
+  gap:clamp(20px,2.8vw,40px);padding-top:26px;align-items:start}
+.sa-native-ui .sa-directory{position:sticky;top:0;align-self:start;display:flex;flex-direction:column;
+  gap:16px;max-height:calc(100vh - 125px);overflow:auto;padding:0 2px 16px;min-width:0}
+.sa-native-ui .sa-navigation{display:flex;flex-direction:column;align-items:stretch;gap:4px;
+  padding:0;border:0;margin:0}
+.sa-native-ui .sa-nav-heading{display:block;color:var(--muted);font-size:var(--ds-text-chip);
+  font-weight:var(--weight-medium);padding:5px 12px 6px}
+.sa-native-ui .sa-nav-divider{border-top:1px solid var(--ds-border);padding-top:16px;margin-top:12px}
+.sa-native-ui .sa-navigation button{display:flex;align-items:center;justify-content:flex-start;
+  min-height:38px;border:0;border-radius:var(--ds-radius-inner);padding:0 12px;background:transparent;
+  color:var(--muted);font-weight:var(--weight-medium);font-size:var(--ds-text-ui);text-align:left}
+.sa-native-ui .sa-navigation button:hover{background:var(--ds-row-hover);color:var(--text)}
+.sa-native-ui .sa-navigation button[aria-current="page"]{background:var(--ds-fill-hover);
+  color:var(--text);font-weight:var(--weight-medium)}
+.sa-native-ui .sa-team-picker{border-top:1px solid var(--ds-border);padding:17px 8px 0;
+  display:grid;gap:10px;min-width:0}
+.sa-native-ui .sa-team-picker h3{font-size:var(--ds-text-meta);font-weight:var(--weight-medium)}
+.sa-native-ui .sa-team-picker label{display:grid;gap:5px;color:var(--muted);
+  font-size:var(--ds-text-chip);min-width:0}
+.sa-native-ui .sa-team-picker input,.sa-native-ui .sa-team-picker select{width:100%;
+  min-width:0;height:34px;padding:0 9px;border:1px solid var(--ds-border);
+  border-radius:var(--ds-radius-control);background:var(--ds-track);font-size:var(--ds-text-meta)}
+.sa-native-ui .sa-team-picker p{margin:0;font-size:var(--ds-text-chip);line-height:1.4}
+.sa-native-ui .sa-team-picker .sa-list{gap:5px}
+.sa-native-ui .sa-team-picker .sa-item{display:flex;flex-wrap:wrap;gap:5px;
+  border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner);
+  padding:10px;background:var(--ds-card)}
+.sa-native-ui .sa-team-picker .sa-item>div{min-width:0;width:100%}
+.sa-native-ui .sa-team-picker .sa-item>div strong{font-size:var(--ds-text-meta)}
+.sa-native-ui .sa-team-picker .sa-item small{font-size:var(--ds-text-chip)}
+.sa-native-ui .sa-team-picker .sa-item>button{font-size:var(--ds-text-chip);
+  border:1px solid var(--ds-border);border-radius:var(--ds-radius-control);padding:4px 9px}
+.sa-native-ui .sa-team-picker .sa-item>button[aria-current="true"]{background:var(--ds-fill-hover)}
+.sa-native-ui .sa-stage{min-width:0;display:flex;flex-direction:column;gap:16px;padding:4px 0 55px}
+.sa-native-ui .sa-stage .sa-pane{max-width:none;background:var(--ds-card);
+  border-color:var(--ds-border);box-shadow:var(--ds-shadow-card);border-radius:var(--ds-radius-card);
+  padding:17px 19px}
+.sa-native-ui .sa-native-first-use{padding:clamp(18px,3vw,35px);
+  border:1px solid var(--ds-border);border-radius:var(--ds-radius-card);background:var(--ds-card);
+  display:flex;flex-direction:column;align-items:flex-start;gap:12px}
+.sa-native-ui .sa-native-first-use .sa-first-use-icon{width:42px;height:42px;display:grid;place-items:center;
+  border-radius:var(--ds-radius-inner);font-size:24px;background:var(--ds-fill-hover);
+  border:1px solid var(--ds-border)}
+.sa-native-ui .sa-native-first-use h3{font-size:var(--ds-text-title);letter-spacing:-.02em}
+.sa-native-ui .sa-native-first-use p{max-width:590px;margin:0;color:var(--muted);
+  font-size:var(--ds-text-meta);line-height:1.55}
+.sa-native-ui .sa-first-use-steps{list-style:none;margin:8px 0 2px;padding:0;display:grid;
+  grid-template-columns:repeat(3,minmax(0,1fr));gap:13px;width:100%}
+.sa-native-ui .sa-first-use-steps li{display:flex;flex-direction:column;gap:6px;
+  padding:12px 12px 12px 0;min-width:0}
+.sa-native-ui .sa-first-use-steps li strong{font-size:var(--ds-text-meta);font-weight:var(--weight-medium)}
+.sa-native-ui .sa-first-use-steps li span{font-size:var(--ds-text-chip);color:var(--muted);line-height:1.5}
+.sa-native-ui .sa-native-first-use+.sa-team-builder-launch{padding:0}
+.sa-native-ui .sa-native-first-use+.sa-team-builder-launch button{padding:0 14px;
+  min-height:36px;background:var(--ds-primary-bg);color:var(--ds-primary-fg);
+  border-radius:var(--ds-radius-control);font-size:var(--ds-text-ui);font-weight:var(--weight-medium)}
+.sa-native-ui .sa-native-first-use+.sa-team-builder-launch p{display:none}
+.sa-native-ui .sa-team-landing{display:flex;flex-direction:column;gap:17px}
+.sa-native-ui .sa-native-section-heading h3{font-size:var(--ds-text-title);letter-spacing:-.02em}
+.sa-native-ui .sa-native-section-heading p{font-size:var(--ds-text-meta);color:var(--muted);margin:5px 0 0}
+.sa-native-ui .sa-team-tabs{display:flex;gap:20px;border-bottom:1px solid var(--ds-border);
+  min-width:0;overflow-x:auto}
+.sa-native-ui .sa-team-tabs button{padding:10px 2px;border:0;border-bottom:2px solid transparent;
+  background:transparent;color:var(--muted);font-size:var(--ds-text-ui);
+  font-weight:var(--weight-medium);white-space:nowrap}
+.sa-native-ui .sa-team-tabs button[aria-current="page"]{border-bottom-color:var(--text);color:var(--text)}
+.sa-native-ui .sa-native-overview{display:flex;flex-direction:column;gap:18px}
+.sa-native-ui .sa-native-team-head{display:flex;align-items:flex-start;justify-content:space-between;
+  gap:16px;flex-wrap:wrap}
+.sa-native-ui .sa-native-team-head h3{font-size:var(--ds-text-lead)}
+.sa-native-ui .sa-native-team-head p{font-size:var(--ds-text-meta);margin:5px 0 0;color:var(--muted)}
+.sa-native-ui .sa-native-team-head .sa-actions button{border:1px solid var(--ds-border);
+  border-radius:var(--ds-radius-control);padding:6px 10px;background:var(--ds-raised);
+  font-size:var(--ds-text-meta)}
+.sa-native-ui .sa-native-team-head .sa-actions button.primary-button{background:var(--ds-primary-bg);
+  color:var(--ds-primary-fg);border-color:var(--ds-primary-bg)}
+.sa-native-ui .sa-status-pill{display:inline-flex;align-items:center;color:var(--muted);
+  font-size:var(--ds-text-chip);line-height:20px;padding:1px 7px;white-space:nowrap;
+  border:1px solid var(--ds-border);background:var(--ds-fill);border-radius:var(--ds-radius-chip)}
+.sa-native-ui .sa-native-note{padding:10px 12px;background:var(--ds-fill);
+  border-radius:var(--ds-radius-inner);font-size:var(--ds-text-meta);color:var(--muted)}
+.sa-native-ui .sa-native-roster{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(235px,1fr);
+  gap:14px}
+.sa-native-ui .sa-native-roster-list h4,.sa-native-ui .sa-native-member-inspector h4{
+  margin:0 0 12px;font-size:var(--ds-text-meta);font-weight:var(--weight-medium)}
+.sa-native-ui .sa-native-roster-list .sa-list{gap:5px}
+.sa-native-ui .sa-native-roster-list .sa-list>li{list-style:none;margin:0}
+.sa-native-ui .sa-native-member{display:flex;gap:11px;align-items:center;width:100%;text-align:left;
+  border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner);background:var(--ds-card-inner);
+  padding:10px;font-size:var(--ds-text-ui)}
+.sa-native-ui .sa-native-member:hover,.sa-native-ui .sa-native-member[aria-pressed="true"]{
+  background:var(--ds-fill-hover)}
+.sa-native-ui .sa-native-member[aria-pressed="true"]{border-color:var(--ds-border-strong)}
+.sa-native-ui .sa-member-avatar{width:35px;height:35px;border-radius:50%;display:grid;place-items:center;
+  flex-shrink:0;background:var(--ds-fill-hover);border:1px solid var(--ds-border);
+  color:var(--text);font-size:var(--ds-text-head);font-weight:var(--weight-strong)}
+.sa-native-ui .sa-member-label{display:flex;flex-direction:column;gap:4px;min-width:0;flex:1}
+.sa-native-ui .sa-member-label strong{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:var(--ds-text-ui);font-weight:var(--weight-medium)}
+.sa-native-ui .sa-member-label small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+  font-size:var(--ds-text-chip);color:var(--muted)}
+.sa-native-ui .sa-native-member-inspector{padding:15px;border:1px solid var(--ds-border);
+  border-radius:var(--ds-radius-inner);background:var(--ds-card-inner)}
+.sa-native-ui .sa-native-member-inspector>strong{display:block;margin:0 0 15px;font-size:var(--ds-text-head)}
+.sa-native-ui .sa-native-member-inspector dl{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.35fr);
+  gap:11px;margin:0}
+.sa-native-ui .sa-native-member-inspector dt,.sa-native-ui .sa-native-member-inspector dd{
+  margin:0;min-width:0;overflow-wrap:anywhere;font-size:var(--ds-text-chip)}
+.sa-native-ui .sa-native-member-inspector dt{color:var(--muted)}
+.sa-native-ui .sa-native-member-inspector p{font-size:var(--ds-text-chip);line-height:1.5;margin:14px 0 0}
+.sa-native-ui .sa-native-policy-line{display:flex;gap:8px 20px;flex-wrap:wrap;padding-top:12px;
+  border-top:1px solid var(--ds-border);font-size:var(--ds-text-chip);color:var(--muted)}
+.sa-native-ui .sa-legacy-create{margin-top:14px;border-top:1px solid var(--ds-border);padding-top:15px}
+.sa-native-ui .sa-legacy-create>summary{font-size:var(--ds-text-chip);color:var(--muted);cursor:pointer}
+.sa-native-ui .sa-legacy-create>section{margin-top:12px}
+.sa-native-ui .sa-team-builder{padding:18px 22px}
+.sa-native-ui .sa-builder-layout{display:grid;grid-template-columns:minmax(130px,200px) minmax(0,1fr);
+  gap:22px;margin-top:12px}
+.sa-native-ui .sa-builder-step-list{display:flex;flex-direction:column;gap:8px;list-style:none;
+  margin:0;padding:0}
+.sa-native-ui .sa-builder-step-list li{display:flex;align-items:center;gap:9px;padding:9px;
+  font-size:var(--ds-text-meta);border-radius:var(--ds-radius-control);color:var(--muted)}
+.sa-native-ui .sa-builder-step-list li.current{background:var(--ds-fill-hover);color:var(--text)}
+.sa-native-ui .sa-builder-step-list li span{display:grid;place-items:center;width:22px;height:22px;
+  border:1px solid var(--ds-border-strong);border-radius:50%;font-size:var(--ds-text-chip);flex:none}
+.sa-native-ui .sa-team-builder form{margin:0}
+.sa-native-ui .sa-team-builder form section[aria-label="Team setup step"]{gap:12px}
+.sa-native-ui .sa-team-builder form label{font-size:var(--ds-text-meta)}
+.sa-native-ui .sa-team-builder form :is(input,select,textarea){background:var(--ds-track);
+  border:1px solid var(--ds-border);border-radius:var(--ds-radius-control);font-size:var(--ds-text-ui);
+  min-height:35px;padding:7px 10px}
+.sa-native-ui .sa-team-builder form input[type=checkbox]{min-height:auto;width:16px}
+.sa-native-ui .sa-team-builder .sa-actions{padding-top:14px;justify-content:flex-end}
+.sa-native-ui .sa-team-builder .sa-actions button{min-height:34px;padding:0 13px;
+  border:1px solid var(--ds-border);border-radius:var(--ds-radius-control);background:var(--ds-raised);
+  font-size:var(--ds-text-ui)}
+.sa-native-ui .sa-team-builder .sa-actions button[data-sa-builder-next]{background:var(--ds-primary-bg);
+  color:var(--ds-primary-fg);border-color:var(--ds-primary-bg)}
+.sa-native-ui .sa-global-demands :is(form[data-sa-form="demand-search"],form[data-sa-form="demand-project-filter"]){
+  display:flex;flex-direction:row;flex-wrap:wrap;align-items:flex-end;gap:9px}
+.sa-native-ui .sa-global-demands :is(form[data-sa-form="demand-search"],form[data-sa-form="demand-project-filter"]) label{
+  width:min(390px,100%);flex:1}
+.sa-native-ui .sa-global-demands :is(form[data-sa-form="demand-search"],form[data-sa-form="demand-project-filter"]) button{
+  border:1px solid var(--ds-border);padding:7px 11px;border-radius:var(--ds-radius-control);
+  background:var(--ds-raised);font-size:var(--ds-text-meta)}
+.sa-native-ui .sa-global-demands .sa-demand-layout-toggle button{
+  font-size:var(--ds-text-meta);border-radius:var(--ds-radius-control)}
+.sa-native-ui .sa-global-demands .sa-demand-card{background:var(--ds-card-inner);
+  border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner);padding:12px}
+.sa-native-ui .sa-global-demands .sa-demand-column{background:var(--ds-card);border-radius:var(--ds-radius-card)}
+.sa-native-ui .sa-global-demands .sa-demand-column .sa-tickets{gap:6px}
+.sa-native-ui .sa-global-demands .sa-demand-card>button{font-size:var(--ds-text-chip);
+  border:1px solid var(--ds-border);border-radius:var(--ds-radius-control);padding:6px 9px}
+@media(min-width:1500px){.sa-native-ui .sa-demand-board{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:1100px){
+  .sa-native-ui .sa-native-roster{grid-template-columns:minmax(0,1fr)}
+  .sa-native-ui .sa-native-layout{gap:20px}
+}
+@media(max-width:850px){
+  #superagent-workspace .sa-native-ui{padding:14px 16px 28px}
+  .sa-native-ui .sa-native-layout{grid-template-columns:minmax(0,1fr);gap:15px;padding-top:14px}
+  .sa-native-ui .sa-directory{position:static;max-height:none;overflow:visible}
+  .sa-native-ui .sa-navigation{flex-direction:row;flex-wrap:wrap;gap:5px}
+  .sa-native-ui .sa-nav-heading{flex-basis:100%;padding-top:7px}
+  .sa-native-ui .sa-nav-divider{margin-top:5px}
+  .sa-native-ui .sa-navigation button{min-height:35px;border:1px solid var(--ds-border);padding:0 10px}
+  .sa-native-ui .sa-team-picker{display:grid;grid-template-columns:1fr 1fr;align-items:end}
+  .sa-native-ui .sa-team-picker .sa-list{grid-column:1/-1}
+  .sa-native-ui .sa-team-picker>p{grid-column:1/-1}
+  .sa-native-ui .sa-first-use-steps{grid-template-columns:1fr}
+  .sa-native-ui .sa-first-use-steps li{padding:4px 0}
+}
+@media(max-width:550px){
+  .sa-native-ui .sa-native-header{flex-direction:column}
+  .sa-native-ui .sa-native-header-actions{align-self:stretch}
+  .sa-native-ui .sa-builder-layout{grid-template-columns:minmax(0,1fr)}
+  .sa-native-ui .sa-native-member-inspector dl{grid-template-columns:minmax(0,1fr)}
+  .sa-native-ui .sa-team-picker{grid-template-columns:minmax(0,1fr)}
+  .sa-native-ui .sa-team-picker .sa-list,.sa-native-ui .sa-team-picker>p{grid-column:1}
+}

@@ -176,6 +176,7 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
 });
 
 test('settled Team role edit uses one native revision-bound mutation without dispatch', async ({page}) => {
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {
     const {mountSuperagent}=await import('/src/superagent-ui.ts');
@@ -226,6 +227,43 @@ test('settled Team role edit uses one native revision-bound mutation without dis
   expect(calls.filter(item=>item.command==='superagent_submit'||
     item.command==='superagent_set_enabled'||item.command==='superagent_dispatch_worker'))
     .toHaveLength(0);
+});
+
+test('native Team hydration holds controls until the current projection is ready', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-delayed-native-hydration';
+    document.body.appendChild(host);
+    let release!:()=>void;
+    const pending=new Promise<void>(resolve => { release=resolve; });
+    (window as unknown as {releaseTeamHydration:()=>void}).releaseTeamHydration=release;
+    mountSuperagent(host,async command => {
+      if(command==='bots_list')return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list') {
+        await pending;
+        return [{id:'team',name:'Native Team',coordinatorBotId:'coordinator',
+          workerBotId:'worker',enabled:false,policyRevision:3}] as never;
+      }
+      if(command==='superagent_tickets')return [] as never;
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-delayed-native-hydration');
+  await expect(host).toHaveAttribute('aria-busy','true');
+  await expect(host.getByRole('button',{name:'Demands / Runs'})).toBeDisabled();
+  await expect(host.getByRole('searchbox',{name:'Search Teams'})).toBeDisabled();
+  await page.evaluate(() =>
+    (window as unknown as {releaseTeamHydration:()=>void}).releaseTeamHydration());
+  await expect(host).toHaveAttribute('aria-busy','false');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await expect(host.getByRole('textbox',{name:'Preset title'})).toHaveValue('Native Team');
+  await expect(host.getByRole('combobox',{name:'Edit coordinator'})).toHaveValue('coordinator');
 });
 
 test('native SuperAgent clears tickets when switching presets after a failed read', async ({ page }) => {

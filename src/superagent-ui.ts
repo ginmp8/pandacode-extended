@@ -783,7 +783,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             '<button class="primary-button" type="button" data-sa-import>Confirm import</button>' : '') +
           '</section>' : '') +
       '</div></div></div>';
-    host.setAttribute('aria-busy', String(busy));
+    // Native reloads replace the entire workspace. Keep controls inert
+    // until the current snapshot has arrived; otherwise inputs can be edited
+    // while their backing Team/Run state is still being replaced.
+    if (loading) {
+      host.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
+        'button, input, select, textarea',
+      ).forEach(control => { control.disabled = true; });
+    }
+    host.setAttribute('aria-busy', String(busy || loading));
   }
   async function refreshTicketDetails(): Promise<void> {
     const id = inspectedTicket;

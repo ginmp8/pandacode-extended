@@ -613,14 +613,30 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
         Ok(at) => team.changed_at = at,
         Err(error) => eprintln!("Reading team {} changes: {error}", team.session_id),
     }
-    let mut projected = if team.config.council.as_ref()
-        .is_some_and(|config| !config.nested_bot_reviewers.is_empty())
-    {
-        authenticated_hierarchical_status(store, team)
-            .or_else(|| council::status(team))
+    let hierarchical = team.config.council.as_ref()
+        .is_some_and(|config| !config.nested_bot_reviewers.is_empty());
+    let authenticated = if hierarchical { authenticated_hierarchical_status(store, team) }
+        else { None };
+    let native_pass = authenticated.as_ref().is_some_and(|status| status.state == "passed");
+    let mut projected = if hierarchical {
+        authenticated.or_else(|| council::status(team))
     } else {
         council::status(team)
     };
+    // A legacy score projection cannot stand in for a revoked, interrupted or
+    // missing native child receipt. Preserve a useful non-pass status in the
+    // inspector, but never display a fallback as authenticated approval.
+    if hierarchical && !native_pass
+        && projected.as_ref().is_some_and(|status| status.state == "passed")
+    {
+        if let Some(status) = &mut projected {
+            status.state = "blocked".into();
+            status.stale = true;
+            status.notice = Some(
+                "Native child Council evidence is missing or revoked; a scored projection cannot approve this task.".into(),
+            );
+        }
+    }
     // Selected M2 and composed M3 scores are not approval authority until
     // their persisted native grants and callbacks have been reauthenticated.
     if team.config.council.as_ref().is_some_and(|config| matches!(config.mode(), "m2" | "m3"))

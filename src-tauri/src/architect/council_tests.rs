@@ -4393,11 +4393,20 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     assert_eq!(composite.state, "passed");
     assert_eq!(authenticated_hierarchical_status(&store, &root)
         .as_ref().map(|status| status.state.as_str()), Some("passed"));
+    let mut live_projection = root.clone();
+    refresh_council(&store, &mut live_projection);
+    assert_eq!(live_projection.council_status.as_ref()
+        .map(|status| status.state.as_str()), Some("passed"));
     // A restart-interrupted root must not display a passed Council merely
     // because its previous child composite receipts still exist in storage.
     let previous_status = store.session(&sid).unwrap().status;
     store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1", [&sid]).unwrap();
     assert!(authenticated_hierarchical_status(&store, &root).is_none());
+    let mut interrupted_projection = root.clone();
+    refresh_council(&store, &mut interrupted_projection);
+    assert_ne!(interrupted_projection.council_status.as_ref()
+        .map(|status| status.state.as_str()), Some("passed"),
+        "an interrupted task must never expose cached composite approval");
     store.db.execute(
         "UPDATE sessions SET status=?2 WHERE id=?1",
         rusqlite::params![sid, previous_status],

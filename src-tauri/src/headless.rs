@@ -397,10 +397,20 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 // Read-only global queue, no startup recovery or task dispatch.
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
-                    .and_then(|dir| crate::superagent::list_headless_all_demands_project_searched(
-                        &dir.join("kingcode.sqlite3"), state, *before_updated_at,
-                        before_id.as_deref(), search_query.as_deref(), project_id.as_deref(),
-                    ));
+                    .and_then(|dir| {
+                        let db = dir.join("kingcode.sqlite3");
+                        if let Some(project) = project_id.as_deref() {
+                            crate::superagent::list_headless_all_demands_project_searched(
+                                &db, state, *before_updated_at, before_id.as_deref(),
+                                search_query.as_deref(), Some(project),
+                            )
+                        } else {
+                            crate::superagent::list_headless_all_demands_searched(
+                                &db, state, *before_updated_at, before_id.as_deref(),
+                                search_query.as_deref(),
+                            )
+                        }
+                    });
                 match result {
                     Ok(page) => { println!("{page}"); std::process::exit(0) }
                     Err(error) => {
@@ -418,10 +428,22 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     .map_err(|e| e.to_string())
                     .and_then(|dir| {
                         let db = dir.join("kingcode.sqlite3");
-                        crate::superagent::list_headless_team_demands_project_searched(
-                            &db, orchestration_id, state, *before_updated_at,
-                            before_id.as_deref(), search_query.as_deref(), project_id.as_deref(),
-                        )
+                        if let Some(project) = project_id.as_deref() {
+                            crate::superagent::list_headless_team_demands_project_searched(
+                                &db, orchestration_id, state, *before_updated_at,
+                                before_id.as_deref(), search_query.as_deref(), Some(project),
+                            )
+                        } else if let Some(query) = search_query.as_deref() {
+                            crate::superagent::list_headless_team_demands_searched(
+                                &db, orchestration_id, state, *before_updated_at,
+                                before_id.as_deref(), Some(query),
+                            )
+                        } else {
+                            crate::superagent::list_headless_team_demands(
+                                &db, orchestration_id, state, *before_updated_at,
+                                before_id.as_deref(),
+                            )
+                        }
                     });
                 match result {
                     Ok(page) => { println!("{page}"); std::process::exit(0) }

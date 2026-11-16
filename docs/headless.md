@@ -519,7 +519,12 @@ credentials, effect keys and private audit details are not returned.
 Use `pandacode serve --list-demands <state>` to page native Ticket status
 across all Teams, with `all` or an exact native state. Append
 `--before <beforeUpdatedAt> <beforeId>` and optionally
-`--search "objective fragment"` to filter before the 200-item page limit.
+`--search "objective fragment"` and/or `--project <admitted-project-id>`
+to filter before the 200-item page limit. Search and project may appear in
+either order following the optional cursor. The Project filter uses each
+Ticket's immutable admitted project, not the Team's current project; this
+supports archived Project IDs. IDs are bounded ASCII alphanumeric, hyphen or
+underscore, and the same filters must be retained across cursor pages.
 Results include each Ticket ID, Team ID, state, revision, timestamp and
 `nextCursor`; objectives, search terms, actors, sessions, mandates and evidence
 are withheld. The query opens SQLite read-only and cannot launch providers,
@@ -548,6 +553,12 @@ ASCII-case-insensitive and limited to 128 UTF-8 bytes. JSON includes
 `searchApplied` but never returns search phrases or matching objectives.
 Avoid sensitive phrases in CLI arguments, since process listings and shell
 history may expose them. Omitting `--search` preserves the previous view.
+Add `--project <admitted-project-id>` to filter using the original Project ID
+recorded on a Ticket, even if the Team was later reconfigured. Search and
+project can be supplied in either order following the optional `--before`.
+Unknown projects return an empty page, while invalid IDs fail closed.
+`projectFilterApplied` indicates use of a Project filter without echoing its
+value. Omitting `--project` retains the legacy native query path.
 This is observational only: it reuses the native state/Team filter before
 pagination and opens SQLite read-only without running startup recovery,
 granting permissions, admitting assignments or replaying external effects.

@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 60;
+pub const SCHEMA_VERSION: i64 = 61;
 pub(crate) const COUNCIL_REVIEW_SNAPSHOT_DIRECTORY: &str = "council-review-snapshots";
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
@@ -965,6 +965,31 @@ impl Store {
                     .map_err(|e|e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=60;")
                     .map_err(|e|e.to_string())?;
+            }
+            if version < 61 {
+                // PR #150 and #151 used overlapping schema version ranges.
+                // A database from the newer lineage can therefore already be
+                // above v45 while still missing the Worker write tables. Reconcile
+                // them before startup recovery queries the receipt table.
+                migration.execute_batch(crate::superagent::write_grants::SCHEMA)
+                    .map_err(|e| e.to_string())?;
+                let has_project_root: bool = migration.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_worker_write_grants') WHERE name='project_root')",
+                    [], |row| row.get(0),
+                ).map_err(|e| e.to_string())?;
+                if !has_project_root {
+                    migration.execute_batch(
+                        "ALTER TABLE sa_worker_write_grants ADD COLUMN project_root TEXT NOT NULL DEFAULT '';",
+                    ).map_err(|e| e.to_string())?;
+                }
+                // A legacy grant without its exact checkout root cannot safely
+                // retain write authority after this schema reconciliation.
+                migration.execute_batch(
+                    "UPDATE sa_worker_write_grants SET revoked=1,
+                     revoked_at=COALESCE(revoked_at,created_at)
+                     WHERE revoked=0 AND project_root='';
+                     PRAGMA user_version=61;",
+                ).map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
         }

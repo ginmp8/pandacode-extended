@@ -1331,7 +1331,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         safe(confirm.message) + '</p><div class="sa-actions"><button type="button" data-sa-cancel>Cancel</button>' +
         '<button class="primary-button" type="button" data-sa-confirm>Confirm</button></div></section>' : '') +
       '<div class="sa-layout sa-native-layout"><aside class="sa-directory" ' +
-      'aria-label="Orchestrations navigation">' + navigation + '</aside><main class="sa-stage">' +
+      'aria-label="Orchestrations navigation">' + navigation + '</aside><div class="sa-stage" role="region" aria-label="Orchestration content">' +
       (workspaceView === 'teams'
         ? (guidedBuilder.isOpen()
           ? guidedBuilder.render(bots)
@@ -1361,7 +1361,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             preview.unchanged.length + ' unchanged. Imported presets will be disabled.</p>' +
             '<button class="primary-button" type="button" data-sa-import>Confirm import</button>' : '') +
           '</section>' : '') +
-      '</main></div></div>';
+      '</div></div></div>';
     // Include native list hydration: mutation busy alone does not signal readiness.
     host.setAttribute('aria-busy', String(busy || loading));
     restoreFocusedControl(focusedControl);

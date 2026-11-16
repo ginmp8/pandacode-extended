@@ -1355,6 +1355,7 @@ pub struct DemandQuery {
     orchestration_id: Option<String>,
     state_filter: Option<String>,
     search_query: Option<String>,
+    project_id: Option<String>,
 }
 
 /// Bounded cross-Team demand index for the trusted local workspace. The
@@ -1403,6 +1404,33 @@ fn list_all_demands_page_searched(
     store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
     orchestration_id: Option<&str>, state_filter: Option<&str>, search_query: Option<&str>,
 ) -> Result<Vec<DemandIndex>> {
+    list_all_demands_page_for_project(
+        store, limit, before_updated_at, before_id, DemandPageFilters {
+            orchestration_id, state_filter, search_query, project_id: None,
+        },
+    )
+}
+
+struct DemandPageFilters<'a> {
+    orchestration_id: Option<&'a str>,
+    state_filter: Option<&'a str>,
+    search_query: Option<&'a str>,
+    project_id: Option<&'a str>,
+}
+
+/// Scope by each Ticket's admitted project, before keyset pagination.
+fn list_all_demands_page_for_project(
+    store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
+    filters: DemandPageFilters<'_>,
+) -> Result<Vec<DemandIndex>> {
+    let DemandPageFilters { orchestration_id, state_filter, search_query, project_id } = filters;
+    if let Some(id) = project_id {
+        if id.is_empty() || id.len() > 128
+            || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()
+                || matches!(byte, b'-' | b'_')) {
+            return Err("Demand project filter requires a bounded native project ID.".into());
+        }
+    }
     if let Some(search) = search_query {
         if search.is_empty() || search.len()>128 || search.trim()!=search
             || search.chars().any(char::is_control) {
@@ -1444,9 +1472,10 @@ fn list_all_demands_page_searched(
            AND (?4 IS NULL OR t.orchestration_id=?4)
            AND (?5 IS NULL OR t.state=?5)
            AND (?6 IS NULL OR instr(lower(t.objective),lower(?6)) > 0)
+           AND (?7 IS NULL OR t.project_id=?7)
          ORDER BY t.updated_at DESC,t.id DESC LIMIT ?1",
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id,state_filter,search_query], |row| Ok(DemandIndex {
+    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id,state_filter,search_query,project_id], |row| Ok(DemandIndex {
         id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
         state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
         project_id: row.get(6)?,
@@ -4786,16 +4815,22 @@ pub async fn superagent_all_demands(
     query: Option<DemandQuery>,
 ) -> Result<Vec<DemandIndex>> {
     require_main_window(&window)?;
-    let (limit, before_updated_at, before_id, orchestration_id, state_filter, search_query) =
+    let (limit, before_updated_at, before_id, orchestration_id, state_filter, search_query, project_id) =
         if let Some(q) = query {
-            (q.limit, q.before_updated_at, q.before_id, q.orchestration_id, q.state_filter, q.search_query)
+            (q.limit, q.before_updated_at, q.before_id, q.orchestration_id, q.state_filter,
+                q.search_query, q.project_id)
         } else {
-            (limit, before_updated_at, before_id, orchestration_id, state_filter, None)
+            (limit, before_updated_at, before_id, orchestration_id, state_filter, None, None)
         };
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    list_all_demands_page_searched(
+    list_all_demands_page_for_project(
         &store, limit.unwrap_or(200), before_updated_at, before_id.as_deref(),
-        orchestration_id.as_deref(), state_filter.as_deref(), search_query.as_deref(),
+        DemandPageFilters {
+            orchestration_id: orchestration_id.as_deref(),
+            state_filter: state_filter.as_deref(),
+            search_query: search_query.as_deref(),
+            project_id: project_id.as_deref(),
+        },
     )
 }
 
@@ -6426,6 +6461,62 @@ mod tests {
         assert!(list_headless_review_inbox(
             &std::env::temp_dir().join(format!("absent-sa-review-{}.db",storage::id()))
         ).is_err());
+    }
+
+
+    #[test]
+    fn native_project_filter_paginates_admitted_projects_without_rebinding_teams() {
+        let store = fixture();
+        let team = enabled(&store);
+        for index in 0..205_i64 {
+            let project_id = if index == 204 {
+                "foreign-historical-project"
+            } else {
+                team.project_id.as_str()
+            };
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Project-filter fixture','local-user','manual',
+                        ?4,'worker',?5,'blocked',?6,?6)",
+                params![format!("project-demand-{index:03}"),team.id,
+                    format!("project-request-{index:03}"),project_id,
+                    team.policy_revision,1_000+index],
+            ).unwrap();
+        }
+        let page = |store: &Store, time: Option<i64>, id: Option<&str>,
+                    project: Option<&str>| {
+            list_all_demands_page_for_project(
+                store, 200, time, id, DemandPageFilters {
+                    orchestration_id: Some(&team.id),
+                    state_filter: Some("blocked"),
+                    search_query: None,
+                    project_id: project,
+                },
+            )
+        };
+        let first = page(&store, None, None, Some(&team.project_id)).unwrap();
+        assert_eq!(first.len(), 200);
+        assert!(first.iter().all(|row| row.project_id == team.project_id));
+        let boundary = first.last().unwrap();
+        let later = page(&store, Some(boundary.updated_at), Some(&boundary.id),
+            Some(&team.project_id)).unwrap();
+        assert_eq!(later.len(), 4);
+        let unique: std::collections::HashSet<_> = first.iter().chain(later.iter())
+            .map(|row| row.id.as_str()).collect();
+        assert_eq!(unique.len(), 204);
+        let other = page(&store, None, None, Some("foreign-historical-project")).unwrap();
+        assert_eq!(other.len(), 1);
+        assert_eq!(other[0].id, "project-demand-204");
+        for invalid in ["", "../path", "project%wildcard", " spaced "] {
+            assert!(page(&store, None, None, Some(invalid)).is_err());
+        }
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(page(&reopened, None, None, Some(&team.project_id)).unwrap().len(),200);
+        assert_eq!(page(&reopened, None, None, Some("foreign-historical-project")).unwrap().len(),1);
     }
 
     #[test]

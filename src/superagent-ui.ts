@@ -122,6 +122,7 @@ interface DemandIndex { id: string; orchestrationId: string; objective: string;
 interface DemandQuery {
   limit?: number; beforeUpdatedAt?: number; beforeId?: string;
   orchestrationId?: string; stateFilter?: string; searchQuery?: string;
+  projectId?: string;
 }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
 interface ImportResult { created: string[]; unchanged: string[]; backupPath?: string }
@@ -230,6 +231,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
   let demandTeamFilter = '', demandStateFilter = '', demandSearch = '', demandSearchDraft = '';
+  let demandProjectFilter = '', demandProjectDraft = '';
   let teamSearch = '', teamStatusFilter: 'all' | 'enabled' | 'disabled' = 'all';
   let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false;
   let globalDemandLayout: 'board' | 'list' = 'board';
@@ -281,7 +283,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let linkedDecisions: SourceDecision[] = [], linkedDecisionsLoaded = false;
   const safe = (value: unknown) => escape(String(value ?? ''));
   const fetchDemandPage = (query: DemandQuery) =>
-    call<DemandIndex[]>('superagent_all_demands', { query });
+    call<DemandIndex[]>('superagent_all_demands', {
+      query: {...query, ...(demandProjectFilter ? {projectId:demandProjectFilter} : {})},
+    });
   function captureFocusedControl(): {
     selector: string; index: number; selectionStart: number | null;
     selectionEnd: number | null; selectionDirection: 'forward' | 'backward' | 'none' | null;
@@ -897,6 +901,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       presets.map(item => '<option value="' + safe(item.id) + '"' +
         (demandTeamFilter === item.id ? ' selected' : '') + '>' + safe(item.name) + '</option>').join('') +
       '</select></label>' +
+      '<form data-sa-form="demand-project-filter" role="search" aria-label="Filter native Demands by admitted project">' +
+      '<label>Admitted project ID<input type="text" name="projectId" maxlength="128" ' +
+      'aria-label="Exact admitted Project ID" data-sa-demand-project-input ' +
+      'value="' + safe(demandProjectDraft) + '"></label>' +
+      '<button type="submit">Filter Project</button></form>' +
       '<label class="sa-demand-state-filter">Filter by State<select aria-label="Filter Demands by State" data-sa-demand-state-filter>' +
       '<option value="">All States</option>' +
       (['queued','running','waiting_approval','waiting_review','blocked','completed',
@@ -910,6 +919,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       'placeholder="Literal objective fragment" value="' + safe(demandSearchDraft) + '"></label>' +
       '<button type="submit">Search Demands</button></form>' +
       '<p>Native Tickets ' + (demandTeamFilter ? 'for this Team' : 'across Teams') +
+      (demandProjectFilter ? ' admitted to project ' + safe(demandProjectFilter) : '') +
       (demandStateFilter ? ' in state ' + safe(demandStateFilter) : '') +
       (demandSearch ? ' matching objective "' + safe(demandSearch) + '"' : '') +
       ', loaded 200 at a time in newest-first order. Board counts cover ' +
@@ -1482,6 +1492,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target instanceof Element && guidedBuilder.handleInput(target)) return;
     if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-demand-search')) {
       demandSearchDraft = target.value;
+      return;
+    }
+    if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-demand-project-input')) {
+      demandProjectDraft = target.value;
       return;
     }
     if ((target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) &&
@@ -2323,6 +2337,26 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         feedback = result.state === 'applied' && result.reconciliation === 'exact-readback'
           ? 'GitHub comment applied and verified by exact read-back.'
           : 'GitHub comment state: ' + result.state + ' (' + result.reconciliation + '). Repeating the same comment checks its saved receipt and does not blindly post again.';
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'demand-project-filter') {
+      const next = String(data.get('projectId') ?? '').trim();
+      if (next.length > 128 || (next !== '' && !/^[A-Za-z0-9_-]+$/.test(next))) {
+        error = 'Project filter requires an exact native ID (letters, digits, hyphen or underscore).';
+        render(); return;
+      }
+      demandProjectFilter = next; demandProjectDraft = next;
+      allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
+      void work(async () => {
+        const loaded = await fetchDemandPage({
+          limit:200, orchestrationId:demandTeamFilter || undefined,
+          stateFilter:demandStateFilter || undefined,
+          searchQuery:demandSearch || undefined,
+        });
+        allDemands = loaded;
+        allDemandsHasMore = loaded.length === 200;
+        allDemandsLoaded = true;
       });
       return;
     }

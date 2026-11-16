@@ -1262,6 +1262,69 @@ test('native Team filter pages independently and resets pagination when changing
 });
 
 
+
+test('native admitted Project filter scopes Demands before pages and never dispatches',async({page})=>{
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-admitted-project-filter';
+    document.body.appendChild(host);
+    const queries:Record<string,unknown>[]=[];
+    (window as unknown as {saProjectQueries:Record<string,unknown>[]}).saProjectQueries=queries;
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return [{id:'lead',name:'Lead',paused:false},
+        {id:'worker',name:'Worker',paused:false}] as never;
+      if(command==='superagent_list')return [{id:'team',name:'Delivery Team',
+        coordinatorBotId:'lead',workerBotId:'worker',enabled:false,policyRevision:1}] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_all_demands'){
+        const query=args?.query as Record<string,unknown>;
+        queries.push({...query});
+        if(query.projectId==='archived-project')return [{
+          id:'old-demand',orchestrationId:'team',objective:'Historical Ticket',
+          state:'blocked',revision:1,updatedAt:1500,projectId:'archived-project',
+        }] as never;
+        if(query.projectId)throw Error('Unexpected project scope');
+        return [{
+          id:'recent-demand',orchestrationId:'team',objective:'Recent Ticket',
+          state:'blocked',revision:1,updatedAt:2500,projectId:'current-project',
+        }] as never;
+      }
+      throw Error('Unexpected read-only command: '+command);
+    });
+  });
+  const global=page.locator('#sa-admitted-project-filter')
+    .getByRole('region',{name:'All Demands across Teams'});
+  await page.locator('#sa-admitted-project-filter')
+    .getByRole('button',{name:'Demands / Runs'}).click();
+  const input=global.getByRole('textbox',{name:'Exact admitted Project ID'});
+  await input.fill('archived-project');
+  await global.getByRole('button',{name:'Filter Project'}).click();
+  await expect(global).toContainText('Historical Ticket');
+  await expect(global).not.toContainText('Recent Ticket');
+  await expect(global).toContainText('admitted to project archived-project');
+  await input.fill('../invalid');
+  await global.getByRole('button',{name:'Filter Project'}).click();
+  await expect(page.locator('#sa-admitted-project-filter').getByRole('alert'))
+    .toContainText('Project filter requires an exact native ID');
+  const before=await page.evaluate(()=>(
+    window as unknown as {saProjectQueries:Record<string,unknown>[]}).saProjectQueries.length);
+  expect(before).toBe(1,'Rejected project input must not invoke native search');
+  await input.fill('');
+  await global.getByRole('button',{name:'Filter Project'}).click();
+  await expect(global).toContainText('Recent Ticket');
+  await expect(global).not.toContainText('admitted to project archived-project');
+  const queries=await page.evaluate(()=>(
+    window as unknown as {saProjectQueries:Record<string,unknown>[]}).saProjectQueries);
+  expect(queries).toMatchObject([
+    {limit:200,projectId:'archived-project'},
+    {limit:200},
+  ]);
+  expect(queries).toHaveLength(2);
+  expect(queries[1].projectId).toBeUndefined();
+});
+
 test('native objective search filters durable Demands before pagination without dispatch', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

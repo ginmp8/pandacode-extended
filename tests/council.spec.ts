@@ -538,7 +538,7 @@ test('read-only child hierarchy excludes foreign-root usage with a matching chil
     const usage = (rootCycleId: string, reviewerId: string) => ({
       id: rootCycleId + ':' + reviewerId, rootCycleId, childCycleId: 'child:6',
       attemptId: reviewerId, reviewerId, seatId: reviewerId, roundId: 'child:6:1',
-      scope: 'child', phase: 'review', strategy: 'parallel', terminalStatus: 'fixing',
+      scope: 'child', phase: 'review', strategy: 'parallel', terminalStatus: 'stopped',
       queueWaitMs: { status: 'unknown' }, elapsedMs: { status: 'unknown' },
       retries: { status: 'unknown' }, escalations: { status: 'unknown' },
       inputTokens: { status: 'unknown' }, outputTokens: { status: 'unknown' },

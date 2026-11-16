@@ -1162,6 +1162,68 @@ pub(crate) fn receipt_history_page(
 }
 
 
+/// A cross-Ticket native reconciliation queue for a trusted local operator.
+/// Listing pending/uncertain identities never acknowledges or retries them.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UnresolvedEffectView {
+    pub ticket_id: String,
+    pub orchestration_id: String,
+    pub effect_key: String,
+    pub payload_sha256: String,
+    pub state: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+pub(crate) type UnresolvedEffectPage = (Vec<UnresolvedEffectView>, Option<(i64, String, String)>);
+
+pub(crate) fn unresolved_effects_page(
+    store: &Store, limit: i64, before: Option<(i64, &str, &str)>,
+) -> Result<UnresolvedEffectPage> {
+    if !(1..=100).contains(&limit) {
+        return Err("Unresolved effect page size must be between 1 and 100.".into());
+    }
+    if let Some((at, ticket_id, effect_key)) = before {
+        if at <= 0 || ticket_id.is_empty() || ticket_id.len() > 128
+            || !ticket_id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+            || effect_key.is_empty() || effect_key.len() > 128
+            || !effect_key.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+        {
+            return Err("Invalid unresolved effect cursor.".into());
+        }
+    }
+    let (before_at, before_ticket, before_key) = match before {
+        Some((at, ticket, key)) => (Some(at), Some(ticket), Some(key)),
+        None => (None, None, None),
+    };
+    let mut stmt = store.db.prepare(
+        "SELECT r.ticket_id,t.orchestration_id,r.effect_key,r.payload_sha256,
+                r.state,r.created_at,r.updated_at
+         FROM sa_effect_receipts r
+         JOIN sa_tickets t ON t.id=r.ticket_id
+         WHERE r.state IN ('pending','uncertain')
+           AND (?1 IS NULL OR r.updated_at<?1
+                OR (r.updated_at=?1 AND (r.ticket_id<?2
+                     OR (r.ticket_id=?2 AND r.effect_key<?3))))
+         ORDER BY r.updated_at DESC,r.ticket_id DESC,r.effect_key DESC LIMIT ?4",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(
+        params![before_at,before_ticket,before_key,limit+1],
+        |r| Ok(UnresolvedEffectView {
+            ticket_id: r.get(0)?, orchestration_id: r.get(1)?,
+            effect_key: r.get(2)?, payload_sha256: r.get(3)?,
+            state: r.get(4)?, created_at: r.get(5)?, updated_at: r.get(6)?,
+        }),
+    ).map_err(|e| e.to_string())?;
+    let mut items = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+    let next = if items.len()>limit as usize {
+        items.truncate(limit as usize);
+        items.last().map(|r| (r.updated_at,r.ticket_id.clone(),r.effect_key.clone()))
+    } else { None };
+    Ok((items,next))
+}
+
 pub(crate) fn unresolved_count(store: &Store, ticket_id: &str) -> Result<i64> {
     store
         .db
@@ -1221,6 +1283,90 @@ mod tests {
             superagent::admit(&mut store, &cfg.id, "Safe work", "receipt-fixture", false).unwrap();
         assert!(started);
         (store, ticket.id)
+    }
+
+    #[test]
+    fn global_unresolved_effect_inbox_is_complete_read_only_and_restart_safe() {
+        let (store, id) = fixture();
+        store.db.execute(
+            "INSERT INTO sa_tickets
+             (id,orchestration_id,request_key,objective,actor,source,project_id,
+              worker_bot_id,policy_revision,state,created_at,updated_at)
+             SELECT 'other-effect-ticket',orchestration_id,'other-effect-request',
+                    'PRIVATE OBJECTIVE',actor,source,project_id,worker_bot_id,
+                    policy_revision,'blocked',created_at,updated_at
+             FROM sa_tickets WHERE id=?1",
+            [&id],
+        ).unwrap();
+        for index in 0..205_i64 {
+            let ticket = if index % 2 == 0 { id.as_str() } else { "other-effect-ticket" };
+            let state = if index == 0 { "pending" } else { "uncertain" };
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,?4,?5,?5)",
+                params![ticket,format!("effect:{index:03}"),
+                    format!("{index:064x}"),state,1000+index/5],
+            ).unwrap();
+        }
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'already-applied',?2,'applied',9000,9000)",
+            params![&id,"a".repeat(64)],
+        ).unwrap();
+        let path=store.path.clone();
+        let mut cursor_at=None;
+        let mut cursor_ticket:Option<String>=None;
+        let mut cursor_key:Option<String>=None;
+        let mut seen=std::collections::HashSet::new();
+        let mut pages=0;
+        loop {
+            let response:serde_json::Value=serde_json::from_str(
+                &superagent::list_headless_unresolved_effects(
+                    &path,cursor_at,cursor_ticket.as_deref(),cursor_key.as_deref(),
+                ).unwrap(),
+            ).unwrap();
+            pages+=1;
+            assert!(pages<=3, "unresolved inbox cursor must advance");
+            assert_eq!(response["unresolvedTotal"],205);
+            assert_eq!(response["observationalOnly"],true);
+            assert_eq!(response["automaticReplayAllowed"],false);
+            assert_eq!(response["requiresIndependentRemoteReconciliation"],true);
+            assert!(!response.to_string().contains("PRIVATE OBJECTIVE"));
+            assert!(!response.to_string().contains("already-applied"));
+            for item in response["items"].as_array().unwrap() {
+                let composite=format!("{}:{}",
+                    item["ticketId"].as_str().unwrap(),
+                    item["effectKey"].as_str().unwrap());
+                assert!(seen.insert(composite),"a receipt cannot repeat across pages");
+                assert!(item["state"]=="pending" || item["state"]=="uncertain");
+            }
+            if response["nextCursor"].is_null() {break;}
+            cursor_at=response["nextCursor"]["updatedAt"].as_i64();
+            cursor_ticket=response["nextCursor"]["ticketId"].as_str().map(str::to_owned);
+            cursor_key=response["nextCursor"]["effectKey"].as_str().map(str::to_owned);
+        }
+        assert_eq!(pages,3);
+        assert_eq!(seen.len(),205);
+        assert!(superagent::list_headless_unresolved_effects(&path,Some(0),Some(&id),Some("effect:000")).is_err());
+        assert!(superagent::list_headless_unresolved_effects(&path,Some(1000),Some("../bad"),Some("effect:000")).is_err());
+        assert!(superagent::list_headless_unresolved_effects(&path,Some(1000),Some(&id),None).is_err());
+        let pending:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_effect_receipts WHERE state='pending'",
+            [],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(pending,1,"read-only inventory cannot settle live effects");
+        drop(store);
+        let restarted=Store::open(&path).unwrap();
+        let count:i64=restarted.db.query_row(
+            "SELECT COUNT(*) FROM sa_effect_receipts WHERE state='uncertain'",
+            [],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(count,205,"restart must quarantine pending without replay");
+        assert_eq!(serde_json::from_str::<serde_json::Value>(
+            &superagent::list_headless_unresolved_effects(&path,None,None,None).unwrap(),
+        ).unwrap()["unresolvedTotal"],205);
     }
 
     fn make_intent(ticket_id: &str, comment: &str) -> IssueCommentIntent {

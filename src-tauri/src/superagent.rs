@@ -2087,6 +2087,40 @@ pub(crate) fn inspect_headless_effect_receipts_page(
 }
 
 
+/// Inspect every unresolved effect across Tickets, rather than relying on
+/// a bounded per-Ticket view or confusing a missing first-page item with safety.
+/// Read-only snapshots do not start recovery or contact the remote provider.
+pub(crate) fn list_headless_unresolved_effects(
+    database_path: &std::path::Path,
+    before_updated_at: Option<i64>, before_ticket_id: Option<&str>,
+    before_effect_key: Option<&str>,
+) -> Result<String> {
+    let before = match (before_updated_at, before_ticket_id, before_effect_key) {
+        (None,None,None) => None,
+        (Some(at),Some(ticket),Some(effect)) => Some((at,ticket,effect)),
+        _ => return Err("Unresolved effect cursor requires timestamp, Ticket ID and effect key.".into()),
+    };
+    let store = Store::open_read_only(database_path)?;
+    let snapshot = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let (items, next) = effects::unresolved_effects_page(&store, 100, before)?;
+    let total: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM sa_effect_receipts WHERE state IN ('pending','uncertain')",
+        [], |r| r.get(0),
+    ).map_err(|e| e.to_string())?;
+    snapshot.commit().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "unresolvedTotal": total,
+        "pageLimit": 100,
+        "items": items,
+        "nextCursor": next.map(|(updated_at,ticket_id,effect_key)| serde_json::json!({
+            "updatedAt":updated_at, "ticketId":ticket_id, "effectKey":effect_key
+        })),
+        "observationalOnly": true,
+        "automaticReplayAllowed": false,
+        "requiresIndependentRemoteReconciliation": total > 0
+    })).map_err(|e| e.to_string())
+}
+
 /// One-shot headless Team Demand inspection. Reuse the desktop's native
 /// state-filtered page; no migration, startup recovery, provider session,
 /// inferred task, authorization or external effect. Operational metadata

@@ -104,6 +104,23 @@ An interrupted Ticket remains durable and cannot be restarted by an inferred
 source event. On restart, existing `pending` external-effect receipts become
 `uncertain`; they require independent provider reconciliation before any
 future retry. A paused or revoked Team is not re-enabled by a watchdog tick.
+The read-only `--list-unresolved-effects` command pages pending and uncertain
+external-effect receipts **across all Tickets**, including terminal Tickets
+beyond the recovery inbox's first page. Use its `nextCursor` values to inspect
+older receipt identities:
+
+```sh
+pandacode serve --list-unresolved-effects
+pandacode serve --list-unresolved-effects --before <updated-at-ms> <ticket-id> <effect-key>
+```
+
+The result includes Ticket/Team IDs, receipt keys, SHA-256 payload digests,
+`unresolvedTotal` and `nextCursor`, but not Ticket objectives or private bot
+transcripts. This local diagnostic never queries a remote provider, grants an
+effect or acknowledges/retries a GitHub write. Re-list from the first page
+after concurrent receipt changes; provider reconciliation remains a separate,
+explicitly authorized operation.
+
 The existing `--inspect-ticket` and `--inspect-ticket-effects` commands show
 redacted state without touching live sessions. Per-effect dispatch and full
 headless admission/retry still require explicit user-authorized native grants.

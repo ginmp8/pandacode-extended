@@ -1272,7 +1272,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           createRoleOptions(draftAdditionalWorkerIds, true) + '</select></label>' +
           '<label>Optional Reviewers (up to 8)<select name="reviewers" data-sa-create-reviewers multiple size="5">' +
           createRoleOptions(draftReviewerBotIds, false) + '</select></label></details>' +
-          '<label>Maximum Worker attempts per Demand<select name="maxWorkerAttempts">' +
+          '<label>Maximum attempts per Demand<select name="maxWorkerAttempts">' +
           Array.from({length:8},(_,i)=>i+1).map(limit =>
             '<option value="' + limit + '"' +
             (draftWorkerAttemptLimit === limit ? ' selected' : '') + '>' +

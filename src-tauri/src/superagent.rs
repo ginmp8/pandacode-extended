@@ -2874,11 +2874,16 @@ pub(crate) fn headless_cancelled_assignments(
     if active_sessions.is_empty() {
         return Ok(Vec::new());
     }
+    let now = storage::now();
     let mut stmt = store.db.prepare(
         "SELECT EXISTS(
             SELECT 1 FROM sa_assignments a
             JOIN sa_tickets t ON t.id=a.ticket_id
             LEFT JOIN sa_mandates m ON m.ticket_id=t.id
+            LEFT JOIN sa_orchestrations o ON o.id=t.orchestration_id
+            LEFT JOIN bots coordinator ON coordinator.id=o.coordinator_bot_id
+            LEFT JOIN bots assigned_bot ON assigned_bot.id=a.bot_id
+            LEFT JOIN sessions active_session ON active_session.id=a.session_id
             WHERE a.session_id=?1
               AND (a.state IN ('stopped','interrupted')
                    OR t.state IN ('stopped','interrupted')
@@ -2889,12 +2894,30 @@ pub(crate) fn headless_cancelled_assignments(
                        OR m.ticket_id IS NULL
                        OR m.revoked!=0
                        OR m.policy_revision!=t.policy_revision
+                       OR m.expires_at<=?2
+                       OR m.project_id!=t.project_id
+                       OR m.actor!=t.actor
+                       OR m.authorization_id IS NULL
+                       OR trim(m.authorization_id)=''
+                       OR m.allowed_side_effects!=0 OR m.allowed_tools!='[]'
+                       OR o.id IS NULL OR o.enabled=0
+                       OR o.project_id!=t.project_id
+                       OR o.policy_revision!=t.policy_revision
+                       OR coordinator.id IS NULL OR coordinator.paused!=0
+                       OR assigned_bot.id IS NULL OR assigned_bot.paused!=0
+                       -- Do not require the initial Ticket Worker identity:
+                       -- #154's scheduler may authorize another pinned Worker.
+                       OR (a.bot_id!=o.coordinator_bot_id AND
+                           assigned_bot.project_id!=t.project_id)
+                       OR active_session.id IS NULL
+                       OR active_session.project_id!=assigned_bot.project_id
+                       OR a.created_at<=0 OR a.created_at>?2
                    )))
         )",
     ).map_err(|e| e.to_string())?;
     let mut cancelled = Vec::new();
     for session_id in active_sessions {
-        let cancelled_native: bool = stmt.query_row([session_id], |row| row.get(0))
+        let cancelled_native: bool = stmt.query_row(params![session_id, now], |row| row.get(0))
             .map_err(|e| e.to_string())?;
         if cancelled_native && !cancelled.contains(session_id) {
             cancelled.push(session_id.clone());
@@ -6720,7 +6743,9 @@ mod tests {
 
     #[test]
     fn headless_poll_cancels_orphaned_or_revoked_running_native_sessions() {
-        for scenario in ["detached", "revoked", "policy-drift", "blocked"] {
+        for scenario in ["detached", "revoked", "policy-drift", "blocked",
+            "disabled-team", "expired-mandate", "paused-worker",
+            "paused-coordinator", "worker-project-drift"] {
             let mut store = fixture();
             let cfg = enabled(&store);
             let (ticket, admitted) = admit(
@@ -6754,6 +6779,29 @@ mod tests {
                     "UPDATE sa_tickets SET state='blocked' WHERE id=?1",
                     [&ticket.id],
                 ).unwrap(),
+                "disabled-team" => store.db.execute(
+                    "UPDATE sa_orchestrations SET enabled=0 WHERE id=?1",
+                    [&cfg.id],
+                ).unwrap(),
+                "expired-mandate" => store.db.execute(
+                    "UPDATE sa_mandates SET expires_at=?2 WHERE ticket_id=?1",
+                    params![ticket.id, storage::now()-1],
+                ).unwrap(),
+                "paused-worker" => store.db.execute(
+                    "UPDATE bots SET paused=1 WHERE id='worker'", [],
+                ).unwrap(),
+                "paused-coordinator" => store.db.execute(
+                    "UPDATE bots SET paused=1 WHERE id='router'", [],
+                ).unwrap(),
+                "worker-project-drift" => {
+                    store.db.execute(
+                        "INSERT INTO projects(id,name,path)
+                         VALUES('other-project','Other','/tmp/sa-worker-moved')", [],
+                    ).unwrap();
+                    store.db.execute(
+                        "UPDATE bots SET project_id='other-project' WHERE id='worker'", [],
+                    ).unwrap()
+                },
                 _ => unreachable!(),
             };
             assert!(read_only_policy(&store, &assigned).is_err(), "{scenario}");
@@ -9517,7 +9565,9 @@ mod tests {
         assert_eq!(snapshot.policy.max_concurrent_tasks,1);
         assert_eq!(snapshot.policy.autonomy,"off");
         assert!(!snapshot.policy.council_required);
-        let legacy=create_configuration(&store,input()).unwrap();
+        let legacy=create_configuration(&store,NewOrchestration {
+            name:"Legacy bounded Team".into(),..input()
+        }).unwrap();
         assert_eq!(load_team_version_snapshot(&store.db,&legacy.id,1).unwrap()
             .policy.max_attempts_per_assignment,2);
         let reopened=Store::open_read_only(&store.path).unwrap();

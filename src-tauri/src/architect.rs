@@ -656,7 +656,8 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
     }
     if let Some(notice) = team.council_status.as_ref()
         .and_then(|status| {
-            composed_native_authority_notice(store, team, status)
+            composed_root_lifecycle_notice(store, team, status)
+                .or_else(|| composed_native_authority_notice(store, team, status))
                 .or_else(|| composed_terminal_receipt_notice(store, team, status))
         })
     {
@@ -665,6 +666,25 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
             status.notice = Some(notice);
         }
     }
+}
+
+/// A historical composed score is not approval after its native root was
+/// interrupted or archived, or after its in-memory team stopped. A normally
+/// completed task retains authenticated read-only evidence.
+fn composed_root_lifecycle_notice(
+    store: &Store,
+    team: &TeamSnapshot,
+    status: &CouncilStatus,
+) -> Option<String> {
+    if status.state != "passed"
+        || team.config.council.as_ref().is_none_or(|config| config.composition.is_none())
+    {
+        return None;
+    }
+    let persisted_root_live = store.session(&team.session_id)
+        .is_ok_and(|session| !session.archived && session.status != "interrupted");
+    (!(persisted_root_live && (active(&team.status) || team.status == "completed")))
+        .then(|| "council_root_inactive: native root approval was revoked; preserved review receipts remain read-only history.".into())
 }
 
 /// A cached composed "passed" state is not a displayed approval while the
@@ -717,7 +737,8 @@ fn native_council_status(store: &Store, team: &TeamSnapshot) -> Option<CouncilSt
         status.state = "blocked".into();
         status.notice = Some("council_cost_cap_unproven: the configured estimated-cost cap cannot be verified from current native estimate and usage receipts.".into());
     }
-    if let Some(notice) = composed_native_authority_notice(store, team, &status)
+    if let Some(notice) = composed_root_lifecycle_notice(store, team, &status)
+        .or_else(|| composed_native_authority_notice(store, team, &status))
         .or_else(|| composed_terminal_receipt_notice(store, team, &status))
     {
         status.state = "blocked".into();
@@ -756,7 +777,8 @@ fn native_council_finish_refusal(store: &Store, team: &TeamSnapshot) -> Option<S
         );
         if let Some(notice) = status.as_ref()
             .and_then(|status| {
-                composed_native_authority_notice(store, team, status)
+                composed_root_lifecycle_notice(store, team, status)
+                    .or_else(|| composed_native_authority_notice(store, team, status))
                     .or_else(|| composed_terminal_receipt_notice(store, team, status))
             })
         {
@@ -977,7 +999,9 @@ pub(crate) fn verified_council_pass(store: &Store, team: &TeamSnapshot) -> bool 
     let Some(stored) = team.council_status.as_ref() else {
         return false;
     };
-    if stored.state != "passed" || stored.stale {
+    if stored.state != "passed" || stored.stale
+        || composed_root_lifecycle_notice(store, team, stored).is_some()
+    {
         return false;
     }
     let Some(verified) = native_council_status(store, team) else {
@@ -4076,7 +4100,8 @@ fn council_child_session_is_live(store: &Store, child_session_id: &str) -> Resul
 
 fn council_root_session_is_live(store: &Store, root_session_id: &str) -> Result<bool> {
     let root_session = store.session(root_session_id)?;
-    Ok(!root_session.archived && root_session.task_stage != "completed")
+    Ok(!root_session.archived && root_session.task_stage != "completed"
+        && root_session.status != "interrupted")
 }
 
 pub(crate) fn native_child_coordinator_admitted(store: &Store, child_session_id: &str) -> Result<bool> {

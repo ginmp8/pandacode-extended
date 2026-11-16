@@ -7671,16 +7671,20 @@ fn native_child_coordinator_is_never_authorized_for_an_unlinked_root_session() {
 }
 
 #[test]
-fn archived_or_completed_root_revokes_live_child_admission_policy_and_callback() {
-    for (archived, completed) in [(true, false), (false, true)] {
+fn inactive_root_revokes_live_child_admission_policy_and_callback() {
+    for (archived, completed, interrupted) in [
+        (true, false, false),
+        (false, true, false),
+        (false, false, true),
+    ] {
         let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();
         let store = state.store.lock().unwrap();
         assert!(native_child_coordinator_admitted(&store, &child_id).unwrap());
         assert!(nested_council_callback_current(&store, &child_id));
 
         store.db.execute(
-            "UPDATE sessions SET archived=?2, task_stage=CASE WHEN ?3 THEN 'completed' ELSE task_stage END WHERE id=?1",
-            params![root_id, archived, completed],
+            "UPDATE sessions SET archived=?2, task_stage=CASE WHEN ?3 THEN 'completed' ELSE task_stage END, status=CASE WHEN ?4 THEN 'interrupted' ELSE status END WHERE id=?1",
+            params![root_id, archived, completed, interrupted],
         ).unwrap();
         assert!(validate_council_child_link(&store, &child_id).unwrap().is_some(),
             "historical native ownership evidence remains inspectable");
@@ -10916,6 +10920,41 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
                     "{mode_name} × {strategy:?} must reach a native terminal pass after all configured sources settle");
                 assert!(verified_council_pass(&store, &root),
                     "{mode_name} × {strategy:?} pass must be backed by current persisted review/child receipts");
+                // M7's fully authenticated native composite must lose approval
+                // when an older live snapshot survives root pause/restart/archival.
+                if mode_name == "M7" && strategy == Strategy::Parallel {
+                    for inactive_status in ["paused", "stopped", "failed"] {
+                        let mut inactive = root.clone();
+                        inactive.status = inactive_status.into();
+                        assert!(!verified_council_pass(&store, &inactive),
+                            "{inactive_status} must revoke a cached composite approval");
+                        refresh_council(&store, &mut inactive);
+                        assert_eq!(inactive.council_status.as_ref().map(|s| s.state.as_str()),
+                            Some("blocked"), "{inactive_status} must not display Passed");
+                    }
+                    let previous_session_status = store.session(&root_id).unwrap().status;
+                    for persisted_change in ["archived", "interrupted"] {
+                        if persisted_change == "archived" {
+                            store.db.execute("UPDATE sessions SET archived=1 WHERE id=?1", [&root_id]).unwrap();
+                        } else {
+                            store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1", [&root_id]).unwrap();
+                        }
+                        assert!(!verified_council_pass(&store, &root),
+                            "{persisted_change} must revoke persisted native approval");
+                        let mut projected = root.clone();
+                        refresh_council(&store, &mut projected);
+                        assert_eq!(projected.council_status.as_ref().map(|s| s.state.as_str()),
+                            Some("blocked"), "{persisted_change} must not display Passed");
+                        if persisted_change == "archived" {
+                            store.db.execute("UPDATE sessions SET archived=0 WHERE id=?1", [&root_id]).unwrap();
+                        } else {
+                            store.db.execute("UPDATE sessions SET status=?2 WHERE id=?1",
+                                params![root_id, previous_session_status]).unwrap();
+                        }
+                        assert!(verified_council_pass(&store, &root),
+                            "restored session with unchanged native evidence may pass again");
+                    }
+                }
                 let completed_rounds = root
                     .workers
                     .iter()

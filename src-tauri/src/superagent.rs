@@ -5667,12 +5667,19 @@ pub async fn superagent_issue_comment(
 }
 
 #[tauri::command]
-pub async fn superagent_stop(window: tauri::WebviewWindow, app: tauri::AppHandle, state: State<'_,AppState>, ticket_id: String) -> Result<Ticket> {
+pub async fn superagent_stop(
+    window: tauri::WebviewWindow, app: tauri::AppHandle, state: State<'_,AppState>,
+    ticket_id: String, expected_revision: Option<i64>,
+) -> Result<Ticket> {
     require_main_window(&window)?;
     let (ticket,sessions)={
         let store=state.store.lock().map_err(|e|e.to_string())?;
         let mut sessions=scheduler::sessions_for_root(&store,&ticket_id)?;
-        let (ticket,session)=stop(&store,&ticket_id)?;
+        // The native dispatch lock validates revision at the same Stop CAS.
+        // An omitted revision keeps the existing caller-compatible Stop path.
+        let (ticket,session)=stop_with_lock_observer_at_revision(
+            &store, &ticket_id, expected_revision, || {},
+        )?;
         if let Some(session)=session {sessions.push(session);}
         sessions.sort();
         sessions.dedup();
@@ -5701,6 +5708,38 @@ pub async fn superagent_revoke_worker_write_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn global_demand_stop_rejects_stale_revision_and_revokes_exact_assignment() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Revision-bound cross-Team Stop",
+            "global-stop-revision", false,
+        ).unwrap();
+        assert!(launched);
+        let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let audit_before = history(&store, &ticket.id, 20).unwrap().len();
+        assert!(stop_with_lock_observer_at_revision(
+            &store, &ticket.id, Some(ticket.revision + 1), || {},
+        ).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        assert!(!mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().len(), audit_before);
+
+        let (stopped, provider_session) = stop_with_lock_observer_at_revision(
+            &store, &ticket.id, Some(ticket.revision), || {},
+        ).unwrap();
+        assert_eq!(stopped.state, "stopped");
+        assert_eq!(stopped.revision, ticket.revision + 1);
+        assert_eq!(provider_session.as_deref(), Some(session.as_str()));
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        assert_eq!(history(&store, &ticket.id, 20).unwrap().len(), audit_before + 1);
+        assert!(stop_with_lock_observer_at_revision(
+            &store, &ticket.id, Some(ticket.revision), || {},
+        ).is_err(), "a repeated Stop must not duplicate the audit");
+        assert!(!on_run_finished(&store, &session, true, "Late result").unwrap());
+    }
+
     #[cfg(unix)]
     #[test]
     fn missing_checkout_paths_compare_real_parents_not_symlink_spellings() {

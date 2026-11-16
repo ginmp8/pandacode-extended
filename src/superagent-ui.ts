@@ -873,7 +873,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       demand.revision + ' · Admitted project ' + safe(demand.projectId ?? 'Unknown') +
       ' · Updated ' + safe(activityTime(demand.updatedAt)) +
       '</small></div><button type="button" data-sa-open-demand="' + safe(demand.id) +
-      '">Open demand</button></li>';
+      '">Open demand</button>' +
+      (!['completed','failed','stopped','interrupted','inconclusive'].includes(demand.state)
+        ? '<button type="button" data-sa-stop-global-demand="' + safe(demand.id) +
+          '">Stop demand</button>' : '') + '</li>';
     const demandGroups = [
       {label:'Working',states:['queued','running']},
       {label:'Awaiting decision',states:['waiting_approval','waiting_review']},
@@ -1696,6 +1699,32 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
+    if (target.dataset.saStopGlobalDemand) {
+      const demand = allDemands.find(item => item.id === target.dataset.saStopGlobalDemand);
+      if (!demand || busy || !presets.some(item => item.id === demand.orchestrationId)) return;
+      void work(async () => {
+        // A cross-Team index is observation only. Re-read native ownership and
+        // revision, then commit Stop under the identical revision guard.
+        const snapshot = await call<TicketDetails>('superagent_snapshot',
+          {ticketId:demand.id,limit:1});
+        if (snapshot.ticket.id !== demand.id ||
+            snapshot.ticket.orchestrationId !== demand.orchestrationId ||
+            snapshot.ticket.revision !== demand.revision ||
+            snapshot.ticket.state !== demand.state) {
+          throw new Error('Demand changed since the native page was loaded; refresh before stopping.');
+        }
+        if (['completed','failed','stopped','interrupted','inconclusive']
+          .includes(snapshot.ticket.state)) return;
+        ask('Stop Demand ' + demand.id + ' at revision ' + demand.revision +
+          '? Native Stop revokes its mandate and quarantines pending effects.', async () => {
+          await call('superagent_stop',
+            {ticketId:demand.id,expectedRevision:snapshot.ticket.revision});
+          await reload();
+          feedback = 'Demand ' + demand.id + ' stopped by native revocation. Refresh Demands for current states.';
+        });
+      });
+      return;
+    }
     if (target.dataset.saOpenDemand) {
       const demand = allDemands.find(item => item.id === target.dataset.saOpenDemand) ??
         reviewQueue.find(item => item.id === target.dataset.saOpenDemand);
@@ -2112,7 +2141,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target.dataset.saStop) {
       const t = tickets.find(item => item.id === target.dataset.saStop);
       if (t) ask('Stop the task and revoke its authorization?', async () => {
-        await call('superagent_stop',{ ticketId:t.id }); await reload();
+        await call('superagent_stop',{ ticketId:t.id, expectedRevision:t.revision }); await reload();
       });
     }
   });

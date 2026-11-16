@@ -130,7 +130,18 @@ without polling GitHub, granting tools or interrupting another active server:
 
 ```sh
 pandacode serve --inspect-source-health <source-id>
+pandacode serve --inspect-source-decisions <source-id>
+pandacode serve --inspect-source-decisions <source-id> --page
+pandacode serve --inspect-source-decisions <source-id> --before <sequence> <delivery-id>
 ```
+
+The legacy decision inspector returns an array containing the latest 50
+immutable receipts. Use `--page` for a bounded page with `decisions` and
+`nextCursor`, then pass the previous page's exact `sequence` and `deliveryId`
+to `--before`. The source-local keyset order is descending by sequence and
+delivery ID, so duplicate sequence values never skip or repeat receipts.
+The optional cursor does not grant execution, poll a remote source, or expose
+untrusted GitHub bodies; unknown sources and malformed cursors are rejected.
 
 The read-only response reports Off/Observe mode, policy revision, receipt count,
 permitted receipt count, stored cursor and highest immutable receipt sequence.

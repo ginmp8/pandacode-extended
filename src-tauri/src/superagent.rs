@@ -493,19 +493,9 @@ fn list_all_demands_page_filtered(
     store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
     orchestration_id: Option<&str>, state_filter: Option<&str>,
 ) -> Result<Vec<DemandIndex>> {
-    list_all_demands_page_searched(store, limit, before_updated_at, before_id,
-        orchestration_id, state_filter, None)
-}
-
-/// Objective search is scoped to the native, evidence-free Ticket index. It
-/// filters the durable database before keyset pagination, never a loaded page.
-fn list_all_demands_page_searched(
-    store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
-    orchestration_id: Option<&str>, state_filter: Option<&str>, search_query: Option<&str>,
-) -> Result<Vec<DemandIndex>> {
     list_all_demands_page_for_project(
         store, limit, before_updated_at, before_id, DemandPageFilters {
-            orchestration_id, state_filter, search_query, project_id: None,
+            orchestration_id, state_filter, search_query: None, project_id: None,
         },
     )
 }

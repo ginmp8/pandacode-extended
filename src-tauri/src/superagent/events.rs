@@ -162,6 +162,22 @@ pub struct EventDecisionRecord {
 }
 
 
+/// Stable keyset cursor scoped to one source's immutable decision receipts.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceDecisionCursor {
+    pub sequence: i64,
+    pub delivery_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceDecisionPage {
+    pub decisions: Vec<EventDecisionRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<SourceDecisionCursor>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceThreadLink {
@@ -524,6 +540,17 @@ pub(crate) fn headless_source_decisions(
     let store = Store::open_read_only(database_path)?;
     serde_json::to_string_pretty(&list_decisions(&store, source_id, limit)?)
         .map_err(|e| e.to_string())
+}
+
+/// New headless pages preserve the legacy array output when no page is requested.
+pub(crate) fn headless_source_decisions_page(
+    database_path: &std::path::Path, source_id: &str, limit: i64,
+    before_sequence: Option<i64>, before_delivery_id: Option<&str>,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    serde_json::to_string_pretty(&list_decisions_page(
+        &store, source_id, limit, before_sequence, before_delivery_id,
+    )?).map_err(|e| e.to_string())
 }
 
 /// Desktop and headless consume the same native receipt/cursor diagnosis.
@@ -1229,8 +1256,23 @@ pub async fn superagent_source_poll_authenticated(
 /// A source-scoped, restart-durable decision timeline. Neither the read nor
 /// its main-window command can change policy, admit tasks or dispatch work.
 fn list_decisions(store: &Store, source_id: &str, limit: i64) -> Result<Vec<EventDecisionRecord>> {
+    Ok(list_decisions_page(store, source_id, limit, None, None)?.decisions)
+}
+
+/// Keyset pagination is ordered by (sequence, delivery_id), never an offset;
+/// a new observation cannot reshuffle older pages after a restart.
+fn list_decisions_page(
+    store: &Store, source_id: &str, limit: i64,
+    before_sequence: Option<i64>, before_delivery_id: Option<&str>,
+) -> Result<SourceDecisionPage> {
     if !(1..=100).contains(&limit) {
         return Err("Event decision page size must be between 1 and 100.".into());
+    }
+    if before_sequence.is_some() != before_delivery_id.is_some()
+        || before_sequence.is_some_and(|value| value <= 0)
+        || before_delivery_id.is_some_and(|value| !token_ok(value, 128))
+    {
+        return Err("Source decision cursor requires a positive sequence and bounded delivery ID.".into());
     }
     source(store, source_id)?;
     let mut stmt = store.db.prepare(
@@ -1239,9 +1281,12 @@ fn list_decisions(store: &Store, source_id: &str, limit: i64) -> Result<Vec<Even
                 checks.conclusion,checks.head_sha,checks.completed_at
          FROM sa_event_decisions d LEFT JOIN sa_check_run_results checks
            ON checks.source_id=d.source_id AND checks.delivery_id=d.delivery_id
-         WHERE d.source_id=?1 ORDER BY d.sequence DESC,d.delivery_id DESC LIMIT ?2",
+         WHERE d.source_id=?1
+           AND (?3 IS NULL OR d.sequence<?3
+             OR (d.sequence=?3 AND d.delivery_id<?4))
+         ORDER BY d.sequence DESC,d.delivery_id DESC LIMIT ?2",
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![source_id,limit], |row| {
+    let rows = stmt.query_map(params![source_id, limit + 1, before_sequence, before_delivery_id], |row| {
         Ok(EventDecisionRecord {
             source_id:row.get(0)?, delivery_id:row.get(1)?,
             actor:row.get(2)?, event_kind:row.get(3)?,
@@ -1252,7 +1297,16 @@ fn list_decisions(store: &Store, source_id: &str, limit: i64) -> Result<Vec<Even
             check_completed_at:row.get(11)?,
         })
     }).map_err(|e| e.to_string())?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+    let mut decisions = rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    let has_more = decisions.len() > limit as usize;
+    decisions.truncate(limit as usize);
+    let next_cursor = if has_more {
+        decisions.last().map(|last| SourceDecisionCursor {
+            sequence: last.sequence, delivery_id: last.delivery_id.clone(),
+        })
+    } else { None };
+    Ok(SourceDecisionPage { decisions, next_cursor })
 }
 
 /// Checks API lookup is explicitly operator-driven. Its pull_requests array
@@ -1947,6 +2001,60 @@ mod tests {
         }
         assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
             |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn headless_source_decision_pages_preserve_cursor_scope_and_restart_order() {
+        let (store, path) = fixture();
+        let primary = create_source(&store, "orch", "test/fixture",
+            "trusted-bot", "issues.opened").unwrap();
+        let other = create_source(&store, "orch", "test/fixture",
+            "trusted-bot", "issues.closed").unwrap();
+        // Two receipts per upstream sequence exercise the delivery-ID tie breaker.
+        for index in 0..205 {
+            observe(&store, &event(&format!("receipt_{index:03}"), &primary,
+                1 + i64::from(index / 2))).unwrap();
+        }
+        observe(&store, &EventEnvelope {
+            source_id: other.id.clone(), delivery_id: "foreign_001".into(),
+            repository: "test/fixture".into(), actor: "trusted-bot".into(),
+            event_kind: "issues.closed".into(), subject_key: "issue:43".into(),
+            sequence: 200,
+        }).unwrap();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let mut cursor: Option<SourceDecisionCursor> = None;
+        let mut visited = std::collections::HashSet::new();
+        let mut pages = 0;
+        loop {
+            let page = list_decisions_page(&reopened, &primary.id, 50,
+                cursor.as_ref().map(|value| value.sequence),
+                cursor.as_ref().map(|value| value.delivery_id.as_str())).unwrap();
+            assert!(!page.decisions.is_empty());
+            assert!(page.decisions.len() <= 50);
+            for decision in &page.decisions {
+                assert_eq!(decision.source_id, primary.id);
+                assert!(visited.insert(decision.delivery_id.clone()));
+            }
+            cursor = page.next_cursor;
+            pages += 1;
+            if cursor.is_none() { break; }
+            assert!(pages <= 5, "Cursor must make forward progress");
+        }
+        assert_eq!(pages, 5);
+        assert_eq!(visited.len(), 205);
+        assert!(!visited.contains("foreign_001"));
+        assert!(list_decisions_page(&reopened, &primary.id, 50, Some(1), None).is_err());
+        assert!(list_decisions_page(&reopened, &primary.id, 50, Some(0), Some("receipt_001")).is_err());
+        assert!(list_decisions_page(&reopened, &primary.id, 50, Some(1), Some("../private")).is_err());
+        assert!(list_decisions_page(&reopened, "unknown", 50, None, None).is_err());
+        let first: serde_json::Value = serde_json::from_str(
+            &headless_source_decisions_page(&path, &primary.id, 50, None, None).unwrap(),
+        ).unwrap();
+        assert_eq!(first["decisions"].as_array().unwrap().len(), 50);
+        assert!(first["nextCursor"]["sequence"].as_i64().unwrap() > 0);
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 0);
     }
 
     #[test]

@@ -48,7 +48,10 @@ enum Command {
     InspectTicketEffects { ticket_id: String, before_created_at: Option<i64>, before_key: Option<String>, unresolved_only: bool },
     InspectTicketSource { ticket_id: String },
     InspectSourceHealth { source_id: String },
-    InspectSourceDecisions { source_id: String },
+    InspectSourceDecisions {
+        source_id: String, paginated: bool,
+        before_sequence: Option<i64>, before_delivery_id: Option<String>,
+    },
     LinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
     LinkIssuePull { source_id: String, ticket_id: String, issue_key: String, pull_key: String },
     UnlinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
@@ -200,14 +203,26 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
-            if let Command::InspectSourceDecisions { source_id } = &command {
+            if let Command::InspectSourceDecisions {
+                source_id, paginated, before_sequence, before_delivery_id,
+            } = &command {
                 // Immutable source-scoped receipts, no GitHub polling, provider
                 // admission, task grant or startup recovery.
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
-                    .and_then(|dir| crate::superagent::events::headless_source_decisions(
-                        &dir.join("kingcode.sqlite3"), source_id, 50,
-                    ));
+                    .and_then(|dir| {
+                        let database = dir.join("kingcode.sqlite3");
+                        if *paginated {
+                            crate::superagent::events::headless_source_decisions_page(
+                                &database, source_id, 50,
+                                *before_sequence, before_delivery_id.as_deref(),
+                            )
+                        } else {
+                            crate::superagent::events::headless_source_decisions(
+                                &database, source_id, 50,
+                            )
+                        }
+                    });
                 match result {
                     Ok(history) => { println!("{history}"); std::process::exit(0) }
                     Err(error) => {
@@ -1225,7 +1240,32 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                     .ok_or("--inspect-source-decisions needs a source ID.")?;
                 validate_ticket_id(id)
                     .map_err(|_| "Provide a bounded source ID.".to_owned())?;
-                command = Command::InspectSourceDecisions { source_id: id.clone() };
+                let mut paginated = false;
+                let mut before_sequence = None;
+                let mut before_delivery_id = None;
+                match args.get(index + 2).map(String::as_str) {
+                    Some("--page") => {
+                        paginated = true;
+                        index += 1;
+                    }
+                    Some("--before") => {
+                        let sequence = args.get(index + 3)
+                            .ok_or("--before requires a positive source sequence and delivery ID.")?
+                            .parse::<i64>().ok().filter(|value| *value > 0)
+                            .ok_or("--before requires a positive source sequence.")?;
+                        let delivery_id = args.get(index + 4)
+                            .ok_or("--before requires the previous page's delivery ID.")?;
+                        validate_ticket_id(delivery_id)?;
+                        before_sequence = Some(sequence);
+                        before_delivery_id = Some(delivery_id.clone());
+                        paginated = true;
+                        index += 3;
+                    }
+                    _ => {}
+                }
+                command = Command::InspectSourceDecisions {
+                    source_id: id.clone(), paginated, before_sequence, before_delivery_id,
+                };
                 ops += 1;
                 index += 1;
             }
@@ -1657,9 +1697,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-source-health <id>
                          Inspect native source cursor, stored receipts and policy without
                          GitHub access, writes or restart recovery; exit.
-  --inspect-source-decisions <id>
-                          Read the latest 50 native source decision receipts without GitHub,
-                          startup recovery, worker admission or external writes; exit.
+  --inspect-source-decisions <id> [--page | --before <sequence> <delivery-id>]
+                          Read 50 source-scoped decisions. Legacy command returns an array;
+                          --page returns nextCursor, --before follows the exact keyset.
+                          No GitHub polling, startup recovery, worker admission or writes; exit.
   --observe-source <id> Authenticated one-shot GitHub Observe poll for an activated source; exit.
                          No Auto, inferred task, webhook or external write.
   --observe-check-run <id> <check-run-id>
@@ -1805,11 +1846,29 @@ mod tests {
             assert!(parsed(invalid).is_err(), "{invalid}");
         }
         assert_eq!(parsed("--inspect-source-decisions source_123"),
-            Ok(Command::InspectSourceDecisions { source_id: "source_123".into() }));
+            Ok(Command::InspectSourceDecisions {
+                source_id: "source_123".into(), paginated: false,
+                before_sequence: None, before_delivery_id: None,
+            }));
+        assert_eq!(parsed("--inspect-source-decisions source_123 --page"),
+            Ok(Command::InspectSourceDecisions {
+                source_id: "source_123".into(), paginated: true,
+                before_sequence: None, before_delivery_id: None,
+            }));
+        assert_eq!(parsed("--inspect-source-decisions source_123 --before 200 receipt_123"),
+            Ok(Command::InspectSourceDecisions {
+                source_id: "source_123".into(), paginated: true,
+                before_sequence: Some(200), before_delivery_id: Some("receipt_123".into()),
+            }));
         for invalid in [
             "--inspect-source-decisions",
             "--inspect-source-decisions ../private",
             "--inspect-source-decisions source_123 --observe-source source_123",
+            "--inspect-source-decisions source_123 --before",
+            "--inspect-source-decisions source_123 --before 0 receipt_123",
+            "--inspect-source-decisions source_123 --before 10",
+            "--inspect-source-decisions source_123 --before 10 ../private",
+            "--inspect-source-decisions source_123 --page --before 10 receipt_123",
         ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
         assert!(parsed("--list-review-inbox --stop-ticket ticket_1").is_err());
         assert_eq!(parsed("--list-demands all"),

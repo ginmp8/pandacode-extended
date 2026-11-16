@@ -36,6 +36,9 @@ struct Preset {
     autonomy: String,
     max_concurrent_tasks: u8,
     max_attempts_per_assignment: u8,
+    /// Config-only v5 policy. Not a permission grant or automatic retry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    max_worker_attempts: Option<u8>,
     council: Council,
 }
 
@@ -85,6 +88,7 @@ struct Resolved {
     extra_worker_ids: Vec<String>,
     reviewer_ids: Vec<String>,
     project_id: String,
+    max_worker_attempts: i64,
     existing: bool,
 }
 
@@ -100,7 +104,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
     }
     let manifest: Manifest = serde_json::from_value(document.clone())
         .map_err(|e| format!("Invalid SuperAgent companion manifest: {e}"))?;
-    if !matches!(manifest.schema_version, 1..=4) || manifest.orchestrations.len() > MAX_PRESETS {
+    if !matches!(manifest.schema_version, 1..=5) || manifest.orchestrations.len() > MAX_PRESETS {
         return Err("Unsupported SuperAgent manifest schema or too many presets.".into());
     }
     let bots = bots::list(store)?;
@@ -117,6 +121,14 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
         {
             return Err("Unsupported SuperAgent autonomy, Council or execution policy.".into());
         }
+        // Old portable versions retain the exact original two-attempt policy.
+        // Version 5 must explicitly pin a bounded effective Team retry ceiling.
+        let max_worker_attempts = match (manifest.schema_version, preset.max_worker_attempts) {
+            (5, Some(value @ 1..=4)) => i64::from(value),
+            (5, _) => return Err("Version 5 requires a worker-attempt limit between 1 and 4.".into()),
+            (_, None) => 2,
+            (_, Some(_)) => return Err("Worker-attempt policy requires SuperAgent manifest version 5.".into()),
+        };
         let lookup = |name: &str| -> Result<&bots::Bot> {
             if !valid_name(name) { return Err("Invalid portable bot name.".into()); }
             let matches: Vec<_> = bots.iter()
@@ -178,7 +190,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
             }
             reviewer_ids.push(bot.id.clone());
         }
-        // Version 3 pins profiles; version 4 also pins reasoning effort.
+        // Version 3 pins profiles; versions 4 and 5 also pin reasoning effort.
         // Resolve against local bot IDs before taking any backup or inserting a
         // disabled Team. Import never installs Skills or changes existing bots.
         if manifest.schema_version < 3 {
@@ -204,7 +216,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
                     || profile.model!=bot.model
                     || profile.mode!=bot.mode
                     || profile.skills.as_slice()!=bot.skills.as_slice()
-                    || (manifest.schema_version==4
+                    || (manifest.schema_version>=4
                         && profile.reasoning_effort.as_deref()!=Some(bot.reasoning_effort.as_str())) {
                     return Err(format!(
                         "Portable bot profile mismatch for {name}; verify model, harness, mode and assigned Skills."
@@ -225,6 +237,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
                 || old.worker_bot_id != worker.id || old.project_id != worker.project_id
                 || roles.worker_bot_ids.iter().skip(1).cloned().collect::<Vec<_>>() != extra_ids
                 || roles.reviewer_bot_ids != reviewer_ids
+                || roles.max_worker_attempts != max_worker_attempts
             {
                 return Err(format!("Existing orchestration conflicts with imported preset: {}",preset.name));
             }
@@ -236,6 +249,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
             extra_worker_ids: extra_ids,
             reviewer_ids,
             project_id: worker.project_id.clone(),
+            max_worker_attempts,
             existing: existing.is_some(),
         });
     }
@@ -287,6 +301,11 @@ fn apply(store: &Store, document: &serde_json::Value, confirmed: bool) -> Result
                 params![&id,index as i64,bot_id],
             ).map_err(|e| format!("Atomic Team Reviewer import aborted: {e}"))?;
         }
+        tx.execute(
+            "INSERT INTO sa_team_attempt_limits(orchestration_id,max_worker_attempts)
+             VALUES(?1,?2)",
+            params![&id,candidate.max_worker_attempts],
+        ).map_err(|e| format!("Atomic Team attempt-budget import aborted: {e}"))?;
         result.created.push(candidate.name);
     }
     tx.commit().map_err(|e| e.to_string())?;
@@ -366,11 +385,12 @@ fn export(store: &Store) -> Result<serde_json::Value> {
             autonomy: "off".into(),
             max_concurrent_tasks: 1,
             max_attempts_per_assignment: 2,
+            max_worker_attempts: Some(roles.max_worker_attempts as u8),
             council: Council { enabled: false },
         });
     }
     serde_json::to_value(Manifest {
-        schema_version:4,orchestrations:presets,
+        schema_version:5,orchestrations:presets,
     })
         .map_err(|e| e.to_string())
 }
@@ -506,7 +526,7 @@ mod tests {
         let snapshot: serde_json::Value = serde_json::from_slice(
             &std::fs::read(path).unwrap(),
         ).unwrap();
-        assert_eq!(snapshot["schemaVersion"], 4);
+        assert_eq!(snapshot["schemaVersion"], 5);
         assert_eq!(snapshot["orchestrations"].as_array().unwrap().len(), 0);
         let repeat = apply_with_backup(&store, &root, &document("Software Development"), true).unwrap();
         assert_eq!(repeat.unchanged, vec!["Software Development"]);
@@ -698,7 +718,7 @@ mod tests {
         assert!(!config.enabled);
         assert!(super::super::change_enabled(&store,&id,config.policy_revision,true).is_err());
         let exported=export(&store).unwrap();
-        assert_eq!(exported["schemaVersion"], 4);
+        assert_eq!(exported["schemaVersion"], 5);
         assert_eq!(exported["orchestrations"][0]["extraWorkerBots"],json!(["Worker B","Worker C"]));
         assert_eq!(exported["orchestrations"][0]["reviewerBots"],json!(["Reviewer A","Reviewer B"]));
         assert!(!exported.to_string().contains("worker-project"));
@@ -750,15 +770,79 @@ mod tests {
         assert_eq!(apply(&store,&doc,true).unwrap().created.len(),2);
     }
 
+
     #[test]
-    fn portable_v4_profiles_pin_reasoning_and_accept_legacy_v3_imports() {
+    fn portable_v5_worker_budget_roundtrip_and_legacy_compatibility() {
+        let origin=fixture();
+        apply(&origin,&document("Capped Team"),true).unwrap();
+        let source_id:String=origin.db.query_row(
+            "SELECT id FROM sa_orchestrations WHERE name='Capped Team'",[],
+            |row|row.get(0),
+        ).unwrap();
+        let source=super::super::configuration(&origin,&source_id).unwrap();
+        let updated=super::super::roster::set_worker_attempt_limit(
+            &origin,&source_id,source.policy_revision,3,
+        ).unwrap();
+        assert_eq!(updated.max_worker_attempts,3);
+        let exported=export(&origin).unwrap();
+        assert_eq!(exported["schemaVersion"],5);
+        assert_eq!(exported["orchestrations"][0]["maxWorkerAttempts"],json!(3));
+        assert_eq!(exported["orchestrations"][0]["maxAttemptsPerAssignment"],json!(2));
+        assert!(!exported.to_string().contains("authorization_id"));
+        let target=fixture();
+        target.db.execute("UPDATE bots SET id='local-router' WHERE id='router'",[]).unwrap();
+        target.db.execute("UPDATE bots SET id='local-worker' WHERE id='worker'",[]).unwrap();
+        assert_eq!(preview(&target,&exported).unwrap().would_create,vec!["Capped Team"]);
+        assert_eq!(apply(&target,&exported,true).unwrap().created,vec!["Capped Team"]);
+        let imported_id:String=target.db.query_row(
+            "SELECT id FROM sa_orchestrations WHERE name='Capped Team'",[],
+            |row|row.get(0),
+        ).unwrap();
+        let imported=super::super::roster::read(&target,&imported_id).unwrap();
+        assert_eq!(imported.max_worker_attempts,3);
+        assert_eq!(imported.worker_bot_ids,vec!["local-worker"]);
+        assert_eq!(apply(&target,&exported,true).unwrap().unchanged,vec!["Capped Team"]);
+        for bad in [json!(0),json!(5),json!(null),json!("unlimited")] {
+            let mut invalid=exported.clone();
+            invalid["orchestrations"][0]["maxWorkerAttempts"]=bad;
+            assert!(preview(&target,&invalid).is_err());
+            assert!(apply(&target,&invalid,true).is_err());
+        }
+        let mut absent=exported.clone();
+        absent["orchestrations"][0].as_object_mut().unwrap().remove("maxWorkerAttempts");
+        assert!(preview(&target,&absent).unwrap_err().contains("Version 5"));
+        let mut inconsistent=exported.clone();
+        inconsistent["orchestrations"][0]["maxWorkerAttempts"]=json!(2);
+        assert!(preview(&target,&inconsistent).unwrap_err().contains("conflicts"));
+        let mut legacy_v4=exported.clone();
+        legacy_v4["schemaVersion"]=json!(4);
+        assert!(preview(&target,&legacy_v4).is_err());
+        legacy_v4["orchestrations"][0].as_object_mut().unwrap().remove("maxWorkerAttempts");
+        assert!(preview(&target,&legacy_v4).unwrap_err().contains("conflicts"));
+        let mut legacy_new=legacy_v4.clone();
+        legacy_new["orchestrations"][0]["name"]=json!("Legacy two attempts");
+        assert_eq!(apply(&target,&legacy_new,true).unwrap().created,vec!["Legacy two attempts"]);
+        let legacy_id:String=target.db.query_row(
+            "SELECT id FROM sa_orchestrations WHERE name='Legacy two attempts'",[],
+            |row|row.get(0),
+        ).unwrap();
+        assert_eq!(super::super::roster::read(&target,&legacy_id).unwrap().max_worker_attempts,2);
+        let path=target.path.clone();
+        drop(target);
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert_eq!(super::super::roster::read(&reopened,&imported_id).unwrap().max_worker_attempts,3);
+        assert_eq!(super::super::roster::read(&reopened,&legacy_id).unwrap().max_worker_attempts,2);
+    }
+
+    #[test]
+    fn portable_v5_profiles_pin_reasoning_and_accept_legacy_v3_imports() {
         let origin=fixture();
         origin.db.execute(
             "UPDATE bots SET skills='[\"required-skill\"]', reasoning_effort='high' WHERE id='worker'",[],
         ).unwrap();
         apply(&origin,&document("Pinned Team"),true).unwrap();
         let portable=export(&origin).unwrap();
-        assert_eq!(portable["schemaVersion"], 4);
+        assert_eq!(portable["schemaVersion"], 5);
         assert_eq!(portable["orchestrations"][0]["botProfiles"][1]["reasoningEffort"],
             json!("high"));
         assert_eq!(portable["orchestrations"][0]["botProfiles"][1]["skills"],
@@ -806,6 +890,7 @@ mod tests {
         assert!(preview(&target,&missing_effort).unwrap_err().contains("profile mismatch"));
         let mut legacy_v3=portable.clone();
         legacy_v3["schemaVersion"]=json!(3);
+        legacy_v3["orchestrations"][0].as_object_mut().unwrap().remove("maxWorkerAttempts");
         assert!(preview(&target,&legacy_v3).unwrap_err().contains("version 4"));
         for profile in legacy_v3["orchestrations"][0]["botProfiles"]
             .as_array_mut().unwrap() {

@@ -4803,6 +4803,14 @@ fn nested_child_required_criteria_are_proved_by_native_scored_leaf_lenses() {
         rusqlite::params![sid, receipt_key, original],
     ).unwrap();
     assert!(verified_council_pass(&store, &root));
+    // Child-only M4 has no direct root reviewer to mask a revoked root task.
+    let mut paused = root.clone();
+    paused.status = "paused".into();
+    assert!(!verified_council_pass(&store, &paused));
+    store.db.execute("UPDATE sessions SET archived=1 WHERE id=?1", rusqlite::params![sid]).unwrap();
+    assert!(!verified_council_pass(&store, &root));
+    store.db.execute("UPDATE sessions SET archived=0 WHERE id=?1", rusqlite::params![sid]).unwrap();
+    assert!(verified_council_pass(&store, &root));
 }
 
 
@@ -5069,6 +5077,23 @@ fn assert_nested_m5_root_and_child_callbacks(strategy: council::CouncilExecution
     assert_eq!(saved.council_status.as_ref().unwrap().state, "passed");
     assert_eq!(saved.council_status.as_ref().unwrap().lowest, Some(9.5));
     assert!(verified_council_pass(&store, &saved));
+    // Preserved historical scores cannot authorize paused, stopped or archived
+    // roots; restoring the original lifecycle must revalidate native receipts.
+    for status in ["paused", "stopped", "failed"] {
+        let mut inactive = saved.clone();
+        inactive.status = status.into();
+        assert!(!verified_council_pass(&store, &inactive),
+            "{status} root must not approve from previous child receipts");
+        refresh_council(&store, &mut inactive);
+        assert_ne!(inactive.council_status.as_ref().unwrap().state, "passed",
+            "{status} must not display an authenticated root approval");
+    }
+    store.db.execute("UPDATE sessions SET archived=1 WHERE id=?1", rusqlite::params![sid]).unwrap();
+    assert!(!verified_council_pass(&store, &saved),
+        "archived root cannot approve from preserved native child receipts");
+    store.db.execute("UPDATE sessions SET archived=0 WHERE id=?1", rusqlite::params![sid]).unwrap();
+    assert!(verified_council_pass(&store, &saved),
+        "restoring the original session reauthenticates immutable receipts");
     let inspected = council_inspection_state(&store, &sid).unwrap().unwrap();
     assert_eq!(inspected.usage.unique_attempts, 1, "root attempt is separate from child leaves");
     assert_eq!(inspected.reserved_children.len(), 1);

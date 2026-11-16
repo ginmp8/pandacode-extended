@@ -579,7 +579,12 @@ fn authenticated_hierarchical_status(
     // After a restart, session status may have been interrupted while a
     // caller still holds an older active team snapshot. Surviving receipts
     // cannot authorize a passed projection until the task is recovered.
-    if store.session(&team.session_id).ok()?.status == "interrupted" {
+    // Completed Councils retain historical proof, but a paused or stopped
+    // team and archived or interrupted native sessions revoke approval authority.
+    let root_session = store.session(&team.session_id).ok()?;
+    if root_session.archived || root_session.status == "interrupted"
+        || !(active(&team.status) || team.status == "completed")
+    {
         return None;
     }
     let children = child_council::verified_parent_seats(store, team).ok().flatten()?;

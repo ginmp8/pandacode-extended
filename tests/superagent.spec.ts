@@ -71,7 +71,7 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
     });
   });
   const host = page.locator('#sa-new-team-draft');
-  await host.locator('details.sa-legacy-create summary').click();
+  await host.locator('details.sa-legacy-create > summary').click();
   await expect(host.getByRole('button',{name:'Create disabled preset'})).toBeEnabled();
   await host.getByRole('textbox',{name:'Name',exact:true}).fill('Persisted roles');
   await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
@@ -110,7 +110,7 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   const dialog=page.getByRole('region',{name:'Orchestrations'});
   await expect(dialog).toBeVisible();
   await expect(dialog.getByRole('heading',{name:'Your first SuperAgent starts with a Team'})).toBeVisible();
-  await dialog.locator('details.sa-legacy-create summary').click();
+  await dialog.locator('details.sa-legacy-create > summary').click();
   await dialog.getByRole('textbox',{name:'Name'}).fill('Software Development');
   const coordinator=dialog.getByRole('combobox',{name:'Coordinator'});
   const worker=dialog.getByRole('combobox',{name:'Worker'});
@@ -141,7 +141,7 @@ test('duplicating a native Team retains its roles but never its saved runtime au
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
-  await host.locator('details.sa-legacy-create summary').click();
+  await host.locator('details.sa-legacy-create > summary').click();
   const create=host.locator('form[data-sa-form="create"]');
   await create.getByRole('textbox',{name:'Name',exact:true}).fill('Source Team');
   await create.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption({label:'Scout'});
@@ -178,7 +178,7 @@ test('versioned Team strategy is saved future-only with native unsupported-budge
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
-  await host.locator('details.sa-legacy-create summary').click();
+  await host.locator('details.sa-legacy-create > summary').click();
   const create=host.locator('form[data-sa-form="create"]');
   await create.getByRole('textbox',{name:'Name',exact:true}).fill('Economy Team');
   await create.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
@@ -244,7 +244,7 @@ test('provider child hierarchy never fabricates native seats or grants',async ({
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
-  await host.locator('details.sa-legacy-create summary').click();
+  await host.locator('details.sa-legacy-create > summary').click();
   const create=host.locator('form[data-sa-form="create"]');
   await create.getByRole('textbox',{name:'Name',exact:true}).fill('Observed Children');
   await create.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
@@ -273,7 +273,7 @@ test('delivery inspector distinguishes observed native work from verified softwa
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
-  await host.locator('details.sa-legacy-create summary').click();
+  await host.locator('details.sa-legacy-create > summary').click();
   const create=host.locator('form[data-sa-form="create"]');
   await create.getByRole('textbox',{name:'Name',exact:true}).fill('Evidence Team');
   await create.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
@@ -311,7 +311,7 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await sidebar.getByRole('button',{name:'Bot actions'}).click();
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
   const dialog=page.getByRole('region',{name:'Orchestrations'});
-  await dialog.locator('details.sa-legacy-create summary').click();
+  await dialog.locator('details.sa-legacy-create > summary').click();
   await dialog.getByRole('textbox',{name:'Name'}).fill('Issue Resolution');
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
@@ -451,7 +451,7 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
   await sidebar.getByRole('button',{name:'Bot actions'}).click();
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
   const dialog=page.getByRole('region',{name:'Orchestrations'});
-  await dialog.locator('details.sa-legacy-create summary').click();
+  await dialog.locator('details.sa-legacy-create > summary').click();
   await dialog.getByRole('textbox',{name:'Name'}).fill('Safe default');
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
@@ -615,7 +615,7 @@ test('SuperAgent examples only fill names and leave all authorization disabled',
   await sidebar.getByRole('button',{name:'Bot actions'}).click();
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
   const dialog=page.getByRole('region',{name:'Orchestrations'});
-  await dialog.locator('details.sa-legacy-create summary').click();
+  await dialog.locator('details.sa-legacy-create > summary').click();
   const example=dialog.getByRole('combobox',{name:'Example preset'});
   const name=dialog.getByRole('textbox',{name:'Name',exact:true});
   await example.selectOption('Software Development');
@@ -757,7 +757,7 @@ test('SuperAgent preset draft survives an asynchronous native list reload', asyn
     });
   });
   const host = page.locator('#sa-preset-draft-test');
-  await host.locator('details.sa-legacy-create summary').click();
+  await host.locator('details.sa-legacy-create > summary').click();
   await host.getByRole('combobox',{name:'Example preset'}).selectOption('Software Development');
   const name = host.getByRole('textbox',{name:'Name',exact:true});
   await expect(name).toHaveValue('Software Development');
@@ -885,7 +885,7 @@ test('Bots Orchestrations is a persistent main workspace with native-backed Team
   await workspace.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(workspace.getByText('Select a Team from the directory')).toBeVisible();
   await workspace.getByRole('button',{name:'Teams',exact:true}).click();
-  await workspace.locator('details.sa-legacy-create summary').click();
+  await workspace.locator('details.sa-legacy-create > summary').click();
   await workspace.getByRole('textbox',{name:'Name',exact:true}).fill('Persistent Team');
   await workspace.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await workspace.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});

@@ -1410,6 +1410,10 @@ test('the tray button is settings only: no score badge, a cue dot when asking or
   await open(page, '/?council');
   await expect(button(page).locator('b')).toHaveCount(0);
   await expect(button(page)).toHaveAccessibleName('Council: Round 2 of 10 · reviewing');
+  // The button can paint before the native preview snapshot finishes hydrating.
+  // Assert the current round and its semantic cue before testing computed CSS.
+  await expect(strip(page)).toHaveAttribute('data-state', 'reviewing', { timeout: 15_000 });
+  await expect(button(page).locator('.council-glyph')).toHaveAttribute('data-cue', '');
   const dot = () => button(page).locator('.council-glyph').evaluate(node => {
     const pseudo = getComputedStyle(node, '::after');
     // Unrendered pseudo-elements may report 'normal', not 'none', on CI browsers.
@@ -1420,6 +1424,7 @@ test('the tray button is settings only: no score badge, a cue dot when asking or
   await expect.poll(dot).toBe(false);
   await open(page, '/?council=asking');
   await expect(button(page)).toHaveAccessibleName('Council needs you');
+  await expect(button(page).locator('.council-glyph')).toHaveAttribute('data-cue', 'asking');
   await expect.poll(dot).toBe(true);
   await open(page, '/?council=passed');
   // Page navigation only confirms the composer has mounted. Wait for the
@@ -1429,6 +1434,7 @@ test('the tray button is settings only: no score badge, a cue dot when asking or
   await expect.poll(dot).toBe(true);
   await open(page, '/?council=accepted');
   await expect(button(page)).toHaveAccessibleName(/^Council: Accepted/);
+  await expect(button(page).locator('.council-glyph')).toHaveAttribute('data-cue', '');
   await expect.poll(dot).toBe(false);
 });
 

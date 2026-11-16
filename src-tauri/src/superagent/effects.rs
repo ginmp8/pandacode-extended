@@ -402,7 +402,7 @@ fn effect_worker_session_current_for_ticket(
 ) -> Result<bool> {
     let scope = active_scope_for_ticket(&store.db, ticket_id, expected_revision)?
         .ok_or_else(|| "The Ticket, revision, mandate, or active worker no longer permits this effect.".to_string())?;
-    let pinned=super::ticket_team_snapshot(store,&ticket_id)?;
+    let pinned=super::ticket_team_snapshot(store,ticket_id)?;
     let attempt_timeout=pinned.policy.strategy.attempt_timeout_ms;
     // A persisted effect grant does not renew an expired provider attempt.
     // Ambiguous concurrent running assignments cannot authorize a remote write.
@@ -419,10 +419,10 @@ fn effect_worker_session_current_for_ticket(
     ).map_err(|e| e.to_string())?;
     let session = store.session(&scope.session_id)?;
     Ok(session.project_id == scope.project_id
-        && super::assignment_thread_current(store,&scope.session_id,&ticket_id)?
-        && super::assignment_role_authorized(store,&ticket_id,&bot_id,attempt)?
+        && super::assignment_thread_current(store,&scope.session_id,ticket_id)?
+        && super::assignment_role_authorized(store,ticket_id,&bot_id,attempt)?
         && super::admitted_session_matches_profile(
-            store,&ticket_id,&bot_id,"worker",&session,
+            store,ticket_id,&bot_id,"worker",&session,
         )?)
 }
 

@@ -3861,6 +3861,112 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
     assert!(child_council::inspect(&store, &started).unwrap_err().contains("child_council_stale"));
 }
 
+
+#[test]
+fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume() {
+    // Use an actual file-backed database; in-memory interruption simulations
+    // do not exercise Store::open recovery of both sessions and Architect teams.
+    let directory = std::env::temp_dir().join(format!(
+        "pandacode-nested-council-restart-{}", uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&directory).unwrap();
+    let path = directory.join("state.sqlite");
+    let (sid, launch) = {
+        let store = Store::open(&path).unwrap();
+        let project = store.add_project(&directory).unwrap();
+        let session = store.create_session(&project.id, "claude", "default", "ask").unwrap();
+        for bot in ["restart-security", "restart-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project.id, storage::now()],
+            ).unwrap();
+        }
+        let mut council = on(9.0, 3, 0);
+        council.nested_bot_reviewers = ["restart-security", "restart-architecture"]
+            .iter().map(|bot| council::CouncilNestedReviewer {
+                bot_id: (*bot).into(), child_reviewers: 2,
+                child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        council.validate().unwrap();
+        let mut team_config = config();
+        team_config.council = Some(council);
+        let mut root = new_team(session.id.clone(), team_config);
+        save(&store, &mut root).unwrap();
+        let state = AppState {
+            store: Arc::new(std::sync::Mutex::new(store)),
+            agents: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            terminals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+            shutdown: std::sync::atomic::AtomicU8::new(0),
+        };
+        let (started, _) = start_state(
+            &state, &session.id, "Review the frozen artifact", None, None,
+        ).unwrap();
+        let (result, _) = dispatch_state(
+            &state, &session.id, started.generation, "pandacode_finish_team",
+            json!({"summary":"Begin real nested review"}),
+            &std::sync::atomic::AtomicBool::new(false),
+        ).unwrap();
+        assert_eq!(result["completed"], false);
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            assert_eq!(
+                parent_of(&store, &launch.admission.parent).unwrap().as_deref(),
+                Some(session.id.as_str())
+            );
+            child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
+            // Represent a crash with all three native sessions still active.
+            for id in [&session.id, &launch.admission.parent, &launch.sid] {
+                store.db.execute(
+                    "UPDATE sessions SET status='running' WHERE id=?1", [id],
+                ).unwrap();
+            }
+        }
+        (session.id, launch)
+    };
+    let reopened = Store::open(&path).unwrap();
+    let root = load(&reopened, &sid).unwrap().unwrap();
+    let child = load(&reopened, &launch.admission.parent).unwrap().unwrap();
+    assert_eq!(root.status, "interrupted");
+    assert_eq!(child.status, "interrupted");
+    for id in [&sid, &launch.admission.parent, &launch.sid] {
+        assert_eq!(reopened.session(id).unwrap().status, "interrupted");
+    }
+    assert!(child_council::authorize_leaf(
+        &reopened, &launch.sid, &launch.admission
+    ).unwrap_err().contains("child_council_revoked"));
+    assert!(child_council::next_leaf_launch(
+        &reopened, &std::collections::HashMap::new(), &root,
+    ).unwrap_err().contains("child_council_revoked"));
+    let before_root = serde_json::to_value(&root).unwrap();
+    let before_child = serde_json::to_value(&child).unwrap();
+    let state = AppState {
+        store: Arc::new(std::sync::Mutex::new(reopened)),
+        agents: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        terminals: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
+        shutdown: std::sync::atomic::AtomicU8::new(0),
+    };
+    let error = control_state(&state, &sid, "resume").unwrap_err();
+    assert!(error.contains("child_council_revoked"), "{error}");
+    completed_state(
+        &state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {},
+    );
+    {
+        let store = state.store.lock().unwrap();
+        assert_eq!(
+            serde_json::to_value(load(&store, &sid).unwrap().unwrap()).unwrap(),
+            before_root, "unsafe resume must not change the original root cycle"
+        );
+        assert_eq!(
+            serde_json::to_value(load(&store, &launch.admission.parent).unwrap().unwrap()).unwrap(),
+            before_child, "replayed callback must not mutate a restarted child"
+        );
+    }
+    drop(state);
+    std::fs::remove_dir_all(directory).unwrap();
+}
+
 #[test]
 fn settled_or_archived_root_revokes_native_child_launch_and_callback_after_admission() {
     let (state, sid) = state_fixture();

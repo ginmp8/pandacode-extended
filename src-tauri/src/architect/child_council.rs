@@ -255,6 +255,29 @@ fn require_live_root_session(store: &Store, root_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// A physical restart interrupts child Architect snapshots and invalidates
+/// their native reviewer grants. Resume must not present a running root with
+/// unusable child reservations; an explicit fresh Council cycle is required.
+/// This is read-only preflight: no old evidence is deleted or reauthorized.
+pub(super) fn require_resumable_child_cycles(store: &Store, root: &TeamSnapshot) -> Result<()> {
+    let Some(config) = root.config.council.as_ref() else { return Ok(()) };
+    if root.council_since <= 0 || config.nested_bot_reviewers.is_empty() {
+        return Ok(());
+    }
+    for choice in &config.nested_bot_reviewers {
+        match read(store, root, choice) {
+            Ok(Some(_)) => {}
+            Ok(None) => return Err(
+                "child_council_revoked: required child reservation is absent; start a fresh Council task.".into()
+            ),
+            Err(reason) => return Err(format!(
+                "child_council_revoked: nested review cannot resume with invalid native evidence ({reason}); start a fresh Council task."
+            )),
+        }
+    }
+    Ok(())
+}
+
 /// Resolve task descendants through native ownership, never a bot's editable
 /// roster or self-reported parent. This is deliberately limited to depth two.
 fn leaf_sessions(store: &Store, root: &str) -> Result<Vec<String>> {

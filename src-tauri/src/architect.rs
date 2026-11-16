@@ -1917,6 +1917,12 @@ pub(crate) fn control_state(state: &AppState, session_id: &str, action: &str) ->
                 if parent.archived || parent.task_stage == "completed" {
                     return Err(SETTLED_PARENT.into());
                 }
+                // A restarted child has no live native review authority. Do
+                // not silently resume a root whose required child receipts
+                // and reviewer sessions can no longer be authenticated.
+                if team.status == "interrupted" {
+                    child_council::require_resumable_child_cycles(&store, &team)?;
+                }
                 apply_pending_setup(&store, &mut team)?;
                 team.generation += 1;
                 team.status = "running".into();

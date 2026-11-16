@@ -9875,6 +9875,63 @@ fn native_reviewer_test_host(state: Arc<AppState>, sid: String, admission: Admis
         .0.ok_or_else(|| "policy_unsupported: native reviewer host has no authorized tools.".into())
 }
 
+
+#[tokio::test]
+async fn paused_then_resumed_root_revokes_stale_native_child_coordinator_host() {
+    let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();
+    let state = Arc::new(state);
+    let admission = {
+        let store = state.store.lock().unwrap();
+        let child = load(&store, &child_id).unwrap().unwrap();
+        Admission { parent: child_id.clone(), generation: child.generation }
+    };
+    let old_host = native_reviewer_test_host(
+        state.clone(), child_id.clone(), admission.clone(),
+    ).unwrap();
+    assert!((old_host.handler)("pandacode_list_workers".into(), json!({})).await.is_ok());
+    let child_before = {
+        let store = state.store.lock().unwrap();
+        serde_json::to_value(load(&store, &child_id).unwrap().unwrap()).unwrap()
+    };
+
+    {
+        let store = state.store.lock().unwrap();
+        let mut root = load(&store, &root_id).unwrap().unwrap();
+        root.status = "paused".into();
+        save(&store, &mut root).unwrap();
+    }
+    assert!((old_host.handler)("pandacode_list_workers".into(), json!({})).await.is_err(),
+        "a paused root must revoke previously created coordinator tool hosts");
+
+    // A later live root generation must not reauthorize the old host. Only
+    // a newly frozen host may use the same child after native recovery.
+    {
+        let store = state.store.lock().unwrap();
+        let mut root = load(&store, &root_id).unwrap().unwrap();
+        root.status = "running".into();
+        root.generation = root.generation.saturating_add(1);
+        save(&store, &mut root).unwrap();
+        assert!(native_child_coordinator_admitted(&store, &child_id).unwrap(),
+            "the recovered root still owns its existing task-scoped child");
+    }
+    let denied = (old_host.handler)(
+        "pandacode_dispatch_workers".into(), json!({"assignments":[]}),
+    ).await.unwrap_err();
+    assert!(denied.contains("reviewer_session_mismatch"), "{denied}");
+
+    let current_host = native_reviewer_test_host(
+        state.clone(), child_id.clone(), admission,
+    ).unwrap();
+    assert!((current_host.handler)("pandacode_list_workers".into(), json!({})).await.is_ok(),
+        "fresh root authority should retain read-only child inspection");
+    let store = state.store.lock().unwrap();
+    assert_eq!(
+        serde_json::to_value(load(&store, &child_id).unwrap().unwrap()).unwrap(),
+        child_before,
+        "denied old-generation launch must not consume or mutate child work"
+    );
+}
+
 async fn assert_native_reviewer_host_denials(host: &ToolHost, coordinator: bool) {
     assert!(host.approval_tools.is_empty());
     for name in ["pandacode_followup_worker", "pandacode_cancel_worker", "pandacode_sub_workers",

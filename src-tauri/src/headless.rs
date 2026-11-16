@@ -34,6 +34,7 @@ enum Command {
     ListTicketActivity { ticket_id: String, before_id: Option<i64> },
     ListReviewInbox { before_updated_at: Option<i64>, before_id: Option<String> },
     ListRecoveryInbox { before_priority: Option<i64>, before_updated_at: Option<i64>, before_id: Option<String> },
+    ListUnresolvedEffects { before_updated_at: Option<i64>, before_ticket_id: Option<String>, before_effect_key: Option<String> },
     ListDemands {
         state: String, before_updated_at: Option<i64>, before_id: Option<String>,
         search_query: Option<String>, project_id: Option<String>,
@@ -384,6 +385,23 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::ListUnresolvedEffects { before_updated_at, before_ticket_id, before_effect_key } = &command {
+                // Cross-Ticket native receipt inventory; no grant, replay, provider
+                // contact or startup recovery against another live serve host.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::list_headless_unresolved_effects(
+                        &dir.join("kingcode.sqlite3"), *before_updated_at,
+                        before_ticket_id.as_deref(), before_effect_key.as_deref(),
+                    ));
+                match result {
+                    Ok(inbox) => { println!("{inbox}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent effect reconciliation inbox failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             if let Command::ListReviewInbox { before_updated_at, before_id } = &command {
                 // Native pending-decision cursor; no startup recovery or grants.
                 let result = app.path().app_data_dir()
@@ -586,7 +604,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
     match command {
         // Inspection exits before setup_common and must never reach this branch.
         Command::InspectOrchestrations | Command::ListTickets | Command::ListTicketActivity { .. } | Command::ListReviewInbox { .. }
-        | Command::ListRecoveryInbox { .. } | Command::ListDemands { .. }
+        | Command::ListRecoveryInbox { .. } | Command::ListUnresolvedEffects { .. } | Command::ListDemands { .. }
         | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
@@ -1065,6 +1083,27 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                     } else {(None,None,None)};
                 command = Command::ListRecoveryInbox { before_priority,before_updated_at,before_id };
                 ops += 1;
+            }
+            "--list-unresolved-effects" => {
+                let (before_updated_at,before_ticket_id,before_effect_key) =
+                    if args.get(index+1).map(String::as_str)==Some("--before") {
+                        let at=args.get(index+2)
+                            .ok_or("--before needs timestamp, Ticket ID and effect key.")?
+                            .parse::<i64>().ok().filter(|at| *at>0)
+                            .ok_or("Unresolved effect timestamp must be positive.")?;
+                        let ticket=args.get(index+3)
+                            .ok_or("--before needs a Ticket ID.")?;
+                        validate_ticket_id(ticket)?;
+                        let effect=args.get(index+4)
+                            .ok_or("--before needs an effect key.")?;
+                        validate_effect_key(effect)?;
+                        index+=4;
+                        (Some(at),Some(ticket.clone()),Some(effect.clone()))
+                    } else {(None,None,None)};
+                command=Command::ListUnresolvedEffects {
+                    before_updated_at,before_ticket_id,before_effect_key,
+                };
+                ops+=1;
             }
             "--list-review-inbox" => {
                 let (before_updated_at, before_id) =
@@ -1677,6 +1716,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --list-recovery-inbox [--before <priority> <ms> <ticket-id>]
                          Page native recovery/decision Tickets across Teams by stable priority
                          then update time and ID; no provider or remote replay; exit.
+  --list-unresolved-effects [--before <ms> <ticket-id> <effect-key>]
+                         Page unresolved native effect receipts across all Tickets,
+                         including older ones; never retry or acknowledge remotely; exit.
   --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>]
                          Filter by each Ticket's admitted native Project before paging;
                          search/project flags may follow --before in either order; redacted.
@@ -1839,6 +1881,23 @@ mod tests {
             "--list-recovery-inbox --before 1 12345 ../private",
         ] { assert!(parsed(invalid).is_err(),"{invalid}"); }
         assert!(parsed("--list-recovery-inbox --stop-ticket ticket_1").is_err());
+        assert_eq!(parsed("--list-unresolved-effects"), Ok(Command::ListUnresolvedEffects {
+            before_updated_at:None,before_ticket_id:None,before_effect_key:None,
+        }));
+        assert_eq!(parsed("--list-unresolved-effects --before 1000 ticket_1 github:issue:42"),
+            Ok(Command::ListUnresolvedEffects {
+                before_updated_at:Some(1000),before_ticket_id:Some("ticket_1".into()),
+                before_effect_key:Some("github:issue:42".into()),
+            }));
+        for invalid in [
+            "--list-unresolved-effects --before",
+            "--list-unresolved-effects --before 0 ticket_1 github:issue:42",
+            "--list-unresolved-effects --before 1000 ../ticket github:issue:42",
+            "--list-unresolved-effects --before 1000 ticket_1 ../effect",
+            "--list-unresolved-effects --before 1000 ticket_1",
+            "--list-unresolved-effects --stop-ticket ticket_1",
+            "--list-unresolved-effects --before 1000 ticket_1 github:issue:42 --before 999 ticket_1 github:issue:41",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
         assert_eq!(parsed("--inspect-source-health source_123"),
             Ok(Command::InspectSourceHealth { source_id: "source_123".into() }));
         for invalid in ["--inspect-source-health", "--inspect-source-health ../private",

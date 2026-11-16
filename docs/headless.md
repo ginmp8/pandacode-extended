@@ -80,6 +80,15 @@ An interrupted Ticket remains durable and cannot be restarted by an inferred
 source event. On restart, existing `pending` external-effect receipts become
 `uncertain`; they require independent provider reconciliation before any
 future retry. A paused or revoked Team is not re-enabled by a watchdog tick.
+The read-only `--list-unresolved-effects` command pages exact pending/uncertain
+receipt keys, payload SHA-256 digests, Ticket and Team IDs across all Tickets. Use
+`--before <updated-at-ms> <ticket-id> <effect-key>` from `nextCursor`
+to inspect older identities, including terminal Tickets outside the recovery
+inbox's first page. The snapshot never queries the remote provider, acknowledges,
+retries or replays effects; current provider state must be reconciled separately.
+Cursor timestamps are mutable when a receipt changes state, so re-list from the
+first page after concurrent reconciliation. An unrelated applied effect is omitted.
+
 The existing `--inspect-ticket` and `--inspect-ticket-effects` commands show
 redacted state without touching live sessions. Per-effect dispatch and full
 headless admission/retry still require explicit user-authorized native grants.

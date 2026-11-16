@@ -3599,7 +3599,8 @@ fn assignment_thread_current(store: &Store, session_id: &str, ticket_id: &str) -
                     AND EXISTS (SELECT 1 FROM sa_audit initial
                       WHERE initial.ticket_id=assignment.ticket_id
                         AND initial.kind='admitted'
-                        AND initial.detail='blocked: worker occupied')
+                        AND initial.detail IN ('blocked: worker occupied',
+                            'blocked: explicit headless staging'))
                     AND EXISTS (SELECT 1 FROM sa_audit retry
                       WHERE retry.ticket_id=assignment.ticket_id
                         AND retry.kind='manual_retry'))
@@ -3633,7 +3634,8 @@ fn assignment_role_authorized(
     ).optional().map_err(|e| e.to_string())?;
     Ok(match admission.as_deref() {
         Some("manual readonly coordinator reserved") if attempt == 1 => coordinator,
-        Some("manual readonly coordinator reserved" | "manual readonly worker reserved" | "blocked: worker occupied")
+        Some("manual readonly coordinator reserved" | "manual readonly worker reserved"
+            | "blocked: worker occupied" | "blocked: explicit headless staging")
             if attempt > 0 => worker,
         _ => false,
     })
@@ -3852,7 +3854,8 @@ pub(crate) fn guard_gateway_inbound(
                   AND EXISTS (SELECT 1 FROM sa_audit initial
                     WHERE initial.ticket_id=assignment.ticket_id
                       AND initial.kind='admitted'
-                      AND initial.detail='blocked: worker occupied')
+                      AND initial.detail IN ('blocked: worker occupied',
+                          'blocked: explicit headless staging'))
                   AND EXISTS (SELECT 1 FROM sa_audit retry
                     WHERE retry.ticket_id=assignment.ticket_id
                       AND retry.kind='manual_retry'))
@@ -5682,6 +5685,73 @@ mod tests {
         ).is_ok(),"revocation must release the native ownership guard");
     }
 
+
+    #[test]
+    fn headless_staged_demand_can_run_only_after_explicit_native_retry() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let raw = headless_queue_demand(
+            &store.path, &config.id, "Staged readonly work", "headless-retry-a",
+        ).unwrap();
+        let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let ticket_id = view["ticketId"].as_str().unwrap();
+        let native_thread = format!("{ticket_id}:attempt:1");
+
+        // Staging is not dispatch. A forged inbound message has no assignment
+        // and must be denied before the gateway can create a conversation.
+        assert!(assignment_session(&store, ticket_id).unwrap().is_none());
+        assert!(guard_gateway_inbound(
+            &store, "worker", &native_thread, "local-user", true,
+        ).is_err());
+
+        let (running, thread, worker) = retry_blocked(
+            &mut store, ticket_id, false,
+        ).unwrap();
+        assert_eq!(running.state, "running");
+        assert_eq!(thread, native_thread);
+        assert_eq!(worker, "worker");
+        let session = assignment_session(&store, ticket_id).unwrap().unwrap();
+        assert!(guard_gateway_inbound(
+            &store, &worker, &thread, "local-user", true,
+        ).is_ok());
+        assert!(guard_gateway_inbound(
+            &store, &worker, &thread, "untrusted", true,
+        ).is_err());
+        assert!(read_only_policy(&store, &session).unwrap().is_some());
+        assert!(on_run_finished(&store, &session, true, "Verified worker evidence").unwrap());
+        let awaiting = get_ticket(&store, ticket_id).unwrap();
+        assert_eq!(awaiting.state, "waiting_approval");
+        assert_eq!(accept(&store, ticket_id, awaiting.revision).unwrap().state, "completed");
+        assert!(!on_run_finished(&store, &session, true, "Stale callback").unwrap());
+        assert!(guard_gateway_inbound(
+            &store, &worker, &thread, "local-user", true,
+        ).is_err());
+    }
+
+    #[test]
+    fn headless_staged_retry_without_original_audit_cannot_enter_gateway() {
+        let mut store = fixture();
+        let config = enabled(&store);
+        let raw = headless_queue_demand(
+            &store.path, &config.id, "Staged scope", "headless-retry-b",
+        ).unwrap();
+        let view: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        let ticket_id = view["ticketId"].as_str().unwrap();
+        let (_, thread, worker) = retry_blocked(
+            &mut store, ticket_id, false,
+        ).unwrap();
+        let session = assignment_session(&store, ticket_id).unwrap().unwrap();
+        store.db.execute(
+            "UPDATE sa_audit SET kind='invalidated_retry'
+             WHERE ticket_id=?1 AND kind='manual_retry'",
+            [ticket_id],
+        ).unwrap();
+        assert!(guard_gateway_inbound(
+            &store, &worker, &thread, "local-user", true,
+        ).is_err());
+        assert!(read_only_policy(&store, &session).is_err());
+        assert_eq!(get_ticket(&store, ticket_id).unwrap().state, "running");
+    }
 
     #[test]
     fn headless_queue_demand_is_durable_idempotent_and_never_dispatches() {

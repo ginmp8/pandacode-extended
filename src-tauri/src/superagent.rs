@@ -3124,7 +3124,18 @@ fn change_enabled(
              )",
             [orchestration_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
-        if !unsettled { return Ok(current); }
+        // Legacy or interrupted state writers can leave a pending remote
+        // effect on an already terminal Ticket. A repeated Off must quarantine
+        // that effect too, even when no active Mandate remains to revoke.
+        let pending_effects: bool = store.db.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sa_effect_receipts e
+                 JOIN sa_tickets t ON t.id=e.ticket_id
+                 WHERE t.orchestration_id=?1 AND e.state='pending'
+             )",
+            [orchestration_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !unsettled && !pending_effects { return Ok(current); }
     }
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let now = storage::now();
@@ -3147,13 +3158,27 @@ fn change_enabled(
              FROM sa_tickets WHERE orchestration_id=?1 AND state IN {PENDING}"
         );
         tx.execute(&audit, params![orchestration_id,now]).map_err(|e| e.to_string())?;
-        // Team Off revokes all outstanding attempts; uncertain external work
-        // is preserved in the same transaction, never retried by this path.
+        // Legacy terminal Tickets can still carry pending external effects
+        // after a partially interrupted state writer. Record their recovery
+        // obligation before changing the receipts; terminal Ticket state and
+        // original payload identity must remain untouched.
+        let terminal_effect_audit = format!(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             SELECT t.id,'orchestration_disabled_effect_uncertain',
+               'Pending remote effect quarantined; independent reconciliation required',?2
+             FROM sa_tickets t
+             WHERE t.orchestration_id=?1 AND t.state NOT IN {PENDING}
+               AND EXISTS(SELECT 1 FROM sa_effect_receipts e
+                          WHERE e.ticket_id=t.id AND e.state='pending')"
+        );
+        tx.execute(&terminal_effect_audit,params![orchestration_id,now])
+            .map_err(|e| e.to_string())?;
+        // Quarantine every pending effect of this Team, including legacy
+        // terminal receipts. Never infer failure, mark applied, or resend.
         tx.execute(
             "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
              WHERE state='pending' AND ticket_id IN (
-                SELECT id FROM sa_tickets WHERE orchestration_id=?1
-                AND state IN ('queued','running','waiting_approval','waiting_review','blocked'))",
+                SELECT id FROM sa_tickets WHERE orchestration_id=?1)",
             params![orchestration_id,now],
         ).map_err(|e| e.to_string())?;
         let grants = format!(
@@ -7334,6 +7359,110 @@ mod tests {
              WHERE ticket_id=?1 AND effect_key='comment'", [&task.id],
         ).unwrap();
         assert_eq!(accept(&store, &task.id, waiting.revision).unwrap().state, "completed");
+    }
+
+    #[test]
+    fn disabling_team_quarantines_terminal_pending_effects_and_repeated_off_repairs_legacy_receipts() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private terminal effect", "terminal-effect-off", false,
+        ).unwrap();
+        assert!(launched);
+        stop(&store, &ticket.id).unwrap();
+        let terminal_revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        let timestamp = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'legacy-first','digest','pending',?2,?2)",
+            params![&ticket.id,timestamp],
+        ).unwrap();
+
+        let off = change_enabled(&store, &cfg.id, cfg.policy_revision, false).unwrap();
+        assert!(!off.enabled);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "stopped");
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, terminal_revision);
+        let first_state: String = store.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key='legacy-first'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(first_state, "uncertain");
+
+        // The Team is already Off, but a legacy or interrupted writer left
+        // another pending receipt. Reissuing Off must not silently skip it.
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'legacy-second','digest','pending',?2,?2)",
+            params![&ticket.id,timestamp],
+        ).unwrap();
+        let repaired = change_enabled(&store, &cfg.id, off.policy_revision, false).unwrap();
+        assert!(!repaired.enabled);
+        assert_eq!(effects::unresolved_count(&store, &ticket.id).unwrap(), 2);
+        let uncertain: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND state='uncertain'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(uncertain, 2);
+        let audit_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE ticket_id=?1 AND kind='orchestration_disabled_effect_uncertain'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(audit_count, 2);
+        let unchanged = change_enabled(&store, &cfg.id, repaired.policy_revision, false).unwrap();
+        assert_eq!(unchanged.policy_revision, repaired.policy_revision);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(effects::unresolved_count(&reopened, &ticket.id).unwrap(), 2);
+        let all_uncertain: i64 = reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND state='uncertain'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(all_uncertain, 2, "restart must not replay or bless remote effects");
+    }
+
+    #[test]
+    fn terminal_pending_effect_off_quarantine_rolls_back_on_audit_failure() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private legacy effect", "terminal-effect-rollback", false,
+        ).unwrap();
+        assert!(launched);
+        stop(&store, &ticket.id).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'legacy-pending','digest','pending',?2,?2)",
+            params![&ticket.id,storage::now()],
+        ).unwrap();
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER fail_terminal_effect_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='orchestration_disabled_effect_uncertain'
+             BEGIN SELECT RAISE(ABORT,'injected recovery audit failure'); END;",
+        ).unwrap();
+        assert!(change_enabled(&store, &cfg.id, cfg.policy_revision, false).is_err());
+        assert!(configuration(&store, &cfg.id).unwrap().enabled);
+        assert_eq!(configuration(&store, &cfg.id).unwrap().policy_revision, cfg.policy_revision);
+        let pending: String = store.db.query_row(
+            "SELECT state FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND effect_key='legacy-pending'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(pending, "pending", "audit failure must roll back the entire Off transaction");
+        store.db.execute_batch("DROP TRIGGER fail_terminal_effect_audit").unwrap();
+        change_enabled(&store, &cfg.id, cfg.policy_revision, false).unwrap();
+        let uncertain: String = store.db.query_row(
+            "SELECT state FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND effect_key='legacy-pending'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(uncertain, "uncertain");
     }
 
     #[test]

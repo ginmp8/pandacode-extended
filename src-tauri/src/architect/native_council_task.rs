@@ -178,6 +178,13 @@ pub fn admit(
             Err("council_task_conflict: admission cannot rebind objective, policy, cycle or artifact.".into())
         };
     }
+    // A saved team can remain running after its owning session settled.
+    // Preserve idempotent replay above, but never create new task authority
+    // from an interrupted, completed, or archived root session.
+    let session = store.session(session_id)?;
+    if session.archived || session.task_stage == "completed" || session.status == "interrupted" {
+        return Err("council_task_denied: new requests require a live root session.".into());
+    }
     let team = super::load(store, session_id)?
         .ok_or("council_task_denied: root Architect task disappeared.")?;
     if team.status != "running" || team.workers.iter().any(|worker|

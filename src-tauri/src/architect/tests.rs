@@ -2143,6 +2143,50 @@ fn native_task_council_admission_is_idempotent_and_rejects_foreign_or_stale_requ
 }
 
 #[test]
+fn native_task_admission_denies_settled_root_without_revoking_existing_request_identity() {
+    let (state, sid) = state_fixture();
+    let store = state.store.lock().unwrap();
+    let session = store.session(&sid).unwrap();
+    let project = session.project_id;
+    let initial_status = session.status;
+    let initial_stage = session.task_stage;
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    team.status = "running".into();
+    team.objective = "Review a frozen native task.".into();
+    team.council_since = storage::now().max(1);
+    team.config.council = Some(council::CouncilConfig::default());
+    save(&store, &mut team).unwrap();
+    let artifact = "d".repeat(64);
+    let original = native_council_task::admit(
+        &store, "native-client", &sid, &project, "original-task", &artifact,
+    ).unwrap();
+    for (status, stage, archived) in [
+        ("interrupted", initial_stage.as_str(), false),
+        (initial_status.as_str(), "completed", false),
+        (initial_status.as_str(), initial_stage.as_str(), true),
+    ] {
+        store.db.execute(
+            "UPDATE sessions SET status=?2,task_stage=?3,archived=?4 WHERE id=?1",
+            rusqlite::params![sid, status, stage, archived],
+        ).unwrap();
+        assert_eq!(load(&store, &sid).unwrap().unwrap().status, "running",
+            "the team snapshot must remain stale while the owning session is closed");
+        let refusal = native_council_task::admit(
+            &store, "native-client", &sid, &project, "new-task", &artifact,
+        ).unwrap_err();
+        assert!(refusal.contains("live root session"), "{refusal}");
+        assert_eq!(native_council_task::admit(
+            &store, "native-client", &sid, &project, "original-task", &artifact,
+        ).unwrap(), original, "an identical previous request is still idempotent");
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1 AND kind='council_native_task'",
+            [&sid], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1, "rejected admission must not create another authority record");
+    }
+}
+
+#[test]
 fn native_criterion_outcome_can_report_clean_work_without_a_fabricated_finding() {
     let (state, sid) = state_fixture();
     let generation;

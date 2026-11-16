@@ -354,6 +354,8 @@ fn active_scope_if_current(
            AND m.policy_revision=o.policy_revision AND t.project_id=m.project_id
            AND m.project_id=o.project_id AND t.actor=m.actor AND m.authorization_id<>''
            AND b.project_id=t.project_id AND b.paused=0 AND o.enabled=1
+           AND EXISTS (SELECT 1 FROM bots coordinator
+                       WHERE coordinator.id=o.coordinator_bot_id AND coordinator.paused=0)
            AND a.bot_id<>o.coordinator_bot_id
            AND (SELECT COUNT(*) FROM sa_assignments other
                 WHERE other.ticket_id=t.id AND other.state='running')=1",
@@ -1470,6 +1472,21 @@ mod tests {
         assert_eq!(unchanged, 8);
     }
 
+
+    #[test]
+    fn paused_coordinator_revokes_effect_reservation_without_creating_a_receipt() {
+        let (store, ticket_id) = fixture();
+        let intent = make_intent(&ticket_id, "coordinator pause fence");
+        authorize(&store, &intent).unwrap();
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='co'", []).unwrap();
+        assert!(reserve(&store, &intent).is_err(),
+            "a previously granted effect must not be reserved while the Coordinator is paused");
+        assert_eq!(unresolved_count(&store, &ticket_id).unwrap(), 0,
+            "a rejected reservation must not create a pending receipt");
+        store.db.execute("UPDATE bots SET paused=0 WHERE id='co'", []).unwrap();
+        assert_eq!(reserve(&store, &intent).unwrap(), Reservation::Reserved,
+            "restoring native Coordinator availability does not widen the exact grant");
+    }
 
     #[test]
     fn exact_grant_is_required_and_receipts_prevent_replay_and_mismatch() {

@@ -286,12 +286,9 @@ test('delivery inspector distinguishes observed native work from verified softwa
 test('native SuperAgent manual dispatch requires opt-in and supports explicit revocation',async ({page})=>{
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
-  const bar=page.locator('.sidebar-bots-bar');
-  if(await bar.getAttribute('aria-pressed')!=='true')await bar.click();
-  const sidebar=page.getByRole('region',{name:'Bots',exact:true});
-  await expect(sidebar).toBeVisible();
-  await sidebar.getByRole('button',{name:'Bot actions'}).click();
-  await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
+  // Native list hydration is a prerequisite for an operator action. Await
+  // actual workspace readiness instead of racing its initial reload.
+  await openOrchestrationWorkspace(page);
   const dialog=page.getByRole('region',{name:'Orchestrations'});
   await dialog.getByRole('textbox',{name:'Name'}).fill('Issue Resolution');
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});

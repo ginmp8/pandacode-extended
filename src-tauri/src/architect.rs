@@ -898,16 +898,21 @@ fn composed_native_authority_current(
     if config.composition.is_none() {
         return true;
     }
+    // A scored seat still counts after abandonment. It must be revalidated,
+    // not silently dropped so another review can replace its evidence.
     let seats = team.workers.iter().filter(|worker| {
-        !worker.abandoned
-            && worker.created_at >= team.council_since
-            && worker.council.as_ref().is_some_and(|seat| seat.round == round)
+        worker.created_at >= team.council_since
+            && worker.council.as_ref().is_some_and(|seat| {
+                seat.round == round && (!worker.abandoned || seat.score.is_some())
+            })
     }).collect::<Vec<_>>();
     if seats.len() < config.needed() {
         return false;
     }
     seats.into_iter().all(|worker| {
-        if !worker.read_only || worker.status != "completed" {
+        if !worker.read_only || worker.status != "completed"
+            || worker.abandoned || worker.wrote_at != 0
+        {
             return false;
         }
         let Some(binding) = worker.reviewer_binding.as_ref() else {

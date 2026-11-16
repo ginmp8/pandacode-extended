@@ -231,6 +231,18 @@ fn composed_root_authority_denies_unissued_tampered_and_revoked_seats() {
     store.message(&team.workers[1].session_id, "assistant",
         "Revalidated result.\nCouncil score: 9.7/10").unwrap();
     assert!(composed_native_authority_current(&store, &team, 1));
+    let mut abandoned = team.clone();
+    abandoned.workers[0].abandoned = true;
+    assert!(!composed_native_authority_current(&store, &abandoned, 1),
+        "an abandoned scored root seat cannot retain native approval");
+    let mut wrote = team.clone();
+    wrote.workers[1].wrote_at = SINCE + 3;
+    assert!(!composed_native_authority_current(&store, &wrote, 1),
+        "a read-only reviewer that recorded a write cannot approve");
+    let mut scoped = team.clone();
+    scoped.workers[0].files.push("src/main.ts".into());
+    assert!(composed_native_authority_current(&store, &scoped, 1),
+        "file scope alone must not be mistaken for a recorded write");
 
     let mut tampered = team.clone();
     tampered.workers[0].reviewer_binding.as_mut().unwrap()

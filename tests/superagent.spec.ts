@@ -2042,6 +2042,8 @@ test('SuperAgent issue comments use a stable receipt and report uncertain state 
       allowedTools:[],allowedSideEffects:true},assignments:[{id:'assignment-one',botId:'worker',
       sessionId:'session-one',state:'running',attempt:1}],activity:[]};
     const calls:Array<{command:string;args?:Record<string,unknown>}> = [];
+    const draftCalls:Array<{command:string;args?:Record<string,unknown>}> = [];
+    (window as unknown as {saDraftPrCalls:typeof draftCalls}).saDraftPrCalls=draftCalls;
     mountSuperagent(host,async(command,args)=>{
       if(command==='bots_list')return [
         {id:'coordinator',name:'Coordinator',paused:false},
@@ -2052,6 +2054,10 @@ test('SuperAgent issue comments use a stable receipt and report uncertain state 
       if(command==='superagent_tickets')return [ticket] as never;
       if(command==='superagent_snapshot')return snapshot as never;
       if(command==='superagent_source_thread_links')return [] as never;
+      if(command==='superagent_verify_draft_pull_request_target'){
+        draftCalls.push({command,args:{...args}});
+        return 'b'.repeat(40) as never;
+      }
       if(command==='superagent_issue_comment'){
         calls.push({command,args:{...args}});
         return {ticketId:'ticket-comment',ticketRevision:4,repository:'acme/widget',
@@ -2071,6 +2077,30 @@ test('SuperAgent issue comments use a stable receipt and report uncertain state 
   await expect(details).toContainText('reviewer-hash');
   await details.getByText('Inspect exact saved Team payload').click();
   await expect(details.locator('pre')).toContainText('"provenance": "native"');
+  const preflight=details.getByRole('region',{name:'Draft PR target preflight'});
+  await expect(preflight).toContainText('No pull request is created');
+  const preflightForm=preflight.locator('form[data-sa-form="draft-pr-preflight"]');
+  await preflightForm.getByRole('textbox',{name:'GitHub repository (owner/name)'}).fill('acme/widget');
+  const headBranch=preflightForm.getByRole('textbox',{name:'Pushed head branch'});
+  await headBranch.fill('feature..invalid');
+  await preflightForm.getByRole('textbox',{name:'Base branch'}).fill('main');
+  await preflightForm.getByRole('button',{name:'Verify pushed branch (read-only)'}).click();
+  await expect(preflightForm.getByRole('alert')).toContainText('distinct valid head/base branches');
+  await expect.poll(()=>page.evaluate(()=>(window as unknown as {
+    saDraftPrCalls:Array<unknown>;
+  }).saDraftPrCalls.length)).toBe(0);
+  await headBranch.fill('feature/ready');
+  await preflightForm.getByRole('button',{name:'Verify pushed branch (read-only)'}).click();
+  await expect(preflightForm.getByRole('status')).toContainText('b'.repeat(40));
+  const preflightCalls=await page.evaluate(()=>(window as unknown as {
+    saDraftPrCalls:Array<{command:string;args?:Record<string,unknown>}>;
+  }).saDraftPrCalls);
+  expect(preflightCalls).toEqual([{command:'superagent_verify_draft_pull_request_target',
+    args:{ticketId:'ticket-comment',expectedRevision:4,repository:'acme/widget',
+      head:'feature/ready',base:'main'}}]);
+  await headBranch.fill('feature/new-head');
+  await expect(preflightForm.getByRole('status')).toHaveCount(0);
+
   const commentForm=details.locator('form[data-sa-form="issue-comment"]');
   await expect(commentForm).toBeVisible();
   await commentForm.getByRole('textbox',{name:'Repository (owner/name)'}).fill('acme/widget');

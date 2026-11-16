@@ -247,6 +247,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   // Preserve fields across native refreshes of the *same* Ticket only.
   let commentDraftTicketId = '';
   let issueCommentError = '', issueCommentStatus: IssueCommentStatus | null = null;
+  // Read-only draft PR target preflight; never a publication or durable permission.
+  let draftPrRepository = '', draftPrHead = '', draftPrBase = '';
+  let draftPrError = '', draftPrVerifiedSha = '', draftPrVerifiedRevision = -1;
   let demandObjective = '', demandMode: 'coordinated' | 'direct' | 'auto' = 'coordinated';
   let workPlan: DemandPlanEvidence | null = null, workPlanLoaded = false;
   let workWriteItemKey = '', workWritePaths = '';
@@ -392,6 +395,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       commentDraft = '';
       issueCommentError = '';
       issueCommentStatus = null;
+      draftPrRepository = ''; draftPrHead = ''; draftPrBase = '';
+      draftPrError = ''; draftPrVerifiedSha = ''; draftPrVerifiedRevision = -1;
     }
     const roleSummary = (item:Config): string =>
       typeof item.workerCount === 'number' && typeof item.reviewerCount === 'number' &&
@@ -766,6 +771,21 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               commentStatus?.state === 'pending' ? 'Check pending comment' :
                 commentStatus?.state === 'uncertain' ? 'Reconcile comment status' :
                   'Authorize and post comment') + '</button></form></section>'
+          : '') +
+        (canComment
+          ? '<section class="sa-effect-editor" role="region" aria-label="Draft PR target preflight">' +
+            '<h5>Draft pull request target (read-only)</h5>' +
+            '<p>Verify the active Worker checkout is clean, its head is already pushed, and the base exists in the same repository. No pull request is created and no permission is granted.</p>' +
+            '<form data-sa-form="draft-pr-preflight"><label>GitHub repository (owner/name)' +
+            '<input name="repository" maxlength="200" required value="' + safe(draftPrRepository) + '"></label>' +
+            '<div class="sa-grid"><label>Pushed head branch<input name="head" maxlength="200" required value="' +
+            safe(draftPrHead) + '"></label><label>Base branch<input name="base" maxlength="200" required value="' +
+            safe(draftPrBase) + '"></label></div>' +
+            (draftPrError ? '<p role="alert" data-sa-draft-pr-error>' + safe(draftPrError) + '</p>' : '') +
+            (draftPrVerifiedSha && draftPrVerifiedRevision === inspected.revision
+              ? '<p role="status" data-sa-draft-pr-sha>Verified remote head SHA: <code>' +
+                safe(draftPrVerifiedSha) + '</code>. Read-only verification only; creating a PR remains unavailable.</p>' : '') +
+            '<button type="submit">Verify pushed branch (read-only)</button></form></section>'
           : '') +
         '<button type="button" data-sa-close-details>Close evidence</button></section>'
       : '';
@@ -1503,6 +1523,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-demand-project-input')) {
       demandProjectDraft = target.value;
+      return;
+    }
+    if (target instanceof HTMLInputElement &&
+        target.closest('form[data-sa-form="draft-pr-preflight"]')) {
+      if (target.name === 'repository') draftPrRepository = target.value;
+      if (target.name === 'head') draftPrHead = target.value;
+      if (target.name === 'base') draftPrBase = target.value;
+      draftPrError = ''; draftPrVerifiedSha = ''; draftPrVerifiedRevision = -1;
+      host.querySelector('[data-sa-draft-pr-error]')?.remove();
+      host.querySelector('[data-sa-draft-pr-sha]')?.remove();
       return;
     }
     if ((target instanceof HTMLInputElement || target instanceof HTMLTextAreaElement) &&
@@ -2306,6 +2336,61 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         feedback = 'Native confirmation authorized Ticket ' + ticketId + ' at revision ' +
           expectedRevision + '. Worker state: ' + result.ticket.state + '. Allowed files: ' +
           result.grant.allowedPaths.join(', ') + '. Grant expires ' + activityTime(result.grant.expiresAt) + '.';
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'draft-pr-preflight') {
+      const ticketId = inspectedTicket;
+      const ticket = tickets.find(item => item.id === ticketId);
+      const snapshot = ticketDetails;
+      const repository = String(data.get('repository') ?? '');
+      const head = String(data.get('head') ?? '');
+      const base = String(data.get('base') ?? '');
+      draftPrRepository = repository; draftPrHead = head; draftPrBase = base;
+      draftPrVerifiedSha = ''; draftPrVerifiedRevision = -1;
+      const parts = repository.split('/');
+      const validRepository = repository.length <= 200 && parts.length === 2 &&
+        parts.every(part => part.length > 0 && part !== '.' && part !== '..' &&
+          /^[A-Za-z0-9_.-]+$/.test(part));
+      const validBranch = (value: string) => value.length > 0 && value.length <= 200 &&
+        /^[A-Za-z0-9_./-]+$/.test(value) && !value.startsWith('-') &&
+        !value.endsWith('.') && !value.endsWith('/') &&
+        !value.includes('..') && !value.includes('//');
+      if (!validRepository || !validBranch(head) || !validBranch(base) || head === base) {
+        draftPrError = 'Enter an exact owner/name repository and distinct valid head/base branches.';
+        render(); return;
+      }
+      if (!ticket || ticket.state !== 'running' || !snapshot ||
+          snapshot.ticket.id !== ticketId || snapshot.ticket.revision !== ticket.revision ||
+          snapshot.mandate.revoked || !snapshot.mandate.allowedSideEffects) {
+        draftPrError = 'The Ticket has no current side-effect mandate; refresh evidence.';
+        render(); return;
+      }
+      const expectedRevision = snapshot.ticket.revision;
+      draftPrError = '';
+      void work(async () => {
+        await refreshTicketDetails();
+        const refreshed = ticketDetails;
+        const currentTicket = tickets.find(item => item.id === ticketId);
+        if (inspectedTicket !== ticketId || !refreshed || !currentTicket ||
+            refreshed.ticket.id !== ticketId || refreshed.ticket.revision !== expectedRevision ||
+            currentTicket.revision !== expectedRevision ||
+            refreshed.ticket.state !== 'running' || refreshed.mandate.revoked ||
+            !refreshed.mandate.allowedSideEffects) {
+          throw new Error('The Ticket or its mandate changed; review native evidence again.');
+        }
+        const sha = await call<string>('superagent_verify_draft_pull_request_target', {
+          ticketId, expectedRevision, repository, head, base,
+        });
+        if (!/^[0-9a-fA-F]{40}([0-9a-fA-F]{24})?$/.test(sha)) {
+          throw new Error('GitHub did not return a valid remote head commit SHA.');
+        }
+        if (inspectedTicket !== ticketId || draftPrRepository !== repository ||
+            draftPrHead !== head || draftPrBase !== base) return;
+        draftPrVerifiedSha = sha;
+        draftPrVerifiedRevision = expectedRevision;
+        feedback = 'Read-only target verification succeeded for ' + repository + ':' + head +
+          '. No branch was pushed, pull request created, or permission granted.';
       });
       return;
     }

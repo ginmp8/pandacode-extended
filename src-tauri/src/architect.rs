@@ -682,7 +682,7 @@ fn composed_root_lifecycle_notice(
         return None;
     }
     let persisted_root_live = store.session(&team.session_id)
-        .is_ok_and(|session| !session.archived && session.status != "interrupted");
+        .is_ok_and(|session| !session.archived && !matches!(session.status.as_str(), "interrupted" | "error"));
     (!(persisted_root_live && (active(&team.status) || team.status == "completed")))
         .then(|| "council_root_inactive: native root approval was revoked; preserved review receipts remain read-only history.".into())
 }
@@ -4095,13 +4095,13 @@ pub(crate) fn check_manual(store: &Store, sid: &str) -> Result<()> {
 // still reports running. Keep historical link inspection independent of liveness.
 fn council_child_session_is_live(store: &Store, child_session_id: &str) -> Result<bool> {
     let session = store.session(child_session_id)?;
-    Ok(!session.archived && session.task_stage != "completed" && session.status != "interrupted")
+    Ok(!session.archived && session.task_stage != "completed" && !matches!(session.status.as_str(), "interrupted" | "error"))
 }
 
 fn council_root_session_is_live(store: &Store, root_session_id: &str) -> Result<bool> {
     let root_session = store.session(root_session_id)?;
     Ok(!root_session.archived && root_session.task_stage != "completed"
-        && root_session.status != "interrupted")
+        && !matches!(root_session.status.as_str(), "interrupted" | "error"))
 }
 
 pub(crate) fn native_child_coordinator_admitted(store: &Store, child_session_id: &str) -> Result<bool> {

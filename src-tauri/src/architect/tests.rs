@@ -7705,6 +7705,35 @@ fn inactive_root_revokes_live_child_admission_policy_and_callback() {
 }
 
 #[test]
+fn failed_native_root_or_child_session_revokes_nested_authority() {
+    for failed in ["root", "child"] {
+        let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();
+        let store = state.store.lock().unwrap();
+        assert!(native_child_coordinator_admitted(&store, &child_id).unwrap());
+        let target = if failed == "root" { &root_id } else { &child_id };
+        store.db.execute(
+            "UPDATE sessions SET status='error' WHERE id=?1", [target],
+        ).unwrap();
+        assert!(validate_council_child_link(&store, &child_id).unwrap().is_some(),
+            "{failed}: historical ownership remains readable");
+        assert!(!native_child_coordinator_admitted(&store, &child_id).unwrap(),
+            "{failed}: a failed persisted session cannot authorize new child work");
+        assert!(!nested_council_callback_current(&store, &child_id),
+            "{failed}: a failed persisted session cannot accept a delayed callback");
+
+        let child = load(&store, &child_id).unwrap().unwrap();
+        let admission = Admission { parent: child_id.clone(), generation: child.generation };
+        assert_eq!(validate_admission(&store, &child_id, Some(&admission)).unwrap_err(),
+            SETTLED_PARENT);
+        let denied = reviewer_policy_with_executable(
+            &store, &child_id, Some(&admission), false,
+        ).unwrap_err();
+        assert!(denied.contains("read_only_policy_violation"),
+            "{failed}: {denied}");
+    }
+}
+
+#[test]
 fn interrupted_native_child_session_revokes_dispatch_policy_and_callbacks() {
     let (state, _root_id, child_id, _) = nested_child_lifecycle_fixture();
     let store = state.store.lock().unwrap();
@@ -10933,11 +10962,12 @@ fn runtime_dispatch_creates_root_and_child_reviewers_for_all_mode_strategy_pairs
                             Some("blocked"), "{inactive_status} must not display Passed");
                     }
                     let previous_session_status = store.session(&root_id).unwrap().status;
-                    for persisted_change in ["archived", "interrupted"] {
+                    for persisted_change in ["archived", "interrupted", "error"] {
                         if persisted_change == "archived" {
                             store.db.execute("UPDATE sessions SET archived=1 WHERE id=?1", [&root_id]).unwrap();
                         } else {
-                            store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1", [&root_id]).unwrap();
+                            store.db.execute("UPDATE sessions SET status=?2 WHERE id=?1",
+                                params![root_id, persisted_change]).unwrap();
                         }
                         assert!(!verified_council_pass(&store, &root),
                             "{persisted_change} must revoke persisted native approval");

@@ -3073,6 +3073,20 @@ fn checkout_paths_equivalent(left: &str, right: &str) -> bool {
 }
 
 
+/// A project rooted inside another project's checkout can edit the same
+/// files even though its canonical path is not equal. Serialize native work
+/// across ancestor/descendant roots, including as-yet-uncreated children,
+/// without treating prefix-shaped siblings as the same checkout.
+fn checkout_paths_overlap(left: &str, right: &str) -> bool {
+    if checkout_paths_equivalent(left, right) {
+        return true;
+    }
+    match (canonical_checkout_intent(left), canonical_checkout_intent(right)) {
+        (Some(left), Some(right)) => left.starts_with(&right) || right.starts_with(&left),
+        _ => false,
+    }
+}
+
 fn active_manual_conflict(
     store: &Store, active: &[String], candidate_id: &str, project_id: &str,
 ) -> Result<bool> {
@@ -3081,7 +3095,7 @@ fn active_manual_conflict(
         let session = store.session(session_id)
             .map_err(|_| "Active provider session is unavailable; checkout admission denied.".to_string())?;
         if session.project_id == project_id
-            || checkout_paths_equivalent(
+            || checkout_paths_overlap(
                 &checkout_path(store,&session.project_id)?,&requested_path,
             ) {
             return Ok(true);
@@ -3132,8 +3146,8 @@ fn manual_candidate_occupied(
     for (original,session_project) in active {
         for id in std::iter::once(original.as_str()).chain(session_project.as_deref()) {
             let path=checkout_path(store,id)?;
-            if checkout_paths_equivalent(&path,&team_path)
-                || checkout_paths_equivalent(&path,&candidate_path) {
+            if checkout_paths_overlap(&path,&team_path)
+                || checkout_paths_overlap(&path,&candidate_path) {
                 return Ok(true);
             }
         }
@@ -4015,7 +4029,7 @@ pub(crate) fn guard_run_admission(
         let requested_path=checkout_path(store,&session.project_id)?;
         for (native_project,assigned_project) in live_native {
             for id in std::iter::once(native_project.as_str()).chain(assigned_project.as_deref()) {
-                if checkout_paths_equivalent(&requested_path,&checkout_path(store,id)?) {
+                if checkout_paths_overlap(&requested_path,&checkout_path(store,id)?) {
                     return Err("Physical checkout is leased by a native SuperAgent assignment.".into());
                 }
             }
@@ -4030,7 +4044,7 @@ pub(crate) fn guard_run_admission(
             let other_bot_id = bots::owner_of(store, other_id)?.map(|(bot, _)| bot.id);
             if (session_bot_id.is_some() && session_bot_id == other_bot_id)
                 || other.project_id == session.project_id
-                || checkout_paths_equivalent(&requested_path,&checkout_path(store,&other.project_id)?) {
+                || checkout_paths_overlap(&requested_path,&checkout_path(store,&other.project_id)?) {
                 return Err("Project has another active agent; SuperAgent dispatch denied.".into());
             }
         }
@@ -10936,6 +10950,85 @@ mod tests {
         ).unwrap();
         assert_eq!(count,0);
         assert!(admit(&mut store,&config.id,&"x".repeat(MAX_OBJECTIVE_BYTES),"max-accepted",false).is_ok());
+    }
+
+    #[test]
+    fn nested_checkout_roots_fence_native_and_ordinary_sessions_but_not_siblings() {
+        let mut store = fixture();
+        let root = std::env::temp_dir().join(format!(
+            "sa-nested-checkout-{}", storage::id(),
+        ));
+        let checkout = root.join("workspace");
+        let child = checkout.join("service");
+        let sibling = root.join("workspace-other");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::create_dir_all(&sibling).unwrap();
+        let checkout_path_text = checkout.to_string_lossy().to_string();
+        let child_path_text = child.to_string_lossy().to_string();
+        let sibling_path_text = sibling.to_string_lossy().to_string();
+
+        // Lexical prefix matches are not sufficient; only path components and
+        // resolved existing ancestors define a shared writeable resource.
+        assert!(!checkout_paths_equivalent(&checkout_path_text, &child_path_text));
+        assert!(checkout_paths_overlap(&checkout_path_text, &child_path_text));
+        assert!(checkout_paths_overlap(
+            &checkout_path_text,
+            &child.join("future").to_string_lossy(),
+        ));
+        assert!(!checkout_paths_overlap(&checkout_path_text, &sibling_path_text));
+
+        store.db.execute(
+            "UPDATE projects SET path=?1 WHERE id='project'",
+            [&checkout_path_text],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('child-project','Child',?1)",
+            [&child_path_text],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('sibling-project','Sibling',?1)",
+            [&sibling_path_text],
+        ).unwrap();
+        let config = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &config.id, "Fence nested checkouts", "nested-checkout", false,
+        ).unwrap();
+        assert!(launched);
+        let native_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let child_session = store.create_session(
+            "child-project", "codex", "default", "plan",
+        ).unwrap();
+        let sibling_session = store.create_session(
+            "sibling-project", "codex", "default", "plan",
+        ).unwrap();
+
+        assert!(active_manual_conflict(
+            &store, std::slice::from_ref(&child_session.id), "worker", "project",
+        ).unwrap());
+        assert!(!active_manual_conflict(
+            &store, std::slice::from_ref(&sibling_session.id), "worker", "project",
+        ).unwrap());
+        assert!(manual_candidate_occupied(
+            &store, "different-bot", "child-project", "child-project",
+        ).unwrap());
+        assert!(!manual_candidate_occupied(
+            &store, "different-bot", "sibling-project", "sibling-project",
+        ).unwrap());
+        assert!(guard_run_admission(&store, &child_session.id, &[]).is_err());
+        assert!(guard_run_admission(&store, &sibling_session.id, &[]).is_ok());
+        assert!(guard_run_admission(
+            &store, &native_session, std::slice::from_ref(&child_session.id),
+        ).is_err());
+        assert!(guard_run_admission(
+            &store, &native_session, std::slice::from_ref(&sibling_session.id),
+        ).is_ok());
+
+        stop(&store, &ticket.id).unwrap();
+        assert!(!manual_candidate_occupied(
+            &store, "different-bot", "child-project", "child-project",
+        ).unwrap());
+        assert!(guard_run_admission(&store, &child_session.id, &[]).is_ok());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

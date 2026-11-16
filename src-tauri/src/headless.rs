@@ -761,7 +761,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::QuarantineDetachedTicket { .. } | Command::QuarantinePendingEffect { .. }
         | Command::QuarantineTerminalOrphan { .. }
         | Command::DisableOrchestration { .. }
-        | Command::RenameOrchestration { .. } | Command::IssueComment { .. } => {
+        | Command::RenameOrchestration { .. } | Command::VerifyDraftPrTarget { .. }
+        | Command::IssueComment { .. } => {
             eprintln!("SuperAgent inspection must use the read-only startup path.");
             std::process::exit(2)
         }

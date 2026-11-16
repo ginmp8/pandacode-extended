@@ -5548,6 +5548,21 @@ pub(crate) fn control_state(
                 if parent.archived || parent.task_stage == "completed" {
                     return Err(SETTLED_PARENT.into());
                 }
+                // A process restart revokes the native host for an interrupted child.
+                // Revalidate every persisted child before requeuing any root or leaf;
+                // the ownership link alone is historical evidence, not live authority.
+                if team.status == "interrupted" {
+                    for link in &child_links {
+                        if !council_child_session_is_live(&store, &link.child_session_id)? {
+                            return Err("child_council_revoked: interrupted child reviewer authority cannot resume; start a fresh Council cycle.".into());
+                        }
+                        if validate_council_child_link(&store, &link.child_session_id)?
+                            .as_ref() != Some(link)
+                        {
+                            return Err("child_council_revoked: persisted child ownership cannot be authenticated; start a fresh Council cycle.".into());
+                        }
+                    }
+                }
                 apply_pending_setup(&store, &mut team)?;
                 team.generation += 1;
                 team.status = "running".into();

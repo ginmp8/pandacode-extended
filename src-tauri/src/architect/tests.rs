@@ -6652,6 +6652,31 @@ fn legacy_council_reviewers_keep_scoped_sub_workers_but_nested_leaves_cannot_spa
 }
 
 #[test]
+fn interrupted_child_native_session_blocks_root_resume_without_requeuing() {
+    let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();
+    control_state(&state, &root_id, "pause").unwrap();
+    let (before_root, before_child) = {
+        let store = state.store.lock().unwrap();
+        let mut root = load(&store, &root_id).unwrap().unwrap();
+        root.status = "interrupted".into();
+        save(&store, &mut root).unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status='interrupted' WHERE id=?1",
+            [&child_id],
+        ).unwrap();
+        (
+            serde_json::to_value(load(&store, &root_id).unwrap().unwrap()).unwrap(),
+            serde_json::to_value(load(&store, &child_id).unwrap().unwrap()).unwrap(),
+        )
+    };
+    let denied = control_state(&state, &root_id, "resume").unwrap_err();
+    assert!(denied.contains("child_council_revoked"), "{denied}");
+    let store = state.store.lock().unwrap();
+    assert_eq!(serde_json::to_value(load(&store, &root_id).unwrap().unwrap()).unwrap(), before_root);
+    assert_eq!(serde_json::to_value(load(&store, &child_id).unwrap().unwrap()).unwrap(), before_child);
+}
+
+#[test]
 fn nested_child_tracks_root_pause_resume_and_cancel_with_idempotent_recovery() {
     let (state, root_id, child_id, link) = nested_child_lifecycle_fixture();
 

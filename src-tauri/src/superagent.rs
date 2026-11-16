@@ -1369,6 +1369,8 @@ pub struct DemandIndex {
     pub state: String,
     pub revision: i64,
     pub updated_at: i64,
+    /// The immutable project at Ticket admission, not the mutable Team project.
+    pub project_id: String,
 }
 
 /// Test-only compatibility helper for pagination oracles; production callers
@@ -1435,7 +1437,7 @@ fn list_all_demands_page_searched(
         configuration(store, id)?;
     }
     let mut stmt = store.db.prepare(
-        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at
+        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at,t.project_id
          FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
          WHERE (?2 IS NULL OR t.updated_at < ?2
                 OR (t.updated_at=?2 AND t.id < ?3))
@@ -1447,6 +1449,7 @@ fn list_all_demands_page_searched(
     let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id,state_filter,search_query], |row| Ok(DemandIndex {
         id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
         state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
+        project_id: row.get(6)?,
     })).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
@@ -1480,7 +1483,7 @@ fn list_review_inbox_page(
         return Err("Review cursor needs a positive timestamp and bounded Ticket ID.".into());
     }
     let mut stmt = store.db.prepare(
-        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at
+        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at,t.project_id
          FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
          WHERE t.state IN ('waiting_approval','waiting_review')
            AND (?2 IS NULL OR t.updated_at < ?2
@@ -1490,6 +1493,7 @@ fn list_review_inbox_page(
     let rows = stmt.query_map(params![limit,before_updated_at,before_id], |row| Ok(DemandIndex {
         id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
         state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
+        project_id: row.get(6)?,
     })).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
@@ -6398,6 +6402,38 @@ mod tests {
         assert!(list_headless_review_inbox(
             &std::env::temp_dir().join(format!("absent-sa-review-{}.db",storage::id()))
         ).is_err());
+    }
+
+    #[test]
+    fn demand_and_review_indices_preserve_admitted_project_after_team_move() {
+        let store = fixture();
+        let team = enabled(&store);
+        store.db.execute(
+            "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,
+                    source,project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+             VALUES('historical-review',?1,'historical-review-request','Historical project',
+                    'local-user','manual','archived-project','worker',?2,'waiting_review',1000,1000)",
+            params![team.id, team.policy_revision],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET project_id='new-team-project' WHERE id=?1",
+            [&team.id],
+        ).unwrap();
+        let indexed = list_all_demands_page_searched(
+            &store, 200, None, None, Some(&team.id), Some("waiting_review"), None,
+        ).unwrap();
+        assert_eq!(indexed.len(), 1);
+        assert_eq!(indexed[0].project_id, "archived-project");
+        assert_eq!(indexed[0].id, "historical-review");
+        assert_eq!(list_review_inbox(&store, 200).unwrap()
+            .into_iter().find(|item| item.id == "historical-review")
+            .unwrap().project_id, "archived-project");
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        assert_eq!(list_all_demands_page_searched(
+            &reopened, 200, None, None, Some(&team.id), Some("waiting_review"), None,
+        ).unwrap()[0].project_id, "archived-project");
     }
 
     #[test]

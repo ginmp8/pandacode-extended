@@ -118,7 +118,7 @@ interface NativeSubagentTree {
   nodes:NativeSubagentNode[];
 }
 interface DemandIndex { id: string; orchestrationId: string; objective: string;
-  state: string; revision: number; updatedAt: number }
+  state: string; revision: number; updatedAt: number; projectId?: string }
 interface DemandQuery {
   limit?: number; beforeUpdatedAt?: number; beforeId?: string;
   orchestrationId?: string; stateFilter?: string; searchQuery?: string;
@@ -866,7 +866,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '<li class="sa-demand-card"><div><strong>' + safe(demand.objective) +
       '</strong><small>' + safe(presets.find(item => item.id === demand.orchestrationId)?.name ??
         'Unknown Team') + ' · ' + safe(demand.state) + ' · Revision ' +
-      demand.revision + ' · Updated ' + safe(activityTime(demand.updatedAt)) +
+      demand.revision + ' · Admitted project ' + safe(demand.projectId ?? 'Unknown') +
+      ' · Updated ' + safe(activityTime(demand.updatedAt)) +
       '</small></div><button type="button" data-sa-open-demand="' + safe(demand.id) +
       '">Open demand</button></li>';
     const demandGroups = [

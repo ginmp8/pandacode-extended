@@ -1067,7 +1067,8 @@ test('cross-Team Demands index is native-backed and opens only the original Team
         enabled:true,policyRevision:3},
     ];
     const run={id:'demand-b',orchestrationId:'team-b',objective:'Inspect build logs',
-      state:'waiting_approval',revision:4,updatedAt:1794470400000,evidence:'private'};
+      state:'waiting_approval',revision:4,updatedAt:1794470400000,
+      projectId:'admitted-project',evidence:'private'};
     mountSuperagent(host,async(command,args)=>{
       calls.push(command);
       if(command==='bots_list')return [
@@ -1079,6 +1080,7 @@ test('cross-Team Demands index is native-backed and opens only the original Team
       if(command==='superagent_all_demands')return [{
         id:run.id,orchestrationId:run.orchestrationId,objective:run.objective,
         state:run.state,revision:run.revision,updatedAt:run.updatedAt,
+        projectId:run.projectId,
       }] as never;
       if(command==='superagent_snapshot') {
         if(args?.ticketId!==run.id)throw Error('Cross-Team Ticket leak');
@@ -1098,6 +1100,7 @@ test('cross-Team Demands index is native-backed and opens only the original Team
   await global.getByRole('button',{name:'Refresh all Teams'}).click();
   await expect(global).toContainText('Performance');
   await expect(global).toContainText('Inspect build logs');
+  await expect(global).toContainText('Admitted project admitted-project');
   const board=global.getByRole('group',{name:'Demand status board'});
   await expect(board).toBeVisible();
   await expect(board.getByRole('region',{name:'Awaiting decision Demands'})).toContainText('Inspect build logs');

@@ -2543,6 +2543,83 @@ pub(crate) fn headless_stop_ticket_at_revision(
     headless_ticket_status(&ticket)
 }
 
+/// An explicit local operator can quarantine one exact pending effect after
+/// inspecting the Ticket revision and stored digest. Never infer a remote
+/// outcome, retry the provider, or mutate completion/worker authority.
+/// The cross-process dispatcher fence prevents racing an in-flight GitHub
+/// write; the receipt transition and audit are one SQLite transaction.
+pub(crate) fn headless_quarantine_pending_effect(
+    database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
+    effect_key: &str, payload_sha256: &str,
+) -> Result<String> {
+    if expected_revision < 0
+        || ticket_id.is_empty() || ticket_id.len() > 128
+        || !ticket_id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        || effect_key.is_empty() || effect_key.len() > 128
+        || !effect_key.bytes().all(|b| b.is_ascii_alphanumeric()
+            || matches!(b, b'-' | b'_' | b'.' | b':'))
+        || payload_sha256.len() != 64
+        || !payload_sha256.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err("Invalid pending-effect quarantine identity.".into());
+    }
+    let _dispatch_fence = effects::lock_dispatch(database_path)?;
+    let store = open_headless_transition_store(database_path)?;
+    let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
+    let revision: i64 = tx.query_row(
+        "SELECT revision FROM sa_tickets WHERE id=?1",
+        [ticket_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("SuperAgent Ticket not found.")?;
+    if revision != expected_revision {
+        return Err("SuperAgent Ticket revision changed before effect quarantine.".into());
+    }
+    let (state, original_digest): (String, String) = tx.query_row(
+        "SELECT state,payload_sha256 FROM sa_effect_receipts
+         WHERE ticket_id=?1 AND effect_key=?2",
+        params![ticket_id,effect_key],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(|e| e.to_string())?
+        .ok_or("External effect receipt not found.")?;
+    if original_digest != payload_sha256 {
+        return Err("External effect payload identity changed.".into());
+    }
+    let changed = match state.as_str() {
+        "pending" => {
+            let now = storage::now();
+            if tx.execute(
+                "UPDATE sa_effect_receipts SET state='uncertain',
+                 uncertainty_reason='headless_operator_quarantine',
+                 readback_state='not_attempted',updated_at=?4
+                 WHERE ticket_id=?1 AND effect_key=?2
+                   AND payload_sha256=?3 AND state='pending'",
+                params![ticket_id,effect_key,payload_sha256,now],
+            ).map_err(|e| e.to_string())? != 1 {
+                return Err("External effect changed during quarantine.".into());
+            }
+            tx.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES(?1,'headless_effect_quarantined',
+                 'Pending effect quarantined; remotely verify outcome before reconciliation',?2)",
+                params![ticket_id,now],
+            ).map_err(|e| e.to_string())?;
+            true
+        }
+        "uncertain" => false,
+        _ => return Err("Only pending or already uncertain effects may be quarantined.".into()),
+    };
+    tx.commit().map_err(|e| e.to_string())?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "ticketId": ticket_id,
+        "effectKey": effect_key,
+        "state": "uncertain",
+        "changed": changed,
+        "remoteResultVerified": false,
+        "providerDispatchedByCommand": false,
+        "externalEffectReplayAllowed": false,
+    })).map_err(|e| e.to_string())
+}
+
 /// Operator quarantine never replays remote effects or claims to stop a live provider.
 pub(crate) fn headless_quarantine_detached_ticket(
     database_path: &std::path::Path, ticket_id: &str, expected_revision: i64,
@@ -7202,6 +7279,87 @@ mod tests {
         assert_eq!(total,205);
     }
 
+
+    #[test]
+    fn headless_pending_effect_quarantine_is_atomic_idempotent_and_restart_safe() {
+        let mut store = fixture();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Private remote-effect objective",
+            "pending-effect-quarantine", false,
+        ).unwrap();
+        assert!(launched);
+        let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+        let digest = "a".repeat(64);
+        let now = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'github:comment:pending',?2,'pending',?3,?3)",
+            params![&ticket.id,&digest,now],
+        ).unwrap();
+        let path = store.path.clone();
+        let quarantine = |revision, digest: &str| headless_quarantine_pending_effect(
+            &path, &ticket.id, revision, "github:comment:pending", digest,
+        );
+        assert!(quarantine(revision + 1, &digest).is_err());
+        assert!(quarantine(revision, &"b".repeat(64)).is_err());
+        assert!(headless_quarantine_pending_effect(
+            &path, &ticket.id, revision, "../invalid", &digest,
+        ).is_err());
+        store.db.execute_batch(
+            "CREATE TRIGGER deny_effect_quarantine_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='headless_effect_quarantined'
+             BEGIN SELECT RAISE(ABORT,'injected audit failure'); END;",
+        ).unwrap();
+        assert!(quarantine(revision, &digest).is_err());
+        let initial: String = store.db.query_row(
+            "SELECT state FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND effect_key='github:comment:pending'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(initial,"pending");
+        store.db.execute_batch("DROP TRIGGER deny_effect_quarantine_audit").unwrap();
+        let first: serde_json::Value = serde_json::from_str(
+            &quarantine(revision, &digest).unwrap(),
+        ).unwrap();
+        assert_eq!(first["state"],"uncertain");
+        assert_eq!(first["changed"],true);
+        assert_eq!(first["remoteResultVerified"],false);
+        assert_eq!(first["externalEffectReplayAllowed"],false);
+        let repeat: serde_json::Value = serde_json::from_str(
+            &quarantine(revision, &digest).unwrap(),
+        ).unwrap();
+        assert_eq!(repeat["changed"],false);
+        let receipt: (String,String,String) = store.db.query_row(
+            "SELECT state,uncertainty_reason,readback_state FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND effect_key='github:comment:pending'",
+            [&ticket.id], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        assert_eq!(receipt,(
+            "uncertain".into(),"headless_operator_quarantine".into(),"not_attempted".into(),
+        ));
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().revision,revision);
+        assert_eq!(history(&store,&ticket.id,30).unwrap().iter()
+            .filter(|audit| audit.kind=="headless_effect_quarantined").count(),1);
+        store.db.execute(
+            "UPDATE sa_effect_receipts SET state='applied'
+             WHERE ticket_id=?1 AND effect_key='github:comment:pending'",
+            [&ticket.id],
+        ).unwrap();
+        assert!(quarantine(revision,&digest).is_err(),
+            "Applied effect must not be demoted");
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let state: String = reopened.db.query_row(
+            "SELECT state FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND effect_key='github:comment:pending'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(state,"applied");
+        assert_eq!(history(&reopened,&ticket.id,30).unwrap().iter()
+            .filter(|audit| audit.kind=="headless_effect_quarantined").count(),1);
+    }
 
     #[test]
     fn headless_detached_quarantine_is_revisioned_atomic_and_restart_safe() {

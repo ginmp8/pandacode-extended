@@ -74,6 +74,7 @@ enum Command {
     StopTicket { ticket_id: String },
     StopTicketAtRevision { ticket_id: String, expected_revision: i64 },
     QuarantineDetachedTicket { ticket_id: String, expected_revision: i64 },
+    QuarantinePendingEffect { ticket_id: String, expected_revision: i64, effect_key: String, payload_sha256: String },
     QuarantineTerminalOrphan { ticket_id: String, expected_revision: i64 },
     DisableOrchestration { orchestration_id: String, expected_revision: i64 },
     RenameOrchestration { orchestration_id: String, expected_revision: i64, name: String },
@@ -596,7 +597,8 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
             let native_action = matches!(&command,
                 Command::EnableOrchestration { .. } | Command::RetryTicket { .. } | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
                 | Command::StopTicket { .. } | Command::StopTicketAtRevision { .. }
-                | Command::QuarantineDetachedTicket { .. } | Command::QuarantineTerminalOrphan { .. }
+                | Command::QuarantineDetachedTicket { .. } | Command::QuarantinePendingEffect { .. }
+                | Command::QuarantineTerminalOrphan { .. }
                 | Command::DisableOrchestration { .. }
                 | Command::RenameOrchestration { .. } | Command::IssueComment { .. });
             if native_action {
@@ -626,6 +628,10 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                             Command::QuarantineDetachedTicket { ticket_id, expected_revision } =>
                                 crate::superagent::headless_quarantine_detached_ticket(
                                     &database, ticket_id, *expected_revision,
+                                ),
+                            Command::QuarantinePendingEffect { ticket_id, expected_revision, effect_key, payload_sha256 } =>
+                                crate::superagent::headless_quarantine_pending_effect(
+                                    &database, ticket_id, *expected_revision, effect_key, payload_sha256,
                                 ),
                             Command::QuarantineTerminalOrphan { ticket_id, expected_revision } =>
                                 crate::superagent::headless_quarantine_terminal_orphan(
@@ -699,7 +705,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::EnableOrchestration { .. }
         | Command::RetryTicket { .. } | Command::InspectRetryRequest { .. }
         | Command::StopTicket { .. } | Command::StopTicketAtRevision { .. }
-        | Command::QuarantineDetachedTicket { .. } | Command::QuarantineTerminalOrphan { .. }
+        | Command::QuarantineDetachedTicket { .. } | Command::QuarantinePendingEffect { .. }
+        | Command::QuarantineTerminalOrphan { .. }
         | Command::DisableOrchestration { .. }
         | Command::RenameOrchestration { .. } | Command::IssueComment { .. } => {
             eprintln!("SuperAgent inspection must use the read-only startup path.");
@@ -1698,6 +1705,31 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 2;
             }
+            "--quarantine-pending-effect" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or("--quarantine-pending-effect needs a Ticket ID, revision, effect key and SHA-256.")?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--quarantine-pending-effect needs an expected Ticket revision.")?;
+                let effect_key = args.get(index + 3)
+                    .ok_or("--quarantine-pending-effect needs an exact effect key.")?;
+                validate_effect_key(effect_key)?;
+                let payload_sha256 = args.get(index + 4)
+                    .ok_or("--quarantine-pending-effect needs the exact payload SHA-256.")?;
+                if payload_sha256.len() != 64
+                    || !payload_sha256.bytes().all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+                {
+                    return Err("Provide the exact lowercase SHA-256 from the receipt.".into());
+                }
+                command = Command::QuarantinePendingEffect {
+                    ticket_id: ticket_id.clone(),
+                    expected_revision: parse_ticket_revision(revision)?,
+                    effect_key: effect_key.clone(),
+                    payload_sha256: payload_sha256.clone(),
+                };
+                ops += 1;
+                index += 4;
+            }
             "--quarantine-terminal-orphan" => {
                 let ticket_id = args.get(index + 1)
                     .ok_or("--quarantine-terminal-orphan needs Ticket ID and revision.")?;
@@ -1936,7 +1968,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-recovery-inbox | --list-unresolved-effects [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-delivery <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --create-orchestration <file> | --configure-team-roles <id> <revision> <file> | --enable-orchestration <id> <revision> | --retry-ticket <id> <revision> | --inspect-retry-request <id> <revision> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-recovery-inbox | --list-unresolved-effects [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-delivery <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --create-orchestration <file> | --configure-team-roles <id> <revision> <file> | --enable-orchestration <id> <revision> | --retry-ticket <id> <revision> | --inspect-retry-request <id> <revision> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -2049,6 +2081,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --quarantine-detached-ticket <id> <revision>
                          Revoke a running Ticket with one proven missing native session;
                          mark pending effects uncertain without provider replay.
+  --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256>
+                         Mark one exact pending receipt uncertain with durable audit;
+                         no provider call, remote retry, or task completion.
   --quarantine-terminal-orphan <id> <revision>
                          Quarantine a running assignment on a terminal Ticket;
                          revoke its mandate, preserve uncertain effects and never replay.
@@ -2174,6 +2209,33 @@ mod tests {
         ] {
             assert!(parsed(invalid).is_err(), "{invalid}");
         }
+    }
+
+    #[test]
+    fn pending_effect_quarantine_requires_exact_identity_and_exclusive_cli_action() {
+        let digest = "a".repeat(64);
+        let valid = format!("--quarantine-pending-effect ticket_123 8 github:comment:1 {digest}");
+        assert_eq!(parsed(&valid), Ok(Command::QuarantinePendingEffect {
+            ticket_id: "ticket_123".into(),
+            expected_revision: 8,
+            effect_key: "github:comment:1".into(),
+            payload_sha256: digest.clone(),
+        }));
+        for invalid in [
+            "--quarantine-pending-effect",
+            "--quarantine-pending-effect ticket_123 8",
+            "--quarantine-pending-effect ../unsafe 8 github:comment:1",
+            "--quarantine-pending-effect ticket_123 -1 github:comment:1",
+            "--quarantine-pending-effect ticket_123 8 ../effect",
+            "--quarantine-pending-effect ticket_123 8 github:comment:1 bad",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        assert!(parsed(&format!(
+            "--quarantine-pending-effect ticket_123 8 github:comment:1 {}",
+            "A".repeat(64),
+        )).is_err(), "noncanonical SHA-256 must be denied");
+        assert!(parsed(&format!("{valid} --stop-ticket ticket_123")).is_err());
     }
 
     #[test]

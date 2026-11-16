@@ -520,6 +520,27 @@ snapshots rather than one long transaction; concurrently changing Tickets
 may move between pages. Avoid sensitive CLI search phrases in shell history
 and process arguments.
 
+### Quarantine one pending external-effect receipt
+
+Use `pandacode serve --inspect-ticket <ticket-id>` and
+`pandacode serve --inspect-ticket-effects <ticket-id> --unresolved-only`
+to obtain the observed revision, exact effect key and lowercase SHA-256 digest.
+Then explicitly run:
+
+```sh
+pandacode serve --quarantine-pending-effect <ticket-id> <revision> <effect-key> <payload-sha256>
+```
+
+This operation holds the same cross-process dispatch fence as native GitHub
+writes. It atomically marks only the matching **pending** receipt **uncertain**
+and records one durable audit entry. The schema's uncertainty reason and
+read-back state remain explicit. An already uncertain matching receipt is
+idempotent (`changed: false`). Stale revisions, mismatched identities, applied
+receipts and audit-write failures do not alter evidence. A live provider may
+have finished before the fence was acquired; the command does not assert a
+remote outcome, retry an effect, authorize a write or complete a Ticket.
+Independently verify the remote provider state before reconciliation.
+
 ### Terminal orphan assignment quarantine
 
 Use `pandacode serve --quarantine-terminal-orphan <ticket-id> <revision>` only

@@ -615,13 +615,12 @@ fn refresh_council(store: &Store, team: &mut TeamSnapshot) {
     } else {
         council::status(team)
     };
-    // The M3 structural scorer can see plausible in-memory scores before
-    // their native grants have been persisted (or after grant revocation).
-    // Do not publish a user-visible Passed snapshot from those claims: the
-    // existing terminal gate already reauthenticates them independently.
-    if team.config.council.as_ref().is_some_and(|config| config.mode() == "m3")
+    // Selected M2 and composed M3 scores are not approval authority until
+    // their persisted native grants and callbacks have been reauthenticated.
+    if team.config.council.as_ref().is_some_and(|config| matches!(config.mode(), "m2" | "m3"))
         && projected.as_ref().is_some_and(|status| status.state == "passed")
-        && !mixed_native_authority_current(store, team)
+        && !(mixed_native_authority_current(store, team)
+            && selected_direct_native_authority_current(store, team))
     {
         if let Some(status) = &mut projected {
             status.state = "blocked".into();
@@ -699,6 +698,59 @@ fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
     })
 }
 
+/// M2's legacy Council scorer is unchanged; its native terminal result must
+/// still reauthenticate the selected bots' actual callbacks and recorded grants.
+/// This does not apply the composed-mode roster rules to automatic M1 seats.
+fn selected_direct_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
+    let Some(config) = team.config.council.as_ref() else { return false };
+    if config.mode() != "m2" { return true; }
+    let Some(status) = council::status(team) else { return false };
+    if status.state != "passed" || status.stale || status.round == 0 {
+        return false;
+    }
+    let mut rounds = vec![status.round];
+    if status.round != 1
+        && (config.strategy == council::CouncilExecutionStrategy::TwoPhase
+            || (config.strategy == council::CouncilExecutionStrategy::Escalated
+                && config.force_escalation))
+    {
+        // S3 challengers and explicitly forced S2 cannot replace the
+        // original native reviewer wave with later score-only claims.
+        rounds.push(1);
+    }
+    rounds.into_iter().all(|round| {
+        let eligible = team.workers.iter().filter(|worker| {
+            worker.created_at >= team.council_since && !worker.abandoned
+                && worker.council.as_ref().is_some_and(|seat|
+                    seat.round == round && seat.score.is_some())
+        }).collect::<Vec<_>>();
+        let mut bots = std::collections::HashSet::new();
+        let mut worker_ids = std::collections::HashSet::new();
+        let mut session_ids = std::collections::HashSet::new();
+        eligible.len() == config.reviewer_bot_ids.len()
+            && eligible.iter().all(|worker| {
+                let Some(seat) = worker.council.as_ref() else { return false };
+                let Some(binding) = worker.reviewer_binding.as_ref() else { return false };
+                let Some(bot) = binding.reviewer_bot_id.as_deref() else { return false };
+                worker.read_only && worker.status == "completed"
+                    && worker.wrote_at == 0 && worker.files.is_empty()
+                    && !worker.id.is_empty() && !worker.session_id.is_empty()
+                    && worker_ids.insert(worker.id.as_str())
+                    && session_ids.insert(worker.session_id.as_str())
+                    && config.reviewer_bot_ids.iter().any(|id| id == bot)
+                    && bots.insert(bot)
+                    && binding.roster_bot_ids == config.reviewer_bot_ids
+                    && binding.required_reviewers == Some(config.needed())
+                    && binding.validate(team, worker).is_ok()
+                    && reviewer_security::validate_recorded_authority(
+                        store, &team.session_id, binding,
+                    ).is_ok()
+                    && bot_reviewers::validate_frozen_seat(store, binding, false).is_ok()
+                    && council::latest_score(store, &worker.session_id) == seat.score
+            })
+    })
+}
+
 /// Do not use a cached "passed" label as an authorization token. Recompute
 /// the native Council gate from frozen workers, scores, required skill receipts
 /// and current stored change evidence before publishing a successful result.
@@ -716,6 +768,7 @@ pub(crate) fn verified_council_pass(store: &Store, team: &TeamSnapshot) -> bool 
     let Some(verified) = verified else { return false };
     verified.state == "passed" && !verified.stale
         && mixed_native_authority_current(store, team)
+        && selected_direct_native_authority_current(store, team)
         && stored.round == verified.round
         && stored.lowest == verified.lowest
         && stored.target == verified.target

@@ -134,6 +134,18 @@ without polling GitHub, granting tools or interrupting another active server:
 pandacode serve --inspect-source-health <source-id>
 ```
 
+Use `--inspect-source-decisions <source-id>` for the legacy list of up to 50
+immutable receipts. Use `--page` for a bounded page with `decisions` and
+`nextCursor`; follow its `sequence` and `deliveryId` with `--before`:
+
+```sh
+pandacode serve --inspect-source-decisions <source-id> --page
+pandacode serve --inspect-source-decisions <source-id> --before <sequence> <delivery-id>
+```
+
+The source-scoped keyset order is descending by sequence and delivery ID.
+Reads do not poll GitHub, accept work, grant effects or expose event bodies.
+
 The read-only response reports Off/Observe mode, policy revision, receipt count,
 permitted receipt count, stored cursor and highest immutable receipt sequence.
 For GitHub Events the cursor is a verified event-ID high-watermark; for explicit

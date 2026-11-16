@@ -639,7 +639,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
                 (chosen.enabled || tickets.some(ticket => !['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)) ? ' disabled' : '') +
                 '>Save configured roles</button></form>' +
               '<form data-sa-form="attempt-budget">' +
-                '<label>Maximum Worker attempts per Demand<select name="maxWorkerAttempts">' +
+                '<label>Maximum attempts per Demand<select name="maxWorkerAttempts">' +
                 [1,2,3,4].map(limit => '<option value="' + limit + '"' +
                   (roleRoster?.maxWorkerAttempts === limit ? ' selected' : '') +
                   '>' + limit + '</option>').join('') + '</select></label>' +
@@ -767,7 +767,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           optionsFor(draftAdditionalWorkerIds) + '</select></label>' +
           '<label>Optional Reviewers<select name="reviewers" multiple size="4">' +
           optionsFor(draftReviewerBotIds) + '</select></label></details>' +
-          '<label>Maximum Worker attempts per Demand<select name="maxWorkerAttempts">' +
+          '<label>Maximum attempts per Demand<select name="maxWorkerAttempts">' +
           [1,2,3,4].map(limit => '<option value="' + limit + '"' +
             (draftWorkerAttemptLimit === limit ? ' selected' : '') + '>' +
             limit + '</option>').join('') + '</select></label>' +

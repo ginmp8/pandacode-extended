@@ -1307,10 +1307,14 @@ mod tests {
         assert_eq!(multi.policy_revision,1);
         assert_eq!(read(&store,&multi.id).unwrap().max_worker_attempts,3);
         assert!(!read(&store,&multi.id).unwrap().execution_ready);
-        let single=create_with_attempt_policy(&store,input(),None,1).unwrap();
+        let single=create_with_attempt_policy(&store,NewOrchestration {
+            name:"Single Attempt Team".into(),..input()
+        },None,1).unwrap();
         assert!(!single.enabled);
         assert_eq!(read(&store,&single.id).unwrap().max_worker_attempts,1);
-        let legacy=super::super::create_configuration(&store,input()).unwrap();
+        let legacy=super::super::create_configuration(&store,NewOrchestration {
+            name:"Legacy Attempt Team".into(),..input()
+        }).unwrap();
         assert_eq!(read(&store,&legacy.id).unwrap().max_worker_attempts,2);
         let reopened=Store::open_read_only(&path).unwrap();
         assert_eq!(read(&reopened,&multi.id).unwrap().max_worker_attempts,3);

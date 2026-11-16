@@ -16,6 +16,9 @@ test('native SuperAgent preset UI stays manual and imports disabled portable con
   const worker=dialog.getByRole('combobox',{name:'Worker'});
   await coordinator.selectOption({label:'Scout'});
   await worker.selectOption({label:'Writer'});
+  // The separate attempt budget must not ambiguously match the Worker selector.
+  await expect(dialog.getByRole('combobox',{name:'Maximum attempts per Demand',exact:true}))
+    .toHaveValue('2');
   // The directory is independent of the unsaved Team: redraws retain role selections.
   await dialog.locator('details.sa-new-members summary').click();
   await dialog.getByRole('combobox',{name:'Team status'}).selectOption('disabled');

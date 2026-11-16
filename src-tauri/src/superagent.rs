@@ -1908,6 +1908,7 @@ pub(crate) fn headless_cancelled_assignments(
             LEFT JOIN sa_mandates m ON m.ticket_id=t.id
             LEFT JOIN sa_orchestrations o ON o.id=t.orchestration_id
             LEFT JOIN bots b ON b.id=a.bot_id
+            LEFT JOIN bots coordinator ON coordinator.id=o.coordinator_bot_id
             LEFT JOIN sessions s ON s.id=a.session_id
             WHERE a.session_id=?1
               AND (a.state IN ('stopped','interrupted')
@@ -1928,7 +1929,10 @@ pub(crate) fn headless_cancelled_assignments(
                        OR o.id IS NULL OR o.enabled=0
                        OR o.project_id!=t.project_id
                        OR o.policy_revision!=t.policy_revision
+                       OR coordinator.id IS NULL OR coordinator.paused!=0
                        OR b.id IS NULL OR b.paused!=0
+                       OR (a.bot_id!=o.coordinator_bot_id AND
+                           (a.bot_id!=t.worker_bot_id OR b.project_id!=t.project_id))
                        OR s.id IS NULL OR s.project_id!=b.project_id
                        OR a.created_at<=0 OR a.created_at>?2
                        OR (?2-a.created_at)>=?3
@@ -5472,7 +5476,8 @@ mod tests {
     #[test]
     fn headless_poll_cancels_orphaned_or_revoked_running_native_sessions() {
         for scenario in ["detached", "revoked", "policy-drift", "blocked",
-            "expired-mandate", "disabled-team", "paused-worker", "expired-assignment",
+            "expired-mandate", "disabled-team", "paused-worker",
+            "paused-coordinator", "worker-project-drift", "expired-assignment",
             "unexpected-tools"] {
             let mut store = fixture();
             let cfg = enabled(&store);
@@ -5520,6 +5525,18 @@ mod tests {
                 "paused-worker" => store.db.execute(
                     "UPDATE bots SET paused=1 WHERE id='worker'", [],
                 ).unwrap(),
+                "paused-coordinator" => store.db.execute(
+                    "UPDATE bots SET paused=1 WHERE id='router'", [],
+                ).unwrap(),
+                "worker-project-drift" => {
+                    store.db.execute(
+                        "INSERT INTO projects(id,name,path)
+                         VALUES('other-project','Other','/tmp/sa-worker-moved')", [],
+                    ).unwrap();
+                    store.db.execute(
+                        "UPDATE bots SET project_id='other-project' WHERE id='worker'", [],
+                    ).unwrap()
+                },
                 "expired-assignment" => store.db.execute(
                     "UPDATE sa_assignments SET created_at=?2 WHERE ticket_id=?1",
                     params![ticket.id, storage::now()-MAX_ASSIGNMENT_RUN_MS-1000],

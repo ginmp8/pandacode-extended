@@ -1855,6 +1855,98 @@ fn mixed_root_terminal_gate_requires_recorded_native_reviewer_authority() {
 }
 
 #[test]
+fn selected_m2_native_terminal_denies_revoked_replayed_and_foreign_review_proof() {
+    let (state, sid) = state_fixture();
+    let store = state.store.lock().unwrap();
+    let project = store.session(&sid).unwrap().project_id;
+    for bot in ["m2-security", "m2-quality"] {
+        store.db.execute(
+            "INSERT INTO bots(id,name,role,project_id,provider,model,mode,created_at,updated_at)
+             VALUES(?1,?1,'Reviewer',?2,'codex','default','plan',1,1)",
+            rusqlite::params![bot, project],
+        ).unwrap();
+    }
+    let mut config = on(9.0, 3, 0);
+    config.reviewer_bot_ids = vec!["m2-security".into(), "m2-quality".into()];
+    let mut team = team_with(config.clone(), Vec::new());
+    team.session_id = sid.clone();
+    team.changed_at = storage::now();
+    for (index, bot_id) in config.reviewer_bot_ids.iter().enumerate() {
+        let id = format!("m2-granted-{index}");
+        let mut worker = seat(&id, 1, Some(9.8), SINCE + index as i64 + 1);
+        let session = store.create_session(
+            &project, &worker.provider, &worker.model, "plan",
+        ).unwrap();
+        worker.session_id = session.id;
+        store.message(&worker.session_id, "assistant",
+            "Observed native reviewer callback.\nCouncil score: 9.8/10").unwrap();
+        let mut binding = reviewer_security::ReviewerBinding::native(
+            &team, &worker.id, worker.created_at, &worker.provider,
+            &worker.model, worker.council.as_ref().unwrap(),
+        );
+        binding.reviewer_bot_id = Some(bot_id.clone());
+        binding.roster_bot_ids = config.reviewer_bot_ids.clone();
+        binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext::from_bot(
+            &crate::bots::get(&store, bot_id).unwrap(),
+        ));
+        worker.reviewer_binding = Some(binding);
+        team.workers.push(worker);
+    }
+    assert_eq!(council::status(&team).unwrap().state, "passed");
+    team.council_status = council::status(&team);
+    assert!(!selected_direct_native_authority_current(&store, &team),
+        "model scores cannot replace a recorded native M2 reviewer grant");
+    assert!(!verified_council_pass(&store, &team));
+    refresh_council(&store, &mut team);
+    assert_eq!(team.council_status.as_ref().unwrap().state, "blocked");
+
+    reviewer_security::record_native_authority(
+        &store, &sid, team.workers[0].reviewer_binding.as_ref().unwrap(),
+    ).unwrap();
+    assert!(!selected_direct_native_authority_current(&store, &team),
+        "one selected bot cannot approve for the other");
+    reviewer_security::record_native_authority(
+        &store, &sid, team.workers[1].reviewer_binding.as_ref().unwrap(),
+    ).unwrap();
+    assert!(selected_direct_native_authority_current(&store, &team));
+    refresh_council(&store, &mut team);
+    assert_eq!(team.council_status.as_ref().unwrap().state, "passed");
+    assert!(verified_council_pass(&store, &team));
+
+    let mut forged = team.clone();
+    forged.workers[1].council.as_mut().unwrap().score = Some(10.0);
+    assert!(!selected_direct_native_authority_current(&store, &forged),
+        "a modified in-memory score cannot substitute for the original callback");
+    let mut replay = team.clone();
+    replay.workers[1].session_id = replay.workers[0].session_id.clone();
+    assert!(!selected_direct_native_authority_current(&store, &replay),
+        "two reviewer identities cannot count one native session twice");
+
+    store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, "native-reviewer-authority:m2-granted-1"],
+    ).unwrap();
+    assert!(!verified_council_pass(&store, &team),
+        "revoking a selected bot's native grant invalidates the terminal verdict");
+    refresh_council(&store, &mut team);
+    assert_eq!(team.council_status.as_ref().unwrap().state, "blocked");
+    reviewer_security::record_native_authority(
+        &store, &sid, team.workers[1].reviewer_binding.as_ref().unwrap(),
+    ).unwrap();
+    assert!(selected_direct_native_authority_current(&store, &team));
+    store.db.execute(
+        "UPDATE bots SET paused=1 WHERE id='m2-security'", [],
+    ).unwrap();
+    assert!(!verified_council_pass(&store, &team),
+        "a paused selected bot may not retain a pass-equivalent final callback");
+    let original = team.clone();
+    let mut m1 = original;
+    m1.config.council = Some(on(9.0, 3, 2));
+    assert!(selected_direct_native_authority_current(&store, &m1),
+        "the original M1 automatic Council preserves its preexisting gate");
+}
+
+#[test]
 fn mixed_two_phase_revalidates_both_native_reviewer_rounds_before_approval() {
     let (state, sid) = state_fixture();
     let store = state.store.lock().unwrap();

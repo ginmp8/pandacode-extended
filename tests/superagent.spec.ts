@@ -444,6 +444,7 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
   await sidebar.getByRole('button',{name:'Bot actions'}).click();
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
   const dialog=page.getByRole('region',{name:'Orchestrations'});
+  await dialog.locator('details.sa-legacy-create summary').click();
   await dialog.getByRole('textbox',{name:'Name'}).fill('Safe default');
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
@@ -451,6 +452,7 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
   // Wait for the committed Team and navigation before interacting with the edit form.
   await expect(dialog.locator('.sa-list .sa-item strong'))
     .toHaveText('Safe default',{timeout:15_000});
+  await dialog.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(dialog.getByRole('button',{name:'Demands / Runs'}))
     .toHaveAttribute('aria-current','page');
   await dialog.getByRole('textbox',{name:'Preset title'}).fill('Safely renamed');
@@ -459,7 +461,8 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
   await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
   await dialog.getByRole('button',{name:'Delete unused'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
-  await expect(dialog.getByText('No orchestrations created.')).toBeVisible();
+  await dialog.getByRole('button',{name:'Teams',exact:true}).click();
+  await expect(dialog.getByRole('heading',{name:'Your first SuperAgent starts with a Team'})).toBeVisible();
 });
 
 test('native SuperAgent clears tickets when switching presets after a failed read', async ({ page }) => {
@@ -605,11 +608,12 @@ test('SuperAgent examples only fill names and leave all authorization disabled',
   await sidebar.getByRole('button',{name:'Bot actions'}).click();
   await sidebar.getByRole('menuitem',{name:'Orchestrations'}).click();
   const dialog=page.getByRole('region',{name:'Orchestrations'});
+  await dialog.locator('details.sa-legacy-create summary').click();
   const example=dialog.getByRole('combobox',{name:'Example preset'});
   const name=dialog.getByRole('textbox',{name:'Name',exact:true});
   await example.selectOption('Software Development');
   await expect(name).toHaveValue('Software Development');
-  await expect(dialog.getByText('No orchestrations created.')).toBeVisible();
+  await expect(dialog.getByRole('heading',{name:'Your first SuperAgent starts with a Team'})).toBeVisible();
   await name.fill('Edited safe template');
   await expect(name).toHaveValue('Edited safe template');
   await example.selectOption('Issue Resolution');
@@ -619,6 +623,7 @@ test('SuperAgent examples only fill names and leave all authorization disabled',
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Issue Resolution');
   await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
+  await dialog.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(dialog.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
 });
 
@@ -745,12 +750,13 @@ test('SuperAgent preset draft survives an asynchronous native list reload', asyn
     });
   });
   const host = page.locator('#sa-preset-draft-test');
+  await host.locator('details.sa-legacy-create summary').click();
   await host.getByRole('combobox',{name:'Example preset'}).selectOption('Software Development');
   const name = host.getByRole('textbox',{name:'Name',exact:true});
   await expect(name).toHaveValue('Software Development');
   await name.fill('Custom original name');
   await page.evaluate(() => window.dispatchEvent(new Event('sa-release-native-list')));
-  await expect(host.getByText('No orchestrations created.')).toBeVisible();
+  await expect(host.getByRole('heading',{name:'Your first SuperAgent starts with a Team'})).toBeVisible();
   await expect(name).toHaveValue('Custom original name');
   await expect(host.getByRole('combobox',{name:'Example preset'})).toHaveValue('Software Development');
 });
@@ -867,15 +873,18 @@ test('Bots Orchestrations is a persistent main workspace with native-backed Team
   await expect(workspace).toBeVisible();
   await expect(page.getByRole('dialog',{name:'Orchestrations'})).toHaveCount(0);
   await expect(workspace.getByRole('navigation',{name:'Orchestration views'})).toBeVisible();
-  await expect(workspace.getByRole('complementary',{name:'Teams directory'})).toContainText('No orchestrations created.');
+  await expect(workspace.getByRole('complementary',{name:'Orchestrations navigation'})).toBeVisible();
+  await expect(workspace.getByRole('heading',{name:'Your first SuperAgent starts with a Team'})).toBeVisible();
   await workspace.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(workspace.getByText('Select a Team from the directory')).toBeVisible();
   await workspace.getByRole('button',{name:'Teams',exact:true}).click();
+  await workspace.locator('details.sa-legacy-create summary').click();
   await workspace.getByRole('textbox',{name:'Name',exact:true}).fill('Persistent Team');
   await workspace.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await workspace.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
   await workspace.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(workspace.locator('.sa-list')).toContainText('Persistent Team');
+  await workspace.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(workspace.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await workspace.getByRole('button',{name:'Back to Bots'}).click();
   await expect(workspace).toBeHidden();

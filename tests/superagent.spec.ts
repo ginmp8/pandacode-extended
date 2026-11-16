@@ -24,7 +24,14 @@ test('SuperAgent Team search preserves focus and text selection through rerender
   test.setTimeout(45_000);
   await page.goto('/?bots=sample');
   const host=await openOrchestrationWorkspace(page);
-  await host.getByRole('button',{name:'Teams',exact:true}).click();
+  await host.locator('.sa-native-header [data-sa-builder-open]').click();
+  const builder=host.getByRole('region',{name:'Guided Team Builder'});
+  await builder.getByRole('textbox',{name:'Team name'}).fill('Searchable Team');
+  await builder.getByRole('button',{name:'Next'}).click();
+  await builder.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
+  await builder.getByRole('combobox',{name:'Primary Worker'}).selectOption({label:'Writer'});
+  for(let step=0;step<3;step++)await builder.getByRole('button',{name:'Next'}).click();
+  await builder.getByRole('button',{name:'Create Team (disabled)'}).click();
   const search=host.getByRole('searchbox',{name:'Search Teams'});
   await search.fill('S');
   await expect(search).toBeFocused();

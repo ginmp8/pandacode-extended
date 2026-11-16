@@ -1824,7 +1824,7 @@ test('native Team directory counts configured roles and filters without creating
     });
   });
   const host=page.locator('#sa-directory-filter-test');
-  const directory=host.getByRole('complementary',{name:'Teams directory'});
+  const directory=host.getByRole('complementary',{name:'Orchestrations navigation'});
   await expect(directory.locator('.sa-item')).toHaveCount(3);
   await expect(directory.locator('.sa-role-counts').nth(1))
     .toHaveText('1 Coordinator · 3 Workers · 2 Reviewers');

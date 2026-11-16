@@ -783,13 +783,18 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             '<button class="primary-button" type="button" data-sa-import>Confirm import</button>' : '') +
           '</section>' : '') +
       '</div></div></div>';
-    // Native reloads replace the entire workspace. Keep controls inert
-    // until the current snapshot has arrived; otherwise inputs can be edited
-    // while their backing Team/Run state is still being replaced.
+    // Native reloads replace the entire workspace. Block stateful actions
+    // until the snapshot arrives, but preserve the local-only new-Team draft
+    // (example template and name) without granting any native authority.
     if (loading) {
       host.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
         'button, input, select, textarea',
-      ).forEach(control => { control.disabled = true; });
+      ).forEach(control => {
+        const localDraft = control.matches(
+          'form[data-sa-form="create"] [data-sa-template], form[data-sa-form="create"] input[name="name"]',
+        );
+        control.disabled = !localDraft;
+      });
     }
     host.setAttribute('aria-busy', String(busy || loading));
   }
@@ -1523,6 +1528,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const form = event.target;
     if (!(form instanceof HTMLFormElement) || !host.contains(form)) return;
     event.preventDefault();
+    // Enter/submit events must not bypass disabled native-backed controls
+    // while hydration or a previous native operation remains unresolved.
+    if (loading || busy) return;
     const data = new FormData(form);
     if (form.dataset.saForm === 'demand-project-id') {
       const exact = String(data.get('projectId') ?? '').trim();

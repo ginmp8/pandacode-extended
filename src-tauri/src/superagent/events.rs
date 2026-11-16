@@ -515,6 +515,17 @@ pub(crate) fn headless_inspect_source_integrity(
         .map_err(|e| e.to_string())
 }
 
+/// Headless has the same source-scoped, bounded decision history as desktop.
+/// This reads immutable metadata only and cannot invoke GitHub, providers,
+/// restart recovery or issue a task grant.
+pub(crate) fn headless_source_decisions(
+    database_path: &std::path::Path, source_id: &str, limit: i64,
+) -> Result<String> {
+    let store = Store::open_read_only(database_path)?;
+    serde_json::to_string_pretty(&list_decisions(&store, source_id, limit)?)
+        .map_err(|e| e.to_string())
+}
+
 /// Desktop and headless consume the same native receipt/cursor diagnosis.
 #[tauri::command]
 pub async fn superagent_source_integrity(
@@ -1936,6 +1947,38 @@ mod tests {
         }
         assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
             |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn headless_source_decisions_are_scoped_and_restart_durable_without_work() {
+        let (store, path) = fixture();
+        let primary = create_source(&store, "orch", "test/fixture",
+            "trusted-bot", "issues.opened").unwrap();
+        let other = create_source(&store, "orch", "test/fixture",
+            "trusted-bot", "issues.closed").unwrap();
+        let primary = set_mode(&store, &primary.id, primary.policy_revision, "observe").unwrap();
+        let other = set_mode(&store, &other.id, other.policy_revision, "observe").unwrap();
+        observe(&store, &event("primary-receipt", &primary, 1)).unwrap();
+        observe(&store, &event("foreign-receipt", &other, 1)).unwrap();
+        drop(store);
+
+        let history: serde_json::Value = serde_json::from_str(
+            &headless_source_decisions(&path, &primary.id, 50).unwrap(),
+        ).unwrap();
+        assert_eq!(history.as_array().unwrap().len(), 1);
+        assert_eq!(history[0]["deliveryId"], "primary-receipt");
+        assert_eq!(history[0]["eventKind"], "issues.opened");
+        assert!(headless_source_decisions(&path, "missing-source", 50).is_err());
+        assert!(headless_source_decisions(&path, &primary.id, 0).is_err());
+        assert!(headless_source_decisions(&path, &primary.id, 101).is_err());
+
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(list_decisions(&reopened, &primary.id, 50).unwrap().len(), 1);
+        assert_eq!(list_decisions(&reopened, &other.id, 50).unwrap().len(), 1);
+        let tickets: i64 = reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(tickets, 0, "Source inspection cannot create inferred Tickets");
     }
 
     #[test]

@@ -48,6 +48,7 @@ enum Command {
     InspectTicketEffects { ticket_id: String, before_created_at: Option<i64>, before_key: Option<String>, unresolved_only: bool },
     InspectTicketSource { ticket_id: String },
     InspectSourceHealth { source_id: String },
+    InspectSourceDecisions { source_id: String },
     LinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
     LinkIssuePull { source_id: String, ticket_id: String, issue_key: String, pull_key: String },
     UnlinkSourceThread { source_id: String, ticket_id: String, subject_key: String },
@@ -195,6 +196,22 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(status) => { println!("{status}"); std::process::exit(0) }
                     Err(error) => {
                         eprintln!("SuperAgent source health inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::InspectSourceDecisions { source_id } = &command {
+                // Immutable source-scoped receipts, no GitHub polling, provider
+                // admission, task grant or startup recovery.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::events::headless_source_decisions(
+                        &dir.join("kingcode.sqlite3"), source_id, 50,
+                    ));
+                match result {
+                    Ok(history) => { println!("{history}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent source decision inspection failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -546,6 +563,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::PreflightDemand { .. }
         | Command::InspectTicketEffects { .. }
         | Command::InspectTicketSource { .. } | Command::InspectSourceHealth { .. }
+        | Command::InspectSourceDecisions { .. }
         | Command::LinkSourceThread { .. } | Command::LinkIssuePull { .. }
         | Command::UnlinkSourceThread { .. }
         | Command::ObserveSource { .. } | Command::ObserveCheckRun { .. }
@@ -1158,6 +1176,15 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--inspect-source-decisions" => {
+                let id = args.get(index + 1)
+                    .ok_or("--inspect-source-decisions needs a source ID.")?;
+                validate_ticket_id(id)
+                    .map_err(|_| "Provide a bounded source ID.".to_owned())?;
+                command = Command::InspectSourceDecisions { source_id: id.clone() };
+                ops += 1;
+                index += 1;
+            }
             "--observe-source" => {
                 let value = args.get(index + 1)
                     .ok_or_else(|| format!("--observe-source needs a source ID.\n\n{}", help()))?;
@@ -1576,6 +1603,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-source-health <id>
                          Inspect native source cursor, stored receipts and policy without
                          GitHub access, writes or restart recovery; exit.
+  --inspect-source-decisions <id>
+                          Read the latest 50 native source decision receipts without GitHub,
+                          startup recovery, worker admission or external writes; exit.
   --observe-source <id> Authenticated one-shot GitHub Observe poll for an activated source; exit.
                          No Auto, inferred task, webhook or external write.
   --observe-check-run <id> <check-run-id>
@@ -1720,6 +1750,13 @@ mod tests {
                         "--inspect-source-health source_123 --observe-source source_123"] {
             assert!(parsed(invalid).is_err(), "{invalid}");
         }
+        assert_eq!(parsed("--inspect-source-decisions source_123"),
+            Ok(Command::InspectSourceDecisions { source_id: "source_123".into() }));
+        for invalid in [
+            "--inspect-source-decisions",
+            "--inspect-source-decisions ../private",
+            "--inspect-source-decisions source_123 --observe-source source_123",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
         assert!(parsed("--list-review-inbox --stop-ticket ticket_1").is_err());
         assert_eq!(parsed("--list-demands all"),
             Ok(Command::ListDemands {
@@ -2111,6 +2148,7 @@ mod tests {
             "--inspect-ticket-graph",
             "--inspect-ticket-effects",
             "--inspect-ticket-source",
+            "--inspect-source-decisions",
             "--link-source-thread",
             "--unlink-source-thread",
             "--observe-source",

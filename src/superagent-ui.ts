@@ -943,7 +943,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-demand-project-filter')) {
       if (busy) { target.value = demandProjectFilter; return; }
       const filter = target.value;
-      if (filter && !presets.some(item => item.projectId === filter)) {
+      // Previously admitted Demands retain their original project even when
+      // the Team has moved to a different project. Both are native-backed IDs.
+      if (filter && !presets.some(item => item.projectId === filter)
+          && !allDemands.some(item => item.projectId === filter)) {
         target.value = demandProjectFilter; return;
       }
       demandProjectFilter = filter;

@@ -7149,6 +7149,13 @@ fn preflight_dispatch_batch(
             continue;
         }
 
+        // Match dispatch's scored-seat guard before validating a replacement lens.
+        // Preflight must reject immutable reviews without changing the refusal reason.
+        if let Some(old) = assignment.replaces.as_deref()
+            .and_then(|id| team.workers.iter().find(|worker| worker.id == id))
+        {
+            council::refuse_unseat(old)?;
+        }
         let seat = council::seat_for(
             team,
             assignment.council_lens.as_deref(),

@@ -237,6 +237,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let globalDemandLayout: 'board' | 'list' = 'board';
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
   let workspaceView: 'teams' | 'runs' | 'review' | 'sources' | 'portable' = 'teams';
+  let teamSection: 'overview' | 'members' | 'execution' = 'overview';
+  let selectedMemberId = '';
   let preview: Preview | null = null, inspected: unknown = null;
   let confirm: { message: string; action: () => Promise<void> } | null = null;
   let taskKey = crypto.randomUUID();
@@ -1129,24 +1131,95 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             '<button type="button" data-sa-effective-load>Inspect effective policy and Skills</button>' +
             effectivePolicy) +
         '</section>' : '';
+    // Configured bot identity is a read-only projection of native Team data.
+    // It does not prove provider availability, actual execution or tool grants.
+    const configuredWorkers = chosen
+      ? [chosen.workerBotId, ...(chosen.workerBotIds ?? []).filter(id => id !== chosen.workerBotId)]
+      : [];
+    const configuredReviewers = chosen?.reviewerBotIds ?? [];
+    const configuredMembers = chosen
+      ? [chosen.coordinatorBotId, ...configuredWorkers, ...configuredReviewers] : [];
+    const inspectedMemberId = configuredMembers.includes(selectedMemberId)
+      ? selectedMemberId : (chosen?.coordinatorBotId ?? '');
+    const inspectedMember = bots.find(bot => bot.id === inspectedMemberId);
+    const memberRow = (botId: string, role: string, position: number): string => {
+      const bot = bots.find(item => item.id === botId);
+      return '<li><button type="button" class="sa-native-member" data-sa-member-open="' +
+        safe(botId) + '" aria-pressed="' + (inspectedMemberId === botId) + '">' +
+        '<span class="sa-member-avatar" aria-hidden="true">' +
+        safe((bot?.name ?? '?').slice(0, 1).toUpperCase()) + '</span>' +
+        '<span class="sa-member-label"><strong>' + safe(bot?.name ?? 'Missing bot') +
+        '</strong><small>' + safe(role) + (position > 0 ? ' ' + position : '') +
+        ' · ' + safe(bot?.provider || 'Provider unknown') + ' / ' +
+        safe(bot?.model || 'Model unknown') + '</small></span>' +
+        '<span class="sa-status-pill">' + (bot?.paused ? 'Paused' :
+          bot ? 'Configured' : 'Missing') + '</span></button></li>';
+    };
     const overview = chosen
-      ? '<section class="sa-pane" aria-label="Team overview"><h3>Selected Team</h3>' +
-        '<p>' + safe(chosen.name) + ' · ' + (chosen.enabled ? 'Manual read-only' : 'Disabled / Off') +
-        ' · Policy revision ' + chosen.policyRevision + '</p>' +
-        '<dl><dt>Coordinator (read-only)</dt><dd>' + safe(botName(chosen.coordinatorBotId)) + '</dd>' +
-        '<dt>Worker</dt><dd>' + safe(botName(chosen.workerBotId)) + '</dd>' +
-        '<dt>Configured members</dt><dd>' + safe(roleSummary(chosen)) + '</dd>' +
-        '<dt>Review policy</dt><dd>' + (chosen.councilRequired ? 'Native Council required' : 'Council Off') + '</dd>' +
-        '<dt>Current native support</dt><dd>Manual worker dispatch with explicitly authorized scoped writes on supported platforms; authenticated GitHub Auto only with an exact native grant.</dd></dl>' +
-        '<div class="sa-actions"><button type="button" data-sa-enable="' + safe(chosen.id) + '"' +
+      ? '<section class="sa-pane sa-native-overview" aria-label="Team overview">' +
+        '<header class="sa-native-team-head"><div><h3>' + safe(chosen.name) +
+        '</h3><p>' + safe(roleSummary(chosen)) + ' · Revision ' + chosen.policyRevision +
+        '</p></div><div class="sa-actions"><span class="sa-status-pill">' +
+        (chosen.enabled ? 'Manual' : 'Off') + '</span>' +
+        '<button type="button" data-sa-enable="' + safe(chosen.id) + '"' +
         (!chosen.enabled && (chosen.workerBotIds?.length ?? 1) > 1
           ? ' disabled title="Native manual admission supports one executable Worker"' : '') +
         '>' + (chosen.enabled ? 'Disable' : 'Enable manual') + '</button>' +
-        '<button type="button" data-sa-open-runs>Assign demand / Open runs</button></div>' +
+        '<button type="button" class="primary-button" data-sa-open-runs>Assign demand / Open runs</button>' +
+        '</div></header>' +
+        '<p class="sa-native-note">Team members are reusable configuration, not active sessions. ' +
+        'Every task needs native admission and its own scoped authorization.</p>' +
+        '<div class="sa-native-roster">' +
+        '<div class="sa-native-roster-list"><h4>Members and roles</h4>' +
+        '<ul class="sa-list">' + memberRow(chosen.coordinatorBotId, 'Coordinator', 0) +
+        configuredWorkers.map((id, index) => memberRow(id, 'Worker', index + 1)).join('') +
+        configuredReviewers.map((id, index) => memberRow(id, 'Council reviewer', index + 1)).join('') +
+        '</ul></div>' +
+        '<section class="sa-native-member-inspector" aria-label="Member profile">' +
+        '<h4>Member profile</h4><strong>' +
+        safe(inspectedMember?.name ?? 'Missing bot') + '</strong>' +
+        '<dl><dt>Provider / harness</dt><dd>' +
+        safe(inspectedMember?.provider ?? 'Not verified') + '</dd>' +
+        '<dt>Configured model</dt><dd>' + safe(inspectedMember?.model ?? 'Not verified') + '</dd>' +
+        '<dt>Bot mode</dt><dd>' + safe(inspectedMember?.mode ?? 'Not specified') + '</dd>' +
+        '<dt>Project</dt><dd>' + safe(inspectedMember?.projectId ?? 'Not specified') + '</dd>' +
+        '<dt>Availability</dt><dd>' +
+        (inspectedMember?.paused ? 'Paused' : inspectedMember ? 'Not paused; provider unverified' : 'Bot unavailable') +
+        '</dd><dt>Assigned Skills</dt><dd>' +
+        safe(inspectedMember?.skills?.join(', ') || 'None recorded') + '</dd>' +
+        '</dl><p>Skills, provider execution, and tool permissions must be verified ' +
+        'separately for each admitted Demand.</p></section></div>' +
+        '<div class="sa-native-policy-line"><span>Review policy: ' +
+        (chosen.councilRequired ? 'Native Council required' : 'Council Off') +
+        '</span><span>Saved state: ' + (chosen.enabled ? 'Manual' : 'Off') + '</span>' +
+        '<span>Last activity: ' + safe(activityTime(chosen.lastActivityAt)) + '</span></div>' +
         (!chosen.enabled && (chosen.workerBotIds?.length ?? 1) > 1
-          ? '<p role="note">This Team has multiple configured Workers; native manual execution is unavailable until separately scoped multi-worker admission is supported.</p>' : '') +
-        '</section>'
-      : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
+          ? '<p role="note">Multiple Workers are configured; native manual admission requires a supported executable topology.</p>'
+          : '') + '</section>'
+      : '<section class="sa-pane sa-native-no-selection"><h3>Select a Team</h3>' +
+        '<p>Choose a saved Team from the left to inspect its members and native policy.</p></section>';
+    const teamTabs = chosen
+      ? '<nav class="sa-team-tabs" aria-label="Selected Team sections">' +
+        ([
+          ['overview', 'Overview'], ['members', 'Members and Skills'],
+          ['execution', 'Execution policy'],
+        ] as const).map(([id, label]) =>
+          '<button type="button" data-sa-team-section="' + id + '" aria-current="' +
+          (teamSection === id ? 'page' : 'false') + '">' + label + '</button>').join('') +
+        '</nav>' : '';
+    const firstUse = '<section class="sa-native-first-use" aria-label="Get started with Teams">' +
+      '<span class="sa-first-use-icon" aria-hidden="true">+</span>' +
+      '<h3>Your first SuperAgent starts with a Team</h3>' +
+      '<p>Choose existing PandaCode bots for coordination, implementation and optional ' +
+      'independent review. Save the Team Off, then explicitly authorize each Demand.</p>' +
+      '<ol class="sa-first-use-steps"><li><strong>1. Configure members</strong>' +
+      '<span>Assign a Coordinator, Workers and optional Council reviewers.</span></li>' +
+      '<li><strong>2. Review capabilities</strong>' +
+      '<span>Inspect model, Skills, project and native authorization limits.</span></li>' +
+      '<li><strong>3. Assign a Demand</strong>' +
+      '<span>Start with an eligible manual task, then inspect evidence and review.</span></li></ol>' +
+      '<p class="sa-native-note">Nothing runs automatically when a Team is created.</p>' +
+      '</section>';
     const globalReviewPanel = '<section class="sa-pane sa-cross-team-review" ' +
       'role="region" aria-label="Cross-Team native review inbox"><header>' +
       '<h3>Review inbox · All Teams</h3><button type="button" data-sa-load-review-inbox>' +
@@ -1188,38 +1261,36 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       : '<section class="sa-pane"><p>Select a Team to inspect its native human review queue.</p></section>';
     const reviewPanel = globalReviewPanel + selectedTeamReview;
     const navigation = '<nav class="sa-navigation" aria-label="Orchestration views">' +
+      '<span class="sa-nav-heading">Workspace</span>' +
       ([
-        ['teams','Teams'],['runs','Demands / Runs'],['review','Review inbox'],
-        ['sources','Sources'],['portable','Portable configuration'],
-      ] as const).map(([id,label]) =>
+        ['teams', 'Teams'], ['runs', 'Demands / Runs'], ['review', 'Review inbox'],
+      ] as const).map(([id, label]) =>
         '<button type="button" data-sa-view="' + id + '" aria-current="' +
         (workspaceView === id ? 'page' : 'false') + '">' + label + '</button>').join('') +
-      '</nav>';
-    host.innerHTML = '<div class="sa-ui">' +
-      '<p class="sa-intro">A Team is a reusable SuperAgent. All Run actions below use native Ticket and Mandate records; scope-bound worker writes and task Council are native policy-gated; Authenticated GitHub Auto is available only for an explicitly granted source, actor and event class with bounded quotas; manual work remains Off by default.</p>' +
-      (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
-      (error ? '<p role="alert" class="sa-error">' + safe(error) + '</p>' : '') +
-      (feedback ? '<p role="status" class="sa-feedback">' + safe(feedback) + '</p>' : '') +
-      (confirm ? '<section role="alertdialog" aria-label="Confirm orchestration action" class="sa-confirm"><p>' +
-        safe(confirm.message) + '</p><div class="sa-actions"><button type="button" data-sa-cancel>Cancel</button>' +
-        '<button class="primary-button" type="button" data-sa-confirm>Confirm</button></div></section>' : '') +
-      navigation +
-      '<div class="sa-layout"><aside class="sa-directory" aria-label="Teams directory">' +
-      '<section class="sa-pane"><h3>Teams</h3>' +
-      '<label>Search Teams<input type="search" data-sa-team-search value="' +
-      safe(teamSearch) + '" placeholder="Team name"></label>' +
-      '<label>Team status<select data-sa-team-status>' +
-      '<option value="all"' + (teamStatusFilter === 'all' ? ' selected' : '') + '>All statuses</option>' +
-      '<option value="enabled"' + (teamStatusFilter === 'enabled' ? ' selected' : '') + '>Manual enabled</option>' +
-      '<option value="disabled"' + (teamStatusFilter === 'disabled' ? ' selected' : '') + '>Disabled / Off</option>' +
-      '</select></label><p role="status">' + visibleTeams.length + ' of ' +
-      presets.length + ' native Teams displayed. Selection remains open when filtered out.</p>' +
-      '<ul class="sa-list">' + (list || '<li class="sa-empty">' +
-      (presets.length ? 'No Teams match these filters.' : 'No orchestrations created.') +
-      '</li>') + '</ul></section>' +
-      '</aside><div class="sa-stage">' +
-      (workspaceView === 'teams'
-        ? '<section class="sa-pane"><h3>New manual preset</h3><form data-sa-form="create">' +
+      '<span class="sa-nav-heading sa-nav-divider">Configuration</span>' +
+      ([
+        ['sources', 'Sources'], ['portable', 'Portable configuration'],
+      ] as const).map(([id, label]) =>
+        '<button type="button" data-sa-view="' + id + '" aria-current="' +
+        (workspaceView === id ? 'page' : 'false') + '">' + label + '</button>').join('') +
+      '</nav>' +
+      (presets.length
+        ? '<section class="sa-team-picker" aria-label="Teams directory">' +
+          '<h3>Teams</h3>' +
+          '<label>Search Teams<input type="search" data-sa-team-search value="' +
+          safe(teamSearch) + '" placeholder="Team name"></label>' +
+          '<label>Team status<select data-sa-team-status>' +
+          '<option value="all"' + (teamStatusFilter === 'all' ? ' selected' : '') + '>All statuses</option>' +
+          '<option value="enabled"' + (teamStatusFilter === 'enabled' ? ' selected' : '') + '>Manual enabled</option>' +
+          '<option value="disabled"' + (teamStatusFilter === 'disabled' ? ' selected' : '') + '>Disabled / Off</option>' +
+          '</select></label><p role="status">' + visibleTeams.length + ' of ' +
+          presets.length + ' native Teams displayed.</p>' +
+          '<ul class="sa-list">' + (list || '<li class="sa-empty">No Teams match these filters.</li>') +
+          '</ul></section>' : '');
+    // The original manual form remains in a collapsed compatibility section.
+    // The guided builder is the primary creation path and never grants authority.
+    const legacyCreate = '<details class="sa-legacy-create"><summary>Advanced: legacy manual setup</summary>' +
+'<section class="sa-pane"><h3>New manual preset</h3><form data-sa-form="create">' +
           '<label>Example preset<select data-sa-template aria-label="Example preset">' +
           '<option value="">Custom</option>' +
           '<option value="Software Development"' +
@@ -1244,7 +1315,32 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           createRoleOptions(draftReviewerBotIds, false) + '</select></label></details>' +
           '<button class="primary-button" type="submit"' +
           (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' +
-           guidedBuilder.render(bots) + overview + teamRoles + strategyPane
+      '</details>';
+    host.innerHTML = '<div class="sa-ui sa-native-ui">' +
+      '<header class="sa-native-header"><div><span class="sa-eyebrow">Bots / Team workspace</span>' +
+      '<h2>Orchestrations</h2><p>Configure reusable agent teams, assign work, and review results.</p>' +
+      '</div><div class="sa-native-header-actions"><button class="primary-button" type="button" ' +
+      'data-sa-builder-open>+ New Team</button></div></header>' +
+      (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
+      (error ? '<p role="alert" class="sa-error">' + safe(error) + '</p>' : '') +
+      (feedback ? '<p role="status" class="sa-feedback">' + safe(feedback) + '</p>' : '') +
+      (confirm ? '<section role="alertdialog" aria-label="Confirm orchestration action" class="sa-confirm"><p>' +
+        safe(confirm.message) + '</p><div class="sa-actions"><button type="button" data-sa-cancel>Cancel</button>' +
+        '<button class="primary-button" type="button" data-sa-confirm>Confirm</button></div></section>' : '') +
+      '<div class="sa-layout sa-native-layout"><aside class="sa-directory" ' +
+      'aria-label="Orchestrations navigation">' + navigation + '</aside><main class="sa-stage">' +
+      (workspaceView === 'teams'
+        ? (guidedBuilder.isOpen()
+          ? guidedBuilder.render(bots)
+          : presets.length === 0
+            ? firstUse + guidedBuilder.render(bots) + legacyCreate
+            : '<section class="sa-team-landing">' +
+              '<div class="sa-native-section-heading"><h3>Saved Teams</h3>' +
+              '<p>Select a Team to review its configuration before admitting work.</p></div>' +
+              teamTabs +
+              (teamSection === 'members' ? teamRoles :
+                teamSection === 'execution' ? strategyPane : overview) +
+              legacyCreate + '</section>')
         : '') +
       (workspaceView === 'runs' ? globalDemands + (active ||
         '<section class="sa-pane"><p>Select a Team from the directory to assign and inspect native Tickets.</p></section>') : '') +
@@ -1262,7 +1358,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             preview.unchanged.length + ' unchanged. Imported presets will be disabled.</p>' +
             '<button class="primary-button" type="button" data-sa-import>Confirm import</button>' : '') +
           '</section>' : '') +
-      '</div></div></div>';
+      '</main></div></div>';
     // Include native list hydration: mutation busy alone does not signal readiness.
     host.setAttribute('aria-busy', String(busy || loading));
     restoreFocusedControl(focusedControl);
@@ -1545,6 +1641,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   host.addEventListener('click', event => {
     const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button') : null;
     if (!target || !host.contains(target) || target.disabled) return;
+    if (target.hasAttribute('data-sa-builder-open')) {
+      workspaceView = 'teams';
+      teamSection = 'overview';
+    }
     if (guidedBuilder.handleClick(target, bots)) {
       render();
       host.querySelector<HTMLElement>('[aria-label="Team setup step"] h4')
@@ -1598,6 +1698,28 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       globalDemandLayout = layout;
       render();
       host.querySelector<HTMLButtonElement>('[data-sa-global-demand-layout="' + layout + '"]')
+        ?.focus({preventScroll:true});
+      return;
+    }
+    if (target.dataset.saMemberOpen) {
+      const chosen = current();
+      const eligible = chosen
+        ? [chosen.coordinatorBotId, chosen.workerBotId,
+          ...(chosen.workerBotIds ?? []), ...(chosen.reviewerBotIds ?? [])] : [];
+      if (eligible.includes(target.dataset.saMemberOpen)) {
+        selectedMemberId = target.dataset.saMemberOpen;
+        render();
+        host.querySelector<HTMLButtonElement>('[data-sa-member-open="' +
+          CSS.escape(selectedMemberId) + '"]')?.focus({preventScroll:true});
+      }
+      return;
+    }
+    if (target.dataset.saTeamSection) {
+      const next = target.dataset.saTeamSection;
+      if (!['overview', 'members', 'execution'].includes(next) || !current()) return;
+      teamSection = next as typeof teamSection;
+      render();
+      host.querySelector<HTMLButtonElement>('[data-sa-team-section="' + next + '"]')
         ?.focus({preventScroll:true});
       return;
     }
@@ -1767,10 +1889,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (target.dataset.saSelect) {
       if (busy || loading) return;
-      workspaceView = 'runs';
+      workspaceView = 'teams';
+      teamSection = 'overview';
       if (selected === target.dataset.saSelect) { render(); return; }
       const next = target.dataset.saSelect;
       selected = next;
+      selectedMemberId = '';
       tickets = [];
       inspectedTicket = ''; ticketDetails = null; threadLinks = [];
       inspectedAssignmentId = ''; roleRoster = null; effectiveTeam = null; teamStrategy = null;
@@ -2511,7 +2635,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       void work(async () => {
         const created = await call<Config>('superagent_create',{ input });
         guidedBuilder.reset();
-        selected = created.id; workspaceView = 'runs';
+        selected = created.id; workspaceView = 'teams'; teamSection = 'overview';
         await reload();
         feedback = 'Team saved Off; enable Manual only after native role checks.';
       });
@@ -2541,7 +2665,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         draftPresetName=''; draftPresetTemplate='';
         draftCoordinatorBotId=''; draftWorkerBotId='';
         draftAdditionalWorkerIds=[]; draftReviewerBotIds=[]; draftMembersExpanded=false;
-        selected = created.id; workspaceView = 'runs'; await reload();
+        selected = created.id; workspaceView = 'teams'; teamSection = 'overview'; await reload();
       });
     }
     if (form.dataset.saForm === 'reject') {

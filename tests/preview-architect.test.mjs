@@ -514,6 +514,12 @@ test('architect preview round-trips only admitted native Council strategies with
   const restored = createPreviewArchitect(host).get('parent');
   assert.equal(restored.config.council.strategy, 'escalated');
   assert.equal(restored.config.council.forceEscalation, true);
+  const onDemand = api.setCouncil('parent', { ...standard, strategy: 'escalated', forceEscalation: false });
+  assert.equal(onDemand.config.council.strategy, 'escalated');
+  assert.equal(onDemand.config.council.forceEscalation, undefined, 'native serialization omits false');
+  const restoredOnDemand = createPreviewArchitect(host).get('parent');
+  assert.equal(restoredOnDemand.config.council.strategy, 'escalated');
+  assert.equal(restoredOnDemand.config.council.forceEscalation, undefined, 'on-demand policy survives native-compatible persistence');
   const twoPhase = api.setCouncil('parent', { ...standard, strategy: 'two_phase' });
   assert.equal(twoPhase.config.council.strategy, 'two_phase');
   assert.equal(twoPhase.config.council.forceEscalation, undefined);

@@ -344,8 +344,9 @@ export function createCouncil(host: CouncilHost) {
       option.hidden = effectiveStrategy !== 'escalated';
     }
     const escalationToggle = panel.querySelector<HTMLInputElement>('[data-council-force-escalation]');
+    // Native omits false from persisted S2 policies; only an unsaved S2 draft defaults to immediate escalation.
     if (escalationToggle) escalationToggle.checked = escalationDraft.get(sessionId)
-      ?? (values.strategy === 'escalated' ? values.forceEscalation !== false : true);
+      ?? (strategyDraft.has(sessionId) ? effectiveStrategy === 'escalated' : values.forceEscalation === true);
     panel.querySelector<HTMLInputElement>('.council-new-threads')!.checked = councilForNewThreads();
     // The switch is busy while an automatic team starts for it.
     const sw = panel.querySelector<HTMLInputElement>('.council-switch')!, starting = pending.has(sessionId) && !host.team(sessionId);
@@ -549,7 +550,7 @@ export function createCouncil(host: CouncilHost) {
         }
         failures.delete(sessionId);
         if (current) void apply(sessionId, { ...current, strategy,
-          forceEscalation: strategy === 'escalated' ? (current.strategy === 'escalated' ? current.forceEscalation !== false : true) : false }, remember);
+          forceEscalation: strategy === 'escalated' ? (current.strategy === 'escalated' ? current.forceEscalation === true : true) : false }, remember);
         else {
           strategyDraft.set(sessionId, strategy);
           escalationDraft.delete(sessionId);

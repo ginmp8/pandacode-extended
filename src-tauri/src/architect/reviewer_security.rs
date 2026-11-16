@@ -198,6 +198,28 @@ impl ReviewerCapabilityGrant {
     }
 }
 
+/// Immutable reviewer identity pinned separately from the mutable team snapshot.
+/// A score cannot migrate to a different round, lens, provider or model by
+/// changing both the worker and its binding after native admission.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ReviewerSeatContext {
+    round: usize,
+    lens: String,
+    provider: String,
+    model: String,
+}
+impl ReviewerSeatContext {
+    fn from_binding(binding: &ReviewerBinding) -> Self {
+        Self {
+            round: binding.round,
+            lens: binding.snapshot.lens.clone(),
+            provider: binding.snapshot.provider.clone(),
+            model: binding.snapshot.model.clone(),
+        }
+    }
+}
+
 /// Authenticated native-issued identity, independent of the mutable worker snapshot.
 /// User-scope authorization (S2/S4) must update this via trusted native code.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -205,6 +227,10 @@ impl ReviewerCapabilityGrant {
 struct ReviewerAuthority {
     council_cycle_id: String,
     seat_id: String,
+    /// Older grants lacked an independent identity snapshot. Only original
+    /// automatic/selected parallel Councils may consume that legacy format.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    seat_context: Option<ReviewerSeatContext>,
     artifact_revision: String,
     tool_policy: ReviewerToolPolicy,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -223,6 +249,7 @@ pub(crate) fn record_native_authority(store: &Store, parent: &str, binding: &Rev
     let record = ReviewerAuthority {
         council_cycle_id: binding.council_cycle_id.clone(),
         seat_id: binding.seat_id.clone(),
+        seat_context: Some(ReviewerSeatContext::from_binding(binding)),
         artifact_revision: binding.artifact_revision.clone(),
         tool_policy: binding.snapshot.tool_policy.clone(),
         reviewer_bot_id: binding.reviewer_bot_id.clone(),
@@ -259,6 +286,25 @@ pub(crate) fn validate_issued_authority(store: &Store, parent: &str, binding: &R
                 || original.required_reviewers != binding.required_reviewers
             {
                 return Err("reviewer_session_mismatch: saved review revision or grant differs from native authorization.".into());
+            }
+            match original.seat_context.as_ref() {
+                Some(context) if context == &ReviewerSeatContext::from_binding(binding) => {}
+                None => {
+                    // A pre-upgrade grant never gains composed-source, named-
+                    // criterion or multi-phase authority by deserialization.
+                    let legacy = super::load(store, parent)?
+                        .and_then(|team| team.config.council)
+                        .is_some_and(|config| {
+                            matches!(config.mode(), "m1" | "m2")
+                                && config.strategy == super::council::CouncilExecutionStrategy::Parallel
+                                && config.criteria_source == super::council::CouncilCriteriaSource::Architect
+                                && config.criteria.is_empty()
+                        });
+                    if !legacy {
+                        return Err("reviewer_session_mismatch: legacy reviewer context cannot authorize composed or criteria-bound review.".into());
+                    }
+                }
+                _ => return Err("reviewer_session_mismatch: native reviewer round, lens or model was changed.".into()),
             }
             Ok(())
         }
@@ -305,6 +351,7 @@ pub(crate) fn authorize_user_grants(
     let old = ReviewerAuthority {
         council_cycle_id: binding.council_cycle_id.clone(),
         seat_id: binding.seat_id.clone(),
+        seat_context: Some(ReviewerSeatContext::from_binding(binding)),
         artifact_revision: binding.artifact_revision.clone(),
         tool_policy: binding.snapshot.tool_policy.clone(),
         reviewer_bot_id: binding.reviewer_bot_id.clone(),

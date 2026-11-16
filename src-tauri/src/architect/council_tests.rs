@@ -1932,6 +1932,38 @@ fn selected_m2_native_terminal_denies_revoked_replayed_and_foreign_review_proof(
     assert_eq!(team.council_status.as_ref().unwrap().state, "passed");
     assert!(verified_council_pass(&store, &team));
 
+    // A mutable worker and its embedded binding agreeing is not sufficient:
+    // the independently issued native authority must still match exactly.
+    for change in ["round", "lens", "provider", "model"] {
+        let mut altered = team.clone();
+        let worker = &mut altered.workers[0];
+        match change {
+            "round" => {
+                worker.council.as_mut().unwrap().round = 2;
+                worker.reviewer_binding.as_mut().unwrap().round = 2;
+            }
+            "lens" => {
+                worker.council.as_mut().unwrap().lens = "substituted lens".into();
+                worker.reviewer_binding.as_mut().unwrap().snapshot.lens = "substituted lens".into();
+            }
+            "provider" => {
+                worker.provider = "substituted-provider".into();
+                worker.reviewer_binding.as_mut().unwrap().snapshot.provider = worker.provider.clone();
+            }
+            "model" => {
+                worker.model = "substituted-model".into();
+                worker.reviewer_binding.as_mut().unwrap().snapshot.model = worker.model.clone();
+            }
+            _ => unreachable!(),
+        }
+        let worker = &altered.workers[0];
+        let binding = worker.reviewer_binding.as_ref().unwrap();
+        assert!(binding.validate(&altered, worker).is_ok(),
+            "{change}: the mutable binding by itself cannot detect paired tampering");
+        assert!(reviewer_security::validate_recorded_authority(&store, &sid, binding).is_err(),
+            "{change}: independently pinned native identity must reject substitution");
+    }
+
     let mut forged = team.clone();
     forged.workers[1].council.as_mut().unwrap().score = Some(10.0);
     assert!(!selected_direct_native_authority_current(&store, &forged),
@@ -1963,6 +1995,37 @@ fn selected_m2_native_terminal_denies_revoked_replayed_and_foreign_review_proof(
     m1.config.council = Some(on(9.0, 3, 2));
     assert!(selected_direct_native_authority_current(&store, &m1),
         "the original M1 automatic Council preserves its preexisting gate");
+}
+
+#[test]
+fn legacy_reviewer_grants_remain_usable_only_for_original_parallel_councils() {
+    let (state, sid) = council_state(on(9.0, 3, 2));
+    let store = state.store.lock().unwrap();
+    let mut team = load(&store, &sid).unwrap().unwrap();
+    team.council_since = SINCE;
+    let reviewer = seat("legacy-reviewer", 1, Some(9.8), SINCE + 1);
+    let binding = reviewer_security::ReviewerBinding::native(
+        &team, &reviewer.id, reviewer.created_at, &reviewer.provider,
+        &reviewer.model, reviewer.council.as_ref().unwrap(),
+    );
+    reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+    let key = "native-reviewer-authority:legacy-reviewer";
+    let raw: String = store.db.query_row(
+        "SELECT content FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, key], |row| row.get(0),
+    ).unwrap();
+    let mut historic: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    historic.as_object_mut().unwrap().remove("seatContext");
+    store.db.execute(
+        "UPDATE architect_requests SET content=?1 WHERE parent_session_id=?2 AND key=?3",
+        rusqlite::params![historic.to_string(), sid, key],
+    ).unwrap();
+    assert!(reviewer_security::validate_recorded_authority(&store, &sid, &binding).is_ok(),
+        "an original M1 parallel reviewer may resume with its historical authority");
+    team.config.council.as_mut().unwrap().strategy = council::CouncilExecutionStrategy::Escalated;
+    save(&store, &mut team).unwrap();
+    assert!(reviewer_security::validate_recorded_authority(&store, &sid, &binding).is_err(),
+        "historical grants cannot acquire S2 authority without a native frozen context");
 }
 
 #[test]

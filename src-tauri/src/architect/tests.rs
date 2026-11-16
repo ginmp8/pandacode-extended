@@ -7701,6 +7701,62 @@ fn archived_or_completed_root_revokes_live_child_admission_policy_and_callback()
 }
 
 #[test]
+fn interrupted_native_child_session_revokes_dispatch_policy_and_callbacks() {
+    let (state, _root_id, child_id, _) = nested_child_lifecycle_fixture();
+    let store = state.store.lock().unwrap();
+    let mut child = load(&store, &child_id).unwrap().unwrap();
+    child.status = "running".into();
+    child.pending_turn = None;
+    child.workers[0].read_only = true;
+    child.workers[0].council = Some(CouncilSeat {
+        round: 1, ..CouncilSeat::default()
+    });
+    assert!(eligible(&child, 0));
+    save(&store, &mut child).unwrap();
+    assert!(native_child_coordinator_admitted(&store, &child_id).unwrap());
+    assert!(nested_council_callback_current(&store, &child_id));
+
+    let previous_status = store.session(&child_id).unwrap().status;
+    store.db.execute(
+        "UPDATE sessions SET status='interrupted' WHERE id=?1",
+        [&child_id],
+    ).unwrap();
+    assert!(validate_council_child_link(&store, &child_id).unwrap().is_some(),
+        "persisted ownership evidence remains inspectable");
+    assert!(!native_child_coordinator_admitted(&store, &child_id).unwrap(),
+        "interrupted child cannot retain an old coordinator grant");
+    assert!(!nested_council_callback_current(&store, &child_id),
+        "interrupted child callbacks must not settle a parent seat");
+    let admission = Admission { parent: child_id.clone(), generation: child.generation };
+    assert_eq!(validate_admission(&store, &child_id, Some(&admission)).unwrap_err(),
+        SETTLED_PARENT);
+    let denied = reviewer_policy_with_executable(
+        &store, &child_id, Some(&admission), false,
+    ).unwrap_err();
+    assert!(denied.contains("read_only_policy_violation"), "{denied}");
+
+    let before = serde_json::to_value(load(&store, &child_id).unwrap().unwrap()).unwrap();
+    let candidates = vec![child];
+    let roots = std::cell::OnceCell::new();
+    let launch = team_action(
+        &store, &std::collections::HashMap::new(), &candidates, &roots,
+        &candidates[0], &mut |_| {},
+    ).unwrap();
+    assert!(launch.is_none(), "interrupted child must not reserve a leaf");
+    assert_eq!(
+        serde_json::to_value(load(&store, &child_id).unwrap().unwrap()).unwrap(),
+        before, "denied dispatch must not mutate the child team",
+    );
+
+    store.db.execute(
+        "UPDATE sessions SET status=?2 WHERE id=?1",
+        params![child_id, previous_status],
+    ).unwrap();
+    assert!(native_child_coordinator_admitted(&store, &child_id).unwrap(),
+        "restored native session may use its still-current task-owned grant");
+}
+
+#[test]
 fn child_dispatch_rejects_paused_or_archived_root_without_consuming_leaf() {
     for root_state in ["paused", "archived"] {
         let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();

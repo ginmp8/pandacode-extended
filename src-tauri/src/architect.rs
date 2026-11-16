@@ -4067,6 +4067,13 @@ pub(crate) fn check_manual(store: &Store, sid: &str) -> Result<()> {
 /// and its original, non-abandoned selected Council seat.
 /// A persisted child link may remain available for historical inspection, but
 /// an archived or completed root must never authorize fresh child execution.
+// The persisted session is authoritative after restart even if a saved child team
+// still reports running. Keep historical link inspection independent of liveness.
+fn council_child_session_is_live(store: &Store, child_session_id: &str) -> Result<bool> {
+    let session = store.session(child_session_id)?;
+    Ok(!session.archived && session.task_stage != "completed" && session.status != "interrupted")
+}
+
 fn council_root_session_is_live(store: &Store, root_session_id: &str) -> Result<bool> {
     let root_session = store.session(root_session_id)?;
     Ok(!root_session.archived && root_session.task_stage != "completed")
@@ -4078,7 +4085,8 @@ pub(crate) fn native_child_coordinator_admitted(store: &Store, child_session_id:
     };
     let root = load(store, &link.root_session_id)?
         .ok_or("reviewer_session_mismatch: root Council task disappeared.")?;
-    Ok(council_root_session_is_live(store, &link.root_session_id)?
+    Ok(council_child_session_is_live(store, child_session_id)?
+        && council_root_session_is_live(store, &link.root_session_id)?
         && active(&root.status)
         && root.workers.iter().any(|worker| {
         worker.id == link.root_worker_id && !worker.abandoned
@@ -4109,6 +4117,9 @@ fn reviewer_policy_with_executable(
         let Some(link) = validate_council_child_link(store, sid)? else {
             return Ok(None);
         };
+        if !council_child_session_is_live(store, sid)? {
+            return Err("read_only_policy_violation: nested Council child session is no longer live.".into());
+        }
         if link.timeout_at <= storage::now() {
             return Err(
                 "reviewer_session_mismatch: nested Council task exceeded its native timeout."
@@ -4160,6 +4171,9 @@ fn reviewer_policy_with_executable(
             let link = validate_council_child_link(store, &team.session_id)?.ok_or(
                 "reviewer_session_mismatch: child reviewer has no native parent Council link.",
             )?;
+            if !council_child_session_is_live(store, &team.session_id)? {
+                return Err("read_only_policy_violation: nested Council child session is no longer live.".into());
+            }
             if !council_root_session_is_live(store, &link.root_session_id)? {
                 return Err("read_only_policy_violation: nested Council root is archived or completed.".into());
             }
@@ -4232,6 +4246,9 @@ pub(crate) fn validate_admission(
         return Err(SETTLED_PARENT.into());
     }
     if let Some(link) = validate_council_child_link(store, &team.session_id)? {
+        if !council_child_session_is_live(store, &team.session_id)? {
+            return Err(SETTLED_PARENT.into());
+        }
         if !council_root_session_is_live(store, &link.root_session_id)? {
             return Err(SETTLED_PARENT.into());
         }
@@ -10003,7 +10020,9 @@ fn nested_council_callback_current(store: &Store, parent: &str) -> bool {
         Ok(Some(link)) => link,
         Err(_) => return false,
     };
-    if validate_council_child_link(store, parent).ok().flatten().is_none() {
+    if validate_council_child_link(store, parent).ok().flatten().is_none()
+        || !council_child_session_is_live(store, parent).unwrap_or(false)
+    {
         return false;
     }
     let Ok(Some(root)) = load(store, &link.root_session_id) else {

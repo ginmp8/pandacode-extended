@@ -1890,9 +1890,11 @@ pub(crate) fn has_task_assignment_history(store: &Store, session_id: &str) -> Re
     ).map_err(|error| error.to_string())
 }
 
-/// A live server may still own a provider handle after another local
-/// operator revokes its Mandate or a recovery transition detaches its
-/// Assignment. Stop only those task-owned sessions; never infer a retry.
+/// A live server may still own a provider handle after a local operator
+/// revokes a Mandate or after expiry, pause, policy/profile drift, or recovery
+/// detaches an Assignment. Poll native authority directly so cancellation need
+/// not wait for a state-writing watchdog tick. Stop only task-owned sessions;
+/// this query never settles the Ticket, grants a retry, or replays effects.
 pub(crate) fn headless_cancelled_assignments(
     store: &Store, active_sessions: &[String],
 ) -> Result<Vec<String>> {
@@ -1904,6 +1906,9 @@ pub(crate) fn headless_cancelled_assignments(
             SELECT 1 FROM sa_assignments a
             JOIN sa_tickets t ON t.id=a.ticket_id
             LEFT JOIN sa_mandates m ON m.ticket_id=t.id
+            LEFT JOIN sa_orchestrations o ON o.id=t.orchestration_id
+            LEFT JOIN bots b ON b.id=a.bot_id
+            LEFT JOIN sessions s ON s.id=a.session_id
             WHERE a.session_id=?1
               AND (a.state IN ('stopped','interrupted')
                    OR t.state IN ('stopped','interrupted')
@@ -1913,14 +1918,29 @@ pub(crate) fn headless_cancelled_assignments(
                        OR t.active_assignment_id!=a.id
                        OR m.ticket_id IS NULL
                        OR m.revoked!=0
+                       OR m.expires_at<=?2
+                       OR length(trim(m.authorization_id))=0
+                       OR m.actor!=t.actor
+                       OR m.project_id!=t.project_id
+                       OR m.allowed_tools!='[]'
+                       OR m.allowed_side_effects!=0
                        OR m.policy_revision!=t.policy_revision
+                       OR o.id IS NULL OR o.enabled=0
+                       OR o.project_id!=t.project_id
+                       OR o.policy_revision!=t.policy_revision
+                       OR b.id IS NULL OR b.paused!=0
+                       OR s.id IS NULL OR s.project_id!=b.project_id
+                       OR a.created_at<=0 OR a.created_at>?2
+                       OR (?2-a.created_at)>=?3
                    )))
         )",
     ).map_err(|e| e.to_string())?;
     let mut cancelled = Vec::new();
+    let now = storage::now();
     for session_id in active_sessions {
-        let cancelled_native: bool = stmt.query_row([session_id], |row| row.get(0))
-            .map_err(|e| e.to_string())?;
+        let cancelled_native: bool = stmt.query_row(
+            params![session_id, now, MAX_ASSIGNMENT_RUN_MS], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
         if cancelled_native && !cancelled.contains(session_id) {
             cancelled.push(session_id.clone());
         }
@@ -5447,7 +5467,9 @@ mod tests {
 
     #[test]
     fn headless_poll_cancels_orphaned_or_revoked_running_native_sessions() {
-        for scenario in ["detached", "revoked", "policy-drift", "blocked"] {
+        for scenario in ["detached", "revoked", "policy-drift", "blocked",
+            "expired-mandate", "disabled-team", "paused-worker", "expired-assignment",
+            "unexpected-tools"] {
             let mut store = fixture();
             let cfg = enabled(&store);
             let (ticket, admitted) = admit(
@@ -5482,6 +5504,25 @@ mod tests {
                 "blocked" => store.db.execute(
                     "UPDATE sa_tickets SET state='blocked' WHERE id=?1",
                     [&ticket.id],
+                ).unwrap(),
+                "expired-mandate" => store.db.execute(
+                    "UPDATE sa_mandates SET expires_at=?2 WHERE ticket_id=?1",
+                    params![ticket.id, storage::now()-1],
+                ).unwrap(),
+                "disabled-team" => store.db.execute(
+                    "UPDATE sa_orchestrations SET enabled=0 WHERE id=?1",
+                    [&cfg.id],
+                ).unwrap(),
+                "paused-worker" => store.db.execute(
+                    "UPDATE bots SET paused=1 WHERE id='worker'", [],
+                ).unwrap(),
+                "expired-assignment" => store.db.execute(
+                    "UPDATE sa_assignments SET created_at=?2 WHERE ticket_id=?1",
+                    params![ticket.id, storage::now()-MAX_ASSIGNMENT_RUN_MS-1000],
+                ).unwrap(),
+                "unexpected-tools" => store.db.execute(
+                    "UPDATE sa_mandates SET allowed_tools=?2 WHERE ticket_id=?1",
+                    params![ticket.id, "[\"write\"]"],
                 ).unwrap(),
                 _ => unreachable!(),
             };

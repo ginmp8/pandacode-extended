@@ -418,6 +418,72 @@ test('active Team title edit preserves immutable saved role IDs in future-only I
   });
 });
 
+test('settled Team role rotation updates only future native policy without dispatch', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-role-rotation';
+    document.body.appendChild(host);
+    const calls: Array<{command:string;args?:Record<string,unknown>}> = [];
+    (window as unknown as {saRoleRotationCalls:typeof calls}).saRoleRotationCalls = calls;
+    const cfg = {
+      id:'reusable-team',name:'Reusable Team',coordinatorBotId:'router',
+      workerBotId:'worker',workerBotIds:['worker'],reviewerBotIds:[],
+      projectId:'project',policyRevision:4,teamVersion:6,enabled:false,ticketCount:1,
+    };
+    mountSuperagent(host,async(command,args) => {
+      calls.push({command,args});
+      if(command==='bots_list')return [
+        {id:'router',name:'Router',paused:false,projectId:'project'},
+        {id:'worker',name:'Worker',paused:false,projectId:'project'},
+        {id:'worker-two',name:'Second Worker',paused:false,projectId:'project'},
+      ] as never;
+      if(command==='superagent_list')return [{...cfg}] as never;
+      if(command==='superagent_tickets')return [
+        {id:'previous',orchestrationId:'reusable-team',objective:'Delivered previously',
+          state:'stopped',revision:2},
+      ] as never;
+      if(command==='superagent_update'){
+        if(args?.orchestrationId!=='reusable-team'||args?.expectedRevision!==4)
+          throw Error('Unpinned Team edit');
+        const input=args?.input as {coordinatorBotId:string;workerBotId:string;workerBotIds:string[]};
+        if(input.coordinatorBotId!=='router'||input.workerBotId!=='worker-two'||
+            input.workerBotIds.join(',')!=='worker-two')
+          throw Error('Unexpected role mutation payload');
+        Object.assign(cfg,{workerBotId:'worker-two',workerBotIds:['worker-two'],
+          policyRevision:5,teamVersion:7});
+        return {...cfg} as never;
+      }
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-role-rotation');
+  await expect(host.locator('.sa-list .sa-item strong'))
+    .toHaveText('Reusable Team',{timeout:30_000});
+  await expect(host).toHaveAttribute('aria-busy','false');
+  await host.getByRole('navigation',{name:'Orchestration views'})
+    .getByRole('button',{name:'Demands / Runs'}).click();
+  await expect(host.getByText('Disabled Teams can rotate primary roles',{exact:false}))
+    .toBeVisible();
+  const edit=host.locator('form[data-sa-form="edit"]');
+  await edit.getByRole('combobox',{name:'Edit worker'}).selectOption('worker-two');
+  await edit.getByRole('button',{name:'Save preset'}).click();
+  await expect.poll(async()=>page.evaluate(() =>
+    (window as unknown as {saRoleRotationCalls:Array<{command:string}>})
+      .saRoleRotationCalls.filter(c=>c.command==='superagent_update').length
+  )).toBe(1);
+  const calls=await page.evaluate(() =>
+    (window as unknown as {saRoleRotationCalls:Array<{command:string;args?:unknown}>})
+      .saRoleRotationCalls);
+  expect(calls.find(c=>c.command==='superagent_update')).toMatchObject({
+    args:{orchestrationId:'reusable-team',expectedRevision:4,
+      input:{coordinatorBotId:'router',workerBotId:'worker-two',
+        workerBotIds:['worker-two']}},
+  });
+  expect(calls.filter(c=>/dispatch|admit|start|run/.test(c.command))).toEqual([]);
+});
+
 test('native SuperAgent preset edit and deletion require unused disabled configuration',async ({page})=>{
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

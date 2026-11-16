@@ -1831,6 +1831,22 @@ fn mixed_root_terminal_gate_requires_recorded_native_reviewer_authority() {
     ).unwrap();
     assert!(mixed_native_authority_current(&store, &team),
         "both recorded, distinct completed read-only native seats qualify");
+    let mut abandoned = team.clone();
+    abandoned.workers[0].abandoned = true;
+    assert!(!mixed_native_authority_current(&store, &abandoned),
+        "an abandoned scored M3 seat cannot retain native approval");
+    let mut projected_abandoned = abandoned;
+    refresh_council(&store, &mut projected_abandoned);
+    assert_eq!(projected_abandoned.council_status.as_ref().unwrap().state, "blocked",
+        "the visible M3 status must not project an abandoned reviewer as passed");
+    let mut wrote = team.clone();
+    wrote.workers[1].wrote_at = SINCE + 3;
+    assert!(!mixed_native_authority_current(&store, &wrote),
+        "a scored reviewer that wrote after admission cannot approve M3");
+    let mut changed_files = team.clone();
+    changed_files.workers[0].files.push("src/main.ts".into());
+    assert!(!mixed_native_authority_current(&store, &changed_files),
+        "recorded reviewer file changes invalidate native authority");
     refresh_council(&store, &mut projected);
     assert_eq!(projected.council_status.as_ref().unwrap().state, "passed",
         "only reauthenticated native reviewer authority can restore visible approval");
@@ -1870,7 +1886,10 @@ fn selected_m2_native_terminal_denies_revoked_replayed_and_foreign_review_proof(
     config.reviewer_bot_ids = vec!["m2-security".into(), "m2-quality".into()];
     let mut team = team_with(config.clone(), Vec::new());
     team.session_id = sid.clone();
-    team.changed_at = storage::now();
+    // No assessed files changed in this fixture. A wall-clock timestamp here
+    // would spuriously mark reviews created at SINCE as stale before authority
+    // verification is exercised.
+    team.changed_at = 0;
     for (index, bot_id) in config.reviewer_bot_ids.iter().enumerate() {
         let id = format!("m2-granted-{index}");
         let mut worker = seat(&id, 1, Some(9.8), SINCE + index as i64 + 1);

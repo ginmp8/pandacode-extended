@@ -672,7 +672,13 @@ fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
                         && (!worker.abandoned || seat.score.is_some()))
         }).collect::<Vec<_>>();
         eligible.len() == required && eligible.iter().all(|worker| {
-            if !worker.read_only || worker.status != "completed" { return false; }
+            // A persisted score or grant cannot rehabilitate a reviewer that
+            // was abandoned or touched the assessed checkout after admission.
+            if !worker.read_only || worker.status != "completed"
+                || worker.abandoned || worker.wrote_at != 0 || !worker.files.is_empty()
+            {
+                return false;
+            }
             let Some(binding) = worker.reviewer_binding.as_ref() else { return false };
             if binding.validate(team, worker).is_err()
                 || reviewer_security::validate_recorded_authority(store, &team.session_id, binding).is_err()

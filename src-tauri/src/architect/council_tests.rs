@@ -1966,6 +1966,70 @@ fn selected_m2_native_terminal_denies_revoked_replayed_and_foreign_review_proof(
 }
 
 #[test]
+fn s2_s3_native_authority_rounds_never_drop_the_original_review() {
+    use council::CouncilExecutionStrategy::{Escalated, Parallel, TwoPhase};
+    assert_eq!(native_reviewer_authority_rounds(Parallel, 3), vec![3]);
+    assert_eq!(native_reviewer_authority_rounds(Escalated, 1), vec![1]);
+    assert_eq!(native_reviewer_authority_rounds(Escalated, 2), vec![1, 2]);
+    assert_eq!(native_reviewer_authority_rounds(Escalated, 3), vec![1, 2, 3]);
+    assert_eq!(native_reviewer_authority_rounds(TwoPhase, 2), vec![1, 2]);
+}
+
+#[test]
+fn forced_m3_root_rechecks_both_authenticated_native_rounds() {
+    let (state, sid) = state_fixture();
+    let store = state.store.lock().unwrap();
+    let mut config = on(9.0, 2, 0);
+    config.reviewer_bot_ids = vec!["selected-reviewer".into()];
+    config.automatic_reviewers = 1;
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    config.force_escalation = true;
+    let mut team = team_with(config, Vec::new());
+    team.session_id = sid.clone();
+    team.changed_at = 0;
+    for round in 1..=2 {
+        let mut direct = seat(&format!("s2-{round}-direct"), round, Some(9.8),
+            SINCE + (round * 2 - 1) as i64);
+        direct.council.as_mut().unwrap().lens = "security".into();
+        let mut automatic = seat(&format!("s2-{round}-automatic"), round, Some(9.7),
+            SINCE + (round * 2) as i64);
+        automatic.council.as_mut().unwrap().lens = "quality".into();
+        let mut binding = reviewer_security::ReviewerBinding::native(
+            &team, &direct.id, direct.created_at, &direct.provider, &direct.model,
+            direct.council.as_ref().unwrap(),
+        );
+        binding.reviewer_bot_id = Some("selected-reviewer".into());
+        binding.roster_bot_ids = vec!["selected-reviewer".into()];
+        binding.required_reviewers = Some(2);
+        binding.snapshot.bot_context = Some(reviewer_security::ReviewerBotContext {
+            name: "Selected reviewer".into(), role: "Security".into(),
+            instructions: String::new(), goals: String::new(), soul: String::new(),
+            reasoning_effort: String::new(), skill_ids: vec![],
+        });
+        direct.reviewer_binding = Some(binding);
+        automatic.reviewer_binding = Some(reviewer_security::ReviewerBinding::native(
+            &team, &automatic.id, automatic.created_at, &automatic.provider, &automatic.model,
+            automatic.council.as_ref().unwrap(),
+        ));
+        team.workers.extend([direct, automatic]);
+    }
+    assert_eq!(council::status(&team).unwrap().state, "passed");
+    for worker in &team.workers {
+        reviewer_security::record_native_authority(
+            &store, &sid, worker.reviewer_binding.as_ref().unwrap(),
+        ).unwrap();
+    }
+    assert!(mixed_native_authority_current(&store, &team),
+        "two S2 waves with separate recorded native authorities can qualify");
+    store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, "native-reviewer-authority:s2-1-direct"],
+    ).unwrap();
+    assert!(!mixed_native_authority_current(&store, &team),
+        "the terminal wave cannot launder a revoked first-wave native reviewer");
+}
+
+#[test]
 fn mixed_two_phase_revalidates_both_native_reviewer_rounds_before_approval() {
     let (state, sid) = state_fixture();
     let store = state.store.lock().unwrap();

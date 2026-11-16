@@ -640,6 +640,17 @@ pub(crate) fn council_evidence_is_current(store: &Store, team: &TeamSnapshot) ->
 /// seat. Nested composite seats are independently verified against their child
 /// receipts, while direct/automatic roots must also own current native grants.
 /// M1/M2 retain the existing legacy completion contract.
+/// All scored waves in an opt-in S2/S3 flow must retain native authority.
+fn native_reviewer_authority_rounds(
+    strategy: council::CouncilExecutionStrategy, terminal_round: usize,
+) -> Vec<usize> {
+    if terminal_round > 1 && strategy != council::CouncilExecutionStrategy::Parallel {
+        (1..=terminal_round).collect()
+    } else {
+        vec![terminal_round]
+    }
+}
+
 fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
     let Some(config) = team.config.council.as_ref() else { return false };
     let mode = config.mode();
@@ -647,12 +658,10 @@ fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
     let (rounds, required) = if mode == "m3" {
         let Some(status) = council::status(team) else { return false };
         if status.state != "passed" || status.stale { return false; }
-        let mut rounds = vec![status.round];
-        if config.strategy == council::CouncilExecutionStrategy::TwoPhase {
-            if status.round != 2 { return false; }
-            rounds.push(1);
+        if config.strategy == council::CouncilExecutionStrategy::TwoPhase && status.round != 2 {
+            return false;
         }
-        (rounds, config.needed())
+        (native_reviewer_authority_rounds(config.strategy, status.round), config.needed())
     } else {
         // An S2 terminal pass requires native grants in both original and
         // independently authorized new root waves, not only their scores.
@@ -714,16 +723,7 @@ fn selected_direct_native_authority_current(store: &Store, team: &TeamSnapshot) 
     if status.state != "passed" || status.stale || status.round == 0 {
         return false;
     }
-    let mut rounds = vec![status.round];
-    if status.round != 1
-        && (config.strategy == council::CouncilExecutionStrategy::TwoPhase
-            || (config.strategy == council::CouncilExecutionStrategy::Escalated
-                && config.force_escalation))
-    {
-        // S3 challengers and explicitly forced S2 cannot replace the
-        // original native reviewer wave with later score-only claims.
-        rounds.push(1);
-    }
+    let rounds = native_reviewer_authority_rounds(config.strategy, status.round);
     rounds.into_iter().all(|round| {
         let eligible = team.workers.iter().filter(|worker| {
             worker.created_at >= team.council_since && !worker.abandoned

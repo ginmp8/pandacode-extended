@@ -953,6 +953,82 @@ test('cross-Team Demands index is native-backed and opens only the original Team
   expect(after.filter(value=>value==='superagent_accept'||value==='superagent_submit')).toHaveLength(0);
 });
 
+
+test('global Demand Stop checks native ownership/revision before confirmed revocation', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-global-stop-fixture';
+    document.body.appendChild(host);
+    type Trace = {command:string;args?:Record<string,unknown>};
+    const trace:Trace[] = [];
+    (window as unknown as {saGlobalStopTrace:Trace[];saGlobalStopStale:boolean}).saGlobalStopTrace=trace;
+    (window as unknown as {saGlobalStopStale:boolean}).saGlobalStopStale=true;
+    let demand = {id:'run-stop',orchestrationId:'team-b',objective:'Stop bounded work',
+      state:'running',revision:6,updatedAt:1794470400000,projectId:'project-b',evidence:null};
+    const teams=[{id:'team-a',name:'Economy',coordinatorBotId:'lead',workerBotId:'worker',
+      enabled:true,policyRevision:2},{id:'team-b',name:'Performance',
+      coordinatorBotId:'lead',workerBotId:'worker',enabled:true,policyRevision:3}];
+    mountSuperagent(host, async (command,args) => {
+      trace.push({command,args});
+      if (command==='bots_list') return [
+        {id:'lead',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if (command==='superagent_list') return teams as never;
+      if (command==='superagent_tickets') return [] as never;
+      if (command==='superagent_all_demands') return [{...demand}] as never;
+      if (command==='superagent_snapshot') {
+        if (args?.ticketId!==demand.id) throw Error('Wrong Ticket inspected');
+        const stale=(window as unknown as {saGlobalStopStale:boolean}).saGlobalStopStale;
+        return {ticket:stale?{...demand,revision:demand.revision+1}:{...demand},
+          mandate:{actor:'local-user',authorizationId:'native',projectId:'project-b',
+            policyRevision:3,expiresAt:1800000000000,revoked:false,
+            allowedTools:[],allowedSideEffects:false},
+          assignments:[],activity:[],council:null} as never;
+      }
+      if (command==='superagent_stop') {
+        if (args?.ticketId!==demand.id || args?.expectedRevision!==demand.revision)
+          throw Error('Native revision guard not supplied');
+        demand={...demand,state:'stopped',revision:demand.revision+1};
+        return {...demand} as never;
+      }
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-global-stop-fixture');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  const global=host.getByRole('region',{name:'All Demands across Teams'});
+  await global.getByRole('button',{name:'Refresh all Teams'}).click();
+  await expect(global.getByRole('button',{name:'Stop demand'})).toBeVisible();
+  await global.getByRole('button',{name:'Stop demand'}).click();
+  await expect(host.getByRole('alert')).toContainText('Demand changed since the native page');
+  await expect(host.getByRole('alertdialog')).toHaveCount(0);
+  let trace=await page.evaluate(()=>
+    (window as unknown as {saGlobalStopTrace:{command:string}[]}).saGlobalStopTrace);
+  expect(trace.filter(item=>item.command==='superagent_stop')).toHaveLength(0);
+  await page.evaluate(() => {
+    (window as unknown as {saGlobalStopStale:boolean}).saGlobalStopStale=false;
+  });
+  await global.getByRole('button',{name:'Stop demand'}).click();
+  const confirm=host.getByRole('alertdialog',{name:'Confirm orchestration action'});
+  await expect(confirm).toContainText('revision 6');
+  trace=await page.evaluate(()=>
+    (window as unknown as {saGlobalStopTrace:{command:string}[]}).saGlobalStopTrace);
+  expect(trace.filter(item=>item.command==='superagent_stop')).toHaveLength(0);
+  await confirm.getByRole('button',{name:'Confirm'}).click();
+  await expect(host.getByRole('status').filter({hasText:'run-stop stopped'})).toBeVisible();
+  trace=await page.evaluate(()=>
+    (window as unknown as {saGlobalStopTrace:{command:string;args?:Record<string,unknown>}[]}).saGlobalStopTrace);
+  expect(trace.filter(item=>item.command==='superagent_stop')).toHaveLength(1);
+  expect(trace.find(item=>item.command==='superagent_stop')?.args)
+    .toMatchObject({ticketId:'run-stop',expectedRevision:6});
+  await global.getByRole('button',{name:'Refresh all Teams'}).click();
+  await expect(global.getByRole('button',{name:'Stop demand'})).toHaveCount(0);
+  await expect(global).toContainText('stopped');
+});
+
 test('cross-Team native Demand pages load older Tickets without inferring new work', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

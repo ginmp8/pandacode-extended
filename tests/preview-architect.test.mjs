@@ -71,6 +71,34 @@ test('architect preview preserves native S3 root and nested round limits without
   assert.equal(api.setCouncil('parent', legacy).config.council.composition, undefined);
 });
 
+test('S2 nested escalation preserves on-trigger and always policies through preview reloads', t => {
+  const { api, host } = fixture(t);
+  api.configure('parent', config());
+  const nested = {
+    template: 'explicit_task', childCriteriaSource: 'architect', childReviewerCount: 2,
+    target: 9, maxRounds: 3, escalation: 'on_trigger',
+  };
+  const composition = {
+    ...newCouncilComposition(), strategy: 'escalated',
+    automatic: { enabled: true, count: 1 },
+    selected: [{ botId: 'nested-a', mode: 'nested', required: true, nested }],
+  };
+  const base = { target: 9, maxRounds: 3, reviewers: 0 };
+  for (const escalation of ['on_trigger', 'always']) {
+    const selected = [{ ...composition.selected[0], nested: { ...nested, escalation } }];
+    const saved = api.setCouncil('parent', withCouncilComposition(base, { ...composition, selected }));
+    assert.equal(saved.councilStatus.state, 'waiting', 'preview cannot manufacture child approval');
+    assert.equal(saved.config.council.composition.selected[0].nested.escalation, escalation);
+    assert.equal(createPreviewArchitect(host).get('parent').config.council.composition.selected[0].nested.escalation, escalation,
+      'S2 child escalation must not change on native-compatible preview serialization');
+  }
+  const invalid = [{ ...composition.selected[0], nested: { ...nested, escalation: 'skip' } }];
+  assert.throws(() => api.setCouncil('parent', withCouncilComposition(base, { ...composition, selected: invalid })),
+    /Child escalation.*must be Always or On trigger/);
+  assert.equal(createPreviewArchitect(host).get('parent').config.council.composition.selected[0].nested.escalation, 'always',
+    'a rejected policy must not replace the previously persisted valid Council');
+});
+
 test('preview eligibility keeps dependencies queued until they complete', () => {
   const dependent = assignment('dependent', { dependsOn: ['dependency'], readOnly: true });
   for (const status of ['queued', 'running', 'waiting', 'failed', 'stopped']) {

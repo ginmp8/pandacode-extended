@@ -79,6 +79,8 @@ export function councilCompositionValidationIssues(composition: CouncilCompositi
       if (!Number.isInteger(nested.maxRounds) || nested.maxRounds < 1 || nested.maxRounds > 100) add(field('nested.maxRounds'), `Child max rounds for "${reviewer.botId}" must be 1–100.`);
       if (composition.strategy === 'two_phase' && nested.maxRounds < 2)
         add(field('nested.maxRounds'), `Child max rounds for "${reviewer.botId}" must be at least 2 for the two-phase Council strategy.`);
+      if (nested.escalation !== 'always' && nested.escalation !== 'on_trigger')
+        add(field('nested.escalation'), `Child escalation for "${reviewer.botId}" must be Always or On trigger.`);
     } else if (reviewer.nested) add(field('mode'), `Direct reviewer "${reviewer.botId}" cannot include child Council settings.`);
   }
   // Match native preflight: mandatory Always-nested child rounds must fit

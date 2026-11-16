@@ -93,6 +93,29 @@ The existing `--inspect-ticket` and `--inspect-ticket-effects` commands show
 redacted state without touching live sessions. Per-effect dispatch and full
 headless admission/retry still require explicit user-authorized native grants.
 
+### Quarantine one exact pending remote-effect receipt
+
+A local headless operator may quarantine a pending receipt without treating an
+unknown remote outcome as failed or applied. Inspect the current Ticket revision
+and the receipt's exact effect key and lowercase SHA-256 digest first:
+
+```sh
+pandacode serve --inspect-ticket <ticket-id>
+pandacode serve --inspect-ticket-effects <ticket-id> --unresolved-only
+pandacode serve --quarantine-pending-effect <ticket-id> <expected-revision> <effect-key> <payload-sha256>
+```
+
+The native transaction verifies the current Ticket revision and exact stored
+payload identity, marks **pending → uncertain**, and records one durable audit
+entry together with the state change. Stale revisions, mismatched identities,
+applied receipts and audit-write failures leave the receipt untouched. Repeating
+the command on the same uncertain identity reports `changed: false` and
+does not duplicate evidence. It never calls the provider, grants permissions,
+retries the remote operation, acknowledges success, or changes task completion.
+The provider outcome remains unknown until separately verified and reconciled.
+A concurrent provider call may still be in flight; quarantining the receipt
+does not stop that provider.
+
 ### Quarantine a running Ticket's detached native session
 
 When recovery inspection reports one running native Assignment whose `sessions`

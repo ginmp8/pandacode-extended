@@ -1263,7 +1263,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             '<button class="primary-button" type="button" data-sa-import>Confirm import</button>' : '') +
           '</section>' : '') +
       '</div></div></div>';
-    host.setAttribute('aria-busy', String(busy));
+    // Include native list hydration: mutation busy alone does not signal readiness.
+    host.setAttribute('aria-busy', String(busy || loading));
     restoreFocusedControl(focusedControl);
   }
   async function refreshTicketDetails(): Promise<void> {

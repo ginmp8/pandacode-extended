@@ -331,6 +331,33 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
 });
 
 
+test('native orchestration loading remains busy until the Team list is hydrated', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await expect(page.locator('.sidebar-bots-bar')).toBeVisible();
+  await page.evaluate(async() => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-native-load-readiness';
+    host.style.cssText='position:fixed;inset:0;z-index:10000;overflow:auto;background:var(--bg)';
+    document.body.appendChild(host);
+    const gate=new Promise<never>(resolve => {
+      (window as unknown as {completeNativeTeamLoad:()=>void}).completeNativeTeamLoad=() => resolve([] as never);
+    });
+    mountSuperagent(host, async command => {
+      if(command==='bots_list') return [] as never;
+      if(command==='superagent_list') return gate;
+      throw Error('Unexpected command before native Team list hydration: '+command);
+    });
+  });
+  const host=page.locator('#sa-native-load-readiness');
+  await expect(host).toHaveAttribute('aria-busy','true');
+  await expect(host.getByText('Loading orchestrations…')).toBeVisible();
+  await page.evaluate(() => (window as unknown as {completeNativeTeamLoad:()=>void}).completeNativeTeamLoad());
+  await expect(host).toHaveAttribute('aria-busy','false');
+  await expect(host.getByRole('navigation',{name:'Orchestration views'})).toBeVisible();
+  await expect(host.getByRole('alert')).toHaveCount(0);
+});
+
 test('active Team title edit preserves immutable saved role IDs in future-only IPC', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');
@@ -368,8 +395,7 @@ test('active Team title edit preserves immutable saved role IDs in future-only I
     });
   });
   const host=page.locator('#sa-future-only-edit');
-  // aria-busy tracks mutations, not the initial asynchronous native list load.
-  // A loaded Team is the actual prerequisite for the future-only edit action.
+  // A loaded Team is the prerequisite for the future-only edit action.
   await expect(host.locator('.sa-list .sa-item strong')).toHaveText('Pinned Team', {timeout:30_000});
   await expect(host.getByRole('alert')).toHaveCount(0);
   await expect(host).toHaveAttribute('aria-busy','false');

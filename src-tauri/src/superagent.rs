@@ -7137,7 +7137,7 @@ mod tests {
             worker_bot_id:"router".into(),
         };
         assert!(update_configuration(&store,&cfg.id,cfg.policy_revision,&swapped).unwrap_err()
-            .contains("Ticket history pins"));
+            .contains("Legacy Ticket history has no immutable Team profile"));
         assert_eq!(configuration(&store,&cfg.id).unwrap().policy_revision,cfg.policy_revision);
         let renamed=update_configuration(&store,&cfg.id,cfg.policy_revision,&rename).unwrap();
         assert_eq!(renamed.policy_revision,cfg.policy_revision+1);
@@ -7196,7 +7196,7 @@ mod tests {
     }
 
     #[test]
-    fn durable_ticket_blocks_reconfiguration_and_deletion_after_disable() {
+    fn disabled_team_rotation_preserves_durable_ticket_and_blocks_deletion() {
         let mut store=fixture();
         let config=enabled(&store);
         let (ticket,_)=admit(&mut store,&config.id,"Immutable history","policy-guard",false).unwrap();
@@ -7212,10 +7212,15 @@ mod tests {
         let forbidden=NewOrchestration{
             name:"Rebound".into(),coordinator_bot_id:"worker".into(),worker_bot_id:"router".into(),
         };
-        assert!(update_configuration(&store,&config.id,renamed.policy_revision,&forbidden).is_err());
-        assert!(delete_configuration(&store,&config.id,renamed.policy_revision).is_err());
+        let rotated=update_configuration(&store,&config.id,renamed.policy_revision,&forbidden).unwrap();
+        assert_eq!(rotated.coordinator_bot_id,"worker");
+        assert_eq!(rotated.worker_bot_id,"router");
+        let profile=roster::ticket_profile(&store,&ticket.id).unwrap().unwrap();
+        assert_eq!(profile.members[0].bot_id,"router");
+        assert_eq!(get_ticket(&store,&ticket.id).unwrap().worker_bot_id,"worker");
+        assert!(delete_configuration(&store,&config.id,rotated.policy_revision).is_err());
         assert_eq!(get_ticket(&store,&ticket.id).unwrap().objective,"Immutable history");
-        assert_eq!(configuration(&store,&config.id).unwrap().name,"Changed");
+        assert_eq!(configuration(&store,&config.id).unwrap().name,"Rebound");
     }
 
     #[test]

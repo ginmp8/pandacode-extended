@@ -208,6 +208,9 @@ test('settled Team role edit uses one native revision-bound mutation without dis
     });
   });
   const host=page.locator('#sa-team-role-reuse');
+  // The editable Team details are deliberately in the first-class Runs view,
+  // not the Teams creation screen. Navigate as a user would.
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(host.getByText('Disabled Teams may change primary roles', {exact:false})).toBeVisible();
   await host.getByRole('textbox',{name:'Preset title'}).fill('Rotated Team');
   await host.getByRole('combobox',{name:'Edit coordinator'}).selectOption('worker');

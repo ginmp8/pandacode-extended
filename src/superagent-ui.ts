@@ -1,12 +1,14 @@
 import './superagent.css';
-import { escape } from './dom';
+import { escape, icon } from './dom';
+import { botAvatarHtml } from './bot-avatars';
 import { GuidedTeamBuilder } from './superagent-team-builder';
 
 // This interface only invokes native policy/authorization decisions. It cannot
 // grant tools, infer work, start tasks on import or bypass Council review.
 type Call = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 interface Bot { id: string; name: string; paused: boolean;
-  provider?: string; model?: string; mode?: string; projectId?: string; skills?: string[] }
+  provider?: string; model?: string; mode?: string; projectId?: string; skills?: string[];
+  avatar?: string; color?: string }
 interface Config {
   id: string; name: string; coordinatorBotId: string; workerBotId: string;
   enabled: boolean; policyRevision: number; councilRequired?:boolean;
@@ -1147,8 +1149,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const bot = bots.find(item => item.id === botId);
       return '<li><button type="button" class="sa-native-member" data-sa-member-open="' +
         safe(botId) + '" aria-pressed="' + (inspectedMemberId === botId) + '">' +
-        '<span class="sa-member-avatar" aria-hidden="true">' +
-        safe((bot?.name ?? '?').slice(0, 1).toUpperCase()) + '</span>' +
+        botAvatarHtml(bot?.avatar ?? '', bot?.name ?? '?', 'sa-member-native-avatar',
+          bot?.color ?? '') +
         '<span class="sa-member-label"><strong>' + safe(bot?.name ?? 'Missing bot') +
         '</strong><small>' + safe(role) + (position > 0 ? ' ' + position : '') +
         ' · ' + safe(bot?.provider || 'Provider unknown') + ' / ' +
@@ -1264,16 +1266,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const navigation = '<nav class="sa-navigation" aria-label="Orchestration views">' +
       '<span class="sa-nav-heading">Workspace</span>' +
       ([
-        ['teams', 'Teams'], ['runs', 'Demands / Runs'], ['review', 'Review inbox'],
-      ] as const).map(([id, label]) =>
+        ['teams', 'team', 'Teams'], ['runs', 'board', 'Demands / Runs'],
+        ['review', 'check', 'Review inbox'],
+      ] as const).map(([id, glyph, label]) =>
         '<button type="button" data-sa-view="' + id + '" aria-current="' +
-        (workspaceView === id ? 'page' : 'false') + '">' + label + '</button>').join('') +
+        (workspaceView === id ? 'page' : 'false') + '">' + icon(glyph) +
+        '<span>' + label + '</span></button>').join('') +
       '<span class="sa-nav-heading sa-nav-divider">Configuration</span>' +
       ([
-        ['sources', 'Sources'], ['portable', 'Portable configuration'],
-      ] as const).map(([id, label]) =>
+        ['sources', 'github', 'Sources'], ['portable', 'file', 'Portable configuration'],
+      ] as const).map(([id, glyph, label]) =>
         '<button type="button" data-sa-view="' + id + '" aria-current="' +
-        (workspaceView === id ? 'page' : 'false') + '">' + label + '</button>').join('') +
+        (workspaceView === id ? 'page' : 'false') + '">' + icon(glyph) +
+        '<span>' + label + '</span></button>').join('') +
       '</nav>' +
       (presets.length
         ? '<section class="sa-team-picker" aria-label="Teams directory">' +
@@ -1323,7 +1328,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '<header class="sa-native-header"><div><span class="sa-eyebrow">Bots / Team workspace</span>' +
       '<h2>Orchestrations</h2><p>Configure reusable agent teams, assign work, and review results.</p>' +
       '</div><div class="sa-native-header-actions"><button class="primary-button" type="button" ' +
-      'data-sa-builder-open>+ New Team</button></div></header>' +
+      'data-sa-builder-open>' + icon('plus') + 'New Team</button></div></header>' +
       (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
       (error ? '<p role="alert" class="sa-error">' + safe(error) + '</p>' : '') +
       (feedback ? '<p role="status" class="sa-feedback">' + safe(feedback) + '</p>' : '') +

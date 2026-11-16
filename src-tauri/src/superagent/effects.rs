@@ -65,6 +65,9 @@ pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Res
            AND t.project_id=m.project_id AND m.project_id=o.project_id
            AND t.actor=m.actor AND length(trim(m.authorization_id))>0
            AND b.project_id=t.project_id AND b.paused=0
+           AND EXISTS(SELECT 1 FROM bots coordinator
+                      WHERE coordinator.id=o.coordinator_bot_id
+                        AND coordinator.paused=0)
            AND a.bot_id<>o.coordinator_bot_id
            AND a.created_at>0 AND a.created_at<=?2
            AND (?2-a.created_at)<?3
@@ -251,9 +254,11 @@ pub(crate) struct UnresolvedEffectView {
     pub updated_at: i64,
 }
 
+pub(crate) type UnresolvedEffectPage = (Vec<UnresolvedEffectView>, Option<(i64, String, String)>);
+
 pub(crate) fn unresolved_effects_page(
     store: &Store, limit: i64, before: Option<(i64, &str, &str)>,
-) -> Result<(Vec<UnresolvedEffectView>, Option<(i64, String, String)>)> {
+) -> Result<UnresolvedEffectPage> {
     if !(1..=100).contains(&limit) {
         return Err("Unresolved effect page size must be between 1 and 100.".into());
     }
@@ -598,6 +603,32 @@ mod tests{
         assert_eq!(unresolved_count(&store,&id).unwrap(),0);
         store.db.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[&id]).unwrap();
         assert!(reserve(&store,&id,"github:comment:8",b"payload").is_err());
+    }
+
+    #[test]
+    fn effect_reservation_rechecks_coordinator_pause_before_reserving() {
+        let (store, ticket_id) = fixture();
+        // This fixture exercises the defensive reservation boundary only.
+        // Production cannot issue a writable SuperAgent grant yet.
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+            [&ticket_id],
+        ).unwrap();
+        assert_eq!(reserve(&store, &ticket_id, "github:issue:before-pause", b"body").unwrap(),
+            Reservation::Reserved);
+        store.db.execute(
+            "UPDATE bots SET paused=1 WHERE id='co'", [],
+        ).unwrap();
+        assert!(reserve(&store, &ticket_id, "github:issue:after-pause", b"body").is_err(),
+            "paused Coordinator must block a Worker effect reservation");
+        assert_eq!(unresolved_count(&store, &ticket_id).unwrap(), 1,
+            "a denied effect must not create a receipt");
+        store.db.execute(
+            "UPDATE bots SET paused=0 WHERE id='co'", [],
+        ).unwrap();
+        assert_eq!(reserve(&store, &ticket_id, "github:issue:after-pause", b"body").unwrap(),
+            Reservation::Reserved);
+        assert_eq!(unresolved_count(&store, &ticket_id).unwrap(), 2);
     }
 
     #[test]

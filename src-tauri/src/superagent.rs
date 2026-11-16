@@ -4514,7 +4514,18 @@ fn change_enabled(
              )",
             [orchestration_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
-        if !unsettled { return Ok(current); }
+        // Interrupted legacy writers may leave pending effect receipts on
+        // terminal Tickets even after the Team has already been disabled.
+        // Repeated Off must quarantine those receipts, never silently return.
+        let pending_effects: bool = store.db.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sa_effect_receipts e
+                 JOIN sa_tickets t ON t.id=e.ticket_id
+                 WHERE t.orchestration_id=?1 AND e.state='pending'
+             )",
+            [orchestration_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !unsettled && !pending_effects { return Ok(current); }
     }
     let _dispatch_fence = effects::lock_dispatch(&store.path)?;
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
@@ -4538,13 +4549,26 @@ fn change_enabled(
              FROM sa_tickets WHERE orchestration_id=?1 AND state IN {PENDING}"
         );
         tx.execute(&audit, params![orchestration_id,now]).map_err(|e| e.to_string())?;
-        // Team Off revokes all outstanding attempts; uncertain external work
-        // is preserved in the same transaction, never retried by this path.
+        // Preserve the recovery obligation for terminal Tickets carrying
+        // a legacy pending external effect. Never rewrite their state,
+        // receipt identity or claim that the remote operation was applied.
+        let terminal_effect_audit = format!(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             SELECT t.id,'orchestration_disabled_effect_uncertain',
+               'Pending remote effect quarantined; independent reconciliation required',?2
+             FROM sa_tickets t
+             WHERE t.orchestration_id=?1 AND t.state NOT IN {PENDING}
+               AND EXISTS(SELECT 1 FROM sa_effect_receipts e
+                          WHERE e.ticket_id=t.id AND e.state='pending')"
+        );
+        tx.execute(&terminal_effect_audit,params![orchestration_id,now])
+            .map_err(|e| e.to_string())?;
+        // Both active and terminal pending receipts become uncertain in the
+        // same transaction as the Team disable. Never replay remote writes.
         tx.execute(
             "UPDATE sa_effect_receipts SET state='uncertain',updated_at=?2
              WHERE state='pending' AND ticket_id IN (
-                SELECT id FROM sa_tickets WHERE orchestration_id=?1
-                AND state IN ('queued','running','waiting_approval','waiting_review','blocked'))",
+                SELECT id FROM sa_tickets WHERE orchestration_id=?1)",
             params![orchestration_id,now],
         ).map_err(|e| e.to_string())?;
         let grants = format!(
@@ -6405,7 +6429,7 @@ mod tests {
     }
 
     #[test]
-    fn demand_and_review_indices_preserve_admitted_project_after_team_move() {
+    fn demand_and_review_indices_preserve_admitted_project_after_team_edit() {
         let store = fixture();
         let team = enabled(&store);
         store.db.execute(
@@ -6415,10 +6439,20 @@ mod tests {
                     'local-user','manual','archived-project','worker',?2,'waiting_review',1000,1000)",
             params![team.id, team.policy_revision],
         ).unwrap();
-        store.db.execute(
-            "UPDATE sa_orchestrations SET project_id='new-team-project' WHERE id=?1",
-            [&team.id],
+        // Only a future-facing Team edit is legal after Ticket history exists.
+        // The immutable Ticket project must not be inferred from the current
+        // Team name, revision, or other mutable configuration.
+        let updated = update_configuration_roles_with_policy(
+            &store, &team.id, team.policy_revision,
+            &NewOrchestration {
+                name: "Renamed Team after historical demand".into(),
+                coordinator_bot_id: team.coordinator_bot_id.clone(),
+                worker_bot_id: team.worker_bot_id.clone(),
+            },
+            vec![team.worker_bot_id.clone()], vec![], team.council_required,
         ).unwrap();
+        assert_eq!(updated.project_id, team.project_id);
+        assert_eq!(updated.name, "Renamed Team after historical demand");
         let indexed = list_all_demands_page_searched(
             &store, 200, None, None, Some(&team.id), Some("waiting_review"), None,
         ).unwrap();
@@ -8980,6 +9014,93 @@ mod tests {
         assert!(mandate(&store, &ticket.id).unwrap().revoked);
         assert!(read_only_policy(&store, &session).is_err());
         assert!(!on_run_finished(&store, &session, true, "late result").unwrap());
+    }
+
+    #[test]
+    fn team_off_quarantines_terminal_pending_effects_even_on_repeated_off() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private effect", "legacy-terminal-effect", false,
+        ).unwrap();
+        assert!(launched);
+        stop(&store, &ticket.id).unwrap();
+        let original = get_ticket(&store, &ticket.id).unwrap();
+        let at = storage::now();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'first','digest','pending',?2,?2)",
+            params![&ticket.id,at],
+        ).unwrap();
+        let disabled = change_enabled(&store, &cfg.id, cfg.policy_revision, false).unwrap();
+        assert!(!disabled.enabled);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, original.revision);
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, original.state);
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'second','digest','pending',?2,?2)",
+            params![&ticket.id,at],
+        ).unwrap();
+        let repaired = change_enabled(&store, &cfg.id, disabled.policy_revision, false).unwrap();
+        let uncertain: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND state='uncertain'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(uncertain, 2);
+        let audits: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE ticket_id=?1 AND kind='orchestration_disabled_effect_uncertain'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(audits, 2);
+        assert_eq!(effects::unresolved_count(&store, &ticket.id).unwrap(), 2);
+        let unchanged = change_enabled(&store, &cfg.id, repaired.policy_revision, false).unwrap();
+        assert_eq!(unchanged.policy_revision, repaired.policy_revision);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(effects::unresolved_count(&reopened, &ticket.id).unwrap(), 2);
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().revision, original.revision);
+    }
+
+    #[test]
+    fn terminal_pending_effect_quarantine_rolls_back_with_audit_failure() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Private audit", "terminal-effect-audit", false,
+        ).unwrap();
+        assert!(launched);
+        stop(&store, &ticket.id).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts
+             (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES(?1,'pending','digest','pending',?2,?2)",
+            params![&ticket.id,storage::now()],
+        ).unwrap();
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER reject_terminal_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='orchestration_disabled_effect_uncertain'
+             BEGIN SELECT RAISE(ABORT,'injected audit failure'); END;",
+        ).unwrap();
+        assert!(change_enabled(&store, &cfg.id, cfg.policy_revision, false).is_err());
+        assert!(configuration(&store, &cfg.id).unwrap().enabled);
+        assert_eq!(configuration(&store, &cfg.id).unwrap().policy_revision, cfg.policy_revision);
+        let still_pending: String = store.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key='pending'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(still_pending, "pending");
+        store.db.execute_batch("DROP TRIGGER reject_terminal_audit").unwrap();
+        change_enabled(&store, &cfg.id, cfg.policy_revision, false).unwrap();
+        let uncertain: String = store.db.query_row(
+            "SELECT state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key='pending'",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(uncertain, "uncertain");
     }
 
     #[test]

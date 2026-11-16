@@ -7627,6 +7627,36 @@ fn native_child_coordinator_is_never_authorized_for_an_unlinked_root_session() {
 }
 
 #[test]
+fn archived_or_completed_root_revokes_live_child_admission_policy_and_callback() {
+    for (archived, completed) in [(true, false), (false, true)] {
+        let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();
+        let store = state.store.lock().unwrap();
+        assert!(native_child_coordinator_admitted(&store, &child_id).unwrap());
+        assert!(nested_council_callback_current(&store, &child_id));
+
+        store.db.execute(
+            "UPDATE sessions SET archived=?2, task_stage=CASE WHEN ?3 THEN 'completed' ELSE task_stage END WHERE id=?1",
+            params![root_id, archived, completed],
+        ).unwrap();
+        assert!(validate_council_child_link(&store, &child_id).unwrap().is_some(),
+            "historical native ownership evidence remains inspectable");
+        assert!(!native_child_coordinator_admitted(&store, &child_id).unwrap(),
+            "a closed root cannot authorize a child coordinator");
+        assert!(!nested_council_callback_current(&store, &child_id),
+            "a closed root cannot accept delayed child results");
+
+        let child = load(&store, &child_id).unwrap().unwrap();
+        let admission = Admission { parent: child_id.clone(), generation: child.generation };
+        assert_eq!(validate_admission(&store, &child_id, Some(&admission)).unwrap_err(),
+            SETTLED_PARENT);
+        let policy_error = reviewer_policy_with_executable(
+            &store, &child_id, Some(&admission), false,
+        ).unwrap_err();
+        assert!(policy_error.contains("read_only_policy_violation"), "{policy_error}");
+    }
+}
+
+#[test]
 fn stale_nested_council_callback_cannot_mutate_child_after_parent_revocation() {
     let (state, root_id, child_id, _) = nested_child_lifecycle_fixture();
     assert!(nested_council_callback_current(&state.store.lock().unwrap(), &root_id),

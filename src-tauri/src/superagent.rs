@@ -1398,8 +1398,9 @@ fn list_all_demands_page_filtered(
         orchestration_id, state_filter, None)
 }
 
-/// Search uses a bound SQLite substring predicate before keyset paging.
-/// No wildcards, SQL interpolation, provider dispatch, or implicit authority.
+/// Test oracle for the searched native query; production callers use the
+/// project-aware query directly. Search is bound before keyset paging.
+#[cfg(test)]
 fn list_all_demands_page_searched(
     store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
     orchestration_id: Option<&str>, state_filter: Option<&str>, search_query: Option<&str>,
@@ -2100,6 +2101,7 @@ pub(crate) fn list_headless_team_demands(
 }
 
 /// Return only redacted state metadata: objective matching is server-side.
+#[cfg(test)]
 pub(crate) fn list_headless_team_demands_searched(
     database_path: &std::path::Path, orchestration_id: &str, state: &str,
     before_updated_at: Option<i64>, before_id: Option<&str>, search_query: Option<&str>,
@@ -2151,6 +2153,7 @@ pub(crate) fn list_headless_team_demands_project_searched(
 /// Global headless Demand index using the desktop's native pre-pagination search.
 /// The operator gets only Ticket IDs, Team IDs, states and revisions, not
 /// objectives, actor identifiers, mandates, provider sessions or evidence.
+#[cfg(test)]
 pub(crate) fn list_headless_all_demands_searched(
     database_path: &std::path::Path, state: &str,
     before_updated_at: Option<i64>, before_id: Option<&str>, search_query: Option<&str>,
@@ -7284,10 +7287,7 @@ mod tests {
                 params![id,owner.id,project,owner.policy_revision],
             ).unwrap();
         }
-        store.db.execute(
-            "UPDATE sa_orchestrations SET project_id='current-project' WHERE id=?1",
-            [&team.id],
-        ).unwrap();
+        assert_ne!(team.project_id.as_str(), "archived-project");
         let path = store.path.clone();
         drop(store);
 
@@ -7336,7 +7336,7 @@ mod tests {
         assert_eq!(serde_json::from_str::<serde_json::Value>(&excluded).unwrap()
             ["demands"].as_array().unwrap().len(), 1);
         let missing = list_headless_team_demands_project_searched(
-            &path, &team.id, "blocked", None, None, None, Some("current-project"),
+            &path, &team.id, "blocked", None, None, None, Some(team.project_id.as_str()),
         ).unwrap();
         assert_eq!(serde_json::from_str::<serde_json::Value>(&missing).unwrap()
             ["demands"].as_array().unwrap().len(), 0);

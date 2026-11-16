@@ -582,7 +582,7 @@ fn authenticated_hierarchical_status(
     // Completed Councils retain historical proof, but a paused or stopped
     // team and archived or interrupted native sessions revoke approval authority.
     let root_session = store.session(&team.session_id).ok()?;
-    if root_session.archived || root_session.status == "interrupted"
+    if root_session.archived || matches!(root_session.status.as_str(), "interrupted" | "error")
         || !(active(&team.status) || team.status == "completed")
     {
         return None;

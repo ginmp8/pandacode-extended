@@ -105,8 +105,10 @@ fn frozen(
     // A persisted interrupted child cannot retain leaf review authority
     // across restart, even when its old child TeamSnapshot still says running.
     // Recheck the native session on every inspection, launch and callback.
-    if session.archived || session.task_stage == "completed" || session.status == "interrupted" {
-        return Err("child_council_revoked: reserved child task is archived, completed or interrupted.".into());
+    if session.archived || session.task_stage == "completed"
+        || matches!(session.status.as_str(), "interrupted" | "error")
+    {
+        return Err("child_council_revoked: reserved child task is archived, completed, interrupted or failed.".into());
     }
     if session.project_id != parent.project_id || session.worktree_path != parent.worktree_path
         || session.mode != "plan"
@@ -245,8 +247,10 @@ fn read(store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer) -> Re
 /// TeamSnapshot still says "running" after a crash or storage transition.
 fn require_live_root_session(store: &Store, root_id: &str) -> Result<()> {
     let session = store.session(root_id)?;
-    if session.archived || session.task_stage == "completed" || session.status == "interrupted" {
-        return Err("child_council_revoked: root task is archived, completed or interrupted.".into());
+    if session.archived || session.task_stage == "completed"
+        || matches!(session.status.as_str(), "interrupted" | "error")
+    {
+        return Err("child_council_revoked: root task is archived, completed, interrupted or failed.".into());
     }
     Ok(())
 }
@@ -349,6 +353,12 @@ fn validate_admitted(
     for (index, leaf) in team.workers.iter().enumerate() {
         let expected_round = if index < choice.child_reviewers { 1 } else { 2 };
         let session = store.session(&leaf.session_id)?;
+        // A persisted running worker is not authority to resume an interrupted
+        // or failed native session after restart. Reject before any callback,
+        // sibling launch, composite receipt or root approval.
+        if matches!(session.status.as_str(), "interrupted" | "error") {
+            return Err("child_council_revoked: native leaf session was interrupted or failed.".into());
+        }
         if !ids.insert(&leaf.id) || !sessions.insert(&leaf.session_id)
             || super::parent_of(store, &leaf.session_id)?.as_deref()
                 != Some(record.child_session_id.as_str())

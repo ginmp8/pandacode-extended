@@ -3916,6 +3916,64 @@ fn settled_or_archived_root_revokes_native_child_launch_and_callback_after_admis
     ).unwrap();
     child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
 
+    // A persisted native session can fail without updating a stale running
+    // Architect snapshot. Neither root nor child may issue or accept leaves.
+    for target in [&sid, &launch.admission.parent] {
+        let prior_status = store.session(target).unwrap().status;
+        store.db.execute(
+            "UPDATE sessions SET status='error' WHERE id=?1", [target.as_str()],
+        ).unwrap();
+        for denied in [
+            child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap_err(),
+            child_council::next_leaf_launch(&store, &std::collections::HashMap::new(), &root)
+                .err().expect("failed root or child session must deny leaf dispatch"),
+            child_council::admit_leaves(&store, &root).unwrap_err(),
+        ] {
+            assert!(denied.contains("child_council_revoked"), "{denied}");
+        }
+        if target == &launch.admission.parent {
+            let denied = child_council::inspect(&store, &root).unwrap_err();
+            assert!(denied.contains("child_council_revoked"), "{denied}");
+        }
+        assert_eq!(
+            serde_json::to_value(load(&store, &launch.admission.parent).unwrap().unwrap()).unwrap(),
+            child_before, "failed session cannot mutate the native child team",
+        );
+        store.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![target, prior_status],
+        ).unwrap();
+        child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
+    }
+
+    // A crashed leaf can retain an old running worker snapshot. The real
+    // interrupted/error session must revoke callbacks, new leaves and results.
+    let leaf_status = store.session(&launch.sid).unwrap().status;
+    for revoked in ["interrupted", "error"] {
+        store.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![&launch.sid, revoked],
+        ).unwrap();
+        for denied in [
+            child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap_err(),
+            child_council::next_leaf_launch(&store, &std::collections::HashMap::new(), &root)
+                .err().expect("interrupted or failed leaf must block sibling dispatch"),
+            child_council::admit_leaves(&store, &root).unwrap_err(),
+            child_council::inspect(&store, &root).unwrap_err(),
+        ] {
+            assert!(denied.contains("child_council_revoked"), "{denied}");
+        }
+        assert_eq!(
+            serde_json::to_value(load(&store, &launch.admission.parent).unwrap().unwrap()).unwrap(),
+            child_before, "revoked leaf cannot change a persisted child team",
+        );
+    }
+    store.db.execute(
+        "UPDATE sessions SET status=?2 WHERE id=?1",
+        rusqlite::params![&launch.sid, leaf_status],
+    ).unwrap();
+    child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
+
     for (archive, stage) in [(true, previous_stage.as_str()), (false, "completed")] {
         store.db.execute(
             "UPDATE sessions SET archived=?2,task_stage=?3 WHERE id=?1",
@@ -5094,6 +5152,18 @@ fn assert_nested_m5_root_and_child_callbacks(strategy: council::CouncilExecution
     store.db.execute("UPDATE sessions SET archived=0 WHERE id=?1", rusqlite::params![sid]).unwrap();
     assert!(verified_council_pass(&store, &saved),
         "restoring the original session reauthenticates immutable receipts");
+    let original_session_status = store.session(&sid).unwrap().status;
+    store.db.execute("UPDATE sessions SET status='error' WHERE id=?1", [&sid]).unwrap();
+    assert!(!verified_council_pass(&store, &saved),
+        "a failed persisted root session must revoke even authenticated M5 child receipts");
+    let mut projected = saved.clone();
+    refresh_council(&store, &mut projected);
+    assert_ne!(projected.council_status.as_ref().unwrap().state, "passed",
+        "a failed root session cannot display an inherited pass");
+    store.db.execute("UPDATE sessions SET status=?2 WHERE id=?1",
+        rusqlite::params![sid, original_session_status]).unwrap();
+    assert!(verified_council_pass(&store, &saved),
+        "restoring the persisted root session reauthenticates immutable evidence");
     let inspected = council_inspection_state(&store, &sid).unwrap().unwrap();
     assert_eq!(inspected.usage.unique_attempts, 1, "root attempt is separate from child leaves");
     assert_eq!(inspected.reserved_children.len(), 1);

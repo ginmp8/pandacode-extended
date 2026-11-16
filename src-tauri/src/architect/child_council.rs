@@ -102,10 +102,11 @@ fn frozen(
     let council = root.config.council.as_ref().ok_or("Council is off.")?;
     let parent = store.session(&root.session_id)?;
     let session = store.session(session_id)?;
-    // A reservation must never resume an archived/completed session through a
-    // fresh parent review. This is enforced on every inspection and retry.
-    if session.archived || session.task_stage == "completed" {
-        return Err("child_council_revoked: reserved child task is archived or completed.".into());
+    // A persisted interrupted child cannot retain leaf review authority
+    // across restart, even when its old child TeamSnapshot still says running.
+    // Recheck the native session on every inspection, launch and callback.
+    if session.archived || session.task_stage == "completed" || session.status == "interrupted" {
+        return Err("child_council_revoked: reserved child task is archived, completed or interrupted.".into());
     }
     if session.project_id != parent.project_id || session.worktree_path != parent.worktree_path
         || session.mode != "plan"

@@ -3889,6 +3889,33 @@ fn settled_or_archived_root_revokes_native_child_launch_and_callback_after_admis
     ).unwrap();
     child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
 
+    // A restarted child may be interrupted independently of its root. A
+    // persisted running child team is not proof of a live, authorized session.
+    let child_session_status = store.session(&launch.admission.parent).unwrap().status;
+    store.db.execute(
+        "UPDATE sessions SET status='interrupted' WHERE id=?1",
+        [&launch.admission.parent],
+    ).unwrap();
+    for denied in [
+        child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap_err(),
+        child_council::next_leaf_launch(&store, &std::collections::HashMap::new(), &root)
+            .err().expect("interrupted child must not launch a sibling leaf"),
+        child_council::admit_leaves(&store, &root).unwrap_err(),
+        child_council::inspect(&store, &root).unwrap_err(),
+    ] {
+        assert!(denied.contains("child_council_revoked"), "{denied}");
+    }
+    assert_eq!(
+        serde_json::to_value(load(&store, &launch.admission.parent).unwrap().unwrap()).unwrap(),
+        child_before,
+        "revoked child session cannot mutate the native child team",
+    );
+    store.db.execute(
+        "UPDATE sessions SET status=?2 WHERE id=?1",
+        rusqlite::params![&launch.admission.parent, child_session_status],
+    ).unwrap();
+    child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
+
     for (archive, stage) in [(true, previous_stage.as_str()), (false, "completed")] {
         store.db.execute(
             "UPDATE sessions SET archived=?2,task_stage=?3 WHERE id=?1",

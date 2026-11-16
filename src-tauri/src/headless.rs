@@ -636,7 +636,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::InspectSourceDecisions { .. }
         | Command::LinkSourceThread { .. } | Command::LinkIssuePull { .. }
         | Command::UnlinkSourceThread { .. }
-        | Command::ObserveSource { .. } | Command::ObserveCheckRun { .. }
+        | Command::ObserveSource { .. } | Command::ObserveTeamSources { .. }
+        | Command::ObserveCheckRun { .. }
         | Command::QueueDemand { .. }
         | Command::AcceptTicket { .. } | Command::RejectTicket { .. }
         | Command::StopTicket { .. } | Command::StopTicketAtRevision { .. }
@@ -2451,6 +2452,7 @@ mod tests {
             "--link-source-thread",
             "--unlink-source-thread",
             "--observe-source",
+            "--observe-team-sources",
             "--observe-check-run",
             "--accept-ticket",
             "--reject-ticket",

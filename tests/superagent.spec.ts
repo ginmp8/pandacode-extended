@@ -98,12 +98,21 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();
+  // Wait for the native create and list refresh, not merely the click. An
+  // absent editor must report the real mutation error instead of timing out.
+  await expect(dialog.locator('#superagent-host')).toHaveAttribute('aria-busy','false',{timeout:20_000});
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
+  await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Safe default');
   await dialog.getByRole('textbox',{name:'Preset title'}).fill('Safely renamed');
   await dialog.getByRole('button',{name:'Save preset'}).click();
+  await expect(dialog.locator('#superagent-host')).toHaveAttribute('aria-busy','false',{timeout:20_000});
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
   await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Safely renamed');
   await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
   await dialog.getByRole('button',{name:'Delete unused'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(dialog.locator('#superagent-host')).toHaveAttribute('aria-busy','false',{timeout:20_000});
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
   await expect(dialog.getByText('No orchestrations created.')).toBeVisible();
 });
 

@@ -1257,11 +1257,26 @@ pub(crate) fn list_headless_team_demands_searched(
     database_path: &std::path::Path, orchestration_id: &str, state: &str,
     before_updated_at: Option<i64>, before_id: Option<&str>, search_query: Option<&str>,
 ) -> Result<String> {
+    list_headless_team_demands_project_searched(
+        database_path, orchestration_id, state, before_updated_at, before_id,
+        search_query, None,
+    )
+}
+
+/// Apply an exact admitted Project filter to the native Ticket index before
+/// keyset pagination; current Team settings do not rewrite historical scope.
+pub(crate) fn list_headless_team_demands_project_searched(
+    database_path: &std::path::Path, orchestration_id: &str, state: &str,
+    before_updated_at: Option<i64>, before_id: Option<&str>,
+    search_query: Option<&str>, project_id: Option<&str>,
+) -> Result<String> {
     let store = Store::open_read_only(database_path)?;
     let state_filter = if state == "all" { None } else { Some(state) };
-    let page = list_all_demands_page_searched(
-        &store, 200, before_updated_at, before_id, Some(orchestration_id),
-        state_filter, search_query,
+    let page = list_all_demands_page_for_project(
+        &store, 200, before_updated_at, before_id, DemandPageFilters {
+            orchestration_id: Some(orchestration_id), state_filter,
+            search_query, project_id,
+        },
     )?;
     let may_have_more = page.len() == 200;
     let next_cursor = if may_have_more {
@@ -1273,6 +1288,7 @@ pub(crate) fn list_headless_team_demands_searched(
         "orchestrationId": orchestration_id,
         "stateFilter": state,
         "searchApplied": search_query.is_some(),
+        "projectFilterApplied": project_id.is_some(),
         "pageLimit": 200,
         "mayHaveMore": may_have_more,
         "nextCursor": next_cursor,
@@ -1293,10 +1309,24 @@ pub(crate) fn list_headless_all_demands_searched(
     database_path: &std::path::Path, state: &str,
     before_updated_at: Option<i64>, before_id: Option<&str>, search_query: Option<&str>,
 ) -> Result<String> {
+    list_headless_all_demands_project_searched(
+        database_path, state, before_updated_at, before_id, search_query, None,
+    )
+}
+
+/// Global headless index shares desktop's immutable admitted Project filter.
+/// Only redacted Ticket metadata is returned, never task/provider evidence.
+pub(crate) fn list_headless_all_demands_project_searched(
+    database_path: &std::path::Path, state: &str,
+    before_updated_at: Option<i64>, before_id: Option<&str>,
+    search_query: Option<&str>, project_id: Option<&str>,
+) -> Result<String> {
     let store = Store::open_read_only(database_path)?;
     let state_filter = if state == "all" { None } else { Some(state) };
-    let page = list_all_demands_page_searched(
-        &store, 200, before_updated_at, before_id, None, state_filter, search_query,
+    let page = list_all_demands_page_for_project(
+        &store, 200, before_updated_at, before_id, DemandPageFilters {
+            orchestration_id: None, state_filter, search_query, project_id,
+        },
     )?;
     let may_have_more = page.len() == 200;
     let next_cursor = if may_have_more {
@@ -1308,6 +1338,7 @@ pub(crate) fn list_headless_all_demands_searched(
         "scope": "allTeams",
         "stateFilter": state,
         "searchApplied": search_query.is_some(),
+        "projectFilterApplied": project_id.is_some(),
         "pageLimit": 200,
         "mayHaveMore": may_have_more,
         "nextCursor": next_cursor,
@@ -5735,6 +5766,107 @@ mod tests {
         assert_eq!(check.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0)
         ).unwrap(), 208);
+    }
+
+
+    #[test]
+    fn headless_project_filter_uses_admitted_ticket_project_before_paging() {
+        let store = fixture();
+        let team = create_configuration(&store, NewOrchestration {
+            name: "Headless historical project".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        let other = create_configuration(&store, NewOrchestration {
+            name: "Headless independent Team".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        for index in 0..205 {
+            let owner = if index == 203 { &other } else { &team };
+            let project = if index == 204 { "other-project" } else { "archived-project" };
+            let id = format!("history-{index:03}");
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,project_id,
+                  worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?1,'PRIVATE ORIGINAL OBJECTIVE','local-user','manual',
+                        ?3,'worker',?4,'blocked',1000,9000)",
+                params![id,owner.id,project,owner.policy_revision],
+            ).unwrap();
+        }
+        store.db.execute(
+            "UPDATE sa_orchestrations SET project_id='current-project' WHERE id=?1",
+            [&team.id],
+        ).unwrap();
+        let path = store.path.clone();
+        drop(store);
+
+        let team_first_raw = list_headless_team_demands_project_searched(
+            &path, &team.id, "blocked", None, None,
+            Some("ORIGINAL"), Some("archived-project"),
+        ).unwrap();
+        let team_first: serde_json::Value = serde_json::from_str(&team_first_raw).unwrap();
+        assert_eq!(team_first["projectFilterApplied"], true);
+        assert_eq!(team_first["searchApplied"], true);
+        assert_eq!(team_first["demands"].as_array().unwrap().len(), 200);
+        assert!(team_first["demands"].as_array().unwrap().iter()
+            .all(|item| item["ticketId"].as_str().unwrap() != "history-203"));
+        let timestamp = team_first["nextCursor"]["beforeUpdatedAt"].as_i64().unwrap();
+        let cursor = team_first["nextCursor"]["beforeId"].as_str().unwrap();
+        let team_next_raw = list_headless_team_demands_project_searched(
+            &path, &team.id, "blocked", Some(timestamp), Some(cursor),
+            Some("ORIGINAL"), Some("archived-project"),
+        ).unwrap();
+        let team_next: serde_json::Value = serde_json::from_str(&team_next_raw).unwrap();
+        assert_eq!(team_next["demands"].as_array().unwrap().len(), 3);
+        let team_ids: std::collections::HashSet<_> = team_first["demands"].as_array().unwrap()
+            .iter().chain(team_next["demands"].as_array().unwrap().iter())
+            .map(|item| item["ticketId"].as_str().unwrap()).collect();
+        assert_eq!(team_ids.len(), 203);
+        assert!(team_next["nextCursor"].is_null());
+        let global_first_raw = list_headless_all_demands_project_searched(
+            &path, "blocked", None, None, None, Some("archived-project"),
+        ).unwrap();
+        let global_first: serde_json::Value = serde_json::from_str(&global_first_raw).unwrap();
+        assert_eq!(global_first["demands"].as_array().unwrap().len(), 200);
+        let global_time = global_first["nextCursor"]["beforeUpdatedAt"].as_i64().unwrap();
+        let global_id = global_first["nextCursor"]["beforeId"].as_str().unwrap();
+        let global_next_raw = list_headless_all_demands_project_searched(
+            &path, "blocked", Some(global_time), Some(global_id), None,
+            Some("archived-project"),
+        ).unwrap();
+        let global_next: serde_json::Value = serde_json::from_str(&global_next_raw).unwrap();
+        assert_eq!(global_next["demands"].as_array().unwrap().len(), 4);
+        assert!(global_first["demands"].as_array().unwrap().iter()
+            .chain(global_next["demands"].as_array().unwrap().iter())
+            .any(|item| item["orchestrationId"] == other.id));
+        let excluded = list_headless_team_demands_project_searched(
+            &path, &team.id, "blocked", None, None, None, Some("other-project"),
+        ).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&excluded).unwrap()
+            ["demands"].as_array().unwrap().len(), 1);
+        let missing = list_headless_team_demands_project_searched(
+            &path, &team.id, "blocked", None, None, None, Some("current-project"),
+        ).unwrap();
+        assert_eq!(serde_json::from_str::<serde_json::Value>(&missing).unwrap()
+            ["demands"].as_array().unwrap().len(), 0);
+        for invalid in ["", "../escape", "project' OR 1=1 --", " spaced "] {
+            assert!(list_headless_all_demands_project_searched(
+                &path, "blocked", None, None, None, Some(invalid),
+            ).is_err());
+        }
+        assert!(list_headless_team_demands_project_searched(
+            &path, "other-nonexistent", "blocked", None, None, None,
+            Some("archived-project"),
+        ).is_err());
+        for private in ["PRIVATE", "ORIGINAL OBJECTIVE", "local-user", "authorizationId"] {
+            assert!(!team_first_raw.contains(private)
+                && !team_next_raw.contains(private)
+                && !global_first_raw.contains(private));
+        }
+        let check = Store::open_read_only(&path).unwrap();
+        assert_eq!(check.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 205);
     }
 
     #[test]

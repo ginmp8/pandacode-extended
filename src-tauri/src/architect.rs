@@ -576,6 +576,12 @@ fn authenticated_hierarchical_status(
     store: &Store, team: &TeamSnapshot,
 ) -> Option<CouncilStatus> {
     let config = team.config.council.as_ref()?;
+    // After a restart, session status may have been interrupted while a
+    // caller still holds an older active team snapshot. Surviving receipts
+    // cannot authorize a passed projection until the task is recovered.
+    if store.session(&team.session_id).ok()?.status == "interrupted" {
+        return None;
+    }
     let children = child_council::verified_parent_seats(store, team).ok().flatten()?;
     // Child receipts never replace a revoked root reviewer grant. Recheck all
     // applicable native root waves before displaying a passing Council status,

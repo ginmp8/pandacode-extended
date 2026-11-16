@@ -3828,6 +3828,27 @@ fn settled_or_archived_root_revokes_native_child_launch_and_callback_after_admis
     let child_before = serde_json::to_value(
         load(&store, &launch.admission.parent).unwrap().unwrap()
     ).unwrap();
+    // A persisted interrupted session revokes child authority even when an
+    // older root team snapshot still reads running after a partial restart.
+    let previous_status = store.session(&sid).unwrap().status;
+    store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1", [&sid]).unwrap();
+    for denied in [
+        child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap_err(),
+        child_council::next_leaf_launch(&store, &std::collections::HashMap::new(), &root)
+            .err().expect("interrupted root must not launch native child leaves"),
+        child_council::admit_leaves(&store, &root).unwrap_err(),
+    ] {
+        assert!(denied.contains("child_council_revoked"), "{denied}");
+    }
+    assert_eq!(serde_json::to_value(
+        load(&store, &launch.admission.parent).unwrap().unwrap()
+    ).unwrap(), child_before, "interrupted root cannot mutate a native child");
+    store.db.execute(
+        "UPDATE sessions SET status=?2 WHERE id=?1",
+        rusqlite::params![sid, previous_status],
+    ).unwrap();
+    child_council::authorize_leaf(&store, &launch.sid, &launch.admission).unwrap();
+
     for (archive, stage) in [(true, previous_stage.as_str()), (false, "completed")] {
         store.db.execute(
             "UPDATE sessions SET archived=?2,task_stage=?3 WHERE id=?1",
@@ -4370,6 +4391,19 @@ fn child_receipts_require_all_fresh_native_callbacks_and_reject_replay_tampering
     let composite = council::status_for_authenticated_children(&root, &complete_roster)
         .expect("two authenticated child Councils satisfy the M4 S1 root quorum");
     assert_eq!(composite.state, "passed");
+    assert_eq!(authenticated_hierarchical_status(&store, &root)
+        .as_ref().map(|status| status.state.as_str()), Some("passed"));
+    // A restart-interrupted root must not display a passed Council merely
+    // because its previous child composite receipts still exist in storage.
+    let previous_status = store.session(&sid).unwrap().status;
+    store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1", [&sid]).unwrap();
+    assert!(authenticated_hierarchical_status(&store, &root).is_none());
+    store.db.execute(
+        "UPDATE sessions SET status=?2 WHERE id=?1",
+        rusqlite::params![sid, previous_status],
+    ).unwrap();
+    assert_eq!(authenticated_hierarchical_status(&store, &root)
+        .as_ref().map(|status| status.state.as_str()), Some("passed"));
     assert_eq!(composite.lowest, Some(9.5));
     assert_eq!(composite.round, 1);
     // A child composite score alone does not attest that the user's named

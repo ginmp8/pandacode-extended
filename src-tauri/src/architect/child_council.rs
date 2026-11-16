@@ -244,8 +244,8 @@ fn read(store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer) -> Re
 /// TeamSnapshot still says "running" after a crash or storage transition.
 fn require_live_root_session(store: &Store, root_id: &str) -> Result<()> {
     let session = store.session(root_id)?;
-    if session.archived || session.task_stage == "completed" {
-        return Err("child_council_revoked: root task is archived or completed.".into());
+    if session.archived || session.task_stage == "completed" || session.status == "interrupted" {
+        return Err("child_council_revoked: root task is archived, completed or interrupted.".into());
     }
     Ok(())
 }

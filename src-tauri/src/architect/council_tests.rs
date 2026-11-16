@@ -2191,13 +2191,14 @@ fn executable_composition_fixture(
         .map(|reviewer| reviewer.bot_id.clone()).collect::<Vec<_>>();
     let (_, mut team) = fixture();
     team.config.council = Some(config.clone());
-    team.council_since = SINCE;
+    // The terminal gate evaluates the real clock; the synthetic round stays within its deadline.
+    team.council_since = storage::now().saturating_sub(60_000);
     for round in 1..=rounds {
         for lens_index in 0..sources.len() {
             let source_index = if round == 1 { lens_index } else { (lens_index + 1) % sources.len() };
             let source = &sources[source_index];
             let id = format!("matrix-r{round}-s{lens_index}");
-            let mut reviewer = seat(&id, round, Some(9.7), SINCE + (round * 10 + lens_index) as i64);
+            let mut reviewer = seat(&id, round, Some(9.7), team.council_since + (round * 10 + lens_index) as i64);
             reviewer.council.as_mut().unwrap().lens = format!("lens-{lens_index}");
             reviewer.profile_id = source.bot_id.as_ref().map_or_else(
                 || format!("profile-{}", source.model),

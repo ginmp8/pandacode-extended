@@ -43,12 +43,12 @@ enum Command {
     ListRecoveryInbox,
     ListDemands {
         state: String, before_updated_at: Option<i64>, before_id: Option<String>,
-        search_query: Option<String>,
+        search_query: Option<String>, project_id: Option<String>,
     },
     ListTeamDemands {
         orchestration_id: String, state: String,
         before_updated_at: Option<i64>, before_id: Option<String>,
-        search_query: Option<String>,
+        search_query: Option<String>, project_id: Option<String>,
     },
     InspectTicket { ticket_id: String },
     InspectTicketGraph { ticket_id: String },
@@ -441,14 +441,14 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 }
             }
             if let Command::ListDemands {
-                state, before_updated_at, before_id, search_query,
+                state, before_updated_at, before_id, search_query, project_id,
             } = &command {
                 // Read-only global queue, no startup recovery or task dispatch.
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
-                    .and_then(|dir| crate::superagent::list_headless_all_demands_searched(
+                    .and_then(|dir| crate::superagent::list_headless_all_demands_project_searched(
                         &dir.join("kingcode.sqlite3"), state, *before_updated_at,
-                        before_id.as_deref(), search_query.as_deref(),
+                        before_id.as_deref(), search_query.as_deref(), project_id.as_deref(),
                     ));
                 match result {
                     Ok(page) => { println!("{page}"); std::process::exit(0) }
@@ -459,15 +459,16 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 }
             }
             if let Command::ListTeamDemands {
-                orchestration_id, state, before_updated_at, before_id, search_query,
+                orchestration_id, state, before_updated_at, before_id, search_query, project_id,
             } = &command {
                 // Read the same source-of-truth Ticket state index as desktop,
                 // without mutating a concurrent live serve process.
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
-                    .and_then(|dir| crate::superagent::list_headless_team_demands_searched(
+                    .and_then(|dir| crate::superagent::list_headless_team_demands_project_searched(
                         &dir.join("kingcode.sqlite3"), orchestration_id, state,
                         *before_updated_at, before_id.as_deref(), search_query.as_deref(),
+                        project_id.as_deref(),
                     ));
                 match result {
                     Ok(page) => { println!("{page}"); std::process::exit(0) }
@@ -1221,18 +1222,33 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                         index += 3;
                         (Some(timestamp), Some(cursor_id.clone()))
                     } else { (None, None) };
-                let search_query = if args.get(index + 2).map(String::as_str) == Some("--search") {
-                    let query = args.get(index + 3)
-                        .ok_or("--search needs a 1 to 128 byte objective fragment.")?;
-                    if query.trim().is_empty() || query.len() > 128
-                        || query.starts_with("--") || query.chars().any(char::is_control) {
-                        return Err("--search needs 1 to 128 non-control UTF-8 bytes.".into());
+                let mut search_query = None;
+                let mut project_id = None;
+                loop {
+                    match args.get(index + 2).map(String::as_str) {
+                        Some("--search") if search_query.is_none() => {
+                            let query = args.get(index + 3)
+                                .ok_or("--search needs a 1 to 128 byte objective fragment.")?;
+                            if query.trim().is_empty() || query.len() > 128
+                                || query.starts_with("--") || query.chars().any(char::is_control) {
+                                return Err("--search needs 1 to 128 non-control UTF-8 bytes.".into());
+                            }
+                            search_query = Some(query.clone());
+                            index += 2;
+                        }
+                        Some("--project") if project_id.is_none() => {
+                            let value = args.get(index + 3)
+                                .ok_or("--project needs an exact admitted native Project ID.")?;
+                            validate_project_id(value)?;
+                            project_id = Some(value.clone());
+                            index += 2;
+                        }
+                        _ => break,
                     }
-                    index += 2;
-                    Some(query.clone())
-                } else { None };
+                }
                 command = Command::ListDemands {
-                    state: state.clone(), before_updated_at, before_id, search_query,
+                    state: state.clone(), before_updated_at, before_id,
+                    search_query, project_id,
                 };
                 ops += 1;
                 index += 1;
@@ -1260,20 +1276,33 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                         index += 3;
                         (Some(timestamp), Some(cursor_id.clone()))
                     } else { (None, None) };
-                let search_query = if args.get(index + 3).map(String::as_str) == Some("--search") {
-                    let query = args.get(index + 4)
-                        .ok_or("--search needs a bounded objective fragment.")?;
-                    if query.is_empty() || query.len() > 128 || query.trim() != query
-                        || query.starts_with("--")
-                        || query.chars().any(char::is_control) {
-                        return Err("--search requires a nonempty, bounded literal fragment.".into());
+                let mut search_query = None;
+                let mut project_id = None;
+                loop {
+                    match args.get(index + 3).map(String::as_str) {
+                        Some("--search") if search_query.is_none() => {
+                            let query = args.get(index + 4)
+                                .ok_or("--search needs a bounded objective fragment.")?;
+                            if query.is_empty() || query.len() > 128 || query.trim() != query
+                                || query.starts_with("--") || query.chars().any(char::is_control) {
+                                return Err("--search requires a nonempty, bounded literal fragment.".into());
+                            }
+                            search_query = Some(query.clone());
+                            index += 2;
+                        }
+                        Some("--project") if project_id.is_none() => {
+                            let value = args.get(index + 4)
+                                .ok_or("--project needs an exact admitted native Project ID.")?;
+                            validate_project_id(value)?;
+                            project_id = Some(value.clone());
+                            index += 2;
+                        }
+                        _ => break,
                     }
-                    index += 2;
-                    Some(query.clone())
-                } else { None };
+                }
                 command = Command::ListTeamDemands {
                     orchestration_id: id.clone(), state: state.clone(),
-                    before_updated_at, before_id, search_query,
+                    before_updated_at, before_id, search_query, project_id,
                 };
                 ops += 1;
                 index += 2;
@@ -1771,6 +1800,15 @@ fn validate_orchestration_id(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_project_id(value: &str) -> Result<(), String> {
+    if value.is_empty() || value.len() > 128
+        || !value.bytes().all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_'))
+    {
+        return Err("Provide a bounded exact native Project ID.".into());
+    }
+    Ok(())
+}
+
 fn validate_effect_key(value: &str) -> Result<(), String> {
     if value.is_empty() || value.len() > 128
         || !value.bytes().all(|c| c.is_ascii_alphanumeric()
@@ -1819,7 +1857,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-recovery-inbox | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-delivery <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --create-orchestration <file> | --configure-team-roles <id> <revision> <file> | --enable-orchestration <id> <revision> | --retry-ticket <id> <revision> | --inspect-retry-request <id> <revision> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-recovery-inbox | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-delivery <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --create-orchestration <file> | --configure-team-roles <id> <revision> <file> | --enable-orchestration <id> <revision> | --retry-ticket <id> <revision> | --inspect-retry-request <id> <revision> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1859,9 +1897,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          nextCursor; redact objectives; never approve; exit.
   --list-recovery-inbox  Prioritize up to 200 actual recovery/decision Tickets across Teams;
                          identify stale native runs and uncertain remote effects, read-only; exit.
-  --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>]
+  --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>]
                          Page the global native Demand queue across Teams, read-only and redacted.
-  --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>]
+                         Search and admitted-project filters run before keyset pagination;
+  --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>]
                          Page up to 200 native Demands for one Team and exact Ticket state
                          (or all). Next page uses returned nextCursor; no private evidence
                          or startup recovery; exit.
@@ -2139,12 +2178,12 @@ mod tests {
         assert!(parsed("--list-review-inbox --stop-ticket ticket_1").is_err());
         assert_eq!(parsed("--list-demands all"),
             Ok(Command::ListDemands {
-                state:"all".into(),before_updated_at:None,before_id:None,search_query:None,
+                state:"all".into(),before_updated_at:None,before_id:None,search_query:None,project_id:None,
             }));
         assert_eq!(parsed("--list-demands blocked --before 2000 ticket_099 --search needle"),
             Ok(Command::ListDemands {
                 state:"blocked".into(),before_updated_at:Some(2000),
-                before_id:Some("ticket_099".into()),search_query:Some("needle".into()),
+                before_id:Some("ticket_099".into()),search_query:Some("needle".into()),project_id:None,
             }));
         for invalid in [
             "--list-demands", "--list-demands ALL", "--list-demands ../unsafe",
@@ -2156,17 +2195,17 @@ mod tests {
         assert_eq!(parsed("--list-team-demands team_123 blocked"),
             Ok(Command::ListTeamDemands {
                 orchestration_id:"team_123".into(),state:"blocked".into(),
-                before_updated_at:None,before_id:None,search_query:None,
+                before_updated_at:None,before_id:None,search_query:None,project_id:None,
             }));
         assert_eq!(parsed("--list-team-demands team_123 all"),
             Ok(Command::ListTeamDemands {
                 orchestration_id:"team_123".into(),state:"all".into(),
-                before_updated_at:None,before_id:None,search_query:None,
+                before_updated_at:None,before_id:None,search_query:None,project_id:None,
             }));
         assert_eq!(parsed("--list-team-demands team_123 blocked --before 2000 ticket_099"),
             Ok(Command::ListTeamDemands {
                 orchestration_id:"team_123".into(),state:"blocked".into(),
-                before_updated_at:Some(2000),before_id:Some("ticket_099".into()),search_query:None,
+                before_updated_at:Some(2000),before_id:Some("ticket_099".into()),search_query:None,project_id:None,
             }));
         for invalid in [
             "--list-team-demands team_123 blocked --before",
@@ -2182,11 +2221,11 @@ mod tests {
         assert_eq!(parsed("--list-team-demands team_123 blocked --search retry"),
             Ok(Command::ListTeamDemands { orchestration_id:"team_123".into(),
                 state:"blocked".into(),before_updated_at:None,before_id:None,
-                search_query:Some("retry".into()) }));
+                search_query:Some("retry".into()),project_id:None }));
         assert_eq!(parsed("--list-team-demands team_123 blocked --before 2000 ticket_099 --search retry"),
             Ok(Command::ListTeamDemands { orchestration_id:"team_123".into(),
                 state:"blocked".into(),before_updated_at:Some(2000),
-                before_id:Some("ticket_099".into()),search_query:Some("retry".into()) }));
+                before_id:Some("ticket_099".into()),search_query:Some("retry".into()),project_id:None }));
         assert!(parsed("--list-team-demands team_123 blocked --search").is_err());
         assert!(parsed("--list-team-demands team_123 blocked --search --stop-ticket").is_err());
         assert!(parsed("--list-team-demands").is_err());
@@ -2194,6 +2233,35 @@ mod tests {
         assert!(parsed("--list-team-demands team_123 BLOCKED").is_err());
         assert!(parsed("--list-team-demands ../unsafe running").is_err());
         assert!(parsed("--list-team-demands team_123 running --stop-ticket task").is_err());
+
+        assert_eq!(parsed("--list-demands blocked --project archived --search needle"),
+            Ok(Command::ListDemands {
+                state:"blocked".into(),before_updated_at:None,before_id:None,
+                search_query:Some("needle".into()),project_id:Some("archived".into()),
+            }));
+        assert_eq!(parsed("--list-demands blocked --before 2000 ticket_099 --search needle --project archived"),
+            Ok(Command::ListDemands {
+                state:"blocked".into(),before_updated_at:Some(2000),
+                before_id:Some("ticket_099".into()),
+                search_query:Some("needle".into()),project_id:Some("archived".into()),
+            }));
+        assert_eq!(parsed("--list-team-demands team_123 blocked --before 2000 ticket_099 --project archived --search needle"),
+            Ok(Command::ListTeamDemands {
+                orchestration_id:"team_123".into(),state:"blocked".into(),
+                before_updated_at:Some(2000),before_id:Some("ticket_099".into()),
+                search_query:Some("needle".into()),project_id:Some("archived".into()),
+            }));
+        for invalid in [
+            "--list-demands blocked --project",
+            "--list-demands blocked --project ../outside",
+            "--list-demands blocked --project --search private",
+            "--list-demands blocked --project archived --project another",
+            "--list-demands blocked --project archived --stop-ticket ticket_123",
+            "--list-team-demands team_123 blocked --project",
+            "--list-team-demands team_123 blocked --project ../outside",
+            "--list-team-demands team_123 blocked --project archived --project another",
+            "--list-team-demands team_123 blocked --project archived --stop-ticket ticket_123",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
         assert_eq!(parsed("--inspect-team-roster team_123"),
             Ok(Command::InspectTeamRoster{orchestration_id:"team_123".into()}));
         for invalid in [

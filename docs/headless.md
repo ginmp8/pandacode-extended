@@ -518,6 +518,12 @@ existing first-page behavior is unchanged. To search before pagination, append `
 optional `--before` cursor. The literal substring filter is
 ASCII-case-insensitive and limited to 128 UTF-8 bytes. JSON includes
 `searchApplied` but never returns search phrases or matching objectives.
+Add `--project <admitted-project-id>` to restrict the index to each Ticket's
+immutable admitted Project, including archived Projects after Team edits.
+`--search` and `--project` may follow the optional cursor in either order;
+retain the same filters on subsequent pages. IDs use bounded ASCII letters,
+digits, underscore or hyphen. JSON signals `projectFilterApplied` without
+echoing the value. Omitting the Project filter preserves existing queries.
 Avoid sensitive phrases in CLI arguments, since process listings and shell
 history may expose them. Omitting `--search` preserves the previous view.
 This is observational only: it reuses the native state/Team filter before

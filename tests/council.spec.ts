@@ -351,6 +351,7 @@ test('Council inspector attributes native root and child usage by round without 
     host.id = 'native-usage-groups-test'; host.innerHTML = markup; document.body.append(host);
   }, html);
   const ledger = page.locator('#native-usage-groups-test .council-ledger');
+  await ledger.locator('details').filter({ hasText: 'Usage and hard-limit records' }).locator('summary').click();
   const groups = ledger.getByRole('region', { name: 'Root and child native usage by round' });
   await expect(groups.locator('li')).toHaveCount(2);
   await expect(groups.locator('li').nth(0)).toContainText('Root reviewer · Round root:group:1 · 1 unique native attempts');

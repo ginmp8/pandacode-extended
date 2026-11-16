@@ -301,7 +301,21 @@ function councilHierarchyHtml(value: CouncilLedgerView): string {
 /** Render native's projected Council records as inert text; workspace references are decorated by the bound file view. */
 export function councilReadOnlyPresenterHtml(value: CouncilLedgerView): string {
   if (value.unavailableMessage) return `<section class="council-ledger"><p class="council-ledger-unavailable">${escape(value.unavailableMessage)}</p></section>`;
-  const findings = value.findings ?? [], history = value.historicalReportedFindings ?? [], currentReports = value.reportedFindings ?? [], dispositions = value.findingDispositions ?? [], receipts = value.reviewReceipts ?? [], children = (value.childReceipts ?? []).filter(receipt => receipt.rootCycleId === value.cycleId), usage = (value.usage ?? []).filter(record => record.rootCycleId === value.cycleId);
+  const children = (value.childReceipts ?? []).filter(receipt => receipt.rootCycleId === value.cycleId);
+  const usage = (value.usage ?? []).filter(record => record.rootCycleId === value.cycleId);
+  // The presenter also serves raw read-only host snapshots. Keep all displayed
+  // current evidence in the root cycle or a child correlated to that root.
+  const childCycles = [
+    ...children.map(receipt => receipt.childCycleId),
+    ...(value.childLeaves ?? []).filter(leaf => leaf.rootCycleId === value.cycleId).map(leaf => leaf.childCycleId),
+    ...usage.map(record => record.childCycleId).filter((id): id is string => typeof id === 'string' && id.length > 0),
+  ];
+  const allowedCycles = new Set([value.cycleId, ...childCycles]);
+  const findings = (value.findings ?? []).filter(finding => allowedCycles.has(finding.cycleId));
+  const findingIds = new Set(findings.map(finding => finding.id));
+  const dispositions = (value.findingDispositions ?? []).filter(item => findingIds.has(item.findingId));
+  const receipts = (value.reviewReceipts ?? []).filter(receipt => allowedCycles.has(receipt.cycleId));
+  const history = value.historicalReportedFindings ?? [], currentReports = value.reportedFindings ?? [];
   if (!value.findings && !value.historicalReportedFindings && !value.reportedFindings && !value.findingDispositions && !value.reviewReceipts && !value.childReceipts && !value.childLeaves && !value.councilChildLeafScores && !value.criterionOutcomes && !value.usage) {
     return '<section class="council-ledger"><p class="council-ledger-unavailable">This host snapshot does not include Council ledger records.</p></section>';
   }

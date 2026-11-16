@@ -417,6 +417,65 @@ test('read-only inspector renders supplied findings, receipts, usage, stale stat
 });
 
 
+test('read-only presenter isolates current root and child evidence from foreign-cycle host records', async ({ page }) => {
+  await open(page, '/?council=composition');
+  const markup = await page.evaluate(async () => {
+    const { councilReadOnlyPresenterHtml } = await import('/src/council-panel.ts');
+    const finding = (id: string, cycleId: string) => ({
+      id, cycleId, roundId: cycleId + ':1', seatId: 'reviewer', artifactDigest: 'revision',
+      criterionId: 'security', severity: 'high', category: 'Security',
+      summary: id + ' finding', evidenceRefs: [], locationStatus: 'unverified',
+    });
+    const review = (id: string, cycleId: string) => ({
+      schemaVersion: 1, requestId: id, cycleId, taskId: id, assignmentId: 'reviewer',
+      policyFingerprint: 'pinned', artifactDigest: 'revision', verdict: 'passed',
+      findingsRefs: [], evidenceRefs: [], terminalRevision: 1, idempotencyKey: id,
+    });
+    return councilReadOnlyPresenterHtml({
+      cycleId: 'root:current',
+      childReceipts: [{
+        rootCycleId: 'root:current', parentSeatId: 'reviewer', childCycleId: 'child:current',
+        botId: 'nested', artifactRevision: 'revision', policyFingerprint: 'pinned',
+        status: 'fixing', leafScoreRefs: [], findingsRefs: [], evidenceRefs: [],
+        snapshotFingerprint: 'pinned',
+      }],
+      findings: [
+        finding('Current root', 'root:current'),
+        finding('Current child', 'child:current'),
+        finding('Foreign', 'root:old'),
+      ],
+      findingDispositions: [
+        { findingId: 'Current root', disposition: 'waived_by_authorized_human', actorId: 'user', rationale: 'Current exception', timestampMs: 1, artifactLinks: [] },
+        { findingId: 'Foreign', disposition: 'waived_by_authorized_human', actorId: 'user', rationale: 'Foreign exception', timestampMs: 1, artifactLinks: [] },
+      ],
+      reviewReceipts: [
+        review('current-root', 'root:current'),
+        review('current-child', 'child:current'),
+        review('foreign-review', 'root:old'),
+      ],
+      usage: [],
+    } as any);
+  });
+  await page.evaluate(html => {
+    const host = document.createElement('section');
+    host.id = 'cycle-evidence-isolation-test';
+    host.innerHTML = html;
+    document.body.append(host);
+  }, markup);
+  const ledger = page.locator('#cycle-evidence-isolation-test .council-ledger');
+  await expect(ledger).toContainText('Current root finding');
+  await expect(ledger).toContainText('Current child finding');
+  await expect(ledger).toContainText('Current exception');
+  await expect(ledger).toContainText('current-root');
+  await expect(ledger).toContainText('current-child');
+  await expect(ledger).not.toContainText('Foreign finding');
+  await expect(ledger).not.toContainText('Foreign exception');
+  await expect(ledger).not.toContainText('foreign-review');
+  await expect(ledger.getByText('Findings and dispositions · 2', { exact: true })).toBeVisible();
+  await expect(ledger.getByText('Review receipts · 2', { exact: true })).toBeVisible();
+  await expect(ledger.getByText('Authorized finding exceptions · 1', { exact: true })).toBeVisible();
+});
+
 test('child reviewer reported scores remain pending until the native child terminal is issued', async ({ page }) => {
   await open(page, '/?council=composition');
   const html = await page.evaluate(async () => {

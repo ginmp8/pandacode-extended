@@ -79,6 +79,13 @@ enum Command {
     QuarantineTerminalOrphan { ticket_id: String, expected_revision: i64 },
     DisableOrchestration { orchestration_id: String, expected_revision: i64 },
     RenameOrchestration { orchestration_id: String, expected_revision: i64, name: String },
+    VerifyDraftPrTarget {
+        ticket_id: String,
+        expected_revision: i64,
+        repository: String,
+        head: String,
+        base: String,
+    },
     IssueComment {
         ticket_id: String,
         expected_revision: i64,
@@ -174,6 +181,34 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     Ok(receipt)=>{println!("{receipt}");std::process::exit(0)}
                     Err(error)=>{
                         eprintln!("Native delivery inspection failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
+            if let Command::VerifyDraftPrTarget {
+                ticket_id, expected_revision, repository, head, base,
+            } = &command {
+                // Use the desktop's live native preflight without a Webview,
+                // startup recovery, effect reservation, or any GitHub write.
+                let result = app.path().app_data_dir()
+                    .map_err(|error| error.to_string())
+                    .and_then(|dir| {
+                        let store = crate::superagent::effects::open_effect_store(
+                            &dir.join("kingcode.sqlite3"),
+                        )?;
+                        let sha = crate::superagent::effects::verify_draft_pull_request_target(
+                            &store, ticket_id, *expected_revision, repository, head, base,
+                        )?;
+                        Ok(serde_json::json!({
+                            "verifiedHeadSha": sha,
+                            "created": false,
+                            "authorizationIssued": false,
+                        }).to_string())
+                    });
+                match result {
+                    Ok(preflight) => { println!("{preflight}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent draft PR preflight failed: {error}");
                         std::process::exit(1)
                     }
                 }
@@ -1807,6 +1842,35 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 1;
             }
+            "--verify-draft-pr-target" => {
+                let ticket_id = args.get(index + 1)
+                    .ok_or("--verify-draft-pr-target needs Ticket ID, revision, repository, head and base.")?;
+                validate_ticket_id(ticket_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--verify-draft-pr-target needs an expected Ticket revision.")?;
+                let expected_revision = parse_ticket_revision(revision)?;
+                let repository = args.get(index + 3)
+                    .ok_or("--verify-draft-pr-target needs an owner/name repository.")?;
+                crate::superagent::effects::validate_repository(repository)?;
+                let head = args.get(index + 4)
+                    .ok_or("--verify-draft-pr-target needs a pushed head branch.")?;
+                let base = args.get(index + 5)
+                    .ok_or("--verify-draft-pr-target needs a base branch.")?;
+                if head.is_empty() || base.is_empty() || head == base
+                    || head.len() > 200 || base.len() > 200
+                    || head.starts_with('-') || base.starts_with('-')
+                    || head.chars().any(char::is_control)
+                    || base.chars().any(char::is_control)
+                {
+                    return Err("Choose distinct bounded head and base branches.".into());
+                }
+                command = Command::VerifyDraftPrTarget {
+                    ticket_id: ticket_id.clone(), expected_revision,
+                    repository: repository.clone(), head: head.clone(), base: base.clone(),
+                };
+                ops += 1;
+                index += 5;
+            }
             "--issue-comment" => {
                 let ticket_id = args.get(index + 1)
                     .ok_or_else(|| format!("--issue-comment needs a Ticket ID.\n\n{}", help()))?;
@@ -1994,7 +2058,7 @@ fn parse_confirmation_hash(value: &str) -> Result<String, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-recovery-inbox | --list-unresolved-effects [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-delivery <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --create-orchestration <file> | --configure-team-roles <id> <revision> <file> | --enable-orchestration <id> <revision> | --retry-ticket <id> <revision> | --inspect-retry-request <id> <revision> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
+Usage: pandacode serve [--help | -h] [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--preview-orchestrations <file> | --import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --inspect-team-strategy <id> | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-recovery-inbox | --list-unresolved-effects [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-delivery <id> | --inspect-demand-plan <root-ticket-id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --create-orchestration <file> | --configure-team-roles <id> <revision> <file> | --enable-orchestration <id> <revision> | --retry-ticket <id> <revision> | --inspect-retry-request <id> <revision> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --verify-draft-pr-target <id> <revision> <owner/name> <head> <base> | --issue-comment <id> <revision> <owner/name> <issue> <effect-key> <body> [--confirm-issue-comment <sha256>]]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -2119,6 +2183,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --disable-orchestration <id> <revision>
                          Turn a Team Off and atomically revoke its mandates;
                          live provider calls may finish but native authority stays revoked.
+  --verify-draft-pr-target <id> <revision> <owner/name> <head> <base>
+                         Read-only: verify the active Ticket worker checkout, clean local
+                         head, pushed remote SHA, repository and base branch. Never creates
+                         a PR, reserves an effect, or grants authorization.
   --issue-comment <id> <revision> <owner/name> <issue> <key> <body>
                          Prepare one exact scoped GitHub issue comment, then confirm
                          its SHA-256 on a second invocation; uncertain effects are reconciled.
@@ -2194,6 +2262,29 @@ mod tests {
             "--enable-orchestration team_1 0",
             "--enable-orchestration team_1 2 --disable-orchestration team_1 2"] {
             assert!(parsed(invalid).is_err(),"{invalid}");
+        }
+    }
+
+    #[test]
+    fn draft_pr_preflight_is_exact_revision_scoped_and_exclusive() {
+        assert_eq!(parsed("--verify-draft-pr-target ticket_1 3 acme/repo feature/main main"),
+            Ok(Command::VerifyDraftPrTarget {
+                ticket_id: "ticket_1".into(), expected_revision: 3,
+                repository: "acme/repo".into(), head: "feature/main".into(),
+                base: "main".into(),
+            }));
+        for invalid in [
+            "--verify-draft-pr-target",
+            "--verify-draft-pr-target ../unsafe 3 acme/repo feature main",
+            "--verify-draft-pr-target ticket_1 -1 acme/repo feature main",
+            "--verify-draft-pr-target ticket_1 3 bad-repository feature main",
+            "--verify-draft-pr-target ticket_1 3 acme/repo main main",
+            "--verify-draft-pr-target ticket_1 3 acme/repo --force main",
+            "--verify-draft-pr-target ticket_1 3 acme/repo feature",
+            "--verify-draft-pr-target ticket_1 3 acme/repo feature main --stop-ticket ticket_1",
+            "--verify-draft-pr-target ticket_1 3 acme/repo feature main --confirm-issue-comment aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
         }
     }
 

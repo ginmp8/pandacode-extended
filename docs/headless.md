@@ -822,6 +822,23 @@ dynamic subagent hierarchy. The response sets
 pass. Native authorization, live state and independent review still require
 the corresponding guarded operations.
 
+## Read-only draft PR target verification (headless)
+
+A headless operator can inspect the same native Ticket-bound draft PR preflight
+as the desktop, without a Webview or startup recovery beside an active worker:
+
+```sh
+pandacode serve --verify-draft-pr-target <ticket-id> <revision> <owner/repository> <pushed-head-branch> <base-branch>
+```
+
+The preflight requires the active worker assignment, current Ticket revision,
+matching project GitHub remote, a clean checkout on the exact head branch,
+a pushed commit identical to local HEAD, and an existing base in the same
+repository. Output reports the verified SHA and explicitly states that no PR
+was created or authority granted. A stale check exits nonzero; neither result
+is a durable authorization for publication. Draft PR creation and effect
+reconciliation remain separate, unimplemented operations.
+
 ## Explicit SuperAgent GitHub issue-comment effects (integrated)
 
 A local operator may request an exact GitHub issue comment only for a currently

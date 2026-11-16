@@ -3936,9 +3936,10 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
     assert!(child_council::authorize_leaf(
         &reopened, &launch.sid, &launch.admission
     ).unwrap_err().contains("child_council_revoked"));
-    assert!(child_council::next_leaf_launch(
+    let denied_launch = child_council::next_leaf_launch(
         &reopened, &std::collections::HashMap::new(), &root,
-    ).unwrap_err().contains("child_council_revoked"));
+    ).err().expect("interrupted root must not dispatch a child leaf");
+    assert!(denied_launch.contains("child_council_revoked"), "{denied_launch}");
     let before_root = serde_json::to_value(&root).unwrap();
     let before_child = serde_json::to_value(&child).unwrap();
     let state = AppState {

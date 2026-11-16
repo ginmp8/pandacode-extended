@@ -7032,6 +7032,183 @@ fn roster_names(config: &TeamConfig) -> String {
         .join(", ")
 }
 
+#[allow(clippy::too_many_arguments)]
+fn preflight_dispatch_batch(
+    store: &Store,
+    sid: &str,
+    team: &mut TeamSnapshot,
+    parent: &storage::Session,
+    args: &Value,
+    routes: &routing::AutoRoutes,
+    owner: Option<&str>,
+    test_reviewer_execution: bool,
+) -> Result<()> {
+    #[derive(Deserialize)]
+    #[serde(rename_all = "camelCase", deny_unknown_fields)]
+    struct PreflightDispatchBatch {
+        assignments: Vec<Value>,
+        #[serde(default)]
+        force_escalation: bool,
+    }
+    let batch: PreflightDispatchBatch = serde_json::from_value(args.clone())
+        .map_err(|e| format!("Invalid assignments: {e}"))?;
+    if batch.assignments.is_empty() {
+        return Err("Assign at least one worker.".into());
+    }
+    let has_council_lens = batch
+        .assignments
+        .iter()
+        .any(|assignment| assignment.get("councilLens").is_some());
+    if owner.is_none() && has_council_lens {
+        freeze_architect_criteria(team, &batch.assignments)?;
+    }
+    if let Some(config) = team.config.council.as_ref() {
+        config.validate()?;
+    }
+    let has_selected_bots = team
+        .config
+        .council
+        .as_ref()
+        .is_some_and(|config| !config.reviewer_bot_ids.is_empty());
+    if (owner.is_none() && has_council_lens) || has_selected_bots {
+        if let Some(config) = team
+            .config
+            .council
+            .as_ref()
+            .filter(|config| config.composition.is_some())
+        {
+            let capabilities = if test_reviewer_execution {
+                let composition = config.composition.as_ref().unwrap();
+                council::CouncilCompositionCapabilities {
+                    automatic_reviewers: true,
+                    supported_strategies: vec![
+                        council::CouncilStrategy::Parallel,
+                        council::CouncilStrategy::Escalated,
+                        council::CouncilStrategy::TwoPhase,
+                    ],
+                    reviewers: composition
+                        .selected
+                        .iter()
+                        .map(|reviewer| council::CouncilReviewerCapability {
+                            bot_id: reviewer.bot_id.clone(),
+                            direct: true,
+                            nested: reviewer.mode == council::SelectedReviewerMode::Nested,
+                        })
+                        .collect(),
+                }
+            } else {
+                bot_reviewers::composition_capabilities(store, sid, config)?
+            };
+            let executor = bot_reviewers::executor(store, sid)?;
+            config
+                .validate_for_dispatch(executor.as_deref(), &capabilities)
+                .map_err(|error| error.to_string())?;
+        } else if let Some(config) = team
+            .config
+            .council
+            .as_ref()
+            .filter(|config| !config.reviewer_bot_ids.is_empty())
+        {
+            bot_reviewers::validate_roster(store, sid, config)?;
+        }
+    }
+
+    if batch.force_escalation
+        && batch.assignments.iter().any(|assignment| {
+            assignment
+                .get("councilLens")
+                .and_then(Value::as_str)
+                .is_none()
+                || assignment.get("replaces").is_some()
+        })
+    {
+        return Err("forceEscalation requires fresh Council reviewer assignments without replaces.".into());
+    }
+    if batch.force_escalation {
+        s2_user_forced_signal(team)?;
+    }
+
+    let request_key = |key: &str| owner.map_or_else(|| key.to_string(), |owner| format!("{owner}/{key}"));
+    for raw in &batch.assignments {
+        let mut assignment: Assignment = serde_json::from_value(raw.clone())
+            .map_err(|e| format!("Invalid assignments: {e}"))?;
+        if !valid_id(&assignment.key) {
+            return Err("Use a short alphanumeric assignment key.".into());
+        }
+        normalize_file_scopes(&mut assignment.files);
+        let request = serde_json::to_string(&assignment).map_err(|e| e.to_string())?;
+        if request_duplicate(
+            store,
+            sid,
+            &request_key(&assignment.key),
+            "dispatch",
+            &request,
+        )?
+        .is_some()
+        {
+            continue;
+        }
+
+        let seat = council::seat_for(
+            team,
+            assignment.council_lens.as_deref(),
+            assignment.replaces.as_deref(),
+        )?;
+        if seat.is_none()
+            && (assignment.council_source.is_some() || assignment.reviewer_bot_id.is_some())
+        {
+            return Err("council_source_invalid: councilSource and reviewerBotId require a Council seat with councilLens.".into());
+        }
+        let reviewer = seat.is_some();
+        let council = team.config.council.as_ref();
+        let selected_bot = reviewer
+            && (assignment.council_source == Some(CouncilAssignmentSource::SelectedBot)
+                || (assignment.council_source.is_none()
+                    && council.is_some_and(|config| !config.reviewer_bot_ids.is_empty())));
+        if reviewer {
+            if let Some(config) = council {
+                let plan = config.seat_plan();
+                if plan.automatic > 0
+                    && plan.selected_bots() > 0
+                    && assignment.council_source.is_none()
+                {
+                    return Err("council_source_required: every mixed Council seat must explicitly name its source.".into());
+                }
+                if assignment.council_source == Some(CouncilAssignmentSource::Automatic)
+                    && (config.composition.is_none()
+                        || plan.automatic == 0
+                        || assignment.reviewer_bot_id.is_some())
+                {
+                    return Err("council_source_invalid: this assignment cannot claim an automatic Council seat.".into());
+                }
+                if assignment.council_source == Some(CouncilAssignmentSource::SelectedBot) {
+                    let requested = assignment
+                        .reviewer_bot_id
+                        .as_deref()
+                        .ok_or("council_source_invalid: selected_bot seats require reviewerBotId.")?;
+                    if !config.reviewer_bot_ids.iter().any(|id| id == requested) {
+                        return Err("council_source_invalid: reviewerBotId is not selected in this frozen Council composition.".into());
+                    }
+                }
+            }
+        }
+
+        if !selected_bot {
+            let unchosen = assignment.profile_id.is_none()
+                && assignment.provider.is_none()
+                && assignment.model.is_none();
+            let profile = if assignment.profile_id.as_deref() == Some(routing::AUTO)
+                || (unchosen && routes.contains_key(&assignment.key))
+            {
+                routing::staff(&team.config, parent, &assignment, routes)?.0
+            } else {
+                staff(&team.config, parent, &assignment)?
+            };
+            validate_worker_role(&profile.provider, reviewer)?;
+        }
+    }
+    Ok(())
+}
 fn freeze_architect_criteria(team: &mut TeamSnapshot, assignments: &[Value]) -> Result<()> {
     let target = team.config.council.as_ref().map_or(9.0, |config| config.target);
     let Some(composition) = team.config.council.as_mut().and_then(|config| config.composition.as_mut()) else {
@@ -7337,21 +7514,6 @@ fn dispatch_as_inner(
     }
     // Turns that ended since the last save may have changed the work: rounds are judged on that.
     refresh_council(&store, &mut team);
-    // Reclaim abandoned reviewer skill materializations before admitting another
-    // selected-bot dispatch. The app store lock spans reference discovery and
-    // removal, so a new Council round cannot lose its pinned files mid-flight.
-    // A persisted round remains protected, including across restarts.
-    if name == "pandacode_dispatch_workers"
-        && team
-            .config
-            .council
-            .as_ref()
-            .is_some_and(|c| !c.reviewer_bot_ids.is_empty())
-    {
-        if let Some(library) = library {
-            crate::skills::reviewer::cleanup_orphaned(library, &store)?;
-        }
-    }
     let owner = caller.map(|(id, _)| id);
     // The calling direct worker as it is now: its scope bounds its sub-workers' scopes.
     let me = match caller {
@@ -7405,6 +7567,16 @@ fn dispatch_as_inner(
     let request_key =
         |key: &str| owner.map_or_else(|| key.to_string(), |owner| format!("{owner}/{key}"));
     let parent = store.session(sid)?;
+    if name == "pandacode_dispatch_workers" {
+        // Validate the whole request before cleanup can touch staged reviewer skills.
+        preflight_dispatch_batch(&store, sid, &mut team, &parent, &args, routes, owner, test_reviewer_execution)?;
+        // The store lock protects pins from concurrent admission/cleanup across rounds.
+        if team.config.council.as_ref().is_some_and(|config| !config.reviewer_bot_ids.is_empty()) {
+            if let Some(library) = library {
+                crate::skills::reviewer::cleanup_orphaned(library, &store)?;
+            }
+        }
+    }
     let mut changed = false;
     // Council seats a new round overtook, stopped only once this call's changes are saved.
     let mut overtaken = Vec::new();

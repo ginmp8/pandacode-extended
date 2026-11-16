@@ -3532,3 +3532,235 @@ Council score: 7/10"#
     assert!(council_read_snapshot(&store, &team).council_historical_reported_findings.is_empty(),
         "revoked native reviewer authority must hide historical claims");
 }
+
+#[test]
+fn production_dispatch_preflight_rejections_preserve_native_state_and_staged_artifacts() {
+    use crate::skills::{Kind, Library, Source};
+
+    let selected_roster = config_for_composition(composition(
+        false,
+        council::AutomaticReviewerCount::Fixed(0),
+        vec![direct_reviewer("bot-a"), direct_reviewer("bot-b")],
+    ));
+    selected_roster.validate().unwrap();
+    let valid_selected_roster = config_for_composition(composition(
+        false,
+        council::AutomaticReviewerCount::Fixed(0),
+        vec![direct_reviewer("bot-a"), direct_reviewer("bot-b")],
+    ));
+    valid_selected_roster.validate().unwrap();
+    let cases = [
+        (
+            "selected-roster",
+            selected_roster,
+            json!({
+                "key": "invalid-selected-roster",
+                "name": "normal assignment",
+                "prompt": "This ordinary assignment has no Council lens.",
+                "files": []
+            }),
+            "reviewer_unavailable: selected bot bot-a was removed.".to_owned(),
+            false,
+        ),
+        (
+            "model",
+            valid_selected_roster,
+            json!({
+                "key": "invalid-model",
+                "profileId": "missing-profile",
+                "name": "invalid model",
+                "prompt": "This must fail in preflight.",
+                "files": []
+            }),
+            "Unknown worker profile.".to_owned(),
+            true,
+        ),
+    ];
+
+    let (state, sid) = state_fixture();
+    let root = std::env::temp_dir().join(format!("council-ac08-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(root.join("skills")).unwrap();
+    let library = Library::new(root.join("skills"), root.clone());
+    let imported = library
+        .import(
+            Kind::Skill,
+            vec![(
+                "SKILL.md".into(),
+                b"Pinned artifact for dispatch preflight regression.".to_vec(),
+            )],
+            "preflight-regression",
+            Source {
+                kind: "folder".into(),
+                location: "preflight-regression".into(),
+                git_ref: None,
+                commit: None,
+            },
+        )
+        .unwrap();
+    let staged = crate::skills::reviewer::freeze_for_round(
+        &library,
+        &[imported.meta.id],
+        "codex",
+        &[],
+        &[],
+        &sid,
+    )
+    .unwrap()
+    .pins[0]
+        .staged_path
+        .clone()
+        .unwrap();
+    let staged_file = std::path::Path::new(&staged).join("SKILL.md");
+    assert!(staged_file.is_file());
+    let persisted_state = |state: &AppState, sid: &str| {
+        let store = state.store.lock().unwrap();
+        let session = serde_json::to_value(store.session(sid).unwrap()).unwrap();
+        let sessions: i64 = store
+            .db
+            .query_row("SELECT count(*) FROM sessions", [], |row| row.get(0))
+            .unwrap();
+        let team: String = store
+            .db
+            .query_row(
+                "SELECT content FROM architect_teams WHERE session_id=?1",
+                [sid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let workers = {
+            let mut statement = store
+                .db
+                .prepare(
+                    "SELECT worker_id,session_id FROM architect_workers \
+                     WHERE parent_session_id=?1 ORDER BY worker_id",
+                )
+                .unwrap();
+            statement
+                .query_map([sid], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<Vec<(String, String)>, _>>()
+                .unwrap()
+        };
+        let requests = {
+            let mut statement = store
+                .db
+                .prepare(
+                    "SELECT key,kind,content,worker_id FROM architect_requests \
+                     WHERE parent_session_id=?1 ORDER BY key",
+                )
+                .unwrap();
+            statement
+                .query_map([sid], |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<std::result::Result<Vec<(String, String, String, String)>, _>>()
+                .unwrap()
+        };
+        (session, sessions, team, workers, requests)
+    };
+
+    for (case, council_config, assignment, expected_error, test_reviewer_execution) in cases {
+        if case == "model" {
+            let store = state.store.lock().unwrap();
+            let project_id = store.session(&sid).unwrap().project_id;
+            for id in ["bot-a", "bot-b"] {
+                store
+                    .db
+                    .execute(
+                        "INSERT INTO bots(id,name,role,project_id,provider,model,mode,created_at,updated_at) \
+                         VALUES(?1,?1,'QA',?2,'codex','gpt-5-nano','full',1,1)",
+                        rusqlite::params![id, project_id],
+                    )
+                    .unwrap();
+            }
+            drop(store);
+
+            let mut team = saved(&state, &sid);
+            team.config.council = Some(council_config.clone());
+            store_team(&state, &mut team);
+            let store = state.store.lock().unwrap();
+            for bot_id in &council_config.reviewer_bot_ids {
+                let reviewer = bot_reviewers::seat_bot_inner_for_assignment(
+                    &store,
+                    &team,
+                    1,
+                    None,
+                    Some(CouncilAssignmentSource::SelectedBot),
+                    Some(bot_id),
+                    false,
+                )
+                .unwrap()
+                .expect("the valid selected roster must resolve each bot");
+                assert_eq!(reviewer.id, *bot_id);
+            }
+        }
+
+        let mut team = saved(&state, &sid);
+        team.config.council = Some(council_config);
+        store_team(&state, &mut team);
+        let before = saved(&state, &sid);
+        let before_json = serde_json::to_value(&before).unwrap();
+        let before_state = persisted_state(&state, &sid);
+        let args = json!({"assignments": [assignment]});
+        let routes = routing::AutoRoutes::default();
+        let result = if test_reviewer_execution {
+            // Avoid depending on an installed provider executable. The runtime-test
+            // admission path still validates Council composition before model admission.
+            dispatch_as_inner(
+                &state,
+                &sid,
+                before.generation,
+                None,
+                "pandacode_dispatch_workers",
+                args,
+                &AtomicBool::new(false),
+                &routes,
+                Some(&library),
+                true,
+            )
+            .map(|result| result.0)
+        } else {
+            dispatch_as(
+                &state,
+                &sid,
+                before.generation,
+                None,
+                "pandacode_dispatch_workers",
+                args,
+                &AtomicBool::new(false),
+                &routes,
+                Some(&library),
+            )
+            .map(|result| result.0)
+        };
+        let error = result.expect_err("preflight must reject invalid selected-bot and model input");
+        assert_eq!(error, expected_error, "unexpected {case} rejection");
+        assert!(staged_file.is_file(), "{case} rejection removed staged files");
+        assert_eq!(
+            serde_json::to_value(saved(&state, &sid)).unwrap(),
+            before_json,
+            "{case} rejection changed the saved team"
+        );
+        let after_state = persisted_state(&state, &sid);
+        assert_eq!(
+            after_state,
+            before_state,
+            "{case} rejection changed saved session, team, worker, or request state"
+        );
+    }
+
+    assert_eq!(
+        crate::skills::reviewer::cleanup_orphaned(&library, &state.store.lock().unwrap()).unwrap(),
+        1,
+        "the staged fixture must be an orphan eligible for cleanup"
+    );
+    assert!(!staged_file.exists(), "cleanup_orphaned did not remove the orphaned artifact");
+    std::fs::remove_dir_all(root).unwrap();
+}
+

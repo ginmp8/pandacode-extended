@@ -719,6 +719,33 @@ fn observe_authenticated_in_tx(
         params![&event.source_id,&event.delivery_id,&event.repository,&event.actor,
           &event.event_kind,&event.subject_key,event.sequence,decision,src.policy_revision,at],
     ).map_err(|e| e.to_string())?;
+    // Only a previously operator-linked Ticket may receive durable context.
+    // Both the observing source and the linked source must be independently
+    // pinned to the SAME numeric GitHub repository ID. Legacy name-only links
+    // remain visible in the read-only inspector but cannot receive new audit.
+    // This is a receipt-bound context update, never authorization or approval.
+    if decision == "observed_permitted" {
+        let detail = format!(
+            "{} / {} / {} / {}",
+            event.source_id, event.event_kind, event.subject_key, event.delivery_id,
+        );
+        tx.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             SELECT DISTINCT l.ticket_id,'source_context_observed',?3,?4
+             FROM sa_source_thread_links l
+             JOIN sa_event_sources linked ON linked.id=l.source_id
+             JOIN sa_source_repository_identity link_id ON link_id.source_id=linked.id
+             JOIN sa_source_repository_identity observed_id
+               ON observed_id.source_id=?1
+              AND observed_id.repository_id=link_id.repository_id
+             JOIN sa_tickets ticket ON ticket.id=l.ticket_id
+             WHERE l.subject_key=?2 AND linked.orchestration_id=?5
+               AND ticket.orchestration_id=?5
+               AND linked.repository=?6 COLLATE NOCASE",
+            params![&event.source_id,&event.subject_key,detail,at,
+                    &src.orchestration_id,&src.repository],
+        ).map_err(|e| e.to_string())?;
+    }
     // Advance the source cursor even for Off and ignored filters, preventing
     // old data from being reclassified as authorized after a mode change.
     if event.sequence > src.last_sequence {
@@ -3934,6 +3961,120 @@ mod tests {
             "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0),
         ).unwrap();
         assert_eq!(count, 2, "Observing linked events must not admit a new demand");
+    }
+
+    #[test]
+    fn authenticated_observe_delivers_linked_context_once_without_new_authority() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "context-ticket", "orch");
+        insert_manual_ticket(&store, "unrelated-ticket", "orch");
+        let issue = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let comment = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issue_comment.created").unwrap();
+        let reused_name = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.edited").unwrap();
+        let issue = set_mode(&store, &issue.id, issue.policy_revision, "observe").unwrap();
+        let comment = set_mode(&store, &comment.id, comment.policy_revision, "observe").unwrap();
+        let reused_name = set_mode(&store, &reused_name.id,
+            reused_name.policy_revision, "observe").unwrap();
+        link_thread(&store, &issue.id, "context-ticket", "issue:42").unwrap();
+        let raw = |id: &str, repo_id: u64, kind: &str, action: &str|
+            serde_json::json!([{
+                "id": id, "created_at": "2026-11-12T09:00:00Z",
+                "type": kind, "repo": {"name": "test/fixture", "id": repo_id},
+                "actor": {"login": "trusted-bot"},
+                "payload": {"action": action, "issue": {"number": 42}}
+            }]);
+        let opened = raw("5000099001", 101, "IssuesEvent", "opened");
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &issue, 0, &opened, "operator", 1, 101,
+        ).unwrap().recorded, 1);
+        let audit_count = |store: &Store, ticket: &str| -> i64 {
+            store.db.query_row(
+                "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1
+                 AND kind='source_context_observed'",
+                [ticket], |r| r.get(0),
+            ).unwrap()
+        };
+        assert_eq!(audit_count(&store, "context-ticket"), 1);
+        assert_eq!(audit_count(&store, "unrelated-ticket"), 0);
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &issue, 0, &opened, "operator", 1, 101,
+        ).unwrap().duplicates, 1);
+        assert_eq!(audit_count(&store, "context-ticket"), 1);
+
+        // One exact operator link correlates later authenticated source classes
+        // in the same real repository, without additional links or grants.
+        let comment_raw = raw("5000099002", 101, "IssueCommentEvent", "created");
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &comment, 0, &comment_raw, "operator", 1, 101,
+        ).unwrap().recorded, 1);
+        assert_eq!(audit_count(&store, "context-ticket"), 2);
+
+        // A deleted/recreated repository may reuse its display name. Never
+        // append its observations to the original Ticket's native audit.
+        let foreign = raw("5000099003", 202, "IssuesEvent", "edited");
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &reused_name, 0, &foreign, "operator", 1, 202,
+        ).unwrap().recorded, 1);
+        assert_eq!(audit_count(&store, "context-ticket"), 2);
+        let audit_detail: String = store.db.query_row(
+            "SELECT detail FROM sa_audit WHERE kind='source_context_observed'
+             AND ticket_id='context-ticket' ORDER BY id LIMIT 1",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert!(audit_detail.contains("issue:42"));
+        assert!(!audit_detail.contains("Private objective"));
+        assert_eq!(super::super::get_ticket(&store, "context-ticket").unwrap().state, "queued");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [],
+            |r| r.get::<_, i64>(0),
+        ).unwrap(), 0);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(audit_count(&reopened, "context-ticket"), 2);
+        assert_eq!(audit_count(&reopened, "unrelated-ticket"), 0);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments", [],
+            |r| r.get::<_, i64>(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn source_context_audit_failure_rolls_back_identity_receipt_and_cursor() {
+        let (store, _) = fixture();
+        insert_manual_ticket(&store, "context-ticket", "orch");
+        let off = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let observed = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        link_thread(&store, &observed.id, "context-ticket", "issue:42").unwrap();
+        store.db.execute_batch(
+            "CREATE TEMP TRIGGER fail_context_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.kind='source_context_observed'
+             BEGIN SELECT RAISE(ABORT,'simulated context-audit failure'); END;"
+        ).unwrap();
+        let raw = serde_json::json!([{
+            "id":"5000099101","created_at":"2026-11-12T09:00:00Z",
+            "type":"IssuesEvent","repo":{"name":"test/fixture","id":101},
+            "actor":{"login":"trusted-bot"},
+            "payload":{"action":"opened","issue":{"number":42}}
+        }]);
+        assert!(poll_authenticated_events_with_repository_id(
+            &store, &observed, 0, &raw, "operator", 1, 101,
+        ).is_err());
+        assert_eq!(source(&store, &observed.id).unwrap().last_sequence, 0);
+        assert_eq!(inspect_source_integrity(&store, &observed.id).unwrap().repository_id, None);
+        assert!(list_decisions(&store, &observed.id, 10).unwrap().is_empty());
+        store.db.execute_batch("DROP TRIGGER fail_context_audit").unwrap();
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &observed, 0, &raw, "operator", 1, 101,
+        ).unwrap().recorded, 1);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE ticket_id='context-ticket' AND kind='source_context_observed'",
+            [], |r| r.get::<_, i64>(0),
+        ).unwrap(), 1);
     }
 
     #[test]

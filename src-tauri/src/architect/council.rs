@@ -2823,7 +2823,15 @@ fn composed_verdict_in(
             .unwrap_or(CouncilStrategy::Parallel)
         {
             CouncilStrategy::Parallel => return None,
-            CouncilStrategy::Escalated => return None,
+            CouncilStrategy::Escalated => {
+                if !strategy_terminal_pass(team, config, view, round, outcomes, findings) {
+                    return Some((
+                        "council_s2_terminal_blocked: the terminal review reused an earlier native session or exceeded its frozen round limit.".into(),
+                        false,
+                    ));
+                }
+                return None;
+            },
             CouncilStrategy::TwoPhase if round == 1 => return Some((
                 "council_phase2_required: phase 1 passed. Dispatch fresh read-only Council challengers with the same frozen lenses and artifact; phase 1 alone cannot approve the task.".into(),
                 false,
@@ -3191,6 +3199,30 @@ fn two_phase_phase1_passes(
         && lowest(team, 1).is_some_and(|score| score >= config.target)
 }
 
+/// S2 may replace incomplete earlier evidence, but a fresh final wave must
+/// never reuse an earlier task-owned reviewer session or exceed its frozen budget.
+fn s2_terminal_rounds_valid(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds, round: usize) -> bool {
+    if round == 0 || round > config.max_rounds || view.started > config.max_rounds {
+        return false;
+    }
+    let mut prior_sessions = HashSet::new();
+    for previous in 1..round {
+        for (worker, seat) in in_round(team, previous) {
+            if seat.started_at > 0 {
+                if worker.session_id.is_empty() {
+                    return false;
+                }
+                prior_sessions.insert(worker.session_id.as_str());
+            }
+        }
+    }
+    if round > 1 && prior_sessions.is_empty() {
+        return false;
+    }
+    in_round(team, round).filter(|(worker, seat)| counts(worker, seat))
+        .all(|(worker, _)| !prior_sessions.contains(worker.session_id.as_str()))
+}
+
 fn strategy_terminal_pass(
     team: &TeamSnapshot,
     config: &CouncilConfig,
@@ -3211,7 +3243,8 @@ fn strategy_terminal_pass(
     }
     match composition.strategy {
         CouncilStrategy::Parallel => true,
-        CouncilStrategy::Escalated => s2_escalation_signals(team, round, outcomes, findings).is_empty(),
+        CouncilStrategy::Escalated => s2_terminal_rounds_valid(team, config, view, round)
+            && s2_escalation_signals(team, round, outcomes, findings).is_empty(),
         CouncilStrategy::TwoPhase => round >= 2
             && two_phase_phase1_passes(team, config, view, outcomes)
             && two_phase_independent(team, 1, round),

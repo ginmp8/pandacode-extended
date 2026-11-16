@@ -2419,6 +2419,38 @@ fn two_phase_requires_both_correlated_rounds_and_independent_challengers() {
 }
 
 #[test]
+fn escalated_strategy_requires_fresh_round_sessions_and_frozen_round_ceiling() {
+    use council::AutomaticReviewerCount as Count;
+    let mut plan = composition(true, Count::Fixed(2), vec![]);
+    plan.strategy = council::CouncilStrategy::Escalated;
+    let (team, receipts) = executable_composition_fixture(config_for_composition(plan), 2);
+    let state = |team: &TeamSnapshot| {
+        council::status_with_criterion_outcomes(team, &receipts).unwrap().state
+    };
+    assert_eq!(state(&team), "passed", "two fresh complete native rounds may pass");
+
+    let mut incomplete = team.clone();
+    incomplete.workers[1].council.as_mut().unwrap().score = None;
+    assert_eq!(state(&incomplete), "passed",
+        "a fresh final wave can replace incomplete first-round evidence");
+
+    let mut replay = incomplete.clone();
+    replay.workers[2].session_id = incomplete.workers[0].session_id.clone();
+    assert_ne!(state(&replay), "passed",
+        "a late high-score round cannot reuse a prior reviewer session");
+    assert!(council::finish_refusal_with_criterion_outcomes(&replay, &receipts)
+        .unwrap().contains("council_s2_terminal_blocked"),
+        "terminal completion must reject the same reused session");
+
+    let mut over_budget = team.clone();
+    over_budget.config.council.as_mut().unwrap().max_rounds = 1;
+    assert_ne!(state(&over_budget), "passed",
+        "restored S2 rounds beyond the pinned ceiling cannot approve");
+    assert!(council::finish_refusal_with_criterion_outcomes(&over_budget, &receipts)
+        .unwrap().contains("council_s2_terminal_blocked"));
+}
+
+#[test]
 fn escalated_strategy_executes_its_pinned_criteria_gate() {
     use council::AutomaticReviewerCount as Count;
     let mut plan = composition(true, Count::Fixed(2), vec![]);

@@ -332,7 +332,10 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
 
 
 test('active Team title edit preserves immutable saved role IDs in future-only IPC', async ({page}) => {
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
+  // Wait for the preview shell before attaching the isolated native-IPC fixture.
+  await expect(page.locator('.sidebar-bots-bar')).toBeVisible();
   await page.evaluate(async() => {
     const {mountSuperagent}=await import('/src/superagent-ui.ts');
     const host=document.createElement('div');
@@ -365,8 +368,14 @@ test('active Team title edit preserves immutable saved role IDs in future-only I
     });
   });
   const host=page.locator('#sa-future-only-edit');
+  // aria-busy tracks mutations, not the initial asynchronous native list load.
+  // A loaded Team is the actual prerequisite for the future-only edit action.
+  await expect(host.locator('.sa-list .sa-item strong')).toHaveText('Pinned Team', {timeout:30_000});
+  await expect(host.getByRole('alert')).toHaveCount(0);
   await expect(host).toHaveAttribute('aria-busy','false');
-  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  const navigation=host.getByRole('navigation',{name:'Orchestration views'});
+  await expect(navigation).toBeVisible();
+  await navigation.getByRole('button',{name:'Demands / Runs'}).click();
   const edit=host.locator('form[data-sa-form="edit"]');
   await edit.locator('input[name="name"]').fill('Pinned Team renamed');
   await expect(edit.getByRole('button',{name:'Save preset'})).toBeEnabled();

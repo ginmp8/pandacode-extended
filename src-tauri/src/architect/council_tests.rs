@@ -1904,8 +1904,12 @@ fn mixed_root_terminal_gate_requires_recorded_native_reviewer_authority() {
     config.automatic_reviewers = 1;
     let mut team = team_with(config, Vec::new());
     team.session_id = sid.clone();
+    let project = store.session(&sid).unwrap().project_id;
 
     let mut direct = seat("direct-auth", 1, Some(9.8), SINCE + 1);
+    let direct_session = store.create_session(&project, &direct.provider, &direct.model, "plan").unwrap();
+    direct.session_id = direct_session.id;
+    store.message(&direct.session_id, "assistant", "Independent direct review.\nCouncil score: 9.8/10").unwrap();
     let mut direct_binding = reviewer_security::ReviewerBinding::native(
         &team, &direct.id, direct.created_at, &direct.provider, &direct.model,
         direct.council.as_ref().unwrap(),
@@ -1921,6 +1925,9 @@ fn mixed_root_terminal_gate_requires_recorded_native_reviewer_authority() {
     direct.reviewer_binding = Some(direct_binding);
 
     let mut automatic = seat("automatic-auth", 1, Some(9.6), SINCE + 2);
+    let automatic_session = store.create_session(&project, &automatic.provider, &automatic.model, "plan").unwrap();
+    automatic.session_id = automatic_session.id;
+    store.message(&automatic.session_id, "assistant", "Independent automatic review.\nCouncil score: 9.6/10").unwrap();
     automatic.reviewer_binding = Some(reviewer_security::ReviewerBinding::native(
         &team, &automatic.id, automatic.created_at, &automatic.provider, &automatic.model,
         automatic.council.as_ref().unwrap(),
@@ -1947,6 +1954,10 @@ fn mixed_root_terminal_gate_requires_recorded_native_reviewer_authority() {
     ).unwrap();
     assert!(mixed_native_authority_current(&store, &team),
         "both recorded, distinct completed read-only native seats qualify");
+    let mut forged_score = team.clone();
+    forged_score.workers[0].council.as_mut().unwrap().score = Some(10.0);
+    assert!(!mixed_native_authority_current(&store, &forged_score),
+        "a forged M3 score cannot replace the original native reviewer callback");
     let mut abandoned = team.clone();
     abandoned.workers[0].abandoned = true;
     assert!(!mixed_native_authority_current(&store, &abandoned),
@@ -2165,6 +2176,7 @@ fn forced_m3_root_rechecks_both_authenticated_native_rounds() {
     config.force_escalation = true;
     let mut team = team_with(config, Vec::new());
     team.session_id = sid.clone();
+    let project = store.session(&sid).unwrap().project_id;
     team.changed_at = 0;
     for round in 1..=2 {
         let mut direct = seat(&format!("s2-{round}-direct"), round, Some(9.8),
@@ -2172,6 +2184,12 @@ fn forced_m3_root_rechecks_both_authenticated_native_rounds() {
         direct.council.as_mut().unwrap().lens = "security".into();
         let mut automatic = seat(&format!("s2-{round}-automatic"), round, Some(9.7),
             SINCE + (round * 2) as i64);
+        let direct_session = store.create_session(&project, &direct.provider, &direct.model, "plan").unwrap();
+        direct.session_id = direct_session.id;
+        store.message(&direct.session_id, "assistant", "Independent direct review.\nCouncil score: 9.8/10").unwrap();
+        let automatic_session = store.create_session(&project, &automatic.provider, &automatic.model, "plan").unwrap();
+        automatic.session_id = automatic_session.id;
+        store.message(&automatic.session_id, "assistant", "Independent automatic review.\nCouncil score: 9.7/10").unwrap();
         automatic.council.as_mut().unwrap().lens = "quality".into();
         let mut binding = reviewer_security::ReviewerBinding::native(
             &team, &direct.id, direct.created_at, &direct.provider, &direct.model,
@@ -2218,12 +2236,19 @@ fn mixed_two_phase_revalidates_both_native_reviewer_rounds_before_approval() {
     config.strategy = council::CouncilExecutionStrategy::TwoPhase;
     let mut team = team_with(config, Vec::new());
     team.session_id = sid.clone();
+    let project = store.session(&sid).unwrap().project_id;
 
     for round in 1..=2 {
         let mut direct = seat(&format!("phase-{round}-direct"), round, Some(9.8),
             SINCE + (round * 2 - 1) as i64);
         let mut automatic = seat(&format!("phase-{round}-automatic"), round, Some(9.7),
             SINCE + (round * 2) as i64);
+        let direct_session = store.create_session(&project, &direct.provider, &direct.model, "plan").unwrap();
+        direct.session_id = direct_session.id;
+        store.message(&direct.session_id, "assistant", "Independent direct review.\nCouncil score: 9.8/10").unwrap();
+        let automatic_session = store.create_session(&project, &automatic.provider, &automatic.model, "plan").unwrap();
+        automatic.session_id = automatic_session.id;
+        store.message(&automatic.session_id, "assistant", "Independent automatic review.\nCouncil score: 9.7/10").unwrap();
         if round == 2 {
             direct.council.as_mut().unwrap().lens = "lens phase-1-direct".into();
             automatic.council.as_mut().unwrap().lens = "lens phase-1-automatic".into();

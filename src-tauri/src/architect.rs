@@ -721,19 +721,17 @@ fn mixed_native_authority_current(store: &Store, team: &TeamSnapshot) -> bool {
             {
                 return false;
             }
-            if mode != "m3" {
-                // The persisted score must still match a real native callback
-                // rather than a plausible or restored snapshot field.
-                if worker.council.as_ref().and_then(|seat| seat.score)
-                    != council::latest_score(store, &worker.session_id)
-                {
-                    return false;
-                }
-                if binding.reviewer_bot_id.is_some()
-                    && bot_reviewers::validate_frozen_seat(store, binding, true).is_err()
-                {
-                    return false;
-                }
+            // M3 also requires a real native reviewer callback: recorded
+            // authority is not proof that the model supplied this score.
+            if worker.council.as_ref().and_then(|seat| seat.score)
+                != council::latest_score(store, &worker.session_id)
+            {
+                return false;
+            }
+            if mode != "m3" && binding.reviewer_bot_id.is_some()
+                && bot_reviewers::validate_frozen_seat(store, binding, true).is_err()
+            {
+                return false;
             }
             true
         })

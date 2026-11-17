@@ -524,6 +524,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         ? '<p role="status">Plan ' + safe(workPlan.state) +
           ' · Team version ' + safe(workPlan.teamVersion) +
           ' · SHA-256 ' + safe(workPlan.planSha256) + '</p>' +
+          (workPlan.state === 'active' && tickets.some(ticket =>
+            ticket.id === workPlan?.ticketId && ticket.state === 'queued') &&
+            workPlan.items.filter(item => item.requiresWrite && !item.writeAuthorized &&
+              item.state === 'pending' && !item.childTicketId).length > 1
+            ? '<p>Authorize the SAME exact file paths for every pending write WorkItem ' +
+              'with one native confirmation. Each child keeps a separate immutable grant; ' +
+              'other files, shell and GitHub actions remain denied.</p>' +
+              '<button type="button" data-sa-authorize-demand-work>' +
+              'Authorize shared paths for pending WorkItems</button>' : '') +
           '<ol class="sa-tickets">' + workPlan.items.map(item =>
             '<li><strong>' + safe(item.key) + '</strong> · ' + safe(item.state) +
             ' · Worker ' + safe(botName(item.workerBotId)) +
@@ -546,11 +555,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             (item.requiresWrite && item.writeAuthorized
               ? ' <small>Exact file scope confirmed locally</small>' : '') +
             '</li>').join('') + '</ol>' +
-          (workWriteItemKey && workPlan.items.some(item => item.key === workWriteItemKey &&
-            item.requiresWrite && item.state === 'pending' && !item.writeAuthorized)
+          ((workWriteItemKey === '*' && workPlan.items.filter(item =>
+            item.requiresWrite && item.state === 'pending' &&
+            !item.writeAuthorized && !item.childTicketId).length > 1) ||
+            (workWriteItemKey !== '*' && workPlan.items.some(item =>
+              item.key === workWriteItemKey && item.requiresWrite &&
+              item.state === 'pending' && !item.writeAuthorized)))
             ? '<form data-sa-form="work-write-scope" aria-label="WorkItem file authorization">' +
-              '<p>Native local-user confirmation required for ' + safe(workWriteItemKey) +
-              '. Only exact file paths; other tool and GitHub rights remain denied.</p>' +
+              '<p>Native local-user confirmation required for ' +
+              (workWriteItemKey === '*'
+                ? workPlan.items.filter(item => item.requiresWrite && !item.writeAuthorized &&
+                    item.state === 'pending' && !item.childTicketId).length +
+                  ' pending WorkItems. The same exact file paths will be granted to each.'
+                : safe(workWriteItemKey) + '.') +
+              ' Other tool and GitHub rights remain denied.</p>' +
               '<label>Exact project-relative paths, one per line' +
               '<textarea name="allowedPaths" rows="4" spellcheck="false" required>' +
               safe(workWritePaths) + '</textarea></label>' +
@@ -2073,6 +2091,18 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
+    if (target.hasAttribute('data-sa-authorize-demand-work')) {
+      const ticket=tickets.find(ticket=>ticket.id===inspectedTicket);
+      const eligible=workPlan?.items.filter(item=>item.requiresWrite &&
+        item.state==='pending' && !item.writeAuthorized && !item.childTicketId) ?? [];
+      if (ticket?.state==='queued' && workPlan?.ticketId===ticket.id &&
+          workPlan.state==='active' && eligible.length>1) {
+        workWriteItemKey='*'; workWritePaths=''; render();
+        host.querySelector<HTMLTextAreaElement>(
+          'form[data-sa-form="work-write-scope"] textarea')?.focus();
+      }
+      return;
+    }
     if (target.dataset.saAuthorizeWork) {
       const item = workPlan?.items.find(item => item.key === target.dataset.saAuthorizeWork);
       const ticket = tickets.find(ticket => ticket.id === inspectedTicket);
@@ -2287,23 +2317,34 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const ticketId = inspectedTicket;
       const plan = workPlan;
       const itemKey = workWriteItemKey;
+      const batch = itemKey === '*';
       const ticket = tickets.find(ticket => ticket.id === ticketId);
       workWritePaths = String(data.get('allowedPaths') ?? '');
       const paths = workWritePaths.split(/\r\n?|\n/).filter(Boolean);
+      const pendingItems = plan?.items.filter(item => item.state === 'pending' &&
+        item.requiresWrite && !item.writeAuthorized && !item.childTicketId) ?? [];
+      const selectedItems = batch ? pendingItems :
+        pendingItems.filter(item => item.key === itemKey);
       if (!plan || !ticket || ticket.state !== 'queued' || plan.state !== 'active' ||
           plan.ticketId !== ticketId || plan.ticketRevision !== ticket.revision ||
-          !plan.items.some(item => item.key === itemKey && item.state === 'pending' &&
-            item.requiresWrite && !item.writeAuthorized) || paths.length === 0 || paths.length > 16) {
-        error = 'A current, pending WorkItem and 1 to 16 exact paths are required.';
+          selectedItems.length !== (batch ? pendingItems.length : 1) ||
+          (batch && selectedItems.length < 2) ||
+          paths.length === 0 || paths.length > 16) {
+        error = 'A current, pending write scope and 1 to 16 exact paths are required.';
         render(); return;
       }
       void work(async () => {
-        const result = await call<DemandPlanEvidence>('superagent_authorize_work_item_write', {
-          ticketId, expectedRevision:plan.ticketRevision, itemKey, allowedPaths:paths,
-        });
-        if (result.ticketId !== ticketId || !result.items.some(item =>
-          item.key === itemKey && item.requiresWrite && item.writeAuthorized)) {
-          throw new Error('Native file permission did not match the selected WorkItem.');
+        const command = batch
+          ? 'superagent_authorize_demand_work_item_writes'
+          : 'superagent_authorize_work_item_write';
+        const args = batch
+          ? {ticketId, expectedRevision:plan.ticketRevision, allowedPaths:paths}
+          : {ticketId, expectedRevision:plan.ticketRevision, itemKey, allowedPaths:paths};
+        const result = await call<DemandPlanEvidence>(command, args);
+        if (result.ticketId !== ticketId || selectedItems.some(selected =>
+          !result.items.some(item => item.key === selected.key &&
+            item.requiresWrite && item.writeAuthorized))) {
+          throw new Error('Native file permission did not match the selected WorkItems.');
         }
         workWriteItemKey = ''; workWritePaths = '';
         await reload();
@@ -2311,7 +2352,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           workPlan = await call<DemandPlanEvidence | null>('superagent_demand_plan',{ticketId});
           workPlanLoaded = true;
         }
-        feedback = 'Exact WorkItem file scope confirmed natively. The scheduler will admit the eligible Worker without broader tool rights.';
+        feedback = batch
+          ? 'One native confirmation authorized ' + selectedItems.length +
+            ' pending WorkItems, each with the same exact file paths and separate grants.'
+          : 'Exact WorkItem file scope confirmed natively. The scheduler will admit the eligible Worker without broader tool rights.';
       });
       return;
     }

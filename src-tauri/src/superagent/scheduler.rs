@@ -358,6 +358,29 @@ pub async fn superagent_demand_plan(
 }
 
 
+/// Build a read-only Coordinator request. The optional requiresWrite flag is
+/// untrusted intent that must pass the later local-user confirmation gate.
+fn coordinator_demand_prompt(ticket_id:&str,objective:&str,workers:&[String])->String {
+    let selected=workers.iter().map(|id|format!("- {id}"))
+        .collect::<Vec<_>>().join("\n");
+    format!(
+        "SuperAgent Demand {}\n\n{}\n\n\
+         Output a SINGLE JSON object with one field, workItems, containing 1 to 32 \
+         objects with key, objective, workerBotId, dependsOn (array of prerequisite keys) \
+         and requiresWrite (boolean). Use ONLY these existing Worker IDs:\n{}\n\n\
+         Keep every WorkItem inside the admitted user objective. Set requiresWrite=true \
+         ONLY when editing source files is necessary. This flag REQUESTS a later explicit \
+         native local-user confirmation of exact paths; it NEVER authorizes any write. \
+         You are planning read-only: do not modify files, run shell commands or call \
+         external tools. Workers may only use a separate native scoped-file ToolHost \
+         after exact path confirmation, and must never infer shell, MCP, GitHub or \
+         Council privileges from this plan. Every child receives a new native \
+         Ticket, session, independent policy check and completion gate. \
+         Output valid JSON only, no Markdown or commentary.",
+        ticket_id,objective,selected,
+    )
+}
+
 /// A single initial operator action starts the configured Team Coordinator.
 /// Its JSON plan is strictly validated and may only schedule read-only native
 /// WorkItems for the Workers in the immutable Team; no model grants effects.
@@ -392,25 +415,13 @@ pub async fn superagent_start_demand(
         (ticket,launch,config.coordinator_bot_id,config.worker_bot_ids)
     };
     if !launch {return Ok(ticket)}
-    let selected=workers.iter().map(|id|format!("- {id}")).collect::<Vec<_>>().join("\n");
     let delivered=bots::gateway::deliver(&app,bots::gateway::Inbound{
         bot_id:coordinator_id,
         channel_id:super::CHANNEL.into(),
         thread:ticket.id.clone(),
         sender_id:"local-user".into(),
         sender_name:"Authorized Team Demand".into(),
-        text:format!(
-            "SuperAgent Demand {}\n\n{}\n\n\
-             Output a SINGLE JSON object with one field, workItems, containing 1 to 32 \
-             objects with key, objective, workerBotId and dependsOn (array of prerequisite keys). \
-             Use ONLY these existing Worker IDs:\n{}\n\n\
-             Keep every objective inside the user request. Plan read-only tasks only; \
-             neither you nor the Workers have permission to change code, run shell commands, \
-             invoke external tools, approve Council or widen task scope. \
-             Each Worker gets a fresh native Ticket, session and policy check. \
-             Output valid JSON only, no Markdown or commentary.",
-            ticket.id,ticket.objective,selected,
-        ),
+        text:coordinator_demand_prompt(&ticket.id,&ticket.objective,&workers),
         trusted:true,image_ids:None,moodboard_ids:None,
     }).await;
     if let Err(error)=delivered {
@@ -781,6 +792,19 @@ mod tests {
         WorkItemInput{key:key.into(),objective:format!("Implement {key}"),
             worker_bot_id:"worker".into(),depends_on:deps.iter().map(|s|s.to_string()).collect(),
             requires_write:false}
+    }
+    #[test]
+    fn coordinator_can_request_write_work_items_but_cannot_grant_paths() {
+        let prompt=coordinator_demand_prompt(
+            "demand-1","Implement a bounded change",&["worker-a".into(),"worker-b".into()],
+        );
+        assert!(prompt.contains("requiresWrite (boolean)"));
+        assert!(prompt.contains("requiresWrite=true"));
+        assert!(prompt.contains("NEVER authorizes any write"));
+        assert!(prompt.contains("native local-user confirmation of exact paths"));
+        assert!(prompt.contains("worker-a"));
+        assert!(prompt.contains("worker-b"));
+        assert!(!prompt.contains("Plan read-only tasks only"));
     }
     #[test]
     fn work_item_graph_rejects_unknown_cycles_duplicates_and_unbounded_intent() {

@@ -740,6 +740,44 @@ fn history(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<AuditEntry>
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
 
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ActivityPage {
+    pub ticket_id: String,
+    pub items: Vec<AuditEntry>,
+    pub has_more: bool,
+    pub next_cursor: Option<i64>,
+}
+
+/// Bounded, immutable keyset history for the authorized desktop Ticket inspector.
+/// Details stay inside the main-window boundary; the headless inspector remains redacted.
+fn activity_page(
+    store: &Store, ticket_id: &str, before_id: Option<i64>, limit: i64,
+) -> Result<ActivityPage> {
+    if !(1..=100).contains(&limit) {
+        return Err("Activity page size must be between 1 and 100.".into());
+    }
+    if before_id.is_some_and(|id| id <= 0) {
+        return Err("Activity cursor must be a positive audit ID.".into());
+    }
+    get_ticket(store, ticket_id)?;
+    let mut stmt = store.db.prepare(
+        "SELECT id,kind,detail,at FROM sa_audit
+         WHERE ticket_id=?1 AND (?2 IS NULL OR id < ?2)
+         ORDER BY id DESC LIMIT ?3",
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![ticket_id, before_id, limit + 1], |row| Ok(AuditEntry {
+        id: row.get(0)?, kind: row.get(1)?, detail: row.get(2)?, at: row.get(3)?,
+    })).map_err(|e| e.to_string())?;
+    let mut items = rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    let has_more = items.len() > limit as usize;
+    items.truncate(limit as usize);
+    let next_cursor = if has_more { items.last().map(|entry| entry.id) } else { None };
+    Ok(ActivityPage { ticket_id: ticket_id.into(), items, has_more, next_cursor })
+}
+
 /// Consistent native read of a Ticket, its mandate, attempt history and audit.
 /// A single SQLite read transaction prevents a pre-Stop assignment being
 /// displayed alongside a post-Stop authority record.
@@ -3666,6 +3704,17 @@ pub async fn superagent_activity(window: tauri::WebviewWindow,
     history(&store, &ticket_id, limit.unwrap_or(100))
 }
 
+
+#[tauri::command]
+pub async fn superagent_activity_page(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    ticket_id: String, before_id: Option<i64>, limit: Option<i64>,
+) -> Result<ActivityPage> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    activity_page(&store, &ticket_id, before_id, limit.unwrap_or(50))
+}
+
 #[tauri::command]
 pub async fn superagent_effect_receipts(
     window: tauri::WebviewWindow, state: State<'_, AppState>,
@@ -4477,6 +4526,68 @@ mod tests {
             &list_headless_ticket_activity(&path, &ticket.id, None).unwrap(),
         ).unwrap();
         assert_eq!(restarted["items"].as_array().unwrap().len(), 100);
+    }
+
+
+    #[test]
+    fn native_desktop_activity_pages_are_ticket_scoped_strict_and_restart_durable() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Sensitive desktop activity",
+            "desktop-activity-main", false,
+        ).unwrap();
+        assert!(launched);
+        for index in 0..125 {
+            store.db.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES(?1,'activity_test',?2,?3)",
+                params![&ticket.id, format!("private-{index}"), storage::now()],
+            ).unwrap();
+        }
+        let (other, _) = admit(
+            &mut store, &cfg.id, "Other activity", "desktop-activity-other", true,
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'unrelated','foreign-detail',?2)",
+            params![&other.id, storage::now()],
+        ).unwrap();
+        let expected: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1",
+            [&ticket.id], |row| row.get(0),
+        ).unwrap();
+        let mut cursor = None;
+        let mut visited = std::collections::HashSet::new();
+        let mut previous = i64::MAX;
+        loop {
+            let page = activity_page(&store, &ticket.id, cursor, 50).unwrap();
+            assert_eq!(page.ticket_id, ticket.id);
+            assert!(page.items.len() <= 50);
+            for item in &page.items {
+                assert!(item.id < previous);
+                assert!(visited.insert(item.id), "activity row was replayed");
+                assert_ne!(item.detail, "foreign-detail");
+                previous = item.id;
+            }
+            if !page.has_more {
+                assert!(page.next_cursor.is_none());
+                break;
+            }
+            assert_eq!(page.next_cursor, page.items.last().map(|item| item.id));
+            cursor = page.next_cursor;
+        }
+        assert_eq!(visited.len() as i64, expected);
+        assert!(activity_page(&store, &ticket.id, Some(0), 50).is_err());
+        assert!(activity_page(&store, &ticket.id, None, 0).is_err());
+        assert!(activity_page(&store, &ticket.id, None, 101).is_err());
+        assert!(activity_page(&store, "missing-ticket", None, 50).is_err());
+        assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+        let db_path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&db_path).unwrap();
+        assert_eq!(activity_page(&reopened, &ticket.id, None, 50).unwrap().items.len(), 50);
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "running");
     }
 
     #[test]

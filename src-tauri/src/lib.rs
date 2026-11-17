@@ -4470,6 +4470,7 @@ pub fn run() {
                 superagent::superagent_review_inbox,
                 superagent::superagent_assignments,
                 superagent::superagent_activity,
+                superagent::superagent_activity_page,
                 superagent::superagent_snapshot,
                 superagent::superagent_graph,
                 superagent::superagent_effect_receipts,

@@ -62,6 +62,19 @@ export async function invokeSuperagent<T>(
       else value={ticket:t,mandate,assignments:assignments.get(t.id)||[],activity:activity.get(t.id)||[]};
       break;
     }
+    case 'superagent_activity_page': {
+      const t=[...tickets.values()].flat().find(item=>item.id===args.ticketId);
+      if(!t)throw Error('Ticket not found.');
+      const limit=Number(args.limit??50), beforeId=args.beforeId===undefined?null:Number(args.beforeId);
+      if(!Number.isInteger(limit)||limit<1||limit>100||
+          (beforeId!==null&&(!Number.isSafeInteger(beforeId)||beforeId<=0)))
+        throw Error('Invalid native activity pagination input.');
+      const eligible=[...(activity.get(t.id)||[])].filter(entry=>beforeId===null||entry.id<beforeId)
+        .sort((a,b)=>b.id-a.id);
+      const items=eligible.slice(0,limit), hasMore=eligible.length>limit;
+      value={ticketId:t.id,items,hasMore,nextCursor:hasMore?items[items.length-1].id:null};
+      break;
+    }
     case 'superagent_source_thread_links':
       value=threadLinks.get(args.ticketId)||[];break;
     // These are preview-only references. Real native code verifies source and

@@ -2017,3 +2017,67 @@ test('new Team persists optional reviewers as one disabled role configuration', 
   await workspace.getByRole('button',{name:'Load native members'}).click();
   await expect(workspace.getByRole('region',{name:'Configured Team roles'})).toContainText('Ledger');
 });
+
+
+test('desktop native Ticket activity pages are keyset-bound, filterable and never launch work', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div'); host.id='sa-older-audit'; document.body.appendChild(host);
+    const seen:Array<{command:string;beforeId?:number}>=[];
+    (window as unknown as {saOlderAuditCalls:typeof seen}).saOlderAuditCalls=seen;
+    mountSuperagent(host, async (command,args) => {
+      seen.push({command,beforeId:Number(args?.beforeId)});
+      if(command==='bots_list')return [{id:'router',name:'Router',paused:false},
+        {id:'worker',name:'Worker',paused:false}] as never;
+      if(command==='superagent_list')return [{id:'team',name:'History Team',
+        coordinatorBotId:'router',workerBotId:'worker',enabled:true,policyRevision:1}] as never;
+      if(command==='superagent_tickets')return [{id:'ticket',orchestrationId:'team',
+        objective:'Audit history',state:'running',revision:2,evidence:null}] as never;
+      if(command==='superagent_source_thread_links')return [] as never;
+      if(command==='superagent_snapshot')return {
+        ticket:{id:'ticket',orchestrationId:'team',objective:'Audit history',
+          state:'running',revision:2,evidence:null},
+        mandate:{actor:'operator',authorizationId:'manual',policyRevision:1,
+          projectId:'project',expiresAt:1800000000000,revoked:false,
+          allowedTools:[],allowedSideEffects:false},
+        assignments:[],
+        activity:Array.from({length:50},(_,i)=>({id:105-i,kind:'native',
+          detail:'audit-'+(105-i),at:1800000000000-i})),
+        finalizationGate:'not_pending',unresolvedExternalEffects:0
+      } as never;
+      if(command==='superagent_activity_page') {
+        const before=Number(args?.beforeId);
+        if(before===56)return {ticketId:'ticket',
+          items:Array.from({length:50},(_,i)=>({id:55-i,kind:'native',
+            detail:'audit-'+(55-i),at:1800000000000-50-i})),
+          hasMore:true,nextCursor:6} as never;
+        if(before===6)return {ticketId:'ticket',
+          items:Array.from({length:5},(_,i)=>({id:5-i,kind:'native',
+            detail:'audit-'+(5-i),at:1800000000000-100-i})),
+          hasMore:false,nextCursor:null} as never;
+        throw Error('Unexpected keyset cursor: '+before);
+      }
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-older-audit');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  await expect(host.locator('.sa-audit-list li')).toHaveCount(50);
+  await host.getByRole('button',{name:'Load older native events'}).click();
+  await expect(host.locator('.sa-audit-list li')).toHaveCount(100);
+  await host.getByRole('button',{name:'Load older native events'}).click();
+  await expect(host.locator('.sa-audit-list li')).toHaveCount(105);
+  await expect(host.getByRole('button',{name:'Load older native events'})).toHaveCount(0);
+  await host.getByRole('button',{name:'Json'}).click();
+  await expect(host.locator('.sa-audit-json')).toContainText('audit-1');
+  await host.getByRole('searchbox',{name:'Filter native activity'}).fill('audit-1');
+  await expect(host.locator('.sa-activity-source')).toContainText('matching of 105 loaded native events');
+  const calls=await page.evaluate(()=>
+    (window as unknown as {saOlderAuditCalls:Array<{command:string;beforeId?:number}>}).saOlderAuditCalls);
+  expect(calls.filter(item=>item.command==='superagent_activity_page').map(item=>item.beforeId))
+    .toEqual([56,6]);
+  expect(calls.some(item=>/submit|dispatch|accept|stop|grant|reserve/.test(item.command))).toBe(false);
+});
+

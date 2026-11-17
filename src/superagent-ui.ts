@@ -53,6 +53,7 @@ interface ManualPreflight {
   canStageBlocked?: boolean; allowedTools: string[]; allowedSideEffects: boolean; attemptBudgetMs: number;
 }
 interface Activity { id: number; kind: string; detail: string; at: number }
+interface ActivityPage { ticketId: string; items: Activity[]; hasMore: boolean; nextCursor: number | null }
 interface CouncilObservation {
   nativeStatus: string; nativeRound: number; nativeStale: boolean;
   nativePassVerified: boolean; ticketArtifactBound: boolean;
@@ -119,6 +120,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let inspectedAssignmentId = '';
   let activityMode: 'all' | 'compact' | 'json' = 'all';
   let activityFilter = '';
+  let olderActivity: Activity[] = [], olderActivityTicketId = '', olderActivityHasMore = true;
   let ticketDetails: TicketDetails | null = null;
   let effectReceipts: EffectReceipt[] = [], effectReceiptsLoaded = false;
   let runGraph: RunGraph | null = null, runGraphLoaded = false;
@@ -185,7 +187,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     };
     const chosen = current();
     const inspected = tickets.find(ticket => ticket.id === inspectedTicket);
-    const activity = (ticketDetails?.activity ?? []).filter(entry => {
+    const latestActivity = ticketDetails?.activity ?? [];
+    const newestIds = new Set(latestActivity.map(entry => entry.id));
+    const activityTrail = olderActivityTicketId === ticketDetails?.ticket.id
+      ? [...latestActivity, ...olderActivity.filter(entry => !newestIds.has(entry.id))]
+      : latestActivity;
+    const activity = activityTrail.filter(entry => {
       const needle = activityFilter.trim().toLowerCase();
       return !needle || (entry.kind + ' ' + entry.detail + ' ' + entry.id).toLowerCase().includes(needle);
     });
@@ -306,9 +313,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '</button>').join('') + '</nav>' +
         '<label class="sa-activity-filter">Filter native activity<input type="search" data-sa-activity-filter value="' +
         safe(activityFilter) + '" placeholder="Event type, detail or ID"></label>' +
-        '<p class="sa-activity-source">' + activity.length + ' native events in view · ' +
-        'bounded latest-50 Ticket snapshot, native audit order. No inferred status.</p>' +
+        '<p class="sa-activity-source" aria-live="polite">' + activity.length +
+        ' matching of ' + activityTrail.length + ' loaded native events · ' +
+        'latest-50 Ticket snapshot plus explicitly requested older pages. ' +
+        'Native audit ID order; no inferred status.</p>' +
         auditContent +
+        (latestActivity.length === 50 && olderActivityHasMore
+          ? '<button type="button" data-sa-load-older-activity>Load older native events</button>'
+          : '') +
         '<h5>Linked GitHub threads (context references only)</h5><ul class="sa-linked-threads">' +
         (threadLinks.map(link => '<li>' + safe(link.repository) + ' / ' +
           safe(link.subjectKey) + ' <button type="button" data-sa-unlink-source="' +
@@ -845,6 +857,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         ticketDetails = null; threadLinks = []; inspectedAssignmentId = '';
         throw new Error('Native Ticket identity or Team changed; reload before acting.');
       }
+      if (olderActivityTicketId !== id) {
+        olderActivity = []; olderActivityHasMore = true; olderActivityTicketId = id;
+      }
       ticketDetails = snapshot;
       if (!snapshot.assignments.some(item => item.id === inspectedAssignmentId)) {
         inspectedAssignmentId = '';
@@ -1165,6 +1180,34 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         await call('superagent_source_unlink_thread',{sourceId,ticketId,subjectKey});
         await refreshTicketDetails();
         feedback='Source thread unlinked. Stored authenticated receipts were not deleted.';
+      });
+      return;
+    }
+    if (target.hasAttribute('data-sa-load-older-activity')) {
+      const id = inspectedTicket, details = ticketDetails;
+      if (!id || details?.ticket.id !== id || details.activity.length !== 50 ||
+          !olderActivityHasMore || busy) return;
+      const known = [...details.activity, ...(olderActivityTicketId === id ? olderActivity : [])];
+      const beforeId = Math.min(...known.map(entry => entry.id));
+      if (!Number.isSafeInteger(beforeId) || beforeId <= 0) return;
+      void work(async () => {
+        const page = await call<ActivityPage>('superagent_activity_page',
+          {ticketId:id,beforeId,limit:50});
+        if (inspectedTicket !== id || ticketDetails?.ticket.id !== id) return;
+        if (page.ticketId !== id || !Array.isArray(page.items) || page.items.length > 50 ||
+            page.items.some((entry, index) =>
+              !Number.isSafeInteger(entry.id) || entry.id <= 0 ||
+              entry.id >= beforeId || (index > 0 && entry.id >= page.items[index-1].id)) ||
+            (page.hasMore && (page.items.length === 0 ||
+              page.nextCursor !== page.items[page.items.length-1].id)) ||
+            (!page.hasMore && page.nextCursor !== null)) {
+          throw new Error('Native activity page identity or cursor is inconsistent; reload Ticket.');
+        }
+        const seen = new Set(known.map(entry => entry.id));
+        olderActivity = [...(olderActivityTicketId === id ? olderActivity : []),
+          ...page.items.filter(entry => !seen.has(entry.id))];
+        olderActivityTicketId = id;
+        olderActivityHasMore = page.hasMore;
       });
       return;
     }

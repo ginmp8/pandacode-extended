@@ -223,3 +223,18 @@ restart persistence and schema-v45 upgrade preserving historical Tickets.
 ## Atomic multi-role Team creation (partial UX-P2)
 
 The native `superagent_create` IPC accepts an optional ordered `roster` with `workerBotIds` and `reviewerBotIds`. It also accepts optional `maxWorkerAttempts` (1–4); a provided cap is saved transactionally with the disabled Team and its roles, while omission preserves the legacy default of two. Example templates suggest a bounded cap but never select bots or enable retries, permissions or work. Existing callers without this argument retain the one-Worker contract. With a roster, the Team and all role rows are created in one SQLite transaction. Duplicate, paused, missing, over-limit and cross-project Worker roles fail without leaving a partially created Team. All roles reuse existing bot IDs. Teams remain disabled/Off; multi-member execution remains unavailable pending native scoped admission. The workspace exposes these optional members before Save and disables unsupported execution. Rust rollback/restart and Playwright creation regressions are authored, but their execution requires verification on the published SHA.
+
+
+### Native Ticket activity paging (desktop)
+
+The Ticket inspector begins with a bounded latest-50 native audit snapshot. The user can
+explicitly load older pages through `superagent_activity_page`, with an exclusive audit-ID
+cursor, a 1–100 item limit, Ticket identity checks and descending durable event order.
+All/Compact/JSON views and the text filter operate on the loaded native events only;
+there is no inferred history or implicit provider action. The main-window IPC guard
+protects full private audit details. Headless activity inspection remains separately
+redacted and read-only. Missing or invalid Tickets and cursors fail closed.
+
+Validation: `native_desktop_activity_pages_are_ticket_scoped_strict_and_restart_durable`
+(Rust) and `desktop native Ticket activity pages are keyset-bound` (Playwright).
+These tests do not constitute proof of native Council or tool authorization.

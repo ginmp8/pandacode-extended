@@ -134,7 +134,14 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await expect(dialog.locator('#superagent-host')).toHaveAttribute('aria-busy','false');
   await dialog.getByRole('textbox',{name:'Task objective'}).fill('Inspect a disposable fixture');
   await dialog.getByRole('combobox',{name:'Dispatch'}).selectOption('direct');
+  await expect(dialog.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
+  await dialog.getByRole('button',{name:'Review native preflight'}).click();
+  await expect(dialog.getByRole('region',{name:'Native demand preflight'}))
+    .toContainText('Eligible for manual read-only admission now.');
   await dialog.getByRole('button',{name:'Dispatch manually'}).click();
+  await expect(dialog.getByRole('alertdialog',{name:'Confirm orchestration action'}))
+    .toContainText('No write grant is issued.');
+  await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
   const row=dialog.locator('.sa-tickets li',{hasText:'Inspect a disposable fixture'});
   await expect(row).toContainText('running');
   await expect(dialog.locator('.sa-list .sa-counts')).toHaveText('1 tasks · 1 running · 0 blocked');
@@ -1427,6 +1434,7 @@ test('manual demand preflight shows native read-only scope and never admits work
   const host = page.locator('#sa-native-preflight-test');
   await host.getByRole('button',{name:'Demands / Runs'}).click();
   await host.getByRole('textbox',{name:'Task objective'}).fill('Inspect changes');
+  await expect(host.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await host.getByRole('button',{name:'Review native preflight'}).click();
   const panel = host.getByRole('region',{name:'Native demand preflight'});
   await expect(panel).toContainText('Eligible for manual read-only admission now.');
@@ -1434,6 +1442,7 @@ test('manual demand preflight shows native read-only scope and never admits work
   await expect(panel).toContainText('isolated-project / 2');
   await expect(panel).toContainText('none / no side effects');
   await expect(panel).toContainText('not a grant, Ticket or guaranteed reservation');
+  await expect(host.getByRole('button',{name:'Dispatch manually'})).toBeEnabled();
   await expect(host.getByRole('textbox',{name:'Task objective'})).toHaveValue('Inspect changes');
   const calls = await page.evaluate(() =>
     (window as unknown as {saPreflightCalls:()=>string[]}).saPreflightCalls());
@@ -1441,6 +1450,64 @@ test('manual demand preflight shows native read-only scope and never admits work
   expect(calls.filter(name=>name.includes('submit')||name.includes('dispatch'))).toHaveLength(0);
   await host.getByRole('textbox',{name:'Task objective'}).fill('Changed objective');
   await expect(panel).toHaveCount(0);
+  await expect(host.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
+});
+
+test('manual Demand cannot dispatch a blocked or revision-stale native preflight', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-preflight-revalidation-test'; document.body.appendChild(host);
+    const calls:string[]=[];
+    let inspected=0;
+    mountSuperagent(host, async (command) => {
+      calls.push(command);
+      if(command==='bots_list') return [
+        {id:'router',name:'Router',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list') return [{
+        id:'team',name:'Revision-sensitive Team',coordinatorBotId:'router',
+        workerBotId:'worker',enabled:true,policyRevision:4,
+      }] as never;
+      if(command==='superagent_tickets') return [] as never;
+      if(command==='superagent_preflight') {
+        inspected++;
+        return {
+          orchestrationId:'team',policyRevision:inspected===3?5:4,
+          projectId:'safe-project',selectedBotId:'worker',selectedRole:'worker',
+          eligible:inspected!==1,reason:inspected===1?'Worker occupied':null,
+          allowedTools:[],allowedSideEffects:false,attemptBudgetMs:1800000,
+        } as never;
+      }
+      throw Error('Unexpected native operation '+command);
+    });
+    (window as unknown as {saNativeAdmissionCalls:()=>string[]}).saNativeAdmissionCalls=()=>calls;
+  });
+  const host=page.locator('#sa-preflight-revalidation-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('textbox',{name:'Task objective'}).fill('Inspect a bounded fixture');
+  await host.getByRole('combobox',{name:'Dispatch'}).selectOption('direct');
+  const submit=host.getByRole('button',{name:'Dispatch manually'});
+  await expect(submit).toBeDisabled();
+  await host.getByRole('button',{name:'Review native preflight'}).click();
+  await expect(host.getByRole('region',{name:'Native demand preflight'}))
+    .toContainText('Not eligible for immediate admission: Worker occupied');
+  await expect(submit).toBeDisabled();
+  await host.getByRole('button',{name:'Review native preflight'}).click();
+  await expect(submit).toBeEnabled();
+  await submit.click();
+  await expect(host.getByRole('alertdialog',{name:'Confirm orchestration action'}))
+    .toContainText('No write grant is issued.');
+  await host.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(host.getByRole('alert')).toContainText(
+    'Native admission scope or availability changed. Review a fresh preflight.');
+  await expect(submit).toBeDisabled();
+  const calls=await page.evaluate(() =>
+    (window as unknown as {saNativeAdmissionCalls:()=>string[]}).saNativeAdmissionCalls());
+  expect(calls.filter(command=>command==='superagent_preflight')).toHaveLength(3);
+  expect(calls.filter(command=>command.includes('submit'))).toHaveLength(0);
 });
 
 test('native-backed attempt inspector shows recorded sessions and run budgets without granting effects', async ({page}) => {

@@ -505,8 +505,18 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<p role="status">' + allDemands.length + ' native Demands loaded.</p>' +
         (allDemandsHasMore ? '<button type="button" data-sa-load-older-demands>Load older Demands</button>' : '')) +
       '</section>';
-    const nativePreflight = demandPreflight && demandPreflight.orchestrationId === selected &&
-      preflightObjective === demandObjective.trim() && preflightMode === demandMode
+    const preflightCurrent = Boolean(chosen && demandPreflight &&
+      demandPreflight.orchestrationId === chosen.id &&
+      demandPreflight.policyRevision === chosen.policyRevision &&
+      preflightObjective === demandObjective.trim() && preflightMode === demandMode &&
+      demandPreflight.selectedRole === (demandMode === 'coordinated' ? 'coordinator' : 'worker') &&
+      demandPreflight.selectedBotId === (demandMode === 'coordinated'
+        ? chosen.coordinatorBotId : chosen.workerBotId));
+    // A preview is a read-only observation, never a grant or authorization.
+    const manualAdmissionReady = Boolean(chosen?.enabled && preflightCurrent &&
+      demandPreflight?.eligible && demandPreflight.allowedTools.length === 0 &&
+      !demandPreflight.allowedSideEffects);
+    const nativePreflight = preflightCurrent
       ? '<section class="sa-pane" role="region" aria-label="Native demand preflight">' +
         '<h4>Native demand preflight</h4><p role="status">' +
         (demandPreflight.eligible ? 'Eligible for manual read-only admission now.' :
@@ -546,8 +556,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '<option value="direct"' + (demandMode === 'direct' ? ' selected' : '') +
       '>Worker directly</option></select></label>' +
       '<button type="button" data-sa-preflight>Review native preflight</button>' +
-      '<button class="primary-button" type="submit"' + (chosen.enabled ? '' : ' disabled') +
-      '>Dispatch manually</button></form>' + nativePreflight +
+      '<button class="primary-button" type="submit"' + (manualAdmissionReady ? '' : ' disabled') +
+      '>Dispatch manually</button></form>' +
+      (chosen.enabled && !manualAdmissionReady
+        ? '<p role="status">Review an eligible native read-only preflight before dispatch. ' +
+          'Changes to the objective, role or Team policy require a new review.</p>'
+        : '') + nativePreflight +
       '<div class="sa-title"><h4>Tickets</h4><button type="button" data-sa-refresh>Refresh</button></div>' +
       '<ul class="sa-tickets">' + (tickets.map(ticket =>
         '<li><div><strong>' + safe(ticket.objective) + '</strong><small>' + safe(ticket.state) +
@@ -1027,7 +1041,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         target.closest<HTMLFormElement>('form[data-sa-form="run"]')) {
       demandMode = target.value === 'direct' ? 'direct' : 'coordinated';
       demandPreflight = null;
-      host.querySelector('[aria-label="Native demand preflight"]')?.remove();
+      render();
+      host.querySelector<HTMLSelectElement>('form[data-sa-form="run"] select[name="mode"]')
+        ?.focus({preventScroll:true});
       return;
     }
     if (target instanceof HTMLSelectElement && target.name === 'maxWorkerAttempts' &&
@@ -1066,6 +1082,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       demandObjective = target.value;
       demandPreflight = null;
       host.querySelector('[aria-label="Native demand preflight"]')?.remove();
+      const dispatch = host.querySelector<HTMLButtonElement>(
+        'form[data-sa-form="run"] button[type="submit"]');
+      if (dispatch) dispatch.disabled = true;
     }
     if (target instanceof HTMLInputElement && target.name === 'name' &&
         target.closest<HTMLFormElement>('form[data-sa-form="create"]')) {
@@ -1179,9 +1198,18 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (!chosen || !objective) return;
       demandPreflight = null;
       void work(async () => {
-        demandPreflight = await call<ManualPreflight>('superagent_preflight', {
+        const snapshot = await call<ManualPreflight>('superagent_preflight', {
           orchestrationId: chosen.id, objective, coordinated,
         });
+        if (snapshot.orchestrationId !== chosen.id ||
+            snapshot.policyRevision !== chosen.policyRevision ||
+            snapshot.selectedRole !== (coordinated ? 'coordinator' : 'worker') ||
+            snapshot.selectedBotId !== (coordinated ? chosen.coordinatorBotId : chosen.workerBotId) ||
+            snapshot.allowedTools.length !== 0 || snapshot.allowedSideEffects) {
+          demandPreflight = null;
+          throw new Error('Native preflight identity, policy or read-only scope changed. Refresh the Team.');
+        }
+        demandPreflight = snapshot;
         demandObjective = objective;
         preflightObjective = objective;
         preflightMode = coordinated ? 'coordinated' : 'direct';
@@ -1721,10 +1749,40 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (form.dataset.saForm === 'run') {
       const selectedConfig = current(), objective = String(data.get('objective') ?? '').trim();
-      const command = data.get('mode') === 'direct' ? 'superagent_submit' : 'superagent_submit_coordinated';
-      if (!selectedConfig?.enabled || !objective) return;
+      const coordinated = data.get('mode') !== 'direct';
+      const command = coordinated ? 'superagent_submit_coordinated' : 'superagent_submit';
+      const reviewed = demandPreflight;
+      if (!selectedConfig?.enabled || !objective || !reviewed ||
+          reviewed.orchestrationId !== selectedConfig.id ||
+          reviewed.policyRevision !== selectedConfig.policyRevision ||
+          reviewed.selectedRole !== (coordinated ? 'coordinator' : 'worker') ||
+          reviewed.selectedBotId !== (coordinated ? selectedConfig.coordinatorBotId : selectedConfig.workerBotId) ||
+          preflightObjective !== objective ||
+          preflightMode !== (coordinated ? 'coordinated' : 'direct') ||
+          !reviewed.eligible || reviewed.allowedSideEffects || reviewed.allowedTools.length !== 0) {
+        error = 'Review an eligible native read-only preflight before submitting this Demand.';
+        render();
+        return;
+      }
       const key = taskKey;
-      void work(async () => {
+      ask('Start this manual read-only Demand for Team ' + selectedConfig.name +
+        ' at policy revision ' + reviewed.policyRevision +
+        '? Native admission will recheck scope and availability. No write grant is issued.', async () => {
+        // A cached preview never confers authority. Fresh native preflight is
+        // followed by the native submit's own authorization and lease checks.
+        const latest = await call<ManualPreflight>('superagent_preflight', {
+          orchestrationId:selectedConfig.id,objective,coordinated,
+        });
+        if (!latest.eligible || latest.orchestrationId !== reviewed.orchestrationId ||
+            latest.policyRevision !== reviewed.policyRevision ||
+            latest.projectId !== reviewed.projectId ||
+            latest.selectedRole !== reviewed.selectedRole ||
+            latest.selectedBotId !== reviewed.selectedBotId ||
+            latest.attemptBudgetMs !== reviewed.attemptBudgetMs ||
+            latest.allowedTools.length !== 0 || latest.allowedSideEffects) {
+          demandPreflight = null;
+          throw new Error('Native admission scope or availability changed. Review a fresh preflight.');
+        }
         await call(command,{ orchestrationId:selectedConfig.id, objective, requestKey:key });
         taskKey = crypto.randomUUID(); demandObjective = ''; demandPreflight = null;
         await reload();

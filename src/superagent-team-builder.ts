@@ -152,6 +152,11 @@ export class GuidedTeamBuilder {
       return true;
     }
     if (!this.visible) return false;
+    if (target.hasAttribute('data-sa-builder-reviewers')) {
+      this.step = 2;
+      this.error = '';
+      return true;
+    }
     if (target.hasAttribute('data-sa-builder-cancel')) {
       this.reset();
       return true;
@@ -263,6 +268,9 @@ export class GuidedTeamBuilder {
         '<p>' + (this.executionMode === 'full_auto'
           ? 'Select at least two distinct native reviewer bots in Members. Without verified Council, work stops rather than being accepted.'
           : 'Human acceptance is required. No Council verdict can silently replace it.') + '</p>' +
+        (this.executionMode === 'full_auto' && this.reviewers.length < 2
+          ? '<button type="button" data-sa-builder-reviewers>Choose independent reviewers</button>'
+          : '') +
         '<p>Both policies preserve each bot\'s model, skills and native conversation. Tool and GitHub effects still require specific native grants.</p>' +
         '<p>Saving a Team leaves it Off until explicitly enabled; no request or permission is created by configuration.</p>';
     } else {

@@ -687,6 +687,14 @@ fn native_skill_tools_observe_retrieval_and_integrity_without_model_self_reports
     team.council_since = SINCE;
     let mut reviewer = seat("native-seat", 1, Some(9.8), SINCE + 1);
     reviewer.status = "running".into();
+    // Host evidence requires a real task-owned native reviewer session, not
+    // only a synthetic ID in the mutable worker snapshot.
+    let native_reviewer_session = {
+        let store = state.store.lock().unwrap();
+        let root = store.session(&sid).unwrap();
+        store.create_session(&root.project_id, "codex", "", "full").unwrap()
+    };
+    reviewer.session_id = native_reviewer_session.id.clone();
     let mut binding = reviewer_security::ReviewerBinding::native(
         &team, &reviewer.id, reviewer.created_at, &reviewer.provider,
         &reviewer.model, reviewer.council.as_ref().unwrap(),
@@ -775,6 +783,43 @@ fn native_skill_tools_observe_retrieval_and_integrity_without_model_self_reports
             rusqlite::params![&sid, original_root.status, original_root.task_stage, original_root.archived],
         ).unwrap();
     }
+    let before_leaf_revocation = serde_json::to_value(
+        load(&state.store.lock().unwrap(), &sid).unwrap().unwrap()
+    ).unwrap();
+    for (status, stage, archived) in [
+        ("interrupted", native_reviewer_session.task_stage.as_str(), false),
+        ("error", native_reviewer_session.task_stage.as_str(), false),
+        (native_reviewer_session.status.as_str(), "completed", false),
+        (native_reviewer_session.status.as_str(), native_reviewer_session.task_stage.as_str(), true),
+    ] {
+        {
+            let store = state.store.lock().unwrap();
+            store.db.execute(
+                "UPDATE sessions SET status=?2,task_stage=?3,archived=?4 WHERE id=?1",
+                rusqlite::params![&native_reviewer_session.id, status, stage, archived],
+            ).unwrap();
+        }
+        for tool in ["pandacode_reviewer_skill_open", "pandacode_reviewer_skill_verify"] {
+            let denied = reviewer_skill_evidence::dispatch_state(
+                &state, &sid, generation, &actor, tool, args(),
+            ).unwrap_err();
+            assert!(denied.contains("native reviewer session is no longer authorized"),
+                "{tool} must reject revoked leaf authority: {denied}");
+            assert_eq!(serde_json::to_value(
+                load(&state.store.lock().unwrap(), &sid).unwrap().unwrap()
+            ).unwrap(), before_leaf_revocation,
+                "stale native leaf hosts must not modify task-bound evidence");
+        }
+    }
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status=?2,task_stage=?3,archived=?4 WHERE id=?1",
+            rusqlite::params![&native_reviewer_session.id,
+                native_reviewer_session.status, native_reviewer_session.task_stage,
+                native_reviewer_session.archived],
+        ).unwrap();
+    }
     let (_, after_restore) = reviewer_skill_evidence::dispatch_state(
         &state, &sid, generation, &actor, "pandacode_reviewer_skill_verify", args(),
     ).unwrap();
@@ -792,6 +837,27 @@ fn native_skill_tools_observe_retrieval_and_integrity_without_model_self_reports
     persisted.workers[0].reviewer_binding.as_mut().unwrap().skill_evidence
         .get_mut("native-check").unwrap().content_sha256 = "stale".into();
     assert_eq!(council::status(&persisted).unwrap().state, "fixing");
+
+    // A revoked authority row cannot silently fall back to the old automatic
+    // M1 grant after this same task opts into S2.
+    let mut escalated = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    escalated.config.council.as_mut().unwrap().strategy =
+        council::CouncilExecutionStrategy::Escalated;
+    escalated.workers[0].status = "running".into();
+    {
+        let store = state.store.lock().unwrap();
+        save(&store, &mut escalated).unwrap();
+        store.db.execute(
+            "DELETE FROM architect_requests WHERE parent_session_id=?1
+             AND key=?2 AND kind='reviewer_authority'",
+            rusqlite::params![&sid, "native-reviewer-authority:native-seat"],
+        ).unwrap();
+    }
+    let denied = reviewer_skill_evidence::dispatch_state(
+        &state, &sid, generation, &actor, "pandacode_reviewer_skill_verify", args(),
+    ).unwrap_err();
+    assert!(denied.contains("no recorded native authority"),
+        "S2 must never fall back to a legacy grant: {denied}");
 }
 
 

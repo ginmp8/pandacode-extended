@@ -154,10 +154,34 @@ pub(super) fn dispatch_state(
     let index = team.workers.iter().position(|w| w.id == *id && w.attempt == *attempt
         && active(&w.status) && !w.abandoned && w.council.is_some())
         .ok_or("reviewer_session_mismatch: reviewer run is not active.")?;
+    // A retained host can outlive its worker session while the persisted
+    // worker row still appears active. Revoked or foreign leaf sessions must
+    // not mint host-observed evidence, even with a valid root and seat.
+    let reviewer_session = store.session(&team.workers[index].session_id)
+        .map_err(|_| "reviewer_session_mismatch: native reviewer session unavailable.".to_string())?;
+    if reviewer_session.project_id != root_session.project_id
+        || reviewer_session.archived || reviewer_session.task_stage == "completed"
+        || matches!(reviewer_session.status.as_str(), "interrupted" | "error" | "completed")
+    {
+        return Err("reviewer_session_mismatch: native reviewer session is no longer authorized.".into());
+    }
     let binding = team.workers[index].reviewer_binding.as_ref()
         .ok_or("reviewer_skill_unavailable: seat has no reviewer authority.")?;
     binding.validate(&team, &team.workers[index])?;
-    reviewer_security::validate_issued_authority(&store, parent, binding)?;
+    // The original M1/M2 parallel path alone may consume a pre-#147 native
+    // read-only fallback. Composed sources, S2/S3 and named criteria require
+    // an independently issued host authority record.
+    let legacy_grant = team.config.council.as_ref().is_some_and(|config| {
+        matches!(config.mode(), "m1" | "m2")
+            && config.strategy == council::CouncilExecutionStrategy::Parallel
+            && config.criteria_source == council::CouncilCriteriaSource::Architect
+            && config.criteria.is_empty()
+    });
+    if legacy_grant {
+        reviewer_security::validate_issued_authority(&store, parent, binding)?;
+    } else {
+        reviewer_security::validate_recorded_authority(&store, parent, binding)?;
+    }
     let frozen = binding.snapshot.skills.as_ref()
         .ok_or("reviewer_skill_unavailable: seat has no frozen skills.")?;
     frozen.verify()?;

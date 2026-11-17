@@ -51,7 +51,12 @@ function conversationsPanel(detail: BotDetail, context: PanelContext): string {
   const threads = [...detail.threads].sort((a, b) =>
     b.updatedAt - a.updatedAt);
   const assigned = threads.filter(thread => thread.channelId === 'superagent');
-  const ordinary = threads.filter(thread => thread.channelId !== 'superagent');
+  // Preserve the native bot-chat ordering: "This app" is first regardless
+  // of more recent external/scheduled work. SuperAgent tasks are a separate
+  // read-only grouping, never a replacement for this native behavior.
+  const ordinary = threads.filter(thread => thread.channelId !== 'superagent')
+    .sort((a,b) => Number(b.channelId === 'desktop') -
+      Number(a.channelId === 'desktop') || b.updatedAt - a.updatedAt);
   const web = detail.channels.find(item => item.kind === 'web' && item.enabled);
   const row = (thread: BotDetail['threads'][number]) =>
     '<li><span class="bots-item-main"><b>' +

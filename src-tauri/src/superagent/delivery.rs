@@ -18,6 +18,8 @@ pub struct DeliveryObservation {
     pub total_work_items:i64,
     pub verified_work_items:i64,
     pub unresolved_external_effects:i64,
+    pub applied_scoped_file_writes:i64,
+    pub unresolved_scoped_file_writes:i64,
     pub repository_head_sha:Option<String>,
     pub worktree_status_sha256:Option<String>,
     pub worktree_diff_sha256:Option<String>,
@@ -43,6 +45,23 @@ fn classify(state:&str,total:i64,verified:i64,unresolved:i64)->&'static str {
         _ if verified>0=>"partially_verified",
         _=>"in_progress",
     }
+}
+
+/// Count only real worker ToolHost receipts belonging to this native Ticket
+/// or its admitted WorkItem children. A Git status alone is never attribution.
+fn scoped_write_receipts(db:&Connection,ticket_id:&str)->Result<(i64,i64)> {
+    db.query_row(
+        "SELECT
+           COALESCE(SUM(CASE WHEN receipt.state='applied' THEN 1 ELSE 0 END),0),
+           COALESCE(SUM(CASE WHEN receipt.state IN ('reserved','uncertain') THEN 1 ELSE 0 END),0)
+         FROM sa_worker_write_receipts receipt
+         WHERE receipt.ticket_id=?1 OR EXISTS (
+           SELECT 1 FROM sa_work_items item
+           WHERE item.ticket_id=?1 AND item.child_ticket_id=receipt.ticket_id
+         )",
+        [ticket_id],
+        |row|Ok((row.get(0)?,row.get(1)?)),
+    ).map_err(|e|e.to_string())
 }
 
 fn git_read(root:&Path,args:&[&str],limit:usize)->Result<Vec<u8>> {
@@ -101,6 +120,7 @@ fn native_observation(store:&Store,ticket_id:&str)->Result<(DeliveryObservation,
              SELECT child_ticket_id FROM sa_work_items WHERE ticket_id=?1))",
         [ticket_id],|row|row.get(0),
     ).map_err(|e|e.to_string())?;
+    let (applied_file_writes,unresolved_file_writes)=scoped_write_receipts(&store.db,ticket_id)?;
     let path:Option<String>=store.db.query_row(
         "SELECT path FROM projects WHERE id=?1",
         [&snapshot.project_id],|row|row.get(0),
@@ -115,13 +135,20 @@ fn native_observation(store:&Store,ticket_id:&str)->Result<(DeliveryObservation,
     let result=DeliveryObservation{
         ticket_id:ticket.id,ticket_revision:ticket.revision,
         ticket_state:ticket.state.clone(),
-        delivery_state:classify(&ticket.state,total,verified,unresolved).into(),
+        delivery_state:classify(&ticket.state,total,verified,
+            unresolved.saturating_add(unresolved_file_writes)).into(),
         total_work_items:total,verified_work_items:verified,
         unresolved_external_effects:unresolved,
+        applied_scoped_file_writes:applied_file_writes,
+        unresolved_scoped_file_writes:unresolved_file_writes,
         repository_head_sha:None,worktree_status_sha256:None,
         worktree_diff_sha256:None,observed_status_entries:None,
         checkout_observation:if allowed {"pending"} else {"unavailable_or_unpinned"}.into(),
-        source_attribution:"not_attributed_to_ticket".into(),
+        source_attribution:if applied_file_writes>0 {
+            "native_scoped_file_write_receipts_only"
+        } else {
+            "not_attributed_to_ticket"
+        }.into(),
         test_execution_verified:false,ci_result_verified:false,
         external_delivery_verified:false,
         checked_at:storage::now(),read_only:true,
@@ -185,6 +212,30 @@ pub(crate) fn headless_inspect(database_path:&Path,ticket_id:&str)->Result<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn real_scoped_write_receipts_are_tied_to_the_exact_root_and_block_uncertain_delivery() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_work_items(ticket_id TEXT NOT NULL,child_ticket_id TEXT);
+             CREATE TABLE sa_worker_write_receipts(ticket_id TEXT NOT NULL,state TEXT NOT NULL);
+             INSERT INTO sa_work_items VALUES('root','child-a');
+             INSERT INTO sa_work_items VALUES('root','child-b');
+             INSERT INTO sa_work_items VALUES('other','child-c');
+             INSERT INTO sa_worker_write_receipts VALUES('root','applied');
+             INSERT INTO sa_worker_write_receipts VALUES('child-a','applied');
+             INSERT INTO sa_worker_write_receipts VALUES('child-a','reserved');
+             INSERT INTO sa_worker_write_receipts VALUES('child-b','uncertain');
+             INSERT INTO sa_worker_write_receipts VALUES('child-b','failed');
+             INSERT INTO sa_worker_write_receipts VALUES('child-c','applied');",
+        ).unwrap();
+        let (applied,uncertain)=scoped_write_receipts(&db,"root").unwrap();
+        assert_eq!((applied,uncertain),(2,2));
+        assert_eq!(scoped_write_receipts(&db,"other").unwrap(),(1,0));
+        assert_eq!(scoped_write_receipts(&db,"absent").unwrap(),(0,0));
+        assert_eq!(classify("completed",2,2,uncertain),"partially_verified");
+        assert_eq!(classify("completed",2,2,0),"native_complete_delivery_unverified");
+    }
+
     #[test]
     fn delivery_state_never_claims_a_verified_release_without_independent_evidence() {
         assert_eq!(classify("completed",3,3,0),"native_complete_delivery_unverified");

@@ -1971,6 +1971,15 @@ pub(crate) fn has_task_assignment_history(store: &Store, session_id: &str) -> Re
 pub(crate) fn headless_cancelled_assignments(
     store: &Store, active_sessions: &[String],
 ) -> Result<Vec<String>> {
+    headless_cancelled_assignments_with_pause(
+        store, active_sessions, crate::feature_controls::get().bots_paused,
+    )
+}
+
+// Inject the pause state to test native cancellation without changing global settings.
+fn headless_cancelled_assignments_with_pause(
+    store: &Store, active_sessions: &[String], bots_paused: bool,
+) -> Result<Vec<String>> {
     if active_sessions.is_empty() {
         return Ok(Vec::new());
     }
@@ -1984,10 +1993,11 @@ pub(crate) fn headless_cancelled_assignments(
             LEFT JOIN bots coordinator ON coordinator.id=o.coordinator_bot_id
             LEFT JOIN sessions s ON s.id=a.session_id
             WHERE a.session_id=?1
-              AND (a.state IN ('stopped','interrupted')
+              AND (a.state!='running'
                    OR t.state IN ('stopped','interrupted')
                    OR (a.state='running' AND (
-                       t.state!='running'
+                       ?4=1
+                       OR t.state!='running'
                        OR t.active_assignment_id IS NULL
                        OR t.active_assignment_id!=a.id
                        OR m.ticket_id IS NULL
@@ -2016,7 +2026,7 @@ pub(crate) fn headless_cancelled_assignments(
     let now = storage::now();
     for session_id in active_sessions {
         let cancelled_native: bool = stmt.query_row(
-            params![session_id, now, MAX_ASSIGNMENT_RUN_MS], |row| row.get(0),
+            params![session_id, now, MAX_ASSIGNMENT_RUN_MS, i64::from(bots_paused)], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
         if cancelled_native && !cancelled.contains(session_id) {
             cancelled.push(session_id.clone());
@@ -5740,6 +5750,52 @@ mod tests {
                 &store, &ordinary,
             ).is_ok(), "ordinary bot paths must not inherit task revocation: {scenario}");
         }
+    }
+
+    #[test]
+    fn headless_poll_immediately_fences_settled_and_paused_task_handles_only() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, admitted) = admit(
+            &mut store, &cfg.id, "Finish without a lingering provider handle",
+            "headless-completion-lease", false,
+        ).unwrap();
+        assert!(admitted);
+        let task_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let worker = bots::get(&store, "worker").unwrap();
+        let ordinary = bots::thread_session(
+            &store, &worker, "desktop", "ordinary-headless-poll",
+            "Unrelated ordinary chat",
+        ).unwrap().0;
+        let handles = vec![ordinary.clone(), task_session.clone(), task_session.clone()];
+
+        assert!(headless_cancelled_assignments_with_pause(
+            &store, &handles, false,
+        ).unwrap().is_empty(), "healthy task and ordinary chat remain live");
+        assert_eq!(headless_cancelled_assignments_with_pause(
+            &store, &handles, true,
+        ).unwrap(), vec![task_session.clone()], "a global pause stops only task-owned providers");
+        assert!(headless_cancelled_assignments_with_pause(
+            &store, &[ordinary.clone()], true,
+        ).unwrap().is_empty(), "ordinary sessions keep their independent cancellation path");
+
+        // A provider can retain a live handle after its native Assignment
+        // has settled; late turns must not continue that finished task.
+        assert!(on_run_finished(&store, &task_session, true, "Coordinator plan recorded").unwrap());
+        let state: String = store.db.query_row(
+            "SELECT state FROM sa_assignments WHERE session_id=?1",
+            [&task_session], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(state, "finished");
+        assert_eq!(headless_cancelled_assignments_with_pause(
+            &store, &handles, false,
+        ).unwrap(), vec![task_session.clone()]);
+        assert_eq!(headless_cancelled_assignments_with_pause(
+            &store, &handles, false,
+        ).unwrap(), vec![task_session], "polling remains read-only and deduplicated");
+        assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(
+            &store, &ordinary,
+        ).is_ok(), "task settlement cannot alter ordinary bot permissions");
     }
 
     #[test]

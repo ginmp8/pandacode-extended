@@ -536,7 +536,7 @@ mod tests {
              CREATE TABLE sa_demand_plans(ticket_id TEXT,state TEXT,created_at INTEGER,
                  policy_revision INTEGER,ticket_revision INTEGER);
              CREATE TABLE sa_tickets(id TEXT,orchestration_id TEXT,state TEXT,
-                 active_assignment_id TEXT,policy_revision INTEGER,project_id TEXT);
+                 active_assignment_id TEXT,policy_revision INTEGER,project_id TEXT,actor TEXT);
              CREATE TABLE sa_mandates(ticket_id TEXT,revoked INTEGER,expires_at INTEGER,
                  policy_revision INTEGER,project_id TEXT,actor TEXT,
                  allowed_tools TEXT,allowed_side_effects INTEGER);
@@ -559,7 +559,7 @@ mod tests {
         for (index,count) in [(0,31),(1,1),(2,1)] {
             let root=format!("root-{index}");
             db.execute(
-                "INSERT INTO sa_tickets VALUES(?1,'team','queued',NULL,1,'project')",
+                "INSERT INTO sa_tickets VALUES(?1,'team','queued',NULL,1,'project','local-user')",
                 [&root],
             ).unwrap();
             db.execute(

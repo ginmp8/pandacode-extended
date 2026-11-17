@@ -404,7 +404,7 @@ fn create_plan(store:&Store,ticket_id:&str,revision:i64,items:&[WorkItemInput])-
         if team_version!=snapshot.team_version ||
             policy_revision!=snapshot.policy.policy_revision ||
             project_id!=snapshot.project_id ||
-            checkout_root!=root.to_string_lossy().as_ref() ||
+            checkout_root!=root.to_string_lossy().into_owned() ||
             !crate::workspace::scoped_writes_supported() {
             return Err("Initial Demand file scope no longer matches its immutable Team or checkout.".into());
         }
@@ -824,7 +824,7 @@ pub async fn superagent_authorize_demand_work_item_writes(
     }
     super::write_grants::validate_paths(&allowed_paths)?;
     let pending=|store:&Store|->Result<Vec<String>> {
-        let plan=inspect(store,ticket_id)?.ok_or("Demand plan not found.")?;
+        let plan=inspect(store,&ticket_id)?.ok_or("Demand plan not found.")?;
         if plan.ticket_revision!=expected_revision || plan.state!="active" {
             return Err("Demand plan changed before file-write authorization.".into());
         }

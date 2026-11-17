@@ -111,6 +111,20 @@ pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Res
         "SELECT payload_sha256,state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key=?2",
         params![ticket_id,key],|r|Ok((r.get(0)?,r.get(1)?))
     ).optional().map_err(|e|e.to_string())?;
+    // An unknown outcome for a different effect can change the meaning of
+    // subsequent operations. Do not stage a new remote action for this Ticket
+    // until that uncertainty is independently reconciled. Repeated reads of
+    // the same idempotency key still return its original status.
+    if existing.is_none() {
+        let uncertain_other: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND effect_key<>?2 AND state='uncertain')",
+            params![ticket_id,key], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if uncertain_other {
+            return Err("Another external effect has an uncertain outcome; reconcile it before reserving new effects.".into());
+        }
+    }
     let result=match existing {
         Some((previous,_)) if previous!=digest =>
             return Err("Effect key already used for different payload.".into()),
@@ -891,6 +905,46 @@ mod tests{
         ).unwrap();
         assert_eq!(reserve(&store,&id,"github:issue:duplicate",b"body").unwrap(),
             Reservation::Reserved);
+    }
+
+    #[test]
+    fn unrelated_new_effect_is_fenced_until_uncertain_remote_outcome_is_reconciled() {
+        let (store, id) = fixture();
+        // Test-only receipt authority. Production task effects remain denied
+        // until native scoped grants and effect-time enforcement exist.
+        store.db.execute(
+            "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",
+            [&id],
+        ).unwrap();
+        let original = "github:comment:original";
+        let next = "github:comment:next";
+        assert_eq!(reserve(&store, &id, original, b"original-body").unwrap(),
+            Reservation::Reserved);
+        mark_uncertain(&store, &id, original).unwrap();
+        assert_eq!(reserve(&store, &id, original, b"original-body").unwrap(),
+            Reservation::RequiresReconciliation,
+            "same idempotency key must remain inspectable without replay");
+        assert!(reserve(&store, &id, next, b"next-body").unwrap_err()
+            .contains("uncertain outcome"));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_effect_receipts WHERE ticket_id=?1",
+            [&id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 1, "rejected reservation cannot leave a durable receipt");
+        // Simulate an independently verified provider result in this fixture;
+        // this primitive does not itself contact or verify any remote service.
+        acknowledge_applied(&store, &id, original, b"original-body").unwrap();
+        assert_eq!(reserve(&store, &id, next, b"next-body").unwrap(),
+            Reservation::Reserved);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let history = receipt_history(&reopened, &id, 10).unwrap();
+        assert_eq!(history.len(), 2);
+        assert!(history.iter().any(|receipt|
+            receipt.effect_key == original && receipt.state == "applied"));
+        assert!(history.iter().any(|receipt|
+            receipt.effect_key == next && receipt.state == "uncertain"),
+            "restart must quarantine the new pending action rather than replay");
     }
 
     #[test]

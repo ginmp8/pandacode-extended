@@ -2338,7 +2338,7 @@ mod tests {
                 // determines which exact thread is correlated.
                 "payload": {"action": action,
                     "issue": {"number": 41},
-                    "pull_request": {"number": 71},
+                    "pull_request": {"number": 71, "merged": (*action == "merged")},
                     "label": {"name": "untrusted-content"}}
             }]);
             let first = poll_authenticated_events(&store, &active, 0, &raw).unwrap();

@@ -237,16 +237,21 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
           ? '<p role="status">Authenticated S2 first-wave trigger: ' +
             escape(triggers.join(', ').replaceAll('_', ' ')) +
             (freshLeafCount > 0
-              ? '. Fresh native second-wave reviewers have been admitted; independent receipts and root approval are still pending.</p>'
+              ? (verified && escalationCorrelated
+                ? '. Independent second-wave evidence and root native pass verified.</p>'
+                : '. Fresh native second-wave reviewers have been admitted; independent receipts and root approval are still pending.</p>')
               : '. Fresh independent child reviewers are required; admission and root approval remain pending.</p>')
           : '';
+        const rootEscalationVerified = Boolean(verified && escalationCorrelated);
         const hasFreshWave = child.status === 'child_escalation_reviewing'
           || child.status === 'child_challenge_reviewing' || freshLeafCount > 0;
         const escalationHtml = hasFreshWave && !s3
           ? '<p role="status">Fresh native child escalation: round 2 admitted ' +
             escape(String(freshLeafCount)) + ' of ' + escape(String(child.requiredLeafReviewers)) +
             ' reviewers. ' + (escalationCorrelated
-              ? 'Fresh child evidence is recorded separately; root approval remains pending.'
+              ? (rootEscalationVerified
+                ? 'Fresh child evidence and root native pass are verified.'
+                : 'Fresh child evidence is recorded separately; root approval remains pending.')
               : 'First-wave receipts do not verify second-wave completion or authorize root approval.') + '</p>'
           : '';
         const challengeHtml = hasFreshWave && s3
@@ -269,8 +274,9 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
             : '';
         const escalationReceiptHtml = !s3 && escalationReceipt
           ? (escalationCorrelated
-            ? '<p>Native second-wave child evidence recorded (root approval pending): minimum score ' +
-              escape(escalationReceipt.lowestScore.toFixed(1)) + '/10 · ' +
+            ? '<p>Native second-wave child evidence recorded (' +
+              (rootEscalationVerified ? 'root native pass verified' : 'root approval pending') +
+              '): minimum score ' + escape(escalationReceipt.lowestScore.toFixed(1)) + '/10 · ' +
               escape(String(freshIds.length)) + ' independent fresh reviewer identifiers.</p>' +
               '<ul aria-label="Fresh child reviewer evidence identifiers">' +
               freshIds.map(id => '<li>' + escape(id) + '</li>').join('') + '</ul>'

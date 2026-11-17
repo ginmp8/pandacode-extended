@@ -4431,6 +4431,33 @@ fn paused_nested_root_resume_rejects_revoked_native_leaf_grant_before_state_chan
         save(&store, &mut root).unwrap();
         (serde_json::to_value(root).unwrap(), original_worktree)
     };
+    // An absent native ownership row is invisible to a descendant-only scan.
+    // Resume must deny this without changing the paused root or its cycle.
+    let (leaf_parent, leaf_worker): (String, String) = {
+        let store = state.store.lock().unwrap();
+        store.db.query_row(
+            "SELECT parent_session_id,worker_id FROM architect_workers WHERE session_id=?1",
+            [&launch.sid], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap()
+    };
+    {
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.db.execute(
+            "DELETE FROM architect_workers WHERE parent_session_id=?1 AND session_id=?2",
+            rusqlite::params![&leaf_parent, &launch.sid],
+        ).unwrap(), 1);
+    }
+    let denied = control_state(&state, &sid, "resume").unwrap_err();
+    assert!(denied.contains("child leaf ownership roster changed"), "{denied}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before,
+        "missing native ownership must not mutate the paused root");
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",
+            rusqlite::params![&leaf_parent, &leaf_worker, &launch.sid],
+        ).unwrap();
+    }
     // Native leaf scope is revalidated before Resume can change root state.
     {
         let store = state.store.lock().unwrap();
@@ -7240,7 +7267,7 @@ fn nested_m5_unforced_s2_low_root_score_admits_only_authenticated_fresh_root_rev
 }
 
 #[test]
-fn nested_m4_triggered_s2_records_authentic_second_wave_evidence_without_parent_approval() {
+fn nested_m4_triggered_s2_requires_authenticated_evidence_before_terminal_pass() {
     let (state, sid) = state_fixture();
     {
         let store = state.store.lock().unwrap();
@@ -7318,8 +7345,8 @@ fn nested_m4_triggered_s2_records_authentic_second_wave_evidence_without_parent_
         json!({"summary":"Persist native triggered child evidence"}),
         &std::sync::atomic::AtomicBool::new(false),
     ).unwrap();
-    assert_eq!(pending["completed"], false,
-        "a verified second wave must not self-approve its hierarchical root");
+    assert_eq!(pending["completed"], true,
+        "explicit root completion requires independently authenticated second-wave callbacks");
     let store = state.store.lock().unwrap();
     let root = load(&store, &sid).unwrap().unwrap();
     let children = child_council::inspect(&store, &root).unwrap();
@@ -7339,7 +7366,8 @@ fn nested_m4_triggered_s2_records_authentic_second_wave_evidence_without_parent_
     assert_eq!(first_ids.len(), 2);
     assert_eq!(second_ids.len(), 2);
     assert!(first_ids.is_disjoint(&second_ids));
-    assert!(!verified_council_pass(&store, &root));
+    assert!(verified_council_pass(&store, &root),
+        "root completion is backed by current child receipts and native leaf callbacks");
 
     let mut altered = load(&store, &security_id).unwrap().unwrap();
     let leaf = altered.workers.iter_mut()
@@ -7349,6 +7377,8 @@ fn nested_m4_triggered_s2_records_authentic_second_wave_evidence_without_parent_
     save(&store, &mut altered).unwrap();
     assert!(child_council::inspect(&store, &root).is_err(),
         "a forged second-wave score must revoke the persisted native receipt");
+    assert!(!verified_council_pass(&store, &root),
+        "a completed root cannot keep approval after native receipt revocation");
     altered.workers.iter_mut()
         .find(|leaf| leaf.council.as_ref().is_some_and(|seat| seat.round == 2))
         .unwrap().council.as_mut().unwrap().score = Some(9.8);
@@ -7357,4 +7387,6 @@ fn nested_m4_triggered_s2_records_authentic_second_wave_evidence_without_parent_
         .find(|child| child.bot_id == "security-child").unwrap()
         .verified_escalation_receipt.is_some(),
         "only restoring the original callback-bound score revalidates the persisted receipt");
+    assert!(verified_council_pass(&store, &root),
+        "the original callback-bound receipt revalidates the terminal gate");
 }

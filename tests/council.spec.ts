@@ -612,6 +612,53 @@ test('child S2 inspector distinguishes a native second-wave receipt from termina
 });
 
 
+test('verified M4 S2 inspector distinguishes authenticated root completion from pending child evidence', async ({ page }) => {
+  const nativeReceipt = {
+    rootCycleId: 'root:1000', childSessionId: 'child-task', botId: 'security-child',
+    objectiveSha256: 'frozen-objective', policySha256: 'frozen-policy',
+    childConfigSha256: 'frozen-child', lowestScore: 9.6, leafWorkerIds: ['fresh-a', 'fresh-b'],
+  };
+  const inspection = {
+    sessionId: 'root', mode: 'm4', strategy: 'escalated', forceEscalation: false,
+    cycleStartedAt: 1000, teamRevision: 22,
+    status: { state: 'passed', round: 1, lowest: 9.6, target: 9.0, stale: false },
+    verifiedPass: true,
+    verifiedCompletion: { sessionId: 'root', cycleId: 'root:1000', teamRevision: 22, round: 1, lowest: 9.6 },
+    criteria: [], attempts: [],
+    reservedChildren: [{
+      botId: 'security-child', childSessionId: 'child-task', rootCycleId: 'root:1000',
+      requiredLeafReviewers: 2, status: 'child_escalation_evidence_ready_root_pending',
+      automaticEscalationTriggers: ['below_target'],
+      verifiedEscalationReceipt: nativeReceipt,
+      leafAttempts: [
+        { workerId: 'first-a', round: 1 },
+        { workerId: 'first-b', round: 1 },
+        { workerId: 'fresh-a', round: 2 },
+        { workerId: 'fresh-b', round: 2 },
+      ],
+    }],
+  };
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  let child = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await child.locator('summary').click();
+  await expect(child).toContainText('root native pass verified');
+  await expect(panel(page)).toContainText('Verified native pass');
+
+  // A stale cycle cannot turn an independently correlated child receipt into
+  // a successful root verdict.
+  inspection.verifiedCompletion.cycleId = 'another-task:1000';
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  child = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await child.locator('summary').click();
+  await expect(child).toContainText('root approval pending');
+  await expect(panel(page)).toContainText('Native pass not verified');
+  await expect(child).not.toContainText('root native pass verified');
+});
+
 test('native M4 S3 child challenge inspector correlates distinct phases without approving the root', async ({ page }) => {
   const receipt = {
     rootCycleId: 'cycle:1000', childSessionId: 'task-owned-child', botId: 'child-reviewer',

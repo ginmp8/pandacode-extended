@@ -336,6 +336,31 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
         {
             return Err("child_council_revoked: child ownership or unique reservation changed; start a fresh Council task.".into());
         }
+        // A paused root must not adopt a child whose persisted reviewer
+        // ownership rows have been deleted, duplicated or substituted. The
+        // descendant loop sees only existing rows and misses an absent owner.
+        let child_team = super::load(store, &child_id)?
+            .ok_or("child_council_revoked: task-owned child team is missing.")?;
+        let mut worker_ids = HashSet::new();
+        let mut leaf_ids = HashSet::new();
+        let valid_leaf_roster = child_team.workers.iter().all(|leaf| {
+            !leaf.id.is_empty() && !leaf.session_id.is_empty()
+                && worker_ids.insert(leaf.id.as_str())
+                && leaf_ids.insert(leaf.session_id.as_str())
+                && store.db.query_row(
+                    "SELECT COUNT(*) FROM architect_workers
+                     WHERE parent_session_id=?1 AND worker_id=?2 AND session_id=?3",
+                    params![&child_id, &leaf.id, &leaf.session_id],
+                    |row| row.get::<_, i64>(0),
+                ).ok() == Some(1)
+        });
+        let owned_leaf_count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_workers WHERE parent_session_id=?1",
+            [&child_id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if !valid_leaf_roster || owned_leaf_count != child_team.workers.len() as i64 {
+            return Err("child_council_revoked: child leaf ownership roster changed; start a fresh Council task.".into());
+        }
         let session = store.session(&child_id)?;
         if session.project_id != root_session.project_id
             || session.worktree_path != root_session.worktree_path

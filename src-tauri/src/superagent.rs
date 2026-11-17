@@ -3565,6 +3565,17 @@ fn admit_role_with_grant_inner(
     )?;
     // Team strategy is pinned from the last immutable config version; a new
     // Ticket must never silently reset its retry/time/resource settings.
+    if configured_snapshot.policy.autonomy == "full_auto" &&
+        (!config.council_required || config.reviewer_bot_ids.len() < 2) {
+        return Err("Full Auto is not authorized without independent native Council review.".into());
+    }
+    if configured_snapshot.policy.autonomy == "approval" && config.council_required {
+        return Err("With Approval cannot bypass its human acceptance gate.".into());
+    }
+    if !matches!(configured_snapshot.policy.autonomy.as_str(), "off" | "approval" | "full_auto") {
+        return Err("Ticket admission rejected an unknown execution policy.".into());
+    }
+    team_snapshot.policy.autonomy = configured_snapshot.policy.autonomy;
     team_snapshot.policy.strategy = configured_snapshot.policy.strategy;
     team_snapshot.policy.max_concurrent_tasks = configured_snapshot.policy.max_concurrent_tasks;
     team_snapshot.policy.max_attempts_per_assignment = configured_snapshot.policy.max_attempts_per_assignment;
@@ -4669,11 +4680,17 @@ fn duplicate_configuration(
          VALUES(?1,?2,?3,?4,?5,?6,?6)",
         params![id,name,coordinator.id,source.worker_bot_ids[0],project_id,now],
     ).map_err(|e| e.to_string())?;
-    let snapshot = make_team_snapshot(
+    let mut snapshot = make_team_snapshot(
         &tx,&id,1,name,project_id,1,&source.coordinator_bot_id,
         &source.worker_bot_ids,&source.reviewer_bot_ids,source.council_required,
         TeamSnapshotProvenance::Native,
     )?;
+    // A duplicate retains the selected mode and bounded strategy, but never
+    // inherits source Tickets, mandates, review cycles or effect authority.
+    snapshot.policy.autonomy = pinned.policy.autonomy;
+    snapshot.policy.strategy = pinned.policy.strategy;
+    snapshot.policy.max_concurrent_tasks = pinned.policy.max_concurrent_tasks;
+    snapshot.policy.max_attempts_per_assignment = pinned.policy.max_attempts_per_assignment;
     insert_team_version(&tx,&snapshot)?;
     tx.commit().map_err(|e| e.to_string())?;
     configuration(store,&id)
@@ -4750,6 +4767,16 @@ fn change_enabled(
         // A requested wider hard parallel limit or unmetered cost/token ceiling
         // must fail closed, rather than pretending to enforce an unsupported cap.
         let configured=load_team_version_snapshot(&store.db,orchestration_id,current.team_version)?;
+        if configured.policy.autonomy == "full_auto" &&
+            (!current.council_required || current.reviewer_bot_ids.len() < 2) {
+            return Err("Full Auto requires a versioned native Council with at least two reviewers.".into());
+        }
+        if configured.policy.autonomy == "approval" && current.council_required {
+            return Err("With Approval needs human acceptance; disable automatic Council finalization.".into());
+        }
+        if !matches!(configured.policy.autonomy.as_str(), "off" | "approval" | "full_auto") {
+            return Err("Unrecognized Team execution policy; admission denied.".into());
+        }
         if configured.policy.max_concurrent_tasks!=1
             || configured.policy.strategy.token_ceiling.is_some()
             || configured.policy.strategy.estimated_cost_ceiling_minor.is_some()
@@ -5045,9 +5072,17 @@ fn update_configuration_roles_with_policy(
     ).map_err(|e| e.to_string())?;
     if changed!=1 { return Err("Team changed concurrently; reload before editing future-only policy.".into()); }
     let previous_snapshot = load_team_version_snapshot(&tx,id,current.team_version)?;
+    if previous_snapshot.policy.autonomy == "full_auto" &&
+        (!council_required || reviewer_bot_ids.len() < 2) {
+        return Err("Disable Full Auto before removing its independent Council reviewers.".into());
+    }
+    if previous_snapshot.policy.autonomy == "approval" && council_required {
+        return Err("With Approval must retain human acceptance; change the execution mode before enabling native Council finalization.".into());
+    }
     let mut snapshot = make_team_snapshot(&tx,id,next_version,name,&project_id,next_revision,
         &coordinator.id,&worker_bot_ids,&reviewer_bot_ids,council_required,
         TeamSnapshotProvenance::Native)?;
+    snapshot.policy.autonomy = previous_snapshot.policy.autonomy;
     snapshot.policy.strategy = previous_snapshot.policy.strategy;
     snapshot.policy.max_concurrent_tasks = previous_snapshot.policy.max_concurrent_tasks;
     snapshot.policy.max_attempts_per_assignment = previous_snapshot.policy.max_attempts_per_assignment;

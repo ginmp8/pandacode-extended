@@ -527,7 +527,7 @@ $app.innerHTML = `<div class="workspace" data-tauri-drag-region>
     <section id="superagent-workspace" aria-label="Orchestrations" hidden>
       <header class="sa-workspace-header">
         <div class="sa-workspace-trail"><button type="button" data-action="superagent-back">Back to Bots</button><span aria-hidden="true">/</span><h1>Orchestrations</h1></div>
-        <p>Reusable Teams and their native Demands. Manual read-only execution only until scoped authorization is available.</p>
+        <p>Build reusable Teams, configure Full Auto or human approval, and follow each Demand in its bot's native chat.</p>
       </header>
       <div id="superagent-host"><p role="status">Loading orchestrations…</p></div>
     </section>
@@ -6313,6 +6313,28 @@ async function showSuperagent(): Promise<void> {
   workspace.hidden = false;
   $('.workspace').classList.add('superagent-open');
   const host = workspace.querySelector<HTMLElement>('#superagent-host')!;
+  // Native SuperAgent assignments are regular bot sessions. The workspace
+  // only navigates to an existing bot-owned thread; it never launches a new
+  // turn or substitutes a separate transcript for the bot's real chat.
+  if (!host.dataset.chatNavigationBound) {
+    host.dataset.chatNavigationBound = 'true';
+    host.addEventListener('superagent-open-bot-chat', event => {
+      const detail = (event as CustomEvent<{sessionId?:string;botId?:string}>).detail;
+      if (!detail?.sessionId || !detail.botId) return;
+      void run((async () => {
+        const bot = await call<import('./bots').BotDetail>('bot_detail',{
+          botId:detail.botId,
+        });
+        if (!bot.threads.some(thread => thread.channelId === 'superagent' &&
+            thread.sessionId === detail.sessionId)) {
+          throw new Error('The native bot conversation is no longer available.');
+        }
+        closeSuperagent(false);
+        await reloadSessions();
+        await selectSession(detail.sessionId!,true);
+      })());
+    });
+  }
   try {
     if (superagentMount) await superagentMount.refresh();
     else {

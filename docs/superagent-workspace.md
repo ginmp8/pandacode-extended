@@ -52,6 +52,13 @@ The global Demands workspace can filter by the exact native project ID already a
 - **Open demand:** resolves the original Team, fetches the exact Ticket
   when outside the Team's latest 50, verifies its Team ownership, then offers
   the established native Ticket controls.
+- **Admitted Team configuration:** the native Ticket snapshot compares its original
+  Mandate policy revision with the current Team policy inside one read transaction,
+  while retaining the frozen original role identities, models and assigned Skill IDs.
+  The Demand inspector displays both revisions and the original configuration,
+  not current bot names or local checkout paths. Drift never changes admission
+  authority, authorizes a tool or establishes actual Skill invocation. Legacy
+  Tickets without a recorded profile explicitly show unavailable provenance.
 - **Native Assignment inspector:** the Ticket snapshot includes transactional
   native Assignment insights: current linkage, recorded result presence, revocation,
   bounded attempt budget and timestamps. No provider result content is displayed.

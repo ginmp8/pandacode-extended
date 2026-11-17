@@ -808,6 +808,9 @@ pub struct TaskSnapshot {
     /// Legacy Tickets admitted before schema v46 report None.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admitted_profile: Option<roster::AdmittedTeamProfile>,
+    /// Read-side policy drift only: a Team edit cannot reauthorize or rewrite a Demand.
+    pub current_team_policy_revision: i64,
+    pub team_policy_changed_since_admission: bool,
     /// Snapshot explanation only. Provider admission and native acceptance
     /// always recheck their own authority, revision and effect state.
     pub finalization_gate: String,
@@ -824,6 +827,11 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let ticket = get_ticket(store, ticket_id)?;
     let native_mandate = mandate(store, ticket_id)?;
+    // Compare both revisions inside this same read transaction. This is not a
+    // provider/tool authorization decision and cannot advance task state.
+    let current_team_policy_revision = configuration(store, &ticket.orchestration_id)?.policy_revision;
+    let team_policy_changed_since_admission =
+        current_team_policy_revision != native_mandate.policy_revision;
     let native_assignments = assignments(store, ticket_id, limit)?;
     let observed_at = storage::now();
     let attempt_insights = native_assignments.iter().map(|a| {
@@ -853,6 +861,8 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
         "native_recheck_required"
     };
     let result = TaskSnapshot {
+        current_team_policy_revision,
+        team_policy_changed_since_admission,
         finalization_gate: finalization_gate.to_owned(),
         unresolved_external_effects,
         council: council_adapter::inspect(store, &ticket)?,

@@ -58,8 +58,19 @@ interface CouncilObservation {
   nativeStatus: string; nativeRound: number; nativeStale: boolean;
   nativePassVerified: boolean; ticketArtifactBound: boolean;
 }
+interface AdmittedMemberProfile {
+  role: string; position: number; botId: string; projectId: string;
+  provider: string; model: string; mode: string; reasoningEffort: string;
+  assignedSkillIds: string[];
+}
+interface AdmittedTeamProfile {
+  policyRevision: number; capturedAt: number; members: AdmittedMemberProfile[];
+}
 interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
+  admittedProfile?: AdmittedTeamProfile | null;
+  currentTeamPolicyRevision?: number;
+  teamPolicyChangedSinceAdmission?: boolean;
   attemptInsights?: AssignmentInsight[];
   activity: Activity[]; council?: CouncilObservation | null;
   finalizationGate?: 'not_pending' | 'native_recheck_required' | 'council_required' | 'effects_unresolved';
@@ -261,6 +272,32 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             : ticketDetails.finalizationGate === 'native_recheck_required'
               ? 'Manual decision possible only after native authorization recheck.'
               : 'No finalization decision pending.') + '</dd></dl>' +
+        '<section class="sa-admitted-profile" role="region" aria-label="Admitted Team configuration">' +
+        '<h5>Team configuration at Demand admission</h5>' +
+        '<p>Historical native configuration, not provider capability, a tool grant, Skill invocation or Council approval. ' +
+        'Editing the reusable Team cannot rewrite this Demand.</p>' +
+        (ticketDetails.admittedProfile &&
+         ticketDetails.admittedProfile.policyRevision === ticketDetails.mandate.policyRevision
+          ? '<p>Admitted policy revision ' + ticketDetails.admittedProfile.policyRevision +
+            ' · Captured ' + safe(activityTime(ticketDetails.admittedProfile.capturedAt)) +
+            ' · Current Team policy revision ' +
+            safe(ticketDetails.currentTeamPolicyRevision ?? 'unavailable') + ' · ' +
+            (ticketDetails.teamPolicyChangedSinceAdmission === true
+              ? 'Team policy changed after admission; original Demand remains pinned.'
+              : ticketDetails.teamPolicyChangedSinceAdmission === false
+                ? 'Team policy revision unchanged since admission.'
+                : 'Native policy drift comparison unavailable.') + '</p>' +
+            '<ol>' + ticketDetails.admittedProfile.members.map(member =>
+              '<li><strong>' + safe(member.role) + ' ' + (member.position + 1) +
+              ' · Bot ID ' + safe(member.botId) + '</strong>' +
+              ' · Project ID ' + safe(member.projectId) +
+              ' · Harness ' + safe(member.provider) + ' · Model ' + safe(member.model) +
+              ' · Mode ' + safe(member.mode) +
+              ' · Reasoning ' + safe(member.reasoningEffort || 'not specified') +
+              ' · Assigned Skills (not invocation evidence): ' +
+              safe(member.assignedSkillIds?.join(', ') || 'none') + '</li>').join('') + '</ol>'
+          : '<p>Legacy or inconsistent admission snapshot unavailable; no role, model or Skill provenance inferred.</p>') +
+        '</section>' +
         '<h5>Assignment attempts</h5><ul>' +
         (ticketDetails.assignments.map(item => '<li>Attempt ' + item.attempt + ' · ' +
           safe(item.state) + ' · Bot ' + safe(botName(item.botId)) + ' · Session <code>' +

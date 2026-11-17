@@ -2139,3 +2139,63 @@ test('desktop native Ticket activity pages are keyset-bound, filterable and neve
   expect(calls.some(item=>/submit|dispatch|accept|stop|grant|reserve/.test(item.command))).toBe(false);
 });
 
+
+test('Demand inspector preserves native admitted Team identity across revisions without exposing paths', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-admission-history-test'; document.body.appendChild(host);
+    const calls:string[]=[];
+    (window as unknown as {admissionHistoryCalls:()=>string[]}).admissionHistoryCalls=()=>calls;
+    const ticket={id:'frozen-ticket',orchestrationId:'team',objective:'Historical policy',
+      state:'completed',revision:5,evidence:'recorded'};
+    mountSuperagent(host,async(command) => {
+      calls.push(command);
+      if(command==='bots_list') return [
+        {id:'lead',name:'Renamed Lead',paused:false},
+        {id:'new-worker',name:'Replacement Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list') return [{
+        id:'team',name:'Updated Team',coordinatorBotId:'lead',workerBotId:'new-worker',
+        enabled:false,policyRevision:5,
+      }] as never;
+      if(command==='superagent_tickets') return [ticket] as never;
+      if(command==='superagent_source_thread_links') return [] as never;
+      if(command==='superagent_snapshot') return {
+        ticket,
+        mandate:{actor:'operator',authorizationId:'frozen',policyRevision:2,
+          projectId:'project-old',expiresAt:1800000000000,revoked:true,
+          allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[],
+        currentTeamPolicyRevision:5,teamPolicyChangedSinceAdmission:true,
+        admittedProfile:{policyRevision:2,capturedAt:1800000000000,members:[
+          {role:'coordinator',position:0,botId:'lead',projectId:'project-old',
+            provider:'codex',model:'original-lead-model',mode:'plan',reasoningEffort:'high',
+            assignedSkillIds:[],projectPath:'/private/hidden-coordinator'},
+          {role:'worker',position:0,botId:'former-worker',projectId:'project-old',
+            provider:'claude',model:'original-worker-model',mode:'plan',reasoningEffort:'medium',
+            assignedSkillIds:['verification'],projectPath:'/private/hidden-worker'},
+        ]},
+        finalizationGate:'not_pending',unresolvedExternalEffects:0,
+      } as never;
+      throw Error('Unexpected native call: '+command);
+    });
+  });
+  const host=page.locator('#sa-admission-history-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  const pane=host.getByRole('region',{name:'Admitted Team configuration'});
+  await expect(pane).toContainText('Admitted policy revision 2');
+  await expect(pane).toContainText('Current Team policy revision 5');
+  await expect(pane).toContainText('Team policy changed after admission');
+  await expect(pane).toContainText('Bot ID former-worker');
+  await expect(pane).toContainText('Model original-worker-model');
+  await expect(pane).toContainText('Assigned Skills (not invocation evidence): verification');
+  await expect(pane).not.toContainText('Replacement Worker');
+  await expect(host).not.toContainText('/private/hidden-worker');
+  await expect(host).not.toContainText('/private/hidden-coordinator');
+  const calls=await page.evaluate(() =>
+    (window as unknown as {admissionHistoryCalls:()=>string[]}).admissionHistoryCalls());
+  expect(calls.some(command=>/submit|dispatch|accept|effect|grant|reserve/.test(command))).toBe(false);
+});

@@ -1387,6 +1387,77 @@ mod tests {
             vec!["reviewer"]);
     }
 
+
+    #[test]
+    fn native_ticket_snapshot_preserves_admitted_policy_after_team_changes_and_restart() {
+        let path=std::env::temp_dir().join(format!("sa-admitted-policy-{}.sqlite3",storage::id()));
+        let mut store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('p','Team','/tmp/sa-policy-evidence')",[]
+        ).unwrap();
+        for id in ["lead","worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'p','codex','original-model','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let team=super::super::create_configuration(&store,NewOrchestration {
+            name:"Policy history".into(),
+            coordinator_bot_id:"lead".into(),worker_bot_id:"worker".into(),
+        }).unwrap();
+        let enabled=super::super::change_enabled(
+            &store,&team.id,team.policy_revision,true,
+        ).unwrap();
+        let (ticket,started)=super::super::admit(
+            &mut store,&team.id,"Capture original Team configuration","policy-evidence",false,
+        ).unwrap();
+        assert!(started);
+        let original=super::super::ticket_snapshot(&store,&ticket.id,50).unwrap();
+        assert_eq!(original.current_team_policy_revision,enabled.policy_revision);
+        assert!(!original.team_policy_changed_since_admission);
+        let admitted=original.admitted_profile.unwrap();
+        assert_eq!(admitted.policy_revision,enabled.policy_revision);
+        assert_eq!(admitted.members.len(),2);
+        assert_eq!(admitted.members[1].model,"original-model");
+
+        // Complete the disposable fixture's native records before changing
+        // the reusable Team; never mutate the Ticket's admitted Mandate.
+        store.db.execute(
+            "UPDATE sa_assignments SET state='finished' WHERE ticket_id=?1",
+            [&ticket.id],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_tickets SET state='completed',active_assignment_id=NULL WHERE id=?1",
+            [&ticket.id],
+        ).unwrap();
+        let off=super::super::change_enabled(
+            &store,&team.id,enabled.policy_revision,false,
+        ).unwrap();
+        let updated=set_worker_attempt_limit(&store,&team.id,off.policy_revision,3).unwrap();
+        assert!(updated.policy_revision>admitted.policy_revision);
+        store.db.execute("UPDATE bots SET model='new-model' WHERE id='worker'",[])
+            .unwrap();
+
+        for snapshot in [
+            super::super::ticket_snapshot(&store,&ticket.id,50).unwrap(),
+        ] {
+            assert_eq!(snapshot.current_team_policy_revision,updated.policy_revision);
+            assert!(snapshot.team_policy_changed_since_admission);
+            let frozen=snapshot.admitted_profile.unwrap();
+            assert_eq!(frozen.policy_revision,admitted.policy_revision);
+            assert_eq!(frozen.members[1].model,"original-model");
+            assert_eq!(frozen.members[1].bot_id,"worker");
+            assert!(!snapshot.mandate.allowed_side_effects);
+        }
+        drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        let snapshot=super::super::ticket_snapshot(&reopened,&ticket.id,50).unwrap();
+        assert!(snapshot.team_policy_changed_since_admission);
+        assert_eq!(snapshot.current_team_policy_revision,updated.policy_revision);
+        assert_eq!(snapshot.admitted_profile.unwrap().members[1].model,"original-model");
+    }
+
     #[test]
     fn malformed_persisted_roster_positions_and_primary_aliases_fail_closed() {
         let path=std::env::temp_dir().join(format!("sa-roster-integrity-{}.sqlite3",storage::id()));

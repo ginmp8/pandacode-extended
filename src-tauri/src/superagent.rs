@@ -2140,7 +2140,10 @@ fn checkout_paths_overlap(left: &str, right: &str) -> bool {
     }
     match (canonical_checkout_intent(left), canonical_checkout_intent(right)) {
         (Some(left), Some(right)) => left.starts_with(&right) || right.starts_with(&left),
-        _ => false,
+        // Unknown filesystem identity is not proof of disjoint write scopes.
+        // An invalid path, dangling symlink or denied ancestor must never
+        // let a second provider bypass the native checkout lease.
+        _ => true,
     }
 }
 
@@ -9155,6 +9158,44 @@ mod tests {
         ).unwrap();
         assert_eq!(count,0);
         assert!(admit(&mut store,&config.id,&"x".repeat(MAX_OBJECTIVE_BYTES),"max-accepted",false).is_ok());
+    }
+
+    #[test]
+    fn unresolved_checkout_identity_blocks_native_and_ordinary_session_races() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        // A NUL makes filesystem identity unresolvable on all platforms.
+        // A rejected path must not be interpreted as a separate checkout.
+        let opaque = format!("unknown-{}\0checkout", storage::id());
+        assert!(canonical_checkout_intent(&opaque).is_none());
+        let root = std::env::temp_dir().join(format!("sa-valid-{}", storage::id()));
+        let sibling = std::env::temp_dir().join(format!("sa-other-{}", storage::id()));
+        assert!(!checkout_paths_overlap(&root.to_string_lossy(), &sibling.to_string_lossy()),
+            "Resolvable unrelated checkouts remain independent");
+        assert!(checkout_paths_overlap(&opaque, &root.to_string_lossy()),
+            "Unresolvable checkout identity must fail closed");
+
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('opaque-project','Opaque',?1)",
+            [&opaque],
+        ).unwrap();
+        let ordinary = store.create_session("opaque-project", "codex", "default", "ask").unwrap();
+        assert!(active_manual_conflict(
+            &store, std::slice::from_ref(&ordinary.id), &cfg.worker_bot_id, &cfg.project_id,
+        ).unwrap());
+
+        // Simulate an ordinary provider arriving after the initial Ticket
+        // reservation; the second native admission fence must still deny it.
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Inspect only", "opaque-checkout-race", false,
+        ).unwrap();
+        assert!(launched);
+        let native = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        assert!(guard_run_admission(
+            &store, &native, std::slice::from_ref(&ordinary.id),
+        ).is_err());
+        assert!(guard_run_admission(&store, &ordinary.id, &[]).is_err());
+        fail_launch(&store, &ticket.id, "No concurrent checkout access").unwrap();
     }
 
     #[test]

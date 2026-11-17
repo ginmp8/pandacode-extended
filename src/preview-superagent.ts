@@ -18,7 +18,8 @@ export async function invokeSuperagent<T>(
   // Pure listing must not race the preview's first bots_list seed. Only
   // commands that actually resolve portable bot identities may load bots.
   const needsBots=['superagent_create','superagent_update','superagent_duplicate',
-    'superagent_manifest_export','superagent_manifest_preview','superagent_manifest_import'].includes(command);
+    'superagent_manifest_export','superagent_manifest_preview','superagent_manifest_import',
+    'superagent_preflight'].includes(command);
   const bots=needsBots?await listBots():[];
   const find=(id:string)=>{ const b=bots.find(b=>b.id===id); if(!b)throw Error('Bot no longer exists.'); return b; };
   const configName=(name:string)=>[...configs.values()].find(c=>c.name.toLowerCase()===name.toLowerCase());
@@ -146,6 +147,28 @@ export async function invokeSuperagent<T>(
       const c=get(args.orchestrationId);if(c.enabled||c.policyRevision!==args.expectedRevision||
         (tickets.get(c.id)?.length||0)>0)throw Error('Cannot delete used or enabled preset.');
       configs.delete(c.id);rosters.delete(c.id);value=null;break;
+    }
+    case 'superagent_preflight': {
+      // Sample-mode UI testing only: never claim provider permission or
+      // create a Ticket. Production preflight lives in native Rust.
+      const c=get(args.orchestrationId);
+      const objective=typeof args.objective==='string'?args.objective.trim():'';
+      if(!objective||new TextEncoder().encode(objective).length>16000||objective.includes('\0'))
+        throw Error('A nonempty, bounded objective is required.');
+      const coordinator=find(c.coordinatorBotId),worker=find(c.workerBotId);
+      const coordinated=args.coordinated===true;
+      const selected=coordinated?coordinator:worker;
+      const reason=!c.enabled?'Team is disabled or bots are globally paused.':
+        coordinator.paused||worker.paused||worker.projectId!==c.projectId
+          ?'Selected bot is paused or outside the Team project.':
+        (c.workerCount??1)>1||(c.reviewerCount??0)>0
+          ?'Multi-member execution requires native scoped role admission; manual runner is single-worker.':null;
+      value={orchestrationId:c.id,policyRevision:c.policyRevision,
+        projectId:c.projectId,selectedBotId:selected.id,
+        selectedRole:coordinated?'coordinator':'worker',
+        eligible:reason===null,reason,canStageBlocked:false,
+        allowedTools:[],allowedSideEffects:false,attemptBudgetMs:4*60*60*1000};
+      break;
     }
     case 'superagent_submit':
     case 'superagent_submit_coordinated':{

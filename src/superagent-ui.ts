@@ -240,7 +240,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false;
   let globalDemandLayout: 'board' | 'list' = 'board';
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
-  let workspaceView: 'teams' | 'runs' | 'review' | 'sources' | 'portable' = 'teams';
+  let workspaceView: 'teams' | 'team' | 'runs' | 'review' | 'sources' | 'portable' = 'teams';
+  let teamPanel: 'overview' | 'members' | 'execution' = 'overview';
   let preview: Preview | null = null, inspected: unknown = null;
   let confirm: { message: string; action: () => Promise<void> } | null = null;
   let taskKey = crypto.randomUUID();
@@ -262,12 +263,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let demandPreflight: ManualPreflight | null = null;
   let initialDemandWritePaths = '';
   let preflightObjective = '', preflightMode: 'coordinated' | 'direct' = 'coordinated';
-  // Persist the user's editable preset draft across asynchronous list refreshes.
-  let draftPresetName = '', draftPresetTemplate = '', draftWorkerAttemptLimit = 2;
-  // Unsaved native Team roster; never treated as execution authority.
-  let draftCoordinatorBotId = '', draftWorkerBotId = '';
-  let draftAdditionalWorkerIds: string[] = [], draftReviewerBotIds: string[] = [];
-  let draftMembersExpanded = false;
   const guidedBuilder = new GuidedTeamBuilder();
   let rejectingTicket = '', inspectedTicket = '';
   let inspectedAssignmentId = '';
@@ -421,31 +416,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       ' running · ' + (item.blockedCount ?? 0) + ' blocked</small>' +
       '<small class="sa-last-activity">Last activity: ' + safe(activityTime(item.lastActivityAt)) +
       '</small></div><span>' +
-      (item.enabled ? 'Manual' : 'Off') + '</span>' +
+      (item.enabled ? 'Enabled' : 'Off') + '</span>' +
       '<button type="button" data-sa-select="' + safe(item.id) + '" aria-current="' +
       (item.id === selected) + '">Details</button></li>').join('');
     const optionsFor = (botId: string) => bots.map(bot => '<option value="' + safe(bot.id) + '"' +
       (bot.paused ? ' disabled' : '') + (bot.id === botId ? ' selected' : '') + '>' + safe(bot.name) +
       (bot.paused ? ' (paused)' : '') + '</option>').join('');
     const choices = optionsFor('');
-    const createRoleOptions = (selectedRoles: string[], workerRole: boolean) => {
-      const workerProject = bots.find(bot => bot.id === draftWorkerBotId)?.projectId;
-      const exclusive = new Set([
-        draftCoordinatorBotId, draftWorkerBotId,
-        ...(workerRole ? draftReviewerBotIds : draftAdditionalWorkerIds),
-      ]);
-      return bots.map(bot => {
-        const invalid = bot.paused || exclusive.has(bot.id) ||
-          (workerRole && !!workerProject && bot.projectId !== workerProject);
-        return '<option value="' + safe(bot.id) + '"' +
-          (selectedRoles.includes(bot.id) ? ' selected' : '') +
-          (invalid ? ' disabled' : '') + '>' + safe(bot.name) +
-          (bot.paused ? ' (paused)' : workerRole && workerProject &&
-          bot.projectId !== workerProject ? ' (different Worker project)' : '') +
-          '</option>';
-      }).join('');
-    };
-
     const chosen = current();
     const inspected = tickets.find(ticket => ticket.id === inspectedTicket);
     const writeTicket = tickets.find(ticket => ticket.id === writeGrantTicket);
@@ -1217,9 +1194,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<dt>Review policy</dt><dd>' + (chosen.councilRequired ? 'Native Council required' : 'Council Off') + '</dd>' +
         '<dt>Current native support</dt><dd>Manual worker dispatch with explicitly authorized scoped writes on supported platforms; authenticated GitHub Auto only with an exact native grant.</dd></dl>' +
         '<div class="sa-actions"><button type="button" data-sa-enable="' + safe(chosen.id) + '"' +
-        (!chosen.enabled && (chosen.workerBotIds?.length ?? 1) > 1
-          ? ' disabled title="Native manual admission supports one executable Worker"' : '') +
-        '>' + (chosen.enabled ? 'Disable' : 'Enable manual') + '</button>' +
+        '>' + (chosen.enabled ? 'Disable Team' : 'Enable Team') + '</button>' +
         '<button type="button" data-sa-open-runs>Assign demand / Open runs</button></div>' +
         (!chosen.enabled && (chosen.workerBotIds?.length ?? 1) > 1
           ? '<p role="note">This Team has multiple configured Workers; native manual execution is unavailable until separately scoped multi-worker admission is supported.</p>' : '') +
@@ -1266,83 +1241,85 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       : '<section class="sa-pane"><p>Select a Team to inspect its native human review queue.</p></section>';
     const reviewPanel = globalReviewPanel + selectedTeamReview;
     const navigation = '<nav class="sa-navigation" aria-label="Orchestration views">' +
+      '<p class="sa-nav-label">Workspace</p>' +
       ([
         ['teams','Teams'],['runs','Demands / Runs'],['review','Review inbox'],
-        ['sources','Sources'],['portable','Portable configuration'],
       ] as const).map(([id,label]) =>
         '<button type="button" data-sa-view="' + id + '" aria-current="' +
-        (workspaceView === id ? 'page' : 'false') + '">' + label + '</button>').join('') +
+        (workspaceView === id || (workspaceView === 'team' && id === 'teams') ? 'page' : 'false') +
+        '">' + label + '</button>').join('') +
+      '<p class="sa-nav-label sa-nav-separator">Team settings</p>' +
+      ([
+        ['sources','GitHub sources'],['portable','Import / export'],
+      ] as const).map(([id,label]) =>
+        '<button type="button" data-sa-view="' + id + '" aria-current="' +
+        (workspaceView === id ? 'page' : 'false') + '"' +
+        (!presets.length ? ' disabled' : '') + '>' + label + '</button>').join('') +
       '</nav>';
+    const directory = '<div class="sa-section-head"><div><h2>Teams</h2>' +
+      '<p>Each Team is a reusable SuperAgent made from existing PandaCode bots.</p></div>' +
+      '<button class="primary-button" type="button" data-sa-builder-open>New Team</button></div>' +
+      (!presets.length ? '<section class="sa-pane sa-first-team"><h3>Create your first Team</h3>' +
+        '<p>Assign a Coordinator, Workers and optional independent Reviewers. ' +
+        'Choose Full Auto or With Approval before enabling the Team.</p>' +
+        '<p>Creating a Team does not run a task or grant additional permissions.</p></section>' : '') +
+      guidedBuilder.render(bots) +
+      '<section class="sa-pane sa-teams-panel" aria-label="Saved Teams">' +
+      '<div class="sa-list-controls"><label>Search Teams<input type="search" data-sa-team-search value="' +
+      safe(teamSearch) + '" placeholder="Search teams"></label>' +
+      '<label>Team status<select data-sa-team-status>' +
+      '<option value="all"' + (teamStatusFilter === 'all' ? ' selected' : '') + '>All Teams</option>' +
+      '<option value="enabled"' + (teamStatusFilter === 'enabled' ? ' selected' : '') + '>Enabled</option>' +
+      '<option value="disabled"' + (teamStatusFilter === 'disabled' ? ' selected' : '') + '>Off</option>' +
+      '</select></label></div>' +
+      '<p class="sa-list-caption" role="status">' + visibleTeams.length + ' of ' +
+        presets.length + ' Teams</p>' +
+      '<ul class="sa-list">' + (list || '<li class="sa-empty">' +
+      (presets.length ? 'No Teams match these filters.' : 'No Teams created yet.') +
+      '</li>') + '</ul></section>';
+    const teamView = chosen
+      ? '<div class="sa-team-detail-head"><button type="button" data-sa-team-back>All Teams</button>' +
+        '<div class="sa-team-detail-title"><div><h2>' + safe(chosen.name) + '</h2>' +
+        '<p>Policy revision ' + chosen.policyRevision + ' · ' +
+          (chosen.enabled ? 'Enabled' : 'Off') + ' · ' +
+          (teamStrategy?.orchestrationId === chosen.id
+            ? (teamStrategy.executionMode === 'full_auto' ? 'Full Auto' :
+              teamStrategy.executionMode === 'approval' ? 'With Approval' :
+              'Execution mode not configured')
+            : 'Loading native policy') + '</p></div>' +
+        '<button class="primary-button" type="button" data-sa-open-runs>Assign Demand</button>' +
+        '</div></div>' +
+        '<nav class="sa-subtabs" aria-label="Team details">' +
+        ([
+          ['overview','Overview'],['members','Members and roles'],['execution','Execution and review'],
+        ] as const).map(([id,label]) =>
+          '<button type="button" data-sa-team-tab="' + id + '" aria-current="' +
+          (teamPanel === id ? 'page' : 'false') + '">' + label + '</button>').join('') +
+        '</nav>' +
+        (teamPanel === 'overview' ? overview :
+          teamPanel === 'members' ? teamRoles : strategyPane)
+      : '<section class="sa-pane"><h3>No Team selected</h3>' +
+        '<p>Return to Teams and create or select a Team.</p></section>';
     host.innerHTML = '<div class="sa-ui">' +
-      '<p class="sa-intro">A Team is a reusable SuperAgent. All Run actions below use native Ticket and Mandate records; scope-bound worker writes and task Council are native policy-gated; Authenticated GitHub Auto is available only for an explicitly granted source, actor and event class with bounded quotas; manual work remains Off by default.</p>' +
       (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
       (error ? '<p role="alert" class="sa-error">' + safe(error) + '</p>' : '') +
       (feedback ? '<p role="status" class="sa-feedback">' + safe(feedback) + '</p>' : '') +
       (confirm ? '<section role="alertdialog" aria-label="Confirm orchestration action" class="sa-confirm"><p>' +
         safe(confirm.message) + '</p><div class="sa-actions"><button type="button" data-sa-cancel>Cancel</button>' +
         '<button class="primary-button" type="button" data-sa-confirm>Confirm</button></div></section>' : '') +
-      navigation +
-      '<div class="sa-layout"><aside class="sa-directory" aria-label="Teams directory">' +
-      '<section class="sa-pane"><h3>Teams</h3>' +
-      '<label>Search Teams<input type="search" data-sa-team-search value="' +
-      safe(teamSearch) + '" placeholder="Team name"></label>' +
-      '<label>Team status<select data-sa-team-status>' +
-      '<option value="all"' + (teamStatusFilter === 'all' ? ' selected' : '') + '>All statuses</option>' +
-      '<option value="enabled"' + (teamStatusFilter === 'enabled' ? ' selected' : '') + '>Manual enabled</option>' +
-      '<option value="disabled"' + (teamStatusFilter === 'disabled' ? ' selected' : '') + '>Disabled / Off</option>' +
-      '</select></label><p role="status">' + visibleTeams.length + ' of ' +
-      presets.length + ' native Teams displayed. Selection remains open when filtered out.</p>' +
-      '<ul class="sa-list">' + (list || '<li class="sa-empty">' +
-      (presets.length ? 'No Teams match these filters.' : 'No orchestrations created.') +
-      '</li>') + '</ul></section>' +
-      '</aside><div class="sa-stage">' +
-      (workspaceView === 'teams'
-        ? '<section class="sa-pane"><h3>New manual preset</h3><form data-sa-form="create">' +
-          '<label>Example preset<select data-sa-template aria-label="Example preset">' +
-          '<option value="">Custom</option>' +
-          '<option value="Software Development"' +
-          (draftPresetTemplate === 'Software Development' ? ' selected' : '') +
-          '>Software Development</option>' +
-          '<option value="Issue Resolution"' +
-          (draftPresetTemplate === 'Issue Resolution' ? ' selected' : '') +
-          '>Issue Resolution</option>' +
-          ['Economy','Balanced','Performance','Security-critical'].map(name =>
-            '<option value="' + name + '"' +
-            (draftPresetTemplate === name ? ' selected' : '') + '>' + name + '</option>'
-          ).join('') + '</select></label>' +
-          '<label>Name<input name="name" maxlength="120" placeholder="Software Development" value="' +
-          safe(draftPresetName) + '" required></label>' +
-          '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" data-sa-create-coordinator required>' +
-          '<option value="">Choose bot</option>' + optionsFor(draftCoordinatorBotId) + '</select></label>' +
-          '<label>Worker<select name="workerBotId" data-sa-create-worker required><option value="">Choose bot</option>' +
-          optionsFor(draftWorkerBotId) + '</select></label></div>' +
-          '<details class="sa-new-members"' + (draftMembersExpanded ? ' open' : '') +
-          '><summary>Additional Team members (optional)</summary>' +
-          '<p>Additional Workers share the primary Worker checkout; reviewers are isolated. ' +
-          'One bot may hold only one role. Native Team creation remains disabled.</p>' +
-          '<label>Additional Workers (up to 15)<select name="additionalWorkers" data-sa-create-additional-workers multiple size="5">' +
-          createRoleOptions(draftAdditionalWorkerIds, true) + '</select></label>' +
-          '<label>Optional Reviewers (up to 8)<select name="reviewers" data-sa-create-reviewers multiple size="5">' +
-          createRoleOptions(draftReviewerBotIds, false) + '</select></label></details>' +
-          '<label>Maximum attempts per Demand<select name="maxWorkerAttempts">' +
-          Array.from({length:8},(_,i)=>i+1).map(limit =>
-            '<option value="' + limit + '"' +
-            (draftWorkerAttemptLimit === limit ? ' selected' : '') + '>' +
-            limit + '</option>').join('') + '</select></label>' +
-          '<p>This cap includes the first Worker attempt. Templates suggest a cap, ' +
-          'not tools, bot assignments or automatic retries. Native strategy can ' +
-          'change it later only for a disabled, settled Team.</p>' +
-          '<button class="primary-button" type="submit"' +
-          (bots.length < 2 ? ' disabled' : '') + '>Create disabled preset</button></form></section>' +
-           guidedBuilder.render(bots) + overview + teamRoles + strategyPane
-        : '') +
-      (workspaceView === 'runs' ? globalDemands + (active ||
-        '<section class="sa-pane"><p>Select a Team from the directory to assign and inspect native Tickets.</p></section>') : '') +
+      '<div class="sa-layout">' + navigation + '<div class="sa-stage">' +
+      (workspaceView === 'teams' ? directory : '') +
+      (workspaceView === 'team' ? teamView : '') +
+      (workspaceView === 'runs'
+        ? '<div class="sa-section-head"><div><h2>Demands / Runs</h2>' +
+          '<p>Every Demand and WorkItem belongs to a native Ticket and a bot conversation.</p></div></div>' +
+          globalDemands + (active ||
+          '<section class="sa-pane"><p>Select a Team to assign a Demand.</p></section>') : '') +
       (workspaceView === 'review' ? reviewPanel : '') +
       (workspaceView === 'sources' ? (chosen ? '<section class="sa-pane">' + sourcePanel + '</section>'
-        : '<section class="sa-pane"><p>Select a Team to configure its Off/Observe GitHub sources.</p></section>') : '') +
+        : '<section class="sa-pane"><p>Select a Team to configure its GitHub sources.</p></section>') : '') +
       (workspaceView === 'portable'
-        ? '<section class="sa-pane"><h3>Portable configuration</h3>' +
+        ? '<section class="sa-pane"><h3>Import / export</h3>' +
           '<p>Configuration only: no credentials, memories, conversations, approvals or live tasks.</p>' +
           '<label>Companion manifest JSON<textarea data-sa-manifest rows="5" spellcheck="false">' +
           safe(importText) + '</textarea></label>' +
@@ -1358,12 +1335,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (loading) {
       host.querySelectorAll<HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>(
         'button, input, select, textarea',
-      ).forEach(control => {
-        const localDraft = control.matches(
-          'form[data-sa-form="create"] [data-sa-template], form[data-sa-form="create"] input[name="name"], form[data-sa-form="create"] select[name="maxWorkerAttempts"]',
-        );
-        control.disabled = !localDraft;
-      });
+      ).forEach(control => { control.disabled = true; });
     }
     host.setAttribute('aria-busy', String(busy || loading));
     restoreFocusedControl(focusedControl);
@@ -1449,10 +1421,24 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         workerOrder = roleRoster.workerBotIds.slice(1);
         reviewerDraft = [...roleRoster.reviewerBotIds];
       }
-      if (teamStrategy && !presets.some(config =>
-        config.id === teamStrategy?.orchestrationId &&
-        config.policyRevision === teamStrategy?.policyRevision)) {
-        teamStrategy = null;
+      // Policy and roster always come from the native revisioned Team; no
+      // local template or cached UI selection becomes execution authority.
+      if (selected) {
+        const [policy, roster] = await Promise.all([
+          call<StrategyView>('superagent_strategy_get',{orchestrationId:selected}),
+          call<TeamRoster>('superagent_roster',{orchestrationId:selected}),
+        ]);
+        const currentConfig = presets.find(config => config.id === selected);
+        if (currentConfig && policy.policyRevision === currentConfig.policyRevision &&
+            roster.policyRevision === currentConfig.policyRevision) {
+          teamStrategy = policy; roleRoster = roster;
+          workerOrder = roster.workerBotIds.slice(1);
+          reviewerDraft = [...roster.reviewerBotIds];
+        } else {
+          teamStrategy = null; roleRoster = null;
+        }
+      } else {
+        teamStrategy = null; roleRoster = null;
       }
       // Any native refresh invalidates this non-authoritative, time-bound scan.
       effectiveTeam = null;
@@ -1487,31 +1473,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     confirm = { message, action }; render();
     host.querySelector<HTMLButtonElement>('[data-sa-cancel]')?.focus();
   }
-  // Templates suggest a name and attempt cap, never a bot, tool or task.
   host.addEventListener('change', event => {
     const target = event.target;
-    if (target instanceof HTMLSelectElement && target.closest('form[data-sa-form="create"]') &&
-        !target.hasAttribute('data-sa-template')) {
-      if (target.name === 'maxWorkerAttempts') {
-        const limit = Number(target.value);
-        if (Number.isInteger(limit) && limit >= 1 && limit <= 8)
-          draftWorkerAttemptLimit = limit;
-        return;
-      }
-      if (target.name === 'coordinatorBotId') draftCoordinatorBotId = target.value;
-      else if (target.name === 'workerBotId') draftWorkerBotId = target.value;
-      else if (target.name === 'additionalWorkers') {
-        draftAdditionalWorkerIds = [...target.selectedOptions].map(option => option.value);
-      } else if (target.name === 'reviewers') {
-        draftReviewerBotIds = [...target.selectedOptions].map(option => option.value);
-      } else return;
-      // DOM replacement can precede the asynchronous <details> toggle event.
-      // Capture the live disclosure state before replacing the roster inputs.
-      const members = target.closest<HTMLDetailsElement>('details.sa-new-members');
-      if (members) draftMembersExpanded = members.open;
-      render();
-      return;
-    }
     if (target instanceof Element && guidedBuilder.handleChange(target)) {
       render();
       return;
@@ -1579,24 +1542,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
-    if (!(target instanceof HTMLSelectElement) || !target.hasAttribute('data-sa-template')) return;
-    draftPresetTemplate = target.value;
-    draftPresetName = target.value;
-    draftWorkerAttemptLimit = ['Economy','Security-critical'].includes(target.value) ? 1 :
-      ['Performance','Software Development'].includes(target.value) ? 3 : 2;
-    const field = target.form?.querySelector<HTMLInputElement>('input[name="name"]');
-    if (field) field.value = draftPresetName;
-    const budget = target.form?.querySelector<HTMLSelectElement>('select[name="maxWorkerAttempts"]');
-    if (budget) budget.value = String(draftWorkerAttemptLimit);
   });
-  host.addEventListener('toggle', event => {
-    const target = event.target;
-    if (target instanceof HTMLDetailsElement && target.classList.contains('sa-new-members')
-        && host.contains(target)) {
-      // Ignore stale queued toggle events from a disclosure replaced by render().
-      draftMembersExpanded = target.open;
-    }
-  }, true);
   host.addEventListener('input', event => {
     const target = event.target;
     if (target instanceof Element && guidedBuilder.handleInput(target)) return;
@@ -1649,10 +1595,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       demandObjective = target.value;
       demandPreflight = null;
       host.querySelector('[aria-label="Native demand preflight"]')?.remove();
-    }
-    if (target instanceof HTMLInputElement && target.name === 'name' &&
-        target.closest<HTMLFormElement>('form[data-sa-form="create"]')) {
-      draftPresetName = target.value;
     }
     if (target instanceof HTMLTextAreaElement && target.hasAttribute('data-sa-manifest')) {
       importText = target.value; preview = null; inspected = null;
@@ -1756,6 +1698,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       host.querySelector<HTMLButtonElement>('[data-sa-global-demand-layout="' + layout + '"]')
         ?.focus({preventScroll:true});
       return;
+    }
+    if (target.hasAttribute('data-sa-team-back')) {
+      workspaceView = 'teams'; render(); return;
+    }
+    if (target.dataset.saTeamTab) {
+      const tab = target.dataset.saTeamTab;
+      if (!['overview','members','execution'].includes(tab)) return;
+      teamPanel = tab as typeof teamPanel; render(); return;
     }
     if (target.dataset.saView) {
       const next = target.dataset.saView;
@@ -1949,7 +1899,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (target.dataset.saSelect) {
       if (busy || loading) return;
-      workspaceView = 'runs';
+      workspaceView = 'team'; teamPanel = 'overview';
       if (selected === target.dataset.saSelect) { render(); return; }
       const next = target.dataset.saSelect;
       selected = next;
@@ -1959,13 +1909,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       sourceIntegrity = null;
       void work(async () => {
-        tickets = await call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 });
+        const [loaded, policy, roster] = await Promise.all([
+          call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 }),
+          call<StrategyView>('superagent_strategy_get',{orchestrationId:next}),
+          call<TeamRoster>('superagent_roster',{orchestrationId:next}),
+        ]);
+        if (selected !== next) return;
+        tickets = loaded; teamStrategy = policy; roleRoster = roster;
+        workerOrder = roster.workerBotIds.slice(1); reviewerDraft = [...roster.reviewerBotIds];
       });
       return;
     }
     if (target.dataset.saEnable) {
       const c = presets.find(item => item.id === target.dataset.saEnable);
-      if (c) ask((c.enabled ? 'Disable ' : 'Enable manual mode for ') + c.name + '?', async () => {
+      if (c) ask((c.enabled ? 'Disable ' : 'Enable the configured mode for ') + c.name + '?', async () => {
         await call('superagent_set_enabled',{ orchestrationId:c.id, expectedRevision:c.policyRevision, enabled:!c.enabled });
         await reload();
       });
@@ -2704,7 +2661,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             ...(typeof councilRequired === 'boolean' ? {councilRequired} : {})},
         });
         await reload();
-        workspaceView='teams';
+        workspaceView='team';
       });
       return;
     }
@@ -2804,37 +2761,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           ' policy saved Off. Enable the Team to start a native Demand.';
       });
       return;
-    }
-    if (form.dataset.saForm === 'create') {
-      const input = {
-        name:String(data.get('name') ?? '').trim(),
-        coordinatorBotId:String(data.get('coordinatorBotId') ?? ''),
-        workerBotId:String(data.get('workerBotId') ?? ''),
-        workerBotIds:[String(data.get('workerBotId') ?? ''), ...draftAdditionalWorkerIds],
-        reviewerBotIds:[...draftReviewerBotIds],
-        councilRequired:false,
-      };
-      const maxAttemptsPerAssignment=Number(data.get('maxWorkerAttempts'));
-      void work(async () => {
-        if (!Number.isInteger(maxAttemptsPerAssignment) ||
-            maxAttemptsPerAssignment < 1 || maxAttemptsPerAssignment > 8)
-          throw new Error('Choose a Worker attempt limit between 1 and 8.');
-        const all=[input.coordinatorBotId,...input.workerBotIds,...input.reviewerBotIds];
-        if (!input.name || all.some(id => !id) || new Set(all).size !== all.length ||
-            input.workerBotIds.length > 16 || input.reviewerBotIds.length > 8) {
-          throw new Error('Choose a unique bot for each Team role and respect member limits.');
-        }
-        const project=bots.find(bot => bot.id===input.workerBotId)?.projectId;
-        if (input.workerBotIds.some(id => {
-          const bot=bots.find(candidate => candidate.id === id);
-          return !bot || bot.paused || (!!project && bot.projectId !== project);
-        })) throw new Error('Additional Workers must be active in the primary Worker project.');
-        const created = await call<Config>('superagent_create',{ input,maxAttemptsPerAssignment });
-        draftPresetName=''; draftPresetTemplate=''; draftWorkerAttemptLimit=2;
-        draftCoordinatorBotId=''; draftWorkerBotId='';
-        draftAdditionalWorkerIds=[]; draftReviewerBotIds=[]; draftMembersExpanded=false;
-        selected = created.id; workspaceView = 'runs'; await reload();
-      });
     }
     if (form.dataset.saForm === 'reject') {
       const ticket = tickets.find(item => item.id === rejectingTicket);

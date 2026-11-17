@@ -1099,16 +1099,36 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         // healthy, even if its own state is terminal.
         running == 0
     };
+    // A structurally linked Assignment may still have lost its native
+    // provider/tool authority (disabled Team, paused bot, stale role/profile,
+    // changed policy or detached task thread). Reuse admission enforcement
+    // rather than presenting an invalid provider as healthy.
+    let active_read_only_authorized = if ticket.state == "running" && consistent {
+        let session_id: Option<String> = store.db.query_row(
+            "SELECT session_id FROM sa_assignments
+             WHERE ticket_id=?1 AND id=?2 AND state='running'",
+            params![&ticket.id, ticket.active_assignment_id.as_deref()],
+            |row| row.get(0),
+        ).optional().map_err(|e| e.to_string())?;
+        session_id.as_deref().is_some_and(|id|
+            matches!(read_only_policy(store, id), Ok(Some(_))))
+    } else {
+        false
+    };
     let terminal = matches!(ticket.state.as_str(),
         "completed" | "failed" | "stopped" | "interrupted" | "inconclusive");
-    let next_action = if pending + uncertain > 0 {
+    let next_action = if ticket.state == "running" && !consistent {
+        "investigate_native_assignment_state"
+    } else if ticket.state == "running" && expired_running > 0 {
+        "investigate_expired_native_assignment_before_retry"
+    } else if ticket.state == "running" && !active_read_only_authorized {
+        // Contain the live provider before reconciling an uncertain effect;
+        // neither action may imply that the remote operation succeeded.
+        "stop_or_quarantine_revoked_native_execution"
+    } else if pending + uncertain > 0 {
         "reconcile_authoritative_remote_effects"
     } else if !consistent {
         "investigate_native_assignment_state"
-    } else if expired_running > 0 {
-        "investigate_expired_native_assignment_before_retry"
-    } else if ticket.state == "running" && (mandate.revoked || mandate.expires_at <= now) {
-        "stop_or_quarantine_revoked_native_execution"
     } else if running > 0 {
         "verify_live_serve_provider_before_intervention"
     } else if ticket.state == "waiting_review" {
@@ -1127,6 +1147,7 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         "expiredNativeAssignments": expired_running,
         "activeAssignmentLinked": active_linked == 1,
         "assignmentStateConsistent": consistent,
+        "activeNativeReadOnlyAdmissionValid": active_read_only_authorized,
         "pendingExternalEffects": pending,
         "uncertainExternalEffects": uncertain,
         "requiresIndependentRemoteReconciliation": pending + uncertain > 0,
@@ -1528,11 +1549,33 @@ pub(crate) fn list_headless_recovery_inbox_page(
                                       AND a.ticket_id=t.id AND a.state='running'
                                       AND a.created_at>0 AND a.created_at<=?1
                                       AND a.created_at>?2)
-                      -- A live provider with revoked or expired authority
-                      -- must be visible before the watchdog intervenes.
+                      -- Detect durable native authority drift even before
+                      -- a watchdog tick. The full provider/tool admission
+                      -- policy is independently rechecked in the projection.
                       OR NOT EXISTS(SELECT 1 FROM sa_mandates m
                                     WHERE m.ticket_id=t.id AND m.revoked=0
-                                      AND m.expires_at>?1)))
+                                      AND m.expires_at>?1
+                                      AND m.policy_revision=t.policy_revision
+                                      AND m.project_id=t.project_id
+                                      AND m.actor=t.actor
+                                      AND length(trim(m.authorization_id))>0
+                                      AND m.allowed_tools='[]'
+                                      AND m.allowed_side_effects=0)
+                      OR NOT EXISTS(
+                        SELECT 1 FROM sa_orchestrations o
+                        JOIN bots coordinator ON coordinator.id=o.coordinator_bot_id
+                        JOIN sa_assignments active ON active.id=t.active_assignment_id
+                          AND active.ticket_id=t.id AND active.state='running'
+                        JOIN bots assignee ON assignee.id=active.bot_id
+                        JOIN sessions live ON live.id=active.session_id
+                        WHERE o.id=t.orchestration_id AND o.enabled=1
+                          AND o.policy_revision=t.policy_revision
+                          AND o.project_id=t.project_id
+                          AND coordinator.paused=0 AND assignee.paused=0
+                          AND live.project_id=assignee.project_id
+                          AND (active.bot_id=o.coordinator_bot_id OR
+                               (active.bot_id=t.worker_bot_id
+                                AND assignee.project_id=t.project_id)))))
              )
              SELECT id,priority,updated_at FROM candidates
              WHERE ?3 IS NULL OR priority>?3
@@ -5146,6 +5189,87 @@ mod tests {
             "SELECT state FROM sa_assignments WHERE ticket_id=?1",
             [&ticket.id], |row| row.get::<_, String>(0)
         ).unwrap(), "running");
+    }
+
+    #[test]
+    fn headless_recovery_inbox_surfaces_native_admission_drift_without_replay() {
+        for fault in ["team_disabled", "coordinator_paused", "worker_paused",
+                      "policy_revision", "unsupported_tools"] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, launched) = admit(&mut store, &cfg.id,
+                "Private drift recovery objective", "drift-recovery", false).unwrap();
+            assert!(launched);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(matches!(read_only_policy(&store, &session), Ok(Some(_))));
+            let path = store.path.clone();
+            let before: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            assert!(before["items"].as_array().unwrap().is_empty(), "{fault}");
+            let audit_before = history(&store, &ticket.id, 100).unwrap().len();
+
+            match fault {
+                "team_disabled" => {
+                    store.db.execute("UPDATE sa_orchestrations SET enabled=0 WHERE id=?1",
+                        [&cfg.id]).unwrap();
+                }
+                "coordinator_paused" => {
+                    store.db.execute("UPDATE bots SET paused=1 WHERE id=?1",
+                        [&cfg.coordinator_bot_id]).unwrap();
+                }
+                "worker_paused" => {
+                    store.db.execute("UPDATE bots SET paused=1 WHERE id=?1",
+                        [&cfg.worker_bot_id]).unwrap();
+                }
+                "policy_revision" => {
+                    store.db.execute(
+                        "UPDATE sa_orchestrations SET policy_revision=policy_revision+1 WHERE id=?1",
+                        [&cfg.id],
+                    ).unwrap();
+                }
+                "unsupported_tools" => {
+                    store.db.execute(
+                        "UPDATE sa_mandates SET allowed_tools='[\"shell\"]' WHERE ticket_id=?1",
+                        [&ticket.id],
+                    ).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(read_only_policy(&store, &session).is_err(), "{fault}");
+
+            // An uncertain remote operation must not outrank containment of
+            // a now-unauthorized running native provider.
+            if fault == "coordinator_paused" {
+                store.db.execute(
+                    "INSERT INTO sa_effect_receipts
+                     (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                     VALUES(?1,'github:comment:pending',?2,'uncertain',?3,?3)",
+                    params![&ticket.id, "a".repeat(64), storage::now()],
+                ).unwrap();
+            }
+            let found: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            assert_eq!(found["items"].as_array().unwrap().len(), 1, "{fault}");
+            assert_eq!(found["items"][0]["ticketId"], ticket.id, "{fault}");
+            assert_eq!(found["items"][0]["recovery"]["assignmentStateConsistent"], true, "{fault}");
+            assert_eq!(found["items"][0]["recovery"]["activeNativeReadOnlyAdmissionValid"], false, "{fault}");
+            assert_eq!(found["items"][0]["recovery"]["nextOperatorAction"],
+                "stop_or_quarantine_revoked_native_execution", "{fault}");
+            assert_eq!(found["items"][0]["recovery"]["automaticReplayAllowed"], false);
+            assert_eq!(found["automaticRecoveryPerformed"], false);
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+            assert_eq!(history(&store, &ticket.id, 100).unwrap().len(), audit_before);
+            drop(store);
+            let reopened = Store::open_read_only(&path).unwrap();
+            assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "running");
+            let again: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            assert_eq!(again["items"][0]["recovery"]["activeNativeReadOnlyAdmissionValid"], false);
+            assert!(!again.to_string().contains("Private drift recovery objective"));
+        }
     }
 
     #[test]

@@ -74,10 +74,18 @@ pub(super) fn record_accepted(store:&Store,now:i64)->Result<usize> {
                  ORDER BY assignment.id LIMIT 1),
                 (SELECT audit.kind FROM sa_audit audit WHERE audit.ticket_id=child.id
                    AND audit.kind IN ('human_accepted','council_passed','council_human_accepted')
-                 ORDER BY audit.id DESC LIMIT 1),
+                    AND audit.at >= (
+                      SELECT latest.updated_at FROM sa_assignments latest
+                      WHERE latest.ticket_id=child.id
+                      ORDER BY latest.attempt DESC LIMIT 1)
+                  ORDER BY audit.id DESC LIMIT 1),
                 (SELECT audit.at FROM sa_audit audit WHERE audit.ticket_id=child.id
                    AND audit.kind IN ('human_accepted','council_passed','council_human_accepted')
-                 ORDER BY audit.id DESC LIMIT 1)
+                    AND audit.at >= (
+                      SELECT latest.updated_at FROM sa_assignments latest
+                      WHERE latest.ticket_id=child.id
+                      ORDER BY latest.attempt DESC LIMIT 1)
+                  ORDER BY audit.id DESC LIMIT 1)
              FROM sa_work_items item
              JOIN sa_tickets child ON child.id=item.child_ticket_id
              WHERE item.state IN ('running','waiting_review','blocked','completed')
@@ -128,7 +136,8 @@ pub(super) fn record_accepted(store:&Store,now:i64)->Result<usize> {
                      AND applied.assignment_id=native.id
                      AND applied.state='applied'))
                  AND EXISTS(SELECT 1 FROM sa_audit audit WHERE audit.ticket_id=ticket.id
-                   AND audit.kind=?5 AND audit.at=?6)
+                   AND audit.kind=?5 AND audit.at=?6
+                    AND audit.at>=native.updated_at)
                  AND NOT EXISTS(SELECT 1 FROM sa_effect_receipts effect
                    WHERE effect.ticket_id=ticket.id AND effect.state IN ('pending','uncertain'))
                  AND NOT EXISTS(SELECT 1 FROM sa_worker_write_receipts write_receipt
@@ -144,6 +153,8 @@ pub(super) fn record_accepted(store:&Store,now:i64)->Result<usize> {
               WHERE proof.item_id=?1 AND proof.child_ticket_id=?2
                 AND proof.assignment_id=?3 AND proof.evidence_sha256=?4
                 AND proof.approval_kind=?5 AND proof.reviewed_at=?6
+                AND proof.reviewed_at >= (SELECT latest.updated_at
+                    FROM sa_assignments latest WHERE latest.id=proof.assignment_id)
                 AND (item.requires_write=0 OR EXISTS(
                   SELECT 1 FROM sa_worker_write_receipts applied
                   WHERE applied.ticket_id=proof.child_ticket_id
@@ -174,7 +185,7 @@ mod tests {
             "PRAGMA foreign_keys=ON;
              CREATE TABLE sa_tickets(id TEXT PRIMARY KEY,state TEXT,evidence TEXT,revision INTEGER);
              CREATE TABLE sa_assignments(id TEXT PRIMARY KEY,ticket_id TEXT,
-               state TEXT,attempt INTEGER,result TEXT);
+               state TEXT,attempt INTEGER,result TEXT,updated_at INTEGER);
              CREATE TABLE sa_work_items(id TEXT PRIMARY KEY,ticket_id TEXT,ordinal INTEGER,
                child_ticket_id TEXT,state TEXT,last_reason TEXT,updated_at INTEGER,
                requires_write INTEGER NOT NULL DEFAULT 0);
@@ -183,7 +194,7 @@ mod tests {
              CREATE TABLE sa_worker_write_receipts(ticket_id TEXT,state TEXT,assignment_id TEXT);
              CREATE TABLE sa_subagent_nodes(parent_ticket_id TEXT,child_ticket_id TEXT,state TEXT);
              INSERT INTO sa_tickets VALUES('child','completed','native output',2);
-             INSERT INTO sa_assignments VALUES('attempt','child','finished',1,'native output');
+             INSERT INTO sa_assignments VALUES('attempt','child','finished',1,'native output',50);
              INSERT INTO sa_work_items
                (id,ticket_id,ordinal,child_ticket_id,state,last_reason,updated_at)
                VALUES('item','root',0,'child','waiting_review',NULL,1);",
@@ -204,6 +215,27 @@ mod tests {
         assert_eq!(record_accepted(&store,100).unwrap(),0);
         assert!(receipt(&store,"item").unwrap().is_none());
     }
+    #[test]
+    fn stale_human_or_council_verdict_cannot_approve_a_later_worker_attempt() {
+        let store=fixture();
+        store.db.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,at) VALUES('child','council_passed',99)",[],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_assignments SET updated_at=120 WHERE id='attempt'",[],
+        ).unwrap();
+        assert_eq!(record_accepted(&store,130).unwrap(),0);
+        assert!(receipt(&store,"item").unwrap().is_none(),
+            "A review predating the final Assignment result cannot verify it");
+        store.db.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,at) VALUES('child','human_accepted',121)",[],
+        ).unwrap();
+        assert_eq!(record_accepted(&store,131).unwrap(),1);
+        let (_,kind,at)=receipt(&store,"item").unwrap().unwrap();
+        assert_eq!(kind,"human_accepted");
+        assert_eq!(at,121);
+    }
+
     #[test]
     fn native_evidence_receipt_is_idempotent_and_immutable() {
         let store=fixture();

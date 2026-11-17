@@ -139,9 +139,16 @@ pub(super) fn record_accepted(store:&Store,now:i64)->Result<usize> {
             params![item,child,assignment,digest,kind,approved_at,now,revision,result],
         ).map_err(|e|e.to_string())?;
         let exact:bool=tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM sa_work_item_evidence_receipts
-              WHERE item_id=?1 AND child_ticket_id=?2 AND assignment_id=?3
-                AND evidence_sha256=?4 AND approval_kind=?5 AND reviewed_at=?6)",
+            "SELECT EXISTS(SELECT 1 FROM sa_work_item_evidence_receipts proof
+              JOIN sa_work_items item ON item.id=proof.item_id
+              WHERE proof.item_id=?1 AND proof.child_ticket_id=?2
+                AND proof.assignment_id=?3 AND proof.evidence_sha256=?4
+                AND proof.approval_kind=?5 AND proof.reviewed_at=?6
+                AND (item.requires_write=0 OR EXISTS(
+                  SELECT 1 FROM sa_worker_write_receipts applied
+                  WHERE applied.ticket_id=proof.child_ticket_id
+                    AND applied.assignment_id=proof.assignment_id
+                    AND applied.state='applied')))",
             params![item,child,assignment,digest,kind,approved_at],
             |r|r.get(0),
         ).map_err(|e|e.to_string())?;
@@ -284,6 +291,36 @@ mod tests {
         assert_eq!(record_accepted(&store,102).unwrap(),1);
         assert_eq!(record_accepted(&store,103).unwrap(),0);
         assert!(receipt(&store,"item").unwrap().is_some());
+    }
+
+
+    #[test]
+    fn historical_approval_receipt_cannot_launder_missing_scoped_write() {
+        let store=fixture();
+        store.db.execute_batch(
+            "UPDATE sa_work_items SET requires_write=1 WHERE id='item';
+             INSERT INTO sa_audit(ticket_id,kind,at) VALUES('child','council_passed',99);",
+        ).unwrap();
+        let digest=format!("{:x}",Sha256::digest(b"native output"));
+        // Simulate a pre-fix approval receipt already stored for a WorkItem.
+        store.db.execute(
+            "INSERT INTO sa_work_item_evidence_receipts
+             (item_id,child_ticket_id,assignment_id,evidence_sha256,
+              approval_kind,reviewed_at,recorded_at)
+             VALUES('item','child','attempt',?1,'council_passed',99,100)",
+            params![digest],
+        ).unwrap();
+        assert_eq!(record_accepted(&store,101).unwrap(),0);
+        assert_eq!(store.db.query_row(
+            "SELECT state FROM sa_work_items WHERE id='item'",[],
+            |r|r.get::<_,String>(0),
+        ).unwrap(),"waiting_review");
+        store.db.execute(
+            "INSERT INTO sa_worker_write_receipts(ticket_id,state,assignment_id)
+             VALUES('child','applied','attempt')",[],
+        ).unwrap();
+        assert_eq!(record_accepted(&store,102).unwrap(),1);
+        assert_eq!(record_accepted(&store,103).unwrap(),0);
     }
 
     #[test]

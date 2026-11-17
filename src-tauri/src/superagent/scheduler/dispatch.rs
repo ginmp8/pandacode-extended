@@ -190,7 +190,15 @@ fn reconcile(store:&Store)->Result<()> {
                         OR child.state<>'completed'
                         OR NOT EXISTS(SELECT 1 FROM sa_work_item_evidence_receipts evidence
                           WHERE evidence.item_id=item.id
-                            AND evidence.child_ticket_id=item.child_ticket_id)))
+                            AND evidence.child_ticket_id=item.child_ticket_id)
+                        OR (item.requires_write=1 AND NOT EXISTS(
+                          SELECT 1 FROM sa_work_item_evidence_receipts proof
+                          JOIN sa_worker_write_receipts applied
+                            ON applied.ticket_id=proof.child_ticket_id
+                           AND applied.assignment_id=proof.assignment_id
+                          WHERE proof.item_id=item.id
+                            AND proof.child_ticket_id=item.child_ticket_id
+                            AND applied.state='applied'))))
                AND NOT EXISTS(
                  SELECT 1 FROM sa_subagent_nodes descendant
                  WHERE descendant.root_ticket_id=plan.ticket_id
@@ -247,7 +255,15 @@ fn reconcile(store:&Store)->Result<()> {
                         OR child.state<>'completed'
                         OR NOT EXISTS(SELECT 1 FROM sa_work_item_evidence_receipts evidence
                           WHERE evidence.item_id=item.id
-                            AND evidence.child_ticket_id=item.child_ticket_id)))",
+                            AND evidence.child_ticket_id=item.child_ticket_id)
+                        OR (item.requires_write=1 AND NOT EXISTS(
+                          SELECT 1 FROM sa_work_item_evidence_receipts proof
+                          JOIN sa_worker_write_receipts applied
+                            ON applied.ticket_id=proof.child_ticket_id
+                           AND applied.assignment_id=proof.assignment_id
+                          WHERE proof.item_id=item.id
+                            AND proof.child_ticket_id=item.child_ticket_id
+                            AND applied.state='applied'))))",
             params![root,now],
         ).map_err(|e|e.to_string())?;
         if moved==1 {
@@ -301,7 +317,15 @@ fn ready(store:&Store)->Result<Vec<ReadyItem>> {
                AND (prerequisite.state<>'completed'
                   OR NOT EXISTS(SELECT 1 FROM sa_work_item_evidence_receipts evidence
                       WHERE evidence.item_id=prerequisite.id
-                        AND evidence.child_ticket_id=prerequisite.child_ticket_id)))
+                        AND evidence.child_ticket_id=prerequisite.child_ticket_id)
+                  OR (prerequisite.requires_write=1 AND NOT EXISTS(
+                    SELECT 1 FROM sa_work_item_evidence_receipts proof
+                    JOIN sa_worker_write_receipts applied
+                      ON applied.ticket_id=proof.child_ticket_id
+                     AND applied.assignment_id=proof.assignment_id
+                    WHERE proof.item_id=prerequisite.id
+                      AND proof.child_ticket_id=prerequisite.child_ticket_id
+                      AND applied.state='applied'))))
          ORDER BY plan.created_at,item.ordinal,item.id LIMIT 32"
     ).map_err(|e|e.to_string())?;
     let rows=query.query_map([storage::now()],|r|Ok(ReadyItem {

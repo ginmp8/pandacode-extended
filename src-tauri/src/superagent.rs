@@ -2082,7 +2082,15 @@ fn headless_cancelled_assignments_with_pause(
         let cancelled_native: bool = stmt.query_row(
             params![session_id, now, MAX_ASSIGNMENT_RUN_MS, i64::from(bots_paused)], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
-        if cancelled_native && !cancelled.contains(session_id) {
+        // The SQL fast path detects durable revocation and role drift. It does
+        // not encode the entire admission-time profile and task-thread proof.
+        // Recheck those exact native invariants before retaining a live task
+        // handle; a model, harness, checkout or thread change must cancel it
+        // without waiting for the watchdog to settle the Ticket.
+        let task_policy_invalid = !cancelled_native
+            && has_task_assignment_history(store, session_id)?
+            && !matches!(read_only_policy(store, session_id), Ok(Some(_)));
+        if (cancelled_native || task_policy_invalid) && !cancelled.contains(session_id) {
             cancelled.push(session_id.clone());
         }
     }
@@ -5795,6 +5803,69 @@ mod tests {
         assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(
             &store, &ordinary,
         ).is_ok(), "normal bot paths cannot inherit task revocation");
+    }
+
+    #[test]
+    fn headless_poll_fences_admission_profile_and_thread_drift_before_watchdog() {
+        for scenario in ["thread-remapped", "model-changed", "checkout-moved"] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &cfg.id, "Inspect native task authority",
+                &format!("headless-exact-authority-{scenario}"), false,
+            ).unwrap();
+            assert!(launched, "{scenario}");
+            let assigned = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            let worker = bots::get(&store, "worker").unwrap();
+            let ordinary = bots::thread_session(
+                &store, &worker, "desktop", "ordinary-exact-authority",
+                "Ordinary bot chat",
+            ).unwrap().0;
+            let active = vec![ordinary.clone(), assigned.clone(), assigned.clone()];
+            assert!(headless_cancelled_assignments_with_pause(
+                &store, &active, false,
+            ).unwrap().is_empty(), "{scenario}: original authority is valid");
+
+            match scenario {
+                "thread-remapped" => {
+                    assert_eq!(store.db.execute(
+                        "UPDATE bot_threads SET external_id='untrusted-ticket'
+                         WHERE session_id=?1 AND channel_id=?2",
+                        params![&assigned, CHANNEL],
+                    ).unwrap(), 1);
+                }
+                "model-changed" => {
+                    assert_eq!(store.db.execute(
+                        "UPDATE sessions SET model='unapproved-model' WHERE id=?1",
+                        [&assigned],
+                    ).unwrap(), 1);
+                }
+                "checkout-moved" => {
+                    assert_eq!(store.db.execute(
+                        "UPDATE projects SET path='/tmp/disposable-superagent-moved'
+                         WHERE id='project'",
+                        [],
+                    ).unwrap(), 1);
+                }
+                _ => unreachable!(),
+            }
+            assert!(read_only_policy(&store, &assigned).is_err(), "{scenario}");
+            let to_cancel = headless_cancelled_assignments_with_pause(
+                &store, &active, false,
+            ).unwrap();
+            assert_eq!(to_cancel, vec![assigned.clone()], "{scenario}");
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running",
+                "polling may cancel a handle but cannot settle a Ticket");
+            assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(
+                &store, &ordinary,
+            ).is_ok(), "{scenario}: ordinary chat remains unaffected");
+            let path = store.path.clone();
+            drop(store);
+            let reopened = Store::open_read_only(&path).unwrap();
+            assert_eq!(headless_cancelled_assignments_with_pause(
+                &reopened, &active, false,
+            ).unwrap(), vec![assigned], "{scenario}: restart-safe native refusal");
+        }
     }
 
     #[test]

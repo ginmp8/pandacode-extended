@@ -375,6 +375,14 @@ the user's instructions, file scopes, or harness approval policy.
 
 ## Limits and recovery
 
+For a restarted nested Council (M4–M7), ordinary **Resume** cannot reuse
+interrupted child reviewer grants or previous receipts. If no root worker or
+child reviewer remains active or queued, explicitly submitting a **new
+objective** creates a strictly newer Council cycle with fresh task-owned
+child sessions and frozen review authority. Earlier child sessions and
+callbacks remain revoked; this does not resume or approve the previous
+artifact. A still-running child reviewer blocks the new task until it stops.
+
 Setup offers one limit, workers at once. PandaCode enforces no rounds, assignments,
 batch size, file scopes, sub-worker counts or follow-up attempts; the kept brakes
 are the replacement chain (3 tries for an assignment), sub-workers one level deep,

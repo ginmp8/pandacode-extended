@@ -4008,6 +4008,39 @@ fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume
             before_child, "replayed callback must not mutate a restarted child"
         );
     }
+    // A new user objective is not a Resume: restart recovery must allocate
+    // fresh child sessions and never reactivate interrupted reviewer grants.
+    let (fresh, _) = start_state(
+        &state, &sid, "Review a new artifact after restart", None, None,
+    ).unwrap();
+    assert_eq!(fresh.status, "running");
+    assert!(fresh.council_since > root.council_since);
+    {
+        let store = state.store.lock().unwrap();
+        for bot in ["restart-security", "restart-architecture"] {
+            let key = format!("native-council-child:{}:{bot}", fresh.council_since);
+            let child_session: String = store.db.query_row(
+                "SELECT worker_id FROM architect_requests
+                 WHERE parent_session_id=?1 AND kind='council_child' AND key=?2",
+                rusqlite::params![sid, key], |row| row.get(0),
+            ).unwrap();
+            assert_ne!(child_session, launch.admission.parent);
+            let new_child = load(&store, &child_session).unwrap().unwrap();
+            assert_eq!(new_child.status, "blocked");
+            assert!(new_child.workers.is_empty());
+            assert_eq!(store.session(&child_session).unwrap().mode, "plan");
+        }
+        assert_eq!(
+            serde_json::to_value(load(&store, &launch.admission.parent).unwrap().unwrap()).unwrap(),
+            before_child, "a fresh task cannot revive a previous child"
+        );
+        assert!(child_council::authorize_leaf(
+            &store, &launch.sid, &launch.admission,
+        ).is_err(), "a revoked leaf must not enter a fresh Council cycle");
+    }
+    assert!(start_state(
+        &state, &sid, "Concurrent objective", None, None,
+    ).is_err(), "a fresh task cannot be started twice while active");
     drop(state);
     std::fs::remove_dir_all(directory).unwrap();
 }

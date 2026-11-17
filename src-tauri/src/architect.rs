@@ -1744,6 +1744,15 @@ pub(crate) fn start_state(
     if team.workers.iter().any(|w| stoppable(&w.status)) {
         return Err("Resume or stop the pending team before starting another request.".into());
     }
+    // Explicit new work after a physical restart must get fresh child sessions
+    // and native grants; an ordinary Resume remains fail-closed.
+    let restarted_nested_cycle = team.status == "interrupted"
+        && team.council_since > 0
+        && team.config.council.as_ref()
+            .is_some_and(|config| !config.nested_bot_reviewers.is_empty());
+    if restarted_nested_cycle && child_council::active_leaf_agents(&store, session_id, &agents)? {
+        return Err(AGENTS_STOPPING.into());
+    }
     // A fully verified nested terminal must start a new frozen cycle. Capture
     // this before replacing the old objective: its authenticated child receipts
     // would correctly become stale once the objective changes.
@@ -1762,7 +1771,7 @@ pub(crate) fn start_state(
     team.objective = text.to_owned();
     // "Keep going" after a stop continues an unfinished Council cycle and its rounds.
     refresh_council(&store, &mut team);
-    if completed_nested_cycle {
+    if completed_nested_cycle || restarted_nested_cycle {
         // The cycle key is also the receipt namespace. Make it strictly
         // increasing even when two objectives begin within one clock tick.
         team.council_since = storage::now().max(team.council_since.saturating_add(1));

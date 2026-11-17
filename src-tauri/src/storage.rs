@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 43;
+pub const SCHEMA_VERSION: i64 = 44;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -690,6 +690,59 @@ impl Store {
                     .map_err(|e| e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=43;")
                     .map_err(|e| e.to_string())?;
+            }
+            if version < 44 {
+                // Bind task-client replay to the exact assignment created by
+                // original admission. Legacy successful admissions can be
+                // recovered from their immutable admission audit and matching
+                // attempt-1 assignment. Blocked admissions remain unbound,
+                // even if a later retry happens to be attempt 1.
+                let exists: bool = migration.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM pragma_table_info('sa_tickets') WHERE name='original_admission_assignment_id')",
+                    [],
+                    |row| row.get(0),
+                ).map_err(|e| e.to_string())?;
+                if !exists {
+                    migration.execute_batch(
+                        "ALTER TABLE sa_tickets ADD COLUMN original_admission_assignment_id TEXT;",
+                    ).map_err(|e| e.to_string())?;
+                }
+                migration.execute_batch(
+                    "UPDATE sa_tickets
+                     SET original_admission_assignment_id=(
+                       SELECT assignment.id
+                       FROM sa_assignments assignment
+                       JOIN sa_orchestrations orchestration
+                         ON orchestration.id=sa_tickets.orchestration_id
+                       JOIN sa_audit admission
+                         ON admission.ticket_id=sa_tickets.id
+                        AND admission.kind='admitted'
+                       WHERE assignment.ticket_id=sa_tickets.id
+                         AND assignment.attempt=1
+                         AND ((admission.detail='manual readonly worker reserved'
+                               AND assignment.bot_id=sa_tickets.worker_bot_id)
+                           OR (admission.detail='manual readonly coordinator reserved'
+                               AND assignment.bot_id=orchestration.coordinator_bot_id))
+                       ORDER BY admission.id LIMIT 1
+                     )
+                     WHERE original_admission_assignment_id IS NULL
+                       AND EXISTS(
+                         SELECT 1 FROM sa_audit admission
+                         WHERE admission.ticket_id=sa_tickets.id
+                           AND admission.kind='admitted'
+                           AND admission.detail IN (
+                             'manual readonly worker reserved',
+                             'manual readonly coordinator reserved'
+                           )
+                       );
+                     CREATE TRIGGER IF NOT EXISTS sa_original_admission_assignment_immutable
+                       BEFORE UPDATE OF original_admission_assignment_id ON sa_tickets
+                       WHEN NEW.original_admission_assignment_id IS NOT OLD.original_admission_assignment_id
+                       BEGIN
+                         SELECT RAISE(ABORT,'SuperAgent original admission assignment is immutable');
+                       END;
+                     PRAGMA user_version=44;",
+                ).map_err(|e| e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
         }

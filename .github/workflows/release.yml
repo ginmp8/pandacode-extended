@@ -146,7 +146,9 @@ jobs:
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
           APPLE_API_PRIVATE_KEY: ${{ secrets.APPLE_API_PRIVATE_KEY }}
       - name: Build installer
-        run: node scripts/release/build.mjs
+        # On hosted macOS runners, hdiutil can temporarily refuse to eject the
+        # DMG staging volume. Retry only that failure; all other failures remain fatal.
+        run: ${{ runner.os == 'macOS' && 'bash scripts/release/retry-macos-dmg-build.sh' || 'node scripts/release/build.mjs' }}
         env:
           # Signs the in-app update file. Without these secrets the installers still
           # build, but the release offers no automatic update.

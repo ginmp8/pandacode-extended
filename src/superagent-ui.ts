@@ -487,7 +487,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): void {
           input.coordinatorBotId === input.workerBotId) throw new Error('Choose two different existing bots.');
         const created = await call<Config>('superagent_create',{ input });
         draftPresetName = ''; draftPresetTemplate = '';
-        selected = created.id; await reload();
+        selected = created.id;
+        await reload();
+        // The create response is authoritative. A list read may briefly lag it;
+        // keep the newly created disabled preset selected until a fresh read.
+        if (!presets.some(config => config.id === created.id)) {
+          presets = [{ ...created, enabled: false }, ...presets];
+          selected = created.id;
+        }
       });
     }
     if (form.dataset.saForm === 'reject') {

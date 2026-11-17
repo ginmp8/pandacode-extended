@@ -5,6 +5,7 @@ fn config(provider: &str, prompt: &str) -> crate::providers::RunConfig {
     crate::providers::RunConfig {
             reviewer_boundary: false,
             reviewer_policy: None,
+            native_reviewer_host: None,
         session_id: "skill-guard".into(),
         provider: provider.into(),
         model: "default".into(),

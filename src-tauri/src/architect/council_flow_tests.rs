@@ -897,3 +897,1300 @@ fn raising_the_limit_on_a_resting_team_wakes_the_lead_once() {
     let team = council::set(&state, &sid, Some(on(9.0, 2, 0))).unwrap();
     assert_eq!((team.status.as_str(), team.pending_turn.is_none()), ("paused", true));
 }
+
+#[test]
+fn concurrent_roots_freeze_the_same_nested_bot_and_keep_child_approval_task_scoped() {
+    use crate::skills::{Kind, Library, Source};
+    use council::AutomaticReviewerCount as Count;
+
+    const BOT_ID: &str = "shared-reviewer";
+    struct NestedTask {
+        root_id: String,
+        child_id: String,
+        parent_seat_id: String,
+        binding: reviewer_security::ReviewerBinding,
+        link: CouncilChildLink,
+    }
+
+    let (state, root_a_id) = super::super::state_fixture();
+    let now = storage::now().max(2);
+    let temp = std::env::temp_dir().join(format!("pandacode-council-isolation-{}", storage::id()));
+    let library = Library::new(temp.join("library"), temp.join("home"));
+    let import_guide = |instructions: &str| {
+        library.import(
+            Kind::Skill,
+            vec![("SKILL.md".into(), format!(
+                "---\nname: Review guide\ndescription: Task-scoped review guidance.\n---\n{instructions}\n"
+            ).into_bytes())],
+            "Review guide",
+            Source { kind: "folder".into(), location: "disposable-test-fixture".into(), git_ref: None, commit: None },
+        ).unwrap();
+    };
+    import_guide("Read the original task evidence.");
+
+    let task_config = |authorization_id: &str, path: &str| {
+        let mut plan =
+            super::composition(true, Count::Fixed(1), vec![super::nested_reviewer(BOT_ID)]);
+        plan.limits.max_estimated_cost_micros = None;
+        plan.criteria.push(council::CouncilCriterion {
+            id: "coverage".into(),
+            lens: "coverage".into(),
+            description: "Independently verify the task-scoped frozen artifact.".into(),
+            required: true,
+            target: 9.0,
+            evidence_required: false,
+            source: council::CouncilCriterionOrigin::Architect,
+        });
+        let mut config = super::config_for_composition(plan);
+        config.review_permissions = Some(reviewer_security::ReviewerPermissionSelection {
+            authorization_id: authorization_id.into(),
+            grants: vec![reviewer_security::ReviewerCapabilityGrant {
+                tool: "pandacode_open_file".into(),
+                action: "call".into(),
+                action_argument: None,
+                resource_argument: "path".into(),
+                resource: path.into(),
+            }],
+        });
+        config
+    };
+
+    let root_b_id;
+    {
+        let store = state.store.lock().unwrap();
+        let root_session = store.session(&root_a_id).unwrap();
+        root_b_id = store
+            .create_session(
+                &root_session.project_id,
+                &root_session.provider,
+                &root_session.model,
+                &root_session.mode,
+            )
+            .unwrap()
+            .id;
+        store.db.execute(
+            "INSERT INTO bots(id,name,role,instructions,goals,soul,project_id,provider,model,mode,created_at,updated_at,skills) VALUES(?1,'Shared reviewer','QA','Original reviewer instructions','Original goals','Original persona',?2,'codex','gpt-5-nano','full',1,1,'[\"review-guide\"]')",
+            params![BOT_ID, root_session.project_id],
+        ).unwrap();
+    }
+    let mut root_a = saved(&state, &root_a_id);
+    root_a.status = "running".into();
+    root_a.council_since = now;
+    root_a.config.council = Some(task_config("grant-root-a", "src/root-a.rs"));
+    store_team(&state, &mut root_a);
+    let mut root_b = root_a.clone();
+    root_b.session_id = root_b_id.clone();
+    root_b.workers.clear();
+    root_b.council_since = now + 1;
+    root_b.dispatch_revision = 0;
+    root_b.revision = 0;
+    root_b.config.council = Some(task_config("grant-root-b", "src/root-b.rs"));
+    store_team(&state, &mut root_b);
+
+    let install_nested_task = |root_id: &str| -> NestedTask {
+        let store = state.store.lock().unwrap();
+        let mut root = load(&store, root_id).unwrap().unwrap();
+        let nested = root
+            .config
+            .council
+            .as_ref()
+            .unwrap()
+            .composition
+            .as_ref()
+            .unwrap()
+            .selected[0]
+            .nested
+            .as_ref()
+            .unwrap()
+            .clone();
+        let selected = bot_reviewers::seat_bot_inner_with_skills(&store, &root, 1, None, &library)
+            .unwrap()
+            .unwrap();
+        let created_at = storage::now().max(root.council_since + 1);
+        let mut nested_seat = council::seat_for(&root, Some("nested-security"), None)
+            .unwrap()
+            .unwrap();
+        nested_seat.started_at = created_at;
+        let parent_session = store.session(root_id).unwrap();
+        let child_session = store
+            .create_session(
+                &parent_session.project_id,
+                &selected.profile.provider,
+                &selected.profile.model,
+                &parent_session.mode,
+            )
+            .unwrap();
+        let child_id = child_session.id.clone();
+        let mut parent_worker = super::super::worker("nested-review", "waiting", &["src"], &[]);
+        parent_worker.session_id = child_id.clone();
+        parent_worker.name = selected.context.name.clone();
+        parent_worker.profile_id = selected.profile.id.clone();
+        parent_worker.provider = selected.profile.provider.clone();
+        parent_worker.model = selected.profile.model.clone();
+        parent_worker.reasoning_effort = selected.profile.reasoning_effort.clone();
+        parent_worker.created_at = created_at;
+        parent_worker.updated_at = created_at;
+        parent_worker.read_only = true;
+        parent_worker.council = Some(nested_seat.clone());
+        let mut binding = reviewer_security::ReviewerBinding::native(
+            &root,
+            &parent_worker.id,
+            created_at,
+            &parent_worker.provider,
+            &parent_worker.model,
+            &nested_seat,
+        );
+        binding.reviewer_bot_id = Some(selected.id.clone());
+        binding.roster_bot_ids = selected.roster_bot_ids.clone();
+        binding.composition_mode = Some("nested".into());
+        binding.snapshot.bot_context = Some(selected.context.clone());
+        binding.snapshot.tool_policy = selected.tool_policy.clone();
+        binding.snapshot.skills = selected.skills.clone();
+        parent_worker.reviewer_binding = Some(binding.clone());
+        reviewer_security::record_native_authority(&store, root_id, &binding).unwrap();
+
+        let mut auto_seat = council::seat_for(&root, Some("automatic-coverage"), None)
+            .unwrap()
+            .unwrap();
+        auto_seat.started_at = created_at;
+        let auto_session = store
+            .create_session(
+                &parent_session.project_id,
+                "codex",
+                "gpt-5-nano",
+                &parent_session.mode,
+            )
+            .unwrap();
+        let mut automatic = super::super::worker("automatic-review", "waiting", &["src"], &[]);
+        automatic.session_id = auto_session.id;
+        automatic.provider = "codex".into();
+        automatic.model = "gpt-5-nano".into();
+        automatic.created_at = created_at;
+        automatic.updated_at = created_at;
+        automatic.read_only = true;
+        automatic.council = Some(auto_seat.clone());
+        let mut auto_binding = reviewer_security::ReviewerBinding::native(
+            &root,
+            &automatic.id,
+            created_at,
+            &automatic.provider,
+            &automatic.model,
+            &auto_seat,
+        );
+        auto_binding.composition_mode = Some("direct".into());
+        automatic.reviewer_binding = Some(auto_binding.clone());
+        reviewer_security::record_native_authority(&store, root_id, &auto_binding).unwrap();
+
+        store.db.execute(
+            "INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",
+            params![root_id, parent_worker.id, child_id],
+        ).unwrap();
+        root.workers.extend([parent_worker.clone(), automatic]);
+        save(&store, &mut root).unwrap();
+        super::super::super::create_nested_child_team(
+            &store,
+            &root,
+            &parent_worker,
+            &nested,
+            &child_id,
+        )
+        .unwrap();
+        root.dispatch_revision = root.dispatch_revision.saturating_add(1);
+        save(&store, &mut root).unwrap();
+        let decision = council::NestedEscalationDecision {
+            cycle_id: binding.council_cycle_id.clone(),
+            seat_id: parent_worker.id.clone(),
+            round: 1,
+            attempt: 1,
+            artifact_revision: binding.artifact_revision.clone(),
+            phase: council::NestedEscalationPhase::Child,
+            trigger: None,
+            preliminary_score: None,
+            finalized: true,
+            decided_at_ms: created_at as u64,
+            child_session_id: Some(child_id.clone()),
+        };
+        super::super::super::persist_nested_decision(&store, root_id, &decision).unwrap();
+        let link = super::super::super::validate_council_child_link(&store, &child_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(link.binding, binding);
+        NestedTask {
+            root_id: root_id.into(),
+            child_id,
+            parent_seat_id: parent_worker.id,
+            binding,
+            link,
+        }
+    };
+
+    let task_a = install_nested_task(&root_a_id);
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE bots SET name='Reviewer version two',instructions='Task B reviewer instructions',goals='Task B goals',soul='Task B persona' WHERE id=?1",
+            [BOT_ID],
+        ).unwrap();
+    }
+    import_guide("Read the second task's evidence and use its own policy.");
+    let task_b = install_nested_task(&root_b_id);
+
+    assert_ne!(task_a.root_id, task_b.root_id);
+    assert_ne!(task_a.child_id, task_b.child_id);
+    assert_ne!(
+        task_a.link.root_council_cycle_id,
+        task_b.link.root_council_cycle_id
+    );
+    assert_ne!(
+        task_a.link.child_council_cycle_id,
+        task_b.link.child_council_cycle_id
+    );
+    assert_eq!(task_a.binding.reviewer_bot_id.as_deref(), Some(BOT_ID));
+    assert_eq!(task_b.binding.reviewer_bot_id.as_deref(), Some(BOT_ID));
+    assert_eq!(
+        task_a
+            .binding
+            .snapshot
+            .bot_context
+            .as_ref()
+            .unwrap()
+            .instructions,
+        "Original reviewer instructions"
+    );
+    assert_eq!(
+        task_b
+            .binding
+            .snapshot
+            .bot_context
+            .as_ref()
+            .unwrap()
+            .instructions,
+        "Task B reviewer instructions"
+    );
+    let skills_a = task_a.binding.snapshot.skills.as_ref().unwrap();
+    let skills_b = task_b.binding.snapshot.skills.as_ref().unwrap();
+    assert!(skills_a.prompt.contains("original task evidence"));
+    assert!(skills_b.prompt.contains("second task's evidence"));
+    assert_ne!(
+        skills_a.pins[0].content_sha256,
+        skills_b.pins[0].content_sha256
+    );
+    assert_ne!(
+        task_a.binding.snapshot.tool_policy,
+        task_b.binding.snapshot.tool_policy
+    );
+    assert_ne!(
+        super::super::super::council_policy_fingerprint(&task_a.binding).unwrap(),
+        super::super::super::council_policy_fingerprint(&task_b.binding).unwrap(),
+    );
+    assert!(skills_a.verify().is_ok() && skills_b.verify().is_ok());
+
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE bots SET name='Mutable profile after admission',instructions='Unrelated live edit',skills='[\"other-skill\"]' WHERE id=?1",
+            [BOT_ID],
+        ).unwrap();
+    }
+    import_guide("Live library text changed after both task admissions.");
+    {
+        let store = state.store.lock().unwrap();
+        for task in [&task_a, &task_b] {
+            let root = load(&store, &task.root_id).unwrap().unwrap();
+            let parent = root
+                .workers
+                .iter()
+                .find(|worker| worker.id == task.parent_seat_id)
+                .unwrap();
+            let persisted = parent.reviewer_binding.as_ref().unwrap();
+            assert_eq!(persisted, &task.binding);
+            assert!(
+                super::super::super::validate_council_child_link(&store, &task.child_id)
+                    .unwrap()
+                    .is_some()
+            );
+            reviewer_security::validate_issued_authority(&store, &task.root_id, persisted).unwrap();
+            persisted
+                .snapshot
+                .skills
+                .as_ref()
+                .unwrap()
+                .verify()
+                .unwrap();
+        }
+        assert_eq!(
+            crate::bots::get(&store, BOT_ID).unwrap().instructions,
+            "Unrelated live edit"
+        );
+    }
+
+    let settle_nested_task = |task: &NestedTask, child_scores: [f64; 2], automatic_score: f64| {
+        let store = state.store.lock().unwrap();
+        let mut root = load(&store, &task.root_id).unwrap().unwrap();
+        let link = super::super::super::validate_council_child_link(&store, &task.child_id)
+            .unwrap()
+            .unwrap();
+        let mut child = load(&store, &task.child_id).unwrap().unwrap();
+        let child_cycle_id = format!("{}:{}", child.session_id, child.council_since);
+        let root_cycle_id = format!("{}:{}", root.session_id, root.council_since);
+        let mut leaves = Vec::new();
+        for (index, score) in child_scores.into_iter().enumerate() {
+            let id = format!("{}-leaf-{index}", task.root_id);
+            let at = child.council_since + 1 + index as i64;
+            let seat = council::CouncilSeat {
+                round: 1,
+                lens: format!("child-lens-{index}"),
+                score: Some(score),
+                started_at: at,
+                closed_by_selection: false,
+            };
+            let mut leaf = super::super::worker(&id, "completed", &["src"], &[]);
+            leaf.profile_id = format!("local-reviewer-{index}");
+            leaf.provider = "codex".into();
+            leaf.model = "gpt-5-nano".into();
+            let child_session = store.session(&task.child_id).unwrap();
+            leaf.session_id = store.create_session(
+                &child_session.project_id, &leaf.provider, &leaf.model, &child_session.mode,
+            ).unwrap().id;
+            leaf.created_at = at;
+            leaf.updated_at = at;
+            leaf.result_revision = index as u64 + 1;
+            leaf.read_only = true;
+            leaf.council = Some(seat.clone());
+            let mut binding = reviewer_security::ReviewerBinding::native(
+                &child,
+                &leaf.id,
+                at,
+                &leaf.provider,
+                &leaf.model,
+                &seat,
+            );
+            binding.composition_mode = Some("direct".into());
+            binding.parent_council = Some(reviewer_security::ReviewerParentBinding {
+                session_id: root.session_id.clone(),
+                council_cycle_id: root_cycle_id.clone(),
+                artifact_revision: link.root_artifact_revision.clone(),
+                seat_id: task.parent_seat_id.clone(),
+                depth: 1,
+            });
+            reviewer_security::record_native_authority(&store, &task.child_id, &binding).unwrap();
+            leaf.reviewer_binding = Some(binding);
+            leaves.push(leaf);
+        }
+        child.workers = leaves;
+        child.status = "completed".into();
+        child.dispatch_revision = child.workers.len() as u64;
+        save(&store, &mut child).unwrap();
+        for leaf in &child.workers {
+            let score = leaf.council.as_ref().unwrap().score.unwrap();
+            store.message(&leaf.session_id, "assistant", &format!("Council score: {score}/10")).unwrap();
+            super::super::super::persist_council_terminal_receipts(&store, &child, leaf).unwrap();
+            let binding = leaf.reviewer_binding.as_ref().unwrap();
+            for criterion in &child.config.council.as_ref().unwrap().composition.as_ref().unwrap().criteria {
+                let outcome = council::CouncilCriterionOutcome { criterion_id: criterion.id.clone(),
+                    score, verified_evidence_refs: Vec::new() };
+                let local = council::CouncilCriterionOutcomeReceipt {
+                    schema_version: 1, root_cycle_id: child_cycle_id.clone(),
+                    task_id: child.session_id.clone(), task_cycle_id: child_cycle_id.clone(),
+                    child_cycle_id: None, round: 1, seat_id: leaf.id.clone(),
+                    parent_seat_id: None, attempt: leaf.attempt,
+                    artifact_revision: binding.artifact_revision.clone(), outcome: outcome.clone(),
+                };
+                local.validate().unwrap();
+                super::super::super::persist_council_record(&store, &child.session_id,
+                    &format!("native-test-child-criterion:{}:{}", leaf.id, criterion.id),
+                    "council_criterion_outcome", &local, &leaf.id).unwrap();
+                let root_outcome = council::CouncilCriterionOutcomeReceipt {
+                    root_cycle_id: root_cycle_id.clone(), child_cycle_id: Some(child_cycle_id.clone()),
+                    parent_seat_id: Some(task.parent_seat_id.clone()),
+                    artifact_revision: link.root_artifact_revision.clone(), ..local
+                };
+                root_outcome.validate().unwrap();
+                super::super::super::persist_council_record(&store, &root.session_id,
+                    &format!("native-test-root-leaf-criterion:{}:{}", leaf.id, criterion.id),
+                    "council_criterion_outcome", &root_outcome, &leaf.id).unwrap();
+            }
+        }
+        let child_status = super::super::super::native_council_status(&store, &child).unwrap();
+        assert_eq!(
+            child_status.state,
+            "passed",
+            "{}",
+            child_status.notice.unwrap_or_default()
+        );
+        let receipt =
+            super::super::super::create_child_council_receipt(&store, &link, &child).unwrap();
+
+        let parent_index = root
+            .workers
+            .iter()
+            .position(|worker| worker.id == task.parent_seat_id)
+            .unwrap();
+        root.workers[parent_index].status = "completed".into();
+        root.workers[parent_index].updated_at = storage::now();
+        root.workers[parent_index].result_revision = 3;
+        root.workers[parent_index].council.as_mut().unwrap().score = child_status.lowest;
+        let automatic_index = root
+            .workers
+            .iter()
+            .position(|worker| {
+                worker.reviewer_binding.as_ref().is_some_and(|binding| {
+                    binding.composition_mode.as_deref() == Some("direct")
+                        && binding.reviewer_bot_id.is_none()
+                })
+            })
+            .unwrap();
+        root.workers[automatic_index].status = "completed".into();
+        root.workers[automatic_index].updated_at = storage::now();
+        root.workers[automatic_index].result_revision = 4;
+        root.workers[automatic_index]
+            .council
+            .as_mut()
+            .unwrap()
+            .score = Some(automatic_score);
+        store.message(&root.workers[automatic_index].session_id, "assistant",
+            &format!("Council score: {automatic_score}/10")).unwrap();
+        root.status = "completed".into();
+        root.dispatch_revision = 4;
+        save(&store, &mut root).unwrap();
+        super::super::super::persist_council_terminal_receipts(
+            &store,
+            &root,
+            &root.workers[automatic_index],
+        )
+        .unwrap();
+        let automatic = &root.workers[automatic_index];
+        let binding = automatic.reviewer_binding.as_ref().unwrap();
+        for criterion in &root.config.council.as_ref().unwrap().composition.as_ref().unwrap().criteria {
+            let outcome = council::CouncilCriterionOutcomeReceipt {
+                schema_version: 1, root_cycle_id: root_cycle_id.clone(),
+                task_id: root.session_id.clone(), task_cycle_id: root_cycle_id.clone(),
+                child_cycle_id: None, round: 1, seat_id: automatic.id.clone(),
+                parent_seat_id: None, attempt: automatic.attempt,
+                artifact_revision: binding.artifact_revision.clone(),
+                outcome: council::CouncilCriterionOutcome { criterion_id: criterion.id.clone(),
+                    score: automatic_score, verified_evidence_refs: Vec::new() },
+            };
+            outcome.validate().unwrap();
+            super::super::super::persist_council_record(&store, &root.session_id,
+                &format!("native-test-automatic-criterion:{}", criterion.id),
+                "council_criterion_outcome", &outcome, &automatic.id).unwrap();
+        }
+
+        let status = super::super::super::native_council_status(&store, &root).unwrap();
+        assert_eq!(
+            status.state,
+            "passed",
+            "{}",
+            status.notice.unwrap_or_default()
+        );
+        assert!(super::super::super::verify_composition_terminal_receipts(
+            &store, &root, &status
+        ));
+        assert_eq!(
+            receipt.min_score,
+            Some(child_scores[0].min(child_scores[1]))
+        );
+        assert_eq!(receipt.root_cycle_id, root_cycle_id);
+        assert_eq!(receipt.child_cycle_id, child_cycle_id);
+        receipt
+    };
+
+    assert_eq!(saved(&state, &task_a.root_id).status, "running");
+    assert_eq!(saved(&state, &task_b.root_id).status, "running");
+    assert_eq!(saved(&state, &task_a.child_id).status, "running");
+    assert_eq!(saved(&state, &task_b.child_id).status, "running");
+    let receipt_a = settle_nested_task(&task_a, [9.3, 9.8], 9.7);
+    {
+        let store = state.store.lock().unwrap();
+        let root_b = load(&store, &task_b.root_id).unwrap().unwrap();
+        let root_a = load(&store, &task_a.root_id).unwrap().unwrap();
+        let status_a = super::super::super::native_council_status(&store, &root_a).unwrap();
+        assert_eq!(status_a.state, "passed");
+        assert!(
+            !super::super::super::verify_composition_terminal_receipts(&store, &root_b, &status_a),
+            "root A's terminal pass and child receipt cannot approve root B"
+        );
+        let policy_b = super::super::super::council_policy_fingerprint(&task_b.binding).unwrap();
+        assert!(receipt_a
+            .validate_for(
+                &task_b.link.root_council_cycle_id,
+                &task_b.parent_seat_id,
+                BOT_ID,
+                &task_b.link.root_artifact_revision,
+                &policy_b,
+            )
+            .is_err());
+    }
+    let receipt_b = settle_nested_task(&task_b, [9.1, 9.6], 9.5);
+    assert_ne!(receipt_a.min_score, receipt_b.min_score);
+    assert_ne!(receipt_a.root_cycle_id, receipt_b.root_cycle_id);
+    assert_ne!(receipt_a.child_cycle_id, receipt_b.child_cycle_id);
+    receipt_a
+        .validate_for(
+            &task_a.link.root_council_cycle_id,
+            &task_a.parent_seat_id,
+            BOT_ID,
+            &task_a.link.root_artifact_revision,
+            &super::super::super::council_policy_fingerprint(&task_a.binding).unwrap(),
+        )
+        .unwrap();
+    receipt_b
+        .validate_for(
+            &task_b.link.root_council_cycle_id,
+            &task_b.parent_seat_id,
+            BOT_ID,
+            &task_b.link.root_artifact_revision,
+            &super::super::super::council_policy_fingerprint(&task_b.binding).unwrap(),
+        )
+        .unwrap();
+    {
+        let store = state.store.lock().unwrap();
+        for task in [&task_a, &task_b] {
+            let root = load(&store, &task.root_id).unwrap().unwrap();
+            let status = super::super::super::native_council_status(&store, &root).unwrap();
+            assert_eq!(status.state, "passed");
+            assert!(super::super::super::verify_composition_terminal_receipts(
+                &store, &root, &status
+            ));
+            let ledger = super::super::super::council_ledger_projection(&store, &root);
+            assert_eq!(ledger.council_child_receipts.len(), 1);
+            assert_eq!(
+                ledger.council_child_receipts[0].root_cycle_id,
+                task.link.root_council_cycle_id
+            );
+            assert_eq!(
+                ledger.council_child_receipts[0].child_cycle_id,
+                task.link.child_council_cycle_id
+            );
+            assert_eq!(ledger.council_child_leaves.len(), 2);
+            assert!(ledger
+                .council_child_leaves
+                .iter()
+                .all(|score| score.root_cycle_id == task.link.root_council_cycle_id));
+            assert!(ledger
+                .council_usage
+                .iter()
+                .all(|usage| usage.root_cycle_id == task.link.root_council_cycle_id));
+            assert!(ledger
+                .council_usage
+                .iter()
+                .any(|usage| usage.scope == council::CouncilUsageScope::Child));
+        }
+    }
+    let _ = std::fs::remove_dir_all(temp);
+}
+
+#[test]
+fn native_concurrent_roots_dispatch_and_settle_the_same_bot_without_state_leakage() {
+    use crate::skills::{Kind, Library, Source};
+    use council::SelectedReviewerMode as Mode;
+
+    const BOT_ID: &str = "ac22-shared-reviewer";
+    const SKILL_ID: &str = "ac22-review-guide";
+
+    struct Task {
+        root_id: String,
+        worker_id: String,
+        auto_worker_id: String,
+        child_id: String,
+        binding: reviewer_security::ReviewerBinding,
+        link: CouncilChildLink,
+    }
+
+    let (state, root_a_id) = super::super::state_fixture();
+    let state = std::sync::Arc::new(state);
+    let now = storage::now().max(2);
+    let temp = std::env::temp_dir().join(format!("pandacode-ac22-native-{}", storage::id()));
+    let library = Library::new(temp.join("library"), temp.join("home"));
+    let import_guide = |instructions: &str| {
+        library.import(
+            Kind::Skill,
+            vec![("SKILL.md".into(), format!(
+                "---\nname: AC22 Review Guide\ndescription: Task-scoped review guidance.\n---\n{instructions}\n"
+            ).into_bytes())],
+            "AC22 Review Guide",
+            Source { kind: "folder".into(), location: "disposable-ac22-fixture".into(), git_ref: None, commit: None },
+        ).unwrap()
+    };
+    let imported = import_guide("Read only the original task's evidence.");
+    assert_eq!(imported.meta.id, SKILL_ID);
+
+    let task_config = |authorization_id: &str, resource: &str| {
+        // The required nested bot plus one automatic reviewer form two root seats.
+        let mut config = super::super::two_phase_test_config(1, &[(BOT_ID, Mode::Nested)]);
+        config.composition.as_mut().unwrap().strategy = council::CouncilStrategy::Parallel;
+        assert!(config.validate_composition().unwrap().is_some());
+        config.review_permissions = Some(reviewer_security::ReviewerPermissionSelection {
+            authorization_id: authorization_id.into(),
+            grants: vec![reviewer_security::ReviewerCapabilityGrant {
+                tool: "pandacode_open_file".into(),
+                action: "call".into(),
+                action_argument: None,
+                resource_argument: "path".into(),
+                resource: resource.into(),
+            }],
+        });
+        config
+    };
+
+    let root_b_id = {
+        let store = state.store.lock().unwrap();
+        let parent = store.session(&root_a_id).unwrap();
+        let root_b_id = store
+            .create_session(
+                &parent.project_id,
+                &parent.provider,
+                &parent.model,
+                &parent.mode,
+            )
+            .unwrap()
+            .id;
+        store.db.execute(
+            "INSERT INTO bots(id,name,role,instructions,goals,soul,project_id,provider,model,mode,created_at,updated_at,skills) VALUES(?1,'Task A reviewer','QA','Task A reviewer instructions','Task A goals','Task A persona',?2,'codex','gpt-5-nano','full',1,1,'[\"ac22-review-guide\"]')",
+            params![BOT_ID, parent.project_id],
+        ).unwrap();
+
+        let mut root_a = load(&store, &root_a_id).unwrap().unwrap();
+        root_a.status = "running".into();
+        root_a.council_since = now;
+        root_a.config.council = Some(task_config("ac22-grant-a", "src/root-a.rs"));
+        save(&store, &mut root_a).unwrap();
+
+        let mut root_b = root_a.clone();
+        root_b.session_id = root_b_id.clone();
+        root_b.workers.clear();
+        root_b.council_since = now + 1;
+        root_b.dispatch_revision = 0;
+        root_b.revision = 0;
+        root_b.config.council = Some(task_config("ac22-grant-b", "src/root-b.rs"));
+        save(&store, &mut root_b).unwrap();
+        root_b_id
+    };
+
+    let generation_a = load(&state.store.lock().unwrap(), &root_a_id)
+        .unwrap()
+        .unwrap()
+        .generation;
+    let generation_b = load(&state.store.lock().unwrap(), &root_b_id)
+        .unwrap()
+        .unwrap()
+        .generation;
+    let (lead_a, _lead_a_rx) = claim(
+        &state,
+        Launch {
+            sid: root_a_id.clone(),
+            prompt: "Build task A".into(),
+            images: None,
+            admission: Admission {
+                parent: root_a_id.clone(),
+                generation: generation_a,
+            },
+        },
+    );
+    let (lead_b, _lead_b_rx) = claim(
+        &state,
+        Launch {
+            sid: root_b_id.clone(),
+            prompt: "Build task B".into(),
+            images: None,
+            admission: Admission {
+                parent: root_b_id.clone(),
+                generation: generation_b,
+            },
+        },
+    );
+    assert_eq!(lead_a.config.session_id, root_a_id);
+    assert_eq!(lead_b.config.session_id, root_b_id);
+    assert_eq!(saved(&state, &root_a_id).status, "running");
+    assert_eq!(saved(&state, &root_b_id).status, "running");
+
+    // Seed each task's real frozen reviewer round with the disposable library.
+    // The following dispatches use the normal native handler and consume these
+    // persisted snapshots, while the test-only path skips provider discovery.
+    {
+        let store = state.store.lock().unwrap();
+        let root_a = load(&store, &root_a_id).unwrap().unwrap();
+        let frozen = bot_reviewers::seat_bot_inner_with_skills(&store, &root_a, 1, None, &library)
+            .unwrap()
+            .unwrap();
+        assert_eq!(frozen.context.instructions, "Task A reviewer instructions");
+        assert!(frozen
+            .skills
+            .as_ref()
+            .unwrap()
+            .prompt
+            .contains("original task's evidence"));
+    }
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE bots SET name='Task B reviewer',instructions='Task B reviewer instructions',goals='Task B goals',soul='Task B persona' WHERE id=?1",
+            [BOT_ID],
+        ).unwrap();
+    }
+    import_guide("Read only the second task's evidence.");
+    {
+        let store = state.store.lock().unwrap();
+        let root_b = load(&store, &root_b_id).unwrap().unwrap();
+        let frozen = bot_reviewers::seat_bot_inner_with_skills(&store, &root_b, 1, None, &library)
+            .unwrap()
+            .unwrap();
+        assert_eq!(frozen.context.instructions, "Task B reviewer instructions");
+        assert!(frozen
+            .skills
+            .as_ref()
+            .unwrap()
+            .prompt
+            .contains("second task's evidence"));
+    }
+
+    let root_assignment_a =
+        super::super::council_review_assignment("ac22-root-a", None, Some(BOT_ID), "security");
+    let root_assignment_b =
+        super::super::council_review_assignment("ac22-root-b", None, Some(BOT_ID), "quality");
+    let root_auto_assignment_a = super::super::council_review_assignment(
+        "ac22-root-a-direct",
+        Some("fast"),
+        None,
+        "coverage",
+    );
+    let root_auto_assignment_b = super::super::council_review_assignment(
+        "ac22-root-b-direct",
+        Some("fast"),
+        None,
+        "coverage",
+    );
+    let root_worker_ids_a = super::super::dispatch_council_round(
+        &state,
+        &root_a_id,
+        vec![root_assignment_a.clone(), root_auto_assignment_a],
+    )
+    .unwrap();
+    let root_worker_ids_b = super::super::dispatch_council_round(
+        &state,
+        &root_b_id,
+        vec![root_assignment_b.clone(), root_auto_assignment_b],
+    )
+    .unwrap();
+    assert_eq!(root_worker_ids_a.len(), 2);
+    assert_eq!(root_worker_ids_b.len(), 2);
+
+    let task_for = |root_id: &str, worker_ids: &[String]| {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, root_id).unwrap().unwrap();
+        let workers = worker_ids
+            .iter()
+            .map(|worker_id| {
+                root.workers
+                    .iter()
+                    .find(|worker| worker.id == *worker_id)
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let worker = workers
+            .iter()
+            .find(|worker| {
+                worker
+                    .reviewer_binding
+                    .as_ref()
+                    .and_then(|binding| binding.composition_mode.as_deref())
+                    == Some("nested")
+            })
+            .unwrap();
+        let auto_worker = workers
+            .iter()
+            .find(|worker| {
+                worker
+                    .reviewer_binding
+                    .as_ref()
+                    .and_then(|binding| binding.composition_mode.as_deref())
+                    != Some("nested")
+            })
+            .unwrap();
+        let child_id = worker.session_id.clone();
+        let link = super::super::super::validate_council_child_link(&store, &child_id)
+            .unwrap()
+            .unwrap();
+        Task {
+            root_id: root_id.into(),
+            worker_id: worker.id.clone(),
+            auto_worker_id: auto_worker.id.clone(),
+            child_id,
+            binding: worker.reviewer_binding.as_ref().unwrap().clone(),
+            link,
+        }
+    };
+    let task_a = task_for(&root_a_id, &root_worker_ids_a);
+    let task_b = task_for(&root_b_id, &root_worker_ids_b);
+    assert_ne!(task_a.child_id, task_b.child_id);
+    assert_ne!(
+        task_a.link.root_council_cycle_id,
+        task_b.link.root_council_cycle_id
+    );
+    assert_ne!(
+        task_a.link.child_council_cycle_id,
+        task_b.link.child_council_cycle_id
+    );
+    assert_eq!(task_a.binding.reviewer_bot_id.as_deref(), Some(BOT_ID));
+    assert_eq!(task_b.binding.reviewer_bot_id.as_deref(), Some(BOT_ID));
+    let persona_a = task_a.binding.snapshot.bot_context.as_ref().unwrap();
+    let persona_b = task_b.binding.snapshot.bot_context.as_ref().unwrap();
+    assert_eq!(
+        (
+            persona_a.name.as_str(),
+            persona_a.role.as_str(),
+            persona_a.instructions.as_str(),
+            persona_a.goals.as_str(),
+            persona_a.soul.as_str()
+        ),
+        (
+            "Task A reviewer",
+            "QA",
+            "Task A reviewer instructions",
+            "Task A goals",
+            "Task A persona"
+        )
+    );
+    assert_eq!(
+        (
+            persona_b.name.as_str(),
+            persona_b.role.as_str(),
+            persona_b.instructions.as_str(),
+            persona_b.goals.as_str(),
+            persona_b.soul.as_str()
+        ),
+        (
+            "Task B reviewer",
+            "QA",
+            "Task B reviewer instructions",
+            "Task B goals",
+            "Task B persona"
+        )
+    );
+    assert_ne!(
+        task_a.binding.snapshot.tool_policy,
+        task_b.binding.snapshot.tool_policy
+    );
+    let policy_identity =
+        |binding: &reviewer_security::ReviewerBinding| match &binding.snapshot.tool_policy {
+            reviewer_security::ReviewerToolPolicy::Scoped(policy) => Some((
+                policy.authorization_id.clone(),
+                policy.grants[0].resource.clone(),
+            )),
+            reviewer_security::ReviewerToolPolicy::NativeReadOnly => None,
+        };
+    assert_eq!(
+        policy_identity(&task_a.binding),
+        Some(("ac22-grant-a".to_owned(), "src/root-a.rs".to_owned()))
+    );
+    assert_eq!(
+        policy_identity(&task_b.binding),
+        Some(("ac22-grant-b".to_owned(), "src/root-b.rs".to_owned()))
+    );
+    let skills_a = task_a.binding.snapshot.skills.as_ref().unwrap();
+    let skills_b = task_b.binding.snapshot.skills.as_ref().unwrap();
+    assert!(skills_a.prompt.contains("original task's evidence"));
+    assert!(skills_b.prompt.contains("second task's evidence"));
+    assert_ne!(
+        skills_a.pins[0].content_sha256,
+        skills_b.pins[0].content_sha256
+    );
+    assert_ne!(skills_a.pins[0].staged_path, skills_b.pins[0].staged_path);
+    assert_ne!(
+        super::super::super::council_policy_fingerprint(&task_a.binding).unwrap(),
+        super::super::super::council_policy_fingerprint(&task_b.binding).unwrap(),
+    );
+
+    // Same-key replay returns the already-dispatched native seat. It cannot
+    // recreate it from later live bot or library contents.
+    let replayed_ids =
+        super::super::dispatch_council_round(&state, &root_a_id, vec![root_assignment_a]).unwrap();
+    assert_eq!(replayed_ids, vec![task_a.worker_id.clone()],
+        "replaying one assignment returns only that existing seat, not unrelated sibling seats");
+    assert_eq!(saved(&state, &root_a_id).workers.len(), 2);
+
+    // Mutating both live sources after admission must leave both dispatched
+    // tasks' snapshots, child guidance and staged skill files intact.
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE bots SET name='Mutable live reviewer',instructions='Live profile after admission',goals='Live goals',soul='Live persona',skills='[]' WHERE id=?1",
+            [BOT_ID],
+        ).unwrap();
+    }
+    import_guide("Live library text changed after both native admissions.");
+    let child_a = saved(&state, &task_a.child_id);
+    let child_b = saved(&state, &task_b.child_id);
+    assert!(child_a
+        .config
+        .lead_guidance
+        .as_ref()
+        .unwrap()
+        .contains("Task A reviewer instructions"));
+    assert!(child_a
+        .config
+        .lead_guidance
+        .as_ref()
+        .unwrap()
+        .contains("original task's evidence"));
+    assert!(!child_a
+        .config
+        .lead_guidance
+        .as_ref()
+        .unwrap()
+        .contains("Task B reviewer instructions"));
+    assert!(child_b
+        .config
+        .lead_guidance
+        .as_ref()
+        .unwrap()
+        .contains("Task B reviewer instructions"));
+    assert!(child_b
+        .config
+        .lead_guidance
+        .as_ref()
+        .unwrap()
+        .contains("second task's evidence"));
+    assert!(!child_b
+        .config
+        .lead_guidance
+        .as_ref()
+        .unwrap()
+        .contains("Task A reviewer instructions"));
+    skills_a.verify().unwrap();
+    skills_b.verify().unwrap();
+
+    // The native scheduler claims both child cycles' leaf reviews and reserves
+    // both child coordinator turns before either task is settled. No provider
+    // runner is launched by this fixture.
+    for task in [&task_a, &task_b] {
+        let child_generation = saved(&state, &task.child_id).generation;
+        let assignments = (0..2)
+            .map(|index| {
+                super::super::council_review_assignment(
+                    &format!("{}-leaf-{index}", task.root_id),
+                    Some("fast"),
+                    None,
+                    if index == 0 { "security" } else { "coverage" },
+                )
+            })
+            .collect::<Vec<_>>();
+        super::super::dispatch_state_runtime_test(
+            &state,
+            &task.child_id,
+            child_generation,
+            "pandacode_dispatch_workers",
+            json!({"assignments":assignments}),
+        )
+        .unwrap_or_else(|error| {
+            panic!("native child dispatch failed for {}: {error}", task.root_id)
+        });
+    }
+    let mut claimed = Vec::new();
+    while let Some(action) = next_action_state(&state, &mut |_| {}).unwrap() {
+        claimed.push(action);
+        assert!(
+            claimed.len() <= 8,
+            "only the two child cycles and their leaf reviews should be claimable"
+        );
+    }
+    for task in [&task_a, &task_b] {
+        let task_claims = claimed
+            .iter()
+            .filter(|action| action.admission.parent == task.child_id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            task_claims.len(),
+            3,
+            "two child leaves and the coordinator turn are claimed per task"
+        );
+        assert!(task_claims.iter().any(|action| action.sid == task.child_id));
+        let child = saved(&state, &task.child_id);
+        assert!(child
+            .workers
+            .iter()
+            .all(|worker| worker.status == "running"));
+        assert!(child.pending_turn.as_ref().unwrap().reserved);
+    }
+    assert_eq!(saved(&state, &task_a.root_id).status, "running");
+    assert_eq!(saved(&state, &task_b.root_id).status, "running");
+    assert_eq!(saved(&state, &task_a.child_id).status, "running");
+    assert_eq!(saved(&state, &task_b.child_id).status, "running");
+
+    // Open and verify both frozen skills through the native evidence handler in
+    // interleaved order; this checks pinned input integrity, not project tests.
+    let skill_actor = |task: &Task| coordination::Actor::Worker {
+        id: task.worker_id.clone(),
+        attempt: 1,
+    };
+    let (opened_a, _) = reviewer_skill_evidence::dispatch_state(
+        &state,
+        &task_a.root_id,
+        generation_a,
+        &skill_actor(&task_a),
+        "pandacode_reviewer_skill_open",
+        json!({"skillId":SKILL_ID}),
+    )
+    .unwrap();
+    let (opened_b, _) = reviewer_skill_evidence::dispatch_state(
+        &state,
+        &task_b.root_id,
+        generation_b,
+        &skill_actor(&task_b),
+        "pandacode_reviewer_skill_open",
+        json!({"skillId":SKILL_ID}),
+    )
+    .unwrap();
+    assert!(opened_a["lowerTrustInstructions"]
+        .as_str()
+        .unwrap()
+        .contains("original task's evidence"));
+    assert!(opened_b["lowerTrustInstructions"]
+        .as_str()
+        .unwrap()
+        .contains("second task's evidence"));
+    assert_ne!(opened_a["readOnlyPath"], opened_b["readOnlyPath"]);
+    let (verified_a, _) = reviewer_skill_evidence::dispatch_state(
+        &state,
+        &task_a.root_id,
+        generation_a,
+        &skill_actor(&task_a),
+        "pandacode_reviewer_skill_verify",
+        json!({"skillId":SKILL_ID}),
+    )
+    .unwrap();
+    let (verified_b, _) = reviewer_skill_evidence::dispatch_state(
+        &state,
+        &task_b.root_id,
+        generation_b,
+        &skill_actor(&task_b),
+        "pandacode_reviewer_skill_verify",
+        json!({"skillId":SKILL_ID}),
+    )
+    .unwrap();
+    assert_eq!(verified_a["pinnedInputIntegrityVerified"], true);
+    assert_eq!(verified_b["pinnedInputIntegrityVerified"], true);
+
+    let settle_child = |task: &Task, score: f64| {
+        settle_native_council_round(&state, &task.child_id, 1, "completed", Some(score));
+        let child_generation = {
+            let store = state.store.lock().unwrap();
+            let mut child = load(&store, &task.child_id).unwrap().unwrap();
+            refresh_council(&store, &mut child);
+            assert_eq!(
+                child
+                    .council_status
+                    .as_ref()
+                    .map(|status| status.state.as_str()),
+                Some("passed")
+            );
+            let generation = child.generation;
+            save(&store, &mut child).unwrap();
+            generation
+        };
+        super::super::dispatch_state_runtime_test(
+            &state,
+            &task.child_id,
+            child_generation,
+            "pandacode_finish_team",
+            json!({"summary":"The isolated child Council passed with its current native receipts."}),
+        ).unwrap_or_else(|error| panic!("child Council finish refused for {}: {error}", task.root_id));
+        let store = state.store.lock().unwrap();
+        let mut root = load(&store, &task.root_id).unwrap().unwrap();
+        let no_agents = std::collections::HashMap::new();
+        super::super::super::reconcile_nested_child_seats(&store, &no_agents, &mut root).unwrap();
+        refresh_council(&store, &mut root);
+        save(&store, &mut root).unwrap();
+    };
+
+    settle_child(&task_a, 9.3);
+    settle_native_council_round(&state, &task_a.root_id, 1, "completed", Some(9.3));
+    let (status_a, receipt_a) = {
+        let store = state.store.lock().unwrap();
+        let root_a = load(&store, &task_a.root_id).unwrap().unwrap();
+        let root_b = load(&store, &task_b.root_id).unwrap().unwrap();
+        let status_a = super::super::super::native_council_status(&store, &root_a).unwrap();
+        let status_b = super::super::super::native_council_status(&store, &root_b).unwrap();
+        assert_eq!(status_a.state, "passed");
+        assert_ne!(
+            status_b.state, "passed",
+            "task A's child result cannot approve task B"
+        );
+        assert!(super::super::super::verify_composition_terminal_receipts(
+            &store, &root_a, &status_a
+        ));
+        assert!(!super::super::super::verify_composition_terminal_receipts(
+            &store, &root_b, &status_a
+        ));
+        let receipt = super::super::super::council_ledger_projection(&store, &root_a)
+            .council_child_receipts
+            .into_iter()
+            .next()
+            .unwrap();
+        let policy_b = super::super::super::council_policy_fingerprint(&task_b.binding).unwrap();
+        assert!(
+            receipt
+                .validate_for(
+                    &task_b.link.root_council_cycle_id,
+                    &task_b.worker_id,
+                    BOT_ID,
+                    &task_b.link.root_artifact_revision,
+                    &policy_b,
+                )
+                .is_err(),
+            "task A's receipt is not valid for task B's frozen authority"
+        );
+        assert_eq!(receipt.min_score, Some(9.3));
+        (status_a, receipt)
+    };
+    let premature_b = super::super::dispatch_state_runtime_test(
+        &state,
+        &task_b.root_id,
+        generation_b,
+        "pandacode_finish_team",
+        json!({"summary":"Task B must remain unsettled until its own child receipts exist."}),
+    )
+    .unwrap_err();
+    assert!(
+        premature_b.contains("Every worker must complete"),
+        "{premature_b}"
+    );
+    super::super::dispatch_state_runtime_test(
+        &state,
+        &task_a.root_id,
+        generation_a,
+        "pandacode_finish_team",
+        json!({"summary":"Task A passed using only its own native child receipt."}),
+    )
+    .unwrap();
+    finish(&state, &lead_a, "Task A native Council settled.", true);
+
+    // Replaying task B's dispatch after A completes still resolves to B's
+    // existing seat and leaves its in-flight child cycle untouched.
+    let replayed_ids_b =
+        super::super::dispatch_council_round(&state, &task_b.root_id, vec![root_assignment_b])
+            .unwrap();
+    assert_eq!(
+        replayed_ids_b,
+        vec![task_b.worker_id.clone()],
+        "replay returns only the requested existing seat, not a sibling seat"
+    );
+    assert_eq!(saved(&state, &task_b.root_id).workers.len(), 2);
+    assert_eq!(saved(&state, &task_b.child_id).status, "running");
+
+    settle_child(&task_b, 9.7);
+    settle_native_council_round(&state, &task_b.root_id, 1, "completed", Some(9.7));
+    let status_b = {
+        let store = state.store.lock().unwrap();
+        let root_b = load(&store, &task_b.root_id).unwrap().unwrap();
+        let status_b = super::super::super::native_council_status(&store, &root_b).unwrap();
+        assert_eq!(status_b.state, "passed");
+        assert!(super::super::super::verify_composition_terminal_receipts(
+            &store, &root_b, &status_b
+        ));
+        let ledger_b = super::super::super::council_ledger_projection(&store, &root_b);
+        assert_eq!(ledger_b.council_child_receipts.len(), 1);
+        assert_eq!(
+            ledger_b.council_child_receipts[0].root_cycle_id,
+            task_b.link.root_council_cycle_id
+        );
+        assert_eq!(
+            ledger_b.council_child_receipts[0].child_cycle_id,
+            task_b.link.child_council_cycle_id
+        );
+        assert_eq!(ledger_b.council_child_receipts[0].min_score, Some(9.7));
+        assert_eq!(ledger_b.council_child_leaves.len(), 2);
+        assert!(ledger_b.council_child_leaves.iter().all(|score| {
+            score.root_cycle_id == task_b.link.root_council_cycle_id && score.score == Some(9.7)
+        }));
+        status_b
+    };
+    super::super::dispatch_state_runtime_test(
+        &state,
+        &task_b.root_id,
+        generation_b,
+        "pandacode_finish_team",
+        json!({"summary":"Task B passed using its own native child receipt."}),
+    )
+    .unwrap();
+    finish(&state, &lead_b, "Task B native Council settled.", true);
+
+    {
+        let store = state.store.lock().unwrap();
+        for (task, expected_score) in [(&task_a, 9.3), (&task_b, 9.7)] {
+            let root = load(&store, &task.root_id).unwrap().unwrap();
+            let required_root_seats = root
+                .workers
+                .iter()
+                .filter(|worker| {
+                    worker.council.as_ref().is_some_and(|seat| seat.round == 1) && !worker.abandoned
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(required_root_seats.len(), 2);
+            assert!(required_root_seats.iter().all(|worker| {
+                worker.status == "completed"
+                    && worker
+                        .council
+                        .as_ref()
+                        .is_some_and(|seat| seat.score.is_some())
+            }));
+            assert!(required_root_seats
+                .iter()
+                .any(|worker| worker.id == task.worker_id));
+            assert!(required_root_seats
+                .iter()
+                .any(|worker| worker.id == task.auto_worker_id));
+            let status = super::super::super::native_council_status(&store, &root).unwrap();
+            assert_eq!(status.state, "passed");
+            assert!(super::super::super::verify_composition_terminal_receipts(
+                &store, &root, &status
+            ));
+            let ledger = super::super::super::council_ledger_projection(&store, &root);
+            assert_eq!(ledger.council_child_receipts.len(), 1);
+            assert_eq!(
+                ledger.council_child_receipts[0].root_cycle_id,
+                task.link.root_council_cycle_id
+            );
+            assert_eq!(
+                ledger.council_child_receipts[0].child_cycle_id,
+                task.link.child_council_cycle_id
+            );
+            assert_eq!(
+                ledger.council_child_receipts[0].min_score,
+                Some(expected_score)
+            );
+            assert_eq!(ledger.council_child_leaves.len(), 2);
+            assert!(ledger.council_child_leaves.iter().all(|score| {
+                score.root_cycle_id == task.link.root_council_cycle_id
+                    && score.score == Some(expected_score)
+            }));
+            let persisted = root
+                .workers
+                .iter()
+                .find(|worker| worker.id == task.worker_id)
+                .unwrap()
+                .reviewer_binding
+                .as_ref()
+                .unwrap();
+            assert_eq!(
+                persisted.snapshot.bot_context,
+                task.binding.snapshot.bot_context
+            );
+            assert_eq!(
+                persisted.snapshot.tool_policy,
+                task.binding.snapshot.tool_policy
+            );
+            assert_eq!(persisted.snapshot.skills, task.binding.snapshot.skills);
+            reviewer_security::validate_issued_authority(&store, &task.root_id, persisted).unwrap();
+        }
+        assert_eq!(status_a.state, "passed");
+        assert_eq!(status_b.state, "passed");
+        assert_eq!(receipt_a.min_score, Some(9.3));
+        assert_ne!(receipt_a.root_cycle_id, task_b.link.root_council_cycle_id);
+        let live_bot = crate::bots::get(&store, BOT_ID).unwrap();
+        assert_eq!(live_bot.instructions, "Live profile after admission");
+        assert!(live_bot.skills.is_empty());
+    }
+    let _ = std::fs::remove_dir_all(temp);
+}

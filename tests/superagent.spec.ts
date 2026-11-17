@@ -49,6 +49,12 @@ test('native SuperAgent manual dispatch requires opt-in and supports explicit re
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();
+  // Native creation and its list refresh can outlive Playwright's default
+  // assertion timeout on cold runners. Wait for the native operation to settle
+  // before checking the same persisted preset and disabled dispatch gate.
+  await expect(dialog.locator('#superagent-host')).toHaveAttribute('aria-busy','false', {timeout:20_000});
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
+  await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Issue Resolution');
   await expect(dialog.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
   await dialog.getByRole('button',{name:'Enable manual'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
@@ -92,12 +98,21 @@ test('native SuperAgent preset edit and deletion require unused disabled configu
   await dialog.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
   await dialog.getByRole('combobox',{name:'Worker'}).selectOption({label:'Writer'});
   await dialog.getByRole('button',{name:'Create disabled preset'}).click();
+  // Wait for the native create and list refresh, not merely the click. An
+  // absent editor must report the real mutation error instead of timing out.
+  await expect(dialog.locator('#superagent-host')).toHaveAttribute('aria-busy','false',{timeout:20_000});
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
+  await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Safe default');
   await dialog.getByRole('textbox',{name:'Preset title'}).fill('Safely renamed');
   await dialog.getByRole('button',{name:'Save preset'}).click();
+  await expect(dialog.locator('#superagent-host')).toHaveAttribute('aria-busy','false',{timeout:20_000});
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
   await expect(dialog.locator('.sa-list .sa-item strong')).toHaveText('Safely renamed');
   await expect(dialog.getByRole('button',{name:'Enable manual'})).toBeVisible();
   await dialog.getByRole('button',{name:'Delete unused'}).click();
   await dialog.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(dialog.locator('#superagent-host')).toHaveAttribute('aria-busy','false',{timeout:20_000});
+  await expect(dialog.getByRole('alert')).toHaveCount(0);
   await expect(dialog.getByText('No orchestrations created.')).toBeVisible();
 });
 
@@ -308,6 +323,34 @@ test('SuperAgent preset draft survives an asynchronous native list reload', asyn
   await expect(host.getByRole('combobox',{name:'Example preset'})).toHaveValue('Software Development');
 });
 
+
+test('SuperAgent keeps the newly created preset selected after a stale list response', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-stale-create-list-test'; document.body.appendChild(host);
+    const created = {id:'created',name:'Fresh preset',coordinatorBotId:'router',
+      workerBotId:'worker',enabled:false,policyRevision:1};
+    mountSuperagent(host, async command => {
+      if (command === 'bots_list') return [
+        {id:'router',name:'Router',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if (command === 'superagent_list') return [] as never;
+      if (command === 'superagent_create') return created as never;
+      if (command === 'superagent_tickets') return [] as never;
+      throw new Error('Unexpected command: ' + command);
+    });
+  });
+  const host = page.locator('#sa-stale-create-list-test');
+  await host.getByRole('textbox',{name:'Name'}).fill('Fresh preset');
+  await host.getByRole('combobox',{name:'Coordinator'}).selectOption('router');
+  await host.getByRole('combobox',{name:'Worker'}).selectOption('worker');
+  await host.getByRole('button',{name:'Create disabled preset'}).click();
+  await expect(host.getByRole('button',{name:'Enable manual'})).toBeVisible();
+  await expect(host.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
+});
 
 test('SuperAgent links explicit GitHub source threads to the selected Ticket without dispatch', async ({page}) => {
   await page.goto('/?bots=sample');

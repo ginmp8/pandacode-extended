@@ -726,6 +726,7 @@ mod tests {
             mode: "full".into(),
             reviewer_boundary: false,
             reviewer_policy: None,
+            native_reviewer_host: None,
             cwd: dir.clone(),
             resume_id: None,
             prompt: "hello".into(),

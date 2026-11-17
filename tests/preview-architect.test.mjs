@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createPreviewArchitect } from '../src/preview-architect.ts';
+import { newCouncilComposition, withCouncilComposition } from '../src/council.ts';
 import { workerQueueReason } from '../src/worker-scheduling.ts';
 import { namedTeamSetup, sameTeamSetup } from '../src/team-mode.ts';
 
@@ -34,6 +35,69 @@ const config = (count = 3) => ({
 });
 
 const assignment = (id, values = {}) => ({ id, name: id, status: 'queued', dependsOn: [], files: [`src/${id}.ts`], ...values });
+
+test('architect preview preserves native S3 root and nested round limits without changing legacy Council', t => {
+  const { api, host } = fixture(t);
+  api.configure('parent', config());
+  const legacy = { target: 9, maxRounds: 1, reviewers: 0 };
+  assert.equal(api.setCouncil('parent', legacy).config.council.composition, undefined);
+
+  const strategy = { ...newCouncilComposition(), strategy: 'two_phase' };
+  const twoPhase = withCouncilComposition({ ...legacy, maxRounds: 3 }, strategy);
+  assert.throws(() => api.setCouncil('parent', { ...twoPhase, maxRounds: 1 }), /at least two review rounds/);
+  const saved = api.setCouncil('parent', twoPhase);
+  assert.equal(saved.councilStatus.state, 'waiting', 'preview cannot manufacture verified reviews');
+  assert.equal(createPreviewArchitect(host).get('parent').config.council.composition.strategy, 'two_phase');
+
+  const selected = { botId: 'nested-a', mode: 'nested', required: true, nested: {
+    template: 'explicit_task', childCriteriaSource: 'architect', childReviewerCount: 2,
+    target: 9, maxRounds: 1, escalation: 'always',
+  } };
+  const mixed = withCouncilComposition({ ...legacy, maxRounds: 3 }, { ...strategy,
+    automatic: { enabled: true, count: 1 }, selected: [selected],
+  });
+  assert.throws(() => api.setCouncil('parent', mixed), /at least 2 for the two-phase/);
+  const corrected = withCouncilComposition({ ...legacy, maxRounds: 3 }, { ...strategy,
+    automatic: { enabled: true, count: 1 },
+    selected: [{ ...selected, nested: { ...selected.nested, maxRounds: 2 } }],
+  });
+  const missingRootSeat = withCouncilComposition({ ...legacy, maxRounds: 3 }, { ...strategy,
+    automatic: { enabled: false, count: 0 }, selected: corrected.composition.selected,
+  });
+  assert.throws(() => api.setCouncil('parent', missingRootSeat), /At least 2 root reviewers/);
+  assert.throws(() => api.setCouncil('parent', { ...legacy, reviewerBotIds: ['nested-a'] }), /Select 2 to 8 distinct reviewer bots/);
+  assert.equal(api.setCouncil('parent', corrected).councilStatus.state, 'waiting');
+  assert.equal(createPreviewArchitect(host).get('parent').config.council.composition.selected[0].nested.maxRounds, 2);
+  assert.equal(api.setCouncil('parent', legacy).config.council.composition, undefined);
+});
+
+test('S2 nested escalation preserves on-trigger and always policies through preview reloads', t => {
+  const { api, host } = fixture(t);
+  api.configure('parent', config());
+  const nested = {
+    template: 'explicit_task', childCriteriaSource: 'architect', childReviewerCount: 2,
+    target: 9, maxRounds: 3, escalation: 'on_trigger',
+  };
+  const composition = {
+    ...newCouncilComposition(), strategy: 'escalated',
+    automatic: { enabled: true, count: 1 },
+    selected: [{ botId: 'nested-a', mode: 'nested', required: true, nested }],
+  };
+  const base = { target: 9, maxRounds: 3, reviewers: 0 };
+  for (const escalation of ['on_trigger', 'always']) {
+    const selected = [{ ...composition.selected[0], nested: { ...nested, escalation } }];
+    const saved = api.setCouncil('parent', withCouncilComposition(base, { ...composition, selected }));
+    assert.equal(saved.councilStatus.state, 'waiting', 'preview cannot manufacture child approval');
+    assert.equal(saved.config.council.composition.selected[0].nested.escalation, escalation);
+    assert.equal(createPreviewArchitect(host).get('parent').config.council.composition.selected[0].nested.escalation, escalation,
+      'S2 child escalation must not change on native-compatible preview serialization');
+  }
+  const invalid = [{ ...composition.selected[0], nested: { ...nested, escalation: 'skip' } }];
+  assert.throws(() => api.setCouncil('parent', withCouncilComposition(base, { ...composition, selected: invalid })),
+    /Child escalation.*must be Always or On trigger/);
+  assert.equal(createPreviewArchitect(host).get('parent').config.council.composition.selected[0].nested.escalation, 'always',
+    'a rejected policy must not replace the previously persisted valid Council');
+});
 
 test('preview eligibility keeps dependencies queued until they complete', () => {
   const dependent = assignment('dependent', { dependsOn: ['dependency'], readOnly: true });

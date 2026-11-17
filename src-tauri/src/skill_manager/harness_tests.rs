@@ -118,6 +118,7 @@ fn skill_manager_switchable_and_off_explicit_invocation() {
     let mut config = crate::providers::RunConfig {
             reviewer_boundary: false,
             reviewer_policy: None,
+            native_reviewer_host: None,
         session_id: "s".into(),
         provider: "codex".into(),
         model: "default".into(),

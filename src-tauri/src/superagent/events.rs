@@ -1030,6 +1030,23 @@ fn github_kind(value: &serde_json::Value) -> Option<&'static str> {
     }
 }
 
+/// A typed GitHub API thread URL is corroborating identity, never a
+/// replacement for the event's exact numeric issue/PR identity. Reject any
+/// present conflicting URL before inserting a source receipt or cursor.
+/// Missing optional URLs remain compatible with older GitHub Events payloads.
+fn require_matching_github_thread_url(
+    raw: &serde_json::Value, pointer: &str, repository: &str,
+    resource: &str, number: u64,
+) -> Result<()> {
+    if let Some(value) = raw.pointer(pointer) {
+        let expected = format!("https://api.github.com/repos/{repository}/{resource}/{number}");
+        if !value.as_str().is_some_and(|url| url.eq_ignore_ascii_case(&expected)) {
+            return Err("Authenticated GitHub event has a conflicting typed thread URL.".into());
+        }
+    }
+    Ok(())
+}
+
 /// Parse only an authenticated GitHub CLI response already scoped by a native
 /// stored source. The caller separately checks Observe mode/revision and event
 /// activation time before writing a receipt.
@@ -1087,6 +1104,31 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
         ) {
             if event_repo.as_u64().is_none() || event_repo.as_u64() != base_repo.as_u64() {
                 return Err("GitHub PR base repository differs from the authenticated event repository.".into());
+            }
+        }
+    }
+    // GitHub comment/review resources can carry a second typed issue or PR
+    // identity. A conflicting URL must not attach context to a different
+    // operator-linked Ticket even when the event's numeric field is valid.
+    if kind.starts_with("pull_request") {
+        require_matching_github_thread_url(raw, "/payload/pull_request/url",
+            &source.repository, "pulls", number)?;
+        if kind.starts_with("pull_request_review.") {
+            require_matching_github_thread_url(raw, "/payload/review/pull_request_url",
+                &source.repository, "pulls", number)?;
+        } else if kind == "pull_request_review_comment.created" {
+            require_matching_github_thread_url(raw, "/payload/comment/pull_request_url",
+                &source.repository, "pulls", number)?;
+        }
+    } else {
+        require_matching_github_thread_url(raw, "/payload/issue/url",
+            &source.repository, "issues", number)?;
+        if kind == "issue_comment.created" {
+            require_matching_github_thread_url(raw, "/payload/comment/issue_url",
+                &source.repository, "issues", number)?;
+            if raw.pointer("/payload/issue/pull_request").is_some() {
+                require_matching_github_thread_url(raw, "/payload/issue/pull_request/url",
+                    &source.repository, "pulls", number)?;
             }
         }
     }
@@ -3101,6 +3143,105 @@ mod tests {
         assert!(authenticated_event(&src, &webhook_only).unwrap().is_none());
         assert_eq!(source(&store, &src.id).unwrap().last_sequence, 0);
         assert!(list_decisions(&store, &src.id, 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn authenticated_comment_thread_urls_fail_closed_without_advancing_source_cursor() {
+        let (store, path) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "issue_comment.created").unwrap();
+        let issue_source = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let issue_comment = serde_json::json!({
+            "id": "5000007350", "type": "IssueCommentEvent",
+            "created_at": "2026-11-12T09:00:00Z",
+            "actor": {"login": "trusted-bot"},
+            "repo": {"name": "owner/repo", "id": 101},
+            "payload": {
+                "action": "created",
+                "issue": {
+                    "number": 42,
+                    "url": "https://api.github.com/repos/owner/repo/issues/42",
+                    "pull_request": {
+                        "url": "https://api.github.com/repos/owner/repo/pulls/42"
+                    }
+                },
+                "comment": {
+                    "issue_url": "https://api.github.com/repos/owner/repo/issues/42",
+                    "body": "Untrusted text must never become a task instruction."
+                }
+            }
+        });
+        for (pointer, wrong_url) in [
+            ("/payload/issue/url", "https://api.github.com/repos/owner/repo/issues/99"),
+            ("/payload/issue/pull_request/url", "https://api.github.com/repos/owner/repo/pulls/99"),
+            ("/payload/comment/issue_url", "https://api.github.com/repos/foreign/repo/issues/42"),
+        ] {
+            let mut malformed = issue_comment.clone();
+            *malformed.pointer_mut(pointer).unwrap() = serde_json::json!(wrong_url);
+            assert!(poll_authenticated_events_with_repository_id(
+                &store, &issue_source, 0, &serde_json::json!([malformed]),
+                "operator", 1, 101,
+            ).is_err(), "Conflicting GitHub thread URL must be rejected: {pointer}");
+            assert_eq!(source(&store, &issue_source.id).unwrap().last_sequence, 0);
+            assert!(list_decisions(&store, &issue_source.id, 10).unwrap().is_empty());
+            let pins: i64 = store.db.query_row(
+                "SELECT COUNT(*) FROM sa_source_repository_identity WHERE source_id=?1",
+                [&issue_source.id], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(pins, 0, "Rejected observation must not pin repository identity");
+        }
+        let accepted = poll_authenticated_events_with_repository_id(
+            &store, &issue_source, 0, &serde_json::json!([issue_comment.clone()]),
+            "operator", 1, 101,
+        ).unwrap();
+        assert_eq!(accepted.recorded, 1);
+        assert_eq!(list_decisions(&store, &issue_source.id, 10).unwrap()[0].subject_key, "pull:42");
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &issue_source, 0, &serde_json::json!([issue_comment]),
+            "operator", 1, 101,
+        ).unwrap().duplicates, 1);
+
+        let review_off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "pull_request_review_comment.created").unwrap();
+        let review_source = set_mode(&store, &review_off.id,
+            review_off.policy_revision, "observe").unwrap();
+        let review_comment = serde_json::json!({
+            "id": "5000007351", "type": "PullRequestReviewCommentEvent",
+            "created_at": "2026-11-12T09:01:00Z",
+            "actor": {"login": "trusted-bot"},
+            "repo": {"name": "owner/repo", "id": 101},
+            "payload": {
+                "action": "created",
+                "pull_request": {
+                    "number": 42,
+                    "url": "https://api.github.com/repos/owner/repo/pulls/42"
+                },
+                "comment": {
+                    "pull_request_url": "https://api.github.com/repos/owner/repo/pulls/42"
+                }
+            }
+        });
+        let mut wrong_review = review_comment.clone();
+        wrong_review["payload"]["comment"]["pull_request_url"] =
+            serde_json::json!("https://api.github.com/repos/owner/repo/pulls/43");
+        assert!(poll_authenticated_events_with_repository_id(
+            &store, &review_source, 0, &serde_json::json!([wrong_review]),
+            "operator", 1, 101,
+        ).is_err());
+        assert!(list_decisions(&store, &review_source.id, 10).unwrap().is_empty());
+        assert_eq!(source(&store, &review_source.id).unwrap().last_sequence, 0);
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &review_source, 0, &serde_json::json!([review_comment]),
+            "operator", 1, 101,
+        ).unwrap().recorded, 1);
+        let tickets: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(tickets, 0, "Authenticated Observe must never infer execution");
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(list_decisions(&reopened, &issue_source.id, 10).unwrap().len(), 1);
+        assert_eq!(list_decisions(&reopened, &review_source.id, 10).unwrap().len(), 1);
     }
 
     #[test]

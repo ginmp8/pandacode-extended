@@ -89,8 +89,8 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
   await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
   await host.getByRole('combobox',{name:'Worker',exact:true}).selectOption('worker');
   await host.locator('details.sa-new-members summary').click();
-  await host.getByRole('checkbox',{name:/Additional Worker/}).check();
-  await host.getByRole('checkbox',{name:/Reviewer/}).check();
+  await host.getByRole('group',{name:'Additional Workers'}).getByRole('checkbox',{name:/Additional Worker/}).check();
+  await host.getByRole('group',{name:'Optional Reviewers'}).getByRole('checkbox',{name:/Reviewer/}).check();
   await expect(host.locator('.sa-member-choice .bot-avatar svg')).toHaveCount(1);
   await host.getByRole('combobox',{name:'Team status'}).selectOption('enabled');
   await host.getByRole('searchbox',{name:'Search Teams'}).fill('another Team');
@@ -2083,7 +2083,7 @@ test('duplicate Team uses native atomic roster creation without copying source a
   await form.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption({label:'Scout'});
   await form.getByRole('combobox',{name:'Worker',exact:true}).selectOption({label:'Writer'});
   await form.locator('summary').click();
-  await form.getByRole('checkbox',{name:/Ledger/}).check();
+  await form.getByRole('group',{name:'Optional Reviewers'}).getByRole('checkbox',{name:/Ledger/}).check();
   await form.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(workspace.locator('.sa-list .sa-item')).toHaveCount(1);
   await workspace.getByRole('button',{name:'Teams',exact:true}).click();
@@ -2201,7 +2201,7 @@ test('new Team persists optional reviewers as one disabled role configuration', 
   await form.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption({label:'Scout'});
   await form.getByRole('combobox',{name:'Worker',exact:true}).selectOption({label:'Writer'});
   await form.locator('summary').click();
-  await form.getByRole('checkbox',{name:/Ledger/}).check();
+  await form.getByRole('group',{name:'Optional Reviewers'}).getByRole('checkbox',{name:/Ledger/}).check();
   await form.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(workspace.locator('.sa-role-counts')).toContainText('1 Coordinator · 1 Workers · 1 Reviewers');
   await workspace.getByRole('button',{name:'Demands / Runs',exact:true}).click();

@@ -1208,6 +1208,14 @@ fn poll_authenticated_events_with_repository_id(
     if events.len() > pages_fetched * GITHUB_PAGE_SIZE {
         return Err("Authenticated GitHub poll exceeded its bounded page size.".into());
     }
+    // The authenticated fetch checks every repository ID before returning.
+    // Repeat that fence at native receipt admission: a caller must not bind
+    // a complete but foreign GitHub feed to a valid source identity. Preserve
+    // the existing legacy identity-free test fixtures; production GitHub
+    // fetches require the independently attested numeric repository ID.
+    if events.iter().any(|event| event.pointer("/repo/id").is_some()) {
+        require_authenticated_feed_repository(raw, repository_id)?;
+    }
     // Verify the complete repository-scoped feed, including unsupported
     // kinds and actors, before any receipt or high-watermark is persisted.
     let feed_watermark = github_feed_watermark(events, &source_now.repository)?;
@@ -2950,6 +2958,49 @@ mod tests {
         assert_eq!(source(&reopened,&observed.id).unwrap().last_sequence,5_000_003_102);
         assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets",[],
             |row|row.get::<_,i64>(0)).unwrap(),0);
+    }
+
+    #[test]
+    fn native_observe_rejects_uniform_foreign_repository_ids_before_receipt_or_cursor() {
+        let (store, path) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "issues.opened").unwrap();
+        let observed = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let event = |id: &str, repo_id: u64| serde_json::json!({
+            "id":id, "created_at":"2026-11-12T09:00:00Z", "type":"IssuesEvent",
+            "actor":{"login":"trusted-bot"},
+            "repo":{"name":"owner/repo","id":repo_id},
+            "payload":{"action":"opened","issue":{"number":42}}
+        });
+        // A uniform foreign ID previously passed the feed's internal
+        // consistency checks, despite disagreeing with the attested metadata.
+        let foreign = serde_json::json!([event("5000099101", 74)]);
+        let error = poll_authenticated_events_with_repository_id(
+            &store, &observed, 0, &foreign, "local-operator", 1, 73,
+        ).unwrap_err();
+        assert!(error.contains("repository ID differs"), "{error}");
+        assert_eq!(source(&store, &observed.id).unwrap().last_sequence, 0);
+        assert!(list_decisions(&store, &observed.id, 10).unwrap().is_empty());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_source_repository_identity WHERE source_id=?1",
+            [&observed.id], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0, "Rejected events cannot pin the wrong identity");
+
+        let valid = serde_json::json!([event("5000099101", 73)]);
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &observed, 0, &valid, "local-operator", 1, 73,
+        ).unwrap().recorded, 1);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let current = source(&reopened, &observed.id).unwrap();
+        assert_eq!(current.last_sequence, 5_000_099_101);
+        assert_eq!(list_decisions(&reopened, &observed.id, 10).unwrap().len(), 1);
+        assert!(poll_authenticated_events_with_repository_id(
+            &reopened, &current, 0, &foreign, "local-operator", 1, 73,
+        ).is_err(), "Foreign repository history stays rejected after restart");
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0, "Observe cannot admit a Demand");
     }
 
     #[test]

@@ -296,6 +296,7 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
     if root.council_since <= 0 || config.nested_bot_reviewers.is_empty() {
         return Ok(());
     }
+    let root_session = store.session(&root.session_id)?;
     for choice in &config.nested_bot_reviewers {
         let child_id: Option<String> = store.db.query_row(
             "SELECT worker_id FROM architect_requests
@@ -310,6 +311,12 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
             return Err("child_council_revoked: child ownership changed; start a fresh Council task.".into());
         }
         let session = store.session(&child_id)?;
+        if session.project_id != root_session.project_id
+            || session.worktree_path != root_session.worktree_path
+            || session.mode != "plan"
+        {
+            return Err("child_council_revoked: child project, checkout or permission mode changed; start a fresh Council task.".into());
+        }
         if session.archived || session.task_stage == "completed"
             || matches!(session.status.as_str(), "interrupted" | "error")
         {
@@ -329,6 +336,13 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
         // not a fabricated root-generation binding.
         let child_id = super::parent_of(store, &leaf_id)?
             .ok_or("child_council_revoked: native reviewer lost its child owner.")?;
+        let coordinator = store.session(&child_id)?;
+        if session.project_id != coordinator.project_id
+            || session.worktree_path != coordinator.worktree_path
+            || session.mode != "plan"
+        {
+            return Err("child_council_revoked: native reviewer project, checkout or permission mode changed; start a fresh Council task.".into());
+        }
         let child = super::load(store, &child_id)?
             .ok_or("child_council_revoked: native child team is unavailable.")?;
         let leaf = child.workers.iter().find(|worker| worker.session_id == leaf_id)

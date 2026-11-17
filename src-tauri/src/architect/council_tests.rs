@@ -4138,7 +4138,7 @@ fn paused_nested_root_resume_denies_revoked_child_without_mutating_cycle() {
     let (started, _) = start_state(
         &state, &sid, "Review an immutable artifact", None, None,
     ).unwrap();
-    let (child_id, previous_status, before_root) = {
+    let (child_id, previous_status, previous_worktree, before_root) = {
         let store = state.store.lock().unwrap();
         let mut root = load(&store, &sid).unwrap().unwrap();
         let child_id = child_council::inspect(&store, &started).unwrap()[0]
@@ -4146,11 +4146,12 @@ fn paused_nested_root_resume_denies_revoked_child_without_mutating_cycle() {
         root.status = "paused".into();
         save(&store, &mut root).unwrap();
         let previous_status = store.session(&child_id).unwrap().status;
+        let previous_worktree = store.session(&child_id).unwrap().worktree_path;
         store.db.execute(
             "UPDATE sessions SET status='interrupted' WHERE id=?1",
             [&child_id],
         ).unwrap();
-        (child_id, previous_status, serde_json::to_value(&root).unwrap())
+        (child_id, previous_status, previous_worktree, serde_json::to_value(&root).unwrap())
     };
     let error = control_state(&state, &sid, "resume").unwrap_err();
     assert!(error.contains("child_council_revoked"), "{error}");
@@ -4161,6 +4162,32 @@ fn paused_nested_root_resume_denies_revoked_child_without_mutating_cycle() {
         store.db.execute(
             "UPDATE sessions SET status=?2 WHERE id=?1",
             rusqlite::params![child_id, previous_status],
+        ).unwrap();
+    }
+    // A paused task must not elevate a child Architect to a full-access
+    // chat or move its review checkout before issuing a new generation.
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute("UPDATE sessions SET mode='full' WHERE id=?1", [&child_id]).unwrap();
+    }
+    let denied = control_state(&state, &sid, "resume").unwrap_err();
+    assert!(denied.contains("child_council_revoked"), "{denied}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root);
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET mode='plan', worktree_path='foreign-checkout' WHERE id=?1",
+            [&child_id],
+        ).unwrap();
+    }
+    let denied = control_state(&state, &sid, "resume").unwrap_err();
+    assert!(denied.contains("child_council_revoked"), "{denied}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root);
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET worktree_path=?2 WHERE id=?1",
+            rusqlite::params![child_id, previous_worktree],
         ).unwrap();
     }
     // A genuine pause with intact child reservations remains resumable.
@@ -4202,8 +4229,38 @@ fn paused_nested_root_resume_rejects_revoked_native_leaf_grant_before_state_chan
     ).unwrap();
     assert_eq!(pending["completed"], false);
     let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
-    let before = {
+    let (before, original_worktree) = {
         let store = state.store.lock().unwrap();
+        let original_worktree = store.session(&launch.sid).unwrap().worktree_path;
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        root.status = "paused".into();
+        save(&store, &mut root).unwrap();
+        (serde_json::to_value(root).unwrap(), original_worktree)
+    };
+    // Native leaf scope is revalidated before Resume can change root state.
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute("UPDATE sessions SET mode='full' WHERE id=?1", [&launch.sid]).unwrap();
+    }
+    let denied = control_state(&state, &sid, "resume").unwrap_err();
+    assert!(denied.contains("child_council_revoked"), "{denied}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before);
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET mode='plan', worktree_path='foreign-checkout' WHERE id=?1",
+            [&launch.sid],
+        ).unwrap();
+    }
+    let denied = control_state(&state, &sid, "resume").unwrap_err();
+    assert!(denied.contains("child_council_revoked"), "{denied}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before);
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET worktree_path=?2 WHERE id=?1",
+            rusqlite::params![&launch.sid, original_worktree],
+        ).unwrap();
         let child = load(&store, &launch.admission.parent).unwrap().unwrap();
         let reviewer = child.workers.iter()
             .find(|worker| worker.session_id == launch.sid).unwrap();
@@ -4212,11 +4269,7 @@ fn paused_nested_root_resume_rejects_revoked_native_leaf_grant_before_state_chan
              AND kind='reviewer_authority' AND worker_id=?2",
             rusqlite::params![launch.admission.parent, reviewer.id],
         ).unwrap(), 1, "the test must revoke a real native reviewer grant");
-        let mut root = load(&store, &sid).unwrap().unwrap();
-        root.status = "paused".into();
-        save(&store, &mut root).unwrap();
-        serde_json::to_value(root).unwrap()
-    };
+    }
     let error = control_state(&state, &sid, "resume").unwrap_err();
     assert!(error.contains("child_council_revoked"), "{error}");
     assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before,

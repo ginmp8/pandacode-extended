@@ -983,6 +983,56 @@ test('multi-member Team Builder updates settled history safely without launching
 });
 
 
+test('paused reviewer remains in the native Team edit payload until explicitly changed', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div');
+    host.id = 'sa-paused-reviewer';
+    document.body.appendChild(host);
+    const calls:unknown[]=[];
+    (window as unknown as {saPausedReviewerCalls:unknown[]}).saPausedReviewerCalls=calls;
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return [
+        {id:'co',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+        {id:'worker-b',name:'Additional Worker',paused:false},
+        {id:'review',name:'Paused Reviewer',paused:true,avatar:'panda:2'},
+      ] as never;
+      if(command==='superagent_list')return [{
+        id:'team',name:'Review Team',coordinatorBotId:'co',workerBotId:'worker',
+        enabled:false,policyRevision:1,workerCount:1,reviewerCount:1,
+      }] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_roster')return {
+        orchestrationId:'team',policyRevision:1,coordinatorBotId:'co',
+        workerBotIds:['worker'],reviewerBotIds:['review'],maxWorkerAttempts:2,
+        executionReady:false,
+      } as never;
+      if(command==='superagent_roster_update'){
+        calls.push(args);
+        throw Error('Paused member must be reviewed before a native policy change.');
+      }
+      throw Error('Unexpected command: '+command);
+    });
+  });
+  const host=page.locator('#sa-paused-reviewer');
+  await host.getByRole('button',{name:'Load native members'}).click();
+  const form=host.locator('form[data-sa-form="roster"]');
+  const paused=form.locator('input[name="reviewers"][value="review"]');
+  await expect(paused).toBeChecked();
+  await expect(paused).toBeDisabled();
+  await form.locator('input[name="additionalWorkers"][value="worker-b"]').check();
+  await form.getByRole('button',{name:'Save configured roles'}).click();
+  await expect(host.getByRole('alert')).toContainText('Paused member must be reviewed');
+  const attempts=await page.evaluate(()=>
+    (window as unknown as {saPausedReviewerCalls:Array<{input:{reviewerBotIds:string[];workerBotIds:string[]}}>})
+      .saPausedReviewerCalls);
+  expect(attempts).toHaveLength(1);
+  expect(attempts[0].input.reviewerBotIds).toEqual(['review']);
+  expect(attempts[0].input.workerBotIds).toEqual(['worker','worker-b']);
+});
+
 test('cross-Team Demands index is native-backed and opens only the original Team Ticket',async({page})=>{
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

@@ -1798,7 +1798,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (!cfg || !roleRoster || roleRoster.orchestrationId!==cfg.id ||
           cfg.enabled || cfg.policyEditBlocker || roleRoster.policyRevision!==cfg.policyRevision) return;
       const workerBotIds=[cfg.workerBotId,...workerOrder];
-      const reviewerBotIds=data.getAll('reviewers').map(String);
+      // Disabled checked controls are intentionally omitted by FormData.
+      // Retain the native roster draft so a paused reviewer is never silently
+      // dropped from the persisted Team as a side effect of editing Workers.
+      const reviewerBotIds=[...reviewerDraft];
       void work(async () => {
         roleRoster=await call<TeamRoster>('superagent_roster_update',{
           orchestrationId:cfg.id, expectedRevision:cfg.policyRevision,

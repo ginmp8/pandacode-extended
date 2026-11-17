@@ -2286,7 +2286,10 @@ test('Demand WorkItem inspector explains native dependency blockers without laun
   await expect(plan.getByText('Write-required WorkItem needs an applied native file-write receipt from its final Worker attempt and a matching approval before dependencies can advance.')).toBeVisible();
   await expect(plan.getByText('Blocked: native recovery required.')).toBeVisible();
   await expect(plan.getByText('Native approval receipt missing; predecessor cannot unlock dependencies.')).toBeVisible();
-  await expect(plan.getByText('Approval receipt unavailable; dependencies remain gated')).toBeVisible();
+  const missingApproval=plan.getByText('Approval receipt unavailable; dependencies remain gated');
+  await expect(missingApproval).toHaveCount(2);
+  await expect(missingApproval.first()).toBeVisible();
+  await expect(missingApproval.last()).toBeVisible();
   const calls=await page.evaluate(()=>
     (window as unknown as {workItemReadCalls:()=>string[]}).workItemReadCalls());
   expect(calls.filter(c=>c==='superagent_demand_plan')).toHaveLength(1);

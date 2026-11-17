@@ -37,7 +37,7 @@ pub(super) fn receipt(store:&Store,id:&str)->Result<Option<(String,String,i64)>>
 /// must match in the same transaction before any dependent item may advance.
 /// In a completed native child, every nested subagent must also have settled.
 /// Pending descendants and un-reconciled effects cannot satisfy an upstream DAG edge.
-fn descendant_receipts_settled(db:&Connection,child_ticket_id:&str)->Result<bool> {
+pub(super) fn descendant_receipts_settled(db:&Connection,child_ticket_id:&str)->Result<bool> {
     db.query_row(
         "WITH RECURSIVE descendants(ticket_id) AS (
            SELECT ?1
@@ -184,7 +184,9 @@ mod tests {
              CREATE TABLE sa_subagent_nodes(parent_ticket_id TEXT,child_ticket_id TEXT,state TEXT);
              INSERT INTO sa_tickets VALUES('child','completed','native output',2);
              INSERT INTO sa_assignments VALUES('attempt','child','finished',1,'native output');
-             INSERT INTO sa_work_items VALUES('item','root',0,'child','waiting_review',NULL,1);",
+             INSERT INTO sa_work_items
+               (id,ticket_id,ordinal,child_ticket_id,state,last_reason,updated_at)
+               VALUES('item','root',0,'child','waiting_review',NULL,1);",
         ).unwrap();
         db.execute_batch(SCHEMA).unwrap();
         Store{db,path:std::path::PathBuf::from(":memory:")}

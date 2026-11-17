@@ -286,6 +286,42 @@ fn reconcile(store:&Store)->Result<()> {
     Ok(())
 }
 
+/// Recheck every predecessor at native child admission. An earlier approval
+/// cannot release new dependent work while descendant effects remain uncertain.
+fn prerequisites_settled(db:&Connection,root:&str,key:&str)->Result<bool> {
+    let mut statement=db.prepare(
+        "SELECT prior.child_ticket_id,
+           COALESCE(prior.state='completed'
+             AND EXISTS(SELECT 1 FROM sa_work_item_evidence_receipts proof
+               WHERE proof.item_id=prior.id AND proof.child_ticket_id=prior.child_ticket_id)
+             AND (prior.requires_write=0 OR EXISTS(
+               SELECT 1 FROM sa_work_item_evidence_receipts proof
+               JOIN sa_worker_write_receipts applied
+                 ON applied.ticket_id=proof.child_ticket_id
+                AND applied.assignment_id=proof.assignment_id
+               WHERE proof.item_id=prior.id
+                 AND proof.child_ticket_id=prior.child_ticket_id
+                 AND applied.state='applied')),0)
+         FROM sa_work_dependencies dependency
+         LEFT JOIN sa_work_items prior
+           ON prior.ticket_id=dependency.ticket_id
+          AND prior.item_key=dependency.depends_on
+         WHERE dependency.ticket_id=?1 AND dependency.item_key=?2"
+    ).map_err(|error|error.to_string())?;
+    let rows=statement.query_map(params![root,key],|row|Ok((
+        row.get::<_,Option<String>>(0)?,row.get::<_,bool>(1)?,
+    ))).map_err(|error|error.to_string())?;
+    let predecessors=rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error|error.to_string())?;
+    for (child,verified) in predecessors {
+        let Some(child)=child else {return Ok(false)};
+        if !verified || !evidence::descendant_receipts_settled(db,&child)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
 fn ready(store:&Store)->Result<Vec<ReadyItem>> {
     let mut query=store.db.prepare(
         "SELECT item.id,item.ticket_id,item.item_key,item.objective,item.worker_bot_id,item.requires_write
@@ -332,7 +368,15 @@ fn ready(store:&Store)->Result<Vec<ReadyItem>> {
         id:r.get(0)?,root:r.get(1)?,key:r.get(2)?,
         objective:r.get(3)?,worker:r.get(4)?,requires_write:r.get(5)?,
     })).map_err(|e|e.to_string())?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e|e.to_string())
+    let candidates=rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e|e.to_string())?;
+    let mut verified=Vec::new();
+    for item in candidates {
+        if prerequisites_settled(&store.db,&item.root,&item.key)? {
+            verified.push(item);
+        }
+    }
+    Ok(verified)
 }
 
 pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
@@ -362,7 +406,9 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
                       WHERE scope.item_id=work.id AND scope.root_ticket_revision=plan.ticket_revision)))",
                 params![item.id,item.root],|r|r.get(0),
             ).map_err(|e|e.to_string())?;
-            if !pending {None} else {
+            if !pending || !prerequisites_settled(&store.db,&item.root,&item.key)? {
+                None
+            } else {
                 let root=get_ticket(&store,&item.root)?;
                 let snapshot=ticket_team_snapshot(&store,&root.id)?;
                 let team=configuration(&store,&root.orchestration_id)?;
@@ -475,6 +521,59 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dependent_worker_waits_for_predecessor_and_nested_effect_reconciliation() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_work_dependencies(ticket_id TEXT,item_key TEXT,depends_on TEXT);
+             CREATE TABLE sa_work_items(id TEXT,ticket_id TEXT,item_key TEXT,
+               child_ticket_id TEXT,state TEXT,requires_write INTEGER);
+             CREATE TABLE sa_work_item_evidence_receipts(
+               item_id TEXT,child_ticket_id TEXT,assignment_id TEXT);
+             CREATE TABLE sa_worker_write_receipts(
+               ticket_id TEXT,state TEXT,assignment_id TEXT);
+             CREATE TABLE sa_subagent_nodes(
+               parent_ticket_id TEXT,child_ticket_id TEXT,state TEXT);
+             CREATE TABLE sa_effect_receipts(ticket_id TEXT,state TEXT);
+             INSERT INTO sa_work_items VALUES('build','root','build','child-build','completed',1);
+             INSERT INTO sa_work_items VALUES('verify','root','verify',NULL,'pending',0);
+             INSERT INTO sa_work_dependencies VALUES('root','verify','build');
+             INSERT INTO sa_work_item_evidence_receipts
+               VALUES('build','child-build','final-attempt');
+             INSERT INTO sa_worker_write_receipts
+               VALUES('child-build','applied','final-attempt');"
+        ).unwrap();
+        assert!(prerequisites_settled(&db,"root","verify").unwrap());
+        db.execute(
+            "INSERT INTO sa_effect_receipts VALUES('child-build','uncertain')",[],
+        ).unwrap();
+        assert!(!prerequisites_settled(&db,"root","verify").unwrap());
+        db.execute(
+            "UPDATE sa_effect_receipts SET state='applied'
+             WHERE ticket_id='child-build'",[],
+        ).unwrap();
+        assert!(prerequisites_settled(&db,"root","verify").unwrap());
+        db.execute_batch(
+            "INSERT INTO sa_subagent_nodes VALUES('child-build','grandchild','completed');
+             INSERT INTO sa_worker_write_receipts VALUES('grandchild','reserved','nested-attempt');"
+        ).unwrap();
+        assert!(!prerequisites_settled(&db,"root","verify").unwrap());
+        db.execute(
+            "UPDATE sa_worker_write_receipts SET state='applied'
+             WHERE ticket_id='grandchild'",[],
+        ).unwrap();
+        assert!(prerequisites_settled(&db,"root","verify").unwrap());
+        db.execute(
+            "INSERT INTO sa_effect_receipts VALUES('unrelated','pending')",[],
+        ).unwrap();
+        assert!(prerequisites_settled(&db,"root","verify").unwrap());
+        db.execute(
+            "UPDATE sa_worker_write_receipts SET state='failed'
+             WHERE ticket_id='child-build'",[],
+        ).unwrap();
+        assert!(!prerequisites_settled(&db,"root","verify").unwrap());
+    }
 
     #[test]
     fn root_finalization_rechecks_scoped_writes_and_external_effects() {

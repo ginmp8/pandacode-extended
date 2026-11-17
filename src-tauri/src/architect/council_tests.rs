@@ -6688,4 +6688,26 @@ fn unforced_nested_s2_admits_only_authenticated_fresh_second_wave_without_approv
     assert_eq!(security.leaf_attempts.len(), 4,
         "reentrant scheduling cannot create duplicate S2 reviewers");
     assert!(!verified_council_pass(&store, &root));
+
+    // A second-wave grant revoked while another leaf is already running
+    // must block the next native scheduler turn without replacing the grant
+    // or creating a duplicate worker. The first-wave trigger stays authentic.
+    let second_leaf = security.leaf_attempts.iter()
+        .find(|attempt| attempt.round == 2 && attempt.status == "running")
+        .expect("a real S2 leaf has entered the native scheduler");
+    store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![security.child_session_id,
+            format!("native-reviewer-authority:{}", second_leaf.worker_id)],
+    ).unwrap();
+    let before = load(&store, &security.child_session_id).unwrap().unwrap();
+    let denial = child_council::next_leaf_launch(
+        &store, &std::collections::HashMap::new(), &root,
+    ).err().expect("revoked triggered S2 authority must deny reentrant dispatch");
+    assert!(denial.contains("triggered S2 leaf authority"), "{denial}");
+    let after = load(&store, &security.child_session_id).unwrap().unwrap();
+    assert_eq!(after.workers.len(), before.workers.len(),
+        "denied native scheduling must not create replacement reviewer seats");
+    assert!(!verified_council_pass(&store, &root),
+        "revoked reviewer authority cannot be promoted into a root verdict");
 }

@@ -1749,7 +1749,35 @@ fn admit_triggered_s2_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool>
         if second > 0 && triggers.is_empty() {
             return Err("child_council_revoked: native S2 escalation trigger was revoked.".into());
         }
-        if first != choice.child_reviewers || second > 0 || triggers.is_empty() {
+        // Reentrant scheduler calls must reauthenticate already-admitted second
+        // waves, including queued leaves. A stored worker count is not authority.
+        if second > 0 {
+            if first != choice.child_reviewers || second != choice.child_reviewers
+                || child.workers.len() != first + second
+            {
+                return Err("child_council_stale: triggered S2 child wave roster changed.".into());
+            }
+            let mut worker_ids = HashSet::new();
+            let mut session_ids = HashSet::new();
+            for leaf in &child.workers {
+                let binding = leaf.reviewer_binding.as_ref()
+                    .ok_or("child_council_stale: triggered S2 leaf has no native grant.")?;
+                if leaf.id.is_empty() || leaf.session_id.is_empty()
+                    || !worker_ids.insert(leaf.id.as_str())
+                    || !session_ids.insert(leaf.session_id.as_str())
+                    || !leaf.read_only || leaf.abandoned || leaf.wrote_at != 0
+                    || !leaf.files.is_empty()
+                    || binding.validate(&child, leaf).is_err()
+                    || reviewer_security::validate_recorded_authority(
+                        store, &child.session_id, binding,
+                    ).is_err()
+                {
+                    return Err("child_council_stale: triggered S2 leaf authority or identity changed.".into());
+                }
+            }
+            continue;
+        }
+        if first != choice.child_reviewers || triggers.is_empty() {
             continue;
         }
         require_total_attempt_capacity(store, root, choice.child_reviewers)?;

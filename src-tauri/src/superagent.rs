@@ -4991,6 +4991,13 @@ fn update_configuration_roles_with_policy(
     if has_history && primary_changed && current.enabled {
         return Err("Disable the Team before changing primary roles for future Demands.".into());
     }
+    // A mode switch spans two versioned operations (native Council roles and
+    // execution mode). While Off, permit either order so both transitions are
+    // achievable. An inconsistent intermediate policy is never executable:
+    // enablement and Ticket admission independently reject it.
+    if current.enabled && current.council_required != council_required {
+        return Err("Disable the Team before changing its Council approval policy.".into());
+    }
     if current.name==name && current.coordinator_bot_id==coordinator.id
         && current.worker_bot_ids==worker_bot_ids && current.reviewer_bot_ids==reviewer_bot_ids
         && current.council_required==council_required
@@ -5072,13 +5079,6 @@ fn update_configuration_roles_with_policy(
     ).map_err(|e| e.to_string())?;
     if changed!=1 { return Err("Team changed concurrently; reload before editing future-only policy.".into()); }
     let previous_snapshot = load_team_version_snapshot(&tx,id,current.team_version)?;
-    if previous_snapshot.policy.autonomy == "full_auto" &&
-        (!council_required || reviewer_bot_ids.len() < 2) {
-        return Err("Disable Full Auto before removing its independent Council reviewers.".into());
-    }
-    if previous_snapshot.policy.autonomy == "approval" && council_required {
-        return Err("With Approval must retain human acceptance; change the execution mode before enabling native Council finalization.".into());
-    }
     let mut snapshot = make_team_snapshot(&tx,id,next_version,name,&project_id,next_revision,
         &coordinator.id,&worker_bot_ids,&reviewer_bot_ids,council_required,
         TeamSnapshotProvenance::Native)?;

@@ -4010,6 +4010,62 @@ fn paused_nested_root_resume_denies_revoked_child_without_mutating_cycle() {
 }
 
 #[test]
+fn paused_nested_root_resume_rejects_revoked_native_leaf_grant_before_state_change() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["grant-security", "grant-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.nested_bot_reviewers = ["grant-security", "grant-architecture"]
+            .iter().map(|bot| council::CouncilNestedReviewer {
+                bot_id: (*bot).into(), child_reviewers: 2,
+                child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(
+        &state, &sid, "Verify paused native leaf grant revocation", None, None,
+    ).unwrap();
+    let (pending, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Start native leaf reviews"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let before = {
+        let store = state.store.lock().unwrap();
+        let child = load(&store, &launch.admission.parent).unwrap().unwrap();
+        let reviewer = child.workers.iter()
+            .find(|worker| worker.session_id == launch.sid).unwrap();
+        assert_eq!(store.db.execute(
+            "DELETE FROM architect_requests WHERE parent_session_id=?1
+             AND kind='reviewer_authority' AND worker_id=?2",
+            rusqlite::params![launch.admission.parent, reviewer.id],
+        ).unwrap(), 1, "the test must revoke a real native reviewer grant");
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        root.status = "paused".into();
+        save(&store, &mut root).unwrap();
+        serde_json::to_value(root).unwrap()
+    };
+    let error = control_state(&state, &sid, "resume").unwrap_err();
+    assert!(error.contains("child_council_revoked"), "{error}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before,
+        "denied Resume must not mutate or resurrect the frozen root cycle");
+}
+
+#[test]
 fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume() {
     // Use an actual file-backed database; in-memory interruption simulations
     // do not exercise Store::open recovery of both sessions and Architect teams.
@@ -6488,11 +6544,18 @@ fn unforced_nested_s2_admits_only_authenticated_fresh_second_wave_without_approv
     let security = children.iter().find(|child| child.bot_id == "security-child").unwrap();
     let architecture = children.iter().find(|child| child.bot_id == "architecture-child").unwrap();
     assert_eq!(security.automatic_escalation_triggers, vec!["below_target"]);
-    assert_eq!(security.status, "child_escalation_required");
+    // The native completion path may admit the triggered child wave before
+    // next_action_state launches it. Admission is not an executed callback.
+    assert_eq!(security.status, "child_escalation_reviewing");
     assert!(security.verified_child_receipt.is_none());
     assert!(architecture.automatic_escalation_triggers.is_empty());
-    assert!(children.iter().all(|child| child.leaf_attempts.len() == 2),
-        "no second-wave leaf exists before the trusted scheduler observes the trigger");
+    assert_eq!(security.leaf_attempts.len(), 4,
+        "the authenticated callback admits exactly one independent S2 wave");
+    assert_eq!(architecture.leaf_attempts.len(), 2,
+        "a passing sibling must not gain an extra reviewer source");
+    assert!(security.leaf_attempts.iter().filter(|attempt| attempt.round == 2)
+        .all(|attempt| attempt.status != "completed" && attempt.score.is_none()),
+        "admission alone must not produce terminal second-wave evidence");
     assert!(!verified_council_pass(&store, &root),
         "first-wave scores or trigger signals cannot authorize root approval");
     drop(store);

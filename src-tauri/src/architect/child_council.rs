@@ -323,6 +323,26 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
         {
             return Err("child_council_revoked: leaf reviewer cannot resume; start a fresh Council task.".into());
         }
+        // An otherwise live native session cannot restore authority revoked
+        // from its task-owned review seat. A paused root may have a newer
+        // generation, so validate the grant against its original child team,
+        // not a fabricated root-generation binding.
+        let child_id = super::parent_of(store, &leaf_id)?
+            .ok_or("child_council_revoked: native reviewer lost its child owner.")?;
+        let child = super::load(store, &child_id)?
+            .ok_or("child_council_revoked: native child team is unavailable.")?;
+        let leaf = child.workers.iter().find(|worker| worker.session_id == leaf_id)
+            .ok_or("child_council_revoked: leaf reviewer is missing from its native child team.")?;
+        let binding = leaf.reviewer_binding.as_ref()
+            .ok_or("child_council_revoked: native reviewer grant is missing.")?;
+        if !leaf.read_only || leaf.wrote_at != 0 || !leaf.files.is_empty()
+            || leaf.council.is_none()
+            || binding.snapshot.tool_policy != ReviewerToolPolicy::NativeReadOnly
+            || binding.validate(&child, leaf).is_err()
+            || reviewer_security::validate_recorded_authority(store, &child_id, binding).is_err()
+        {
+            return Err("child_council_revoked: native reviewer authority changed; start a fresh Council task.".into());
+        }
     }
     Ok(())
 }

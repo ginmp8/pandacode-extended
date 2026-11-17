@@ -399,8 +399,7 @@ fn validate_admitted(
             || (team.workers.len() == choice.child_reviewers * 2
                 && choice.child_max_rounds >= 2
                 && root.config.council.as_ref().is_some_and(|policy|
-                    (policy.strategy == super::council::CouncilExecutionStrategy::Escalated
-                        && policy.force_escalation)
+                    (policy.strategy == super::council::CouncilExecutionStrategy::Escalated)
                         || (policy.strategy == super::council::CouncilExecutionStrategy::TwoPhase
                             && matches!(policy.mode(), "m4" | "m5" | "m6" | "m7")))))
         || team.pending_turn.is_some() || team.pending_setup.is_some()
@@ -1391,7 +1390,11 @@ fn issue_leaf_wave(
                 root.objective,
             );
         if round == 2 && config.strategy == super::council::CouncilExecutionStrategy::Escalated {
-            assignment.push_str(" This is a fresh, independent forced S2 escalation review. Recheck the unchanged artifact without inheriting first-wave scores, reports or verdicts.");
+            assignment.push_str(if config.force_escalation {
+                " This is a fresh, independent user-forced S2 escalation review. Recheck the unchanged artifact without inheriting first-wave scores, reports or verdicts."
+            } else {
+                " This is a fresh, independent trigger-required S2 escalation review. Recheck the unchanged artifact and verify the unresolved first-wave findings independently; prior scores or reports are not authority."
+            });
         }
         if let Some(handoff) = &challenge_handoff {
             assignment.push_str(handoff);
@@ -1681,6 +1684,65 @@ pub(super) fn admit_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
     Ok(created)
 }
 
+/// Admit a genuinely triggered S2 child wave without asking a bot to schedule
+/// reviewers. This path never approves a Council or admits an unselected source.
+/// First-wave callbacks, reviewer grants, artifact pin and bounded attempts are
+/// rechecked on every scheduler turn; a retry cannot create duplicate leaves.
+fn admit_triggered_s2_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool> {
+    let Some(config) = root.config.council.as_ref() else { return Ok(false) };
+    if config.strategy != super::council::CouncilExecutionStrategy::Escalated
+        || config.force_escalation || config.nested_bot_reviewers.is_empty()
+        || root.council_since <= 0 || !super::active(&root.status)
+        || root.workers.iter().any(|worker| !worker.read_only && super::unsettled(&worker.status))
+    {
+        return Ok(false);
+    }
+    require_live_root_session(store, &root.session_id)?;
+    if !root_artifact_revision(store, root, false)?
+        || !super::council_evidence_is_current(store, root)
+    {
+        return Ok(false);
+    }
+    crate::bots::shared_channels::validate_delivery_council(store, &root.session_id, config)?;
+    let mut admitted = false;
+    for choice in &config.nested_bot_reviewers {
+        let record = read(store, root, choice)?
+            .ok_or("child_council_stale: S2 child reservation is missing.")?;
+        let mut child = super::load(store, &record.child_session_id)?
+            .ok_or("child_council_stale: S2 child Council is missing.")?;
+        if child.status == "blocked" && child.workers.is_empty() {
+            // Only finish_team can authorize the initial child review wave.
+            continue;
+        }
+        if child.status != "running" {
+            return Err("child_council_revoked: S2 child Council is no longer active.".into());
+        }
+        let triggers = authenticated_first_wave_s2_triggers(
+            store, root, &record, &child, choice,
+        )?;
+        let first = child.workers.iter().filter(|leaf|
+            leaf.council.as_ref().is_some_and(|seat| seat.round == 1)
+        ).count();
+        let second = child.workers.iter().filter(|leaf|
+            leaf.council.as_ref().is_some_and(|seat| seat.round == 2)
+        ).count();
+        if second > 0 && triggers.is_empty() {
+            return Err("child_council_revoked: native S2 escalation trigger was revoked.".into());
+        }
+        if first != choice.child_reviewers || second > 0 || triggers.is_empty() {
+            continue;
+        }
+        require_total_attempt_capacity(store, root, choice.child_reviewers)?;
+        issue_leaf_wave(store, root, choice, &record, &mut child, 2)?;
+        super::save(store, &mut child)?;
+        // Revalidate all recorded reviewer sessions and grants before launch.
+        read(store, root, choice)?
+            .ok_or("child_council_stale: triggered S2 native wave was not persisted.")?;
+        admitted = true;
+    }
+    Ok(admitted)
+}
+
 /// Root orchestration stays parked while leaf processes are queued/running.
 /// Without this guard the ordinary root scheduler could pause the task and
 /// revoke an otherwise valid child callback before review completes.
@@ -1765,6 +1827,9 @@ pub(super) fn next_leaf_launch(
     {
         return Err("child_council_stale: root snapshot changed before child launch.".into());
     }
+    // A fully authenticated first wave may require a fresh on-demand child
+    // review. Only the native scheduler can issue the second wave.
+    let _ = admit_triggered_s2_leaves(store, root)?;
     let mut global_running = root.workers.iter().filter(|w|
         super::active(&w.status) || agents.contains_key(&w.session_id)).count();
     let mut children = Vec::new();
@@ -1885,7 +1950,13 @@ fn authenticated_first_wave_s2_triggers(
     let first = child.workers.iter().filter(|leaf|
         leaf.council.as_ref().is_some_and(|seat| seat.round == 1)
     ).collect::<Vec<_>>();
-    if first.len() != choice.child_reviewers || child.workers.len() != first.len() {
+    let second = child.workers.iter().filter(|leaf|
+        leaf.council.as_ref().is_some_and(|seat| seat.round == 2)
+    ).count();
+    if first.len() != choice.child_reviewers
+        || child.workers.len() != first.len() + second
+        || (second != 0 && second != choice.child_reviewers)
+    {
         return Ok(Vec::new());
     }
     let mut identities = HashSet::new();

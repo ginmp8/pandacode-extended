@@ -6431,7 +6431,7 @@ fn nested_m7_direct_bot_automatic_and_child_require_independent_native_callbacks
 }
 
 #[test]
-fn unforced_nested_s2_reports_only_authenticated_first_wave_triggers_without_approving() {
+fn unforced_nested_s2_admits_only_authenticated_fresh_second_wave_without_approving() {
     let (state, sid) = state_fixture();
     {
         let store = state.store.lock().unwrap();
@@ -6492,7 +6492,39 @@ fn unforced_nested_s2_reports_only_authenticated_first_wave_triggers_without_app
     assert!(security.verified_child_receipt.is_none());
     assert!(architecture.automatic_escalation_triggers.is_empty());
     assert!(children.iter().all(|child| child.leaf_attempts.len() == 2),
-        "a verified trigger signal must never auto-admit extra child reviewers");
+        "no second-wave leaf exists before the trusted scheduler observes the trigger");
     assert!(!verified_council_pass(&store, &root),
         "first-wave scores or trigger signals cannot authorize root approval");
+    drop(store);
+
+    let first_launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    let children = child_council::inspect(&store, &root).unwrap();
+    let security = children.iter().find(|child| child.bot_id == "security-child").unwrap();
+    let architecture = children.iter().find(|child| child.bot_id == "architecture-child").unwrap();
+    assert_eq!(first_launch.admission.parent, security.child_session_id);
+    assert_eq!(security.leaf_attempts.len(), 4);
+    assert_eq!(architecture.leaf_attempts.len(), 2,
+        "a clean child must not be escalated merely because a sibling failed");
+    assert_eq!(security.leaf_attempts.iter().filter(|attempt| attempt.round == 2).count(), 2);
+    assert_eq!(security.status, "child_escalation_reviewing");
+    let first_ids = security.leaf_attempts.iter().filter(|attempt| attempt.round == 1)
+        .map(|attempt| attempt.worker_id.as_str()).collect::<std::collections::HashSet<_>>();
+    assert!(security.leaf_attempts.iter().filter(|attempt| attempt.round == 2)
+        .all(|attempt| !first_ids.contains(attempt.worker_id.as_str())));
+    assert!(!verified_council_pass(&store, &root),
+        "a newly admitted child wave is not terminal native evidence");
+    drop(store);
+
+    let second_launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    assert_eq!(second_launch.admission.parent, first_launch.admission.parent);
+    assert_ne!(second_launch.sid, first_launch.sid);
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    let security = child_council::inspect(&store, &root).unwrap()
+        .into_iter().find(|child| child.bot_id == "security-child").unwrap();
+    assert_eq!(security.leaf_attempts.len(), 4,
+        "reentrant scheduling cannot create duplicate S2 reviewers");
+    assert!(!verified_council_pass(&store, &root));
 }

@@ -929,6 +929,7 @@ test('the tray button is settings only: no score badge, a cue dot when asking or
   await expect(button(page)).toHaveAccessibleName('Council needs you');
   await expect.poll(dot).toBe(true);
   await open(page, '/?council=passed');
+  await expect(button(page)).toHaveAccessibleName(/^Council: Passed/);
   await expect.poll(dot).toBe(true);
   await open(page, '/?council=accepted');
   await expect(button(page)).toHaveAccessibleName(/^Council: Accepted/);

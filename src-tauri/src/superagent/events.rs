@@ -3915,6 +3915,7 @@ mod tests {
         assert_eq!(super::source(&store,&source.id).unwrap().last_sequence,4200);
         let mut disallowed=event("wrong-event-kind",&source,4202);
         disallowed.event_kind="check_run.completed".into();
+        disallowed.subject_key="pull:42".into();
         assert_eq!(observe(&store,&disallowed).unwrap().decision,"ignored_filter");
         let wrong_thread=issue_payload("test/fixture","trusted-bot",4203,43);
         let mut calls=Vec::new();
@@ -4231,7 +4232,7 @@ mod tests {
         assert!(observe(&store, &event("linked-1", &on, 1)).unwrap().duplicate);
         assert_eq!(linked_decisions(&store, "ticket-one", 50).unwrap().len(), 1);
         let mut wrong_thread = event("different-thread", &on, 2);
-        wrong_thread.subject_key = "pull:42".into();
+        wrong_thread.subject_key = "issue:43".into();
         observe(&store, &wrong_thread).unwrap();
         assert_eq!(linked_decisions(&store, "ticket-one", 50).unwrap().len(), 1);
         for invalid in [0, 101, -1] {

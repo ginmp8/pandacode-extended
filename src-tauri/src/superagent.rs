@@ -1280,9 +1280,12 @@ fn list_headless_unresolved_effects_scoped(
     };
     let store = Store::open_read_only(database_path)?;
     let snapshot = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-    let (items, next) = effects::unresolved_effects_page_for_team(
-        &store, 100, before, orchestration_id,
-    )?;
+    let (items, next) = match orchestration_id {
+        Some(team) => effects::unresolved_effects_page_for_team(
+            &store, 100, before, Some(team),
+        )?,
+        None => effects::unresolved_effects_page(&store, 100, before)?,
+    };
     let total: i64 = store.db.query_row(
         "SELECT COUNT(*) FROM sa_effect_receipts e
          JOIN sa_tickets t ON t.id=e.ticket_id

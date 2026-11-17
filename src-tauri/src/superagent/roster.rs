@@ -1439,17 +1439,14 @@ mod tests {
         store.db.execute("UPDATE bots SET model='new-model' WHERE id='worker'",[])
             .unwrap();
 
-        for snapshot in [
-            super::super::ticket_snapshot(&store,&ticket.id,50).unwrap(),
-        ] {
-            assert_eq!(snapshot.current_team_policy_revision,updated.policy_revision);
-            assert!(snapshot.team_policy_changed_since_admission);
-            let frozen=snapshot.admitted_profile.unwrap();
-            assert_eq!(frozen.policy_revision,admitted.policy_revision);
-            assert_eq!(frozen.members[1].model,"original-model");
-            assert_eq!(frozen.members[1].bot_id,"worker");
-            assert!(!snapshot.mandate.allowed_side_effects);
-        }
+        let snapshot=super::super::ticket_snapshot(&store,&ticket.id,50).unwrap();
+        assert_eq!(snapshot.current_team_policy_revision,updated.policy_revision);
+        assert!(snapshot.team_policy_changed_since_admission);
+        let frozen=snapshot.admitted_profile.unwrap();
+        assert_eq!(frozen.policy_revision,admitted.policy_revision);
+        assert_eq!(frozen.members[1].model,"original-model");
+        assert_eq!(frozen.members[1].bot_id,"worker");
+        assert!(!snapshot.mandate.allowed_side_effects);
         drop(store);
         let reopened=Store::open_read_only(&path).unwrap();
         let snapshot=super::super::ticket_snapshot(&reopened,&ticket.id,50).unwrap();

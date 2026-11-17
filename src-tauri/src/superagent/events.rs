@@ -1011,9 +1011,23 @@ fn github_kind(value: &serde_json::Value) -> Option<&'static str> {
         ("IssuesEvent", "unlabeled") => Some("issues.unlabeled"),
         ("IssueCommentEvent", "created") => Some("issue_comment.created"),
         ("PullRequestEvent", "opened") => Some("pull_request.opened"),
-        ("PullRequestEvent", "closed") => Some("pull_request.closed"),
+        // A merged PR may arrive as a "closed" activity with an explicit
+        // merged flag. Normalize that case without treating an ordinary
+        // closure, missing flag, or contradictory flag as proof of a merge.
+        ("PullRequestEvent", "closed") => match value.pointer("/payload/pull_request/merged") {
+            Some(serde_json::Value::Bool(true)) => Some("pull_request.merged"),
+            Some(serde_json::Value::Bool(false)) | None => Some("pull_request.closed"),
+            _ => None,
+        },
         ("PullRequestEvent", "reopened") => Some("pull_request.reopened"),
-        ("PullRequestEvent", "merged") => Some("pull_request.merged"),
+        ("PullRequestEvent", "merged") => {
+            if value.pointer("/payload/pull_request/merged")
+                == Some(&serde_json::Value::Bool(false)) {
+                None
+            } else {
+                Some("pull_request.merged")
+            }
+        },
         ("PullRequestEvent", "assigned") => Some("pull_request.assigned"),
         ("PullRequestEvent", "unassigned") => Some("pull_request.unassigned"),
         ("PullRequestEvent", "labeled") => Some("pull_request.labeled"),
@@ -2345,6 +2359,71 @@ mod tests {
             assert_eq!(list_decisions(&reopened, &id, 10).unwrap().len(), 1);
             assert!(source(&reopened, &id).unwrap().last_sequence > 0);
         }
+        assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn authenticated_closed_merged_pr_is_typed_and_restart_durable_without_work() {
+        let (store, path) = fixture();
+        let off_merge = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "pull_request.merged",
+        ).unwrap();
+        let merge = set_mode(&store, &off_merge.id, off_merge.policy_revision, "observe").unwrap();
+        let off_close = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "pull_request.closed",
+        ).unwrap();
+        let close = set_mode(&store, &off_close.id, off_close.policy_revision, "observe").unwrap();
+        let merged = serde_json::json!({
+            "id": "5000050001", "type": "PullRequestEvent",
+            "created_at": "2026-11-12T09:00:00Z",
+            "repo": {"name": "owner/repo"}, "actor": {"login": "trusted-bot"},
+            "payload": {"action": "closed", "number": 73,
+                "pull_request": {"number": 73, "merged": true}}
+        });
+        assert_eq!(github_kind(&merged), Some("pull_request.merged"));
+        assert_eq!(poll_authenticated_events(
+            &store, &merge, 0, &serde_json::json!([merged.clone()]),
+        ).unwrap().recorded, 1);
+        assert_eq!(poll_authenticated_events(
+            &store, &merge, 0, &serde_json::json!([merged.clone()]),
+        ).unwrap().duplicates, 1);
+        let first = list_decisions(&store, &merge.id, 10).unwrap();
+        assert_eq!(first[0].event_kind, "pull_request.merged");
+        assert_eq!(first[0].subject_key, "pull:73");
+        // A merged PR must not be misclassified as an ordinary closure.
+        assert_eq!(poll_authenticated_events(
+            &store, &close, 0, &serde_json::json!([merged.clone()]),
+        ).unwrap().recorded, 0);
+
+        let mut ordinary_close = merged.clone();
+        ordinary_close["id"] = serde_json::json!("5000050002");
+        ordinary_close["payload"]["pull_request"]["merged"] = serde_json::json!(false);
+        assert_eq!(github_kind(&ordinary_close), Some("pull_request.closed"));
+        assert_eq!(poll_authenticated_events(
+            &store, &close, 0, &serde_json::json!([ordinary_close.clone()]),
+        ).unwrap().recorded, 1);
+        assert_eq!(poll_authenticated_events(
+            &store, &merge, 0, &serde_json::json!([ordinary_close]),
+        ).unwrap().recorded, 0);
+
+        let mut contradictory = merged.clone();
+        contradictory["payload"]["action"] = serde_json::json!("merged");
+        contradictory["payload"]["pull_request"]["merged"] = serde_json::json!(false);
+        assert_eq!(github_kind(&contradictory), None);
+        let mut malformed = merged.clone();
+        malformed["payload"]["pull_request"]["merged"] = serde_json::json!("true");
+        assert_eq!(github_kind(&malformed), None);
+
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |r| r.get::<_, i64>(0)).unwrap(), 0);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(list_decisions(&reopened, &merge.id, 10).unwrap().len(), 1);
+        assert_eq!(list_decisions(&reopened, &close.id, 10).unwrap().len(), 1);
+        assert_eq!(poll_authenticated_events(
+            &reopened, &merge, 0, &serde_json::json!([merged]),
+        ).unwrap().duplicates, 1);
         assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
             |r| r.get::<_, i64>(0)).unwrap(), 0);
     }

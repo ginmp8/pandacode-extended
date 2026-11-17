@@ -403,3 +403,31 @@ test('native Team settings and Demand pages remain reachable in a compact viewpo
   await expect(host.getByRole('button',{name:'New Demand'})).toBeVisible();
   await expect(host.locator('form[data-sa-form="create"]')).toHaveCount(0);
 });
+
+test('native bot Conversations identifies SuperAgent threads and never calls them removed channels',async({page})=>{
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {renderPanel}=await import('/src/bots-panels.ts');
+    const element=document.createElement('div');
+    element.id='sa-bot-native-history-test';
+    document.body.appendChild(element);
+    const detail={
+      bot:{id:'worker',name:'Worker'},
+      threads:[
+        {channelId:'superagent',externalId:'demand-child-7f0c1d2a',sessionId:'native-worker-session',
+         updatedAt:Date.now()},
+        {channelId:'desktop',externalId:'desktop',sessionId:'original-bot-chat',
+         updatedAt:Date.now()-1000},
+      ],
+      channels:[],
+    };
+    element.innerHTML=renderPanel('conversations',detail as never,
+      {running:()=>false} as never);
+  });
+  const section=page.getByRole('region',{name:'SuperAgent tasks'});
+  await expect(section).toContainText('SuperAgent task');
+  await expect(section).not.toContainText('Removed channel');
+  await expect(section.locator('[data-open-task="native-worker-session"]')).toHaveText('Open chat');
+  await expect(page.getByRole('region',{name:'Other bot conversations'}))
+    .toContainText('This app');
+});

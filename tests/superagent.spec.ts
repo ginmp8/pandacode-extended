@@ -110,6 +110,50 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
   });
 });
 
+test('native policy blocker prevents edits hidden by the paginated Ticket view',async({page})=>{
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-policy-blocked';document.body.appendChild(host);
+    const calls:string[]=[];
+    (window as unknown as {nativePolicyCalls:string[]}).nativePolicyCalls=calls;
+    const team={id:'team',name:'Reusable',coordinatorBotId:'coordinator',workerBotId:'worker',
+      enabled:false,policyRevision:4,policyEditBlocker:'Active or reviewable Demands prevent Team policy edits.'};
+    const mounted=mountSuperagent(host,async command=>{
+      calls.push(command);
+      if(command==='bots_list')return [{id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false}] as never;
+      if(command==='superagent_list')return [team] as never;
+      if(command==='superagent_tickets')return [{id:'recent',orchestrationId:'team',objective:'Closed',
+        state:'completed',revision:1}] as never;
+      if(command==='superagent_roster')return {orchestrationId:'team',policyRevision:4,
+        coordinatorBotId:'coordinator',workerBotIds:['worker'],reviewerBotIds:[],
+        maxWorkerAttempts:2,executionReady:true} as never;
+      throw Error('Unexpected native command '+command);
+    });
+    (window as unknown as {liftBlocker:()=>Promise<void>}).liftBlocker=async()=>{
+      team.policyEditBlocker='';await mounted.refresh();
+    };
+  });
+  const host=page.locator('#sa-policy-blocked');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await expect(host.getByRole('button',{name:'Save preset'})).toBeDisabled();
+  await expect(host.getByText('Team policy edit blocked:',{exact:false})).toContainText('Active or reviewable');
+  await host.locator('form[data-sa-form="edit"]').dispatchEvent('submit');
+  await host.getByRole('button',{name:'Teams',exact:true}).click();
+  await host.getByRole('button',{name:'Load native members'}).click();
+  await expect(host.getByRole('button',{name:'Save configured roles'})).toBeDisabled();
+  await expect(host.getByRole('button',{name:'Save Worker attempt budget'})).toBeDisabled();
+  await host.locator('form[data-sa-form="attempt-budget"]').dispatchEvent('submit');
+  const calls=await page.evaluate(()=>(window as unknown as {nativePolicyCalls:string[]}).nativePolicyCalls);
+  expect(calls).not.toContain('superagent_update');
+  expect(calls).not.toContain('superagent_roster_update');
+  expect(calls).not.toContain('superagent_worker_attempt_limit_update');
+  await page.evaluate(async()=>await (window as unknown as {liftBlocker:()=>Promise<void>}).liftBlocker());
+  await expect(host.getByRole('button',{name:'Save configured roles'})).toBeEnabled();
+  await expect(host.getByRole('button',{name:'Save Worker attempt budget'})).toBeEnabled();
+});
+
 test('native SuperAgent manual dispatch requires opt-in and supports explicit revocation',async ({page})=>{
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

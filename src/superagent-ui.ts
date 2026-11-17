@@ -11,6 +11,7 @@ interface Config {
   ticketCount?: number; runningCount?: number; blockedCount?: number; lastActivityAt?: number;
   workerCount?: number; reviewerCount?: number;
   manualEnableBlocker?: string | null;
+  policyEditBlocker?: string | null;
 }
 interface TeamRoster { orchestrationId:string; policyRevision:number; coordinatorBotId:string;
   workerBotIds:string[]; reviewerBotIds:string[]; maxWorkerAttempts:number; executionReady:boolean }
@@ -198,6 +199,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '>' + safe(bot.name) + (bot.paused ? ' (paused)' : '') + '</option>').join('');
     };
     const chosen = current();
+    // The native directory inspects all durable Demands, not just the latest page.
+    const policyEditBlocker = chosen?.policyEditBlocker ||
+      (chosen?.enabled ? 'Disable the Team before changing its policy.' :
+        tickets.some(ticket => !['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state))
+          ? 'Active or reviewable Demands prevent Team policy edits.' : null);
     const inspected = tickets.find(ticket => ticket.id === inspectedTicket);
     const latestActivity = ticketDetails?.activity ?? [];
     const newestIds = new Set(latestActivity.map(entry => entry.id));
@@ -607,7 +613,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       optionsFor(chosen.coordinatorBotId) + '</select></label>' +
       '<label>Edit worker<select name="workerBotId" required>' + optionsFor(chosen.workerBotId) +
       '</select></label></div><button class="primary-button" type="submit"' +
-      (chosen.enabled ? ' disabled' : '') + '>Save preset</button></form>' +
+      (policyEditBlocker ? ' disabled aria-describedby="sa-policy-edit-blocker"' : '') +
+      '>Save preset</button></form>' +
+      (policyEditBlocker ? '<p id="sa-policy-edit-blocker" role="status">Team policy edit blocked: ' +
+        safe(policyEditBlocker) + '</p>' : '') +
       '<p>Policy revision ' + chosen.policyRevision + ' · Native read-only permission until separately authorized.</p>' +
       '<p>Disabled Teams may change primary roles after settled Demands only when historical native role snapshots are complete and no extra members or GitHub sources remain. Otherwise duplicate the Team.</p>' +
       '<form data-sa-form="run"><label>Task objective<textarea name="objective" rows="3" maxlength="16000" required>' +
@@ -712,16 +721,21 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               roleOptions(reviewerDraft) + '</select></label>' +
               '<p>A bot may have one role only. Workers must share the primary Worker project. A disabled Team may change roles after all demands settle; active/reviewable work and unresolved effects block native saves.</p>' +
               '<button class="primary-button" type="submit"' +
-                (chosen.enabled || tickets.some(ticket => !['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)) ? ' disabled' : '') +
+                (policyEditBlocker || roleRoster.policyRevision !== chosen.policyRevision
+                   ? ' disabled aria-describedby="sa-role-edit-blocker"' : '') +
                 '>Save configured roles</button></form>' +
+              (policyEditBlocker ? '<p id="sa-role-edit-blocker" role="status">Team role edit blocked: ' +
+                safe(policyEditBlocker) + '</p>' : '') +
               '<form data-sa-form="attempt-budget">' +
                 '<label>Maximum attempts per Demand<select name="maxWorkerAttempts">' +
                 [1,2,3,4].map(limit => '<option value="' + limit + '"' +
                   (roleRoster?.maxWorkerAttempts === limit ? ' selected' : '') +
                   '>' + limit + '</option>').join('') + '</select></label>' +
                 '<p>Native hard cap, including the first Worker attempt. Requires a disabled Team; future Demands only. No automatic retry is enabled.</p>' +
-                '<button type="submit"' + (chosen.enabled ? ' disabled' : '') +
+                '<button type="submit"' + (policyEditBlocker ? ' disabled aria-describedby="sa-budget-edit-blocker"' : '') +
                   '>Save Worker attempt budget</button></form>' +
+              (policyEditBlocker ? '<p id="sa-budget-edit-blocker" role="status">Team budget edit blocked: ' +
+                safe(policyEditBlocker) + '</p>' : '') +
               '<p role="status">' + (roleRoster.executionReady ?
                 'Single-worker manual execution available after explicit enable.' :
                 'Multi-member execution is disabled until native scoped admission is available.') + '</p>' +
@@ -1754,7 +1768,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (form.dataset.saForm === 'roster') {
       const cfg=current();
-      if (!cfg || !roleRoster || roleRoster.orchestrationId!==cfg.id) return;
+      if (!cfg || !roleRoster || roleRoster.orchestrationId!==cfg.id ||
+          cfg.enabled || cfg.policyEditBlocker || roleRoster.policyRevision!==cfg.policyRevision) return;
       const workerBotIds=[cfg.workerBotId,...workerOrder];
       const reviewerBotIds=data.getAll('reviewers').map(String);
       void work(async () => {
@@ -1770,7 +1785,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (form.dataset.saForm === 'attempt-budget') {
       const cfg=current();
       if (!cfg || !roleRoster || roleRoster.orchestrationId!==cfg.id ||
-          roleRoster.policyRevision!==cfg.policyRevision || cfg.enabled) return;
+          roleRoster.policyRevision!==cfg.policyRevision || cfg.enabled || cfg.policyEditBlocker) return;
       const maxWorkerAttempts=Number(data.get('maxWorkerAttempts'));
       if (!Number.isInteger(maxWorkerAttempts) ||
           maxWorkerAttempts<1 || maxWorkerAttempts>4) return;
@@ -1827,7 +1842,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (form.dataset.saForm === 'edit') {
       const existing = current();
-      if (!existing || existing.enabled) return;
+      if (!existing || existing.enabled || existing.policyEditBlocker) return;
       const input = {
         name:String(data.get('name') ?? '').trim(),
         coordinatorBotId:String(data.get('coordinatorBotId') ?? ''),

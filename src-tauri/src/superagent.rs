@@ -281,6 +281,8 @@ pub struct OrchestrationOverview {
     /// Read-only reason why a disabled Team cannot currently enter manual mode.
     /// Native enabling rechecks the same guard under its revision-bound mutation.
     pub manual_enable_blocker: Option<String>,
+    /// Read-only Team edit guard across every durable Demand and effect.
+    pub policy_edit_blocker: Option<String>,
 }
 
 /// Derive overview counts from durable tickets rather than a page of sessions.
@@ -311,6 +313,7 @@ fn orchestration_overview(store: &Store) -> Result<Vec<OrchestrationOverview>> {
             worker_count: row.get(11)?,
             reviewer_count: row.get(12)?,
             manual_enable_blocker: None,
+            policy_edit_blocker: None,
         })
     }).map_err(|e| e.to_string())?;
     let mut result = rows.collect::<rusqlite::Result<Vec<_>>>()
@@ -319,6 +322,7 @@ fn orchestration_overview(store: &Store) -> Result<Vec<OrchestrationOverview>> {
         if !item.config.enabled {
             item.manual_enable_blocker = manual_enable_blocker(store, &item.config)?;
         }
+        item.policy_edit_blocker = team_policy_edit_blocker(store, &item.config)?;
     }
     Ok(result)
 }
@@ -3498,6 +3502,31 @@ fn manual_enable_blocker(store: &Store, current: &Orchestration) -> Result<Optio
     Ok(None)
 }
 
+/// Display-only native state; writes retain independent revision and SQL guards.
+fn team_policy_edit_blocker(store: &Store, current: &Orchestration) -> Result<Option<String>> {
+    if current.enabled {
+        return Ok(Some("Disable the Team before changing its policy.".into()));
+    }
+    let unsettled: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
+          AND (t.state NOT IN ('completed','failed','stopped','interrupted','inconclusive')
+            OR EXISTS(SELECT 1 FROM sa_assignments a WHERE a.ticket_id=t.id AND a.state='running')))",
+        [&current.id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if unsettled {
+        return Ok(Some("Active or reviewable Demands prevent Team policy edits.".into()));
+    }
+    let unresolved: bool = store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_effect_receipts e JOIN sa_tickets t ON t.id=e.ticket_id
+          WHERE t.orchestration_id=?1 AND e.state IN ('pending','uncertain'))",
+        [&current.id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if unresolved {
+        return Ok(Some("Unresolved external effects prevent Team policy edits.".into()));
+    }
+    Ok(None)
+}
+
 fn change_enabled(
     store: &Store, orchestration_id: &str,
     expected_revision: i64, enabled: bool,
@@ -4239,6 +4268,47 @@ pub async fn superagent_stop(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn team_policy_projection_sees_unpaged_review_and_restart_uncertain_effect() {
+        let store=fixture();
+        let active=enabled(&store);
+        assert!(team_policy_edit_blocker(&store,&active).unwrap().is_some());
+        let team=change_enabled(&store,&active.id,active.policy_revision,false).unwrap();
+        assert!(team_policy_edit_blocker(&store,&team).unwrap().is_none());
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,
+             project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+             VALUES('old-review',?1,'old-review-key','Objective','local-user','manual',?2,?3,
+             ?4,'waiting_review',?5,?5)",
+            params![team.id,team.project_id,team.worker_bot_id,team.policy_revision,now-1],
+        ).unwrap();
+        for i in 0..55 {
+            store.db.execute(
+                "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,
+                 project_id,worker_bot_id,policy_revision,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'Closed','local-user','manual',?4,?5,?6,'completed',?7,?7)",
+                params![format!("old-{i}"),team.id,format!("key-{i}"),team.project_id,
+                    team.worker_bot_id,team.policy_revision,now+i+1],
+            ).unwrap();
+        }
+        let reason=team_policy_edit_blocker(&store,&team).unwrap().unwrap();
+        assert!(reason.contains("Active or reviewable"));
+        assert_eq!(orchestration_overview(&store).unwrap().iter()
+            .find(|entry|entry.config.id==team.id).unwrap().policy_edit_blocker.as_deref(),Some(reason.as_str()));
+        assert!(roster::set_worker_attempt_limit(&store,&team.id,team.policy_revision,3).is_err());
+        store.db.execute("UPDATE sa_tickets SET state='completed' WHERE id='old-review'",[]).unwrap();
+        assert!(team_policy_edit_blocker(&store,&team).unwrap().is_none());
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts(ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             VALUES('old-review','remote','digest','uncertain',?1,?1)",[now],
+        ).unwrap();
+        let path=store.path.clone(); drop(store);
+        let opened=Store::open_read_only(&path).unwrap();
+        assert_eq!(team_policy_edit_blocker(&opened,&team).unwrap().as_deref(),
+            Some("Unresolved external effects prevent Team policy edits."));
+    }
 
     #[test]
     fn desktop_stop_requires_fresh_ticket_revision_and_preserves_late_callback_denial() {

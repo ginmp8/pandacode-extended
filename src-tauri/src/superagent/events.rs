@@ -1351,6 +1351,7 @@ where
     let mut observed = Vec::new();
     let mut skipped_off = 0;
     let mut skipped_check_runs = 0;
+    let mut failures = Vec::new();
     for selected in sources {
         if selected.mode != "observe" {
             skipped_off += 1;
@@ -1360,17 +1361,32 @@ where
             skipped_check_runs += 1;
             continue;
         }
-        let since: i64 = store.db.query_row(
-            "SELECT updated_at FROM sa_event_sources WHERE id=?1",
-            [&selected.id], |row| row.get(0),
-        ).map_err(|e| e.to_string())?;
-        // No network call for Off or Checks-only sources. Native source policy,
-        // pinned repository identity and exact sequence are rechecked after
-        // every authenticated response, immediately before durable mutation.
-        let (signed_in, response, pages, repository_id) = fetch(&selected, since)?;
-        observed.push(poll_authenticated_events_with_repository_id(
-            store, &selected, since, &response, &signed_in, pages, repository_id,
-        )?);
+        // Each source has an independent policy, cursor and receipt transaction.
+        // A failed provider call or invalid feed must not starve later, unrelated
+        // enabled sources. Never report the overall batch as a success if any
+        // source failed; a caller can safely retry through durable deduplication.
+        let result = (|| -> Result<AuthenticatedPoll> {
+            let since: i64 = store.db.query_row(
+                "SELECT updated_at FROM sa_event_sources WHERE id=?1",
+                [&selected.id], |row| row.get(0),
+            ).map_err(|e| e.to_string())?;
+            // No network call for Off or Checks-only sources. Native source policy,
+            // pinned identity and sequence are rechecked at receipt admission.
+            let (signed_in, response, pages, repository_id) = fetch(&selected, since)?;
+            poll_authenticated_events_with_repository_id(
+                store, &selected, since, &response, &signed_in, pages, repository_id,
+            )
+        })();
+        match result {
+            Ok(receipt) => observed.push(receipt),
+            Err(reason) => failures.push(format!("{}: {}", selected.id, reason)),
+        }
+    }
+    if !failures.is_empty() {
+        return Err(format!(
+            "GitHub Observe batch incomplete: {} source(s) succeeded, {} failed; retry after inspecting: {}",
+            observed.len(), failures.len(), failures.join("; "),
+        ));
     }
     if observed.is_empty() {
         return Err("Team has no enabled GitHub Events Observe sources; no network request made.".into());
@@ -3784,6 +3800,74 @@ mod tests {
         assert!(observe_team_sources_with(&reopened, "not-a-team", |_, _| {
             panic!("Unknown Team must fail before GitHub access");
         }).is_err());
+    }
+
+    #[test]
+    fn failed_team_observe_source_does_not_starve_later_sources_or_replay_after_restart() {
+        let (store, path) = fixture();
+        let first = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let middle = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request.opened").unwrap();
+        let last = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.closed").unwrap();
+        for (index, selected) in [&first, &middle, &last].iter().enumerate() {
+            set_mode(&store, &selected.id, selected.policy_revision, "observe").unwrap();
+            // Stable order makes the failing source demonstrably nonterminal.
+            store.db.execute(
+                "UPDATE sa_event_sources SET created_at=?2,updated_at=0 WHERE id=?1",
+                params![&selected.id, (index + 1) as i64],
+            ).unwrap();
+        }
+        let feed = |selected: &EventSource| {
+            let (event_type, action, number, event_id) = match selected.event_kind.as_str() {
+                "issues.opened" => ("IssuesEvent", "opened", 42, "5000099001"),
+                "pull_request.opened" => ("PullRequestEvent", "opened", 99, "5000099002"),
+                "issues.closed" => ("IssuesEvent", "closed", 42, "5000099003"),
+                _ => panic!("Unexpected source kind"),
+            };
+            ("operator".into(), serde_json::json!([{
+                "id":event_id, "created_at":chrono::Utc::now().to_rfc3339(),
+                "type":event_type, "repo":{"name":"test/fixture","id":101},
+                "actor":{"login":"trusted-bot"},
+                "payload":{"action":action,
+                    "issue":{"number":number},
+                    "pull_request":{"number":number}}
+            }]), 1, 101)
+        };
+        let mut visited = Vec::new();
+        let error = observe_team_sources_with(&store, "orch", |selected, _since| {
+            visited.push(selected.id.clone());
+            if selected.id == middle.id {
+                return Err("simulated provider outage".into());
+            }
+            Ok(feed(selected))
+        }).unwrap_err();
+        assert_eq!(visited, vec![first.id.clone(), middle.id.clone(), last.id.clone()]);
+        assert!(error.contains("GitHub Observe batch incomplete"));
+        assert!(error.contains(&middle.id));
+        assert!(error.contains("simulated provider outage"));
+        assert_eq!(list_decisions(&store, &first.id, 10).unwrap().len(), 1);
+        assert!(list_decisions(&store, &middle.id, 10).unwrap().is_empty());
+        assert_eq!(list_decisions(&store, &last.id, 10).unwrap().len(), 1);
+        assert_eq!(source(&store, &middle.id).unwrap().last_sequence, 0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_,i64>(0),
+        ).unwrap(), 0, "Observe never creates a Demand");
+
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let retried = observe_team_sources_with(&reopened, "orch",
+            |selected, _since| Ok(feed(selected))).unwrap();
+        assert_eq!(retried.observed.len(), 3);
+        assert_eq!(retried.observed.iter().map(|r| r.duplicates).sum::<usize>(), 2);
+        assert_eq!(retried.observed.iter().map(|r| r.recorded).sum::<usize>(), 1);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_event_decisions", [], |row| row.get::<_,i64>(0),
+        ).unwrap(), 3, "Retries and restart cannot duplicate source decisions");
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_,i64>(0),
+        ).unwrap(), 0);
     }
 
     #[test]

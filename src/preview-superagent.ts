@@ -487,7 +487,7 @@ export async function invokeSuperagent<T>(
               throw Error('Portable role profile mismatch; inspect native bot settings.');
           }
         }
-        const policy:Strategy={settings,maxConcurrentTasks,maxAttemptsPerAssignment};
+        const policy:Strategy={settings,maxConcurrentTasks,maxAttemptsPerAssignment,executionMode:'off'};
         const found=configName(preset.name);
         if(found){
           const original=strategyFor(found.id);

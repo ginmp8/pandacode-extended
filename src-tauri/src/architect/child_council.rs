@@ -732,9 +732,10 @@ fn record_verified_receipt(
     Ok(true)
 }
 
-/// A forced hierarchical S2 wave has its own immutable native receipt. The
-/// original child composite remains a first-wave receipt and cannot stand in
-/// for newly admitted reviewers or confer terminal root approval.
+/// Each S2 child wave has one native second-wave evidence receipt. Forced S2
+/// requires an independently passing first-wave composite; triggered S2
+/// instead retains authenticated failing first-wave callbacks as the trigger.
+/// Neither kind is a terminal root verdict or a synthetic parent vote.
 fn escalation_receipt_key(root: &TeamSnapshot, bot_id: &str) -> String {
     format!("native-council-child-s2-receipt:{}:{bot_id}", root.council_since)
 }
@@ -746,20 +747,39 @@ fn escalation_receipt(
     store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
     child: &TeamSnapshot, choice: &CouncilNestedReviewer,
 ) -> Result<Option<VerifiedChildReceipt>> {
-    let Some(first) = read_verified_receipt(store, root, record, child)? else {
-        return Ok(None);
-    };
     let Some(root_config) = root.config.council.as_ref() else { return Ok(None) };
     if root_config.strategy != super::council::CouncilExecutionStrategy::Escalated
-        || !root_config.force_escalation
         || !root_artifact_revision(store, root, false)?
         || !super::council_evidence_is_current(store, root)
         || !super::council_evidence_is_current(store, child)
-        || !fresh_s2_root_reviewers(store, root, root_config)
-        || parent_seat(store, root, record, child, false)?.is_none()
     {
         return Ok(None);
     }
+    // Forced S2 still requires its independently passing first-wave composite
+    // and fresh authenticated root reviewers. Automatically triggered S2
+    // cannot have a passing first-wave receipt when a genuine score failed:
+    // re-derive the original trigger from native leaf callbacks instead.
+    let first = if root_config.force_escalation {
+        let Some(first) = read_verified_receipt(store, root, record, child)? else {
+            return Ok(None);
+        };
+        if !fresh_s2_root_reviewers(store, root, root_config)
+            || parent_seat(store, root, record, child, false)?.is_none()
+        {
+            return Ok(None);
+        }
+        Some(first)
+    } else {
+        let triggers = authenticated_first_wave_s2_triggers(
+            store, root, record, child, choice,
+        )?;
+        // A new read-only review does not correct an unresolved high-severity
+        // artifact defect. Do not issue a pass-equivalent receipt for it.
+        if triggers.is_empty() || triggers.contains(&"high_severity_finding") {
+            return Ok(None);
+        }
+        None
+    };
     let previous = child.workers.iter().filter(|leaf|
         leaf.council.as_ref().is_some_and(|seat| seat.round == 1)
     ).collect::<Vec<_>>();
@@ -772,12 +792,17 @@ fn escalation_receipt(
     {
         return Ok(None);
     }
-    let original_ids: HashSet<&str> = first.leaf_worker_ids.iter().map(String::as_str).collect();
+    let original_ids: HashSet<&str> = first.as_ref()
+        .map(|receipt| receipt.leaf_worker_ids.iter()
+            .map(String::as_str).collect::<HashSet<_>>())
+        .unwrap_or_default();
     let previous_ids: HashSet<&str> = previous.iter().map(|leaf| leaf.id.as_str()).collect();
     let previous_sessions: HashSet<&str> = previous.iter()
         .map(|leaf| leaf.session_id.as_str()).collect();
-    if original_ids.len() != choice.child_reviewers || original_ids != previous_ids
+    if previous_ids.len() != choice.child_reviewers
         || previous_sessions.len() != choice.child_reviewers
+        || (root_config.force_escalation
+            && (original_ids.len() != choice.child_reviewers || original_ids != previous_ids))
     {
         return Ok(None);
     }
@@ -845,8 +870,9 @@ fn escalation_receipt(
     }))
 }
 
-/// Persist and revalidate exactly one second-wave receipt per child/root cycle.
-/// A stale, altered or replayed receipt fails closed, including after restart.
+/// Persist and revalidate exactly one forced or triggered second-wave receipt
+/// per child/root cycle. A stale or revoked first-wave trigger invalidates the
+/// receipt; a native reviewer callback is always required before persistence.
 fn record_escalation_receipt(
     store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
     child: &TeamSnapshot, choice: &CouncilNestedReviewer,

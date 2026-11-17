@@ -7010,3 +7010,123 @@ fn nested_m5_unforced_s2_low_root_score_admits_only_authenticated_fresh_root_rev
     assert!(!verified_council_pass(&store, &root),
         "a fresh root callback does not replace required child S2 terminal proof");
 }
+
+#[test]
+fn nested_m4_triggered_s2_records_authentic_second_wave_evidence_without_parent_approval() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["security-child", "architecture-child"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.strategy = council::CouncilExecutionStrategy::Escalated;
+        config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
+            .map(|bot| council::CouncilNestedReviewer {
+                bot_id: (*bot).into(), child_reviewers: 2,
+                child_target: 9.5, child_max_rounds: 2,
+            }).collect();
+        config.validate().unwrap();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(
+        &state, &sid, "Run native trigger-bound independent child S2 evidence", None, None,
+    ).unwrap();
+    let (pending, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Admit first wave"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    let security_id = {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        child_council::inspect(&store, &root).unwrap().into_iter()
+            .find(|child| child.bot_id == "security-child").unwrap().child_session_id
+    };
+    for _ in 0..4 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        let score = if launch.admission.parent == security_id { 8.5 } else { 9.7 };
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                &format!("Native first-wave Council callback.\nCouncil score: {score}/10")).unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    }
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let security = child_council::inspect(&store, &root).unwrap().into_iter()
+            .find(|child| child.bot_id == "security-child").unwrap();
+        assert_eq!(security.automatic_escalation_triggers, vec!["below_target"]);
+        assert!(security.verified_child_receipt.is_none(),
+            "a failing original Council may not masquerade as a passing first-wave receipt");
+        assert!(security.verified_escalation_receipt.is_none(),
+            "admitted but unexecuted reviewers are not terminal evidence");
+        assert!(!verified_council_pass(&store, &root));
+    }
+    for _ in 0..2 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        assert_eq!(launch.admission.parent, security_id);
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                "Native fresh S2 callback.\nCouncil score: 9.8/10").unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    }
+    let (pending, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Persist native triggered child evidence"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false,
+        "a verified second wave must not self-approve its hierarchical root");
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    let children = child_council::inspect(&store, &root).unwrap();
+    let security = children.iter().find(|child| child.bot_id == "security-child").unwrap();
+    let architecture = children.iter().find(|child| child.bot_id == "architecture-child").unwrap();
+    assert!(security.verified_child_receipt.is_none());
+    assert!(security.verified_escalation_receipt.is_some(),
+        "a genuine failing first wave plus distinct successful native callbacks must create a second-wave receipt");
+    assert_eq!(security.status, "child_escalation_evidence_ready_root_pending");
+    assert!(architecture.verified_escalation_receipt.is_none(),
+        "a passing sibling cannot gain phantom second-wave proof");
+    assert_eq!(security.leaf_attempts.len(), 4);
+    let first_ids = security.leaf_attempts.iter().filter(|leaf| leaf.round == 1)
+        .map(|leaf| leaf.worker_id.as_str()).collect::<std::collections::HashSet<_>>();
+    let second_ids = security.leaf_attempts.iter().filter(|leaf| leaf.round == 2)
+        .map(|leaf| leaf.worker_id.as_str()).collect::<std::collections::HashSet<_>>();
+    assert_eq!(first_ids.len(), 2);
+    assert_eq!(second_ids.len(), 2);
+    assert!(first_ids.is_disjoint(&second_ids));
+    assert!(!verified_council_pass(&store, &root));
+
+    let mut altered = load(&store, &security_id).unwrap().unwrap();
+    let leaf = altered.workers.iter_mut()
+        .find(|leaf| leaf.council.as_ref().is_some_and(|seat| seat.round == 2))
+        .unwrap();
+    leaf.council.as_mut().unwrap().score = Some(10.0);
+    save(&store, &mut altered).unwrap();
+    assert!(child_council::inspect(&store, &root).is_err(),
+        "a forged second-wave score must revoke the persisted native receipt");
+    altered.workers.iter_mut()
+        .find(|leaf| leaf.council.as_ref().is_some_and(|seat| seat.round == 2))
+        .unwrap().council.as_mut().unwrap().score = Some(9.8);
+    save(&store, &mut altered).unwrap();
+    assert!(child_council::inspect(&store, &root).unwrap().into_iter()
+        .find(|child| child.bot_id == "security-child").unwrap()
+        .verified_escalation_receipt.is_some(),
+        "only restoring the original callback-bound score revalidates the persisted receipt");
+}

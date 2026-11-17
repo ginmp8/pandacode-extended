@@ -243,6 +243,39 @@ test('M3 native read-only inspector discloses both reviewer sources without trea
   await expect(panel(page).getByText('Stale revision', { exact: false })).toBeVisible();
 });
 
+test('Council inspector shows verified triggered S2 child evidence without a passing first wave', async ({ page }) => {
+  const inspection = {
+    mode: 'm4', strategy: 'escalated', forceEscalation: false,
+    cycleStartedAt: 1000, teamRevision: 12,
+    status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: false },
+    verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
+    reservedChildren: [{
+      botId: 'security-child', childSessionId: 'child-s2', rootCycleId: 'task:1000',
+      requiredLeafReviewers: 2, status: 'child_escalation_evidence_ready_root_pending',
+      automaticEscalationTriggers: ['below_target'],
+      verifiedChildReceipt: null,
+      verifiedEscalationReceipt: {
+        rootCycleId: 'task:1000', childSessionId: 'child-s2', botId: 'security-child',
+        objectiveSha256: 'a'.repeat(64), policySha256: 'b'.repeat(64),
+        childConfigSha256: 'c'.repeat(64), lowestScore: 9.8,
+        leafWorkerIds: ['fresh-a', 'fresh-b'], criterionEvidence: [],
+      },
+    }],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const children = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await children.locator('summary').click();
+  await expect(children).toContainText('Native second-wave child evidence recorded (root approval pending)');
+  await expect(children).toContainText('9.8/10');
+  await expect(children).toContainText('No verified child receipt is available; no parent vote');
+  await expect(children).not.toContainText('correlation or reviewer identity mismatch');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
 test('Council blocked child state remains non-passing in shared native inspector', async ({ page }) => {
   const inspection = {
     mode: 'm4', cycleStartedAt: 1000, teamRevision: 5,

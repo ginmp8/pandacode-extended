@@ -164,13 +164,23 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
         // Correlation is display hygiene, not a second native approval gate.
         // A receipt displayed by the host must refer to the same frozen child
         // and to fresh identities outside the original child review wave.
-        const escalationCorrelated = escalationReceipt && correlated
+        // A triggered S2 child can start with a genuine failing first wave.
+        // It has no passing first-wave receipt, even after its independently
+        // verified second wave succeeds. This is display hygiene only: the
+        // native inspector has already revalidated the exact task receipt.
+        const triggeredWithoutPassingFirst = !receipt
+          && inspection.strategy === 'escalated' && !inspection.forceEscalation
+          && child.status === 'child_escalation_evidence_ready_root_pending'
+          && (child.automaticEscalationTriggers ?? []).some(reason =>
+            ['below_target', 'required_criterion', 'conflicting_verdict', 'required_evidence'].includes(reason));
+        const escalationCorrelated = escalationReceipt && (correlated || triggeredWithoutPassingFirst)
           && escalationReceipt.rootCycleId === child.rootCycleId
           && escalationReceipt.childSessionId === child.childSessionId
           && escalationReceipt.botId === child.botId
-          && escalationReceipt.objectiveSha256 === receipt?.objectiveSha256
-          && escalationReceipt.policySha256 === receipt?.policySha256
-          && escalationReceipt.childConfigSha256 === receipt?.childConfigSha256
+          && (!receipt || (
+            escalationReceipt.objectiveSha256 === receipt.objectiveSha256
+            && escalationReceipt.policySha256 === receipt.policySha256
+            && escalationReceipt.childConfigSha256 === receipt.childConfigSha256))
           && Number.isFinite(escalationReceipt.lowestScore)
           && escalationReceipt.lowestScore >= 0 && escalationReceipt.lowestScore <= 10
           && Array.isArray(freshIds) && freshIds.length === child.requiredLeafReviewers

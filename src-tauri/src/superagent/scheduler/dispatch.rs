@@ -362,18 +362,21 @@ fn ready(store:&Store)->Result<Vec<ReadyItem>> {
                     WHERE proof.item_id=prerequisite.id
                       AND proof.child_ticket_id=prerequisite.child_ticket_id
                       AND applied.state='applied'))))
-         ORDER BY plan.created_at,item.ordinal,item.id LIMIT 32"
+         ORDER BY plan.created_at,item.ordinal,item.id"
     ).map_err(|e|e.to_string())?;
+    // Do not limit candidates before native descendant/effect validation:
+    // 32 blocked predecessors must not starve another Demand indefinitely.
+    // Rows are streamed and at most eight eligible items are materialized.
     let rows=query.query_map([storage::now()],|r|Ok(ReadyItem {
         id:r.get(0)?,root:r.get(1)?,key:r.get(2)?,
         objective:r.get(3)?,worker:r.get(4)?,requires_write:r.get(5)?,
     })).map_err(|e|e.to_string())?;
-    let candidates=rows.collect::<rusqlite::Result<Vec<_>>>()
-        .map_err(|e|e.to_string())?;
     let mut verified=Vec::new();
-    for item in candidates {
+    for row in rows {
+        let item=row.map_err(|e|e.to_string())?;
         if prerequisites_settled(&store.db,&item.root,&item.key)? {
             verified.push(item);
+            if verified.len()==8 { break; }
         }
     }
     Ok(verified)
@@ -521,6 +524,93 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unsettled_frontier_candidates_cannot_starve_an_independent_demand() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_work_items(id TEXT,ticket_id TEXT,item_key TEXT,
+                 ordinal INTEGER,objective TEXT,worker_bot_id TEXT,requires_write INTEGER,
+                 state TEXT,child_ticket_id TEXT);
+             CREATE TABLE sa_work_dependencies(ticket_id TEXT,item_key TEXT,depends_on TEXT);
+             CREATE TABLE sa_demand_plans(ticket_id TEXT,state TEXT,created_at INTEGER,
+                 policy_revision INTEGER,ticket_revision INTEGER);
+             CREATE TABLE sa_tickets(id TEXT,orchestration_id TEXT,state TEXT,
+                 active_assignment_id TEXT,policy_revision INTEGER,project_id TEXT);
+             CREATE TABLE sa_mandates(ticket_id TEXT,revoked INTEGER,expires_at INTEGER,
+                 policy_revision INTEGER,project_id TEXT,actor TEXT,
+                 allowed_tools TEXT,allowed_side_effects INTEGER);
+             CREATE TABLE sa_orchestrations(id TEXT,enabled INTEGER,
+                 policy_revision INTEGER,project_id TEXT);
+             CREATE TABLE sa_work_item_evidence_receipts(
+                 item_id TEXT,child_ticket_id TEXT,assignment_id TEXT);
+             CREATE TABLE sa_worker_write_receipts(
+                 ticket_id TEXT,state TEXT,assignment_id TEXT);
+             CREATE TABLE sa_subagent_nodes(
+                 parent_ticket_id TEXT,child_ticket_id TEXT,state TEXT);
+             CREATE TABLE sa_effect_receipts(ticket_id TEXT,state TEXT);
+             CREATE TABLE sa_work_item_write_scopes(item_id TEXT,root_ticket_revision INTEGER);
+             INSERT INTO sa_orchestrations VALUES('team',1,1,'project');"
+        ).unwrap();
+        let expiry=storage::now().saturating_add(1_000_000);
+        // Two earlier authorized Demands have 32 SQL-visible candidates,
+        // but their completed predecessor has an unresolved native effect.
+        // A later unrelated Demand must still reach the ready frontier.
+        for (index,count) in [(0,31),(1,1),(2,1)] {
+            let root=format!("root-{index}");
+            db.execute(
+                "INSERT INTO sa_tickets VALUES(?1,'team','queued',NULL,1,'project')",
+                [&root],
+            ).unwrap();
+            db.execute(
+                "INSERT INTO sa_mandates VALUES(?1,0,?2,1,'project',
+                    'local-user','[]',0)",
+                params![&root,expiry],
+            ).unwrap();
+            db.execute(
+                "INSERT INTO sa_demand_plans VALUES(?1,'active',?2,1,1)",
+                params![&root,index],
+            ).unwrap();
+            if index<2 {
+                let build=format!("build-{index}");
+                let child=format!("child-{index}");
+                db.execute(
+                    "INSERT INTO sa_work_items VALUES(
+                        ?1,?2,'build',0,'build','worker',0,'completed',?3)",
+                    params![&build,&root,&child],
+                ).unwrap();
+                db.execute(
+                    "INSERT INTO sa_work_item_evidence_receipts VALUES(?1,?2,'attempt')",
+                    params![&build,&child],
+                ).unwrap();
+                db.execute(
+                    "INSERT INTO sa_effect_receipts VALUES(?1,'uncertain')",
+                    [&child],
+                ).unwrap();
+            }
+            for position in 0..count {
+                let key=format!("next-{position}");
+                db.execute(
+                    "INSERT INTO sa_work_items VALUES(?1,?2,?3,?4,
+                        'work','worker',0,'pending',NULL)",
+                    params![format!("pending-{index}-{position}"),&root,&key,
+                        i64::from(position)+1],
+                ).unwrap();
+                if index<2 {
+                    db.execute(
+                        "INSERT INTO sa_work_dependencies VALUES(?1,?2,'build')",
+                        params![&root,&key],
+                    ).unwrap();
+                }
+            }
+        }
+        let store=Store{db,path:std::path::PathBuf::from(":memory:")};
+        let candidates=ready(&store).unwrap();
+        assert_eq!(candidates.len(),1);
+        assert_eq!(candidates[0].root,"root-2");
+        assert_eq!(candidates[0].key,"next-0");
+    }
+
 
     #[test]
     fn dependent_worker_waits_for_predecessor_and_nested_effect_reconciliation() {

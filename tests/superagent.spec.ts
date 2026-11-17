@@ -418,6 +418,8 @@ test('native bot Conversations identifies SuperAgent threads and never calls the
          updatedAt:Date.now()},
         {channelId:'desktop',externalId:'desktop',sessionId:'original-bot-chat',
          updatedAt:Date.now()-1000},
+        {channelId:'schedule',externalId:'schedule-1',sessionId:'latest-scheduled-chat',
+         updatedAt:Date.now()+1000},
       ],
       channels:[],
     };
@@ -428,6 +430,9 @@ test('native bot Conversations identifies SuperAgent threads and never calls the
   await expect(section).toContainText('SuperAgent task');
   await expect(section).not.toContainText('Removed channel');
   await expect(section.locator('[data-open-task="native-worker-session"]')).toHaveText('Open chat');
-  await expect(page.getByRole('region',{name:'Other bot conversations'}))
-    .toContainText('This app');
+  const ordinary=page.getByRole('region',{name:'Other bot conversations'});
+  await expect(ordinary).toContainText('This app');
+  await expect(ordinary.locator('.bots-items li').first()).toContainText('This app');
+  await expect(ordinary.locator('[data-open-task="latest-scheduled-chat"]'))
+    .toHaveText('Open chat');
 });

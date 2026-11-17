@@ -124,7 +124,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npx playwright install --with-deps chromium
-      - name: Verify SuperAgent native presets and manual orchestration UI
+      - name: Verify SuperAgent Team, Demand and native Review UI
         run: |
           PANDACODE_TEST_CHROME="$(node -e 'process.stdout.write(require("@playwright/test").chromium.executablePath())')" \
             npx playwright test tests/superagent.spec.ts --workers=1

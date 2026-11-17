@@ -560,7 +560,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             !item.writeAuthorized && !item.childTicketId).length > 1) ||
             (workWriteItemKey !== '*' && workPlan.items.some(item =>
               item.key === workWriteItemKey && item.requiresWrite &&
-              item.state === 'pending' && !item.writeAuthorized)))
+              item.state === 'pending' && !item.writeAuthorized))
             ? '<form data-sa-form="work-write-scope" aria-label="WorkItem file authorization">' +
               '<p>Native local-user confirmation required for ' +
               (workWriteItemKey === '*'

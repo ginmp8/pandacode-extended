@@ -58,6 +58,7 @@ interface WorkItemEvidence {
 interface DeliveryObservation {
   ticketId:string; ticketRevision:number; ticketState:string; deliveryState:string;
   totalWorkItems:number; verifiedWorkItems:number; unresolvedExternalEffects:number;
+  appliedScopedFileWrites?:number; unresolvedScopedFileWrites?:number;
   repositoryHeadSha:string|null; worktreeStatusSha256:string|null;
   worktreeDiffSha256:string|null; observedStatusEntries:number|null;
   checkoutObservation:string; sourceAttribution:string;
@@ -507,6 +508,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<dt>Verified WorkItems</dt><dd>' + safe(delivery.verifiedWorkItems) +
             ' / ' + safe(delivery.totalWorkItems) + '</dd>' +
           '<dt>Unresolved external effects</dt><dd>' + safe(delivery.unresolvedExternalEffects) + '</dd>' +
+          '<dt>Applied native scoped file writes</dt><dd>' +
+            safe(delivery.appliedScopedFileWrites ?? 'Unavailable') + '</dd>' +
+          '<dt>Unresolved native scoped file writes</dt><dd>' +
+            safe(delivery.unresolvedScopedFileWrites ?? 'Unavailable') + '</dd>' +
           '<dt>Git observation</dt><dd>' + safe(delivery.checkoutObservation) + '</dd>' +
           '<dt>Git HEAD (unattributed)</dt><dd><code>' +
             safe(delivery.repositoryHeadSha ?? 'unavailable') + '</code></dd>' +

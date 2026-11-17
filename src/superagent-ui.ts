@@ -989,7 +989,31 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         safe(tickets.find(ticket => ticket.id === inspectedTicket)?.objective ?? 'Loading native Demand') + '</h2>' +
       '<p>Team ' + safe(chosen.name) + ' · ' + safe(tickets.find(ticket => ticket.id === inspectedTicket)?.state ?? 'Loading') +
         ' · Ticket ' + safe(inspectedTicket) + '</p></div>' +
-      '<div class="sa-title"><h4>Tickets</h4><button type="button" data-sa-refresh>Refresh</button></div>' +
+      '<ol class="sa-run-milestones" aria-label="Native Run lifecycle">' +
+        '<li><span>01 · Admission</span><strong>' +
+          (ticketDetails?.ticket.id === inspectedTicket ? 'Native Ticket recorded' : 'Loading native record') +
+          '</strong></li>' +
+        '<li><span>02 · Assignment</span><strong>' +
+          (ticketDetails?.ticket.id === inspectedTicket
+            ? ticketDetails.assignments.length + ' recorded attempts' : 'Not inspected') +
+          '</strong></li>' +
+        '<li><span>03 · WorkItems</span><strong>' +
+          (workPlanLoaded && workPlan?.ticketId === inspectedTicket
+            ? workPlan.items.length + ' native WorkItems' : 'Not inspected') +
+          '</strong></li>' +
+        '<li><span>04 · Review</span><strong>' +
+          (ticketDetails?.ticket.id === inspectedTicket
+            ? ticketDetails.finalizationGate === 'council_required' ? 'Council required' :
+              ticketDetails.ticket.state === 'waiting_approval' ? 'Human approval pending' :
+              ticketDetails.ticket.state === 'waiting_review' ? 'Native review pending' :
+              'No verified verdict shown'
+            : 'Not inspected') +
+          '</strong></li>' +
+        '<li><span>05 · Delivery</span><strong>' +
+          (deliveryLoaded && delivery?.ticketId === inspectedTicket
+            ? safe(delivery.deliveryState) : 'Not inspected') +
+          '</strong></li></ol>' +
+      '<div class="sa-title"><h4>Native Ticket</h4><button type="button" data-sa-refresh>Refresh</button></div>' +
       '<ul class="sa-tickets">' + (tickets.filter(ticket => ticket.id === inspectedTicket).map(ticket =>
         '<li><div><strong>' + safe(ticket.objective) + '</strong><small>' + safe(ticket.state) +
         ' · Revision ' + ticket.revision + '</small></div>' +
@@ -1026,15 +1050,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         'Library status is distinct from provider eligibility and verified invocation. ' +
         'No role, model or Skill grants tools.</p>' +
         '<p>Policy revision ' + effectiveTeam.policyRevision + ' · ' +
-        (effectiveTeam.enabled ? 'Team enabled for manual checks' : 'Team Off') + ' · ' +
-        (effectiveTeam.executionReady ? 'Single-worker topology' : 'Multi-role execution unavailable') +
+        (effectiveTeam.enabled ? 'Team enabled' : 'Team Off') + ' · ' +
+        (effectiveTeam.executionReady ? 'Native role checks passed' : 'Native role checks require attention') +
         ' · No task grant issued</p>' +
         (effectiveTeam.manualAdmissionBlockers
           ? (effectiveTeam.manualAdmissionBlockers.length
-            ? '<p>Native manual admission blocked:</p><ul aria-label="Native manual admission blockers">' +
+            ? '<p>Native admission blocked:</p><ul aria-label="Native admission blockers">' +
               effectiveTeam.manualAdmissionBlockers.map(reason => '<li>' + safe(reason) + '</li>').join('') + '</ul>'
-            : '<p>Native manual topology and role preflight passed. Provider tools, Skills, grants and runtime capacity remain unverified.</p>')
-          : '<p>Native manual admission preflight was not returned; execution readiness is unverified.</p>') +
+            : '<p>Native role preflight passed. Provider tools, Skills, grants and runtime capacity remain unverified.</p>')
+          : '<p>Native admission preflight was not returned; execution readiness is unverified.</p>') +
         '<ol>' + effectiveTeam.members.map(member =>
           '<li><strong>' + safe(member.role) + ' ' + (member.position + 1) +
           ': ' + safe(member.name) + '</strong>' +
@@ -1156,6 +1180,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             'Choose an execution mode')
           : 'Loading native policy') +
         '</dd></dl>' +
+        '<div class="sa-roster-summary"><h4>Existing bots</h4><ul>' +
+          ([{role:'Coordinator',id:chosen.coordinatorBotId},
+            ...(chosen.workerBotIds?.length ? chosen.workerBotIds : [chosen.workerBotId])
+              .map((id,index)=>({role:'Worker ' + (index+1),id})),
+            ...(chosen.reviewerBotIds ?? []).map((id,index)=>({role:'Reviewer ' + (index+1),id}))])
+            .map(member=>{
+              const bot=bots.find(candidate=>candidate.id===member.id);
+              return '<li><span><small>' + safe(member.role) + '</small><strong>' +
+                safe(bot?.name ?? member.id) + '</strong></span><span><small>' +
+                safe(bot?.provider ?? 'Unknown harness') + '</small><strong>' +
+                safe(bot?.model ?? 'Unavailable model') + '</strong></span></li>';
+            }).join('') +
+          '</ul><button type="button" data-sa-team-tab="members">Review native bot settings and roles</button></div>' +
         '<div class="sa-actions"><button type="button" data-sa-enable="' + safe(chosen.id) + '"' +
         '>' + (chosen.enabled ? 'Disable Team' : 'Enable Team') + '</button>' +
         '<button type="button" data-sa-create-demand>Assign Demand</button>' +
@@ -1228,7 +1265,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       (!presets.length ? '<section class="sa-pane sa-first-team"><h3>Create your first Team</h3>' +
         '<p>Assign a Coordinator, Workers and optional independent Reviewers. ' +
         'Choose Full Auto or With Approval before enabling the Team.</p>' +
-        '<p>Creating a Team does not run a task or grant additional permissions.</p></section>' : '') +
+        '<p>Creating a Team does not run a task or grant additional permissions.</p>' +
+      '<ol class="sa-onboarding-flow" aria-label="From request to reviewed delivery">' +
+        '<li><strong>1. Configure the Team</strong><span>Assign your existing bots and select an execution mode.</span></li>' +
+        '<li><strong>2. Assign a Demand</strong><span>Describe the outcome and review native permissions.</span></li>' +
+        '<li><strong>3. Review evidence</strong><span>Inspect Worker chats, Council findings or human decisions.</span></li>' +
+      '</ol></section>' : '') +
       guidedBuilder.render(bots) +
       '<section class="sa-pane sa-teams-panel" aria-label="Saved Teams">' +
       '<div class="sa-list-controls"><label>Search Teams<input type="search" data-sa-team-search value="' +

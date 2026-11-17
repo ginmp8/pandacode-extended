@@ -1621,6 +1621,19 @@ pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: O
     if view.at_limit(config) {
         return Err(format!("The Council round limit of {} is reached. Finish and report the scores plainly, or ask the user to raise the limit.", config.max_rounds));
     }
+    // In non-nested S2, a low first-wave score is a deterministic escalation
+    // trigger. Admit a fresh native round from already enabled sources without
+    // requiring an unrelated writer edit. The terminal gate still checks all
+    // independent reviewer identities, sessions, required evidence and scores.
+    // Unresolved severe findings still require correction before a new round.
+    if config.strategy == CouncilExecutionStrategy::Escalated
+        && !config.force_escalation && config.nested_bot_reviewers.is_empty()
+        && latest == 1 && current && view.complete(1)
+        && lowest(team, 1).is_some_and(|score| score < config.target)
+        && !severe_findings(team, 1)
+    {
+        return Ok(2);
+    }
     // Any current round with a score below the target, full or complete: a fresh round needs a change.
     if let Some(low) = lowest(team, latest).filter(|low| current && *low < config.target) {
         return Err(format!("Council round {latest} scored lowest {low}, below the target {}, and nothing changed since it started. Fix the blockers with workers before convening a new round.", config.target));

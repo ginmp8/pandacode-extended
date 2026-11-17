@@ -1101,6 +1101,8 @@ fn native_s2_score_trigger_requires_a_fresh_independent_review_from_the_enabled_
         "even no-trigger S2 must reject a reviewer that modified the artifact");
     team.workers[0].council.as_mut().unwrap().score = Some(8.0);
     assert_eq!(council::status(&team).unwrap().state, "fixing");
+    assert_eq!(council::round_for(&team, &config, None).unwrap(), 2,
+        "a scored S2 trigger must admit fresh reviewers before an artifact edit");
     team.changed_at = SINCE + 3; // Work was corrected after the low score.
     let mut first = seat("fresh-a", 2, Some(9.6), SINCE + 4);
     first.council.as_mut().unwrap().lens = "lens original-a".into();
@@ -1136,6 +1138,68 @@ fn native_s2_score_trigger_requires_a_fresh_independent_review_from_the_enabled_
 }
 
 
+
+#[test]
+fn native_unforced_s2_low_score_admits_fresh_real_reviewer_sessions() {
+    let mut config = on(9.0, 3, 2);
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    let (state, sid) = council_state(config);
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [
+            reviewer_assignment("initial-security", "security"),
+            reviewer_assignment("initial-quality", "quality")
+        ]
+    })).unwrap();
+    for score in [8.0, 9.7] {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        let (run, _) = claim(&state, launch);
+        assert!(run.config.reviewer_boundary, "S2 must use native read-only reviewers");
+        finish(&state, &run, &format!(
+            "Independent first-wave review.\\nCouncil score: {score}/10"
+        ), true);
+    }
+    let initial = saved(&state, &sid);
+    assert_eq!(council::status(&initial).unwrap().state, "fixing");
+    assert_eq!(council::round_for(
+        &initial, initial.config.council.as_ref().unwrap(), None,
+    ).unwrap(), 2, "a failed initial score is a native escalation trigger");
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [
+            reviewer_assignment("fresh-security", "security"),
+            reviewer_assignment("fresh-quality", "quality")
+        ]
+    })).unwrap();
+    let admitted = saved(&state, &sid);
+    assert_eq!(admitted.workers.iter().filter(|worker|
+        worker.council.as_ref().is_some_and(|seat| seat.round == 2)
+    ).count(), 2, "S2 must admit real second-wave reviewer sessions");
+    assert_ne!(council::status(&admitted).unwrap().state, "passed",
+        "admission alone cannot approve a Council");
+    for score in [9.6, 9.7] {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        let (run, _) = claim(&state, launch);
+        assert!(run.config.reviewer_boundary);
+        finish(&state, &run, &format!(
+            "Fresh independent escalation review.\\nCouncil score: {score}/10"
+        ), true);
+    }
+    let completed = saved(&state, &sid);
+    assert_eq!(council::status(&completed).unwrap().state, "passed");
+    let store = state.store.lock().unwrap();
+    let mut sessions = std::collections::HashSet::new();
+    for worker in completed.workers.iter().filter(|worker| worker.council.is_some()) {
+        assert!(sessions.insert(worker.session_id.as_str()),
+            "S2 must not reuse a reviewer session across waves");
+        let binding = worker.reviewer_binding.as_ref().unwrap();
+        assert!(reviewer_security::validate_recorded_authority(
+            &store, &sid, binding,
+        ).is_ok(), "each S2 callback needs an independently issued native grant");
+        assert_eq!(council::latest_score(&store, &worker.session_id),
+            worker.council.as_ref().unwrap().score,
+            "each Council score must be observed in the native reviewer session");
+    }
+    assert_eq!(sessions.len(), 4);
+}
 
 #[test]
 fn s2_incomplete_original_evidence_requires_independent_replacement_and_bounded_rounds() {
@@ -4684,6 +4748,7 @@ fn native_task_admission_revokes_new_requests_after_root_session_settlement() {
 
     for (status, stage, archived) in [
         ("interrupted", original_stage.as_str(), false),
+        ("error", original_stage.as_str(), false),
         (original_status.as_str(), "completed", false),
         (original_status.as_str(), original_stage.as_str(), true),
     ] {

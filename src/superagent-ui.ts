@@ -20,7 +20,7 @@ interface StrategySettings {
 }
 interface StrategyView {
   orchestrationId:string; policyRevision:number; teamVersion:number;
-  settings:StrategySettings; maxAttemptsPerAssignment:number; maxConcurrentTasks:number;
+  settings:StrategySettings; executionMode: 'off' | 'approval' | 'full_auto'; maxAttemptsPerAssignment:number; maxConcurrentTasks:number;
   executableParallelWorkers:number; tokenMeteringAvailable:boolean;
   pricedCostMeteringAvailable:boolean; nestedChildAdmissionAvailable:boolean;
   enableBlockers:string[];
@@ -254,7 +254,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   // Read-only draft PR target preflight; never a publication or durable permission.
   let draftPrRepository = '', draftPrHead = '', draftPrBase = '';
   let draftPrError = '', draftPrVerifiedSha = '', draftPrVerifiedRevision = -1;
-  let demandObjective = '', demandMode: 'coordinated' | 'direct' | 'auto' = 'coordinated';
+  let demandObjective = '', demandMode: 'coordinated' | 'direct' | 'auto' = 'auto';
   let workPlan: DemandPlanEvidence | null = null, workPlanLoaded = false;
   let workWriteItemKey = '', workWritePaths = '';
   let subagentTree:NativeSubagentTree|null = null, subagentTreeLoaded = false;
@@ -500,7 +500,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         (!insight ? 'Unavailable' : insight.runBudgetExpired ? 'Expired' :
           insight.remainingRunBudgetMs === null ? 'Not running' :
           Math.max(0, Math.floor(insight.remainingRunBudgetMs / 1000)) + ' seconds remain') +
-        '</dd></dl><button type="button" data-sa-close-assignment>Close attempt</button></section>'
+        '</dd></dl><div class="sa-actions"><button type="button" class="sa-open-chat" data-sa-open-assignment-chat="' + safe(attempt.sessionId) + '">Open ' + safe(botName(attempt.botId)) + ' chat</button>' +
+        '<button type="button" data-sa-close-assignment>Close attempt</button></div></section>'
       : '';
     const deliveryPanel = '<section class="sa-pane" role="region" aria-label="Engineering delivery evidence">' +
       '<h5>Engineering delivery evidence</h5>' +
@@ -563,6 +564,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
                 '">Authorize exact file paths</button>' : '') +
             (item.requiresWrite && item.writeAuthorized
               ? ' <small>Exact file scope confirmed locally</small>' : '') +
+            (item.childTicketId
+              ? ' <button type="button" data-sa-open-workitem-chat="' +
+                safe(item.childTicketId) + '">Open Worker chat</button>'
+              : '') +
             '</li>').join('') + '</ol>' +
           ((workWriteItemKey === '*' && workPlan.items.filter(item =>
             item.requiresWrite && item.state === 'pending' &&
@@ -1022,12 +1027,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       'unresolved effects remain. Previous Demand roles never change.</p>' +
       '<form data-sa-form="run"><label>Task objective<textarea name="objective" rows="3" maxlength="16000" required>' +
       safe(demandObjective) + '</textarea></label>' +
-      '<label>Dispatch<select name="mode"><option value="coordinated"' +
-      (demandMode === 'coordinated' ? ' selected' : '') + '>Coordinator, then worker</option>' +
-      '<option value="direct"' + (demandMode === 'direct' ? ' selected' : '') +
-      '>Worker directly</option>' +
-      '<option value="auto"' + (demandMode === 'auto' ? ' selected' : '') +
-      '>Supervised Demand · native WorkItems</option></select></label>' +
+      '<p class="sa-execution-explainer"><strong>Native Team orchestration</strong> · ' +
+      (teamStrategy?.orchestrationId === chosen.id
+        ? (teamStrategy.executionMode === 'full_auto' ? 'Full Auto · native Council'
+          : teamStrategy.executionMode === 'approval' ? 'With Approval · human decision'
+          : 'Execution policy not configured')
+        : 'Inspect the Team execution policy before starting') +
+      '. The Coordinator plans dependencies and the scheduler dispatches them to existing bot conversations.</p>' +
       (demandMode === 'auto' ?
         '<label>Optional exact files for this Demand (one project-relative file per line)' +
         '<textarea name="initialAllowedPaths" rows="3" autocomplete="off" ' +
@@ -1038,9 +1044,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         'later per-WorkItem authorization. Shell, MCP and GitHub writes stay denied.</p>'
         : '') +
       '<button type="button" data-sa-preflight>Review native preflight</button>' +
-      '<button class="primary-button" type="submit"' + (chosen.enabled ? '' : ' disabled') +
-      '>' + (demandMode === 'auto' ? 'Start supervised Demand' : 'Dispatch manually') +
-      '</button></form>' + nativePreflight +
+      '<button class="primary-button" type="submit"' +
+      (chosen.enabled && teamStrategy?.orchestrationId === chosen.id &&
+        teamStrategy.executionMode !== 'off' ? '' : ' disabled') +
+      '>Start Demand</button></form>' + nativePreflight +
       '<div class="sa-title"><h4>Tickets</h4><button type="button" data-sa-refresh>Refresh</button></div>' +
       '<ul class="sa-tickets">' + (tickets.map(ticket =>
         '<li><div><strong>' + safe(ticket.objective) + '</strong><small>' + safe(ticket.state) +
@@ -1132,6 +1139,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             (teamStrategy.enableBlockers.length
               ? '<p role="status">Enable blockers: ' + safe(teamStrategy.enableBlockers.join('; ')) + '</p>' : '') +
             '<form data-sa-form="strategy-update">' +
+            '<fieldset class="sa-mode-choices"><legend>Execution mode</legend>' +
+            '<label class="sa-mode-option"><input type="radio" name="executionMode" value="approval"' +
+              (teamStrategy.executionMode === 'approval' ? ' checked' : '') +
+              '><span><strong>With Approval</strong><small>WorkItems pause for native human acceptance. Council automatic finalization must be disabled.</small></span></label>' +
+            '<label class="sa-mode-option"><input type="radio" name="executionMode" value="full_auto"' +
+              (teamStrategy.executionMode === 'full_auto' ? ' checked' : '') +
+              '><span><strong>Full Auto</strong><small>Native dependency dispatch with two or more Council reviewers; only a verified pass settles each WorkItem.</small></span></label>' +
+            '</fieldset>' +
+            '<p class="sa-mode-note">To change the mode, disable the Team first. Neither mode grants shell, GitHub writes, file access or missing provider capabilities.</p>' +
             '<label>Optimization priority<select name="priority">' +
             (['balanced','cost','latency','throughput','quality'] as const).map(priority =>
               '<option value="' + priority + '"' +
@@ -1563,15 +1579,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
-    if (target instanceof HTMLSelectElement && target.name === 'mode' &&
-        target.closest<HTMLFormElement>('form[data-sa-form="run"]')) {
-      demandMode = target.value === 'auto' ? 'auto' :
-        target.value === 'direct' ? 'direct' : 'coordinated';
-      demandPreflight = null;
-      host.querySelector('[aria-label="Native demand preflight"]')?.remove();
-      render();
-      return;
-    }
     if (!(target instanceof HTMLSelectElement) || !target.hasAttribute('data-sa-template')) return;
     draftPresetTemplate = target.value;
     draftPresetName = target.value;
@@ -1662,6 +1669,38 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   host.addEventListener('click', event => {
     const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button') : null;
     if (!target || !host.contains(target) || target.disabled) return;
+    if (target.dataset.saOpenAssignmentChat) {
+      const assignment = ticketDetails?.assignments.find(item =>
+        item.sessionId === target.dataset.saOpenAssignmentChat &&
+        item.id === inspectedAssignmentId);
+      if (!assignment || ticketDetails?.ticket.id !== inspectedTicket) return;
+      host.dispatchEvent(new CustomEvent('superagent-open-bot-chat',{
+        detail:{sessionId:assignment.sessionId, botId:assignment.botId},
+      }));
+      return;
+    }
+    if (target.dataset.saOpenWorkitemChat) {
+      const childId = target.dataset.saOpenWorkitemChat;
+      const item = workPlan?.ticketId === inspectedTicket &&
+        workPlan.items.find(entry => entry.childTicketId === childId);
+      if (!item || !childId) return;
+      void work(async () => {
+        const snapshot = await call<TicketDetails>('superagent_snapshot',{
+          ticketId:childId, limit:10,
+        });
+        if (snapshot.ticket.id !== childId || !workPlan?.items.some(entry =>
+          entry.childTicketId === childId && entry.workerBotId === item.workerBotId)) {
+          throw new Error('Native WorkItem identity changed; reload its plan.');
+        }
+        const assignment = snapshot.assignments.find(entry =>
+          entry.botId === item.workerBotId && Boolean(entry.sessionId));
+        if (!assignment) throw new Error('This WorkItem has no native bot conversation yet.');
+        host.dispatchEvent(new CustomEvent('superagent-open-bot-chat',{
+          detail:{sessionId:assignment.sessionId, botId:assignment.botId},
+        }));
+      });
+      return;
+    }
     if (guidedBuilder.handleClick(target, bots)) {
       render();
       host.querySelector<HTMLElement>('[aria-label="Team setup step"] h4')
@@ -2625,8 +2664,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         tokenCeiling:optionalPositive('tokenCeiling'),
         estimatedCostCeilingMinor:optionalPositive('estimatedCostCeilingMinor'),
         subagentDelegationEnabled:data.has('subagentDelegationEnabled'),
+        executionMode:String(data.get('executionMode') ?? ''),
       };
-      if (!['balanced','cost','latency','throughput','quality'].includes(input.priority) ||
+      if (!['approval','full_auto'].includes(input.executionMode) ||
+          !['balanced','cost','latency','throughput','quality'].includes(input.priority) ||
           !Number.isInteger(input.maxConcurrentTasks) || input.maxConcurrentTasks < 1 || input.maxConcurrentTasks > 8 ||
           !Number.isInteger(input.maxAttemptsPerAssignment) || input.maxAttemptsPerAssignment < 1 ||
           input.maxAttemptsPerAssignment > 8 || !Number.isInteger(input.attemptTimeoutMs) ||
@@ -2642,8 +2683,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         teamStrategy = saved;
         await reload();
         feedback = saved.enableBlockers.length
-          ? 'Strategy saved for future Tickets. This Team remains Off: ' + saved.enableBlockers.join('; ')
-          : 'Versioned Team strategy saved. Existing Ticket snapshots were not modified.';
+          ? 'Execution policy saved for future Demands; this Team remains Off: ' + saved.enableBlockers.join('; ')
+          : 'Execution mode and resource policy saved. Enable the Team to admit new Demands.';
       });
       return;
     }
@@ -2732,14 +2773,35 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
     }
     if (form.dataset.saForm === 'guided-builder') {
-      const input = guidedBuilder.validatedInput(bots);
-      if (!input) { render(); return; }
+      const validated = guidedBuilder.validatedInput(bots);
+      if (!validated) { render(); return; }
+      const {executionMode, ...input} = validated;
       void work(async () => {
         const created = await call<Config>('superagent_create',{ input });
+        selected = created.id;
+        // Save the versioned execution contract before the Team can be enabled.
+        // If this second write fails, the newly created Team remains safely Off.
+        const policy = await call<StrategyView>('superagent_strategy_get',{
+          orchestrationId:created.id,
+        });
+        await call('superagent_strategy_update',{
+          orchestrationId:created.id, expectedRevision:policy.policyRevision,
+          input:{
+            priority:policy.settings.priority,
+            attemptTimeoutMs:policy.settings.attemptTimeoutMs,
+            maxAttemptsPerAssignment:policy.maxAttemptsPerAssignment,
+            maxConcurrentTasks:policy.maxConcurrentTasks,
+            tokenCeiling:policy.settings.tokenCeiling,
+            estimatedCostCeilingMinor:policy.settings.estimatedCostCeilingMinor,
+            subagentDelegationEnabled:policy.settings.subagentDelegationEnabled,
+            executionMode,
+          },
+        });
         guidedBuilder.reset();
-        selected = created.id; workspaceView = 'runs';
+        workspaceView = 'teams';
         await reload();
-        feedback = 'Team saved Off; enable Manual only after native role checks.';
+        feedback = 'Team and ' + (executionMode === 'full_auto' ? 'Full Auto' : 'With Approval') +
+          ' policy saved Off. Enable the Team to start a native Demand.';
       });
       return;
     }
@@ -2785,9 +2847,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (form.dataset.saForm === 'run') {
       const selectedConfig = current(), objective = String(data.get('objective') ?? '').trim();
-      const command = data.get('mode') === 'auto' ? 'superagent_start_demand' :
-        data.get('mode') === 'direct' ? 'superagent_submit' : 'superagent_submit_coordinated';
-      if (!selectedConfig?.enabled || !objective) return;
+      const command = 'superagent_start_demand';
+      if (!selectedConfig?.enabled || !objective ||
+          teamStrategy?.orchestrationId !== selectedConfig.id ||
+          teamStrategy.executionMode === 'off') return;
       const key = taskKey;
       if (command === 'superagent_start_demand') {
         initialDemandWritePaths = String(data.get('initialAllowedPaths') ?? '');

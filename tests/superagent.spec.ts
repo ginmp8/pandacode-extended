@@ -2235,8 +2235,8 @@ test('Demand WorkItem inspector explains native dependency blockers without laun
     const item=(key:string,state:string,dependsOn:string[],
       requiresWrite=false,writeAuthorized=false)=>({
       id:key,key,ordinal:0,workerBotId:'worker',objective:'Task '+key,dependsOn,
-      state,childTicketId:state==='completed'?'ticket-'+key:null,
-      childTicketState:state==='completed'?'completed':null,lastReason:null,
+      state,childTicketId:state==='completed'||key==='write-proof'?'ticket-'+key:null,
+      childTicketState:state==='completed'||key==='write-proof'?'completed':null,lastReason:null,
       requiresWrite,writeAuthorized,
     });
     mountSuperagent(host,async command=>{
@@ -2264,6 +2264,7 @@ test('Demand WorkItem inspector explains native dependency blockers without laun
           item('publish','pending',['verify']),
           item('edit','pending',['compile'],true,false),
           item('review','waiting_review',['compile']),
+          item('write-proof','waiting_review',[],true,true),
           item('blocked','blocked',[]),
         ],
       } as never;
@@ -2282,6 +2283,7 @@ test('Demand WorkItem inspector explains native dependency blockers without laun
   await expect(plan.getByText('Awaiting local authorization of exact file paths.')).toBeVisible();
   await expect(plan.getByText('Pending native Worker admission and checkout availability checks.')).toBeVisible();
   await expect(plan.getByText('Waiting for native review; dependencies cannot advance.')).toBeVisible();
+  await expect(plan.getByText('Write-required WorkItem needs an applied native file-write receipt from its final Worker attempt and a matching approval before dependencies can advance.')).toBeVisible();
   await expect(plan.getByText('Blocked: native recovery required.')).toBeVisible();
   await expect(plan.getByText('Native approval receipt missing; predecessor cannot unlock dependencies.')).toBeVisible();
   await expect(plan.getByText('Approval receipt unavailable; dependencies remain gated')).toBeVisible();

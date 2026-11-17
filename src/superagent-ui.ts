@@ -90,6 +90,9 @@ function workItemProgressHint(item:WorkItemEvidence, items:WorkItemEvidence[]):s
   if(item.state==='completed') return item.evidenceSha256
     ? 'Verified native completion: exact Worker result and attributed acceptance recorded.'
     : 'Native approval receipt missing; predecessor cannot unlock dependencies.';
+  if(item.requiresWrite && item.childTicketState==='completed' && !item.evidenceSha256) {
+    return 'Write-required WorkItem needs an applied native file-write receipt from its final Worker attempt and a matching approval before dependencies can advance.';
+  }
   if(item.state==='blocked') return 'Blocked: native recovery required.';
   if(item.state==='waiting_review') return 'Waiting for native review; dependencies cannot advance.';
   if(item.state==='running') return 'Native Worker assignment running.';

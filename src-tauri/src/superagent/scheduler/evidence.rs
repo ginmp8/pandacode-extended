@@ -122,6 +122,11 @@ pub(super) fn record_accepted(store:&Store,now:i64)->Result<usize> {
                  AND native.result=ticket.evidence
                  AND native.attempt=(SELECT MAX(a.attempt) FROM sa_assignments a
                    WHERE a.ticket_id=ticket.id)
+                 AND (item.requires_write=0 OR EXISTS(
+                   SELECT 1 FROM sa_worker_write_receipts applied
+                   WHERE applied.ticket_id=ticket.id
+                     AND applied.assignment_id=native.id
+                     AND applied.state='applied'))
                  AND EXISTS(SELECT 1 FROM sa_audit audit WHERE audit.ticket_id=ticket.id
                    AND audit.kind=?5 AND audit.at=?6)
                  AND NOT EXISTS(SELECT 1 FROM sa_effect_receipts effect
@@ -164,10 +169,11 @@ mod tests {
              CREATE TABLE sa_assignments(id TEXT PRIMARY KEY,ticket_id TEXT,
                state TEXT,attempt INTEGER,result TEXT);
              CREATE TABLE sa_work_items(id TEXT PRIMARY KEY,ticket_id TEXT,ordinal INTEGER,
-               child_ticket_id TEXT,state TEXT,last_reason TEXT,updated_at INTEGER);
+               child_ticket_id TEXT,state TEXT,last_reason TEXT,updated_at INTEGER,
+               requires_write INTEGER NOT NULL DEFAULT 0);
              CREATE TABLE sa_audit(id INTEGER PRIMARY KEY,ticket_id TEXT,kind TEXT,at INTEGER);
              CREATE TABLE sa_effect_receipts(ticket_id TEXT,state TEXT);
-             CREATE TABLE sa_worker_write_receipts(ticket_id TEXT,state TEXT);
+             CREATE TABLE sa_worker_write_receipts(ticket_id TEXT,state TEXT,assignment_id TEXT);
              CREATE TABLE sa_subagent_nodes(parent_ticket_id TEXT,child_ticket_id TEXT,state TEXT);
              INSERT INTO sa_tickets VALUES('child','completed','native output',2);
              INSERT INTO sa_assignments VALUES('attempt','child','finished',1,'native output');
@@ -228,8 +234,8 @@ mod tests {
         let store=fixture();
         store.db.execute_batch(
             "INSERT INTO sa_audit(ticket_id,kind,at) VALUES('child','council_passed',99);
-             INSERT INTO sa_worker_write_receipts VALUES('child','reserved');
-             INSERT INTO sa_worker_write_receipts VALUES('other','uncertain');",
+             INSERT INTO sa_worker_write_receipts(ticket_id,state) VALUES('child','reserved');
+             INSERT INTO sa_worker_write_receipts(ticket_id,state) VALUES('other','uncertain');",
         ).unwrap();
         assert_eq!(record_accepted(&store,100).unwrap(),0);
         assert!(receipt(&store,"item").unwrap().is_none());
@@ -242,6 +248,38 @@ mod tests {
         store.db.execute(
             "UPDATE sa_worker_write_receipts SET state='applied'
              WHERE ticket_id='child'",[],
+        ).unwrap();
+        assert_eq!(record_accepted(&store,102).unwrap(),1);
+        assert_eq!(record_accepted(&store,103).unwrap(),0);
+        assert!(receipt(&store,"item").unwrap().is_some());
+    }
+
+
+    #[test]
+    fn write_required_item_rejects_missing_stale_foreign_and_failed_write_receipts() {
+        let store=fixture();
+        store.db.execute_batch(
+            "UPDATE sa_work_items SET requires_write=1 WHERE id='item';
+             INSERT INTO sa_audit(ticket_id,kind,at) VALUES('child','council_passed',99);",
+        ).unwrap();
+        // A successful provider turn and Council verdict do not prove a file edit.
+        assert_eq!(record_accepted(&store,100).unwrap(),0);
+        assert!(receipt(&store,"item").unwrap().is_none());
+        store.db.execute_batch(
+            "INSERT INTO sa_worker_write_receipts(ticket_id,state,assignment_id)
+               VALUES('child','applied','earlier-attempt');
+             INSERT INTO sa_worker_write_receipts(ticket_id,state,assignment_id)
+               VALUES('unrelated','applied','attempt');
+             INSERT INTO sa_worker_write_receipts(ticket_id,state,assignment_id)
+               VALUES('child','failed','attempt');",
+        ).unwrap();
+        assert_eq!(record_accepted(&store,101).unwrap(),0);
+        assert!(receipt(&store,"item").unwrap().is_none());
+        // Only the actual native scoped-write ToolHost receipt for the final
+        // successful Assignment may release this WorkItem's dependencies.
+        store.db.execute(
+            "UPDATE sa_worker_write_receipts SET state='applied'
+             WHERE ticket_id='child' AND assignment_id='attempt'",[],
         ).unwrap();
         assert_eq!(record_accepted(&store,102).unwrap(),1);
         assert_eq!(record_accepted(&store,103).unwrap(),0);
@@ -266,7 +304,7 @@ mod tests {
              INSERT INTO sa_subagent_nodes VALUES('child','nested','completed');
              INSERT INTO sa_subagent_nodes VALUES('nested','grandchild','waiting_review');
              INSERT INTO sa_subagent_nodes VALUES('other','other-child','completed');
-             INSERT INTO sa_worker_write_receipts VALUES('nested','reserved');
+             INSERT INTO sa_worker_write_receipts(ticket_id,state) VALUES('nested','reserved');
              INSERT INTO sa_effect_receipts VALUES('grandchild','uncertain');
              INSERT INTO sa_effect_receipts VALUES('other-child','uncertain');",
         ).unwrap();

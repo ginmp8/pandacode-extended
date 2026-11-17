@@ -426,58 +426,64 @@ pub async fn superagent_start_demand(
 /// Persist scope and evidence atomically. A failed audit insertion must not
 /// leave a runnable write permission behind; admission is pinned to the
 /// exact still-pending WorkItem and frozen Demand revision.
-fn commit_work_item_write_scope(
-    store:&Store,ticket_id:&str,item_id:&str,item_key:&str,
+fn commit_work_item_write_scopes(
+    store:&Store,ticket_id:&str,items:&[(&str,&str)],
     paths_json:&str,expected_revision:i64,
 )->Result<()> {
+    if items.is_empty() {
+        return Err("No pending WorkItems were selected for file authorization.".into());
+    }
+    // All WorkItem scopes and audit receipts commit together, or none do.
+    // A model plan cannot inject an item belonging to another Demand.
     let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
-    let existing:Option<String>=tx.query_row(
-        "SELECT allowed_paths FROM sa_work_item_write_scopes WHERE item_id=?1",
-        [item_id],|row|row.get(0),
-    ).optional().map_err(|e|e.to_string())?;
-    if let Some(previous)=existing {
-        if previous!=paths_json {
-            return Err("A different immutable file scope already belongs to this WorkItem.".into());
+    for &(item_id,item_key) in items {
+        let existing:Option<String>=tx.query_row(
+            "SELECT allowed_paths FROM sa_work_item_write_scopes WHERE item_id=?1",
+            [item_id],|row|row.get(0),
+        ).optional().map_err(|e|e.to_string())?;
+        if let Some(previous)=existing {
+            if previous!=paths_json {
+                return Err("A different immutable file scope already belongs to this WorkItem.".into());
+            }
+        } else {
+            let inserted=tx.execute(
+                "INSERT INTO sa_work_item_write_scopes(
+                    item_id,allowed_paths,root_ticket_revision,authorized_at)
+                 SELECT item.id,?3,?4,?5
+                 FROM sa_work_items item
+                 JOIN sa_demand_plans plan ON plan.ticket_id=item.ticket_id
+                 WHERE item.ticket_id=?1 AND item.id=?2
+                   AND item.state='pending' AND item.child_ticket_id IS NULL
+                   AND item.requires_write=1 AND plan.state='active'
+                   AND plan.ticket_revision=?4 AND item.item_key=?6",
+                params![ticket_id,item_id,paths_json,expected_revision,storage::now(),item_key],
+            ).map_err(|e|e.to_string())?;
+            if inserted!=1 {
+                return Err("WorkItem became ineligible before write scope admission.".into());
+            }
+            tx.execute(
+                "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                 VALUES(?1,'work_item_write_scope_confirmed',?2,?3)",
+                params![ticket_id,format!("WorkItem {item_key}"),storage::now()],
+            ).map_err(|e|e.to_string())?;
         }
-    } else {
-        let inserted=tx.execute(
-            "INSERT INTO sa_work_item_write_scopes(
-                item_id,allowed_paths,root_ticket_revision,authorized_at)
-             SELECT item.id,?3,?4,?5
-             FROM sa_work_items item
-             JOIN sa_demand_plans plan ON plan.ticket_id=item.ticket_id
-             WHERE item.ticket_id=?1 AND item.id=?2
-               AND item.state='pending' AND item.child_ticket_id IS NULL
-               AND item.requires_write=1 AND plan.state='active'
-               AND plan.ticket_revision=?4",
-            params![ticket_id,item_id,paths_json,expected_revision,storage::now()],
-        ).map_err(|e|e.to_string())?;
-        if inserted!=1 {
-            return Err("WorkItem became ineligible before write scope admission.".into());
-        }
-        tx.execute(
-            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-             VALUES(?1,'work_item_write_scope_confirmed',?2,?3)",
-            params![ticket_id,format!("WorkItem {item_key}"),storage::now()],
-        ).map_err(|e|e.to_string())?;
     }
     tx.commit().map_err(|e|e.to_string())
 }
 
-/// A write-required WorkItem remains pending until the local user confirms
-/// exactly which paths it may modify. A Coordinator JSON proposal is NEVER a
-/// file-write grant. Only the native Codex ToolHost can execute this scope.
-#[tauri::command]
-pub async fn superagent_authorize_work_item_write(
-    window:tauri::WebviewWindow,app:tauri::AppHandle,state:State<'_,AppState>,
-    ticket_id:String,expected_revision:i64,item_key:String,allowed_paths:Vec<String>,
-)->Result<DemandPlan> {
-    super::require_main_window(&window)?;
-    if !crate::workspace::scoped_writes_supported() {
-        return Err("policy_unsupported: scoped file writes are not supported on this platform.".into());
-    }
-    super::write_grants::validate_paths(&allowed_paths)?;
-    let confirm_preflight=|store:&Store|->Result<()> {
+fn commit_work_item_write_scope(
+    store:&Store,ticket_id:&str,item_id:&str,item_key:&str,
+    paths_json:&str,expected_revision:i64,
+)->Result<()> {
+    commit_work_item_write_scopes(
+        store,ticket_id,&[(item_id,item_key)],paths_json,expected_revision,
+    )
+}
+
+fn preflight_work_item_write(
+    store:&Store,ticket_id:&str,expected_revision:i64,item_key:&str,
+    allowed_paths:&[String],
+)->Result<()> {
         let root=get_ticket(store,&ticket_id)?;
         let plan=inspect(store,&ticket_id)?.ok_or("Demand plan not found.")?;
         if root.revision!=expected_revision || root.state!="queued" ||
@@ -523,10 +529,25 @@ pub async fn superagent_authorize_work_item_write(
         }
         let root_path=store.workspace_root(&snapshot.project_id,None)?;
         super::write_grants::validate_paths_in_root(&root_path,&allowed_paths)
-    };
+
+}
+
+/// A write-required WorkItem remains pending until the local user confirms
+/// exactly which paths it may modify. A Coordinator JSON proposal is NEVER a
+/// file-write grant. Only the native Codex ToolHost can execute this scope.
+#[tauri::command]
+pub async fn superagent_authorize_work_item_write(
+    window:tauri::WebviewWindow,app:tauri::AppHandle,state:State<'_,AppState>,
+    ticket_id:String,expected_revision:i64,item_key:String,allowed_paths:Vec<String>,
+)->Result<DemandPlan> {
+    super::require_main_window(&window)?;
+    if !crate::workspace::scoped_writes_supported() {
+        return Err("policy_unsupported: scoped file writes are not supported on this platform.".into());
+    }
+    super::write_grants::validate_paths(&allowed_paths)?;
     {
         let store=state.store.lock().map_err(|error|error.to_string())?;
-        confirm_preflight(&store)?;
+        preflight_work_item_write(&store,&ticket_id,expected_revision,&item_key,&allowed_paths)?;
     }
     use tauri_plugin_dialog::{DialogExt,MessageDialogButtons};
     let paths=allowed_paths.iter().map(|path|format!("  - {path}")).collect::<Vec<_>>().join("\n");
@@ -550,7 +571,7 @@ pub async fn superagent_authorize_work_item_write(
     }
     let result={
         let store=state.store.lock().map_err(|error|error.to_string())?;
-        confirm_preflight(&store)?;
+        preflight_work_item_write(&store,&ticket_id,expected_revision,&item_key,&allowed_paths)?;
         let original=inspect(&store,&ticket_id)?.ok_or("Demand plan not found.")?;
         let item=original.items.iter().find(|item|item.key==item_key)
             .ok_or("WorkItem not found.")?;
@@ -559,6 +580,84 @@ pub async fn superagent_authorize_work_item_write(
             &store,&ticket_id,&item.id,&item_key,&paths_json,expected_revision,
         )?;
         inspect(&store,&ticket_id)?.ok_or_else(||"Demand plan disappeared after write scope.".to_owned())?
+    };
+    advance(&app).await?;
+    Ok(result)
+}
+
+/// Authorize multiple still-pending write-required WorkItems in one explicit
+/// local confirmation. All receive the SAME exact paths displayed in the
+/// dialog; no Coordinator proposal can grant or extend this scope.
+/// Neither a partial insert nor a stale Demand may dispatch any Worker.
+#[tauri::command]
+pub async fn superagent_authorize_demand_work_item_writes(
+    window:tauri::WebviewWindow,app:tauri::AppHandle,state:State<'_,AppState>,
+    ticket_id:String,expected_revision:i64,allowed_paths:Vec<String>,
+)->Result<DemandPlan> {
+    super::require_main_window(&window)?;
+    if !crate::workspace::scoped_writes_supported() {
+        return Err("policy_unsupported: scoped file writes are not supported on this platform.".into());
+    }
+    super::write_grants::validate_paths(&allowed_paths)?;
+    let pending=|store:&Store|->Result<Vec<String>> {
+        let plan=inspect(store,&ticket_id)?.ok_or("Demand plan not found.")?;
+        if plan.ticket_revision!=expected_revision || plan.state!="active" {
+            return Err("Demand plan changed before file-write authorization.".into());
+        }
+        let keys=plan.items.iter()
+            .filter(|item|item.requires_write && !item.write_authorized &&
+                item.state=="pending" && item.child_ticket_id.is_none())
+            .map(|item|item.key.clone()).collect::<Vec<_>>();
+        if keys.len()<2 {
+            return Err("Batch confirmation needs at least two pending, unauthorized write WorkItems.".into());
+        }
+        for key in &keys {
+            preflight_work_item_write(store,&ticket_id,expected_revision,key,&allowed_paths)?;
+        }
+        Ok(keys)
+    };
+    let keys={
+        let store=state.store.lock().map_err(|e|e.to_string())?;
+        pending(&store)?
+    };
+    use tauri_plugin_dialog::{DialogExt,MessageDialogButtons};
+    let paths=allowed_paths.iter().map(|path|format!("  - {path}")).collect::<Vec<_>>().join("\n");
+    let names=keys.iter().map(|key|format!("  - {key}")).collect::<Vec<_>>().join("\n");
+    let dialog=window.dialog()
+        .message(format!(
+            "Authorize {count} pending Demand WorkItems to each modify ONLY the SAME exact files?\n\n\
+             Demand: {ticket_id}\nWorkItems:\n{names}\n\nExact files granted to EACH WorkItem:\n{paths}\n\n\
+             Each WorkItem retains its own immutable child Ticket and file grant. \
+             Provider-native shell, other files, MCP and external effects remain denied. \
+             Stop or mandate expiry revokes executable access.",
+            count=keys.len(),
+        ))
+        .title("Authorize Demand WorkItem file writes")
+        .buttons(MessageDialogButtons::OkCancelCustom(
+            "Authorize all listed WorkItems".into(),"Cancel".into()
+        ));
+    #[cfg(desktop)]
+    let dialog=dialog.parent(&window);
+    let (send,receive)=tokio::sync::oneshot::channel();
+    dialog.show(move |ok|{let _=send.send(ok);});
+    if !receive.await.unwrap_or(false) {
+        return Err("Demand WorkItem file-write permission was not confirmed.".into());
+    }
+    let result={
+        let store=state.store.lock().map_err(|e|e.to_string())?;
+        if pending(&store)?!=keys {
+            return Err("Pending WorkItems changed during native authorization.".into());
+        }
+        let current=inspect(&store,&ticket_id)?.ok_or("Demand plan not found.")?;
+        let items=current.items.iter().filter(|item|keys.contains(&item.key))
+            .map(|item|(item.id.as_str(),item.key.as_str()))
+            .collect::<Vec<_>>();
+        let paths_json=serde_json::to_string(&allowed_paths).map_err(|e|e.to_string())?;
+        commit_work_item_write_scopes(
+            &store,&ticket_id,&items,&paths_json,expected_revision,
+        )?;
+        inspect(&store,&ticket_id)?
+            .ok_or_else(||"Demand plan disappeared after file authorization.".to_owned())?
     };
     advance(&app).await?;
     Ok(result)
@@ -796,6 +895,74 @@ mod tests {
         assert!(commit_work_item_write_scope(
             &store,"root","item","implement",r#"["src/other.rs"]"#,2,
         ).is_err(),"a replay cannot broaden the confirmed scope");
+    }
+
+    #[test]
+    fn demand_write_scope_batch_is_atomic_idempotent_and_exact() {
+        let db=rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE sa_tickets(id TEXT PRIMARY KEY);
+             CREATE TABLE sa_audit(ticket_id TEXT,kind TEXT,detail TEXT,at INTEGER);
+             INSERT INTO sa_tickets(id) VALUES('root');",
+        ).unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch(
+            "ALTER TABLE sa_work_items ADD COLUMN requires_write INTEGER
+             NOT NULL DEFAULT 0 CHECK(requires_write IN (0,1));",
+        ).unwrap();
+        db.execute_batch(WRITE_SCOPES_SCHEMA).unwrap();
+        db.execute(
+            "INSERT INTO sa_demand_plans(ticket_id,ticket_revision,team_version,
+             policy_revision,plan_sha256,state,created_at,updated_at)
+             VALUES('root',2,1,1,?1,'active',1,1)",
+            ["0".repeat(64)],
+        ).unwrap();
+        for (ordinal,key) in ["first","second"].iter().enumerate() {
+            db.execute(
+                "INSERT INTO sa_work_items(id,ticket_id,item_key,ordinal,objective,
+                 worker_bot_id,state,created_at,updated_at,requires_write)
+                 VALUES(?1,'root',?1,?2,'Edit pinned file','worker','pending',1,1,1)",
+                params![key,ordinal],
+            ).unwrap();
+        }
+        let store=Store{db,path:std::path::PathBuf::from(":memory:")};
+        let exact=[("first","first"),("second","second")];
+        store.db.execute_batch(
+            "CREATE TRIGGER reject_second_scope_audit BEFORE INSERT ON sa_audit
+             WHEN NEW.detail='WorkItem second'
+             BEGIN SELECT RAISE(ABORT,'audit unavailable'); END;",
+        ).unwrap();
+        assert!(commit_work_item_write_scopes(
+            &store,"root",&exact,r#"["src/allowed.rs"]"#,2,
+        ).is_err());
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_work_item_write_scopes",[],
+            |row|row.get::<_,i64>(0),
+        ).unwrap(),0,"one failed audit must roll back every scope");
+        store.db.execute_batch("DROP TRIGGER reject_second_scope_audit;").unwrap();
+        assert!(commit_work_item_write_scopes(
+            &store,"root",&[("first","second")],r#"["src/allowed.rs"]"#,2,
+        ).is_err(),"an item ID/key mismatch cannot receive a scope");
+        assert!(commit_work_item_write_scopes(
+            &store,"root",&exact,r#"["src/allowed.rs"]"#,3,
+        ).is_err(),"a stale root revision cannot grant any child");
+        for _ in 0..2 {
+            commit_work_item_write_scopes(
+                &store,"root",&exact,r#"["src/allowed.rs"]"#,2,
+            ).unwrap();
+        }
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_work_item_write_scopes",[],
+            |row|row.get::<_,i64>(0),
+        ).unwrap(),2);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit",[],
+            |row|row.get::<_,i64>(0),
+        ).unwrap(),2,"replay must not duplicate receipt entries");
+        assert!(commit_work_item_write_scopes(
+            &store,"root",&exact,r#"["src/other.rs"]"#,2,
+        ).is_err(),"a confirmed child scope cannot be widened");
     }
 
     #[test]

@@ -197,3 +197,24 @@
 .sa-run-detail .sa-tickets>li{background:var(--ds-card-inner);border:1px solid var(--ds-border);border-radius:var(--radius-md)}
 .sa-run-detail .sa-tickets>li strong{overflow-wrap:anywhere}
 @media(max-width:700px){#superagent-workspace .sa-stage>section[aria-label="Native Demand and WorkItems"] header{align-items:flex-start;flex-direction:column}.sa-run-detail .sa-tickets>li{flex-wrap:wrap}}
+
+.sa-onboarding-flow{list-style:none;margin:6px 0 0;padding:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.sa-onboarding-flow>li{display:grid;gap:7px;padding:12px;border:1px solid var(--ds-border);border-radius:var(--radius-md);background:var(--ds-card-inner)}
+.sa-onboarding-flow strong{font-size:12px;color:var(--text)}
+.sa-onboarding-flow span{font-size:11px;line-height:1.5;color:var(--muted)}
+.sa-roster-summary{display:grid;gap:10px;margin:18px 0}
+.sa-roster-summary h4{font-size:var(--text-sm);margin:0}
+.sa-roster-summary ul{list-style:none;margin:0;padding:0;display:grid;border:1px solid var(--ds-border);border-radius:var(--radius-md);overflow:hidden}
+.sa-roster-summary li{display:flex;gap:12px;justify-content:space-between;padding:11px 12px;border-bottom:1px solid var(--ds-border)}
+.sa-roster-summary li:last-child{border-bottom:0}
+.sa-roster-summary li>span{display:grid;gap:4px;min-width:0;overflow-wrap:anywhere}
+.sa-roster-summary li>span:last-child{text-align:right}
+.sa-roster-summary li small{font-size:11px;color:var(--muted)}
+.sa-roster-summary li strong{font-size:12px;font-weight:610}
+.sa-roster-summary>button{justify-self:start}
+.sa-run-milestones{margin:0;padding:0;list-style:none;display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:7px}
+.sa-run-milestones li{display:grid;gap:7px;padding:11px;border:1px solid var(--ds-border);border-radius:var(--radius-md);background:var(--ds-card-inner);min-width:0}
+.sa-run-milestones li span{font-size:10px;color:var(--muted);letter-spacing:.04em}
+.sa-run-milestones li strong{font-size:11.5px;font-weight:610;overflow-wrap:anywhere}
+@media(max-width:920px){.sa-run-milestones{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:680px){.sa-onboarding-flow{grid-template-columns:minmax(0,1fr)}.sa-run-milestones{grid-template-columns:minmax(0,1fr)}}

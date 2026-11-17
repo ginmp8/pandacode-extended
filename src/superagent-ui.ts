@@ -1195,7 +1195,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '</ul><button type="button" data-sa-team-tab="members">Review native bot settings and roles</button></div>' +
         '<div class="sa-actions"><button type="button" data-sa-enable="' + safe(chosen.id) + '"' +
         '>' + (chosen.enabled ? 'Disable Team' : 'Enable Team') + '</button>' +
-        '<button type="button" data-sa-create-demand>Assign Demand</button>' +
         '<button type="button" data-sa-view="runs">View runs</button></div>' +
         (teamStrategy?.orchestrationId === chosen.id &&
           teamStrategy.executionMode === 'full_auto' && (chosen.reviewerCount ?? chosen.reviewerBotIds?.length ?? 0) < 2

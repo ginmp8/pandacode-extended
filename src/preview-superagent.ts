@@ -8,11 +8,11 @@ type StrategyPolicy = {
   priority:string; attemptTimeoutMs:number; tokenCeiling?:number;
   estimatedCostCeilingMinor?:number; subagentDelegationEnabled:boolean;
 };
-type Strategy = {settings:StrategyPolicy;maxConcurrentTasks:number;maxAttemptsPerAssignment:number};
+type Strategy = {settings:StrategyPolicy;maxConcurrentTasks:number;maxAttemptsPerAssignment:number;executionMode:'off'|'approval'|'full_auto'};
 const defaultStrategy = ():Strategy => ({
   settings:{priority:'balanced',attemptTimeoutMs:1_800_000,
     subagentDelegationEnabled:false},
-  maxConcurrentTasks:1,maxAttemptsPerAssignment:2,
+  maxConcurrentTasks:1,maxAttemptsPerAssignment:2,executionMode:'off',
 });
 type Ticket = { id:string; orchestrationId:string; objective:string;
   state:string; revision:number; evidence:null };
@@ -76,7 +76,7 @@ export async function invokeSuperagent<T>(
     snapshotVersion:1,provenance:'native',orchestrationId:config.id,teamVersion:config.teamVersion,
     name:config.name,projectId:config.projectId,coordinatorBotId:config.coordinatorBotId,
     workerBotIds:[...config.workerBotIds],reviewerBotIds:[...config.reviewerBotIds],
-    policy:{policyRevision:config.policyRevision,autonomy:'off',
+    policy:{policyRevision:config.policyRevision,autonomy:strategyFor(config.id).executionMode,
       maxConcurrentTasks:strategyFor(config.id).maxConcurrentTasks,
       maxAttemptsPerAssignment:strategyFor(config.id).maxAttemptsPerAssignment,
       councilEnabled:config.councilRequired===true,strategy:strategyFor(config.id).settings},
@@ -115,6 +115,14 @@ export async function invokeSuperagent<T>(
            (tickets.get(config.id)||[]).some(ticket=>!['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)))
           throw Error('Settle Tickets and disable this Team before changing strategy.');
         const validPriority=['balanced','cost','latency','throughput','quality'].includes(request?.priority);
+        const mode = request?.executionMode ?? saved.executionMode;
+        if(!['off','approval','full_auto'].includes(mode) ||
+           (request?.executionMode !== undefined && !['approval','full_auto'].includes(request.executionMode)))
+          throw Error('Execution mode must be approval or full_auto.');
+        if(mode === 'full_auto' && (!config.councilRequired || config.reviewerBotIds.length < 2))
+          throw Error('Full Auto requires the native Council and at least two independent reviewers.');
+        if(mode === 'approval' && config.councilRequired)
+          throw Error('With Approval requires human acceptance; disable automatic Council finalization.');
         if(!validPriority || !Number.isInteger(request.maxConcurrentTasks) ||
            request.maxConcurrentTasks<1 || request.maxConcurrentTasks>8 ||
            !Number.isInteger(request.maxAttemptsPerAssignment) ||
@@ -131,6 +139,7 @@ export async function invokeSuperagent<T>(
             subagentDelegationEnabled:request.subagentDelegationEnabled===true},
           maxConcurrentTasks:request.maxConcurrentTasks,
           maxAttemptsPerAssignment:request.maxAttemptsPerAssignment,
+          executionMode:mode,
         };
         if(JSON.stringify(saved)!==JSON.stringify(next)){
           saved=next;teamStrategies.set(config.id,saved);
@@ -149,6 +158,7 @@ export async function invokeSuperagent<T>(
       ];
       value={orchestrationId:config.id,policyRevision:config.policyRevision,
         teamVersion:config.teamVersion,settings:{...saved.settings},
+        executionMode:saved.executionMode,
         maxConcurrentTasks:saved.maxConcurrentTasks,
         maxAttemptsPerAssignment:saved.maxAttemptsPerAssignment,
         executableParallelWorkers:1,tokenMeteringAvailable:false,
@@ -235,7 +245,8 @@ export async function invokeSuperagent<T>(
         councilRequired:original.councilRequired===true,
       };
       configs.set(created.id,created);
-      teamStrategies.set(created.id,defaultStrategy());
+      teamStrategies.set(created.id,{...strategyFor(original.id),
+        settings:{...strategyFor(original.id).settings}});
       value=created;
       break;
     }
@@ -267,6 +278,10 @@ export async function invokeSuperagent<T>(
     case 'superagent_set_enabled':{
       const c=get(args.orchestrationId);if(c.policyRevision!==args.expectedRevision)throw Error('Stale policy.');
       const strategy=strategyFor(c.id);
+      if(args.enabled && (strategy.executionMode === 'full_auto' &&
+            (!c.councilRequired || c.reviewerBotIds.length < 2) ||
+          strategy.executionMode === 'approval' && c.councilRequired))
+        throw Error('Execution mode and Council configuration disagree.');
       if(args.enabled && (strategy.maxConcurrentTasks!==1 ||
           strategy.settings.tokenCeiling!==undefined ||
           strategy.settings.estimatedCostCeilingMinor!==undefined ||
@@ -279,6 +294,21 @@ export async function invokeSuperagent<T>(
       const c=get(args.orchestrationId);if(c.enabled||c.policyRevision!==args.expectedRevision||
         (tickets.get(c.id)?.length||0)>0)throw Error('Cannot delete used or enabled preset.');
       configs.delete(c.id);teamStrategies.delete(c.id);value=null;break;
+    }
+    case 'superagent_start_demand':{
+      const c=get(args.orchestrationId);
+      if(!c.enabled || strategyFor(c.id).executionMode === 'off')
+        throw Error('Enable a Team with a configured execution mode first.');
+      if(!args.objective?.trim())throw Error('A Demand needs an objective.');
+      const t:Ticket={id:crypto.randomUUID(),orchestrationId:c.id,objective:args.objective,
+        state:'running',revision:0,evidence:null};
+      teamSnapshots.set(t.id,makeTeamSnapshot(c));
+      tickets.set(c.id,[...(tickets.get(c.id)||[]),t]);
+      assignments.set(t.id,[{id:'preview-coordinator-'+t.id,botId:c.coordinatorBotId,
+        sessionId:'preview-coordinator-session-'+t.id,attempt:1,state:'running'}]);
+      activity.set(t.id,[{id:1,kind:'demand_auto_plan_requested',
+        detail:'Preview-only Coordinator plan; no native scheduler or bot session was started.',at:Date.now()}]);
+      value=t;break;
     }
     case 'superagent_submit':
     case 'superagent_submit_coordinated':{

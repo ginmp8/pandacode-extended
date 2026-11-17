@@ -2796,6 +2796,31 @@ pub(crate) fn guard_run_admission(
             }
         }
     }
+    // A stopped or revoked Ticket releases its durable lease immediately,
+    // but the underlying provider may still be running until cancellation
+    // finishes. Keep ordinary sessions off the same checkout or bot until
+    // the native session actually leaves the live agent registry.
+    if !superagent_run && !running_sessions.is_empty() {
+        let session_path=checkout_path(store,&session.project_id)?;
+        for other_id in running_sessions {
+            if other_id == session_id { continue; }
+            let task_owned: bool = store.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE session_id=?1)",
+                [other_id], |row| row.get(0),
+            ).map_err(|e| e.to_string())?;
+            if !task_owned { continue; }
+            let native_session=store.session(other_id)?;
+            let same_bot = if let Some(bot_id)=session_bot_id.as_ref() {
+                bots::owner_of(store,other_id)?
+                    .is_some_and(|(owner,_)| owner.id.as_str()==bot_id.as_str())
+            } else { false };
+            if same_bot || checkout_paths_overlap(
+                &session_path,&checkout_path(store,&native_session.project_id)?,
+            ) {
+                return Err("Native SuperAgent provider is still running on this bot or checkout.".into());
+            }
+        }
+    }
     if superagent_run {
         let session_path=checkout_path(store,&session.project_id)?;
         for other_id in running_sessions {
@@ -9386,6 +9411,46 @@ mod tests {
         assert!(guard_run_admission(&store, &ordinary.id, &[]).is_ok());
         assert!(guard_run_admission(&store, &ordinary_session, &[]).is_ok());
         assert!(guard_run_admission(&store, &superagent_session, &[]).is_err());
+    }
+
+    #[test]
+    fn settled_native_provider_keeps_checkout_fenced_until_process_exit() {
+        let mut store=fixture();
+        let cfg=enabled(&store);
+        let (ticket, started)=admit(
+            &mut store,&cfg.id,"Read-only task that is stopping",
+            "settled-provider-run-fence",false,
+        ).unwrap();
+        assert!(started);
+        let native=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        let worker=bots::get(&store,"worker").unwrap();
+        let ordinary=bots::thread_session(
+            &store,&worker,bots::DESKTOP,"ordinary-after-stop","Normal chat",
+        ).unwrap().0;
+        stop(&store,&ticket.id).unwrap();
+
+        // The durable lease is gone, but a delayed provider exit still
+        // occupies the task's checkout and bot. No new ordinary agent
+        // may execute there until the live agent registry removes it.
+        assert!(guard_run_admission(&store,&ordinary,&[]).is_ok());
+        let error=guard_run_admission(
+            &store,&ordinary,std::slice::from_ref(&native),
+        ).unwrap_err();
+        assert!(error.contains("still running on this bot or checkout"));
+
+        // A separate project and separate bot remain independently usable.
+        store.db.execute(
+            "INSERT INTO projects(id,name,path)
+             VALUES('independent','Independent','/tmp/disposable-superagent-independent')",
+            [],
+        ).unwrap();
+        let independent=store.create_session(
+            "independent","codex","default","plan",
+        ).unwrap();
+        assert!(guard_run_admission(
+            &store,&independent.id,std::slice::from_ref(&native),
+        ).is_ok());
+        assert!(guard_run_admission(&store,&ordinary,&[]).is_ok());
     }
 
     #[test]

@@ -3862,8 +3862,18 @@ mod tests {
         assert!(linked_decisions(&store, "ticket-two", 50).unwrap().is_empty());
         assert!(observe(&store, &event("linked-1", &on, 1)).unwrap().duplicate);
         assert_eq!(linked_decisions(&store, "ticket-one", 50).unwrap().len(), 1);
+        // Issue sources cannot accept PR-typed receipts even if their numeric
+        // thread matches an operator-linked issue. Validation must fail
+        // before a receipt or source cursor is persisted.
+        let mut wrong_kind = event("wrong-thread-kind", &on, 2);
+        wrong_kind.subject_key = "pull:42".into();
+        assert!(observe(&store, &wrong_kind).is_err());
+        assert_eq!(list_decisions(&store, &on.id, 50).unwrap().len(), 1);
+        assert_eq!(source(&store, &on.id).unwrap().last_sequence, 1);
+        // A valid event for a different issue remains observable, but must
+        // not appear in this Ticket's explicitly linked issue:42 timeline.
         let mut wrong_thread = event("different-thread", &on, 2);
-        wrong_thread.subject_key = "pull:42".into();
+        wrong_thread.subject_key = "issue:43".into();
         observe(&store, &wrong_thread).unwrap();
         assert_eq!(linked_decisions(&store, "ticket-one", 50).unwrap().len(), 1);
         for invalid in [0, 101, -1] {

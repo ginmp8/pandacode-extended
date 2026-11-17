@@ -2383,3 +2383,58 @@ test('batch native Demand write confirmation covers multiple WorkItems without m
   await expect(inspector.getByRole('button',{name:'Authorize shared paths for pending WorkItems'}))
     .toHaveCount(0);
 });
+
+
+test('Orchestrations creates a With Approval Team and admits a native Demand', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  const host = await openOrchestrationWorkspace(page);
+  await host.getByRole('button',{name:'New Team',exact:true}).click();
+  const builder = host.getByRole('region',{name:'Guided Team Builder'});
+  await builder.getByRole('textbox',{name:'Team name'}).fill('Approval Delivery Team');
+  await builder.getByRole('button',{name:'Next'}).click();
+  await builder.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
+  await builder.getByRole('combobox',{name:'Primary Worker'}).selectOption({label:'Writer'});
+  await builder.getByRole('button',{name:'Next'}).click();
+  await builder.getByRole('button',{name:'Next'}).click();
+  await expect(builder.getByRole('radio',{name:/With Approval/})).toBeChecked();
+  await builder.getByRole('button',{name:'Next'}).click();
+  await builder.getByRole('button',{name:'Create Team (disabled)'}).click();
+  await expect(host.locator('.sa-list .sa-item').filter({hasText:'Approval Delivery Team'}))
+    .toBeVisible();
+  await host.locator('.sa-list .sa-item').filter({hasText:'Approval Delivery Team'})
+    .getByRole('button',{name:'Details'}).click();
+  await host.getByRole('button',{name:'Execution and review'}).click();
+  await expect(host.locator('form[data-sa-form="strategy-update"] input[value="approval"]'))
+    .toBeChecked();
+  await host.getByRole('button',{name:'Overview'}).click();
+  await host.getByRole('button',{name:'Enable Team'}).click();
+  await host.getByRole('alertdialog',{name:'Confirm orchestration action'})
+    .getByRole('button',{name:'Confirm',exact:true}).click();
+  await host.getByRole('button',{name:'Assign Demand'}).click();
+  await expect(host.getByRole('button',{name:'Start Demand'})).toBeEnabled();
+  await host.getByRole('textbox',{name:'Task objective'}).fill('Inspect a native bot session');
+  await host.getByRole('button',{name:'Start Demand'}).click();
+  await expect(host.locator('.sa-tickets li').filter({hasText:'Inspect a native bot session'}))
+    .toContainText('running');
+});
+
+test('Full Auto setup requires two native Council reviewers and never silently grants tools', async ({page}) => {
+  test.setTimeout(45_000);
+  await page.goto('/?bots=sample');
+  const host = await openOrchestrationWorkspace(page);
+  await host.getByRole('button',{name:'New Team',exact:true}).click();
+  const builder = host.getByRole('region',{name:'Guided Team Builder'});
+  await builder.getByRole('textbox',{name:'Team name'}).fill('Review-gated Auto Team');
+  await builder.getByRole('button',{name:'Next'}).click();
+  await builder.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
+  await builder.getByRole('combobox',{name:'Primary Worker'}).selectOption({label:'Writer'});
+  await builder.getByRole('button',{name:'Next'}).click();
+  await builder.getByRole('button',{name:'Next'}).click();
+  await builder.getByRole('radio',{name:/Full Auto/}).check();
+  await builder.getByRole('button',{name:'Next'}).click();
+  await expect(builder.getByRole('alert'))
+    .toContainText('Required native Council needs at least two selected Reviewers.');
+  await expect(builder).toContainText('Tool and GitHub effects still require specific native grants.');
+  await expect(host.locator('.sa-list .sa-item')).toHaveCount(0);
+});

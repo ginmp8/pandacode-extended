@@ -336,6 +336,8 @@ test('delivery inspector distinguishes observed native work from verified softwa
   await expect(card).toContainText('in_progress');
   await expect(card).toContainText('preview_only_no_native_git');
   await expect(card).toContainText('not_attributed_to_ticket');
+  await expect(card).toContainText('Applied native scoped file writes Unavailable');
+  await expect(card).toContainText('Unresolved native scoped file writes Unavailable');
   await expect(card).toContainText('Tests unverified');
   await expect(card).toContainText('CI unverified');
   await expect(card).toContainText('Publication unverified');

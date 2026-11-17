@@ -9,7 +9,8 @@
   Team-version snapshot and native mandate remain the source of authority.
 - The Coordinator is asked for a single strict JSON object with `workItems`,
   whose objects have `key`, `objective`, `workerBotId`, `dependsOn` and
-  optional `requiresWrite`. This is **untrusted plan data**, not a tool grant,
+  `requiresWrite` (boolean). It may request source edits but cannot authorize
+  them. This is **untrusted plan data**, not a tool grant,
   Shell access, Council approval or authenticated GitHub event.
 - The operator can also create a plan explicitly through
   `superagent_plan_demand`. A DAG is bounded to 32 items, rejects missing
@@ -27,6 +28,12 @@
 - `requiresWrite: true` merely requests a capability. The item is **not ready**
   until a local user invokes `superagent_authorize_work_item_write` and approves
   exact normalized project-relative paths in PandaCode's native dialog.
+- For two or more pending write-required WorkItems, the UI also exposes
+  `superagent_authorize_demand_work_item_writes`: **one native dialog** lists
+  every WorkItem and the identical exact file paths to be granted separately
+  to each. A single transaction inserts all item scopes and audit receipts
+  or none; this is not a Coordinator grant. Use separate item authorizations
+  whenever different WorkItems should have narrower path sets.
 - The approved scope is stored immutably in `sa_work_item_write_scopes`,
   bound to the root Ticket revision. Only eligible existing Codex Workers on
   platforms supporting native scoped-write path pinning can receive it.
@@ -56,8 +63,12 @@
 
 ## Current limits and verification
 
-The incomplete items still include advanced provider-local test execution and
-quality-backed autonomous acceptance without per-child human decisions, full
+The incomplete items still include initial Demand-level file authorization
+(before Coordinator planning); the batch confirmation still requires a user
+interaction after the WorkItem plan exists. Full Auto DD-02/DD-09 is therefore
+**not** satisfied by the batch UI alone. Other gaps include provider-local
+native test execution and quality-backed autonomous acceptance without
+per-child human decisions, full
 multi-checkout concurrent writes, all headless action parity, generic automated
 GitHub publishing, and complete recursive-subagent runtime verification.
 A bounded issue-opened Auto intake and opt-in Worker descendants are authored

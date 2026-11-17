@@ -113,12 +113,16 @@ fn unsettled_root_effects(db:&Connection,root:&str)->Result<bool> {
            SELECT 1 FROM sa_effect_receipts effect
            WHERE effect.state IN ('pending','uncertain')
              AND (effect.ticket_id=?1 OR effect.ticket_id IN (
-               SELECT child_ticket_id FROM sa_work_items WHERE ticket_id=?1))
+               SELECT child_ticket_id FROM sa_work_items WHERE ticket_id=?1)
+               OR effect.ticket_id IN (SELECT child_ticket_id FROM sa_subagent_nodes
+                 WHERE root_ticket_id=?1))
            UNION ALL
            SELECT 1 FROM sa_worker_write_receipts receipt
            WHERE receipt.state IN ('reserved','uncertain')
              AND (receipt.ticket_id=?1 OR receipt.ticket_id IN (
-               SELECT child_ticket_id FROM sa_work_items WHERE ticket_id=?1)))",
+               SELECT child_ticket_id FROM sa_work_items WHERE ticket_id=?1)
+               OR receipt.ticket_id IN (SELECT child_ticket_id FROM sa_subagent_nodes
+                 WHERE root_ticket_id=?1)))",
         [root],|row|row.get(0),
     ).map_err(|error|error.to_string())
 }
@@ -453,6 +457,7 @@ mod tests {
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch(
             "CREATE TABLE sa_work_items(ticket_id TEXT,child_ticket_id TEXT);
+             CREATE TABLE sa_subagent_nodes(root_ticket_id TEXT,child_ticket_id TEXT);
              CREATE TABLE sa_effect_receipts(ticket_id TEXT,state TEXT);
              CREATE TABLE sa_worker_write_receipts(ticket_id TEXT,state TEXT);
              INSERT INTO sa_work_items VALUES('root','child-a');
@@ -486,6 +491,41 @@ mod tests {
             "UPDATE sa_effect_receipts SET state='applied'
              WHERE ticket_id='child-a'",[],
         ).unwrap();
+        assert!(!unsettled_root_effects(&db,"root").unwrap());
+    }
+
+    #[test]
+    fn root_finalization_waits_for_nested_worker_effect_receipts() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_work_items(ticket_id TEXT,child_ticket_id TEXT);
+             CREATE TABLE sa_subagent_nodes(root_ticket_id TEXT,child_ticket_id TEXT);
+             CREATE TABLE sa_effect_receipts(ticket_id TEXT,state TEXT);
+             CREATE TABLE sa_worker_write_receipts(ticket_id TEXT,state TEXT);
+             INSERT INTO sa_work_items VALUES('root','worker-a');
+             INSERT INTO sa_work_items VALUES('other','worker-b');
+             INSERT INTO sa_subagent_nodes VALUES('root','nested-child');
+             INSERT INTO sa_subagent_nodes VALUES('root','nested-grandchild');
+             INSERT INTO sa_subagent_nodes VALUES('other','other-nested');
+             INSERT INTO sa_worker_write_receipts VALUES('nested-child','reserved');
+             INSERT INTO sa_effect_receipts VALUES('nested-grandchild','uncertain');",
+        ).unwrap();
+        assert!(unsettled_root_effects(&db,"root").unwrap());
+        assert!(!unsettled_root_effects(&db,"other").unwrap());
+        db.execute(
+            "UPDATE sa_worker_write_receipts SET state='applied'
+             WHERE ticket_id='nested-child'",[],
+        ).unwrap();
+        assert!(unsettled_root_effects(&db,"root").unwrap());
+        db.execute(
+            "UPDATE sa_effect_receipts SET state='applied'
+             WHERE ticket_id='nested-grandchild'",[],
+        ).unwrap();
+        assert!(!unsettled_root_effects(&db,"root").unwrap());
+        db.execute(
+            "INSERT INTO sa_effect_receipts VALUES('other-nested','pending')",[],
+        ).unwrap();
+        assert!(unsettled_root_effects(&db,"other").unwrap());
         assert!(!unsettled_root_effects(&db,"root").unwrap());
     }
 }

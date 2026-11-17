@@ -657,7 +657,7 @@ mod tests {
                 "SELECT state FROM sa_work_items WHERE id=?1",
                 [item],|row|row.get(0),
             ).unwrap();
-            assert_eq!(actual,state,item);
+            assert_eq!(actual,state,"WorkItem {item}");
         }
         // A delayed retry must not re-open a previously active root once
         // the exact mandate has been revoked.

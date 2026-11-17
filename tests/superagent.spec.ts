@@ -270,6 +270,7 @@ test('native Team role picker preserves checked bots and saves ordered IDs only 
   await expect(workers.getByRole('checkbox',{name:/Worker Two/})).toBeChecked();
   await expect(workers).toHaveAttribute('open','');
   await expect(workers.locator('.sa-multi-faces img')).toHaveCount(1);
+  await workers.getByRole('button',{name:'Done'}).click();
   const council=host.locator('details[data-sa-multi="reviewers"]');
   await council.locator('summary').click();
   await expect(workers).not.toHaveAttribute('open','');

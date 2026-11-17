@@ -1287,8 +1287,18 @@ fn poll_authenticated_events_with_identity(
     store: &Store, expected: &EventSource, since: i64,
     raw: &serde_json::Value, signed_in: &str, pages_fetched: usize,
 ) -> Result<AuthenticatedPoll> {
+    // Tests with an explicit numeric GitHub event repository ID use that
+    // simulated attestation. Real callers instead resolve the repository ID
+    // independently from the authenticated repository metadata endpoint.
+    // Legacy identity-free test fixtures retain their original test ID.
+    let repository_id = raw.as_array()
+        .and_then(|events| events.first())
+        .and_then(|event| event.pointer("/repo/id"))
+        .and_then(serde_json::Value::as_u64)
+        .filter(|id| *id > 0)
+        .unwrap_or(1);
     poll_authenticated_events_with_repository_id(
-        store, expected, since, raw, signed_in, pages_fetched, 1,
+        store, expected, since, raw, signed_in, pages_fetched, repository_id,
     )
 }
 

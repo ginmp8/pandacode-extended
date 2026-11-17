@@ -1,5 +1,10 @@
 import { test, expect, type Page, type Locator } from '@playwright/test';
 
+// This suite loads the complete PandaCode preview, including cold Vite modules.
+// The default 20-second test budget can expire before the existing 30-second
+// native-readiness assertion completes. Keep all functional assertions intact.
+test.describe.configure({ timeout: 60_000 });
+
 /**
  * The v2 SuperAgent workspace has no manual-preset or manual-dispatch UI.
  * These tests exercise the new Team -> Demand -> native Run journey, with a

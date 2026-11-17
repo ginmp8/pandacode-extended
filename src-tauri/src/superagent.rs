@@ -2868,6 +2868,37 @@ pub(crate) fn has_task_assignment_history(store: &Store, session_id: &str) -> Re
     ).map_err(|error| error.to_string())
 }
 
+/// Turn-end checks run project-defined commands outside the scoped Worker
+/// ToolHost. Do not let a task session borrow that ordinary-chat capability.
+/// A future task test runner must require its own explicit Demand-level grant.
+pub(crate) fn ordinary_turn_check_denial(
+    store: &Store, session_id: &str,
+) -> Result<Option<&'static str>> {
+    if has_task_assignment_history(store, session_id)? {
+        Ok(Some("SuperAgent task checks require a separate Demand-authorized test command; ordinary turn-end checks cannot execute for task sessions."))
+    } else {
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod ordinary_turn_checks_security_tests {
+    use super::*;
+
+    #[test]
+    fn task_sessions_do_not_inherit_turn_end_process_access_after_stop() {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE sa_assignments (session_id TEXT NOT NULL, state TEXT NOT NULL);").unwrap();
+        let store = Store { db, path: std::path::PathBuf::from(":memory:") };
+        assert_eq!(ordinary_turn_check_denial(&store, "regular-chat").unwrap(), None);
+        store.db.execute("INSERT INTO sa_assignments(session_id,state) VALUES(?1,'running')", ["task-session"]).unwrap();
+        assert!(ordinary_turn_check_denial(&store, "task-session").unwrap().is_some());
+        store.db.execute("UPDATE sa_assignments SET state='stopped' WHERE session_id=?1", ["task-session"]).unwrap();
+        assert!(ordinary_turn_check_denial(&store, "task-session").unwrap().is_some());
+        assert_eq!(ordinary_turn_check_denial(&store, "another-chat").unwrap(), None);
+    }
+}
+
 pub(crate) fn headless_cancelled_assignments(
     store: &Store, active_sessions: &[String],
 ) -> Result<Vec<String>> {

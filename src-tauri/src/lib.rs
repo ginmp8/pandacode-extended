@@ -3856,12 +3856,18 @@ async fn get_run_script(
 /// clean turn. Bounded; no plan is a result, not an error.
 #[tauri::command]
 async fn run_turn_checks(state: State<'_, AppState>, session_id: String) -> Result<serde_json::Value> {
-    let project_id = state
-        .store
-        .lock()
-        .map_err(|e| e.to_string())?
-        .session(&session_id)?
-        .project_id;
+    let (project_id, denial) = {
+        let store = state.store.lock().map_err(|e| e.to_string())?;
+        let project_id = store.session(&session_id)?.project_id;
+        // Ordinary turn checks execute a project-controlled program. A task
+        // session must never inherit this ambient process capability from UI
+        // preferences, including after Stop or a completed Worker attempt.
+        let denial = superagent::ordinary_turn_check_denial(&store, &session_id)?;
+        (project_id, denial)
+    };
+    if let Some(reason) = denial {
+        return Ok(serde_json::json!({"checked": false, "reason": reason}));
+    }
     let root = state.root(&project_id, Some(&session_id))?;
     blocking(move || Ok(checks::turn_report(&root))).await
 }

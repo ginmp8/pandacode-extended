@@ -7358,8 +7358,28 @@ fn nested_m5_unforced_s2_low_root_score_admits_only_authenticated_fresh_root_rev
     let root = load(&store, &sid).unwrap().unwrap();
     assert_eq!(root.workers.iter().filter(|worker|
         worker.council.as_ref().is_some_and(|seat| seat.round == 2)).count(), 1);
-    assert!(!verified_council_pass(&store, &root),
-        "a fresh root callback does not replace required child S2 terminal proof");
+    let final_status = authenticated_hierarchical_status(&store, &root).unwrap();
+    assert_eq!(final_status.state, "passed",
+        "fresh root callbacks and independently passing children must settle unforced S2");
+    assert_eq!(final_status.round, 2);
+    assert_eq!(final_status.lowest, Some(9.7));
+    assert!(verified_council_pass(&store, &root),
+        "only native current-policy receipts may authorize the completed S2 root gate");
+    let mut swapped = root.clone();
+    let first_session = swapped.workers.iter().find(|worker|
+        worker.council.as_ref().is_some_and(|seat| seat.round == 1))
+        .unwrap().session_id.clone();
+    swapped.workers.iter_mut().find(|worker|
+        worker.council.as_ref().is_some_and(|seat| seat.round == 2))
+        .unwrap().session_id = first_session;
+    assert!(authenticated_hierarchical_status(&store, &swapped).is_none(),
+        "a reused reviewer session cannot satisfy independent S2 review");
+    let mut changed = root.clone();
+    changed.workers.iter_mut().find(|worker|
+        worker.council.as_ref().is_some_and(|seat| seat.round == 1))
+        .unwrap().council.as_mut().unwrap().score = Some(10.0);
+    assert!(authenticated_hierarchical_status(&store, &changed).is_none(),
+        "tampered first-wave trigger cannot authorize an S2 verdict");
 }
 
 #[test]

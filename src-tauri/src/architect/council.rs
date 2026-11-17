@@ -2428,6 +2428,133 @@ pub(super) fn independent_s2_root_identities(team: &TeamSnapshot) -> bool {
     })
 }
 
+/// Settle an unforced S2 root-score trigger only after a genuinely fresh,
+/// independently authenticated root wave passes. A clean child keeps its
+/// original composite receipt; no synthetic child second wave is invented.
+/// The caller must separately revalidate persisted child receipts, root
+/// reviewer grants, latest native callbacks and the unchanged artifact.
+pub(super) fn status_for_authenticated_triggered_s2_roots(
+    team: &TeamSnapshot,
+    children: &[super::child_council::AuthenticatedParentSeat],
+) -> Option<CouncilStatus> {
+    let config = team.config.council.as_ref()?;
+    let required = config.reviewer_bot_ids.len() + config.automatic_reviewers;
+    if config.strategy != CouncilExecutionStrategy::Escalated
+        || config.force_escalation || !matches!(config.mode(), "m5" | "m6" | "m7")
+        || accepted(team) || team.council_since <= 0 || required == 0
+        || !(MIN_REVIEWERS..=MAX_REVIEWERS).contains(&config.needed())
+        || children.len() != config.nested_bot_reviewers.len()
+        || latest_round(team) != 2 || stale(team, 1) || stale(team, 2)
+        || !independent_s2_root_identities(team)
+        || team.workers.iter().any(|worker| !worker.read_only && unsettled(&worker.status))
+        || team.workers.iter().filter(|worker| worker.created_at >= team.council_since
+            && worker.council.is_some()).count() != 2 * required
+        || !criterion_blockers(team, config, 2).is_empty()
+        || !unverified_required_skill_checks(team, 2).is_empty()
+    {
+        return None;
+    }
+    let first = in_round(team, 1).filter(|(worker, seat)| counts(worker, seat))
+        .collect::<Vec<_>>();
+    let second = in_round(team, 2).filter(|(worker, seat)| counts(worker, seat))
+        .collect::<Vec<_>>();
+    if first.len() != required || second.len() != required
+        || !first.iter().any(|(_, seat)| seat.score.is_some_and(|score|
+            score.is_finite() && score < config.target))
+    {
+        return None;
+    }
+    let mut identities = std::collections::HashSet::new();
+    let mut sessions = std::collections::HashSet::new();
+    let mut original_bots = std::collections::HashSet::new();
+    let mut original_automatic = 0usize;
+    for (worker, seat) in first {
+        let binding = worker.reviewer_binding.as_ref()?;
+        if worker.status != "completed" || !worker.read_only || worker.abandoned
+            || worker.wrote_at != 0 || !worker.files.is_empty()
+            || seat.started_at <= 0 || seat.reported_severe_finding || seat.reported_conflict
+            || seat.score.is_none_or(|score| !score.is_finite())
+            || worker.id.is_empty() || worker.session_id.is_empty()
+            || !identities.insert(worker.id.as_str())
+            || !sessions.insert(worker.session_id.as_str())
+            || binding.validate(team, worker).is_err()
+        {
+            return None;
+        }
+        match binding.reviewer_bot_id.as_deref() {
+            Some(bot) if config.reviewer_bot_ids.iter().any(|id| id == bot)
+                && binding.roster_bot_ids == config.reviewer_bot_ids
+                && binding.required_reviewers == Some(config.needed())
+                && original_bots.insert(bot) => {}
+            Some(_) => return None,
+            None => original_automatic += 1,
+        }
+    }
+    if original_bots.len() != config.reviewer_bot_ids.len()
+        || original_automatic != config.automatic_reviewers
+    {
+        return None;
+    }
+    // Every child remains a real, current, single root seat. Its own
+    // required criteria must pass independently of root reviewer scores.
+    let mut child_bots = std::collections::HashSet::new();
+    let mut lowest = f64::INFINITY;
+    for child in children {
+        if child.root_session_id != team.session_id
+            || child.root_cycle_id != format!("{}:{}", team.session_id, team.council_since)
+            || !config.nested_bot_reviewers.iter().any(|choice| choice.bot_id == child.bot_id)
+            || !child_bots.insert(child.bot_id.as_str())
+            || child.parent_worker_id.is_empty() || child.child_session_id.is_empty()
+            || !identities.insert(child.parent_worker_id.as_str())
+            || !sessions.insert(child.child_session_id.as_str())
+            || !child.lowest_score.is_finite() || child.lowest_score < config.target
+            || config.criteria.iter().filter(|criterion| criterion.required)
+                .any(|criterion| criterion.evidence_required
+                    || !child.criterion_evidence.iter().any(|proof| {
+                        proof.id == criterion.id
+                            && same_lens(&proof.lens, &criterion.lens)
+                            && !proof.leaf_worker_ids.is_empty()
+                            && proof.lowest_score.is_finite()
+                            && proof.lowest_score >= criterion.target.max(config.target)
+                    }))
+        {
+            return None;
+        }
+        lowest = lowest.min(child.lowest_score);
+    }
+    let mut fresh_bots = std::collections::HashSet::new();
+    let mut fresh_automatic = 0usize;
+    for (worker, seat) in second {
+        let binding = worker.reviewer_binding.as_ref()?;
+        let score = seat.score?;
+        if worker.status != "completed" || !worker.read_only || worker.abandoned
+            || worker.wrote_at != 0 || !worker.files.is_empty()
+            || seat.started_at <= 0 || seat.reported_severe_finding || seat.reported_conflict
+            || !score.is_finite() || score < config.target
+            || worker.id.is_empty() || worker.session_id.is_empty()
+            || !identities.insert(worker.id.as_str())
+            || !sessions.insert(worker.session_id.as_str())
+            || binding.validate(team, worker).is_err()
+        {
+            return None;
+        }
+        match binding.reviewer_bot_id.as_deref() {
+            Some(bot) if config.reviewer_bot_ids.iter().any(|id| id == bot)
+                && binding.roster_bot_ids == config.reviewer_bot_ids
+                && binding.required_reviewers == Some(config.needed())
+                && fresh_bots.insert(bot) => {}
+            Some(_) => return None,
+            None => fresh_automatic += 1,
+        }
+        lowest = lowest.min(score);
+    }
+    (fresh_bots.len() == config.reviewer_bot_ids.len()
+        && fresh_automatic == config.automatic_reviewers).then_some(CouncilStatus {
+        state: "passed".into(), round: 2, lowest: Some(lowest),
+        target: config.target, stale: false, notice: None,
+    })
+}
+
 /// A forced hierarchical S2 needs both complete, independent native waves.
 /// Callers must revalidate persisted reviewer grants and child receipts before
 /// invoking this structural gate. No composite score supplies a phantom vote.

@@ -617,6 +617,16 @@ fn authenticated_hierarchical_status(
         // separate, independently authenticated phase-two challenge receipts.
         let challenges = child_council::verified_s3_receipts(store, team).ok().flatten()?;
         council::status_for_authenticated_children_s3(team, &children, &challenges)
+    } else if config.strategy == council::CouncilExecutionStrategy::Escalated
+        && !config.force_escalation && matches!(config.mode(), "m5" | "m6" | "m7")
+    {
+        // Fresh root callbacks can settle a root-only S2 trigger without
+        // unnecessarily repeating an independently passing child Council.
+        // Untriggered first-wave success retains the existing parallel gate.
+        let triggered = child_council::fresh_s2_root_reviewers(store, team, config)
+            .then(|| council::status_for_authenticated_triggered_s2_roots(team, &children))
+            .flatten();
+        triggered.or_else(|| council::status_for_authenticated_children(team, &children))
     } else {
         council::status_for_authenticated_children(team, &children)
     }

@@ -219,7 +219,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false;
   let globalDemandLayout: 'board' | 'list' = 'board';
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
-  let workspaceView: 'teams' | 'team' | 'runs' | 'review' | 'sources' | 'portable' = 'teams';
+  let workspaceView: 'teams' | 'team' | 'runs' | 'new-demand' | 'run' | 'review' | 'sources' | 'portable' = 'teams';
   let teamPanel: 'overview' | 'members' | 'execution' = 'overview';
   let preview: Preview | null = null, inspected: unknown = null;
   let confirm: { message: string; action: () => Promise<void> } | null = null;
@@ -954,9 +954,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '<div class="sa-actions"><button type="button" data-sa-duplicate="' + safe(chosen.id) +
       '">Duplicate Team</button><button type="button" data-sa-delete="' + safe(chosen.id) + '"' +
       (chosen.enabled ? ' disabled' : '') + '>Delete unused Team</button></div></section>' : '';
-    const active = chosen ? '<section class="sa-pane" aria-label="Native Demand and WorkItems">' +
-      '<header><h3>Assign Demand · ' + safe(chosen.name) + '</h3>' +
+    const admission = chosen ? '<section class="sa-pane" aria-label="Native Demand and WorkItems">' +
+      '<header><h3>New Demand · ' + safe(chosen.name) + '</h3>' +
       '<button type="button" data-sa-return-team>Team settings</button></header>' +
+      '<label>Team<select data-sa-admission-team aria-label="Team for Demand">' +
+      presets.map(team => '<option value="' + safe(team.id) + '"' +
+        (team.id === chosen.id ? ' selected' : '') + '>' +
+        safe(team.name) + (team.enabled ? '' : ' (Off)') + '</option>').join('') +
+      '</select></label>' +
       '<form data-sa-form="run"><label>Task objective<textarea name="objective" rows="3" maxlength="16000" required>' +
       safe(demandObjective) + '</textarea></label>' +
       '<p class="sa-execution-explainer"><strong>Native Team orchestration</strong> · ' +
@@ -977,8 +982,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       (chosen.enabled && teamStrategy?.orchestrationId === chosen.id &&
         teamStrategy.executionMode !== 'off' ? '' : ' disabled') +
       '>Start Demand</button></form>' +
+      '<p class="sa-mode-note">Native admission checks the Team policy, bot eligibility and every scoped permission before dispatch.</p></section>' : '';
+    const active = chosen && inspectedTicket ? '<section class="sa-pane sa-run-detail" aria-label="Selected native Demand">' +
+      '<div class="sa-run-head"><button type="button" data-sa-back-runs>All Demands</button>' +
+      '<p class="sa-eyebrow">NATIVE DEMAND / RUN</p><h2>' +
+        safe(tickets.find(ticket => ticket.id === inspectedTicket)?.objective ?? 'Loading native Demand') + '</h2>' +
+      '<p>Team ' + safe(chosen.name) + ' · ' + safe(tickets.find(ticket => ticket.id === inspectedTicket)?.state ?? 'Loading') +
+        ' · Ticket ' + safe(inspectedTicket) + '</p></div>' +
       '<div class="sa-title"><h4>Tickets</h4><button type="button" data-sa-refresh>Refresh</button></div>' +
-      '<ul class="sa-tickets">' + (tickets.map(ticket =>
+      '<ul class="sa-tickets">' + (tickets.filter(ticket => ticket.id === inspectedTicket).map(ticket =>
         '<li><div><strong>' + safe(ticket.objective) + '</strong><small>' + safe(ticket.state) +
         ' · Revision ' + ticket.revision + '</small></div>' +
         '<button type="button" data-sa-inspect-ticket="' + safe(ticket.id) +
@@ -1146,7 +1158,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '</dd></dl>' +
         '<div class="sa-actions"><button type="button" data-sa-enable="' + safe(chosen.id) + '"' +
         '>' + (chosen.enabled ? 'Disable Team' : 'Enable Team') + '</button>' +
-        '<button type="button" data-sa-open-runs>Assign demand / Open runs</button></div>' +
+        '<button type="button" data-sa-create-demand>Assign Demand</button>' +
+        '<button type="button" data-sa-view="runs">View runs</button></div>' +
         (teamStrategy?.orchestrationId === chosen.id &&
           teamStrategy.executionMode === 'full_auto' && (chosen.reviewerCount ?? chosen.reviewerBotIds?.length ?? 0) < 2
           ? '<p role="note">Full Auto requires at least two independent reviewers before the Team can be enabled.</p>' : '') +
@@ -1198,7 +1211,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         ['teams','Teams'],['runs','Demands / Runs'],['review','Review inbox'],
       ] as const).map(([id,label]) =>
         '<button type="button" data-sa-view="' + id + '" aria-current="' +
-        (workspaceView === id || (workspaceView === 'team' && id === 'teams') ? 'page' : 'false') +
+        ((workspaceView === id || (workspaceView === 'team' && id === 'teams') ||
+          (id === 'runs' && (workspaceView === 'new-demand' || workspaceView === 'run'))) ? 'page' : 'false') +
         '">' + label + '</button>').join('') +
       '<p class="sa-nav-label sa-nav-separator">Team settings</p>' +
       ([
@@ -1239,7 +1253,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               teamStrategy.executionMode === 'approval' ? 'With Approval' :
               'Execution mode not configured')
             : 'Loading native policy') + '</p></div>' +
-        '<button class="primary-button" type="button" data-sa-open-runs>Assign Demand</button>' +
+        '<button class="primary-button" type="button" data-sa-create-demand>Assign Demand</button>' +
         '</div></div>' +
         '<nav class="sa-subtabs" aria-label="Team details">' +
         ([
@@ -1264,9 +1278,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       (workspaceView === 'team' ? teamView : '') +
       (workspaceView === 'runs'
         ? '<div class="sa-section-head"><div><h2>Demands / Runs</h2>' +
-          '<p>Every Demand and WorkItem belongs to a native Ticket and a bot conversation.</p></div></div>' +
-          globalDemands + (active ||
-          '<section class="sa-pane"><p>Select a Team to assign a Demand.</p></section>') : '') +
+          '<p>Track native WorkItems, approvals and evidence across Teams.</p></div>' +
+          '<button type="button" class="primary-button" data-sa-create-demand>New Demand</button></div>' +
+          globalDemands : '') +
+      (workspaceView === 'new-demand'
+        ? '<div class="sa-section-head"><div><h2>Assign a Demand</h2>' +
+          '<p>Describe the expected result, then review the native execution policy.</p></div></div>' +
+          (admission || '<section class="sa-pane">Create a Team before admitting work.</section>') : '') +
+      (workspaceView === 'run'
+        ? active || '<section class="sa-pane">Open a native Demand from Demands / Runs.</section>' : '') +
       (workspaceView === 'review' ? reviewPanel : '') +
       (workspaceView === 'sources' ? (chosen ? '<section class="sa-pane">' + sourcePanel + '</section>'
         : '<section class="sa-pane"><p>Select a Team to configure its GitHub sources.</p></section>') : '') +
@@ -1442,6 +1462,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       workerOrder = [...workerOrder.filter(id => next.includes(id)),
         ...next.filter(id => !workerOrder.includes(id))];
       render();
+      return;
+    }
+    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-admission-team')) {
+      if (busy || loading || !presets.some(team => team.id === target.value)) return;
+      selected = target.value; inspectedTicket = ''; ticketDetails = null;
+      roleRoster = null; teamStrategy = null;
+      void work(reload);
       return;
     }
     if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-team-status')) {
@@ -1652,6 +1679,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target.hasAttribute('data-sa-return-team')) {
       workspaceView = 'team'; render(); return;
     }
+    if (target.hasAttribute('data-sa-back-runs')) {
+      workspaceView = 'runs'; inspectedTicket = ''; ticketDetails = null;
+      render(); return;
+    }
+    if (target.hasAttribute('data-sa-create-demand')) {
+      workspaceView = presets.length ? 'new-demand' : 'teams';
+      render();
+      if (presets.length) {
+        host.querySelector<HTMLTextAreaElement>('form[data-sa-form="run"] textarea[name="objective"]')
+          ?.focus({preventScroll:true});
+      }
+      return;
+    }
     if (target.hasAttribute('data-sa-team-back')) {
       workspaceView = 'teams'; render(); return;
     }
@@ -1676,6 +1716,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       workspaceView = next as typeof workspaceView;
       render();
       host.querySelector<HTMLButtonElement>('[data-sa-view="' + next + '"]')?.focus({preventScroll:true});
+      if (next === 'runs' && !allDemandsLoaded)
+        host.querySelector<HTMLButtonElement>('[data-sa-load-all-demands]')?.click();
+      if (next === 'review' && !reviewQueueLoaded)
+        host.querySelector<HTMLButtonElement>('[data-sa-load-review-inbox]')?.click();
       return;
     }
     if (target.hasAttribute('data-sa-load-run-graph')) {
@@ -1771,7 +1815,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         reviewQueue.find(item => item.id === target.dataset.saOpenDemand);
       if (!demand || !presets.some(item => item.id === demand.orchestrationId)) return;
       selected = demand.orchestrationId;
-      workspaceView = 'runs';
+      workspaceView = 'run';
       tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
       inspectedAssignmentId = ''; roleRoster = null; workerOrder = []; reviewerDraft = []; effectiveTeam = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
@@ -1831,11 +1875,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         }
         effectiveTeam=snapshot;
       });
-      return;
-    }
-    if (target.hasAttribute('data-sa-open-runs')) {
-      workspaceView = 'runs'; render();
-      host.querySelector<HTMLButtonElement>('[data-sa-view="runs"]')?.focus({preventScroll:true});
       return;
     }
     if (target.dataset.saSelect) {
@@ -2138,8 +2177,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       workWriteItemKey = ''; workWritePaths = '';
       const id = target.dataset.saInspectTicket;
       if (inspectedTicket === id) {
-        inspectedTicket = ''; ticketDetails = null; inspectedAssignmentId = '';
-        render();
+        if (workspaceView === 'run') void work(refreshTicketDetails);
+        else { inspectedTicket = ''; ticketDetails = null; inspectedAssignmentId = ''; render(); }
       } else {
         inspectedTicket = id; ticketDetails = null; inspectedAssignmentId = '';
         void work(refreshTicketDetails);
@@ -2691,12 +2730,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         error = 'Supply at most 16 unique exact project-relative paths.'; render(); return;
       }
       void work(async () => {
-        await call('superagent_start_demand',{
+        const admitted = await call<Ticket>('superagent_start_demand',{
           orchestrationId:selectedConfig.id, objective, requestKey:key,
           ...(initialPaths.length ? {allowedPaths:initialPaths} : {}),
         });
+        if (!admitted.id || admitted.orchestrationId !== selectedConfig.id)
+          throw new Error('Native Demand admission returned a mismatched Team or missing Ticket.');
         taskKey = crypto.randomUUID(); demandObjective = '';
         initialDemandWritePaths = '';
+        inspectedTicket = admitted.id;
+        workspaceView = 'run';
         await reload();
       });
     }

@@ -51,8 +51,12 @@ fn classify(state:&str,total:i64,verified:i64,unresolved:i64)->&'static str {
 /// approval counts as verified. Immutable historical receipts are not current
 /// after a retry, interruption or changed native output.
 fn verified_work_items(db:&Connection,ticket_id:&str)->Result<i64> {
-    db.query_row(
-        "SELECT COUNT(*) FROM sa_work_item_evidence_receipts proof
+    // An immutable receipt only proves the original Worker result. Re-check
+    // its digest and the final assignment's applied write before presenting
+    // it as current evidence after recovery, retries or effect reconciliation.
+    let mut query=db.prepare(
+        "SELECT proof.evidence_sha256,child.evidence
+         FROM sa_work_item_evidence_receipts proof
          JOIN sa_work_items item ON item.id=proof.item_id
          JOIN sa_tickets child ON child.id=proof.child_ticket_id
          JOIN sa_assignments assignment ON assignment.id=proof.assignment_id
@@ -63,9 +67,21 @@ fn verified_work_items(db:&Connection,ticket_id:&str)->Result<i64> {
            AND assignment.result=child.evidence
            AND assignment.attempt=(SELECT MAX(latest.attempt)
              FROM sa_assignments latest WHERE latest.ticket_id=child.id)
-           AND proof.reviewed_at>=assignment.updated_at",
-        [ticket_id],|row|row.get(0),
-    ).map_err(|error|error.to_string())
+           AND proof.reviewed_at>=assignment.updated_at
+           AND (item.requires_write=0 OR EXISTS(
+             SELECT 1 FROM sa_worker_write_receipts applied
+             WHERE applied.ticket_id=child.id
+               AND applied.assignment_id=assignment.id
+               AND applied.state='applied'))"
+    ).map_err(|error|error.to_string())?;
+    let rows=query.query_map([ticket_id],|row|Ok((
+        row.get::<_,String>(0)?,row.get::<_,String>(1)?
+    ))).map_err(|error|error.to_string())?;
+    let candidates=rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error|error.to_string())?;
+    Ok(candidates.into_iter().filter(|(digest,evidence)| {
+        format!("{:x}",Sha256::digest(evidence.as_bytes()))==digest.as_str()
+    }).count() as i64)
 }
 
 /// Count only durable native effects in this Demand, including its WorkItem
@@ -279,9 +295,12 @@ mod tests {
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch(
             "CREATE TABLE sa_work_items(
-               id TEXT,ticket_id TEXT,child_ticket_id TEXT,state TEXT);
+               id TEXT,ticket_id TEXT,child_ticket_id TEXT,state TEXT,
+               requires_write INTEGER NOT NULL DEFAULT 0);
              CREATE TABLE sa_work_item_evidence_receipts(
-               item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER);
+               item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER,
+               evidence_sha256 TEXT NOT NULL DEFAULT '');
+             CREATE TABLE sa_worker_write_receipts(ticket_id TEXT,assignment_id TEXT,state TEXT);
              CREATE TABLE sa_tickets(id TEXT,state TEXT,evidence TEXT);
              CREATE TABLE sa_assignments(
                id TEXT,ticket_id TEXT,state TEXT,attempt INTEGER,result TEXT,updated_at INTEGER);
@@ -290,6 +309,11 @@ mod tests {
                VALUES('item','child','first',80);
              INSERT INTO sa_tickets VALUES('child','completed','Worker output');
              INSERT INTO sa_assignments VALUES('first','child','finished',1,'Worker output',70);",
+        ).unwrap();
+        let digest=format!("{:x}",Sha256::digest(b"Worker output"));
+        db.execute(
+            "UPDATE sa_work_item_evidence_receipts SET evidence_sha256=?1",
+            [&digest],
         ).unwrap();
         assert_eq!(verified_work_items(&db,"root").unwrap(),1);
         assert_eq!(verified_work_items(&db,"other").unwrap(),0);
@@ -317,6 +341,33 @@ mod tests {
         assert_eq!(verified_work_items(&db,"root").unwrap(),1);
         db.execute(
             "UPDATE sa_tickets SET evidence='changed output' WHERE id='child'",[],
+        ).unwrap();
+        assert_eq!(verified_work_items(&db,"root").unwrap(),0);
+
+        // Replaying the exact Worker output does not allow a mismatched
+        // immutable approval hash to count as newly verified delivery.
+        db.execute(
+            "UPDATE sa_tickets SET evidence='Worker output' WHERE id='child'",[],
+        ).unwrap();
+        assert_eq!(verified_work_items(&db,"root").unwrap(),1);
+        db.execute(
+            "UPDATE sa_work_item_evidence_receipts SET evidence_sha256='stale'",[],
+        ).unwrap();
+        assert_eq!(verified_work_items(&db,"root").unwrap(),0);
+        db.execute(
+            "UPDATE sa_work_item_evidence_receipts SET evidence_sha256=?1",
+            [&digest],
+        ).unwrap();
+        // WorkItems that require edits need the current final attempt's
+        // *applied* native ToolHost receipt. A failed write is never enough.
+        db.execute("UPDATE sa_work_items SET requires_write=1",[]).unwrap();
+        assert_eq!(verified_work_items(&db,"root").unwrap(),0);
+        db.execute(
+            "INSERT INTO sa_worker_write_receipts VALUES('child','first','applied')",[],
+        ).unwrap();
+        assert_eq!(verified_work_items(&db,"root").unwrap(),1);
+        db.execute(
+            "UPDATE sa_worker_write_receipts SET state='failed'",[],
         ).unwrap();
         assert_eq!(verified_work_items(&db,"root").unwrap(),0);
     }

@@ -111,18 +111,18 @@ pub fn reserve(store: &Store, ticket_id: &str, key: &str, payload: &[u8]) -> Res
         "SELECT payload_sha256,state FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key=?2",
         params![ticket_id,key],|r|Ok((r.get(0)?,r.get(1)?))
     ).optional().map_err(|e|e.to_string())?;
-    // An unknown outcome for a different effect can change the meaning of
-    // subsequent operations. Do not stage a new remote action for this Ticket
-    // until that uncertainty is independently reconciled. Repeated reads of
-    // the same idempotency key still return its original status.
+    // A pending receipt may already have reached the provider: until its
+    // outcome is independently verified it is just as unsafe to sequence
+    // another action as an explicitly uncertain receipt. A same-key retry
+    // is inspection only and cannot create a second receipt.
     if existing.is_none() {
-        let uncertain_other: bool = tx.query_row(
+        let unresolved_other: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM sa_effect_receipts
-             WHERE ticket_id=?1 AND effect_key<>?2 AND state='uncertain')",
+             WHERE ticket_id=?1 AND effect_key<>?2 AND state IN ('pending','uncertain'))",
             params![ticket_id,key], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
-        if uncertain_other {
-            return Err("Another external effect has an uncertain outcome; reconcile it before reserving new effects.".into());
+        if unresolved_other {
+            return Err("Another external effect is pending or uncertain; reconcile it before reserving new effects.".into());
         }
     }
     let result=match existing {
@@ -908,7 +908,7 @@ mod tests{
     }
 
     #[test]
-    fn unrelated_new_effect_is_fenced_until_uncertain_remote_outcome_is_reconciled() {
+    fn unrelated_new_effect_is_fenced_until_pending_or_uncertain_outcome_is_reconciled() {
         let (store, id) = fixture();
         // Test-only receipt authority. Production task effects remain denied
         // until native scoped grants and effect-time enforcement exist.
@@ -920,12 +920,18 @@ mod tests{
         let next = "github:comment:next";
         assert_eq!(reserve(&store, &id, original, b"original-body").unwrap(),
             Reservation::Reserved);
+        // A 'pending' effect can already have been dispatched. Neither a
+        // simultaneous reservation nor a retry may create an unrelated action.
+        assert_eq!(reserve(&store, &id, original, b"original-body").unwrap(),
+            Reservation::AlreadyPending);
+        assert!(reserve(&store, &id, next, b"next-body").unwrap_err()
+            .contains("pending or uncertain"));
         mark_uncertain(&store, &id, original).unwrap();
         assert_eq!(reserve(&store, &id, original, b"original-body").unwrap(),
             Reservation::RequiresReconciliation,
             "same idempotency key must remain inspectable without replay");
         assert!(reserve(&store, &id, next, b"next-body").unwrap_err()
-            .contains("uncertain outcome"));
+            .contains("pending or uncertain"));
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_effect_receipts WHERE ticket_id=?1",
             [&id], |row| row.get::<_, i64>(0),

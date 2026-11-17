@@ -65,7 +65,19 @@
 /* Configured Team membership, not automatic runtime delegation. */
 #superagent-workspace [data-sa-form="roster"]{display:grid;gap:12px;max-width:640px}
 #superagent-workspace [data-sa-form="roster"] label{display:grid;gap:6px}
-#superagent-workspace [data-sa-form="roster"] select[multiple]{min-height:120px;padding:8px;max-width:100%;overflow:auto}
+/* Shared bot avatar checkboxes avoid platform-specific multi-select gestures. */
+.sa-member-picker{width:100%;box-sizing:border-box;min-width:0;margin:0;padding:9px;border:1px solid var(--ds-border);border-radius:var(--radius-sm)}
+.sa-member-picker legend{font-size:var(--text-sm);font-weight:600;padding:0 4px}
+.sa-member-choice-list{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,190px),1fr));gap:6px;max-height:245px;overflow-y:auto}
+.sa-pane label.sa-member-choice{display:flex;flex-direction:row;align-items:center;width:auto;gap:9px;min-width:0;padding:7px;border:1px solid var(--ds-border);border-radius:var(--radius-sm);cursor:pointer}
+.sa-member-choice:has(input:checked){border-color:var(--ds-border-strong);background:var(--ds-raised)}
+.sa-member-choice:has(input:disabled){opacity:.5;cursor:not-allowed}
+.sa-member-choice:focus-within{outline:2px solid var(--text);outline-offset:2px}
+.sa-ui .sa-member-choice input[type="checkbox"]{width:16px;height:16px;min-width:16px;margin:0;accent-color:var(--accent)}
+.sa-member-choice .bot-avatar{width:30px;height:30px;min-width:30px}
+.sa-member-choice span:last-child{display:flex;flex-direction:column;min-width:0;overflow-wrap:anywhere}
+.sa-member-choice strong{font-size:var(--text-sm);font-weight:600}
+.sa-member-choice small{font-size:var(--text-xs);font-weight:400;color:var(--muted)}
 #superagent-workspace [data-sa-form="roster"] button{justify-self:start}
 
 /* First-class native Demand board. The same bounded Ticket index backs
@@ -104,5 +116,5 @@
 .sa-new-members{width:100%;border:1px solid var(--ds-border);border-radius:var(--radius-sm);padding:10px;box-sizing:border-box}
 .sa-new-members summary{cursor:pointer;font-size:var(--text-sm);font-weight:600}
 .sa-new-members[open]{display:flex;flex-direction:column;gap:12px}
-.sa-new-members select[multiple]{min-height:110px}
+/* Creation and revision-guarded role edits use the same checkbox picker. */
 .sa-new-members summary:focus-visible{outline:2px solid var(--text);outline-offset:3px}

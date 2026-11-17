@@ -777,9 +777,15 @@ mod tests{
         store.db.execute(
             "UPDATE bots SET paused=0 WHERE id='co'", [],
         ).unwrap();
+        // Unpausing cannot override a still-pending external effect.
+        assert_eq!(reserve(&store, &ticket_id, "github:issue:before-pause", b"body").unwrap(),
+            Reservation::AlreadyPending);
+        assert!(reserve(&store, &ticket_id, "github:issue:after-pause", b"body")
+            .unwrap_err().contains("pending or uncertain"));
+        acknowledge_applied(&store, &ticket_id, "github:issue:before-pause", b"body").unwrap();
         assert_eq!(reserve(&store, &ticket_id, "github:issue:after-pause", b"body").unwrap(),
             Reservation::Reserved);
-        assert_eq!(unresolved_count(&store, &ticket_id).unwrap(), 2);
+        assert_eq!(unresolved_count(&store, &ticket_id).unwrap(), 1);
     }
 
     #[test]
@@ -1010,10 +1016,16 @@ mod tests{
         store.db.execute(
             "UPDATE sa_mandates SET allowed_side_effects=1 WHERE ticket_id=?1",[&id],
         ).unwrap();
-        for key in ["github:issue:alpha","github:issue:beta"] {
-            assert_eq!(reserve(&store,&id,key,b"private payload never audited").unwrap(),
-                Reservation::Reserved);
-        }
+        assert_eq!(reserve(&store,&id,"github:issue:alpha",b"private payload never audited").unwrap(),
+            Reservation::Reserved);
+        // Old persisted data can contain multiple pending receipts. Recreate
+        // that pre-upgrade state directly, since new reservations fence it.
+        store.db.execute(
+            "INSERT INTO sa_effect_receipts(ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+             SELECT ticket_id,'github:issue:beta',payload_sha256,state,created_at,updated_at
+             FROM sa_effect_receipts WHERE ticket_id=?1 AND effect_key='github:issue:alpha'",
+            [&id],
+        ).unwrap();
         let path=store.path.clone();
         drop(store);
 

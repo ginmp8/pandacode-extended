@@ -63,7 +63,7 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
       if (command === 'bots_list') return [
         {id:'coordinator',name:'Coordinator',paused:false},
         {id:'worker',name:'Primary Worker',paused:false},
-        {id:'worker-b',name:'Additional Worker',paused:false},
+        {id:'worker-b',name:'Additional Worker',paused:false,avatar:'panda:2'},
         {id:'reviewer',name:'Reviewer',paused:false},
       ] as never;
       if (command === 'superagent_list') return [...configs] as never;
@@ -89,13 +89,14 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
   await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
   await host.getByRole('combobox',{name:'Worker',exact:true}).selectOption('worker');
   await host.locator('details.sa-new-members summary').click();
-  await host.locator('select[name="additionalWorkers"]').selectOption(['worker-b']);
-  await host.locator('select[name="reviewers"]').selectOption(['reviewer']);
+  await host.getByRole('checkbox',{name:/Additional Worker/}).check();
+  await host.getByRole('checkbox',{name:/Reviewer/}).check();
+  await expect(host.locator('.sa-member-choice .bot-avatar svg')).toHaveCount(1);
   await host.getByRole('combobox',{name:'Team status'}).selectOption('enabled');
   await host.getByRole('searchbox',{name:'Search Teams'}).fill('another Team');
   await expect(host.locator('details.sa-new-members')).toHaveAttribute('open','');
-  await expect(host.locator('select[name="additionalWorkers"]')).toHaveValues(['worker-b']);
-  await expect(host.locator('select[name="reviewers"]')).toHaveValues(['reviewer']);
+  await expect(host.locator('input[name="additionalWorkers"][value="worker-b"]')).toBeChecked();
+  await expect(host.locator('input[name="reviewers"][value="reviewer"]')).toBeChecked();
   await expect(host.locator('select[name="coordinatorBotId"]')).toHaveValue('coordinator');
   await expect(host.locator('select[name="workerBotId"]')).toHaveValue('worker');
   await expect(host.locator('select[name="maxWorkerAttempts"]')).toHaveValue('3');
@@ -960,13 +961,16 @@ test('multi-member Team Builder updates settled history safely without launching
   await host.getByRole('button',{name:'Load native members'}).click();
   const form=host.locator('form[data-sa-form="roster"]');
   // Reviewer draft must survive selecting and reordering Workers before Save.
-  await form.locator('select[name="reviewers"]').selectOption(['review-a','review-b']);
-  await form.locator('select[name="additionalWorkers"]').selectOption(['worker-b','worker-c']);
-  await expect(form.locator('select[name="reviewers"] option:checked')).toHaveCount(2);
+  await form.locator('input[name="reviewers"][value="review-a"]').check();
+  await form.locator('input[name="reviewers"][value="review-b"]').check();
+  await form.locator('input[name="additionalWorkers"][value="worker-b"]').check();
+  await form.locator('input[name="additionalWorkers"][value="worker-c"]').check();
+  await expect(form.locator('input[name="reviewers"]:checked')).toHaveCount(2);
   await form.getByRole('button',{name:'Move Worker C up'}).click();
-  await expect(form.locator('select[name="reviewers"] option:checked')).toHaveCount(2);
+  await expect(form.locator('input[name="reviewers"]:checked')).toHaveCount(2);
   await expect(form.locator('.sa-worker-order li').first()).toContainText('Worker C');
-  await expect(form.locator('select[name="reviewers"]')).toHaveValues(['review-a','review-b']);
+  await expect(form.locator('input[name="reviewers"][value="review-a"]')).toBeChecked();
+  await expect(form.locator('input[name="reviewers"][value="review-b"]')).toBeChecked();
   await expect(form.getByRole('button',{name:'Save configured roles'})).toBeEnabled();
   await form.getByRole('button',{name:'Save configured roles'}).click();
   await expect(host.getByText('Multi-member execution is disabled',{exact:false})).toBeVisible();
@@ -2029,7 +2033,7 @@ test('duplicate Team uses native atomic roster creation without copying source a
   await form.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption({label:'Scout'});
   await form.getByRole('combobox',{name:'Worker',exact:true}).selectOption({label:'Writer'});
   await form.locator('summary').click();
-  await form.locator('select[name="reviewers"]').selectOption({label:'Ledger'});
+  await form.getByRole('checkbox',{name:/Ledger/}).check();
   await form.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(workspace.locator('.sa-list .sa-item')).toHaveCount(1);
   await workspace.getByRole('button',{name:'Teams',exact:true}).click();
@@ -2147,7 +2151,7 @@ test('new Team persists optional reviewers as one disabled role configuration', 
   await form.getByRole('combobox',{name:'Coordinator',exact:true}).selectOption({label:'Scout'});
   await form.getByRole('combobox',{name:'Worker',exact:true}).selectOption({label:'Writer'});
   await form.locator('summary').click();
-  await form.locator('select[name="reviewers"]').selectOption({label:'Ledger'});
+  await form.getByRole('checkbox',{name:/Ledger/}).check();
   await form.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(workspace.locator('.sa-role-counts')).toContainText('1 Coordinator · 1 Workers · 1 Reviewers');
   await workspace.getByRole('button',{name:'Demands / Runs',exact:true}).click();

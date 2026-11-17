@@ -1,10 +1,11 @@
 import './superagent.css';
 import { escape } from './dom';
+import { botAvatarHtml } from './bot-avatars';
 
 // This interface only invokes native policy/authorization decisions. It cannot
 // grant tools, infer work, start tasks on import or bypass Council review.
 type Call = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-interface Bot { id: string; name: string; paused: boolean }
+interface Bot { id: string; name: string; paused: boolean; avatar?: string; color?: string }
 interface Config {
   id: string; name: string; coordinatorBotId: string; workerBotId: string;
   projectId?: string; enabled: boolean; policyRevision: number;
@@ -198,6 +199,23 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         (bot.paused ? ' disabled' : '') + (selectedIds.includes(bot.id) ? ' selected' : '') +
         '>' + safe(bot.name) + (bot.paused ? ' (paused)' : '') + '</option>').join('');
     };
+    // Native bot identities and shared PandaCode avatars; configuration only.
+    // Checkbox names are submitted through the existing native roster API.
+    const roleChoices = (name: 'additionalWorkers' | 'reviewers', title: string,
+      selectedIds: string[], excludedIds: string[]) =>
+      '<fieldset class="sa-member-picker" aria-label="' + safe(title) + '">' +
+      '<legend>' + safe(title) + '</legend><div class="sa-member-choice-list">' +
+      (bots.filter(bot => !excludedIds.includes(bot.id)).map(bot =>
+        '<label class="sa-member-choice"><input type="checkbox" name="' + name +
+        '" value="' + safe(bot.id) + '"' +
+        (selectedIds.includes(bot.id) ? ' checked' : '') +
+        (bot.paused ? ' disabled' : '') + '>' +
+        botAvatarHtml(bot.avatar ?? '', bot.name, '', bot.color ?? '') +
+        '<span><strong>' + safe(bot.name) + '</strong><small>' +
+        (bot.paused ? 'Paused · unavailable' : 'Existing bot') +
+        '</small></span></label>').join('') ||
+        '<p>No other existing bots available for this role.</p>') +
+      '</div></fieldset>';
     const chosen = current();
     // The native directory inspects all durable Demands, not just the latest page.
     const policyEditBlocker = chosen?.policyEditBlocker ||
@@ -656,12 +674,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<div class="sa-actions"><button type="submit" class="primary-button">Submit rejection</button>' +
           '<button type="button" data-sa-reject-cancel>Cancel</button></div></form>' : '') +
         details + '</section>' : '';
-    const roleOptions = (selectedRoles:string[]) => bots
-      .filter(bot => chosen && bot.id !== chosen.coordinatorBotId && bot.id !== chosen.workerBotId)
-      .map(bot => '<option value="' + safe(bot.id) + '"' +
-        (selectedRoles.includes(bot.id) ? ' selected' : '') +
-        (bot.paused ? ' disabled' : '') + '>' + safe(bot.name) +
-        (bot.paused ? ' (paused)' : '') + '</option>').join('');
     const effectivePolicy = chosen && effectiveTeam &&
       effectiveTeam.orchestrationId === chosen.id &&
       effectiveTeam.policyRevision === chosen.policyRevision
@@ -706,8 +718,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             ' · Primary Worker: ' + safe(botName(roleRoster.workerBotIds[0])) +
             ' · Policy revision ' + roleRoster.policyRevision + '</p>' +
             '<form data-sa-form="roster">' +
-              '<label>Additional Workers (up to 7)<select name="additionalWorkers" data-sa-worker-select multiple size="5">' +
-              roleOptions(workerOrder) + '</select></label>' +
+              roleChoices('additionalWorkers', 'Additional Workers (up to 7)', workerOrder,
+                [chosen.coordinatorBotId, chosen.workerBotId]) +
               '<ol class="sa-worker-order" aria-label="Additional Worker order">' +
               workerOrder.map((id,index) => '<li><span>' + (index + 2) + '. ' + safe(botName(id)) +
                 '</span><button type="button" data-sa-worker-move="' + safe(id) +
@@ -717,8 +729,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
                 '" data-sa-direction="down" aria-label="Move ' + safe(botName(id)) +
                 ' down"' + (index === workerOrder.length - 1 || chosen.enabled ? ' disabled' : '') +
                 '>Down</button></li>').join('') + '</ol>' +
-              '<label>Optional Council Reviewers (up to 4)<select name="reviewers" multiple size="5">' +
-              roleOptions(reviewerDraft) + '</select></label>' +
+              roleChoices('reviewers', 'Optional Council Reviewers (up to 4)', reviewerDraft,
+                [chosen.coordinatorBotId, chosen.workerBotId]) +
               '<p>A bot may have one role only. Workers must share the primary Worker project. A disabled Team may change roles after all demands settle; active/reviewable work and unresolved effects block native saves.</p>' +
               '<button class="primary-button" type="submit"' +
                 (policyEditBlocker || roleRoster.policyRevision !== chosen.policyRevision
@@ -856,10 +868,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<p>Choose up to seven additional Workers and four independent Reviewers. ' +
           'Each bot has one role, and Workers must share the primary Worker project. ' +
           'Multi-member Teams remain Off until scoped admission is supported.</p>' +
-          '<label>Additional Workers<select name="additionalWorkers" multiple size="4">' +
-          optionsFor(draftAdditionalWorkerIds) + '</select></label>' +
-          '<label>Optional Reviewers<select name="reviewers" multiple size="4">' +
-          optionsFor(draftReviewerBotIds) + '</select></label></details>' +
+          roleChoices('additionalWorkers', 'Additional Workers', draftAdditionalWorkerIds,
+            [draftCoordinatorBotId, draftWorkerBotId]) +
+          roleChoices('reviewers', 'Optional Reviewers', draftReviewerBotIds,
+            [draftCoordinatorBotId, draftWorkerBotId]) + '</details>' +
           '<label>Maximum attempts per Demand<select name="maxWorkerAttempts">' +
           [1,2,3,4].map(limit => '<option value="' + limit + '"' +
             (draftWorkerAttemptLimit === limit ? ' selected' : '') + '>' +
@@ -1018,30 +1030,45 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   // Templates suggest only a name and retry cap, never a bot, tool or task.
   host.addEventListener('change', event => {
     const target = event.target;
+    if (target instanceof HTMLInputElement && target.type === 'checkbox' &&
+        ['additionalWorkers', 'reviewers'].includes(target.name)) {
+      const form = target.closest<HTMLFormElement>('form[data-sa-form]');
+      if (!form || busy) return;
+      const checked = Array.from(form.querySelectorAll<HTMLInputElement>(
+        'input[type="checkbox"][name="' + target.name + '"]:checked',
+      )).map(input => input.value);
+      if (form.dataset.saForm === 'create') {
+        if (target.name === 'additionalWorkers') draftAdditionalWorkerIds = checked;
+        else draftReviewerBotIds = checked;
+      } else if (form.dataset.saForm === 'roster' &&
+          roleRoster?.orchestrationId === selected) {
+        if (target.name === 'reviewers') {
+          reviewerDraft = checked;
+        } else {
+          const focusedId = target.value;
+          workerOrder = [...workerOrder.filter(id => checked.includes(id)),
+            ...checked.filter(id => !workerOrder.includes(id))];
+          render();
+          Array.from(host.querySelectorAll<HTMLInputElement>(
+            'form[data-sa-form="roster"] input[name="additionalWorkers"]',
+          )).find(input => input.value === focusedId)?.focus({preventScroll:true});
+        }
+      }
+      return;
+    }
     if (target instanceof HTMLSelectElement &&
         target.closest('form[data-sa-form="create"]') &&
-        ['coordinatorBotId', 'workerBotId', 'additionalWorkers', 'reviewers'].includes(target.name)) {
+        ['coordinatorBotId', 'workerBotId'].includes(target.name)) {
       if (target.name === 'coordinatorBotId') draftCoordinatorBotId = target.value;
-      else if (target.name === 'workerBotId') draftWorkerBotId = target.value;
-      else if (target.name === 'additionalWorkers')
-        draftAdditionalWorkerIds = Array.from(target.selectedOptions, option => option.value);
-      else if (target.name === 'reviewers')
-        draftReviewerBotIds = Array.from(target.selectedOptions, option => option.value);
-      return;
-    }
-    if (target instanceof HTMLSelectElement && target.name === 'reviewers' &&
-        target.closest('form[data-sa-form="roster"]')) {
-      if (busy || !roleRoster || roleRoster.orchestrationId !== selected) return;
-      reviewerDraft = Array.from(target.selectedOptions, option => option.value);
-      return;
-    }
-    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-worker-select')) {
-      if (busy || !roleRoster || roleRoster.orchestrationId !== selected) return;
-      const next = Array.from(target.selectedOptions, option => option.value);
-      workerOrder = [...workerOrder.filter(id => next.includes(id)),
-        ...next.filter(id => !workerOrder.includes(id))];
+      else draftWorkerBotId = target.value;
+      draftAdditionalWorkerIds = draftAdditionalWorkerIds.filter(id =>
+        id !== draftCoordinatorBotId && id !== draftWorkerBotId);
+      draftReviewerBotIds = draftReviewerBotIds.filter(id =>
+        id !== draftCoordinatorBotId && id !== draftWorkerBotId);
       render();
-      host.querySelector<HTMLSelectElement>('[data-sa-worker-select]')?.focus({preventScroll:true});
+      Array.from(host.querySelectorAll<HTMLSelectElement>(
+        'form[data-sa-form="create"] select',
+      )).find(input => input.name === target.name)?.focus({preventScroll:true});
       return;
     }
     if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-team-status')) {

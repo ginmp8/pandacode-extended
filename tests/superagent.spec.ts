@@ -248,6 +248,11 @@ test('empty Teams view provides an intentional, accessible first-use path',async
 test('Team search keeps focus while the directory rerenders',async({page})=>{
   await page.goto('/?bots=sample');
   const host=await openWorkspace(page);
+  // The reference first-use screen has no list controls until a Team exists.
+  // Seed one through the same native preview journey before testing focus.
+  const builder=await completeWizard(host,'Software Search Team');
+  await builder.getByRole('button',{name:'Next'}).click();
+  await builder.getByRole('button',{name:'Create Team (disabled)'}).click();
   const search=host.getByRole('searchbox',{name:'Search Teams'});
   await search.fill('So');
   await expect(search).toBeFocused();

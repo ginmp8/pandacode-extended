@@ -271,6 +271,30 @@ test('Council blocked child state remains non-passing in shared native inspector
   await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
 });
 
+
+test('Council inspector exposes authenticated unforced S2 triggers without presenting review or approval as completed', async ({ page }) => {
+  const inspection = {
+    mode: 'm4', strategy: 'escalated', forceEscalation: false,
+    cycleStartedAt: 1000, teamRevision: 9,
+    status: { state: 'blocked', round: 0, lowest: null, target: 9, stale: false },
+    verifiedPass: false, verifiedCompletion: null, criteria: [], attempts: [],
+    reservedChildren: [{ botId: 'security-child', childSessionId: 'child-s2', rootCycleId: 'task:1000',
+      requiredLeafReviewers: 2, status: 'child_escalation_required',
+      automaticEscalationTriggers: ['below_target'] }],
+  };
+  await page.setViewportSize({ width: 360, height: 640 });
+  await open(page, '/?council', {}, 0, '', {}, undefined, inspection);
+  await button(page).click();
+  await panel(page).getByText('Review evidence and usage').click();
+  const children = panel(page).getByRole('region', { name: 'Task-owned child Councils' });
+  await children.locator('summary').click();
+  await expect(children.getByRole('status')).toContainText('Authenticated S2 first-wave trigger: below target');
+  await expect(children).toContainText('no automatic second wave or root approval is implied');
+  await expect(children).toContainText('No verified child receipt is available; no parent vote');
+  await expect(panel(page).getByText('Native pass not verified', { exact: false })).toBeVisible();
+  await expect(panel(page).locator('.council-verified-completion')).toHaveCount(0);
+});
+
 test('native child receipt inspector shows independent evidence without promoting root approval', async ({ page }) => {
   const receipt = {
     rootCycleId: 'task:1000', childSessionId: 'child-session', botId: 'security-child',

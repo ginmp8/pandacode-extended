@@ -216,6 +216,16 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
         const leafAttempts = (child.leafAttempts ?? []).slice(-16);
         const freshLeafCount = leafAttempts.filter(attempt => attempt.round === 2).length;
         const s3 = inspection.strategy === 'two_phase';
+        const validTriggers = new Set(['below_target', 'high_severity_finding', 'conflicting_verdict',
+          'required_criterion', 'required_evidence']);
+        const triggers = (child.automaticEscalationTriggers ?? [])
+          .filter(reason => validTriggers.has(reason));
+        const automaticTriggerHtml = !s3 && inspection.strategy === 'escalated'
+          && inspection.forceEscalation !== true && triggers.length > 0
+          ? '<p role="status">Authenticated S2 first-wave trigger: ' +
+            escape(triggers.join(', ').replaceAll('_', ' ')) +
+            '. Fresh independent child reviewers are required; no automatic second wave or root approval is implied.</p>'
+          : '';
         const hasFreshWave = child.status === 'child_escalation_reviewing'
           || child.status === 'child_challenge_reviewing' || freshLeafCount > 0;
         const escalationHtml = hasFreshWave && !s3
@@ -280,7 +290,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
           '<p>Configured leaf reviewers: ' + escape(String(child.requiredLeafReviewers)) +
           ' · Task session: ' + escape(child.childSessionId) +
           ' · Parent cycle: ' + escape(child.rootCycleId) +
-          '</p>' + childUsageHtml + leafHtml + escalationHtml + challengeHtml +
+          '</p>' + childUsageHtml + leafHtml + automaticTriggerHtml + escalationHtml + challengeHtml +
           receiptHtml + escalationReceiptHtml + challengeReceiptHtml + '</details></li>';
       }).join('') + '</ul></section>'
     : '';

@@ -6373,3 +6373,70 @@ fn nested_m6_direct_bot_and_child_require_independent_native_callbacks() {
 fn nested_m7_direct_bot_automatic_and_child_require_independent_native_callbacks() {
     assert_nested_mixed_root_callbacks(true);
 }
+
+#[test]
+fn unforced_nested_s2_reports_only_authenticated_first_wave_triggers_without_approving() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["security-child", "architecture-child"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.strategy = council::CouncilExecutionStrategy::Escalated;
+        config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
+            .map(|bot| council::CouncilNestedReviewer {
+                bot_id: (*bot).into(), child_reviewers: 2,
+                child_target: 9.5, child_max_rounds: 2,
+            }).collect();
+        config.validate().unwrap();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(
+        &state, &sid, "Evaluate authenticated unforced S2 child triggers", None, None,
+    ).unwrap();
+    let (pending, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Admit native first-wave child reviewers"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    for _ in 0..4 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        let score = {
+            let store = state.store.lock().unwrap();
+            let root = load(&store, &sid).unwrap().unwrap();
+            let security = child_council::inspect(&store, &root).unwrap()
+                .into_iter().find(|child| child.bot_id == "security-child").unwrap();
+            if launch.admission.parent == security.child_session_id { 8.5 } else { 9.7 }
+        };
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                &format!("Independent task-owned native review.\nCouncil score: {score}/10")).unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    }
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    let children = child_council::inspect(&store, &root).unwrap();
+    let security = children.iter().find(|child| child.bot_id == "security-child").unwrap();
+    let architecture = children.iter().find(|child| child.bot_id == "architecture-child").unwrap();
+    assert_eq!(security.automatic_escalation_triggers, vec!["below_target"]);
+    assert_eq!(security.status, "child_escalation_required");
+    assert!(security.verified_child_receipt.is_none());
+    assert!(architecture.automatic_escalation_triggers.is_empty());
+    assert!(children.iter().all(|child| child.leaf_attempts.len() == 2),
+        "a verified trigger signal must never auto-admit extra child reviewers");
+    assert!(!verified_council_pass(&store, &root),
+        "first-wave scores or trigger signals cannot authorize root approval");
+}

@@ -100,6 +100,9 @@ export interface CouncilVerifiedChildChallengeReceipt {
 export interface CouncilChildReservation {
   botId: string; childSessionId: string; rootCycleId: string;
   requiredLeafReviewers: number; status: string;
+  /** Native authenticated first-wave S2 trigger signals; not a second-wave receipt. */
+  automaticEscalationTriggers?: ('below_target' | 'high_severity_finding' | 'conflicting_verdict' |
+    'required_criterion' | 'required_evidence')[];
   /** Native child-leaf lifecycle measurements; no reservation or fabricated billing. */
   observedLeafUsage?: CouncilUsageTotals | null;
   /** Actual native child leaves, scoped to this task; never additional root votes. */

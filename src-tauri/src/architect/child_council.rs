@@ -42,6 +42,9 @@ pub struct ChildReservationView {
     pub root_cycle_id: String,
     pub required_leaf_reviewers: usize,
     pub status: &'static str,
+    /// Authenticated first-wave S2 triggers, never approval or reviewer authority.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub automatic_escalation_triggers: Vec<&'static str>,
     /// Issued native child leaves only; reservations are not measured work.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_leaf_usage: Option<super::council::CouncilUsageTotals>,
@@ -1815,6 +1818,76 @@ pub(super) fn reserve(store: &Store, root: &TeamSnapshot) -> Result<()> {
 
 /// Scoped to the root's existing authenticated read-only native Council
 /// inspector. A record is never evidence of a completed or passing review.
+/// An observed unforced S2 trigger only exists after every first-wave leaf
+/// supplied an independently authenticated native callback and read-only grant.
+/// It cannot create another wave or approve the root; both need separate gates.
+fn authenticated_first_wave_s2_triggers(
+    store: &Store, root: &TeamSnapshot, record: &FrozenChildReservation,
+    child: &TeamSnapshot, choice: &CouncilNestedReviewer,
+) -> Result<Vec<&'static str>> {
+    let Some(config) = root.config.council.as_ref() else { return Ok(Vec::new()) };
+    if config.strategy != super::council::CouncilExecutionStrategy::Escalated
+        || config.force_escalation || !super::active(&root.status)
+        || child.status != "running" || record.root_session_id != root.session_id
+        || !root_artifact_revision(store, root, false)?
+        || !super::council_evidence_is_current(store, root)
+        || !super::council_evidence_is_current(store, child)
+        || require_live_root_session(store, &root.session_id).is_err()
+    {
+        return Ok(Vec::new());
+    }
+    let first = child.workers.iter().filter(|leaf|
+        leaf.council.as_ref().is_some_and(|seat| seat.round == 1)
+    ).collect::<Vec<_>>();
+    if first.len() != choice.child_reviewers || child.workers.len() != first.len() {
+        return Ok(Vec::new());
+    }
+    let mut identities = HashSet::new();
+    let mut sessions = HashSet::new();
+    let mut below_target = false;
+    let mut severe = false;
+    let mut conflict = false;
+    for leaf in &first {
+        let Some(seat) = leaf.council.as_ref() else { return Ok(Vec::new()) };
+        let Some(binding) = leaf.reviewer_binding.as_ref() else { return Ok(Vec::new()) };
+        let Some(score) = seat.score else { return Ok(Vec::new()) };
+        let (native_severe, native_conflict) =
+            super::council::report_claims_escalation(store, &leaf.session_id, Some(score));
+        if leaf.status != "completed" || !leaf.read_only || leaf.abandoned
+            || leaf.wrote_at != 0 || !leaf.files.is_empty()
+            || leaf.id.is_empty() || leaf.session_id.is_empty()
+            || !identities.insert(leaf.id.as_str()) || !sessions.insert(leaf.session_id.as_str())
+            || seat.started_at <= 0 || !score.is_finite()
+            || super::council::latest_score(store, &leaf.session_id) != Some(score)
+            || seat.reported_severe_finding != native_severe
+            || seat.reported_conflict != native_conflict
+            || binding.validate(child, leaf).is_err()
+            || reviewer_security::validate_recorded_authority(store, &child.session_id, binding).is_err()
+        {
+            return Ok(Vec::new());
+        }
+        below_target |= score < config.target.max(choice.child_target);
+        severe |= native_severe;
+        conflict |= native_conflict;
+    }
+    let missing_criterion = config.criteria.iter().filter(|criterion| criterion.required)
+        .any(|criterion| !first.iter().any(|leaf| {
+            let Some(seat) = leaf.council.as_ref() else { return false };
+            seat.lens.eq_ignore_ascii_case(&criterion.lens)
+                && seat.score.is_some_and(|score| score >= config.target.max(criterion.target))
+        }));
+    // A scored report never replaces required independent host evidence.
+    let missing_evidence = config.criteria.iter()
+        .any(|criterion| criterion.required && criterion.evidence_required);
+    let mut reasons = Vec::new();
+    if below_target { reasons.push("below_target"); }
+    if severe { reasons.push("high_severity_finding"); }
+    if conflict { reasons.push("conflicting_verdict"); }
+    if missing_criterion { reasons.push("required_criterion"); }
+    if missing_evidence { reasons.push("required_evidence"); }
+    Ok(reasons)
+}
+
 pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildReservationView>> {
     let Some(council) = root.config.council.as_ref() else { return Ok(Vec::new()) };
     if council.nested_bot_reviewers.is_empty() || root.objective.is_empty() {
@@ -1835,6 +1908,8 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
         let verified_escalation_receipt = read_escalation_receipt(store, root, &record, &team, child)?;
         let verified_challenge_receipt = read_challenge_receipt(store, root, &record, &team, child)?;
         let authenticated_parent_seat = parent_seat(store, root, &record, &team, false)?;
+        let automatic_escalation_triggers =
+            authenticated_first_wave_s2_triggers(store, root, &record, &team, child)?;
         let active = team.status == "running";
         let (observed_leaf_usage, leaf_attempts) =
             match super::council::inspection(&team, false) {
@@ -1847,6 +1922,7 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
             child_session_id: record.child_session_id,
             root_cycle_id: record.root_cycle_id,
             required_leaf_reviewers: child.child_reviewers,
+            automatic_escalation_triggers: automatic_escalation_triggers.clone(),
             observed_leaf_usage,
             leaf_attempts,
             status: if verified_challenge_receipt.is_some() {
@@ -1860,6 +1936,8 @@ pub(super) fn inspect(store: &Store, root: &TeamSnapshot) -> Result<Vec<ChildRes
                 } else {
                     "child_escalation_reviewing"
                 }
+            } else if !automatic_escalation_triggers.is_empty() {
+                "child_escalation_required"
             } else if authenticated_parent_seat.is_some() {
                 "parent_composite_ready_root_pending"
             } else if verified_child_receipt.is_some() {

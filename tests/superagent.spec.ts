@@ -48,6 +48,8 @@ test('one initial Demand file scope reaches native admission without per-WorkIte
     });
   });
   const host=page.locator('#sa-initial-demand-scope');
+  await expect(host).toHaveAttribute('aria-busy','false');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
   await expect(host.getByRole('combobox',{name:'Dispatch'})).toBeVisible();
   await host.getByRole('combobox',{name:'Dispatch'}).selectOption('auto');
   await host.getByRole('textbox',{name:'Task objective'}).fill('Modify one pinned source file');

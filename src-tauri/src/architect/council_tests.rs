@@ -945,7 +945,8 @@ fn criterion_pinned_input_integrity_requires_native_receipts_and_denies_replay()
         "pinned input integrity cannot substitute for a security check");
     unsupported.criteria[0].lens = config.criteria[0].lens.clone();
     unsupported.criteria[0].native_evidence.as_mut().unwrap().kind = "project_tests".into();
-    assert!(unsupported.validate().unwrap_err().contains("required pinned-input"));
+    assert!(unsupported.validate().unwrap_err().contains("native criterion check is unsupported"),
+        "an unimplemented host check cannot pass as pinned-input integrity");
 
     let mut workers = vec![
         seat("integrity-a", 1, Some(9.8), SINCE + 1),
@@ -6879,6 +6880,101 @@ fn nested_m4_forced_s2_passes_only_after_two_authenticated_child_waves() {
     ).unwrap();
     assert!(!verified_council_pass(&store, &saved),
         "removing one authenticated child receipt must revoke the final S2 verdict");
+}
+
+#[test]
+fn nested_m4_triggered_s2_passes_only_after_fresh_native_child_callbacks() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["security-child", "architecture-child"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.strategy = council::CouncilExecutionStrategy::Escalated;
+        config.nested_bot_reviewers = ["security-child", "architecture-child"].iter()
+            .map(|bot| council::CouncilNestedReviewer {
+                bot_id: (*bot).into(), child_reviewers: 2,
+                child_target: 9.5, child_max_rounds: 2,
+            }).collect();
+        config.validate().unwrap();
+        assert_eq!(config.mode(), "m4");
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(
+        &state, &sid, "Check native M4 S2 child-only terminal gates", None, None,
+    ).unwrap();
+    let (pending, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Admit independent child first-wave reviews"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    let security_id = {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        child_council::inspect(&store, &root).unwrap().into_iter()
+            .find(|child| child.bot_id == "security-child")
+            .unwrap().child_session_id
+    };
+    for _ in 0..4 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        let score = if launch.admission.parent == security_id { 8.5 } else { 9.7 };
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                &format!("Independent first-wave findings.\nCouncil score: {score}/10")).unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    }
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        assert!(!verified_council_pass(&store, &root),
+            "a below-target child first wave cannot count as a parent pass");
+    }
+    for _ in 0..2 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        assert_eq!(launch.admission.parent, security_id,
+            "only the triggered child may schedule fresh review leaves");
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                "Independent fresh S2 callback.\nCouncil score: 9.8/10").unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    }
+    let (result, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Validate independent native child S2 receipts"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(result["completed"], true,
+        "M4 unforced S2 may pass only after the authentic triggered child wave");
+    let store = state.store.lock().unwrap();
+    let saved = load(&store, &sid).unwrap().unwrap();
+    assert_eq!(saved.council_status.as_ref().unwrap().state, "passed");
+    assert!(verified_council_pass(&store, &saved),
+        "terminal status must reauthenticate genuine receipts after completion");
+    let child = child_council::inspect(&store, &saved).unwrap()
+        .into_iter().find(|child| child.bot_id == "security-child").unwrap();
+    assert!(child.verified_escalation_receipt.is_some());
+    store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid,
+            format!("native-council-child-s2-receipt:{}:security-child", saved.council_since)],
+    ).unwrap();
+    assert!(!verified_council_pass(&store, &saved),
+        "revoking the authenticated second-wave receipt must revoke terminal approval");
 }
 
 #[test]

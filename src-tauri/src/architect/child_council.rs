@@ -1335,6 +1335,119 @@ pub(super) fn verified_parent_seats(
     Ok((ready && artifact_pinned).then_some(seats))
 }
 
+/// An automatically triggered M4 S2 child-only Council can settle only after
+/// each failing first-wave child has supplied fresh native second-wave proof.
+/// A clean sibling keeps its original authenticated composite; no phantom root
+/// worker or unselected reviewer source may replace either child.
+pub(super) fn verified_triggered_s2_m4_parent_seats(
+    store: &Store, root: &TeamSnapshot,
+) -> Result<Option<Vec<AuthenticatedParentSeat>>> {
+    let Some(config) = root.config.council.as_ref() else { return Ok(None) };
+    if config.strategy != super::council::CouncilExecutionStrategy::Escalated
+        || config.force_escalation || config.mode() != "m4"
+        || !(super::active(&root.status) || root.status == "completed")
+        || !root.workers.is_empty()
+        || !root_artifact_revision(store, root, false)?
+        || !super::council_evidence_is_current(store, root)
+    {
+        return Ok(None);
+    }
+    crate::bots::shared_channels::validate_delivery_council(
+        store, &root.session_id, config,
+    )?;
+    let mut child_ids = HashSet::new();
+    let mut parent_ids = HashSet::new();
+    let mut leaf_ids = HashSet::new();
+    let mut leaf_sessions = HashSet::new();
+    let mut clean_count = 0usize;
+    let mut escalated_count = 0usize;
+    let mut seats = Vec::with_capacity(config.nested_bot_reviewers.len());
+    for choice in &config.nested_bot_reviewers {
+        let record = read(store, root, choice)?
+            .ok_or("child_council_stale: required M4 child reservation is missing.")?;
+        let child = super::load(store, &record.child_session_id)?
+            .ok_or("child_council_stale: required M4 child Council is missing.")?;
+        let triggers = authenticated_first_wave_s2_triggers(
+            store, root, &record, &child, choice,
+        )?;
+        let (seat, expected_leaves) = if triggers.is_empty() {
+            let Some(seat) = parent_seat(store, root, &record, &child, false)? else {
+                return Ok(None);
+            };
+            clean_count += 1;
+            (seat, choice.child_reviewers)
+        } else {
+            // A new read-only review cannot correct a high-severity defect in
+            // the unchanged artifact. Every other triggered case needs actual
+            // independently authenticated second-wave callbacks.
+            if triggers.contains(&"high_severity_finding")
+                || parent_seat(store, root, &record, &child, false)?.is_some()
+            {
+                return Ok(None);
+            }
+            let Some(second) = read_escalation_receipt(
+                store, root, &record, &child, choice,
+            )? else { return Ok(None) };
+            let (count, worker): (i64, Option<String>) = store.db.query_row(
+                "SELECT COUNT(*), MIN(worker_id) FROM architect_workers
+                 WHERE parent_session_id=?1 AND session_id=?2",
+                params![root.session_id, record.child_session_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            ).map_err(|err| err.to_string())?;
+            if count != 1 { return Ok(None); }
+            escalated_count += 1;
+            (AuthenticatedParentSeat {
+                root_session_id: root.session_id.clone(),
+                root_cycle_id: record.root_cycle_id.clone(),
+                parent_worker_id: worker
+                    .ok_or("child_council_stale: composite parent worker missing.")?,
+                child_session_id: record.child_session_id.clone(),
+                bot_id: record.bot_id.clone(),
+                objective_sha256: record.objective_sha256.clone(),
+                policy_sha256: record.policy_sha256.clone(),
+                child_receipt_sha256: digest(
+                    &serde_json::to_vec(&second).map_err(|err| err.to_string())?,
+                ),
+                lowest_score: second.lowest_score,
+                criterion_evidence: second.criterion_evidence,
+            }, 2 * choice.child_reviewers)
+        };
+        if child.workers.len() != expected_leaves
+            || !child_ids.insert(seat.child_session_id.clone())
+            || !parent_ids.insert(seat.parent_worker_id.clone())
+            || seat.bot_id != choice.bot_id
+            || child.workers.iter().any(|leaf| {
+                leaf.id.is_empty() || leaf.session_id.is_empty()
+                    || !leaf_ids.insert(leaf.id.clone())
+                    || !leaf_sessions.insert(leaf.session_id.clone())
+                    || leaf.council.as_ref().is_none_or(|review|
+                        review.round != 1 && review.round != 2)
+            })
+        {
+            return Ok(None);
+        }
+        seats.push(seat);
+    }
+    // Extra persistent composite or escalation rows are never silent votes.
+    for (kind, prefix, expected) in [
+        ("council_parent_seat",
+         format!("native-council-parent-seat:{}:", root.council_since), clean_count),
+        ("council_child_s2_receipt",
+         format!("native-council-child-s2-receipt:{}:", root.council_since), escalated_count),
+    ] {
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests
+             WHERE parent_session_id=?1 AND kind=?2
+             AND substr(key,1,length(?3))=?3",
+            params![root.session_id, kind, prefix],
+            |row| row.get(0),
+        ).map_err(|err| err.to_string())?;
+        if count != expected as i64 { return Ok(None); }
+    }
+    Ok((escalated_count > 0
+        && seats.len() == config.nested_bot_reviewers.len()).then_some(seats))
+}
+
 /// Reauthenticate every forced-S2 child wave from independently persisted
 /// native callbacks and grants. A sibling's score or a first-wave composite
 /// receipt cannot be counted as second-wave evidence.
@@ -2070,12 +2183,14 @@ fn authenticated_first_wave_s2_triggers(
 ) -> Result<Vec<&'static str>> {
     let Some(config) = root.config.council.as_ref() else { return Ok(Vec::new()) };
     if config.strategy != super::council::CouncilExecutionStrategy::Escalated
-        || config.force_escalation || !super::active(&root.status)
+        || config.force_escalation
+        || !(super::active(&root.status) || root.status == "completed")
         || child.status != "running" || record.root_session_id != root.session_id
         || !root_artifact_revision(store, root, false)?
         || !super::council_evidence_is_current(store, root)
         || !super::council_evidence_is_current(store, child)
-        || require_live_root_session(store, &root.session_id).is_err()
+        || (root.status != "completed"
+            && require_live_root_session(store, &root.session_id).is_err())
     {
         return Ok(Vec::new());
     }

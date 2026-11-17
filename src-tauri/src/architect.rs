@@ -587,7 +587,17 @@ fn authenticated_hierarchical_status(
     {
         return None;
     }
-    let children = child_council::verified_parent_seats(store, team).ok().flatten()?;
+    let children = if config.strategy == council::CouncilExecutionStrategy::Escalated
+        && !config.force_escalation && config.mode() == "m4"
+    {
+        match child_council::verified_triggered_s2_m4_parent_seats(store, team) {
+            Ok(Some(seats)) => seats,
+            Ok(None) => child_council::verified_parent_seats(store, team).ok().flatten()?,
+            Err(_) => return None,
+        }
+    } else {
+        child_council::verified_parent_seats(store, team).ok().flatten()?
+    };
     // Child receipts never replace a revoked root reviewer grant. Recheck all
     // applicable native root waves before displaying a passing Council status,
     // not only at the final delivery authorization boundary.

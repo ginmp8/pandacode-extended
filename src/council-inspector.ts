@@ -157,7 +157,8 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
           && receipt.childSessionId === child.childSessionId && receipt.botId === child.botId
           && Number.isFinite(receipt.lowestScore) && receipt.lowestScore >= 0 && receipt.lowestScore <= 10
           && Array.isArray(ids) && ids.length === child.requiredLeafReviewers
-          && ids.length >= 2 && ids.length <= 8 && new Set(ids).size === ids.length;
+          && ids.length >= 2 && ids.length <= 8 && new Set(ids).size === ids.length
+          && ids.every(id => typeof id === 'string' && id.trim().length > 0);
         const escalationReceipt = child.verifiedEscalationReceipt;
         const freshIds = escalationReceipt?.leafWorkerIds ?? [];
         // Correlation is display hygiene, not a second native approval gate.
@@ -175,7 +176,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
           && Array.isArray(freshIds) && freshIds.length === child.requiredLeafReviewers
           && freshIds.length >= 2 && freshIds.length <= 8
           && new Set(freshIds).size === freshIds.length
-          && freshIds.every(id => !ids.includes(id));
+          && freshIds.every(id => typeof id === 'string' && id.trim().length > 0 && !ids.includes(id));
         const challengeReceipt = child.verifiedChallengeReceipt;
         const challenge = challengeReceipt?.phaseTwo;
         const challengeIds = challenge?.leafWorkerIds ?? [];
@@ -198,7 +199,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
           && challengeIds.length === child.requiredLeafReviewers
           && challengeIds.length >= 2 && challengeIds.length <= 8
           && new Set(challengeIds).size === challengeIds.length
-          && challengeIds.every(id => typeof id === 'string' && id.length > 0 && !ids.includes(id));
+          && challengeIds.every(id => typeof id === 'string' && id.trim().length > 0 && !ids.includes(id));
         const measured = child.observedLeafUsage;
         const childUsageHtml = measured
           ? '<p>Child-observed native leaf attempts: ' + escape(String(measured.uniqueAttempts)) +
@@ -224,7 +225,9 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
           && inspection.forceEscalation !== true && triggers.length > 0
           ? '<p role="status">Authenticated S2 first-wave trigger: ' +
             escape(triggers.join(', ').replaceAll('_', ' ')) +
-            '. Fresh independent child reviewers are required; no automatic second wave or root approval is implied.</p>'
+            (freshLeafCount > 0
+              ? '. Fresh native second-wave reviewers have been admitted; independent receipts and root approval are still pending.</p>'
+              : '. Fresh independent child reviewers are required; admission and root approval remain pending.</p>')
           : '';
         const hasFreshWave = child.status === 'child_escalation_reviewing'
           || child.status === 'child_challenge_reviewing' || freshLeafCount > 0;

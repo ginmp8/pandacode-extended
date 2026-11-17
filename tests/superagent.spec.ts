@@ -42,7 +42,7 @@ async function openTeam(host: Locator, name: string): Promise<void> {
   const row=host.locator('.sa-teams-panel .sa-item').filter({hasText:name});
   await expect(row).toBeVisible();
   await row.getByRole('button', {name:'Details'}).click();
-  await expect(host.getByRole('button', {name:'Execution and review'})).toBeVisible();
+  await expect(host.locator('.sa-subtabs').getByRole('button', {name:'Execution and review'})).toBeVisible();
 }
 
 /** A narrow, revision-guarded fake native service. No provider, file or GitHub
@@ -239,7 +239,7 @@ test('With Approval Team persists its native execution mode and remains Off',asy
   await expect(host.getByRole('region',{name:'Guided Team Builder'})).toHaveCount(0);
   await openTeam(host,'Approval Delivery Team');
   await expect(host.getByText('With Approval · human acceptance')).toBeVisible();
-  await host.getByRole('button',{name:'Execution and review'}).click();
+  await host.locator('.sa-subtabs').getByRole('button',{name:'Execution and review'}).click();
   await expect(host.locator('form[data-sa-form="strategy-update"] input[value="approval"]')).toBeChecked();
   await expect(host.locator('form[data-sa-form="strategy-update"]')).toBeVisible();
 });
@@ -295,7 +295,7 @@ test('native execution mode switch enables required Council before writing Full 
   await page.goto('/?bots=sample');
   const host=await mountNativeFixture(page);
   await openTeam(host,'Native Team');
-  await host.getByRole('button',{name:'Execution and review'}).click();
+  await host.locator('.sa-subtabs').getByRole('button',{name:'Execution and review'}).click();
   const form=host.locator('form[data-sa-form="strategy-update"]');
   await form.getByRole('radio',{name:/Full Auto/}).check();
   await form.getByRole('button',{name:'Save future-Team policy'}).click();
@@ -314,7 +314,7 @@ test('switching Full Auto back to With Approval removes Council before changing 
   await page.goto('/?bots=sample');
   const host=await mountNativeFixture(page,{mode:'full_auto'});
   await openTeam(host,'Native Team');
-  await host.getByRole('button',{name:'Execution and review'}).click();
+  await host.locator('.sa-subtabs').getByRole('button',{name:'Execution and review'}).click();
   const form=host.locator('form[data-sa-form="strategy-update"]');
   await form.getByRole('radio',{name:/With Approval/}).check();
   await form.getByRole('button',{name:'Save future-Team policy'}).click();
@@ -329,7 +329,7 @@ test('Full Auto configuration rejects insufficient reviewers without native muta
   await page.goto('/?bots=sample');
   const host=await mountNativeFixture(page,{reviewers:1});
   await openTeam(host,'Native Team');
-  await host.getByRole('button',{name:'Execution and review'}).click();
+  await host.locator('.sa-subtabs').getByRole('button',{name:'Execution and review'}).click();
   const form=host.locator('form[data-sa-form="strategy-update"]');
   await form.getByRole('radio',{name:/Full Auto/}).check();
   await form.getByRole('button',{name:'Save future-Team policy'}).click();

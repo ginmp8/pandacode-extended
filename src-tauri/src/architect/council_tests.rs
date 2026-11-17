@@ -1155,7 +1155,7 @@ fn native_unforced_s2_low_score_admits_fresh_real_reviewer_sessions() {
         let (run, _) = claim(&state, launch);
         assert!(run.config.reviewer_boundary, "S2 must use native read-only reviewers");
         finish(&state, &run, &format!(
-            "Independent first-wave review.\\nCouncil score: {score}/10"
+            "Independent first-wave review.\nCouncil score: {score}/10"
         ), true);
     }
     let initial = saved(&state, &sid);
@@ -1180,7 +1180,7 @@ fn native_unforced_s2_low_score_admits_fresh_real_reviewer_sessions() {
         let (run, _) = claim(&state, launch);
         assert!(run.config.reviewer_boundary);
         finish(&state, &run, &format!(
-            "Fresh independent escalation review.\\nCouncil score: {score}/10"
+            "Fresh independent escalation review.\nCouncil score: {score}/10"
         ), true);
     }
     let completed = saved(&state, &sid);

@@ -153,6 +153,22 @@ fn resume_authorized_retried_children(store:&Store,now:i64)->Result<usize> {
                AND grant.policy_revision=plan.policy_revision
                AND grant.project_id=root.project_id AND grant.actor=root.actor
                AND grant.allowed_tools='[]' AND grant.allowed_side_effects=0
+               -- An Auto Demand must retain its original source grant
+               -- at this same native child-recovery state boundary.
+               AND (NOT EXISTS(
+                   SELECT 1 FROM sa_auto_intake intake WHERE intake.ticket_id=root.id)
+                 OR EXISTS(
+                   SELECT 1 FROM sa_auto_intake intake
+                   JOIN sa_event_sources source ON source.id=intake.source_id
+                   JOIN sa_auto_source_grants auto_grant ON auto_grant.source_id=source.id
+                   WHERE intake.ticket_id=root.id AND intake.state='admitted'
+                     AND intake.source_revision=source.policy_revision
+                     AND source.mode='observe' AND source.event_kind='issues.opened'
+                     AND auto_grant.source_revision=source.policy_revision
+                     AND auto_grant.repository=source.repository
+                     AND lower(auto_grant.actor_filter)=lower(source.actor_filter)
+                     AND auto_grant.event_kind=source.event_kind
+                     AND auto_grant.revoked_at IS NULL AND auto_grant.expires_at>?1))
            )",
         [now],
     ).map_err(|e|e.to_string())
@@ -615,7 +631,14 @@ mod tests {
                ticket_id TEXT,revoked INTEGER,expires_at INTEGER,
                policy_revision INTEGER,project_id TEXT,actor TEXT,
                allowed_tools TEXT,allowed_side_effects INTEGER);
-             INSERT INTO sa_orchestrations VALUES('team',1,1,'project');
+             CREATE TABLE sa_event_sources(id TEXT,repository TEXT,actor_filter TEXT,
+                 event_kind TEXT,mode TEXT,policy_revision INTEGER);
+              CREATE TABLE sa_auto_source_grants(source_id TEXT,source_revision INTEGER,
+                 repository TEXT,actor_filter TEXT,event_kind TEXT,revoked_at INTEGER,
+                 expires_at INTEGER);
+              CREATE TABLE sa_auto_intake(source_id TEXT,ticket_id TEXT,state TEXT,
+                 source_revision INTEGER);
+              INSERT INTO sa_orchestrations VALUES('team',1,1,'project');
              INSERT INTO sa_tickets VALUES
                ('active','team','queued',NULL,1,1,'project','local-user'),
                ('stopped','team','stopped',NULL,1,1,'project','local-user'),
@@ -670,6 +693,100 @@ mod tests {
         assert_eq!(resume_authorized_retried_children(&store,101).unwrap(),0);
     }
 
+
+    #[test]
+    fn github_auto_expiry_and_revocation_fence_retried_work_items() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_work_items(id TEXT PRIMARY KEY,ticket_id TEXT,state TEXT,
+                 child_ticket_id TEXT,last_reason TEXT,updated_at INTEGER);
+             CREATE TABLE sa_tickets(id TEXT PRIMARY KEY,orchestration_id TEXT,
+                 state TEXT,active_assignment_id TEXT,revision INTEGER,
+                 policy_revision INTEGER,project_id TEXT,actor TEXT);
+             CREATE TABLE sa_demand_plans(ticket_id TEXT,state TEXT,
+                 ticket_revision INTEGER,policy_revision INTEGER);
+             CREATE TABLE sa_orchestrations(id TEXT,enabled INTEGER,
+                 policy_revision INTEGER,project_id TEXT);
+             CREATE TABLE sa_mandates(ticket_id TEXT,revoked INTEGER,
+                 expires_at INTEGER,policy_revision INTEGER,project_id TEXT,
+                 actor TEXT,allowed_tools TEXT,allowed_side_effects INTEGER);
+             CREATE TABLE sa_event_sources(id TEXT,repository TEXT,actor_filter TEXT,
+                 event_kind TEXT,mode TEXT,policy_revision INTEGER);
+             CREATE TABLE sa_auto_source_grants(source_id TEXT,source_revision INTEGER,
+                 repository TEXT,actor_filter TEXT,event_kind TEXT,
+                 revoked_at INTEGER,expires_at INTEGER);
+             CREATE TABLE sa_auto_intake(source_id TEXT,ticket_id TEXT,
+                 state TEXT,source_revision INTEGER);
+             INSERT INTO sa_orchestrations VALUES('team',1,1,'project');"
+        ).unwrap();
+        // Manual work is unaffected. Auto work requires the unchanged source.
+        for (name,source,mode,revision,grant_revision,revoked_at,expires_at) in [
+            ("manual",None,"",0,0,None,0),
+            ("valid",Some("source-valid"),"observe",1,1,None,500),
+            ("expired",Some("source-expired"),"observe",1,1,None,50),
+            ("revoked",Some("source-revoked"),"observe",1,1,Some(50),500),
+            ("stale",Some("source-stale"),"observe",2,1,None,500),
+            ("off",Some("source-off"),"off",1,1,None,500),
+        ] {
+            let child=format!("child-{name}");
+            let item=format!("item-{name}");
+            db.execute(
+                "INSERT INTO sa_tickets VALUES(?1,'team','queued',NULL,1,1,
+                 'project','local-user')",[name],
+            ).unwrap();
+            db.execute(
+                "INSERT INTO sa_tickets VALUES(?1,'team','running',NULL,1,1,
+                 'project','local-user')",[&child],
+            ).unwrap();
+            db.execute(
+                "INSERT INTO sa_demand_plans VALUES(?1,'active',1,1)",[name],
+            ).unwrap();
+            db.execute(
+                "INSERT INTO sa_mandates VALUES(?1,0,500,1,'project',
+                 'local-user','[]',0)",[name],
+            ).unwrap();
+            db.execute(
+                "INSERT INTO sa_work_items VALUES(?1,?2,'blocked',?3,
+                 'prior block',1)",params![&item,name,&child],
+            ).unwrap();
+            if let Some(source)=source {
+                db.execute(
+                    "INSERT INTO sa_event_sources VALUES(?1,'repo','actor',
+                     'issues.opened',?2,?3)",params![source,mode,revision],
+                ).unwrap();
+                db.execute(
+                    "INSERT INTO sa_auto_source_grants VALUES(?1,?2,'repo',
+                     'actor','issues.opened',?3,?4)",
+                    params![source,grant_revision,revoked_at,expires_at],
+                ).unwrap();
+                db.execute(
+                    "INSERT INTO sa_auto_intake VALUES(?1,?2,'admitted',1)",
+                    params![source,name],
+                ).unwrap();
+            }
+        }
+        let store=Store{db,path:std::path::PathBuf::from(":memory:")};
+        assert_eq!(resume_authorized_retried_children(&store,100).unwrap(),2);
+        for (name,expected) in [
+            ("manual","running"),("valid","running"),("expired","blocked"),
+            ("revoked","blocked"),("stale","blocked"),("off","blocked"),
+        ] {
+            let actual:String=store.db.query_row(
+                "SELECT state FROM sa_work_items WHERE id=?1",
+                [format!("item-{name}")],|row|row.get(0),
+            ).unwrap();
+            assert_eq!(actual,expected,"WorkItem {name}");
+        }
+        // A subsequent retry must not restore the same now-revoked child.
+        store.db.execute(
+            "UPDATE sa_work_items SET state='blocked' WHERE id='item-valid'",[],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_auto_source_grants SET revoked_at=101
+             WHERE source_id='source-valid'",[],
+        ).unwrap();
+        assert_eq!(resume_authorized_retried_children(&store,102).unwrap(),0);
+    }
 
     #[test]
     fn unsettled_frontier_candidates_cannot_starve_an_independent_demand() {

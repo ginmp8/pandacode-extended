@@ -18,6 +18,7 @@ export interface TeamBuilderInput {
   workerBotIds: string[];
   reviewerBotIds: string[];
   councilRequired: boolean;
+  executionMode: 'approval' | 'full_auto';
 }
 
 export class GuidedTeamBuilder {
@@ -31,6 +32,7 @@ export class GuidedTeamBuilder {
   private workers: string[] = [];
   private reviewers: string[] = [];
   private councilRequired = false;
+  private executionMode: 'approval' | 'full_auto' = 'approval';
 
   reset(): void {
     this.visible = false;
@@ -43,6 +45,7 @@ export class GuidedTeamBuilder {
     this.workers = [];
     this.reviewers = [];
     this.councilRequired = false;
+    this.executionMode = 'approval';
   }
 
   private allIds(): string[] {
@@ -89,6 +92,7 @@ export class GuidedTeamBuilder {
       workerBotIds: [this.primaryWorkerId, ...this.workers],
       reviewerBotIds: [...this.reviewers],
       councilRequired: this.councilRequired,
+      executionMode: this.executionMode,
     };
   }
 
@@ -128,9 +132,11 @@ export class GuidedTeamBuilder {
         if (!(target instanceof HTMLSelectElement)) return false;
         this.reviewers = Array.from(target.selectedOptions, item => item.value);
         break;
-      case 'builderCouncilRequired':
-        if (!(target instanceof HTMLInputElement)) return false;
-        this.councilRequired = target.checked;
+      case 'builderExecutionMode':
+        if (!(target instanceof HTMLInputElement) ||
+            !['approval','full_auto'].includes(target.value)) return false;
+        this.executionMode = target.value as 'approval' | 'full_auto';
+        this.councilRequired = this.executionMode === 'full_auto';
         break;
       default: return false;
     }
@@ -250,14 +256,19 @@ export class GuidedTeamBuilder {
         '<p>Native Council Reviewers are independent read-only roles. ' +
         'Skill presence alone does not prove a running harness can invoke it.</p>';
     } else if (this.step === 4) {
-      content = '<p>Saved execution mode: <strong>Off</strong>. Enable Manual separately ' +
-        'after native checks. Parallel Worker execution, GitHub Auto and ' +
-        'nested subagent admission are not available in the current runtime.</p>' +
-        '<label><input type="checkbox" name="builderCouncilRequired"' +
-        (this.councilRequired ? ' checked' : '') +
-        '> Require independent native Council before completion</label>' +
-        '<p>The runtime enforces one active Worker per Team, bounded attempts ' +
-        'and 30 minutes per provider attempt. This wizard cannot issue or widen grants.</p>';
+      content = '<fieldset class="sa-mode-choices"><legend>Execution mode</legend>' +
+        '<label class="sa-mode-option"><input type="radio" name="builderExecutionMode" value="approval"' +
+          (this.executionMode === 'approval' ? ' checked' : '') +
+          '><span><strong>With Approval</strong><small>Every completed WorkItem waits for an explicit human decision before dependents advance.</small></span></label>' +
+        '<label class="sa-mode-option"><input type="radio" name="builderExecutionMode" value="full_auto"' +
+          (this.executionMode === 'full_auto' ? ' checked' : '') +
+          '><span><strong>Full Auto</strong><small>Plan and dispatch native WorkItems automatically. Independent native Council must verify each result to complete it.</small></span></label>' +
+        '</fieldset>' +
+        '<p>' + (this.executionMode === 'full_auto'
+          ? 'Select at least two distinct native reviewer bots in Members. Without verified Council, work stops rather than being accepted.'
+          : 'Human acceptance is required. No Council verdict can silently replace it.') + '</p>' +
+        '<p>Both policies preserve each bot\'s model, skills and native conversation. Tool and GitHub effects still require specific native grants.</p>' +
+        '<p>Saving a Team leaves it Off until explicitly enabled; no request or permission is created by configuration.</p>';
     } else {
       const problem = this.problem(bots, 4);
       content = '<dl><dt>Team</dt><dd>' + safe(this.name.trim()) + '</dd>' +
@@ -268,7 +279,8 @@ export class GuidedTeamBuilder {
         '</dd><dt>Reviewers</dt><dd>' +
         (this.reviewers.map(name).map(safe).join(', ') || 'None') + '</dd>' +
         '<dt>Native Council</dt><dd>' + (this.councilRequired ? 'Required' : 'Off') +
-        '</dd><dt>Autonomy</dt><dd>Off; no new task or tool grants</dd></dl>' +
+        '</dd><dt>Execution mode</dt><dd>' + (this.executionMode === 'full_auto' ? 'Full Auto' : 'With Approval') +
+        '</dd><dt>Team state</dt><dd>Off until enabled; no task or tool grants</dd></dl>' +
         (problem ? '<p role="alert">' + safe(problem) + '</p>' :
           '<p>Save rechecks all native bot, project and versioned Team guards.</p>') +
         '<button class="primary-button" type="submit"' +

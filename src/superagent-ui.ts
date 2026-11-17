@@ -986,22 +986,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         safe(String(Math.floor(demandPreflight.attemptBudgetMs / 60000))) + ' minutes</dd></dl>' +
         '<p>This is a read-only snapshot, not a grant, Ticket or guaranteed reservation. ' +
         'Native admission rechecks all policy, availability and checkout limits.</p></section>' : '';
-    const active = chosen ? '<section class="sa-pane" aria-label="Selected orchestration"><header><h3>' +
-      safe(chosen.name) + '</h3><div class="sa-actions"><button type="button" data-sa-enable="' +
-      safe(chosen.id) + '">' + (chosen.enabled ? 'Disable' : 'Enable manual') +
-      '</button><button type="button" data-sa-duplicate="' + safe(chosen.id) +
-      '">Duplicate as new Team</button><button type="button" data-sa-delete="' + safe(chosen.id) + '"' +
-      (chosen.enabled ? ' disabled' : '') + '>Delete unused</button></div></header>' +
-      '<form data-sa-form="edit"><label>Preset title<input name="name" required maxlength="120" value="' + safe(chosen.name) + '"></label>' +
-      '<div class="sa-grid"><label>Edit coordinator<select name="coordinatorBotId" required>' +
+    const teamEditor = chosen ? '<section class="sa-pane" aria-label="Team identity"><h3>Team identity</h3>' +
+      '<form data-sa-form="edit"><label>Team name<input name="name" required maxlength="120" value="' + safe(chosen.name) + '"></label>' +
+      '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" required>' +
       optionsFor(chosen.coordinatorBotId) + '</select></label>' +
-      '<label>Edit worker<select name="workerBotId" required>' + optionsFor(chosen.workerBotId) +
-      '</select></label></div><button class="primary-button" type="submit"' +
-      '>Save preset</button></form>' +
-      '<p>Policy revision ' + chosen.policyRevision + ' · Native read-only permission until separately authorized.</p>' +
-      '<p>Disabled Teams can rotate primary roles for future Demands only after all earlier ' +
-      'work is settled, native role snapshots are verified, and no GitHub sources or ' +
-      'unresolved effects remain. Previous Demand roles never change.</p>' +
+      '<label>Primary Worker<select name="workerBotId" required>' +
+      optionsFor(chosen.workerBotId) + '</select></label></div>' +
+      '<button class="primary-button" type="submit">Save Team identity</button></form>' +
+      '<p>Identity changes apply to future Demands only. Existing native bot sessions and approvals remain attached to their original Tickets.</p>' +
+      '<div class="sa-actions"><button type="button" data-sa-duplicate="' + safe(chosen.id) +
+      '">Duplicate Team</button><button type="button" data-sa-delete="' + safe(chosen.id) + '"' +
+      (chosen.enabled ? ' disabled' : '') + '>Delete unused Team</button></div></section>' : '';
+    const active = chosen ? '<section class="sa-pane" aria-label="Native Demand and WorkItems">' +
+      '<header><h3>Assign Demand · ' + safe(chosen.name) + '</h3>' +
+      '<button type="button" data-sa-return-team>Team settings</button></header>' +
       '<form data-sa-form="run"><label>Task objective<textarea name="objective" rows="3" maxlength="16000" required>' +
       safe(demandObjective) + '</textarea></label>' +
       '<p class="sa-execution-explainer"><strong>Native Team orchestration</strong> · ' +
@@ -1020,11 +1018,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         'as an immutable child grant. Leave blank for read-only planning and ' +
         'later per-WorkItem authorization. Shell, MCP and GitHub writes stay denied.</p>'
         : '') +
-      '<button type="button" data-sa-preflight>Review native preflight</button>' +
       '<button class="primary-button" type="submit"' +
       (chosen.enabled && teamStrategy?.orchestrationId === chosen.id &&
         teamStrategy.executionMode !== 'off' ? '' : ' disabled') +
-      '>Start Demand</button></form>' + nativePreflight +
+      '>Start Demand</button></form>' +
       '<div class="sa-title"><h4>Tickets</h4><button type="button" data-sa-refresh>Refresh</button></div>' +
       '<ul class="sa-tickets">' + (tickets.map(ticket =>
         '<li><div><strong>' + safe(ticket.objective) + '</strong><small>' + safe(ticket.state) +
@@ -1039,8 +1036,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               ? ' disabled aria-describedby="sa-finalization-blocked"' : '') +
             '>Accept evidence</button>' +
             '<button type="button" data-sa-reject="' + safe(ticket.id) + '">Reject evidence</button>' : '') +
-        (ticket.state === 'queued' ? '<button type="button" data-sa-dispatch="' + safe(ticket.id) + '">Dispatch worker</button>' +
-          '<button type="button" data-sa-write-request="' + safe(ticket.id) + '">Request file writes</button>' : '') +
+        (ticket.state === 'queued' ? '<button type="button" data-sa-write-request="' +
+          safe(ticket.id) + '">Request file writes</button>' : '') +
         (ticket.state === 'blocked' ? '<button type="button" data-sa-retry="' + safe(ticket.id) + '">Retry manually</button>' : '') +
         (!['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)
           ? '<button type="button" data-sa-stop="' + safe(ticket.id) + '">Stop</button>' : '') +
@@ -1149,7 +1146,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '</section>' : '';
     const teamRoles = chosen
       ? '<section class="sa-pane" aria-label="Configured Team roles"><h3>Configure Team roles</h3>' +
-        '<p>Roles reuse existing bot identities, models, harnesses and Skills. Additional Workers remain unavailable for autonomous parallel dispatch; configured Reviewers can be required through native Council.</p>' +
+        '<p>Coordinator, Workers and independent Council Reviewers reuse their native bot profiles, models, reasoning effort, permissions and Skills. Conflicting checkout writes remain serialized.</p>' +
         (!roleRoster || roleRoster.orchestrationId !== chosen.id
           ? '<button type="button" data-sa-role-load>Load native members</button>'
           : '<p>Coordinator: ' + safe(botName(roleRoster.coordinatorBotId)) +
@@ -1186,13 +1183,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '</section>' : '';
     const overview = chosen
       ? '<section class="sa-pane" aria-label="Team overview"><h3>Selected Team</h3>' +
-        '<p>' + safe(chosen.name) + ' · ' + (chosen.enabled ? 'Manual read-only' : 'Disabled / Off') +
+        '<p>' + safe(chosen.name) + ' · ' + (chosen.enabled ? 'Enabled' : 'Off') +
         ' · Policy revision ' + chosen.policyRevision + '</p>' +
         '<dl><dt>Coordinator (read-only)</dt><dd>' + safe(botName(chosen.coordinatorBotId)) + '</dd>' +
         '<dt>Worker</dt><dd>' + safe(botName(chosen.workerBotId)) + '</dd>' +
         '<dt>Configured members</dt><dd>' + safe(roleSummary(chosen)) + '</dd>' +
         '<dt>Review policy</dt><dd>' + (chosen.councilRequired ? 'Native Council required' : 'Council Off') + '</dd>' +
-        '<dt>Current native support</dt><dd>Manual worker dispatch with explicitly authorized scoped writes on supported platforms; authenticated GitHub Auto only with an exact native grant.</dd></dl>' +
+        '<dt>Execution policy</dt><dd>' +
+        (teamStrategy?.orchestrationId === chosen.id
+          ? (teamStrategy.executionMode === 'full_auto' ? 'Full Auto · independent Council' :
+            teamStrategy.executionMode === 'approval' ? 'With Approval · human acceptance' :
+            'Choose an execution mode')
+          : 'Loading native policy') +
+        '</dd></dl>' +
         '<div class="sa-actions"><button type="button" data-sa-enable="' + safe(chosen.id) + '"' +
         '>' + (chosen.enabled ? 'Disable Team' : 'Enable Team') + '</button>' +
         '<button type="button" data-sa-open-runs>Assign demand / Open runs</button></div>' +
@@ -1297,7 +1300,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           (teamPanel === id ? 'page' : 'false') + '">' + label + '</button>').join('') +
         '</nav>' +
         (teamPanel === 'overview' ? overview :
-          teamPanel === 'members' ? teamRoles : strategyPane)
+          teamPanel === 'members' ? teamEditor + teamRoles : strategyPane)
       : '<section class="sa-pane"><h3>No Team selected</h3>' +
         '<p>Return to Teams and create or select a Team.</p></section>';
     host.innerHTML = '<div class="sa-ui">' +
@@ -1698,6 +1701,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       host.querySelector<HTMLButtonElement>('[data-sa-global-demand-layout="' + layout + '"]')
         ?.focus({preventScroll:true});
       return;
+    }
+    if (target.hasAttribute('data-sa-return-team')) {
+      workspaceView = 'team'; render(); return;
     }
     if (target.hasAttribute('data-sa-team-back')) {
       workspaceView = 'teams'; render(); return;

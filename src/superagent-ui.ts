@@ -514,9 +514,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         ? chosen.coordinatorBotId : chosen.workerBotId));
     // A preview is a read-only observation, never a grant or authorization.
     const manualAdmissionReady = Boolean(chosen?.enabled && preflightCurrent &&
-      (demandPreflight?.eligible || demandPreflight?.canStageBlocked === true) &&
+      demandPreflight && (demandPreflight.eligible || demandPreflight.canStageBlocked === true) &&
       demandPreflight.allowedTools.length === 0 && !demandPreflight.allowedSideEffects);
-    const nativePreflight = preflightCurrent
+    const nativePreflight = preflightCurrent && demandPreflight
       ? '<section class="sa-pane" role="region" aria-label="Native demand preflight">' +
         '<h4>Native demand preflight</h4><p role="status">' +
         (demandPreflight.eligible ? 'Eligible for manual read-only admission now.' :

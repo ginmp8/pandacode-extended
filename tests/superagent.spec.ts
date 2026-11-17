@@ -2237,3 +2237,90 @@ test('Demand WorkItem inspector explains native dependency blockers without laun
   expect(calls.some(c=>/authorize|dispatch|accept|stop|retry|spawn/.test(c))).toBe(false);
 });
 
+
+
+test('batch native Demand write confirmation covers multiple WorkItems without manual dispatch',async ({page})=>{
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-batch-demand-writes';
+    host.style.cssText='position:fixed;inset:0;z-index:10000;overflow:auto;background:var(--bg)';
+    document.body.appendChild(host);
+    const ticket={id:'root',orchestrationId:'team',objective:'Implement and test a change',
+      state:'queued',revision:4,evidence:'Validated coordinator plan'};
+    let authorized=false,attempts=0;
+    const calls:Array<{command:string;args?:Record<string,unknown>}>=[];
+    (window as unknown as {batchDemandWriteCalls:typeof calls}).batchDemandWriteCalls=calls;
+    const plan=()=>({
+      ticketId:'root',ticketRevision:4,teamVersion:2,policyRevision:1,
+      planSha256:'a'.repeat(64),state:'active',
+      items:['implement','test'].map((key,ordinal)=>({
+        id:key,key,ordinal,workerBotId:'worker',objective:'Perform '+key,
+        dependsOn:ordinal?['implement']:[],state:'pending',childTicketId:null,
+        childTicketState:null,lastReason:null,requiresWrite:true,
+        writeAuthorized:authorized,
+      })),
+    });
+    mountSuperagent(host,async (command,args)=>{
+      if(command==='bots_list')return [
+        {id:'lead',name:'Lead',paused:false},{id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [{
+        id:'team',name:'Native team',coordinatorBotId:'lead',
+        workerBotId:'worker',enabled:true,policyRevision:1,
+      }] as never;
+      if(command==='superagent_tickets')return [ticket] as never;
+      if(command==='superagent_snapshot')return {
+        ticket,assignments:[],activity:[],finalizationGate:'not_pending',
+        mandate:{actor:'local-user',authorizationId:'native-manual',policyRevision:1,
+          projectId:'fixture',expiresAt:1800000000000,revoked:false,
+          allowedTools:[],allowedSideEffects:false},
+      } as never;
+      if(command==='superagent_source_thread_links')return [] as never;
+      if(command==='superagent_demand_plan')return plan() as never;
+      if(command==='superagent_authorize_demand_work_item_writes'){
+        calls.push({command,args:{...args}});
+        attempts++;
+        if(attempts===1)throw Error('Native confirmation cancelled.');
+        authorized=true;
+        return plan() as never;
+      }
+      throw Error('Unexpected native call: '+command);
+    });
+  });
+  const host=page.locator('#sa-batch-demand-writes');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  await expect(host).toHaveAttribute('aria-busy','false',{timeout:30_000});
+  const inspector=host.getByRole('region',{name:'Demand WorkItems'});
+  await inspector.getByRole('button',{name:'Inspect WorkItems'}).click();
+  const batch=inspector.getByRole('button',{name:'Authorize shared paths for pending WorkItems'});
+  await expect(batch).toBeVisible();
+  await batch.click();
+  const form=inspector.locator('form[data-sa-form="work-write-scope"]');
+  await expect(form).toContainText('2 pending WorkItems');
+  await expect(form).toContainText('same exact file paths');
+  await form.getByRole('textbox',{name:'Exact project-relative paths, one per line'})
+    .fill('src/allowed.rs');
+  await form.getByRole('button',{name:'Review native authorization'}).click();
+  await expect(host.getByRole('alert')).toContainText('Native confirmation cancelled.');
+  await expect(batch).toBeVisible();
+  await form.getByRole('button',{name:'Review native authorization'}).click();
+  await expect(host.getByRole('status').filter({hasText:'One native confirmation authorized 2 pending WorkItems'}))
+    .toBeVisible();
+  const calls=await page.evaluate(()=>(window as unknown as {
+    batchDemandWriteCalls:Array<{command:string;args?:Record<string,unknown>}>
+  }).batchDemandWriteCalls);
+  expect(calls).toEqual([{
+    command:'superagent_authorize_demand_work_item_writes',
+    args:{ticketId:'root',expectedRevision:4,allowedPaths:['src/allowed.rs']},
+  },{
+    command:'superagent_authorize_demand_work_item_writes',
+    args:{ticketId:'root',expectedRevision:4,allowedPaths:['src/allowed.rs']},
+  }]);
+  await expect(inspector.getByText('Exact file scope confirmed locally')).toHaveCount(2);
+  await expect(inspector.getByRole('button',{name:'Authorize shared paths for pending WorkItems'}))
+    .toHaveCount(0);
+});

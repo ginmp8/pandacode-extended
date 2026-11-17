@@ -1251,6 +1251,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           (id === 'runs' && (workspaceView === 'new-demand' || workspaceView === 'run'))) ? 'page' : 'false') +
         '">' + label + '</button>').join('') +
       '<p class="sa-nav-label sa-nav-separator">Team settings</p>' +
+      '<button type="button" data-sa-team-settings="members"' +
+        (!presets.length ? ' disabled' : '') +
+        ' aria-current="' + (workspaceView === 'team' && teamPanel === 'members' ? 'page' : 'false') +
+        '">Members and roles</button>' +
+      '<button type="button" data-sa-team-settings="execution"' +
+        (!presets.length ? ' disabled' : '') +
+        ' aria-current="' + (workspaceView === 'team' && teamPanel === 'execution' ? 'page' : 'false') +
+        '">Execution and review</button>' +
       ([
         ['sources','GitHub sources'],['portable','Import / export'],
       ] as const).map(([id,label]) =>
@@ -1747,6 +1755,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target.hasAttribute('data-sa-edit-mode')) {
       teamPanel = 'execution'; render();
       host.querySelector<HTMLInputElement>('input[name="executionMode"]:checked')?.focus({preventScroll:true});
+      return;
+    }
+    if (target.dataset.saTeamSettings) {
+      const tab=target.dataset.saTeamSettings;
+      if (!['members','execution'].includes(tab) || !selected) return;
+      workspaceView='team';
+      teamPanel=tab as typeof teamPanel;
+      render();
       return;
     }
     if (target.dataset.saTeamTab) {

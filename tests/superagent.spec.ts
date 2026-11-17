@@ -78,10 +78,13 @@ async function mountNativeFixture(page: Page, options: {
     host.style.cssText='position:fixed;inset:0;z-index:10000;overflow:auto;background:var(--bg);padding:20px';
     document.body.appendChild(host);
     const bots=[
-      {id:'coord',name:'Coordinator',paused:false,projectId:'project-1',provider:'codex',model:'test-coord',mode:'ask',skills:[]},
-      {id:'worker',name:'Worker',paused:false,projectId:'project-1',provider:'codex',model:'test-worker',mode:'ask',skills:['native-test']},
-      {id:'rev1',name:'Reviewer One',paused:false,projectId:'review-1',provider:'claude',model:'review-a',mode:'ask',skills:[]},
-      {id:'rev2',name:'Reviewer Two',paused:false,projectId:'review-2',provider:'claude',model:'review-b',mode:'ask',skills:[]},
+      {id:'coord',name:'Coordinator',avatar:'panda:0',paused:false,projectId:'project-1',provider:'codex',model:'test-coord',mode:'ask',skills:[]},
+      {id:'worker',name:'Worker',avatar:'panda:1',paused:false,projectId:'project-1',provider:'codex',model:'test-worker',mode:'ask',skills:['native-test']},
+      {id:'worker2',name:'Worker Two',avatar:'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/Vy8AAAAASUVORK5CYII=',paused:false,projectId:'project-1',provider:'codex',model:'test-worker-2',mode:'ask',skills:[]},
+      {id:'other',name:'Other Project Worker',avatar:'panda:3',paused:false,projectId:'project-2',provider:'codex',model:'other',mode:'ask',skills:[]},
+      {id:'paused',name:'Paused Worker',avatar:'panda:2',paused:true,projectId:'project-1',provider:'codex',model:'paused',mode:'ask',skills:[]},
+      {id:'rev1',name:'Reviewer One',avatar:'panda:4',paused:false,projectId:'review-1',provider:'claude',model:'review-a',mode:'ask',skills:[]},
+      {id:'rev2',name:'Reviewer Two',avatar:'panda:5',paused:false,projectId:'review-2',provider:'claude',model:'review-b',mode:'ask',skills:[]},
     ];
     const requestedReviewers=opts.reviewers ?? 2;
     const cfg={
@@ -219,6 +222,74 @@ async function mountNativeFixture(page: Page, options: {
   await expect(host).toHaveAttribute('aria-busy','false',{timeout:30_000});
   return host;
 }
+
+test('Team wizard uses searchable checkbox pickers with native bot images and project guards',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page);
+  await host.getByRole('button',{name:'New Team',exact:true}).click();
+  const wizard=host.getByRole('region',{name:'Guided Team Builder'});
+  await wizard.getByRole('textbox',{name:'Team name'}).fill('Image-aware Team');
+  await wizard.getByRole('button',{name:'Next'}).click();
+  await wizard.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Coordinator'});
+  await wizard.getByRole('combobox',{name:'Primary Worker'}).selectOption({label:'Worker'});
+  const workers=wizard.locator('details[data-sa-multi="builderWorkers"]');
+  await expect(workers.locator('select[multiple]')).toHaveCount(0);
+  await workers.locator('summary').click();
+  await expect(workers.getByRole('checkbox',{name:/Paused Worker/})).toBeDisabled();
+  await expect(workers.getByRole('checkbox',{name:/Other Project Worker/})).toBeDisabled();
+  const search=workers.getByRole('searchbox',{name:/Search Additional Workers/});
+  await search.fill('worker two');
+  await workers.getByRole('checkbox',{name:/Worker Two/}).check();
+  await expect(workers).toHaveAttribute('open','');
+  await expect(workers.getByRole('searchbox')).toHaveValue('worker two');
+  await expect(workers.locator('.sa-multi-faces img')).toHaveAttribute('src',/^data:image\/png;base64,/);
+  await expect(workers.locator('.sa-multi-count')).toContainText('1 / 15');
+  await workers.getByRole('button',{name:'Done'}).click();
+  await expect(workers).not.toHaveAttribute('open','');
+  const council=wizard.locator('details[data-sa-multi="builderReviewers"]');
+  await council.locator('summary').click();
+  await expect(council.getByRole('checkbox',{name:/Worker Two/})).toBeDisabled();
+  await council.getByRole('checkbox',{name:/Reviewer One/}).check();
+  await expect(council.locator('.sa-multi-faces svg')).toHaveCount(1);
+  await council.getByRole('button',{name:'Done'}).click();
+  await wizard.getByRole('button',{name:'Next'}).click();
+  await expect(wizard.getByText(/Worker Two/).first()).toBeVisible();
+});
+
+test('native Team role picker preserves checked bots and saves ordered IDs only on submit',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page);
+  await openTeam(host,'Native Team');
+  await host.locator('.sa-subtabs').getByRole('button',{name:'Members and roles'}).click();
+  const load=host.getByRole('button',{name:'Load native members'});
+  if (await load.count()) await load.click();
+  const workers=host.locator('details[data-sa-multi="additionalWorkers"]');
+  await expect(workers).toBeVisible();
+  await workers.locator('summary').click();
+  await workers.getByRole('checkbox',{name:/Worker Two/}).check();
+  await expect(workers.getByRole('checkbox',{name:/Worker Two/})).toBeChecked();
+  await expect(workers).toHaveAttribute('open','');
+  await expect(workers.locator('.sa-multi-faces img')).toHaveCount(1);
+  const council=host.locator('details[data-sa-multi="reviewers"]');
+  await council.locator('summary').click();
+  await expect(workers).not.toHaveAttribute('open','');
+  await expect(council.getByRole('checkbox',{name:/Worker Two/})).toBeDisabled();
+  await expect(council.getByRole('checkbox',{name:/Reviewer One/})).toBeChecked();
+  await council.getByRole('button',{name:'Done'}).click();
+  await expect(host.locator('.sa-worker-order li')).toContainText(['Worker Two']);
+  expect(await page.evaluate(()=>
+    (window as unknown as {saFixtureMutations:unknown[]}).saFixtureMutations.length)).toBe(0);
+  await host.getByRole('button',{name:'Save configured roles'}).click();
+  await expect(host).toHaveAttribute('aria-busy','false');
+  const calls=await page.evaluate(()=>
+    (window as unknown as {saFixtureMutations:Array<{command:string;args:Record<string,unknown>}>})
+      .saFixtureMutations);
+  expect(calls.at(-1)?.command).toBe('superagent_roster_update');
+  expect((calls.at(-1)?.args.input as {workerBotIds:string[]}).workerBotIds)
+    .toEqual(['worker','worker2']);
+  expect((calls.at(-1)?.args.input as {reviewerBotIds:string[]}).reviewerBotIds)
+    .toEqual(['rev1','rev2']);
+});
 
 test('Team details use native bot inspector and five reference tabs',async({page})=>{
   await page.goto('/?bots=sample');

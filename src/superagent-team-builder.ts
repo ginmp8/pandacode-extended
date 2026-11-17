@@ -1,10 +1,14 @@
 import { escape } from './dom';
+import { botAvatarHtml } from './bot-avatars';
+import { renderBotMultiSelect } from './superagent-multiselect';
 
 /** Local-only wizard state. It cannot grant permissions or run a model. */
 export interface TeamBuilderBot {
   id: string;
   name: string;
   paused: boolean;
+  avatar?: string;
+  color?: string;
   projectId?: string;
   provider?: string;
   model?: string;
@@ -123,17 +127,21 @@ export class GuidedTeamBuilder {
       }
       case 'builderCoordinator': this.coordinatorId = target.value; break;
       case 'builderWorker': this.primaryWorkerId = target.value; break;
-      case 'builderWorkers': {
-        if (!(target instanceof HTMLSelectElement)) return false;
-        const ids = Array.from(target.selectedOptions, item => item.value);
-        this.workers = [...this.workers.filter(id => ids.includes(id)),
-          ...ids.filter(id => !this.workers.includes(id))];
+      case 'builderWorkers':
+      case 'builderReviewers': {
+        if (!(target instanceof HTMLInputElement) || target.type !== 'checkbox' ||
+            !target.hasAttribute('data-sa-multi-option')) return false;
+        const chosen = target.name === 'builderWorkers' ? this.workers : this.reviewers;
+        const limit = target.name === 'builderWorkers' ? 15 : 8;
+        if (target.checked && !chosen.includes(target.value)) {
+          if (chosen.length >= limit) { target.checked = false; return true; }
+          chosen.push(target.value);
+        } else if (!target.checked) {
+          const index = chosen.indexOf(target.value);
+          if (index >= 0) chosen.splice(index, 1);
+        }
         break;
       }
-      case 'builderReviewers':
-        if (!(target instanceof HTMLSelectElement)) return false;
-        this.reviewers = Array.from(target.selectedOptions, item => item.value);
-        break;
       case 'builderExecutionMode':
         if (!(target instanceof HTMLInputElement) ||
             !['approval','full_auto'].includes(target.value)) return false;
@@ -171,6 +179,12 @@ export class GuidedTeamBuilder {
       this.reset();
       return true;
     }
+    if (target.dataset.saMultiClear === 'builderWorkers') {
+      this.workers = []; this.error = ''; return true;
+    }
+    if (target.dataset.saMultiClear === 'builderReviewers') {
+      this.reviewers = []; this.error = ''; return true;
+    }
     if (target.dataset.saBuilderMove) {
       const index = this.workers.indexOf(target.dataset.saBuilderMove);
       const next = index + (target.dataset.saBuilderDirection === 'up' ? -1 : 1);
@@ -205,17 +219,6 @@ export class GuidedTeamBuilder {
           (selectedId === bot.id ? ' selected' : '') +
           (bot.paused ? ' disabled' : '') + '>' +
           safe(bot.name) + (bot.paused ? ' (paused)' : '') + '</option>').join('');
-    const multiselectOptions = (
-      selectedIds: string[], exclude: string[], workerProjectId?: string,
-    ) => bots.filter(bot => !exclude.includes(bot.id))
-      .map(bot => {
-        const crossProject = !!workerProjectId && bot.projectId !== workerProjectId;
-        return '<option value="' + safe(bot.id) + '"' +
-          (selectedIds.includes(bot.id) ? ' selected' : '') +
-          (bot.paused || crossProject ? ' disabled' : '') + '>' +
-          safe(bot.name) + (bot.paused ? ' (paused)' :
-            crossProject ? ' (different Worker project)' : '') + '</option>';
-      }).join('');
     const steps = ['Purpose', 'Team roles', 'Models and Skills',
       'Execution and review', 'Preflight and Save'];
     let content = '';
@@ -234,22 +237,34 @@ export class GuidedTeamBuilder {
         selectOptions(this.coordinatorId) + '</select></label>' +
         '<label>Primary Worker<select name="builderWorker">' +
         selectOptions(this.primaryWorkerId) + '</select></label>' +
-        '<label>Additional Workers (up to 15)<select name="builderWorkers" multiple size="5">' +
-        multiselectOptions(this.workers, [this.coordinatorId, this.primaryWorkerId, ...this.reviewers],
-          bots.find(bot => bot.id === this.primaryWorkerId)?.projectId) +
-        '</select></label>' +
+        renderBotMultiSelect({
+          name:'builderWorkers', label:'Additional Workers (up to 15)',
+          bots, selectedIds:this.workers, limit:15,
+          unavailable:bot => {
+            if ([this.coordinatorId,this.primaryWorkerId,...this.reviewers].includes(bot.id))
+              return 'Already assigned';
+            const project = bots.find(candidate => candidate.id === this.primaryWorkerId)?.projectId;
+            return project && bot.projectId !== project ? 'Different Worker project' : '';
+          },
+        }) +
         '<ol aria-label="Configured Worker order">' +
         this.workers.map((id, index) =>
-          '<li>' + safe(name(id)) +
+          '<li><span class="sa-multi-order-name">' +
+          botAvatarHtml(selectedBot(id)?.avatar ?? '', name(id), 'sa-multi-avatar',
+            selectedBot(id)?.color ?? '') + safe(name(id)) + '</span>' +
           ' <button type="button" data-sa-builder-move="' + safe(id) +
           '" data-sa-builder-direction="up"' + (index === 0 ? ' disabled' : '') + '>Up</button>' +
           ' <button type="button" data-sa-builder-move="' + safe(id) +
           '" data-sa-builder-direction="down"' +
           (index === this.workers.length - 1 ? ' disabled' : '') + '>Down</button></li>').join('') +
         '</ol>' +
-        '<label>Optional Council Reviewers (up to 8)<select name="builderReviewers" multiple size="5">' +
-        multiselectOptions(this.reviewers, [this.coordinatorId,this.primaryWorkerId,...this.workers]) +
-        '</select></label>' +
+        renderBotMultiSelect({
+          name:'builderReviewers', label:'Optional Council Reviewers (up to 8)',
+          bots, selectedIds:this.reviewers, limit:8,
+          unavailable:bot =>
+            [this.coordinatorId,this.primaryWorkerId,...this.workers].includes(bot.id)
+              ? 'Already assigned' : '',
+        }) +
         '<p>Native validation enforces active bot identities and one project for all Workers.</p>';
     } else if (this.step === 3) {
       content = '<p>These are existing bot configurations, not new credentials or grants. ' +

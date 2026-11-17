@@ -1,11 +1,18 @@
 import './superagent.css';
+import './superagent-multiselect.css';
 import { escape, icon } from './dom';
+import { botAvatarHtml } from './bot-avatars';
 import { GuidedTeamBuilder } from './superagent-team-builder';
+import {
+  renderBotMultiSelect, filterBotMultiSelect,
+  captureBotMultiSelectState, restoreBotMultiSelectState,
+} from './superagent-multiselect';
 
 // This interface only invokes native policy/authorization decisions. It cannot
 // grant tools, infer work, start tasks on import or bypass Council review.
 type Call = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
 interface Bot { id: string; name: string; paused: boolean;
+  avatar?:string; color?:string;
   provider?: string; model?: string; mode?: string; projectId?: string; skills?: string[] }
 interface Config {
   id: string; name: string; coordinatorBotId: string; workerBotId: string;
@@ -216,6 +223,17 @@ async function issueCommentEffectKey(
   return 'github-comment:' + Array.from(digest, byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
+function roleUnavailableForChange(
+  bot:Bot, kind:'additionalWorkers'|'reviewers', cfg:Config,
+  bots:Bot[], workerOrder:string[], reviewerDraft:string[],
+):boolean {
+  if (bot.id === cfg.coordinatorBotId || bot.id === cfg.workerBotId) return true;
+  if (kind === 'reviewers') return workerOrder.includes(bot.id);
+  if (reviewerDraft.includes(bot.id)) return true;
+  const project = bots.find(candidate => candidate.id === cfg.workerBotId)?.projectId;
+  return Boolean(project && bot.projectId !== project);
+}
+
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
@@ -372,6 +390,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   function render(): void {
     if (!host.isConnected) return;
     const focusedControl = captureFocusedControl();
+    const multiselectState = captureBotMultiSelectState(host);
     // A different Ticket is a different confidentiality boundary. Native
     // refreshes can repaint the workspace without clearing the same draft.
     if (commentDraftTicketId !== inspectedTicket) {
@@ -1066,12 +1085,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<div class="sa-actions"><button type="submit" class="primary-button">Submit rejection</button>' +
           '<button type="button" data-sa-reject-cancel>Cancel</button></div></form>' : '') +
         details + '</section>' : '';
-    const roleOptions = (selectedRoles:string[]) => bots
-      .filter(bot => chosen && bot.id !== chosen.coordinatorBotId && bot.id !== chosen.workerBotId)
-      .map(bot => '<option value="' + safe(bot.id) + '"' +
-        (selectedRoles.includes(bot.id) ? ' selected' : '') +
-        (bot.paused ? ' disabled' : '') + '>' + safe(bot.name) +
-        (bot.paused ? ' (paused)' : '') + '</option>').join('');
+    const roleUnavailable = (bot:Bot, kind:'worker'|'reviewer'):string => {
+      if (!chosen) return 'No Team selected';
+      if (bot.id === chosen.coordinatorBotId || bot.id === chosen.workerBotId) return 'Already assigned';
+      if (kind === 'worker') {
+        if (reviewerDraft.includes(bot.id)) return 'Council reviewer';
+        const project = bots.find(candidate => candidate.id === chosen.workerBotId)?.projectId;
+        if (project && bot.projectId !== project) return 'Different Worker project';
+      } else if (workerOrder.includes(bot.id)) return 'Assigned Worker';
+      return '';
+    };
     const effectivePolicy = chosen && effectiveTeam &&
       effectiveTeam.orchestrationId === chosen.id &&
       effectiveTeam.policyRevision === chosen.policyRevision
@@ -1168,10 +1191,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             ' · Primary Worker: ' + safe(botName(roleRoster.workerBotIds[0])) +
             ' · Policy revision ' + roleRoster.policyRevision + '</p>' +
             '<form data-sa-form="roster">' +
-              '<label>Additional Workers (up to 15)<select name="additionalWorkers" data-sa-worker-select multiple size="5">' +
-              roleOptions(workerOrder) + '</select></label>' +
+              renderBotMultiSelect({
+                name:'additionalWorkers', label:'Additional Workers (up to 15)',
+                bots, selectedIds:workerOrder, limit:15, disabled:chosen.enabled,
+                unavailable:bot => roleUnavailable(bot,'worker'),
+              }) +
               '<ol class="sa-worker-order" aria-label="Additional Worker order">' +
-              workerOrder.map((id,index) => '<li><span>' + (index + 2) + '. ' + safe(botName(id)) +
+              workerOrder.map((id,index) => '<li><span class="sa-multi-order-name">' +
+                (index + 2) + '. ' + botAvatarHtml(bots.find(bot => bot.id === id)?.avatar ?? '',
+                  botName(id), 'sa-multi-avatar', bots.find(bot => bot.id === id)?.color ?? '') +
+                safe(botName(id)) +
                 '</span><button type="button" data-sa-worker-move="' + safe(id) +
                 '" data-sa-direction="up" aria-label="Move ' + safe(botName(id)) +
                 ' up"' + (index === 0 || chosen.enabled ? ' disabled' : '') + '>Up</button>' +
@@ -1179,8 +1208,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
                 '" data-sa-direction="down" aria-label="Move ' + safe(botName(id)) +
                 ' down"' + (index === workerOrder.length - 1 || chosen.enabled ? ' disabled' : '') +
                 '>Down</button></li>').join('') + '</ol>' +
-              '<label>Optional Council Reviewers (up to 8)<select name="reviewers" data-sa-reviewer-select multiple size="5">' +
-              roleOptions(reviewerDraft) + '</select></label>' +
+              renderBotMultiSelect({
+                name:'reviewers', label:'Optional Council Reviewers (up to 8)',
+                bots, selectedIds:reviewerDraft, limit:8, disabled:chosen.enabled,
+                unavailable:bot => roleUnavailable(bot,'reviewer'),
+              }) +
               '<label><input type="checkbox" name="councilRequired"' +
               (roleRoster.councilRequired ? ' checked disabled' : ' disabled') +
               '> Council review is managed by the selected execution mode</label>' +
@@ -1462,6 +1494,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       ).forEach(control => { control.disabled = true; });
     }
     host.setAttribute('aria-busy', String(busy || loading));
+    restoreBotMultiSelectState(host, multiselectState);
     restoreFocusedControl(focusedControl);
   }
   async function refreshTicketDetails(): Promise<void> {
@@ -1602,17 +1635,26 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       render();
       return;
     }
-    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-reviewer-select')) {
-      if (busy || !roleRoster || roleRoster.orchestrationId !== selected) return;
-      reviewerDraft = [...target.selectedOptions].map(option => option.value);
-      render();
-      return;
-    }
-    if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-worker-select')) {
-      if (busy || !roleRoster || roleRoster.orchestrationId !== selected) return;
-      const next = Array.from(target.selectedOptions, option => option.value);
-      workerOrder = [...workerOrder.filter(id => next.includes(id)),
-        ...next.filter(id => !workerOrder.includes(id))];
+    if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-multi-option') &&
+        target.closest('form[data-sa-form="roster"]')) {
+      const cfg = current();
+      if (busy || !roleRoster || roleRoster.orchestrationId !== selected || !cfg || cfg.enabled) return;
+      const kind = target.dataset.saMultiScope;
+      if (kind !== 'additionalWorkers' && kind !== 'reviewers') return;
+      const list = kind === 'additionalWorkers' ? workerOrder : reviewerDraft;
+      const limit = kind === 'additionalWorkers' ? 15 : 8;
+      const bot = bots.find(candidate => candidate.id === target.value);
+      if (target.checked && (!bot || bot.paused ||
+          roleUnavailableForChange(bot, kind, cfg, bots, workerOrder, reviewerDraft) ||
+          list.length >= limit)) {
+        target.checked = false;
+        return;
+      }
+      if (target.checked && !list.includes(target.value)) list.push(target.value);
+      if (!target.checked) {
+        const index = list.indexOf(target.value);
+        if (index >= 0) list.splice(index, 1);
+      }
       render();
       return;
     }
@@ -1676,6 +1718,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   });
   host.addEventListener('input', event => {
     const target = event.target;
+    if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-multi-query')) {
+      filterBotMultiSelect(target);
+      return;
+    }
     if (target instanceof Element && guidedBuilder.handleInput(target)) return;
     if (target instanceof HTMLInputElement && target.hasAttribute('data-sa-demand-search')) {
       demandSearchDraft = target.value;
@@ -1740,8 +1786,40 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
   });
   host.addEventListener('click', event => {
+    const clicked = event.target instanceof Element ? event.target : null;
+    const picker = clicked?.closest<HTMLDetailsElement>('details[data-sa-multi]');
+    host.querySelectorAll<HTMLDetailsElement>('details[data-sa-multi][open]').forEach(details => {
+      if (details !== picker) details.open = false;
+    });
+  });
+  host.addEventListener('keydown', event => {
+    if (event.key !== 'Escape' || !(event.target instanceof Element)) return;
+    const picker = event.target.closest<HTMLDetailsElement>('details[data-sa-multi][open]');
+    if (!picker) return;
+    picker.open = false;
+    picker.querySelector<HTMLElement>('summary')?.focus({preventScroll:true});
+    event.preventDefault();
+    event.stopPropagation();
+  });
+  host.addEventListener('click', event => {
     const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button') : null;
     if (!target || !host.contains(target) || target.disabled) return;
+    if (target.hasAttribute('data-sa-multi-done')) {
+      const picker = target.closest<HTMLDetailsElement>('details[data-sa-multi]');
+      if (picker) {
+        picker.open = false;
+        picker.querySelector<HTMLElement>('summary')?.focus({preventScroll:true});
+      }
+      return;
+    }
+    if (target.dataset.saMultiClear === 'additionalWorkers' ||
+        target.dataset.saMultiClear === 'reviewers') {
+      if (busy || !roleRoster || roleRoster.orchestrationId !== selected || current()?.enabled) return;
+      if (target.dataset.saMultiClear === 'additionalWorkers') workerOrder = [];
+      else reviewerDraft = [];
+      render();
+      return;
+    }
     if (target.hasAttribute('data-sa-native-preflight')) {
       const cfg = current();
       const form = host.querySelector<HTMLFormElement>('form[data-sa-form="run"]');
@@ -1807,8 +1885,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (guidedBuilder.handleClick(target, bots)) {
       render();
-      host.querySelector<HTMLElement>('[aria-label="Team setup step"] h4')
-        ?.focus({preventScroll:true});
+      if (!target.hasAttribute('data-sa-multi-clear')) {
+        host.querySelector<HTMLElement>('[aria-label="Team setup step"] h4')
+          ?.focus({preventScroll:true});
+      }
       return;
     }
     if (target.dataset.saWorkerMove) {
@@ -1885,7 +1965,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (target.hasAttribute('data-sa-edit-reviewers')) {
       teamPanel = 'members'; render();
-      host.querySelector<HTMLSelectElement>('[data-sa-reviewer-select]')?.focus({preventScroll:true});
+      host.querySelector<HTMLElement>('[data-sa-multi="reviewers"] summary')?.focus({preventScroll:true});
       return;
     }
     if (target.hasAttribute('data-sa-edit-mode')) {

@@ -51,7 +51,7 @@ async function openTeam(host: Locator, name: string): Promise<void> {
 }
 
 test('Orchestrations keeps the reference page and five-step wizard layout', async ({page}) => {
-  await page.goto('/');
+  await page.goto('/?bots=sample');
   const host=await openWorkspace(page);
   await expect(host.locator('.sa-pagehead h1')).toHaveText('Orchestrations');
   await expect(host.locator('.sa-navigation')).toBeVisible();
@@ -62,7 +62,7 @@ test('Orchestrations keeps the reference page and five-step wizard layout', asyn
   await expect(wizard).toContainText('Step 1 of 5');
   await expect(host.locator('.sa-teams-panel')).toHaveCount(0);
   await wizard.getByRole('button',{name:'Cancel team setup'}).click();
-  await expect(host.locator('.sa-teams-panel')).toHaveCount(1);
+  await expect(host.getByText('Create your first Team')).toBeVisible();
 });
 
 /** A narrow, revision-guarded fake native service. No provider, file or GitHub
@@ -219,6 +219,20 @@ async function mountNativeFixture(page: Page, options: {
   await expect(host).toHaveAttribute('aria-busy','false',{timeout:30_000});
   return host;
 }
+
+test('Team details use native bot inspector and five reference tabs',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page);
+  await host.locator('[data-sa-select="team-1"]').click();
+  await expect(host.locator('.sa-roster-panel')).toBeVisible();
+  await expect(host.locator('.sa-member-inspector')).toBeVisible();
+  await expect(host.locator('.sa-subtabs').getByRole('button',{name:'GitHub sources'})).toBeVisible();
+  await expect(host.locator('.sa-subtabs').getByRole('button',{name:'Import / export'})).toBeVisible();
+  await host.locator('[data-sa-member-inspect="worker"]').click();
+  await expect(host.locator('.sa-member-inspector')).toContainText('test-worker');
+  await host.locator('.sa-subtabs').getByRole('button',{name:'Import / export'}).click();
+  await expect(host.locator('[data-sa-manifest]')).toBeVisible();
+});
 
 test('empty Teams view provides an intentional, accessible first-use path',async({page})=>{
   await page.goto('/?bots=sample');

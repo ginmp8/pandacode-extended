@@ -534,3 +534,42 @@
 @media(prefers-reduced-motion:reduce){
   #superagent-workspace *{scroll-behavior:auto!important;transition:none!important}
 }
+
+/* Faithful Team roster/member inspector and five-tab details, backed by live bots. */
+#superagent-workspace .sa-detail-name{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
+#superagent-workspace .sa-team-detail-title .sa-team-state{display:inline-flex;align-items:center;min-height:24px;padding:3px 8px;border:1px solid var(--sa-border);border-radius:6px;background:var(--raised);color:var(--muted);font-size:11px;font-weight:500}
+#superagent-workspace .sa-detail-actions{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+#superagent-workspace .sa-detail-actions>button:not(.primary-button){background:var(--raised);border:1px solid var(--sa-border);border-radius:8px;min-height:36px;padding:0 13px;font-size:13px}
+#superagent-workspace .sa-detail-actions .icon{width:15px;height:15px}
+#superagent-workspace .sa-stage .sa-team-overview{display:flex;flex-direction:column;gap:16px}
+#superagent-workspace .sa-overview-top{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,310px);gap:16px;align-items:start}
+#superagent-workspace .sa-stage .sa-overview-top>.sa-pane{background:var(--sa-panel);border:1px solid var(--sa-border);padding:18px;border-radius:15px;min-width:0}
+#superagent-workspace .sa-roster-panel>p,#superagent-workspace .sa-member-inspector>p,#superagent-workspace .sa-team-policy p{margin:0;font-size:12px;color:var(--muted)}
+#superagent-workspace .sa-member-group{display:flex;flex-direction:column;min-width:0}
+#superagent-workspace .sa-member-group h4{font-size:11px;letter-spacing:.07em;text-transform:uppercase;color:var(--muted);font-weight:650;margin:13px 0 6px}
+#superagent-workspace .sa-member-row{display:flex;align-items:center;justify-content:flex-start;gap:10px;width:100%;min-width:0;min-height:62px;padding:11px 0;text-align:left;border:0;border-top:1px solid var(--sa-border);background:transparent;color:var(--text)}
+#superagent-workspace .sa-member-row:hover{background:var(--sa-hover)}
+#superagent-workspace .sa-member-row[aria-pressed="true"] .sa-member-avatar{border-color:var(--muted)}
+#superagent-workspace .sa-member-avatar{width:32px;height:32px;display:grid;place-items:center;flex:none;border:1px solid var(--sa-border-strong);border-radius:9px;background:var(--raised);color:var(--text);font-size:11px;font-weight:650}
+#superagent-workspace .sa-member-name{display:grid;gap:3px;min-width:0;flex:1}
+#superagent-workspace .sa-member-name strong{font-size:12.5px;font-weight:600}
+#superagent-workspace .sa-member-name small{font-size:11.5px;color:var(--muted);line-height:1.35;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+#superagent-workspace .sa-member-model{display:grid;gap:1px;min-width:0;max-width:125px;color:var(--muted);font-size:11.5px;text-align:right;overflow-wrap:anywhere}
+#superagent-workspace .sa-member-row>.icon{width:14px;height:14px;color:var(--muted)}
+#superagent-workspace .sa-member-identity{display:flex;flex-direction:column;align-items:flex-start;gap:4px;margin:11px 0 14px}
+#superagent-workspace .sa-member-identity .sa-member-avatar{width:36px;height:36px;margin-bottom:2px}
+#superagent-workspace .sa-member-identity strong{font-size:14px}
+#superagent-workspace .sa-member-identity small{font-size:11.5px;color:var(--muted)}
+#superagent-workspace .sa-member-inspector dl,#superagent-workspace .sa-team-policy dl{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0;font-size:12px;margin:0}
+#superagent-workspace .sa-member-inspector :is(dt,dd),#superagent-workspace .sa-team-policy :is(dt,dd){padding:11px 0;border-top:1px solid var(--sa-border);min-width:0;overflow-wrap:anywhere}
+#superagent-workspace .sa-member-inspector dt,#superagent-workspace .sa-team-policy dt{color:var(--muted)}
+#superagent-workspace .sa-member-inspector dd,#superagent-workspace .sa-team-policy dd{text-align:right;font-weight:550;margin:0}
+#superagent-workspace .sa-stage .sa-team-policy{display:flex;flex-direction:column;gap:12px;background:var(--sa-panel);border:1px solid var(--sa-border);border-radius:15px;padding:18px}
+#superagent-workspace .sa-team-policy header{display:flex;align-items:center;justify-content:space-between;gap:12px}
+#superagent-workspace .sa-team-policy header button{border:1px solid var(--sa-border);border-radius:8px;padding:0 10px;min-height:30px;background:var(--raised);font-size:12px}
+#superagent-workspace .sa-team-policy .sa-actions{margin-top:2px}
+#superagent-workspace .sa-portable-panel{max-width:830px}
+#superagent-workspace .sa-portable-panel textarea{min-height:170px;font-family:var(--mono)}
+#superagent-workspace .sa-sources-panel .sa-event-sources{border:0;padding:0}
+@media(max-width:950px){#superagent-workspace .sa-overview-top{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:740px){#superagent-workspace .sa-member-model{display:none}#superagent-workspace .sa-team-detail-title{align-items:flex-start}#superagent-workspace .sa-detail-actions{justify-content:flex-start}}

@@ -225,8 +225,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false;
   let globalDemandLayout: 'board' | 'list' = 'board';
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
-  let workspaceView: 'teams' | 'team' | 'runs' | 'new-demand' | 'run' | 'review' | 'sources' | 'portable' = 'teams';
-  let teamPanel: 'overview' | 'members' | 'execution' = 'overview';
+  let workspaceView: 'teams' | 'team' | 'runs' | 'new-demand' | 'run' | 'review' = 'teams';
+  let teamPanel: 'overview' | 'members' | 'execution' | 'sources' | 'portable' = 'overview';
+  let memberInspectBotId = '';
   let preview: Preview | null = null, inspected: unknown = null;
   let confirm: { message: string; action: () => Promise<void> } | null = null;
   let taskKey = crypto.randomUUID();
@@ -1194,41 +1195,81 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             '<button type="button" data-sa-effective-load>Inspect effective policy and Skills</button>' +
             effectivePolicy) +
         '</section>' : '';
+    const memberWorkers = chosen
+      ? (chosen.workerBotIds?.length ? chosen.workerBotIds : [chosen.workerBotId]) : [];
+    const memberReviewers = chosen?.reviewerBotIds ?? [];
+    const availableMemberIds = chosen
+      ? [chosen.coordinatorBotId,...memberWorkers,...memberReviewers] : [];
+    const inspectedMemberId = availableMemberIds.includes(memberInspectBotId)
+      ? memberInspectBotId : (chosen?.coordinatorBotId ?? '');
+    const inspectedMemberBot = bots.find(bot => bot.id === inspectedMemberId);
+    const inspectedMemberRole = inspectedMemberId === chosen?.coordinatorBotId
+      ? 'Coordinator' : memberWorkers.includes(inspectedMemberId)
+        ? 'Worker' : 'Independent reviewer';
+    const memberRow = (id: string, role: string, order = '') => {
+      const bot = bots.find(candidate => candidate.id === id);
+      const name = bot?.name ?? id;
+      return '<button type="button" class="sa-member-row" data-sa-member-inspect="' +
+        safe(id) + '" aria-pressed="' + (id === inspectedMemberId) + '">' +
+        '<span class="sa-member-avatar">' + safe(name.slice(0,1).toUpperCase()) +
+        '</span><span class="sa-member-name"><strong>' + safe(name) + '</strong>' +
+        '<small>' + safe(role) + (order ? ' · #' + order : '') +
+        (bot?.skills?.length ? ' · ' + safe(bot.skills.slice(0,2).join(', ')) : '') +
+        '</small></span><span class="sa-member-model">' +
+        safe(bot?.provider ?? 'Unknown harness') + '<span>' +
+        safe(bot?.model ?? 'Unavailable model') + '</span></span>' +
+        icon('chevron') + '</button>';
+    };
     const overview = chosen
-      ? '<section class="sa-pane sa-team-overview" aria-label="Team overview"><h3>Team members</h3>' +
-        '<p>' + safe(chosen.name) + ' · ' + (chosen.enabled ? 'Enabled' : 'Off') +
-        ' · Policy revision ' + chosen.policyRevision + '</p>' +
-        '<div class="sa-overview-policy"><h3>Execution policy</h3><dl><dt>Coordinator (read-only)</dt><dd>' + safe(botName(chosen.coordinatorBotId)) + '</dd>' +
-        '<dt>Worker</dt><dd>' + safe(botName(chosen.workerBotId)) + '</dd>' +
-        '<dt>Configured members</dt><dd>' + safe(roleSummary(chosen)) + '</dd>' +
-        '<dt>Review policy</dt><dd>' + (chosen.councilRequired ? 'Native Council required' : 'Council Off') + '</dd>' +
-        '<dt>Execution policy</dt><dd>' +
+      ? '<div class="sa-team-overview" role="region" aria-label="Team overview">' +
+        '<div class="sa-overview-top">' +
+        '<section class="sa-pane sa-roster-panel"><h3>Team members</h3>' +
+        '<p>' + availableMemberIds.length + ' configured agents · select a member to inspect</p>' +
+        '<div class="sa-member-group"><h4>Coordinator · 1</h4>' +
+        memberRow(chosen.coordinatorBotId,'Coordinator') +
+        '<h4>Workers · ' + memberWorkers.length + '</h4>' +
+        memberWorkers.map((id,index) => memberRow(id,'Worker',String(index+1))).join('') +
+        (memberReviewers.length ? '<h4>Council reviewers · ' + memberReviewers.length + '</h4>' +
+          memberReviewers.map(id => memberRow(id,'Independent reviewer')).join('') : '') +
+        '</div></section>' +
+        '<aside class="sa-pane sa-member-inspector"><h3>Member inspector</h3>' +
+        '<div class="sa-member-identity"><span class="sa-member-avatar">' +
+        safe((inspectedMemberBot?.name ?? inspectedMemberId).slice(0,1).toUpperCase()) +
+        '</span><strong>' + safe(inspectedMemberBot?.name ?? inspectedMemberId) +
+        '</strong><small>' + safe(inspectedMemberRole) + '</small></div>' +
+        '<dl><dt>Harness</dt><dd>' + safe(inspectedMemberBot?.provider ?? 'Unknown') + '</dd>' +
+        '<dt>Model</dt><dd>' + safe(inspectedMemberBot?.model ?? 'Unavailable') + '</dd>' +
+        '<dt>Assigned Skills</dt><dd>' +
+        safe(inspectedMemberBot?.skills?.join(', ') || 'None assigned') + '</dd>' +
+        '<dt>Bot status</dt><dd>' + (inspectedMemberBot?.paused ? 'Paused' : 'Configured') + '</dd>' +
+        '<dt>Write permission</dt><dd>' +
+        (inspectedMemberRole === 'Worker' ? 'Native scoped grant required' : 'Read-only') +
+        '</dd></dl>' +
+        '<p>Native bot configuration is not proof of harness eligibility or completed work.</p>' +
+        '</aside></div>' +
+        '<section class="sa-pane sa-team-policy"><header><div><h3>Execution policy</h3>' +
+        '<p>Native policy is rechecked before every Demand is admitted.</p></div>' +
+        '<button type="button" data-sa-team-tab="execution">Configure</button></header>' +
+        '<dl><dt>Team status</dt><dd>' + (chosen.enabled ? 'Enabled' : 'Off') + '</dd>' +
+        '<dt>Execution</dt><dd>' +
         (teamStrategy?.orchestrationId === chosen.id
           ? (teamStrategy.executionMode === 'full_auto' ? 'Full Auto · independent Council' :
             teamStrategy.executionMode === 'approval' ? 'With Approval · human acceptance' :
-            'Choose an execution mode')
-          : 'Loading native policy') +
-        '</dd></dl></div>' +
-        '<div class="sa-roster-summary"><h4>Existing bots</h4><ul>' +
-          ([{role:'Coordinator',id:chosen.coordinatorBotId},
-            ...(chosen.workerBotIds?.length ? chosen.workerBotIds : [chosen.workerBotId])
-              .map((id,index)=>({role:'Worker ' + (index+1),id})),
-            ...(chosen.reviewerBotIds ?? []).map((id,index)=>({role:'Reviewer ' + (index+1),id}))])
-            .map(member=>{
-              const bot=bots.find(candidate=>candidate.id===member.id);
-              return '<li><span><small>' + safe(member.role) + '</small><strong>' +
-                safe(bot?.name ?? member.id) + '</strong></span><span><small>' +
-                safe(bot?.provider ?? 'Unknown harness') + '</small><strong>' +
-                safe(bot?.model ?? 'Unavailable model') + '</strong></span></li>';
-            }).join('') +
-          '</ul><button type="button" data-sa-team-tab="members">Review native bot settings and roles</button></div>' +
-        '<div class="sa-actions"><button type="button" data-sa-enable="' + safe(chosen.id) + '"' +
-        '>' + (chosen.enabled ? 'Disable Team' : 'Enable Team') + '</button>' +
+            'Not configured')
+          : 'Loading native policy') + '</dd>' +
+        '<dt>Council review</dt><dd>' +
+        (chosen.councilRequired ? 'Required' : 'Policy dependent') + '</dd>' +
+        '<dt>Project</dt><dd>' +
+        safe(bots.find(bot => bot.id === chosen.workerBotId)?.projectId ?? 'Unavailable') +
+        '</dd><dt>Scoped write grants</dt><dd>Per-Demand native authorization</dd></dl>' +
+        '<div class="sa-actions"><button type="button" data-sa-enable="' + safe(chosen.id) +
+        '">' + (chosen.enabled ? 'Disable Team' : 'Enable Team') + '</button>' +
         '<button type="button" data-sa-view="runs">View runs</button></div>' +
         (teamStrategy?.orchestrationId === chosen.id &&
-          teamStrategy.executionMode === 'full_auto' && (chosen.reviewerCount ?? chosen.reviewerBotIds?.length ?? 0) < 2
+          teamStrategy.executionMode === 'full_auto' &&
+          (chosen.reviewerCount ?? chosen.reviewerBotIds?.length ?? 0) < 2
           ? '<p role="note">Full Auto requires at least two independent reviewers before the Team can be enabled.</p>' : '') +
-        '</section>'
+        '</section></div>'
       : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
     const globalReviewPanel = '<section class="sa-pane sa-cross-team-review" ' +
       'role="region" aria-label="Cross-Team native review inbox"><header>' +
@@ -1291,8 +1332,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       ([
         ['sources','GitHub sources','branch'],['portable','Import / export','file'],
       ] as const).map(([id,label,glyph]) =>
-        '<button type="button" data-sa-view="' + id + '" aria-current="' +
-        (workspaceView === id ? 'page' : 'false') + '"' +
+        '<button type="button" data-sa-team-tab="' + id + '" aria-current="' +
+        (workspaceView === 'team' && teamPanel === id ? 'page' : 'false') + '"' +
         (!presets.length ? ' disabled' : '') + '>' + icon(glyph) +
         '<span>' + label + '</span></button>').join('') +
       '</nav>';
@@ -1326,9 +1367,25 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '<ul class="sa-list">' + (list || '<li class="sa-empty">' +
       (presets.length ? 'No Teams match these filters.' : 'No Teams created yet.') +
       '</li>') + '</ul></section>' : '');
+    const portablePanel = '<section class="sa-pane sa-portable-panel"><h3>Import / export</h3>' +
+      '<p>Configuration only: no credentials, memories, conversations, approvals or live tasks.</p>' +
+      '<label>Companion manifest JSON<textarea data-sa-manifest rows="5" spellcheck="false">' +
+      safe(importText) + '</textarea></label>' +
+      '<div class="sa-actions"><button type="button" data-sa-export>Export</button>' +
+      '<button type="button" data-sa-preview>Preview import</button></div>' +
+      (preview ? '<p role="status">' + preview.wouldCreate.length + ' new; ' +
+        preview.unchanged.length + ' unchanged. Imported presets will be disabled.</p>' +
+        '<button class="primary-button" type="button" data-sa-import>Confirm import</button>' : '') +
+      '</section>';
     const teamView = chosen
       ? '<div class="sa-team-detail-head"><button type="button" data-sa-team-back>All Teams</button>' +
-        '<div class="sa-team-detail-title"><div><h2>' + safe(chosen.name) + '</h2>' +
+        '<div class="sa-team-detail-title"><div><div class="sa-detail-name">' +
+        '<h2>' + safe(chosen.name) + '</h2>' +
+        '<span class="sa-team-state">' + (chosen.enabled ? 'Enabled' : 'Off') + '</span>' +
+        '<span class="sa-team-state">' +
+        (teamStrategy?.executionMode === 'full_auto' ? 'Full Auto' :
+          teamStrategy?.executionMode === 'approval' ? 'With Approval' : 'Not configured') +
+        '</span></div>' +
         '<p>Policy revision ' + chosen.policyRevision + ' · ' +
           (chosen.enabled ? 'Enabled' : 'Off') + ' · ' +
           (teamStrategy?.orchestrationId === chosen.id
@@ -1336,17 +1393,26 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               teamStrategy.executionMode === 'approval' ? 'With Approval' :
               'Execution mode not configured')
             : 'Loading native policy') + '</p></div>' +
-        '<button class="primary-button" type="button" data-sa-create-demand>Assign Demand</button>' +
+        '<div class="sa-detail-actions">' +
+        '<button type="button" data-sa-team-tab="members">' + icon('settings') +
+        ' Configure</button>' +
+        '<button class="primary-button" type="button" data-sa-create-demand>' +
+        icon('plus') + ' Assign Demand</button></div>' +
         '</div></div>' +
         '<nav class="sa-subtabs" aria-label="Team details">' +
         ([
-          ['overview','Overview'],['members','Members and roles'],['execution','Execution and review'],
+          ['overview','Overview'],['members','Members and roles'],
+          ['execution','Execution and review'],['sources','GitHub sources'],
+          ['portable','Import / export'],
         ] as const).map(([id,label]) =>
           '<button type="button" data-sa-team-tab="' + id + '" aria-current="' +
           (teamPanel === id ? 'page' : 'false') + '">' + label + '</button>').join('') +
         '</nav>' +
         (teamPanel === 'overview' ? overview :
-          teamPanel === 'members' ? teamEditor + teamRoles : strategyPane)
+          teamPanel === 'members' ? teamEditor + teamRoles :
+          teamPanel === 'execution' ? strategyPane :
+          teamPanel === 'sources' ? '<section class="sa-pane sa-sources-panel">' + sourcePanel + '</section>' :
+          portablePanel)
       : '<section class="sa-pane"><h3>No Team selected</h3>' +
         '<p>Return to Teams and create or select a Team.</p></section>';
     host.innerHTML = '<div class="sa-ui">' +
@@ -1387,19 +1453,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       (workspaceView === 'run'
         ? active || '<section class="sa-pane">Open a native Demand from Demands / Runs.</section>' : '') +
       (workspaceView === 'review' ? reviewPanel : '') +
-      (workspaceView === 'sources' ? (chosen ? '<section class="sa-pane">' + sourcePanel + '</section>'
-        : '<section class="sa-pane"><p>Select a Team to configure its GitHub sources.</p></section>') : '') +
-      (workspaceView === 'portable'
-        ? '<section class="sa-pane"><h3>Import / export</h3>' +
-          '<p>Configuration only: no credentials, memories, conversations, approvals or live tasks.</p>' +
-          '<label>Companion manifest JSON<textarea data-sa-manifest rows="5" spellcheck="false">' +
-          safe(importText) + '</textarea></label>' +
-          '<div class="sa-actions"><button type="button" data-sa-export>Export</button>' +
-          '<button type="button" data-sa-preview>Preview import</button></div>' +
-          (preview ? '<p role="status">' + preview.wouldCreate.length + ' new; ' +
-            preview.unchanged.length + ' unchanged. Imported presets will be disabled.</p>' +
-            '<button class="primary-button" type="button" data-sa-import>Confirm import</button>' : '') +
-          '</section>' : '') +
       '</div></div></div>';
     // During native hydration, local-only draft fields remain editable.
     // Stateful commands and controls must stay inert until the snapshot loads.
@@ -1850,12 +1903,22 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (target.dataset.saTeamTab) {
       const tab = target.dataset.saTeamTab;
-      if (!['overview','members','execution'].includes(tab)) return;
+      if (!['overview','members','execution','sources','portable'].includes(tab)) return;
+      workspaceView = 'team';
       teamPanel = tab as typeof teamPanel; render(); return;
+    }
+    if (target.dataset.saMemberInspect) {
+      if (!current()) return;
+      memberInspectBotId = target.dataset.saMemberInspect;
+      render();
+      host.querySelector<HTMLButtonElement>(
+        '[data-sa-member-inspect="' + CSS.escape(memberInspectBotId) + '"]',
+      )?.focus({preventScroll:true});
+      return;
     }
     if (target.dataset.saView) {
       const next = target.dataset.saView;
-      if (!['teams','runs','review','sources','portable'].includes(next)) return;
+      if (!['teams','runs','review'].includes(next)) return;
       workspaceView = next as typeof workspaceView;
       render();
       host.querySelector<HTMLButtonElement>('[data-sa-view="' + next + '"]')?.focus({preventScroll:true});

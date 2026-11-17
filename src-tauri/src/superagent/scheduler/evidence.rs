@@ -2,7 +2,7 @@
 //! Only a real completed child Ticket, matching Worker assignment and native
 //! human/Council verdict may satisfy a dependency. This never runs a provider.
 use super::*;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension};
 use sha2::{Digest,Sha256};
 
 pub(crate) const SCHEMA:&str=r#"
@@ -35,6 +35,33 @@ pub(super) fn receipt(store:&Store,id:&str)->Result<Option<(String,String,i64)>>
 /// Runs under the existing native effect/dispatch fence. A child being marked
 /// completed is not enough: its last finished assignment, output and verdict
 /// must match in the same transaction before any dependent item may advance.
+/// In a completed native child, every nested subagent must also have settled.
+/// Pending descendants and un-reconciled effects cannot satisfy an upstream DAG edge.
+fn descendant_receipts_settled(db:&Connection,child_ticket_id:&str)->Result<bool> {
+    db.query_row(
+        "WITH RECURSIVE descendants(ticket_id) AS (
+           SELECT ?1
+           UNION
+           SELECT node.child_ticket_id FROM sa_subagent_nodes node
+           JOIN descendants ancestor ON ancestor.ticket_id=node.parent_ticket_id
+           WHERE node.child_ticket_id IS NOT NULL
+         )
+         SELECT NOT EXISTS(
+           SELECT 1 FROM sa_subagent_nodes node
+           JOIN descendants ancestor ON ancestor.ticket_id=node.parent_ticket_id
+           WHERE node.state<>'completed'
+           UNION ALL
+           SELECT 1 FROM sa_effect_receipts effect
+           JOIN descendants subtree ON subtree.ticket_id=effect.ticket_id
+           WHERE effect.state IN ('pending','uncertain')
+           UNION ALL
+           SELECT 1 FROM sa_worker_write_receipts write_receipt
+           JOIN descendants subtree ON subtree.ticket_id=write_receipt.ticket_id
+           WHERE write_receipt.state IN ('reserved','uncertain'))",
+        [child_ticket_id],|row|row.get(0),
+    ).map_err(|error|error.to_string())
+}
+
 pub(super) fn record_accepted(store:&Store,now:i64)->Result<usize> {
     let candidates={
         let mut stmt=store.db.prepare(
@@ -80,6 +107,7 @@ pub(super) fn record_accepted(store:&Store,now:i64)->Result<usize> {
         if approved_at<=0 || revision<1 {continue}
         let digest=format!("{:x}",Sha256::digest(result.as_bytes()));
         let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
+        if !descendant_receipts_settled(&tx,&child)? {continue}
         tx.execute(
             "INSERT OR IGNORE INTO sa_work_item_evidence_receipts
                 (item_id,child_ticket_id,assignment_id,evidence_sha256,approval_kind,reviewed_at,recorded_at)
@@ -140,7 +168,7 @@ mod tests {
              CREATE TABLE sa_audit(id INTEGER PRIMARY KEY,ticket_id TEXT,kind TEXT,at INTEGER);
              CREATE TABLE sa_effect_receipts(ticket_id TEXT,state TEXT);
              CREATE TABLE sa_worker_write_receipts(ticket_id TEXT,state TEXT);
-             CREATE TABLE sa_subagent_nodes(parent_ticket_id TEXT,state TEXT);
+             CREATE TABLE sa_subagent_nodes(parent_ticket_id TEXT,child_ticket_id TEXT,state TEXT);
              INSERT INTO sa_tickets VALUES('child','completed','native output',2);
              INSERT INTO sa_assignments VALUES('attempt','child','finished',1,'native output');
              INSERT INTO sa_work_items VALUES('item','root',0,'child','waiting_review',NULL,1);",
@@ -228,5 +256,38 @@ mod tests {
              INSERT INTO sa_effect_receipts VALUES('child','uncertain');",
         ).unwrap();
         assert_eq!(record_accepted(&store,100).unwrap(),0);
+    }
+
+    #[test]
+    fn nested_subagent_reconciliation_blocks_workitem_dependency_proof() {
+        let store=fixture();
+        store.db.execute_batch(
+            "INSERT INTO sa_audit(ticket_id,kind,at) VALUES('child','council_passed',99);
+             INSERT INTO sa_subagent_nodes VALUES('child','nested','completed');
+             INSERT INTO sa_subagent_nodes VALUES('nested','grandchild','waiting_review');
+             INSERT INTO sa_subagent_nodes VALUES('other','other-child','completed');
+             INSERT INTO sa_worker_write_receipts VALUES('nested','reserved');
+             INSERT INTO sa_effect_receipts VALUES('grandchild','uncertain');
+             INSERT INTO sa_effect_receipts VALUES('other-child','uncertain');",
+        ).unwrap();
+        assert_eq!(record_accepted(&store,100).unwrap(),0);
+        assert!(receipt(&store,"item").unwrap().is_none());
+        store.db.execute(
+            "UPDATE sa_worker_write_receipts SET state='applied'
+             WHERE ticket_id='nested'",[],
+        ).unwrap();
+        assert_eq!(record_accepted(&store,101).unwrap(),0);
+        store.db.execute(
+            "UPDATE sa_effect_receipts SET state='applied'
+             WHERE ticket_id='grandchild'",[],
+        ).unwrap();
+        assert_eq!(record_accepted(&store,102).unwrap(),0);
+        store.db.execute(
+            "UPDATE sa_subagent_nodes SET state='completed'
+             WHERE child_ticket_id='grandchild'",[],
+        ).unwrap();
+        assert_eq!(record_accepted(&store,103).unwrap(),1);
+        assert_eq!(record_accepted(&store,104).unwrap(),0);
+        assert!(receipt(&store,"item").unwrap().is_some());
     }
 }

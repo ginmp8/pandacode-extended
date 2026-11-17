@@ -498,19 +498,6 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     const state = bot.paused ? 'Paused' : live ? 'Working' : 'Ready';
     const next = bot.heartbeatMinutes && bot.nextHeartbeatAt && !bot.paused ? `check-in ${age(bot.nextHeartbeatAt)}` : '';
     const meta = [bot.role, harness?.name, next].filter(Boolean).map(item => escape(item!)).join('<i aria-hidden="true">·</i>');
-    const superagentThreads = detail?.bot.id === bot.id
-      ? detail.threads.filter(thread => thread.channelId === 'superagent')
-      : [];
-    const assignedWork = superagentThreads.length
-      ? '<section class="bp-superagent-chats" aria-label="SuperAgent bot conversations">' +
-        '<div class="bp-superagent-chats-head"><strong>SuperAgent tasks</strong><small>' +
-          superagentThreads.length + ' native chats</small></div>' +
-        '<div class="bp-superagent-chats-list">' +
-          superagentThreads.map(thread =>
-            '<button type="button" data-bots-action="open-superagent-task" data-session-id="' +
-              escape(thread.sessionId) + '"><span>Assigned task</span><small>' +
-              escape(thread.externalId) + '</small></button>').join('') +
-        '</div></section>' : '';
     return `<header class="bp-bar ${live ? 'is-working' : ''} ${bot.paused ? 'is-paused' : ''}"><span class="bots-ring bp-ring">${avatar(bot)}</span>
       <div class="bp-id"><div class="bp-name-row"><h3 class="bp-name">${escape(bot.name)}</h3><span class="bp-state" data-state="${state.toLowerCase()}">${state}</span></div><p class="bp-meta">${meta}</p></div>
       <div class="bp-actions">
@@ -519,8 +506,7 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
         <span class="bp-more"><button type="button" class="icon-button" data-bots-action="more" aria-label="More" title="More" aria-haspopup="menu" aria-expanded="${moreOpen}">${icon('more')}</button>
         ${moreOpen ? `<span class="bp-menu" role="menu"><button type="button" role="menuitem" data-bots-action="reset" aria-label="Reset bot">${icon('reset')}Reset…<small>Forget conversations, memories and schedules</small></button><button type="button" role="menuitem" class="danger" data-bots-action="delete" aria-label="Delete bot">${icon('trash')}Delete…<small>Remove the bot and its channels</small></button></span>` : ''}</span>
       </div></header>
-      ${bot.paused ? '<p class="bots-banner">Paused. Schedules and check-ins wait until you resume; new messages get a paused reply.</p>' : ''}
-      ${assignedWork}`;
+      ${bot.paused ? '<p class="bots-banner">Paused. Schedules and check-ins wait until you resume; new messages get a paused reply.</p>' : ''}`;
   }
 
   function badge(id: Nav): string {
@@ -682,12 +668,6 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     else if (action === 'soul-import') pane.querySelector<HTMLInputElement>('input[data-soul-file]')?.click();
     else if (action === 'soul-remove') setSoul('');
     else if (action === 'open-chat' && bot) options.openChat(bot.id);
-    else if (action === 'open-superagent-task' && bot) {
-      const sessionId = target.dataset.sessionId;
-      if (sessionId && detail?.bot.id === bot.id &&
-          detail.threads.some(thread => thread.channelId === 'superagent' &&
-            thread.sessionId === sessionId)) options.openTask(sessionId);
-    }
     else if (action === 'pause' && bot) void work(async () => { await options.call('bot_set_paused', { botId: bot.id, paused: !bot.paused }); options.notify(bot.paused ? `${bot.name} resumed` : `${bot.name} paused`); await load(); });
     else if (action === 'reset' && bot) context.confirm(`Reset ${bot.name}?`, 'This deletes its conversations, memories, schedules and activity. Its instructions, channels and rules stay.', 'Reset', async () => { await options.call('bot_reset', { botId: bot.id }); options.notify(`${bot.name} was reset`); await load(); });
     else if (action === 'delete' && bot) context.confirm(`Delete ${bot.name}?`, 'This removes the bot, its conversations and its channel connections. Its workspace folder stays on disk.', 'Delete', async () => { await options.call('bot_delete', { botId: bot.id }); selected = ''; options.notify(`${bot.name} was deleted`); if (single) { options.onDeleted?.(); return; } await load(); });

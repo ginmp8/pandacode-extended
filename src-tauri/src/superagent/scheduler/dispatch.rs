@@ -3,6 +3,7 @@
 use super::*;
 use crate::superagent::{self,get_ticket};
 use rusqlite::{params,OptionalExtension,Connection};
+use sha2::{Digest,Sha256};
 use tauri::Manager;
 
 #[derive(Debug,Clone)]
@@ -292,19 +293,24 @@ fn reconcile(store:&Store)->Result<()> {
 /// approval; neither its dependencies nor its parent Demand may reuse that
 /// immutable receipt for a different attempt.
 fn approved_child_attempt_current(db:&Connection,child_ticket_id:&str)->Result<bool> {
-    db.query_row(
-        "SELECT EXISTS(
-           SELECT 1 FROM sa_work_item_evidence_receipts proof
-           JOIN sa_tickets child ON child.id=proof.child_ticket_id
-           JOIN sa_assignments latest ON latest.id=proof.assignment_id
-           WHERE proof.child_ticket_id=?1 AND child.state='completed'
-             AND latest.ticket_id=child.id AND latest.state='finished'
-             AND latest.result=child.evidence
-             AND latest.attempt=(SELECT MAX(a.attempt) FROM sa_assignments a
-               WHERE a.ticket_id=child.id)
-             AND proof.reviewed_at>=latest.updated_at)",
-        [child_ticket_id],|row|row.get(0),
-    ).map_err(|error|error.to_string())
+    // A historical native approval is tied to the exact accepted output.
+    // Re-check the immutable digest before unblocking dependent WorkItems or
+    // completing the root Demand, including after a same-attempt result edit.
+    let candidate:Option<(String,String)>=db.query_row(
+        "SELECT proof.evidence_sha256,child.evidence
+         FROM sa_work_item_evidence_receipts proof
+         JOIN sa_tickets child ON child.id=proof.child_ticket_id
+         JOIN sa_assignments latest ON latest.id=proof.assignment_id
+         WHERE proof.child_ticket_id=?1 AND child.state='completed'
+           AND latest.ticket_id=child.id AND latest.state='finished'
+           AND latest.result=child.evidence
+           AND latest.attempt=(SELECT MAX(a.attempt) FROM sa_assignments a
+             WHERE a.ticket_id=child.id)
+           AND proof.reviewed_at>=latest.updated_at",
+        [child_ticket_id],|row|Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(|error|error.to_string())?;
+    Ok(candidate.is_some_and(|(expected,output)|
+        format!("{:x}",Sha256::digest(output.as_bytes()))==expected))
 }
 
 /// Re-evaluate all native child approvals inside the Demand completion
@@ -585,7 +591,7 @@ mod tests {
              CREATE TABLE sa_orchestrations(id TEXT,enabled INTEGER,
                  policy_revision INTEGER,project_id TEXT);
              CREATE TABLE sa_work_item_evidence_receipts(
-                 item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER);
+                 item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER,evidence_sha256 TEXT NOT NULL DEFAULT '');
              CREATE TABLE sa_worker_write_receipts(
                  ticket_id TEXT,state TEXT,assignment_id TEXT);
              CREATE TABLE sa_subagent_nodes(
@@ -632,7 +638,8 @@ mod tests {
                     params![&attempt,&child],
                 ).unwrap();
                 db.execute(
-                    "INSERT INTO sa_work_item_evidence_receipts VALUES(?1,?2,?3,60)",
+                    "INSERT INTO sa_work_item_evidence_receipts
+                      (item_id,child_ticket_id,assignment_id,reviewed_at) VALUES(?1,?2,?3,60)",
                     params![&build,&child,&attempt],
                 ).unwrap();
                 db.execute(
@@ -656,6 +663,9 @@ mod tests {
                 }
             }
         }
+        let digest=format!("{:x}",Sha256::digest(b"native output"));
+        db.execute("UPDATE sa_work_item_evidence_receipts
+                    SET evidence_sha256=?1",[&digest]).unwrap();
         let store=Store{db,path:std::path::PathBuf::from(":memory:")};
         let candidates=ready(&store).unwrap();
         assert_eq!(candidates.len(),1);
@@ -672,7 +682,7 @@ mod tests {
              CREATE TABLE sa_work_items(id TEXT,ticket_id TEXT,item_key TEXT,
                child_ticket_id TEXT,state TEXT,requires_write INTEGER);
              CREATE TABLE sa_work_item_evidence_receipts(
-               item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER);
+               item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER,evidence_sha256 TEXT NOT NULL DEFAULT '');
              CREATE TABLE sa_tickets(id TEXT,state TEXT,evidence TEXT);
              CREATE TABLE sa_assignments(id TEXT,ticket_id TEXT,state TEXT,
                attempt INTEGER,result TEXT,updated_at INTEGER);
@@ -688,10 +698,14 @@ mod tests {
              INSERT INTO sa_assignments
                VALUES('final-attempt','child-build','finished',1,'native output',50);
              INSERT INTO sa_work_item_evidence_receipts
+               (item_id,child_ticket_id,assignment_id,reviewed_at)
                VALUES('build','child-build','final-attempt',60);
              INSERT INTO sa_worker_write_receipts
                VALUES('child-build','applied','final-attempt');"
         ).unwrap();
+        let digest=format!("{:x}",Sha256::digest(b"native output"));
+        db.execute("UPDATE sa_work_item_evidence_receipts
+                    SET evidence_sha256=?1",[&digest]).unwrap();
         assert!(prerequisites_settled(&db,"root","verify").unwrap());
         db.execute(
             "INSERT INTO sa_effect_receipts VALUES('child-build','uncertain')",[],
@@ -746,7 +760,7 @@ mod tests {
         db.execute_batch(
             "CREATE TABLE sa_work_items(ticket_id TEXT,child_ticket_id TEXT);
              CREATE TABLE sa_work_item_evidence_receipts(
-                 item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER);
+                 item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER,evidence_sha256 TEXT NOT NULL DEFAULT '');
              CREATE TABLE sa_tickets(id TEXT,state TEXT,evidence TEXT);
              CREATE TABLE sa_assignments(id TEXT,ticket_id TEXT,state TEXT,
                  attempt INTEGER,result TEXT,updated_at INTEGER);
@@ -755,8 +769,12 @@ mod tests {
              INSERT INTO sa_assignments
                VALUES('first','child','finished',1,'verified output',50);
              INSERT INTO sa_work_item_evidence_receipts
+               (item_id,child_ticket_id,assignment_id,reviewed_at)
                VALUES('item','child','first',60);",
         ).unwrap();
+        let digest=format!("{:x}",Sha256::digest(b"verified output"));
+        db.execute("UPDATE sa_work_item_evidence_receipts
+                    SET evidence_sha256=?1",[&digest]).unwrap();
         assert!(root_work_item_proofs_current(&db,"root").unwrap());
         db.execute(
             "UPDATE sa_tickets SET state='running' WHERE id='child'",[],
@@ -781,6 +799,14 @@ mod tests {
         db.execute(
             "UPDATE sa_work_item_evidence_receipts SET reviewed_at=80",[],
         ).unwrap();
+        assert!(root_work_item_proofs_current(&db,"root").unwrap());
+        // Result text and the persisted approval hash must stay bound even
+        // if an old Assignment is edited without incrementing its attempt.
+        db.execute("UPDATE sa_tickets SET evidence='changed output' WHERE id='child'",[]).unwrap();
+        db.execute("UPDATE sa_assignments SET result='changed output' WHERE id='first'",[]).unwrap();
+        assert!(!root_work_item_proofs_current(&db,"root").unwrap());
+        db.execute("UPDATE sa_tickets SET evidence='verified output' WHERE id='child'",[]).unwrap();
+        db.execute("UPDATE sa_assignments SET result='verified output' WHERE id='first'",[]).unwrap();
         assert!(root_work_item_proofs_current(&db,"root").unwrap());
         db.execute(
             "INSERT INTO sa_work_items VALUES('root','missing-child')",[],

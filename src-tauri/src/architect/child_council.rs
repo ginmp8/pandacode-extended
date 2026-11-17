@@ -297,6 +297,20 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
         return Ok(());
     }
     let root_session = store.session(&root.session_id)?;
+    // A paused root must not silently adopt an extra or duplicated native
+    // child reservation. Old cycles are excluded from this immutable roster.
+    let prefix = format!("native-council-child:{}:", root.council_since);
+    let reserved: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_child'
+         AND substr(key,1,length(?2))=?2",
+        params![&root.session_id, prefix],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())?;
+    if reserved != config.nested_bot_reviewers.len() as i64 {
+        return Err("child_council_revoked: native child reservation roster changed; start a fresh Council task.".into());
+    }
+    let mut expected_child_sessions = HashSet::new();
     for choice in &config.nested_bot_reviewers {
         let child_id: Option<String> = store.db.query_row(
             "SELECT worker_id FROM architect_requests
@@ -307,8 +321,10 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
         let child_id = child_id.ok_or(
             "child_council_revoked: required child reservation is missing; start a fresh Council task."
         )?;
-        if super::parent_of(store, &child_id)?.as_deref() != Some(root.session_id.as_str()) {
-            return Err("child_council_revoked: child ownership changed; start a fresh Council task.".into());
+        if !expected_child_sessions.insert(child_id.clone())
+            || super::parent_of(store, &child_id)?.as_deref() != Some(root.session_id.as_str())
+        {
+            return Err("child_council_revoked: child ownership or unique reservation changed; start a fresh Council task.".into());
         }
         let session = store.session(&child_id)?;
         if session.project_id != root_session.project_id
@@ -336,6 +352,9 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
         // not a fabricated root-generation binding.
         let child_id = super::parent_of(store, &leaf_id)?
             .ok_or("child_council_revoked: native reviewer lost its child owner.")?;
+        if !expected_child_sessions.contains(&child_id) {
+            return Err("child_council_revoked: native reviewer belongs to an unselected child Council.".into());
+        }
         let coordinator = store.session(&child_id)?;
         if session.project_id != coordinator.project_id
             || session.worktree_path != coordinator.worktree_path

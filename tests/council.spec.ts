@@ -1088,7 +1088,7 @@ test('M3 mixed Council preserves a direct bot plus one explicitly added automati
   expect((await calls(page))[1].reviewerBotIds).toBeUndefined();
 });
 
-test('M4 and M7 task child roles preserve typed native configuration without claiming leaf execution', async ({ page }) => {
+test('M4 and M7 task child roles preserve native configuration and require authenticated leaf callbacks', async ({ page }) => {
   const bots = [
     { id: 'reviewer-alpha', name: 'Alpha', role: 'QA', provider: 'codex', model: 'gpt-5', paused: false, skills: [] },
     { id: 'reviewer-beta', name: 'Beta', role: 'Architecture', provider: 'claude', model: 'sonnet', paused: false, skills: [] },
@@ -1101,7 +1101,7 @@ test('M4 and M7 task child roles preserve typed native configuration without cla
   await eligibleReviewers(page).nth(1).check();
   await panel(page).getByLabel('Review role for Alpha').selectOption('nested');
   await panel(page).getByLabel('Review role for Beta').selectOption('nested');
-  await expect(panel(page).getByText('Child Council dispatch remains blocked until native leaf reviewers are implemented.')).toHaveCount(2);
+  await expect(panel(page).getByText('Child reviewers run in isolated read-only native sessions. Completion requires independently authenticated callbacks.')).toHaveCount(2);
   await panel(page).getByLabel('Child reviewers for Alpha').fill('3');
   await panel(page).getByLabel('Child reviewers for Alpha').press('Tab');
   await toggle(page).click();

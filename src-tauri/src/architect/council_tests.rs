@@ -4251,6 +4251,27 @@ fn paused_nested_root_resume_denies_revoked_child_without_mutating_cycle() {
             rusqlite::params![child_id, previous_worktree],
         ).unwrap();
     }
+    // An extra reservation in the *current* cycle must not create a
+    // phantom child or silently extend the resumed review roster.
+    let unexpected_key = format!("native-council-child:{}:unselected", started.council_since);
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+             VALUES(?1,?2,'council_child','{}',?3)",
+            rusqlite::params![&sid, &unexpected_key, &child_id],
+        ).unwrap();
+    }
+    let error = control_state(&state, &sid, "resume").unwrap_err();
+    assert!(error.contains("child_council_revoked"), "{error}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root);
+    {
+        let store = state.store.lock().unwrap();
+        assert_eq!(store.db.execute(
+            "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+            rusqlite::params![&sid, &unexpected_key],
+        ).unwrap(), 1);
+    }
     // A genuine pause with intact child reservations remains resumable.
     assert_eq!(control_state(&state, &sid, "resume").unwrap().status, "running");
 }

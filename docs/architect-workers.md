@@ -516,6 +516,12 @@ Two-phase Council can reuse the **selected bot roster** in a new second-round na
 
 This enables source-constrained direct-bot review paths without inventing new bot identities or scores. It does **not** implement nested child Council execution, authenticated child composite receipts, artifact content hashing, provider-independent model diversity, or all 21 functional mode/strategy transitions. Missing eligible peer challengers remain blocked.
 
+### Bounded native file evidence checks (#147, partial)
+
+A required named Council criterion may configure a native host check in its frozen `nativeEvidence` policy. `reviewed_file_sha256` verifies the complete bytes of one repository-relative checkout file against an expected lowercase SHA-256 using `reviewer_file_verify({ criterionId })`. `reviewed_file_text_contains` verifies that a bounded UTF-8 checkout file contains an explicitly configured exact text fragment (1–256 bytes) under the matching `File contains: <path>` criterion lens. Both checks require an independently admitted, read-only reviewer session, the recorded native reviewer grant, a task/revision/policy-bound receipt and an immutable assigned criterion. Checks reject path traversal and out-of-checkout targets, read at most 4 MiB, never return file contents and never execute project commands. The resulting inspector states distinguish a file digest from an exact text match.
+
+These checks attest only the host-observed file bytes or text at verification time, **not** project tests, correctness, findings resolution or an ongoing immutable checkout. The full generic `evidenceRequired` execution contract, project test and build receipts, and final 21-mode/strategy acceptance matrix remain incomplete. Neither reviewer text nor a cached proof can waive those gates.
+
 ### Experimental native S2 escalation contract (#147)
 
 A task's optional `strategy: escalated` with `forceEscalation: true` requires **two fresh, separately admitted native Council rounds** to pass on the same current artifact. Each round retains the existing source selection (automatic, configured direct bots, or their supported mixture), score, required-criterion, and verified skill-evidence gates. The native gate does not add reviewer sources, silently reuse a scored seat, or treat an exhausted round budget as approval. Configure at least two rounds. Existing configurations default to `parallel` without serialization changes.

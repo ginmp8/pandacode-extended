@@ -933,7 +933,7 @@ fn criterion_pinned_input_integrity_requires_native_receipts_and_denies_replay()
         required: true, target: 9.5, evidence_required: true,
         native_evidence: Some(council::CouncilCriterionNativeEvidence {
             kind: "pinned_input_integrity".into(), skill_id: "pinned-check".into(),
-            path: None, expected_sha256: None,
+            path: None, expected_sha256: None, expected_text: None,
         }),
     }];
     assert!(config.validate().is_ok());
@@ -1105,7 +1105,7 @@ fn required_file_digest_is_host_executed_bounded_and_task_bound() {
         required: true, target: 9.0, evidence_required: true,
         native_evidence: Some(council::CouncilCriterionNativeEvidence {
             kind: "reviewed_file_sha256".into(), skill_id: String::new(),
-            path: Some("expected.txt".into()), expected_sha256: Some(digest.clone()),
+            path: Some("expected.txt".into()), expected_sha256: Some(digest.clone()), expected_text: None,
         }),
     }];
     config.validate().unwrap();
@@ -1177,6 +1177,102 @@ fn required_file_digest_is_host_executed_bounded_and_task_bound() {
     assert_eq!(council::status(&verified).unwrap().state, "fixing",
         "a changed required target invalidates prior host proof");
     std::fs::remove_file(file_path).unwrap();
+    std::fs::remove_dir(folder).unwrap();
+}
+
+
+#[test]
+fn required_text_fragment_uses_bounded_native_host_receipts_not_model_claims() {
+    let (state, sid) = state_fixture();
+    let folder = std::env::temp_dir().join(format!("native-council-text-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&folder).unwrap();
+    let path = folder.join("policy.txt");
+    std::fs::write(&path, b"feature: disabled\n").unwrap();
+    let checkout = folder.to_string_lossy().into_owned();
+    let mut config = on(9.0, 3, 2);
+    config.criteria_source = council::CouncilCriteriaSource::User;
+    config.criteria = vec![council::CouncilCriterion {
+        id: "text-proof".into(), lens: "File contains: policy.txt".into(),
+        required: true, target: 9.0, evidence_required: true,
+        native_evidence: Some(council::CouncilCriterionNativeEvidence {
+            kind: "reviewed_file_text_contains".into(), skill_id: String::new(),
+            path: Some("policy.txt".into()), expected_sha256: None,
+            expected_text: Some("feature: enabled".into()),
+        }),
+    }];
+    config.validate().unwrap();
+    let long = "X".repeat(257);
+    for invalid in ["", "\0", long.as_str()] {
+        let mut bad = config.clone();
+        bad.criteria[0].native_evidence.as_mut().unwrap().expected_text = Some(invalid.into());
+        assert!(bad.validate().is_err(), "invalid native fragment was admitted");
+    }
+    let mut bad = config.clone();
+    bad.criteria[0].native_evidence.as_mut().unwrap().expected_sha256 = Some("0".repeat(64));
+    assert!(bad.validate().is_err(), "a text check cannot smuggle an unrelated digest");
+    let mut bad = config.clone();
+    bad.criteria[0].lens = "Security".into();
+    assert!(bad.validate().is_err(), "native checks cannot impersonate an arbitrary lens");
+    let mut team = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    team.config.council = Some(config);
+    team.council_since = SINCE;
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute("UPDATE sessions SET worktree_path=?2 WHERE id=?1",
+            rusqlite::params![&sid, &checkout]).unwrap();
+        for (i, id) in ["text-a", "text-b"].iter().enumerate() {
+            let root = store.session(&sid).unwrap();
+            let native = store.create_session(&root.project_id, "codex", "", &root.mode).unwrap();
+            store.db.execute("UPDATE sessions SET worktree_path=?2 WHERE id=?1",
+                rusqlite::params![&native.id, &checkout]).unwrap();
+            store.db.execute(
+                "INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",
+                rusqlite::params![&sid, id, &native.id],
+            ).unwrap();
+            let mut worker = seat(id, 1, Some(9.8), SINCE + i as i64 + 1);
+            worker.status = "running".into();
+            worker.session_id = native.id;
+            worker.council.as_mut().unwrap().lens = "File contains: policy.txt".into();
+            let binding = reviewer_security::ReviewerBinding::native(
+                &team, &worker.id, worker.created_at, &worker.provider, &worker.model,
+                worker.council.as_ref().unwrap(),
+            );
+            reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+            worker.reviewer_binding = Some(binding);
+            team.workers.push(worker);
+        }
+        save(&store, &mut team).unwrap();
+    }
+    let generation = team.generation;
+    let first = coordination::Actor::Worker { id: "text-a".into(), attempt: 1 };
+    assert!(reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+        &first, "pandacode_reviewer_file_verify", json!({"criterionId":"text-proof"})).is_err(),
+        "an absent fragment cannot be attested by a reviewer claim");
+    std::fs::write(&path, b"feature: enabled\n").unwrap();
+    for id in ["text-a", "text-b"] {
+        let actor = coordination::Actor::Worker { id: id.into(), attempt: 1 };
+        let (receipt, changed) = reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+            &actor, "pandacode_reviewer_file_verify",
+            json!({"criterionId":"text-proof"})).unwrap();
+        assert_eq!(receipt["checkKind"], "reviewed_file_text_contains");
+        assert_eq!(receipt["nativeTextMatchVerified"], true);
+        assert_eq!(receipt["nativeFileDigestVerified"], false);
+        assert!(changed.is_some());
+        assert!(reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+            &actor, "pandacode_reviewer_file_verify",
+            json!({"criterionId":"text-proof"})).unwrap().1.is_none());
+    }
+    let mut verified = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    for worker in &mut verified.workers { worker.status = "completed".into(); }
+    assert_eq!(council::status(&verified).unwrap().state, "passed");
+    assert_eq!(council::inspection(&verified, false).unwrap()
+        .criterion_observations[0].state, "reviewed_file_text_contains_verified");
+    verified.workers[0].reviewer_binding.as_mut().unwrap()
+        .skill_evidence.get_mut("criterion-file:text-proof").unwrap()
+        .check_kind = Some("model_claim".into());
+    assert_eq!(council::status(&verified).unwrap().state, "fixing",
+        "a model claim cannot replace host-issued evidence");
+    std::fs::remove_file(path).unwrap();
     std::fs::remove_dir(folder).unwrap();
 }
 

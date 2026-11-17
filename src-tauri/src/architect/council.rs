@@ -119,6 +119,9 @@ pub struct CouncilCriterionNativeEvidence {
     /// Lowercase digest, verified against actual bytes by the native host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_sha256: Option<String>,
+    /// Exact UTF-8 fragment for a bounded host-observed text check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_text: Option<String>,
 }
 fn valid_evidence_path(path: &str) -> bool {
     !path.is_empty() && path.len() <= 240
@@ -263,7 +266,7 @@ impl CouncilConfig {
                     "pinned_input_integrity" => {
                         // Input integrity is not proof of project tests or correctness.
                         if !super::valid_id(&check.skill_id)
-                            || check.path.is_some() || check.expected_sha256.is_some()
+                            || check.path.is_some() || check.expected_sha256.is_some() || check.expected_text.is_some()
                             || !self.required_check_skill_ids.contains(&check.skill_id)
                             || !same_lens(&criterion.lens, &format!("Pinned input integrity: {}", check.skill_id))
                         {
@@ -274,11 +277,24 @@ impl CouncilConfig {
                         let path = check.path.as_deref().unwrap_or("");
                         let sha = check.expected_sha256.as_deref().unwrap_or("");
                         if !check.skill_id.is_empty() || !valid_evidence_path(path)
-                            || sha.len() != 64 || !sha.bytes().all(|ch|
+                            || check.expected_text.is_some() || sha.len() != 64 || !sha.bytes().all(|ch|
                                 ch.is_ascii_digit() || (b'a'..=b'f').contains(&ch))
                             || !same_lens(&criterion.lens, &format!("File SHA-256: {path}"))
                         {
                             return Err("Council file evidence requires a repository-relative file, lowercase SHA-256 and matching required lens.".into());
+                        }
+                    }
+                    "reviewed_file_text_contains" => {
+                        let path = check.path.as_deref().unwrap_or("");
+                        let fragment = check.expected_text.as_deref().unwrap_or("");
+                        if !check.skill_id.is_empty() || !valid_evidence_path(path)
+                            || check.expected_sha256.is_some()
+                            || fragment.is_empty() || fragment.len() > 256
+                            || fragment.chars().any(|ch| ch == '\0'
+                                || (ch.is_control() && ch != '\n' && ch != '\t'))
+                            || !same_lens(&criterion.lens, &format!("File contains: {path}"))
+                        {
+                            return Err("Council text evidence requires a bounded exact UTF-8 fragment, a repository-relative path and matching required lens.".into());
                         }
                     }
                     _ => return Err("Council native criterion check is unsupported.".into()),
@@ -579,7 +595,7 @@ pub struct CouncilCriterionObservation {
     pub root_scored_seats: usize,
     pub lowest_root_score: Option<f64>,
     /// optional | awaiting_review | missing_root_score | below_target |
-    /// native_evidence_unverified | pinned_input_integrity_verified | reviewed_file_sha256_verified | root_scores_observed
+    /// native_evidence_unverified | pinned_input_integrity_verified | reviewed_file_sha256_verified | reviewed_file_text_contains_verified | root_scores_observed
     pub state: &'static str,
 }
 fn criterion_observations(
@@ -601,10 +617,11 @@ fn criterion_observations(
             else if lowest.is_some_and(|score| score < criterion.target.max(config.target)) { "below_target" }
             else if criterion.evidence_required {
                 if native_criterion_check_verified(team, criterion, round) {
-                    if criterion.native_evidence.as_ref().is_some_and(|check|
-                        check.kind == "reviewed_file_sha256") {
-                        "reviewed_file_sha256_verified"
-                    } else { "pinned_input_integrity_verified" }
+                    match criterion.native_evidence.as_ref().map(|check| check.kind.as_str()) {
+                        Some("reviewed_file_sha256") => "reviewed_file_sha256_verified",
+                        Some("reviewed_file_text_contains") => "reviewed_file_text_contains_verified",
+                        _ => "pinned_input_integrity_verified",
+                    }
                 } else { "native_evidence_unverified" }
             }
             else { "root_scores_observed" };
@@ -1285,8 +1302,11 @@ fn native_criterion_check_verified(
     team: &TeamSnapshot, criterion: &CouncilCriterion, round: usize,
 ) -> bool {
     let Some(check) = criterion.native_evidence.as_ref() else { return false };
-    if check.kind == "reviewed_file_sha256" {
-        let Some(expected) = check.expected_sha256.as_deref() else { return false };
+    if check.kind == "reviewed_file_sha256"
+        || check.kind == "reviewed_file_text_contains"
+    {
+        let expected = check.expected_sha256.as_deref();
+        if check.kind == "reviewed_file_sha256" && expected.is_none() { return false; }
         let reviewers = in_round(team, round)
             .filter(|(worker, seat)| counts(worker, seat)
                 && worker.status == "completed" && seat.score.is_some()
@@ -1300,12 +1320,15 @@ fn native_criterion_check_verified(
                 binding.validate(team, worker).is_ok()
                     && binding.skill_evidence.get(&format!("criterion-file:{}", criterion.id))
                         .is_some_and(|record| {
-                            record.content_sha256 == expected
+                            record.content_sha256.len() == 64
+                                && record.content_sha256.bytes().all(|ch|
+                                    ch.is_ascii_digit() || (b'a'..=b'f').contains(&ch))
+                                && expected.is_none_or(|digest| record.content_sha256 == digest)
                                 && record.artifact_revision == binding.artifact_revision
                                 && record.invoked && record.check_executed && record.evidence_verified
-                                && record.check_kind.as_deref() == Some("reviewed_file_sha256")
+                                && record.check_kind.as_deref() == Some(check.kind.as_str())
                                 && record.criterion_receipt.as_ref().is_some_and(|receipt|
-                                    receipt.valid_file_for(team, worker, criterion, expected))
+                                    receipt.valid_file_for(team, worker, criterion, &record.content_sha256))
                         })
             })
         });

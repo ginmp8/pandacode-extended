@@ -946,6 +946,25 @@ fn combine_github_pages(pages: &[serde_json::Value], since: i64, cursor: i64)
     Ok(serde_json::Value::Array(combined))
 }
 
+/// Reject conflicting or unverified PR merge claims across an authenticated
+/// repository feed, including events outside one narrow source subscription.
+/// An unsupported event must not silently advance Observe past suspect history.
+fn verify_pr_merge_marker(raw: &serde_json::Value) -> Result<()> {
+    if raw.get("type").and_then(|value| value.as_str()) != Some("PullRequestEvent") {
+        return Ok(());
+    }
+    let action = raw.pointer("/payload/action").and_then(|value| value.as_str());
+    let marker = raw.pointer("/payload/pull_request/merged");
+    let merged = marker.and_then(|value| value.as_bool());
+    if action == Some("merged") && merged != Some(true) {
+        return Err("GitHub PR merge action lacks a verified merged=true marker; cursor unchanged.".into());
+    }
+    if action == Some("closed") && marker.is_some() && merged.is_none() {
+        return Err("GitHub PR closure has a malformed merged marker; cursor unchanged.".into());
+    }
+    Ok(())
+}
+
 /// A bounded, verified feed may contain no events matching a narrow source.
 /// Progress the cursor to the newest *verified repository event*, not only
 /// matching deliveries, or a busy repository permanently strands sparse
@@ -958,6 +977,7 @@ fn github_feed_watermark(events: &[serde_json::Value], repository: &str) -> Resu
     // fixtures without IDs remain valid only when all events omit the ID.
     let mut feed_repository_id: Option<Option<u64>> = None;
     for item in events {
+        verify_pr_merge_marker(item)?;
         if !item.pointer("/repo/name").and_then(|v| v.as_str())
             .is_some_and(|name| name.eq_ignore_ascii_case(repository))
         {
@@ -996,6 +1016,7 @@ fn github_feed_watermark(events: &[serde_json::Value], repository: &str) -> Resu
 /// Map only GitHub's documented event type + explicit action. Unknown event
 /// shapes must never be guessed from untrusted titles/bodies or action words.
 fn github_kind(value: &serde_json::Value) -> Option<&'static str> {
+    if verify_pr_merge_marker(value).is_err() { return None; }
     let kind = value.get("type")?.as_str()?;
     let action = value.pointer("/payload/action")?.as_str()?;
     match (kind, action) {
@@ -1020,14 +1041,7 @@ fn github_kind(value: &serde_json::Value) -> Option<&'static str> {
             _ => None,
         },
         ("PullRequestEvent", "reopened") => Some("pull_request.reopened"),
-        ("PullRequestEvent", "merged") => {
-            if value.pointer("/payload/pull_request/merged")
-                == Some(&serde_json::Value::Bool(false)) {
-                None
-            } else {
-                Some("pull_request.merged")
-            }
-        },
+        ("PullRequestEvent", "merged") => Some("pull_request.merged"),
         ("PullRequestEvent", "assigned") => Some("pull_request.assigned"),
         ("PullRequestEvent", "unassigned") => Some("pull_request.unassigned"),
         ("PullRequestEvent", "labeled") => Some("pull_request.labeled"),
@@ -2426,6 +2440,57 @@ mod tests {
         ).unwrap().duplicates, 1);
         assert_eq!(reopened.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
             |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
+
+    #[test]
+    fn unverifiable_pr_merge_claims_never_advance_authenticated_observe() {
+        let (store, path) = fixture();
+        let created = create_source(
+            &store, "orch", "owner/repo", "trusted-bot", "pull_request.merged",
+        ).unwrap();
+        let source_config = set_mode(
+            &store, &created.id, created.policy_revision, "observe",
+        ).unwrap();
+        let valid = serde_json::json!({
+            "id": "5000053000", "type": "PullRequestEvent",
+            "created_at": "2026-11-12T09:00:00Z",
+            "repo": {"name": "owner/repo"}, "actor": {"login": "trusted-bot"},
+            "payload": {"action": "closed", "number": 73,
+                "pull_request": {"number": 73, "merged": true}}
+        });
+        assert_eq!(poll_authenticated_events(
+            &store, &source_config, 0, &serde_json::json!([valid.clone()]),
+        ).unwrap().recorded, 1);
+        let cursor = source(&store, &source_config.id).unwrap().last_sequence;
+        assert_eq!(list_decisions(&store, &source_config.id, 10).unwrap().len(), 1);
+        for (action, marker) in [
+            ("merged", None),
+            ("merged", Some(serde_json::json!(false))),
+            ("merged", Some(serde_json::json!("true"))),
+            ("closed", Some(serde_json::json!("true"))),
+        ] {
+            let mut invalid = valid.clone();
+            invalid["id"] = serde_json::json!("5000053001");
+            invalid["payload"]["action"] = serde_json::json!(action);
+            if let Some(marker) = marker {
+                invalid["payload"]["pull_request"]["merged"] = marker;
+            } else {
+                invalid["payload"]["pull_request"].as_object_mut().unwrap().remove("merged");
+            }
+            assert_eq!(github_kind(&invalid), None);
+            assert!(poll_authenticated_events(
+                &store, &source_config, 0, &serde_json::json!([invalid]),
+            ).is_err(), "unverified merge or malformed closure must fail closed");
+            assert_eq!(source(&store, &source_config.id).unwrap().last_sequence, cursor);
+            assert_eq!(list_decisions(&store, &source_config.id, 10).unwrap().len(), 1);
+        }
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(source(&reopened, &source_config.id).unwrap().last_sequence, cursor);
+        assert_eq!(list_decisions(&reopened, &source_config.id, 10).unwrap().len(), 1);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
     }
 
     #[test]

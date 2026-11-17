@@ -2115,6 +2115,9 @@ test('new Team persists optional reviewers as one disabled role configuration', 
 
 
 test('desktop native Ticket activity pages are keyset-bound, filterable and never launch work', async ({page}) => {
+  // Two explicit keyset fetches and full inspector rendering exceed the generic
+  // 20s browser-test budget on loaded CI runners. Keep every assertion intact.
+  test.setTimeout(45_000);
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {
     const {mountSuperagent}=await import('/src/superagent-ui.ts');

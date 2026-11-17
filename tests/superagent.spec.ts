@@ -82,9 +82,9 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
   const host = page.locator('#sa-new-team-draft');
   await expect(host.getByRole('button',{name:'Create disabled preset'})).toBeEnabled();
   await host.getByRole('combobox',{name:'Example preset'}).selectOption('Economy');
-  await expect(host.getByRole('combobox',{name:'Maximum Worker attempts per Demand'})).toHaveValue('1');
+  await expect(host.getByRole('combobox',{name:'Maximum attempts per Demand'})).toHaveValue('1');
   await host.getByRole('combobox',{name:'Example preset'}).selectOption('Performance');
-  await expect(host.getByRole('combobox',{name:'Maximum Worker attempts per Demand'})).toHaveValue('3');
+  await expect(host.getByRole('combobox',{name:'Maximum attempts per Demand'})).toHaveValue('3');
   await host.getByRole('textbox',{name:'Name',exact:true}).fill('Persisted roles');
   await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
   await host.getByRole('combobox',{name:'Worker',exact:true}).selectOption('worker');

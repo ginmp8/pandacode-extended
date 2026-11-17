@@ -631,10 +631,19 @@ fn set_mode(store: &Store, id: &str, expected_revision: i64, mode: &str) -> Resu
 }
 
 fn valid_event(event: &EventEnvelope) -> bool {
+    // Only canonical, typed issue/PR threads may be correlated by a native
+    // receipt. Future adapters cannot substitute a URL, arbitrary text or a
+    // PR number for an issue event merely by constructing an envelope.
+    let thread_matches_kind = match event.event_kind.as_str() {
+        "issue_comment.created" => true, // Comments can refer to an issue or PR.
+        "check_run.completed" => event.subject_key.starts_with("pull:"),
+        kind if kind.starts_with("pull_request") => event.subject_key.starts_with("pull:"),
+        kind if kind.starts_with("issues.") => event.subject_key.starts_with("issue:"),
+        _ => false,
+    };
     token_ok(&event.delivery_id, 128) && repo_ok(&event.repository)
         && token_ok(&event.actor, 80) && EVENT_KINDS.contains(&event.event_kind.as_str())
-        && !event.subject_key.is_empty() && event.subject_key.len() <= 200
-        && !event.subject_key.chars().any(char::is_control)
+        && valid_thread_key(&event.subject_key) && thread_matches_kind
         && event.sequence > 0
 }
 
@@ -1861,6 +1870,67 @@ pub async fn superagent_source_thread_links(
 mod tests {
     use super::*;
 
+
+    #[test]
+    fn native_observe_requires_canonical_event_typed_threads_before_receipts() {
+        let (store, path) = fixture();
+        let off = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let issue = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let valid = EventEnvelope {
+            source_id: issue.id.clone(), delivery_id: "valid-issue".into(),
+            repository: "test/fixture".into(), actor: "trusted-bot".into(),
+            event_kind: "issues.opened".into(), subject_key: "issue:42".into(),
+            sequence: 1,
+        };
+        assert_eq!(observe(&store, &valid).unwrap().decision, "observed_permitted");
+        for (index, thread) in [
+            "pull:42", "issue:0", "issue:042", "issue:42/body",
+            "issue:42?secret=x", "issue:9999999999999",
+        ].into_iter().enumerate() {
+            let mut invalid = valid.clone();
+            invalid.delivery_id = format!("invalid-{index}");
+            invalid.sequence = index as i64 + 2;
+            invalid.subject_key = thread.into();
+            assert!(!valid_event(&invalid), "invalid issue thread: {thread}");
+            assert!(observe(&store, &invalid).is_err());
+        }
+        let off_review = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "pull_request_review.submitted").unwrap();
+        let review = set_mode(&store, &off_review.id, off_review.policy_revision, "observe").unwrap();
+        let mut review_event = valid.clone();
+        review_event.source_id = review.id.clone();
+        review_event.event_kind = "pull_request_review.submitted".into();
+        review_event.subject_key = "issue:42".into();
+        review_event.delivery_id = "wrong-review-thread".into();
+        assert!(observe(&store, &review_event).is_err());
+        review_event.subject_key = "pull:42".into();
+        assert_eq!(observe(&store, &review_event).unwrap().decision, "observed_permitted");
+
+        let off_comment = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issue_comment.created").unwrap();
+        let comment = set_mode(&store, &off_comment.id, off_comment.policy_revision, "observe").unwrap();
+        let mut comment_event = valid.clone();
+        comment_event.source_id = comment.id.clone();
+        comment_event.event_kind = "issue_comment.created".into();
+        observe(&store, &comment_event).unwrap();
+        comment_event.delivery_id = "valid-pr-comment".into();
+        comment_event.sequence = 2;
+        comment_event.subject_key = "pull:42".into();
+        observe(&store, &comment_event).unwrap();
+
+        assert_eq!(list_decisions(&store, &issue.id, 20).unwrap().len(), 1);
+        assert_eq!(list_decisions(&store, &review.id, 20).unwrap().len(), 1);
+        assert_eq!(list_decisions(&store, &comment.id, 20).unwrap().len(), 2);
+        assert_eq!(source(&store, &issue.id).unwrap().last_sequence, 1);
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 0);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(list_decisions(&reopened, &issue.id, 20).unwrap().len(), 1);
+        assert_eq!(list_decisions(&reopened, &review.id, 20).unwrap().len(), 1);
+        assert_eq!(list_decisions(&reopened, &comment.id, 20).unwrap().len(), 2);
+    }
 
     #[test]
     fn authenticated_github_source_pins_repository_identity_across_restart_and_policy_changes() {

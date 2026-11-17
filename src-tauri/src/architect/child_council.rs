@@ -312,15 +312,25 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
     }
     let mut expected_child_sessions = HashSet::new();
     for choice in &config.nested_bot_reviewers {
-        let child_id: Option<String> = store.db.query_row(
-            "SELECT worker_id FROM architect_requests
+        let reservation: Option<(String, String)> = store.db.query_row(
+            "SELECT worker_id,content FROM architect_requests
              WHERE parent_session_id=?1 AND kind='council_child' AND key=?2",
             params![&root.session_id, key(root, &choice.bot_id)],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional().map_err(|error| error.to_string())?;
-        let child_id = child_id.ok_or(
+        let (child_id, frozen_json) = reservation.ok_or(
             "child_council_revoked: required child reservation is missing; start a fresh Council task."
         )?;
+        // Pause increments the root generation without reissuing child leaves.
+        // Revalidate immutable pins here without using read(), whose active
+        // child generation check is only appropriate during native admission.
+        let frozen_record: FrozenChildReservation = serde_json::from_str(&frozen_json)
+            .map_err(|_| "child_council_revoked: malformed frozen child reservation.")?;
+        let expected = frozen(store, root, choice, &child_id, &child_config(config, choice)?)
+            .map_err(|reason| format!("child_council_revoked: frozen child session is no longer authorized ({reason})."))?;
+        if frozen_record != expected {
+            return Err("child_council_revoked: frozen child identity, bot profile or policy changed; start a fresh Council task.".into());
+        }
         if !expected_child_sessions.insert(child_id.clone())
             || super::parent_of(store, &child_id)?.as_deref() != Some(root.session_id.as_str())
         {

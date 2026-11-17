@@ -1092,6 +1092,7 @@ fn criterion_pinned_input_integrity_requires_native_receipts_and_denies_replay()
 fn required_file_digest_is_host_executed_bounded_and_task_bound() {
     let (state, sid) = state_fixture();
     let folder = std::env::temp_dir().join(format!("native-council-file-{}", uuid::Uuid::new_v4()));
+    let checkout = folder.to_string_lossy().into_owned();
     std::fs::create_dir_all(&folder).unwrap();
     let file_path = folder.join("expected.txt");
     std::fs::write(&file_path, b"reviewed native artifact\n").unwrap();
@@ -1125,12 +1126,12 @@ fn required_file_digest_is_host_executed_bounded_and_task_bound() {
     {
         let store = state.store.lock().unwrap();
         store.db.execute("UPDATE sessions SET worktree_path=?2 WHERE id=?1",
-            rusqlite::params![&sid, folder.to_string_lossy().as_ref()]).unwrap();
+            rusqlite::params![&sid, &checkout]).unwrap();
         for (i, id) in ["file-a", "file-b"].iter().enumerate() {
             let root = store.session(&sid).unwrap();
             let reviewer_session = store.create_session(&root.project_id, "codex", "", &root.mode).unwrap();
             store.db.execute("UPDATE sessions SET worktree_path=?2 WHERE id=?1",
-                rusqlite::params![&reviewer_session.id, folder.to_string_lossy().as_ref()]).unwrap();
+                rusqlite::params![&reviewer_session.id, &checkout]).unwrap();
             store.db.execute(
                 "INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",
                 rusqlite::params![&sid, id, &reviewer_session.id],
@@ -4363,6 +4364,24 @@ fn paused_nested_root_resume_denies_revoked_child_without_mutating_cycle() {
             "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
             rusqlite::params![&sid, &unexpected_key],
         ).unwrap(), 1);
+    }
+    // A paused root cannot silently adopt a changed persistent bot profile:
+    // the task owns the original frozen coordinator identity and permissions.
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE bots SET name='spoofed-coordinator' WHERE id='paused-security'", [],
+        ).unwrap();
+    }
+    let denied = control_state(&state, &sid, "resume").unwrap_err();
+    assert!(denied.contains("child_council_revoked"), "{denied}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root,
+        "revoked frozen bot identity must not mutate the root cycle");
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE bots SET name='paused-security' WHERE id='paused-security'", [],
+        ).unwrap();
     }
     // A genuine pause with intact child reservations remains resumable.
     assert_eq!(control_state(&state, &sid, "resume").unwrap().status, "running");

@@ -363,7 +363,9 @@ fn dispatch_file_state(
     let check = criterion.native_evidence.as_ref().unwrap();
     let relative = check.path.as_deref().unwrap_or("");
     let expected = check.expected_sha256.as_deref().unwrap_or("");
-    let root_path = std::fs::canonicalize(&root.worktree_path)
+    let checkout = root.worktree_path.as_deref().filter(|path| !path.is_empty())
+        .ok_or("reviewer_file_evidence_unavailable: reviewed checkout unavailable.")?;
+    let root_path = std::fs::canonicalize(checkout)
         .map_err(|_| "reviewer_file_evidence_unavailable: reviewed checkout unavailable.".to_string())?;
     let target = std::fs::canonicalize(root_path.join(relative))
         .map_err(|_| "reviewer_file_evidence_unavailable: required file unavailable.".to_string())?;

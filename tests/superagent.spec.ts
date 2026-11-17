@@ -91,7 +91,12 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
   await host.locator('details.sa-new-members summary').click();
   await host.getByRole('group',{name:'Additional Workers'}).getByRole('checkbox',{name:/Additional Worker/}).check();
   await host.getByRole('group',{name:'Optional Reviewers'}).getByRole('checkbox',{name:/Reviewer/}).check();
-  await expect(host.locator('.sa-member-choice .bot-avatar svg')).toHaveCount(1);
+  // The same existing bot appears in both eligible role pickers; each
+  // renders its native Panda avatar without duplicating the selected role.
+  await expect(host.getByRole('group',{name:'Additional Workers'})
+    .locator('.sa-member-choice .bot-avatar.has-art svg')).toHaveCount(1);
+  await expect(host.getByRole('group',{name:'Optional Reviewers'})
+    .locator('.sa-member-choice .bot-avatar.has-art svg')).toHaveCount(1);
   await host.getByRole('combobox',{name:'Team status'}).selectOption('enabled');
   await host.getByRole('searchbox',{name:'Search Teams'}).fill('another Team');
   await expect(host.locator('details.sa-new-members')).toHaveAttribute('open','');

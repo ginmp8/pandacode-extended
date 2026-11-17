@@ -350,6 +350,12 @@ fn export(store: &Store) -> Result<serde_json::Value> {
         .map_err(|e| e.to_string())?
         .collect::<rusqlite::Result<Vec<Orchestration>>>()
         .map_err(|e| e.to_string())?;
+    // An export must be importable under the same public schema limits; an
+    // unbounded local Team catalog must not produce a misleading backup.
+    if configs.len() > MAX_PRESETS {
+        return Err("Too many Teams for one portable SuperAgent manifest.".into());
+    }
+    let catalog = bots::list(store)?;
     let mut presets = Vec::with_capacity(configs.len());
     for config in configs {
         let roles=super::roster::read(store,&config.id)?;
@@ -366,6 +372,14 @@ fn export(store: &Store) -> Result<serde_json::Value> {
             .chain(roles.worker_bot_ids.iter())
             .chain(roles.reviewer_bot_ids.iter()) {
             let bot=bots::get(store,id)?;
+            // Import resolves portable names against every existing bot, not
+            // just this Team. A duplicate (including an unrelated bot) or an
+            // invalid legacy name would make this export impossible to restore.
+            if !valid_name(&bot.name) || catalog.iter()
+                .filter(|candidate| candidate.name.eq_ignore_ascii_case(&bot.name))
+                .count() != 1 {
+                return Err("Portable Team bot name is invalid or ambiguous; resolve bot names before exporting.".into());
+            }
             bot_profiles.push(BotProfile {
                 bot:bot.name,provider:bot.provider,model:bot.model,
                 mode:bot.mode,skills:bot.skills,
@@ -389,10 +403,13 @@ fn export(store: &Store) -> Result<serde_json::Value> {
             council: Council { enabled: false },
         });
     }
-    serde_json::to_value(Manifest {
+    let document = serde_json::to_value(Manifest {
         schema_version:5,orchestrations:presets,
-    })
-        .map_err(|e| e.to_string())
+    }).map_err(|e| e.to_string())?;
+    if serde_json::to_vec(&document).map_err(|e| e.to_string())?.len() > MAX_BYTES {
+        return Err("SuperAgent export exceeds the 1 MB portable manifest limit.".into());
+    }
+    Ok(document)
 }
 
 
@@ -734,6 +751,36 @@ mod tests {
         let mut invalid_schema=doc;
         invalid_schema["schemaVersion"]=json!(1);
         assert!(preview(&store,&invalid_schema).is_err());
+    }
+
+    #[test]
+    fn portable_export_rejects_unrestorable_bot_names_without_changing_team_state() {
+        let store = fixture();
+        apply(&store, &document("Portable Team"), true).unwrap();
+        let before = export(&store).unwrap();
+        assert_eq!(preview(&store, &before).unwrap().unchanged, vec!["Portable Team"]);
+
+        // A bot outside the configured Team can make a role name ambiguous
+        // on a different installation. Do not emit an unusable backup.
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('unrelated','builder','worker-project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        assert!(export(&store).unwrap_err().contains("invalid or ambiguous"));
+        store.db.execute("UPDATE bots SET name='Other' WHERE id='unrelated'", []).unwrap();
+
+        store.db.execute("UPDATE bots SET name=' Invalid ' WHERE id='worker'", []).unwrap();
+        assert!(export(&store).unwrap_err().contains("invalid or ambiguous"));
+        store.db.execute("UPDATE bots SET name='Builder' WHERE id='worker'", []).unwrap();
+        let restored = export(&store).unwrap();
+        assert_eq!(restored, before);
+        assert_eq!(preview(&store, &restored).unwrap().unchanged, vec!["Portable Team"]);
+        let (enabled, revision): (i64, i64) = store.db.query_row(
+            "SELECT enabled,policy_revision FROM sa_orchestrations WHERE name='Portable Team'",
+            [], |row| Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        assert_eq!((enabled, revision), (0, 1));
     }
 
     #[test]

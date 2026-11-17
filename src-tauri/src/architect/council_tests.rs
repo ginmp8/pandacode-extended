@@ -692,7 +692,12 @@ fn native_skill_tools_observe_retrieval_and_integrity_without_model_self_reports
     let native_reviewer_session = {
         let store = state.store.lock().unwrap();
         let root = store.session(&sid).unwrap();
-        store.create_session(&root.project_id, "codex", "", "full").unwrap()
+        let session = store.create_session(&root.project_id, "codex", "", &root.mode).unwrap();
+        store.db.execute(
+            "INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",
+            rusqlite::params![&sid, "native-seat", &session.id],
+        ).unwrap();
+        session
     };
     reviewer.session_id = native_reviewer_session.id.clone();
     let mut binding = reviewer_security::ReviewerBinding::native(
@@ -819,6 +824,62 @@ fn native_skill_tools_observe_retrieval_and_integrity_without_model_self_reports
                 native_reviewer_session.status, native_reviewer_session.task_stage,
                 native_reviewer_session.archived],
         ).unwrap();
+    }
+    // A still-running native reviewer must also lose host evidence authority
+    // if its task ownership, checkout, or permission mode is changed. These
+    // are real persisted session mutations, not forged model-tool arguments.
+    let before_scope_revocation = serde_json::to_value(
+        load(&state.store.lock().unwrap(), &sid).unwrap().unwrap()
+    ).unwrap();
+    for tamper in ["owner", "mode", "checkout"] {
+        {
+            let store = state.store.lock().unwrap();
+            match tamper {
+                "owner" => {
+                    store.db.execute(
+                        "UPDATE architect_workers SET parent_session_id=?2 WHERE session_id=?1",
+                        rusqlite::params![&native_reviewer_session.id, &native_reviewer_session.id],
+                    ).unwrap();
+                }
+                "mode" => {
+                    let changed = if original_root.mode == "plan" { "full" } else { "plan" };
+                    store.db.execute(
+                        "UPDATE sessions SET mode=?2 WHERE id=?1",
+                        rusqlite::params![&native_reviewer_session.id, changed],
+                    ).unwrap();
+                }
+                "checkout" => {
+                    store.db.execute(
+                        "UPDATE sessions SET worktree_path='foreign-checkout' WHERE id=?1",
+                        [&native_reviewer_session.id],
+                    ).unwrap();
+                }
+                _ => unreachable!(),
+            }
+        }
+        for tool in ["pandacode_reviewer_skill_open", "pandacode_reviewer_skill_verify"] {
+            let denied = reviewer_skill_evidence::dispatch_state(
+                &state, &sid, generation, &actor, tool, args(),
+            ).unwrap_err();
+            assert!(denied.contains("native reviewer session is no longer authorized"),
+                "{tool} must reject a {tamper} scope change: {denied}");
+            assert_eq!(serde_json::to_value(
+                load(&state.store.lock().unwrap(), &sid).unwrap().unwrap()
+            ).unwrap(), before_scope_revocation,
+                "a revoked native reviewer scope must never mutate recorded evidence");
+        }
+        {
+            let store = state.store.lock().unwrap();
+            store.db.execute(
+                "UPDATE architect_workers SET parent_session_id=?2 WHERE session_id=?1",
+                rusqlite::params![&native_reviewer_session.id, &sid],
+            ).unwrap();
+            store.db.execute(
+                "UPDATE sessions SET mode=?2,worktree_path=?3 WHERE id=?1",
+                rusqlite::params![&native_reviewer_session.id,
+                    &native_reviewer_session.mode, &native_reviewer_session.worktree_path],
+            ).unwrap();
+        }
     }
     let (_, after_restore) = reviewer_skill_evidence::dispatch_state(
         &state, &sid, generation, &actor, "pandacode_reviewer_skill_verify", args(),

@@ -159,7 +159,15 @@ pub(super) fn dispatch_state(
     // not mint host-observed evidence, even with a valid root and seat.
     let reviewer_session = store.session(&team.workers[index].session_id)
         .map_err(|_| "reviewer_session_mismatch: native reviewer session unavailable.".to_string())?;
-    if reviewer_session.project_id != root_session.project_id
+    // A retained reviewer tool host cannot mint evidence after its native
+    // session is reassigned to another task, checkout, or permission mode.
+    // Direct Council seats inherit their root's mode; nested child seats
+    // inherit plan mode. Compare the original task scope, not a blanket
+    // full/plan assumption that would break legacy M1/M2.
+    if super::parent_of(&store, &reviewer_session.id)?.as_deref() != Some(parent)
+        || reviewer_session.project_id != root_session.project_id
+        || reviewer_session.worktree_path != root_session.worktree_path
+        || reviewer_session.mode != root_session.mode
         || reviewer_session.archived || reviewer_session.task_stage == "completed"
         || matches!(reviewer_session.status.as_str(), "interrupted" | "error" | "completed")
     {

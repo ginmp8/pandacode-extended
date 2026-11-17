@@ -278,6 +278,9 @@ pub struct OrchestrationOverview {
     pub last_activity_at: i64,
     pub worker_count: i64,
     pub reviewer_count: i64,
+    /// Read-only reason why a disabled Team cannot currently enter manual mode.
+    /// Native enabling rechecks the same guard under its revision-bound mutation.
+    pub manual_enable_blocker: Option<String>,
 }
 
 /// Derive overview counts from durable tickets rather than a page of sessions.
@@ -307,9 +310,17 @@ fn orchestration_overview(store: &Store) -> Result<Vec<OrchestrationOverview>> {
             last_activity_at: row.get(10)?,
             worker_count: row.get(11)?,
             reviewer_count: row.get(12)?,
+            manual_enable_blocker: None,
         })
     }).map_err(|e| e.to_string())?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+    let mut result = rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    for item in &mut result {
+        if !item.config.enabled {
+            item.manual_enable_blocker = manual_enable_blocker(store, &item.config)?;
+        }
+    }
+    Ok(result)
 }
 
 fn configuration(store: &Store, id: &str) -> Result<Orchestration> {
@@ -3455,6 +3466,38 @@ pub async fn superagent_set_enabled(window: tauri::WebviewWindow,
 
 /// A policy edit must not silently overwrite an authorization change from
 /// another window. Even enabling is Off-mode only; it does not infer work.
+/// This is an explanation of current local eligibility, never a grant or
+/// reservation. The same native checks are repeated when enabling with CAS.
+fn manual_enable_blocker(store: &Store, current: &Orchestration) -> Result<Option<String>> {
+    if roster::has_additional_members(store, &current.id)? {
+        return Ok(Some(
+            "Configured multi-member Teams cannot run without native scoped admission.".into(),
+        ));
+    }
+    // Historic/disabled Teams must remain visible even after their bots are
+    // removed. Do not let a missing identity break the entire Team directory.
+    let coordinator = match bots::get(store, &current.coordinator_bot_id) {
+        Ok(bot) => bot,
+        Err(_) => return Ok(Some("Configured Coordinator bot is unavailable.".into())),
+    };
+    let worker = match bots::get(store, &current.worker_bot_id) {
+        Ok(bot) => bot,
+        Err(_) => return Ok(Some("Configured Worker bot is unavailable.".into())),
+    };
+    if coordinator.paused || worker.paused
+        || worker.project_id != current.project_id
+        || crate::feature_controls::get().bots_paused
+    {
+        return Ok(Some("Selected bots are paused or their worker scope has changed.".into()));
+    }
+    for bot in [&coordinator, &worker] {
+        if let Some(issue) = roster::member_execution_issue(bot) {
+            return Ok(Some(issue.into()));
+        }
+    }
+    Ok(None)
+}
+
 fn change_enabled(
     store: &Store, orchestration_id: &str,
     expected_revision: i64, enabled: bool,
@@ -3464,23 +3507,10 @@ fn change_enabled(
         return Err("Orchestration policy revision changed; reload before editing.".into());
     }
     if enabled {
-        if roster::has_additional_members(store,orchestration_id)? {
-            return Err("Configured multi-member Teams cannot run without native scoped admission.".into());
-        }
-        let coordinator=bots::get(store,&current.coordinator_bot_id)?;
-        let worker=bots::get(store,&current.worker_bot_id)?;
-        if coordinator.paused || worker.paused
-            || worker.project_id != current.project_id
-            || crate::feature_controls::get().bots_paused
-        {
-            return Err("Selected bots are paused or their worker scope has changed.".into());
-        }
-        // Old disabled Teams and edited bot profiles must pass the same
-        // native role checks before the user can explicitly enable them.
-        for bot in [&coordinator, &worker] {
-            if let Some(issue) = roster::member_execution_issue(bot) {
-                return Err(issue.into());
-            }
+        // This is the authoritative mutation boundary. A prior directory
+        // projection may have become stale and can never authorize enabling.
+        if let Some(reason) = manual_enable_blocker(store, &current)? {
+            return Err(reason);
         }
     }
     if current.enabled == enabled {
@@ -7836,6 +7866,55 @@ mod tests {
         assert_eq!(persisted.policy_revision, config.policy_revision);
         store.db.execute("UPDATE bots SET mode='plan' WHERE id='worker'", []).unwrap();
         assert!(change_enabled(&store, &config.id, config.policy_revision, true).unwrap().enabled);
+    }
+
+    #[test]
+    fn directory_reports_native_manual_enable_denials_without_changing_authority() {
+        let store = fixture();
+        let cfg = create_configuration(&store, NewOrchestration {
+            name: "Eligibility Team".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        let view = |store: &Store| -> OrchestrationOverview {
+            orchestration_overview(store).unwrap().into_iter()
+                .find(|item| item.config.id == cfg.id).unwrap()
+        };
+        assert!(view(&store).manual_enable_blocker.is_none());
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        let paused = view(&store);
+        assert_eq!(paused.manual_enable_blocker.as_deref(),
+            Some("Selected bots are paused or their worker scope has changed."));
+        assert!(change_enabled(&store, &cfg.id, cfg.policy_revision, true).is_err());
+        store.db.execute(
+            "UPDATE bots SET paused=0,mode='unsupported-test-mode' WHERE id='worker'",[],
+        ).unwrap();
+        let unsupported = view(&store);
+        assert!(unsupported.manual_enable_blocker.as_deref().unwrap()
+            .contains("permission mode"));
+        let denied = change_enabled(&store, &cfg.id, cfg.policy_revision, true).unwrap_err();
+        assert_eq!(Some(denied.as_str()), unsupported.manual_enable_blocker.as_deref());
+        store.db.execute("UPDATE bots SET mode='plan' WHERE id='worker'", []).unwrap();
+        assert!(view(&store).manual_enable_blocker.is_none());
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('reviewer','Reviewer','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_team_roles(orchestration_id,role,position,bot_id)
+             VALUES(?1,'reviewer',0,'reviewer')", [&cfg.id],
+        ).unwrap();
+        let multirole = view(&store);
+        assert_eq!(multirole.manual_enable_blocker.as_deref(),
+            Some("Configured multi-member Teams cannot run without native scoped admission."));
+        assert!(change_enabled(&store, &cfg.id, cfg.policy_revision, true).is_err());
+        assert!(!configuration(&store, &cfg.id).unwrap().enabled);
+        assert_eq!(configuration(&store, &cfg.id).unwrap().policy_revision, cfg.policy_revision);
+        let db_path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&db_path).unwrap();
+        assert_eq!(view(&reopened).manual_enable_blocker, multirole.manual_enable_blocker);
     }
 
     #[test]

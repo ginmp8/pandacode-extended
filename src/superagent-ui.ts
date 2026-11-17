@@ -10,6 +10,7 @@ interface Config {
   projectId?: string; enabled: boolean; policyRevision: number;
   ticketCount?: number; runningCount?: number; blockedCount?: number; lastActivityAt?: number;
   workerCount?: number; reviewerCount?: number;
+  manualEnableBlocker?: string | null;
 }
 interface TeamRoster { orchestrationId:string; policyRevision:number; coordinatorBotId:string;
   workerBotIds:string[]; reviewerBotIds:string[]; maxWorkerAttempts:number; executionReady:boolean }
@@ -583,15 +584,24 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         safe(String(Math.floor(demandPreflight.attemptBudgetMs / 60000))) + ' minutes</dd></dl>' +
         '<p>This is a read-only snapshot, not a grant, Ticket or guaranteed reservation. ' +
         'Native admission rechecks all policy, availability and checkout limits.</p></section>' : '';
+    // A live native directory projection explains disabled controls. Missing
+    // fields from legacy previews retain the conservative multi-member fence.
+    const enableBlocker = chosen && !chosen.enabled
+      ? chosen.manualEnableBlocker || (
+        (chosen.workerCount ?? 1) > 1 || (chosen.reviewerCount ?? 0) > 0
+          ? 'Configured multi-member Teams cannot run without native scoped admission.'
+          : null)
+      : null;
     const active = chosen ? '<section class="sa-pane" aria-label="Selected orchestration"><header><h3>' +
       safe(chosen.name) + '</h3><div class="sa-actions"><button type="button" data-sa-enable="' +
       safe(chosen.id) + '"' +
-      (!chosen.enabled && ((chosen.workerCount ?? 1)>1 || (chosen.reviewerCount ?? 0)>0)
-        ? ' disabled title="Multi-member execution requires native scoped admission"'
-        : '') + '>' + (chosen.enabled ? 'Disable' : 'Enable manual') +
+      (enableBlocker ? ' disabled aria-describedby="sa-native-enable-blocker"' : '') +
+      '>' + (chosen.enabled ? 'Disable' : 'Enable manual') +
       '</button><button type="button" data-sa-duplicate="' + safe(chosen.id) +
       '">Duplicate as new Team</button><button type="button" data-sa-delete="' + safe(chosen.id) + '"' +
       (chosen.enabled ? ' disabled' : '') + '>Delete unused</button></div></header>' +
+      (enableBlocker ? '<p id="sa-native-enable-blocker" role="status">Manual enable blocked: ' +
+        safe(enableBlocker) + ' No task or grant was started.</p>' : '') +
       '<form data-sa-form="edit"><label>Preset title<input name="name" required maxlength="120" value="' + safe(chosen.name) + '"></label>' +
       '<div class="sa-grid"><label>Edit coordinator<select name="coordinatorBotId" required>' +
       optionsFor(chosen.coordinatorBotId) + '</select></label>' +

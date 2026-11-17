@@ -2049,6 +2049,43 @@ test('Team duplication rejects a stale native revision without creating a preset
     item.command!=='superagent_roster_update')).toBe(true);
 });
 
+test('native Team enable blocker is visible and cannot be bypassed by the workspace', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-manual-enable-denied';
+    document.body.appendChild(host);
+    const calls:string[]=[];
+    (window as unknown as {saEnableDenialCalls:string[]}).saEnableDenialCalls=calls;
+    mountSuperagent(host, async command => {
+      calls.push(command);
+      if (command==='bots_list') return [
+        {id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if (command==='superagent_list') return [{
+        id:'team',name:'Paused policy Team',coordinatorBotId:'coordinator',
+        workerBotId:'worker',enabled:false,policyRevision:9,
+        workerCount:1,reviewerCount:0,
+        manualEnableBlocker:'Bot permission mode is not supported by PandaCode.',
+      }] as never;
+      if (command==='superagent_tickets') return [] as never;
+      throw Error('Unexpected command: '+command);
+    });
+  });
+  const host=page.locator('#sa-manual-enable-denied');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  const enable=host.getByRole('button',{name:'Enable manual'});
+  await expect(enable).toBeDisabled();
+  await expect(enable).toHaveAttribute('aria-describedby','sa-native-enable-blocker');
+  await expect(host.getByRole('status').filter({hasText:'Manual enable blocked:'}))
+    .toContainText('Bot permission mode is not supported by PandaCode.');
+  expect(await page.evaluate(() =>
+    (window as unknown as {saEnableDenialCalls:string[]}).saEnableDenialCalls))
+    .toEqual(['bots_list','superagent_list','superagent_tickets']);
+});
+
 test('new Team persists optional reviewers as one disabled role configuration', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

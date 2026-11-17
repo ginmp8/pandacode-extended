@@ -221,6 +221,25 @@ fn read_preferences(bytes: Option<&[u8]>) -> AgentsDockPreferences {
     }
 }
 
+// A pinned auxiliary WebView may fail to restore on some Windows/display
+// configurations. It must never prevent the primary application from booting.
+// Keep the user's preference file intact; the in-memory state reflects the
+// unavailable window until the user explicitly tries again.
+fn optional_dock_startup_error(
+    outcome: crate::Result<()>,
+    preferences: &Mutex<AgentsDockPreferences>,
+) -> Option<String> {
+    match outcome {
+        Ok(()) => None,
+        Err(error) => {
+            if let Ok(mut current) = preferences.lock() {
+                current.pinned = false;
+            }
+            Some(error)
+        }
+    }
+}
+
 pub fn setup(app: &AppHandle, app_data: &Path) -> crate::Result<()> {
     let path = app_data.join("agents-dock.json");
     let preferences = read_preferences(std::fs::read(&path).ok().as_deref());
@@ -231,7 +250,17 @@ pub fn setup(app: &AppHandle, app_data: &Path) -> crate::Result<()> {
         moves: std::sync::atomic::AtomicU64::new(0),
     });
     if pinned {
-        create_dock_window(app.clone())?;
+        let outcome = create_dock_window(app.clone());
+        if let Some(error) =
+            optional_dock_startup_error(outcome, &app.state::<DockState>().preferences)
+        {
+            // Appearance/positioning can fail after the auxiliary WebView was
+            // created. Never leave a partially restored floating window.
+            if let Some(window) = app.get_webview_window("agents-dock") {
+                let _ = window.close();
+            }
+            eprintln!("Optional Running agents dock could not be restored: {error}");
+        }
     }
     // Event-driven: a run starting, ending, or asking for approval/input wakes the
     // emitter; bursts coalesce, and a slow fallback catches anything else (renames).
@@ -565,7 +594,8 @@ pub async fn agents_dock_open_task(
 #[cfg(test)]
 mod tests {
     use super::{
-        changes_dock, read_preferences, shape_snapshot, AgentsDockPreferences, Candidate,
+        changes_dock, optional_dock_startup_error, read_preferences, shape_snapshot,
+        AgentsDockPreferences, Candidate,
         DockStatus,
     };
 
@@ -592,6 +622,25 @@ mod tests {
         assert!(reloaded.enabled && reloaded.pinned);
 
         assert!(!read_preferences(Some(b"not json")).enabled);
+    }
+
+    #[test]
+    fn optional_dock_restore_failure_does_not_abort_app_startup() {
+        let preferences = std::sync::Mutex::new(AgentsDockPreferences {
+            enabled: true,
+            pinned: true,
+            ..AgentsDockPreferences::default()
+        });
+        assert!(optional_dock_startup_error(Ok(()), &preferences).is_none());
+        assert!(preferences.lock().unwrap().pinned);
+
+        let failure = optional_dock_startup_error(
+            Err("auxiliary WebView cannot be restored".into()), &preferences,
+        );
+        assert_eq!(failure.as_deref(), Some("auxiliary WebView cannot be restored"));
+        let current = preferences.lock().unwrap();
+        assert!(current.enabled, "the optional dock must not disable PandaCode");
+        assert!(!current.pinned, "the missing auxiliary window is not still pinned");
     }
 
     #[test]

@@ -3409,6 +3409,7 @@ mod tests {
     fn team_fixture(workers: Vec<crate::architect::Worker>) -> crate::architect::TeamSnapshot {
         crate::architect::TeamSnapshot {
             session_id: "team-session".into(),
+            superagent_review: None,
             tool_catalog_version: 0,
             config: crate::architect::TeamConfig {
                 auto: true,

@@ -96,10 +96,32 @@ CI (`.github/workflows/ci.yml`) typechecks, runs the unit tests, builds the
 website and runs `cargo check`, `cargo test --lib` and strict Clippy on Linux.
 The release workflow builds each installer on its native runner and, on Windows
 and Linux, installs or launches the packaged app and checks that it stays alive
-for a fixed interval (`scripts/release/ci-startup-smoke.mjs`). Staying alive
-proves only that the process did not exit: it does not prove the webview
-rendered, the window accepted input, or a provider turn completed. Browser
+for a fixed interval (`scripts/release/ci-startup-smoke.mjs`). The Windows
+probe also launches the installed app a second time with the same disposable
+user profile after forced termination, so first-run survival cannot hide a
+restart-recovery failure. Staying alive proves only that the process did not
+exit: it does not prove the webview rendered, the window accepted input, or a
+provider turn completed. Browser
 fixtures on a Mac do not establish native Windows/Linux compatibility either.
+
+### Windows installer closes shortly after opening
+
+First check Task Manager (or `Get-Process PandaCode -ErrorAction SilentlyContinue`
+in PowerShell). If `PandaCode.exe` is still running, check the tray and
+existing single-instance window before classifying a missing window as a
+process crash. If it exited, open **Event Viewer → Windows Logs → Application**,
+filter for **Application Error** or **Windows Error Reporting**, and identify
+the entry whose faulting application is `PandaCode.exe`. Record the exception
+code, faulting module name, event time and installer SHA-256; redact account
+names, personal paths, task contents and tokens before sharing diagnostics.
+
+Also record Windows build, CPU architecture and whether Microsoft Edge
+WebView2 Runtime is installed. Distinguish an existing-profile failure from
+a clean-install failure by repeating on a disposable VM or separate Windows
+test account; **do not delete or rename the original PandaCode database or
+profile**. A CI process-survival result is not a substitute for these
+interactive crash/visibility checks. No crash cause should be inferred solely
+from an unrelated PR compile error.
 
 ### Recording validation results
 

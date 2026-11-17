@@ -1,4 +1,5 @@
 use super::*;
+use sha2::Digest;
 #[path = "council_flow_tests.rs"]
 mod flow;
 use crate::architect::council::review;
@@ -871,6 +872,12 @@ fn criterion_pinned_input_integrity_requires_native_receipts_and_denies_replay()
         team.workers[index].reviewer_binding.as_mut().unwrap().skill_evidence
             .get_mut("pinned-check").unwrap().criterion_receipt = Some(receipt);
     }
+    let native_receipt = team.workers[0].reviewer_binding.as_ref().unwrap()
+        .skill_evidence.get("pinned-check").unwrap()
+        .criterion_receipt.as_ref().unwrap();
+    assert_eq!(native_receipt.schema_version, 2);
+    assert_eq!(native_receipt.objective_sha256,
+        format!("{:x}", sha2::Sha256::digest(team.objective.as_bytes())));
     assert_eq!(council::inspection(&team, false).unwrap()
         .criterion_observations[0].state, "pinned_input_integrity_verified");
     assert_eq!(council::status(&team).unwrap().state, "passed",
@@ -883,7 +890,21 @@ fn criterion_pinned_input_integrity_requires_native_receipts_and_denies_replay()
     let mut tainted = team.clone();
     tainted.workers[0].wrote_at = SINCE + 5;
     assert_eq!(council::status(&tainted).unwrap().state, "fixing");
-    for mutated in ["cycle", "criterion", "lens", "round", "worker", "session", "artifact", "digest", "kind"] {
+    let mut changed_task = team.clone();
+    changed_task.objective.push_str(" changed independently of the cycle");
+    assert_eq!(council::status(&changed_task).unwrap().state, "fixing",
+        "a host check from another task objective cannot authorize this required criterion");
+    let mut old_version = team.clone();
+    let legacy_record = old_version.workers[0].reviewer_binding.as_mut().unwrap()
+        .skill_evidence.get_mut("pinned-check").unwrap()
+        .criterion_receipt.as_mut().unwrap();
+    let mut old_json = serde_json::to_value(&*legacy_record).unwrap();
+    old_json.as_object_mut().unwrap().remove("objectiveSha256");
+    old_json["schemaVersion"] = serde_json::json!(1);
+    *legacy_record = serde_json::from_value(old_json).unwrap();
+    assert_eq!(council::status(&old_version).unwrap().state, "fixing",
+        "old receipts remain readable but cannot bypass the new task-identity gate");
+    for mutated in ["cycle", "criterion", "lens", "round", "worker", "session", "objective", "artifact", "digest", "kind"] {
         let mut altered = team.clone();
         let record = altered.workers[0].reviewer_binding.as_mut().unwrap()
             .skill_evidence.get_mut("pinned-check").unwrap()
@@ -895,6 +916,7 @@ fn criterion_pinned_input_integrity_requires_native_receipts_and_denies_replay()
             "round" => record.round += 1,
             "worker" => record.worker_id = "foreign-worker".into(),
             "session" => record.reviewer_session_id = "foreign-session".into(),
+            "objective" => record.objective_sha256 = "0".repeat(64),
             "artifact" => record.artifact_revision = "other-revision".into(),
             "digest" => record.content_sha256 = "0".repeat(64),
             "kind" => record.check_kind = "model_report".into(),

@@ -1,5 +1,6 @@
 //! Native reviewer skill events are recorded by the host, not inferred from model reports.
 use super::*;
+use sha2::{Digest, Sha256};
 const INTEGRITY: &str = "pinned_input_integrity";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -12,6 +13,9 @@ pub(crate) struct NativeCriterionEvidenceReceipt {
     pub round: usize,
     pub worker_id: String,
     pub reviewer_session_id: String,
+    /// v1 receipts stay deserializable, but cannot satisfy the new task-identity gate.
+    #[serde(default)]
+    pub objective_sha256: String,
     pub artifact_revision: String,
     pub content_sha256: String,
     pub check_kind: String,
@@ -36,13 +40,14 @@ impl NativeCriterionEvidenceReceipt {
             return None;
         }
         Some(Self {
-            schema_version: 1,
+            schema_version: 2,
             cycle_id: binding.council_cycle_id.clone(),
             criterion_id: criterion.id.clone(),
             criterion_lens: criterion.lens.clone(),
             round: seat.round,
             worker_id: worker.id.clone(),
             reviewer_session_id: worker.session_id.clone(),
+            objective_sha256: format!("{:x}", Sha256::digest(team.objective.as_bytes())),
             artifact_revision: binding.artifact_revision.clone(),
             content_sha256: content_sha256.to_owned(),
             check_kind: INTEGRITY.into(),

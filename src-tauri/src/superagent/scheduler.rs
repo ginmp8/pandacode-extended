@@ -326,7 +326,8 @@ fn create_plan(store:&Store,ticket_id:&str,revision:i64,items:&[WorkItemInput])-
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,'work_plan_issued',?2,?3)",
-        params![ticket_id,format!("{} read-only items; plan digest {}",items.len(),digest),now],
+        params![ticket_id,format!("{} WorkItems ({} request local file authorization); plan digest {}",
+                items.len(),items.iter().filter(|item|item.requires_write).count(),digest),now],
     ).map_err(|error|error.to_string())?;
     tx.commit().map_err(|error|error.to_string())?;
     inspect(store,ticket_id)?.ok_or("WorkItem plan disappeared after admission.".into())
@@ -947,7 +948,7 @@ mod tests {
                 "INSERT INTO sa_work_items(id,ticket_id,item_key,ordinal,objective,
                  worker_bot_id,state,created_at,updated_at,requires_write)
                  VALUES(?1,'root',?1,?2,'Edit pinned file','worker','pending',1,1,1)",
-                params![key,ordinal],
+                params![key,ordinal as i64],
             ).unwrap();
         }
         let store=Store{db,path:std::path::PathBuf::from(":memory:")};

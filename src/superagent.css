@@ -25,11 +25,6 @@
 .sa-error{color:var(--danger);font-size:var(--ds-text-sub)}
 .sa-confirm{padding:12px;border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner);background:var(--ds-card-inner)}
 .sa-confirm .sa-actions{margin-top:10px}
-.sa-write-editor{display:flex;flex-direction:column;gap:10px;padding:12px;border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner);background:var(--ds-card-inner)}
-.sa-write-editor h4{margin:0;font-size:var(--ds-text-head)}
-.sa-write-editor p,.sa-write-editor small{margin:0;color:var(--muted);font-size:var(--ds-text-meta);line-height:1.5}
-.sa-write-editor textarea{min-height:104px;resize:vertical;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:var(--ds-text-meta)}
-.sa-write-editor .sa-write-path-error{color:var(--danger)}
 .sa-effect-editor{display:flex;flex-direction:column;gap:10px;padding:12px;border:1px solid var(--ds-border);border-radius:var(--ds-radius-inner);background:var(--ds-card-inner)}
 .sa-effect-editor h5{margin:0;font-size:var(--ds-text-head)}
 .sa-effect-editor p{margin:0;color:var(--muted);font-size:var(--ds-text-meta);line-height:1.5;overflow-wrap:anywhere}
@@ -118,8 +113,6 @@
 @media(prefers-contrast:more){.sa-run-graph-nodes li{border-left-color:var(--text)}}
 
 /* Native Team builder: accessible multi-step forms without nested card surfaces. */
-.sa-team-builder-launch { padding-block: 0.7rem; }
-.sa-team-builder-launch p { margin-block: 0.45rem 0; }
 .sa-team-builder form { display: grid; gap: 0.8rem; }
 .sa-team-builder form section[aria-label="Team setup step"] {
   display: grid; gap: 0.7rem;

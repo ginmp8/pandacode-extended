@@ -47,6 +47,8 @@ pub struct StrategyUpdate {
     pub max_attempts_per_assignment: u8,
     pub max_concurrent_tasks: u8,
     #[serde(default)]
+    pub execution_mode: Option<String>,
+    #[serde(default)]
     pub token_ceiling: Option<u64>,
     #[serde(default)]
     pub estimated_cost_ceiling_minor: Option<u64>,
@@ -71,6 +73,9 @@ impl StrategyUpdate {
             || self.estimated_cost_ceiling_minor.is_some_and(|value| value == 0) {
             return Err("Optional resource ceilings must be positive.".into());
         }
+        if self.execution_mode.as_deref().is_some_and(|mode| !matches!(mode, "approval" | "full_auto")) {
+            return Err("Execution mode must be approval or full_auto.".into());
+        }
         Ok(StrategySettings {
             priority: self.priority.clone(),
             attempt_timeout_ms: self.attempt_timeout_ms,
@@ -88,6 +93,8 @@ pub struct StrategyView {
     pub policy_revision: i64,
     pub team_version: i64,
     pub settings: StrategySettings,
+    /// Frozen Team execution behavior, not a permission or an external-effect grant.
+    pub execution_mode: String,
     pub max_attempts_per_assignment: u8,
     pub max_concurrent_tasks: u8,
     pub executable_parallel_workers: u8,
@@ -122,6 +129,7 @@ fn read(store: &Store, orchestration_id: &str) -> Result<StrategyView> {
         policy_revision: cfg.policy_revision,
         team_version: cfg.team_version,
         settings: snapshot.policy.strategy,
+        execution_mode: snapshot.policy.autonomy,
         max_attempts_per_assignment: snapshot.policy.max_attempts_per_assignment,
         max_concurrent_tasks: snapshot.policy.max_concurrent_tasks,
         executable_parallel_workers: 1,
@@ -140,7 +148,16 @@ fn update(store: &Store, orchestration_id: &str, expected_revision: i64,
         return Err("Disable this Team and reload its exact policy revision before editing strategy.".into());
     }
     let previous = load_team_version_snapshot(&store.db, orchestration_id, current.team_version)?;
-    if previous.policy.strategy == strategy
+    let execution_mode = input.execution_mode.as_deref()
+        .unwrap_or(previous.policy.autonomy.as_str());
+    if execution_mode == "full_auto" &&
+        (!current.council_required || current.reviewer_bot_ids.len() < 2) {
+        return Err("Full Auto requires the native Council and at least two independent reviewers.".into());
+    }
+    if execution_mode == "approval" && current.council_required {
+        return Err("With Approval requires human acceptance; disable automatic Council finalization before selecting this mode.".into());
+    }
+    if previous.policy.autonomy == execution_mode && previous.policy.strategy == strategy
         && previous.policy.max_attempts_per_assignment == input.max_attempts_per_assignment
         && previous.policy.max_concurrent_tasks == input.max_concurrent_tasks {
         return read(store, orchestration_id);
@@ -177,6 +194,7 @@ fn update(store: &Store, orchestration_id: &str, expected_revision: i64,
     next.policy.max_attempts_per_assignment = input.max_attempts_per_assignment;
     next.policy.max_concurrent_tasks = input.max_concurrent_tasks;
     next.policy.strategy = strategy;
+    next.policy.autonomy = execution_mode.into();
     insert_team_version(&tx, &next)?;
     tx.commit().map_err(|error| error.to_string())?;
     read(store, orchestration_id)
@@ -225,12 +243,30 @@ mod tests {
     }
 
     #[test]
+    fn execution_mode_rejects_unknown_or_ambiguous_values() {
+        let mut request = StrategyUpdate {
+            priority: "balanced".into(), attempt_timeout_ms: 300_000,
+            max_attempts_per_assignment: 2, max_concurrent_tasks: 1,
+            token_ceiling: None, estimated_cost_ceiling_minor: None,
+            subagent_delegation_enabled: false,
+            execution_mode: Some("full_auto".into()),
+        };
+        assert!(request.validate().is_ok());
+        request.execution_mode = Some("approval".into());
+        assert!(request.validate().is_ok());
+        request.execution_mode = Some("unrestricted".into());
+        assert!(request.validate().is_err());
+        request.execution_mode = Some(String::new());
+        assert!(request.validate().is_err());
+    }
+
+    #[test]
     fn capability_budget_validation_is_bounded_and_non_privileged() {
         let mut request = StrategyUpdate {
             priority: "cost".into(), attempt_timeout_ms: 300_000,
             max_attempts_per_assignment: 3, max_concurrent_tasks: 2,
             token_ceiling: None, estimated_cost_ceiling_minor: None,
-            subagent_delegation_enabled: false,
+            subagent_delegation_enabled: false, execution_mode: None,
         };
         assert_eq!(request.validate().unwrap().priority, "cost");
         request.max_concurrent_tasks = 0;

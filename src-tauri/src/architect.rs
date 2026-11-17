@@ -813,7 +813,7 @@ pub(crate) fn verified_council_pass(store: &Store, team: &TeamSnapshot) -> bool 
 fn eligible_hierarchical_s2_root_escalation(store: &Store, team: &TeamSnapshot) -> bool {
     let Some(config) = team.config.council.as_ref() else { return false };
     if config.strategy != council::CouncilExecutionStrategy::Escalated
-        || !config.force_escalation || config.nested_bot_reviewers.is_empty()
+        || config.nested_bot_reviewers.is_empty()
     {
         return false;
     }
@@ -825,8 +825,27 @@ fn eligible_hierarchical_s2_root_escalation(store: &Store, team: &TeamSnapshot) 
         else { return false };
     let mut first = team.clone();
     first.workers.retain(|worker| worker.council.as_ref().is_none_or(|seat| seat.round == 1));
-    // This projection only checks whether the first wave merits admitting fresh
-    // reviewers. It never changes the persisted policy or grants a terminal pass.
+    // An authenticated below-target root callback is a genuine unforced S2
+    // trigger. Require a complete first root roster and verified passing child
+    // receipts before admitting a fresh root wave. This is admission only:
+    // missing child escalation and terminal receipts still prevent approval.
+    if !config.force_escalation {
+        let required = config.reviewer_bot_ids.len() + config.automatic_reviewers;
+        let first_roots = first.workers.iter()
+            .filter(|worker| worker.created_at >= team.council_since
+                && worker.council.as_ref().is_some_and(|seat| seat.round == 1))
+            .collect::<Vec<_>>();
+        return required > 0 && active(&team.status)
+            && council::independent_s2_root_identities(team)
+            && children.len() == config.nested_bot_reviewers.len()
+            && first_roots.len() == required
+            && first_roots.iter().any(|worker| worker.council.as_ref()
+                .and_then(|seat| seat.score)
+                .is_some_and(|score| score.is_finite() && score < config.target))
+            && mixed_native_authority_current(store, &first);
+    }
+    // A forced second wave only uses native first-wave proof for admission,
+    // never as a terminal passing verdict.
     first.config.council.as_mut().unwrap().force_escalation = false;
     council::status_for_authenticated_children(&first, &children)
         .is_some_and(|status| status.state == "passed" && !status.stale)

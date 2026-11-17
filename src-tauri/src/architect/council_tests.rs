@@ -6807,3 +6807,92 @@ fn unforced_nested_s2_admits_only_authenticated_fresh_second_wave_without_approv
     assert!(!verified_council_pass(&store, &root),
         "revoked reviewer authority cannot be promoted into a root verdict");
 }
+
+#[test]
+fn nested_m5_unforced_s2_low_root_score_admits_only_authenticated_fresh_root_review() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('security-child','security-child',?1,'codex','default','plan',?2,?2)",
+            rusqlite::params![project, storage::now()],
+        ).unwrap();
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.strategy = council::CouncilExecutionStrategy::Escalated;
+        config.automatic_reviewers = 1;
+        config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+            bot_id: "security-child".into(), child_reviewers: 2,
+            child_target: 9.5, child_max_rounds: 2,
+        });
+        assert_eq!(config.mode(), "m5");
+        config.validate().unwrap();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(
+        &state, &sid, "Review a below-target root finding with real child evidence",
+        None, None,
+    ).unwrap();
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments":[reviewer_assignment("root-initial", "correctness")]
+    })).unwrap();
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (first_run, _) = claim(&state, action);
+    finish(&state, &first_run, "Authenticated low root review.\nCouncil score: 8.5/10", true);
+    let second = json!({
+        "assignments":[reviewer_assignment("root-escalated", "correctness")]
+    });
+    let premature = call(&state, &sid, "pandacode_dispatch_workers", second.clone()).unwrap_err();
+    assert!(premature.contains("first-wave root and child receipts"), "{premature}");
+    assert_eq!(saved(&state, &sid).workers.iter().filter(|worker|
+        worker.council.as_ref().is_some_and(|seat| seat.round == 2)).count(), 0);
+    let (pending, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Await authenticated child callbacks"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(pending["completed"], false);
+    for _ in 0..2 {
+        let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&action.sid, "assistant",
+                "Independent child review.\nCouncil score: 9.7/10").unwrap();
+        }
+        completed_state(&state, &action.sid,
+            Some(&action.admission), true, false, &mut |_| {});
+    }
+    let (pending, _) = dispatch_state(&state, &sid, started.generation,
+        "pandacode_finish_team", json!({"summary":"Child first-wave receipts settled"}),
+        &std::sync::atomic::AtomicBool::new(false)).unwrap();
+    assert_eq!(pending["completed"], false, "a low root score is not approval");
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        assert!(child_council::verified_parent_seats(&store, &root).unwrap().is_some());
+        assert!(eligible_hierarchical_s2_root_escalation(&store, &root),
+            "an authentic low root callback and child receipts must allow one fresh root wave");
+        let mut forged = root.clone();
+        forged.workers.iter_mut().find(|worker|
+            worker.council.as_ref().is_some_and(|seat| seat.round == 1))
+            .unwrap().council.as_mut().unwrap().score = Some(10.0);
+        assert!(!eligible_hierarchical_s2_root_escalation(&store, &forged),
+            "a forged score cannot authorize an on-demand second wave");
+    }
+    let admitted = call(&state, &sid, "pandacode_dispatch_workers", second).unwrap();
+    assert_eq!(admitted["queued"], true);
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (second_run, _) = claim(&state, action);
+    assert_ne!(first_run.config.session_id, second_run.config.session_id);
+    assert!(second_run.config.reviewer_boundary);
+    finish(&state, &second_run, "Independent root re-review.\nCouncil score: 9.8/10", true);
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    assert_eq!(root.workers.iter().filter(|worker|
+        worker.council.as_ref().is_some_and(|seat| seat.round == 2)).count(), 1);
+    assert!(!verified_council_pass(&store, &root),
+        "a fresh root callback does not replace required child S2 terminal proof");
+}

@@ -1460,10 +1460,10 @@ pub(super) fn reviewer_source_for(
     {
         return Err("child_council_unavailable: nested S3 has no authorized root challenge seats.".into());
     }
-    if nested && config.strategy == CouncilExecutionStrategy::Escalated && seat.round > 1
-        && !(config.force_escalation && seat.round == 2)
-    {
-        return Err("child_council_unavailable: triggered S2 escalation needs fresh native root and child review waves.".into());
+    // Never permit a third hierarchical S2 root wave. The dispatcher checks
+    // native first-wave trigger, root grants and child receipts for round two.
+    if nested && config.strategy == CouncilExecutionStrategy::Escalated && seat.round > 2 {
+        return Err("child_council_unavailable: S2 escalation cannot exceed the fresh second native root wave.".into());
     }
     let selected = !config.reviewer_bot_ids.is_empty();
     let automatic = config.automatic_reviewers > 0 || (!selected && !nested);
@@ -1563,19 +1563,22 @@ pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: O
     let done = view.complete(latest);
     // Abandoned seats take room too, so dropping and re-dispatching cannot go on forever.
     let room = in_round(team, latest).count() < MAX_REVIEWERS;
-    // A hierarchical Council's composite child seats are not ordinary root
-    // workers, so Rounds::complete(1) cannot represent their first-wave
-    // quorum. Once all configured root seats are issued, propose a fresh
-    // forced S2 root wave. The trusted dispatcher must independently verify
-    // the first-wave child receipts and root grants *before* admission.
+    // Composite child seats are not ordinary root workers. Reserve a fresh
+    // S2 root round after the first root roster is complete, if forced or if
+    // an observed first-wave root score fell below target. The native
+    // dispatcher must independently authenticate root/child evidence before
+    // granting any new reviewer session.
     if config.strategy == CouncilExecutionStrategy::Escalated
-        && config.force_escalation
         && !config.nested_bot_reviewers.is_empty()
         && latest == 1 && current && !replaced
     {
         let root_needed = config.reviewer_bot_ids.len() + config.automatic_reviewers;
         let issued = in_round(team, 1).filter(|(worker, seat)| counts(worker, seat)).count();
-        if root_needed > 0 && issued >= root_needed {
+        let low_root_score = in_round(team, 1).any(|(_, seat)|
+            seat.score.is_some_and(|score| score.is_finite() && score < config.target));
+        if root_needed > 0 && issued >= root_needed
+            && (config.force_escalation || low_root_score)
+        {
             if view.at_limit(config) {
                 return Err(format!("The Council round limit of {} is reached.", config.max_rounds));
             }

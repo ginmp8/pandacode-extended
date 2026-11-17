@@ -736,6 +736,48 @@ fn native_skill_tools_observe_retrieval_and_integrity_without_model_self_reports
     let (_, duplicate) = reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
         &actor, "pandacode_reviewer_skill_verify", args()).unwrap();
     assert!(duplicate.is_none(), "duplicate native calls are idempotent");
+    // Revoking the *native session* must block even a retained tool host whose
+    // in-memory team snapshot still says running. Neither open nor verify may
+    // create a new receipt or change the persisted Council.
+    let original_root = state.store.lock().unwrap().session(&sid).unwrap();
+    let before_revocation = serde_json::to_value(
+        load(&state.store.lock().unwrap(), &sid).unwrap().unwrap()
+    ).unwrap();
+    for (status, stage, archived) in [
+        ("interrupted", original_root.task_stage.as_str(), false),
+        ("error", original_root.task_stage.as_str(), false),
+        (original_root.status.as_str(), "completed", false),
+        (original_root.status.as_str(), original_root.task_stage.as_str(), true),
+    ] {
+        {
+            let store = state.store.lock().unwrap();
+            store.db.execute(
+                "UPDATE sessions SET status=?2,task_stage=?3,archived=?4 WHERE id=?1",
+                rusqlite::params![&sid, status, stage, archived],
+            ).unwrap();
+        }
+        for tool in ["pandacode_reviewer_skill_open", "pandacode_reviewer_skill_verify"] {
+            let denied = reviewer_skill_evidence::dispatch_state(
+                &state, &sid, generation, &actor, tool, args(),
+            ).unwrap_err();
+            assert!(denied.contains("no longer authorized"),
+                "{tool} must reject a revoked native root session: {denied}");
+            assert_eq!(serde_json::to_value(
+                load(&state.store.lock().unwrap(), &sid).unwrap().unwrap()
+            ).unwrap(), before_revocation, "revoked host calls must not alter Council evidence");
+        }
+    }
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status=?2,task_stage=?3,archived=?4 WHERE id=?1",
+            rusqlite::params![&sid, original_root.status, original_root.task_stage, original_root.archived],
+        ).unwrap();
+    }
+    let (_, after_restore) = reviewer_skill_evidence::dispatch_state(
+        &state, &sid, generation, &actor, "pandacode_reviewer_skill_verify", args(),
+    ).unwrap();
+    assert!(after_restore.is_none(), "restoring native authority keeps existing host proof idempotent");
     let mut persisted = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
     persisted.workers[0].status = "completed".into();
     {

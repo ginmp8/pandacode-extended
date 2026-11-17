@@ -122,6 +122,16 @@ pub(super) fn dispatch_state(
     };
     let store = state.store.lock().map_err(|err| err.to_string())?;
     let mut team = load(&store, parent)?.ok_or("reviewer_session_mismatch: Council unavailable.")?;
+    // A persisted TeamSnapshot may still be running after the native root
+    // session was interrupted, completed or archived. Never mint additional
+    // host-observed evidence from a revoked task, even through an old tool host.
+    let root_session = store.session(parent)
+        .map_err(|_| "reviewer_session_mismatch: native root session unavailable.".to_string())?;
+    if root_session.archived || root_session.task_stage == "completed"
+        || matches!(root_session.status.as_str(), "interrupted" | "error")
+    {
+        return Err("reviewer_session_mismatch: native root Council session is no longer authorized.".into());
+    }
     if team.generation != generation || !active(&team.status) {
         return Err("reviewer_session_mismatch: Council is no longer active.".into());
     }

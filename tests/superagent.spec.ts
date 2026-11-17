@@ -1552,7 +1552,9 @@ test('manual Demand preserves native blocked-Ticket staging without granting wri
   await host.getByRole('button',{name:'Review native preflight'}).click();
   await expect(host.getByRole('region',{name:'Native demand preflight'}))
     .toContainText('blocked Demand may be durably queued');
-  await host.getByRole('button',{name:'Queue blocked Demand'}).click();
+  await host.getByRole('button',{name:'Submit busy Demand'}).click();
+  await expect(host.getByRole('alertdialog',{name:'Confirm orchestration action'}))
+    .toContainText('may start immediately');
   const before=await page.evaluate(() =>
     (window as unknown as {saBlockedCalls:()=>string[]}).saBlockedCalls());
   expect(before.filter(name=>name==='superagent_submit')).toHaveLength(0);

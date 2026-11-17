@@ -560,7 +560,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '<button type="button" data-sa-preflight>Review native preflight</button>' +
       '<button class="primary-button" type="submit"' + (manualAdmissionReady ? '' : ' disabled') +
       '>' + (demandPreflight?.canStageBlocked && preflightCurrent
-        ? 'Queue blocked Demand' : 'Dispatch manually') + '</button></form>' +
+        ? 'Submit busy Demand' : 'Dispatch manually') + '</button></form>' +
       (chosen.enabled && !manualAdmissionReady
         ? '<p role="status">Review an eligible native read-only preflight before dispatch. ' +
           'Changes to the objective, role or Team policy require a new review.</p>'
@@ -1769,10 +1769,19 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         return;
       }
       const key = taskKey;
-      ask((reviewed.canStageBlocked ? 'Queue a blocked manual read-only Demand for Team ' :
+      ask((reviewed.canStageBlocked ? 'Submit a manual read-only Demand for busy Team ' :
         'Start this manual read-only Demand for Team ') + selectedConfig.name +
         ' at policy revision ' + reviewed.policyRevision +
-        '? Native admission will recheck scope and availability. No write grant is issued.', async () => {
+        (reviewed.canStageBlocked
+          ? '? A blocked Ticket is stored if still busy. If capacity opens before native admission, the Worker may start immediately.'
+          : '? Native admission will recheck scope and availability.') +
+        ' No write grant is issued.', async () => {
+        if (selected !== selectedConfig.id || demandPreflight !== reviewed ||
+            demandObjective.trim() !== objective ||
+            preflightObjective !== objective ||
+            preflightMode !== (coordinated ? 'coordinated' : 'direct')) {
+          throw new Error('Demand or Team changed before confirmation. Review native preflight again.');
+        }
         // A cached preview never confers authority. Fresh native preflight is
         // followed by the native submit's own authorization and lease checks.
         const latest = await call<ManualPreflight>('superagent_preflight', {

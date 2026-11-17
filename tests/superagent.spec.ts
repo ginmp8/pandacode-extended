@@ -50,6 +50,21 @@ async function openTeam(host: Locator, name: string): Promise<void> {
   await expect(host.locator('.sa-subtabs').getByRole('button', {name:'Execution and review'})).toBeVisible();
 }
 
+test('Orchestrations keeps the reference page and five-step wizard layout', async ({page}) => {
+  await page.goto('/');
+  const host=await openWorkspace(page);
+  await expect(host.locator('.sa-pagehead h1')).toHaveText('Orchestrations');
+  await expect(host.locator('.sa-navigation')).toBeVisible();
+  await expect(host.locator('.sa-navigation').getByRole('button',{name:'Teams'})).toBeVisible();
+  await host.getByRole('button',{name:'New Team'}).click();
+  const wizard=host.getByRole('region',{name:'Guided Team Builder'});
+  await expect(wizard.locator('.sa-wizard-layout .sa-step-nav')).toBeVisible();
+  await expect(wizard).toContainText('Step 1 of 5');
+  await expect(host.locator('.sa-teams-panel')).toHaveCount(0);
+  await wizard.getByRole('button',{name:'Cancel team setup'}).click();
+  await expect(host.locator('.sa-teams-panel')).toHaveCount(1);
+});
+
 /** A narrow, revision-guarded fake native service. No provider, file or GitHub
  * effect is performed; every mutation is recorded so incorrect dispatch fails. */
 async function mountNativeFixture(page: Page, options: {

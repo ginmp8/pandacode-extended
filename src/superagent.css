@@ -211,3 +211,326 @@
 .sa-run-milestones li strong{font-size:11.5px;font-weight:610;overflow-wrap:anywhere}
 @media(max-width:920px){.sa-run-milestones{grid-template-columns:repeat(2,minmax(0,1fr))}}
 @media(max-width:680px){.sa-onboarding-flow{grid-template-columns:minmax(0,1fr)}.sa-run-milestones{grid-template-columns:minmax(0,1fr)}}
+
+/* Reference-accurate Orchestrations journey.
+   The standalone PandaCode v2 HTML is the visual source; bot state, policy and
+   commands still come exclusively from native code. Do not copy demo data. */
+#superagent-workspace{
+  --sa-panel:var(--panel);
+  --sa-inner:color-mix(in srgb,var(--panel) 68%,var(--raised));
+  --sa-border:var(--border);
+  --sa-border-strong:var(--ds-border-strong);
+  --sa-hover:var(--ds-row-hover);
+  --sa-primary:var(--text);
+  --sa-primary-ink:var(--bg);
+}
+#superagent-workspace .sa-workspace-header{display:none}
+#superagent-workspace .sa-ui{
+  display:flex;flex-direction:column;gap:0;width:100%;max-width:1630px;
+  font-size:14px;line-height:1.5;padding:clamp(18px,2.4vw,42px);
+  padding-bottom:64px;
+}
+#superagent-workspace .sa-pagehead{
+  display:flex;align-items:flex-start;justify-content:space-between;gap:28px;
+  padding-bottom:26px;margin-bottom:27px;border-bottom:1px solid var(--sa-border);
+}
+#superagent-workspace .sa-pagehead h1{
+  margin:0;color:var(--text);font-size:clamp(26px,2vw,32px);
+  font-weight:650;line-height:1.22;letter-spacing:-.035em;
+}
+#superagent-workspace .sa-pagehead .sa-eyebrow{
+  display:block;color:var(--muted);font-size:11px;font-weight:650;
+  letter-spacing:.105em;text-transform:uppercase;margin-bottom:7px;
+}
+#superagent-workspace .sa-pagehead p{font-size:13px;color:var(--muted);margin:8px 0 0}
+#superagent-workspace .sa-page-controls{display:flex;justify-content:flex-end;align-items:center;gap:8px;flex-wrap:wrap}
+#superagent-workspace .sa-page-controls button{
+  display:inline-flex;align-items:center;gap:8px;padding:0 13px;
+  min-height:36px;border-radius:8px;border:1px solid var(--sa-border);
+  background:var(--raised);font-size:13px;font-weight:530;
+}
+#superagent-workspace .sa-page-controls button:hover{background:var(--sa-hover);border-color:var(--sa-border-strong)}
+#superagent-workspace .sa-page-controls .icon{width:15px;height:15px}
+#superagent-workspace .sa-layout{
+  display:grid;grid-template-columns:minmax(155px,194px) minmax(0,1fr);
+  gap:clamp(20px,2.8vw,42px);align-items:start;
+}
+#superagent-workspace .sa-navigation{gap:7px;padding:10px 0;top:16px}
+#superagent-workspace .sa-navigation .sa-nav-label{
+  padding:0 10px 5px;margin:0;font-size:12px;font-weight:500;color:var(--muted);
+}
+#superagent-workspace .sa-navigation .sa-nav-separator{
+  border-top:1px solid var(--sa-border);padding-top:16px;margin-top:12px;
+}
+#superagent-workspace .sa-navigation button{
+  display:flex;align-items:center;gap:11px;justify-content:flex-start;
+  width:100%;min-height:39px;padding:0 12px;border:0;border-radius:9px;
+  background:transparent;color:var(--muted);text-align:left;font-size:12.5px;font-weight:500;
+}
+#superagent-workspace .sa-navigation button .icon{width:16px;height:16px;flex:none;color:var(--muted)}
+#superagent-workspace .sa-navigation button[aria-current="page"]{
+  color:var(--text);font-weight:610;background:var(--raised);
+}
+#superagent-workspace .sa-navigation button:hover:not(:disabled){background:var(--sa-hover)}
+#superagent-workspace .sa-stage{gap:19px;padding:4px 0 60px}
+#superagent-workspace .sa-stage h2{font-size:19px;letter-spacing:-.02em;margin:0 0 5px}
+#superagent-workspace .sa-section-head{align-items:flex-start}
+#superagent-workspace .sa-section-head p{font-size:12.5px}
+#superagent-workspace .sa-stage .sa-pane{
+  background:var(--sa-panel);border:1px solid var(--sa-border);
+  box-shadow:var(--ds-shadow-card);border-radius:15px;padding:18px;gap:12px;
+}
+#superagent-workspace .sa-stage .primary-button,
+#superagent-workspace .sa-wizard-footer [data-sa-builder-next]{
+  display:inline-flex;align-items:center;justify-content:center;gap:8px;
+  min-height:36px;padding:0 13px;border-radius:8px;
+  border:1px solid var(--sa-primary);background:var(--sa-primary);
+  color:var(--sa-primary-ink);font-size:13px;font-weight:620;
+  box-shadow:var(--ds-primary-shadow);
+}
+#superagent-workspace .sa-stage .primary-button:hover:not(:disabled),
+#superagent-workspace .sa-wizard-footer [data-sa-builder-next]:hover:not(:disabled){
+  filter:brightness(.91);color:var(--sa-primary-ink);
+}
+#superagent-workspace .sa-stage :is(input:not([type=checkbox]):not([type=radio]),select,textarea){
+  min-height:37px;max-width:100%;border:1px solid var(--sa-border);
+  border-radius:8px;background:var(--sa-inner);color:var(--text);
+  font-size:13px;padding:8px 11px;
+}
+#superagent-workspace .sa-stage textarea{min-height:90px;resize:vertical}
+#superagent-workspace .sa-stage label{font-size:12.5px;gap:7px}
+#superagent-workspace .sa-stage button:active{scale:1;transform:none}
+#superagent-workspace .sa-first-team{
+  min-height:304px;display:flex;align-items:flex-start;justify-content:center;
+  padding:34px 38px;gap:12px;
+}
+#superagent-workspace .sa-first-team .sa-first-team-icon{
+  display:grid;place-items:center;width:42px;height:42px;
+  border:1px solid var(--sa-border-strong);border-radius:11px;
+  background:var(--raised);color:var(--muted);
+}
+#superagent-workspace .sa-first-team .sa-first-team-icon .icon{width:22px;height:22px}
+#superagent-workspace .sa-first-team h3{font-size:19px!important;letter-spacing:-.025em}
+#superagent-workspace .sa-first-team p{max-width:520px;font-size:13px}
+#superagent-workspace .sa-onboarding-flow{
+  grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;margin-top:4px;
+}
+#superagent-workspace .sa-onboarding-flow li{
+  display:flex;align-items:flex-start;gap:12px;border:0;
+  background:transparent;padding:9px 0;border-radius:0;
+}
+#superagent-workspace .sa-onboarding-flow strong{font-size:12.5px}
+#superagent-workspace .sa-onboarding-flow span{font-size:11.5px}
+#superagent-workspace .sa-stage .sa-teams-panel{
+  background:transparent;border:0;border-radius:0;padding:0;box-shadow:none;
+}
+#superagent-workspace .sa-teams-panel .sa-list{gap:7px}
+#superagent-workspace .sa-teams-panel .sa-item{
+  display:flex;align-items:center;min-height:84px;gap:13px;padding:13px 15px;
+  background:var(--sa-panel);border:1px solid var(--sa-border);border-radius:10px;
+  box-shadow:var(--ds-shadow-card);
+}
+#superagent-workspace .sa-teams-panel .sa-item:hover{background:var(--sa-hover)}
+#superagent-workspace .sa-team-tile{
+  width:41px;height:41px;flex:none;display:grid;place-items:center;
+  background:var(--raised);border:1px solid var(--sa-border-strong);
+  border-radius:9px;color:var(--muted);
+}
+#superagent-workspace .sa-team-tile .icon{width:20px;height:20px}
+#superagent-workspace .sa-teams-panel .sa-item>div:first-of-type{gap:4px}
+#superagent-workspace .sa-teams-panel .sa-item strong{font-size:13.5px;font-weight:650}
+#superagent-workspace .sa-teams-panel .sa-item small{font-size:11.5px}
+#superagent-workspace .sa-teams-panel .sa-item .sa-team-row-meta{
+  display:flex;flex:0 1 auto;flex-direction:row;align-items:center;justify-content:flex-end;
+  flex-wrap:wrap;gap:15px;color:var(--muted);
+}
+#superagent-workspace .sa-teams-panel .sa-item .sa-team-state{
+  border:1px solid var(--sa-border);border-radius:6px;padding:3px 8px;
+  background:var(--raised);font-size:11px;color:var(--muted);
+}
+#superagent-workspace .sa-teams-panel .sa-item>button{
+  flex:none;min-height:30px;padding:0 10px;border-radius:8px;
+  border:1px solid var(--sa-border);background:var(--raised);
+  color:var(--text);font-size:12px;
+}
+#superagent-workspace .sa-teams-panel .sa-item>button .icon{width:13px;height:13px}
+#superagent-workspace .sa-list-controls{align-items:flex-end;justify-content:space-between}
+#superagent-workspace .sa-list-controls label:first-child{flex:0 1 335px}
+#superagent-workspace .sa-list-controls label:last-child{flex:0 1 190px}
+#superagent-workspace .sa-team-detail-head{gap:16px}
+#superagent-workspace .sa-team-detail-title h2{font-size:22px!important}
+#superagent-workspace .sa-subtabs{gap:20px}
+#superagent-workspace .sa-subtabs button{font-size:12.5px}
+#superagent-workspace .sa-stage .sa-team-overview{
+  display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,310px);gap:16px;
+  background:transparent;border:0;box-shadow:none;padding:0;
+}
+#superagent-workspace .sa-team-overview>h3,
+#superagent-workspace .sa-team-overview>p{grid-column:1 / -1}
+#superagent-workspace .sa-team-overview .sa-roster-summary{
+  grid-column:1;grid-row:3;display:grid;align-content:start;gap:12px;
+  padding:18px;margin:0;background:var(--sa-panel);
+  border:1px solid var(--sa-border);border-radius:15px;
+}
+#superagent-workspace .sa-team-overview .sa-overview-policy{
+  grid-column:2;grid-row:3;display:grid;align-content:start;gap:12px;
+  min-width:0;padding:18px;background:var(--sa-panel);
+  border:1px solid var(--sa-border);border-radius:15px;
+}
+#superagent-workspace .sa-team-overview .sa-overview-policy dl,
+#superagent-workspace .sa-admission-summary dl{
+  display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+  gap:0;font-size:12px;margin:0;
+}
+#superagent-workspace .sa-overview-policy :is(dt,dd),
+#superagent-workspace .sa-admission-summary :is(dt,dd){
+  padding:11px 0;border-top:1px solid var(--sa-border);
+  min-width:0;overflow-wrap:anywhere;
+}
+#superagent-workspace .sa-overview-policy dt,
+#superagent-workspace .sa-admission-summary dt{color:var(--muted)}
+#superagent-workspace .sa-overview-policy dd,
+#superagent-workspace .sa-admission-summary dd{text-align:right;font-weight:550;margin:0}
+#superagent-workspace .sa-team-overview>.sa-actions{grid-column:1 / -1;grid-row:4}
+#superagent-workspace .sa-roster-summary ul{
+  border:0;border-radius:0;background:transparent;
+}
+#superagent-workspace .sa-roster-summary li{padding:11px 0;align-items:center}
+#superagent-workspace .sa-demand-board{
+  grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;
+}
+#superagent-workspace .sa-demand-column{
+  min-height:285px;padding:7px;border-radius:13px;
+  background:var(--sa-panel);border:1px solid var(--sa-border);
+}
+#superagent-workspace .sa-demand-column h4{
+  padding:8px 6px 14px;margin:0;align-items:center;color:var(--muted);
+  font-size:12px;font-weight:550;
+}
+#superagent-workspace .sa-demand-board .sa-tickets{gap:7px}
+#superagent-workspace .sa-demand-board .sa-demand-card{
+  background:var(--sa-inner);border:1px solid var(--sa-border);
+  border-radius:9px;padding:12px;gap:9px;min-height:100px;
+}
+#superagent-workspace .sa-demand-board .sa-demand-card strong{
+  white-space:normal;font-size:12.5px;line-height:1.4;font-weight:560;
+}
+#superagent-workspace .sa-demand-board .sa-demand-card small{
+  font-size:11px;line-height:1.4;white-space:normal;overflow-wrap:anywhere;
+}
+#superagent-workspace .sa-demand-card button{
+  min-height:29px;padding:4px 8px;border:1px solid var(--sa-border);
+  border-radius:7px;background:var(--raised);font-size:11px;
+}
+#superagent-workspace .sa-stage .sa-global-demands{
+  background:transparent;box-shadow:none;border:0;padding:0;
+}
+#superagent-workspace .sa-global-demands>header{
+  border-bottom:1px solid var(--sa-border);padding-bottom:12px;
+}
+#superagent-workspace .sa-global-demands>header h3{font-size:15px}
+#superagent-workspace .sa-demand-layout-toggle{
+  display:inline-flex;width:max-content;gap:3px;padding:3px;
+  background:var(--sa-inner);border:1px solid var(--sa-border);border-radius:8px;
+}
+#superagent-workspace .sa-demand-layout-toggle button{border:0;background:transparent}
+#superagent-workspace .sa-demand-layout-toggle button[aria-pressed="true"]{
+  background:var(--raised);border:1px solid var(--sa-border-strong);
+  border-radius:6px;padding:6px 11px;
+}
+#superagent-workspace .sa-admission-grid{
+  display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,310px);
+  gap:16px;align-items:start;
+}
+#superagent-workspace .sa-admission-summary{position:sticky;top:16px}
+#superagent-workspace .sa-run-milestones{
+  gap:0;border:1px solid var(--sa-border);border-radius:10px;
+  overflow:hidden;background:var(--sa-panel);
+}
+#superagent-workspace .sa-run-milestones li{
+  padding:13px 12px;border:0;border-right:1px solid var(--sa-border);
+  border-radius:0;background:transparent;
+}
+#superagent-workspace .sa-run-milestones li:last-child{border:0}
+#superagent-workspace .sa-run-milestones li span{font-size:11px}
+#superagent-workspace .sa-run-milestones li strong{font-size:12px}
+#superagent-workspace .sa-team-builder{display:flex;flex-direction:column;gap:18px;min-width:0}
+#superagent-workspace .sa-team-builder .sa-detail-back{
+  align-self:flex-start;min-height:24px;color:var(--muted);font-size:12px;
+}
+#superagent-workspace .sa-wizard-layout{
+  display:grid;grid-template-columns:176px minmax(0,1fr);gap:26px;padding-top:11px;
+}
+#superagent-workspace .sa-step-nav{display:flex;flex-direction:column;gap:6px;align-self:start}
+#superagent-workspace .sa-step-nav button{
+  display:flex;align-items:center;justify-content:flex-start;gap:10px;
+  min-height:38px;border:0;border-radius:8px;padding:8px 9px;
+  background:transparent;color:var(--muted);font-size:12px;text-align:left;
+}
+#superagent-workspace .sa-step-nav button[aria-current="step"]{
+  background:var(--raised);color:var(--text);
+}
+#superagent-workspace .sa-step-nav button:disabled{opacity:.5}
+#superagent-workspace .sa-step-number{
+  display:grid;place-items:center;width:23px;height:23px;flex:none;
+  border:1px solid var(--sa-border-strong);border-radius:7px;font-size:11px;
+}
+#superagent-workspace .sa-wizard-form{display:grid;gap:18px;max-width:730px}
+#superagent-workspace .sa-wizard-head{
+  display:block;padding-bottom:13px;border-bottom:1px solid var(--sa-border);
+}
+#superagent-workspace .sa-wizard-head h3{font-size:19px}
+#superagent-workspace .sa-wizard-head p{margin-top:7px;font-size:12px}
+#superagent-workspace .sa-wizard-form>section{display:grid;gap:17px}
+#superagent-workspace .sa-wizard-form label{display:grid;gap:7px}
+#superagent-workspace .sa-wizard-form select[multiple]{min-height:116px}
+#superagent-workspace .sa-wizard-footer{
+  display:flex;justify-content:space-between;align-items:center;gap:12px;
+  border-top:1px solid var(--sa-border);padding-top:16px;
+}
+#superagent-workspace .sa-wizard-footer [data-sa-builder-prev]{
+  background:var(--raised);border:1px solid var(--sa-border);
+  border-radius:8px;min-height:36px;padding:0 13px;font-size:13px;
+}
+@media(max-width:1200px){
+  #superagent-workspace .sa-demand-board{grid-template-columns:repeat(2,minmax(0,1fr))}
+  #superagent-workspace .sa-team-row-meta .sa-last-activity{display:none}
+}
+@media(max-width:950px){
+  #superagent-workspace .sa-layout{grid-template-columns:156px minmax(0,1fr);gap:19px}
+  #superagent-workspace .sa-pagehead{gap:14px}
+  #superagent-workspace .sa-team-overview{grid-template-columns:minmax(0,1fr)}
+  #superagent-workspace .sa-team-overview .sa-roster-summary,
+  #superagent-workspace .sa-team-overview .sa-overview-policy{grid-column:1;grid-row:auto}
+}
+@media(max-width:740px){
+  #superagent-workspace .sa-ui{padding:22px 26px}
+  #superagent-workspace .sa-pagehead{flex-direction:column;gap:14px;padding-bottom:19px}
+  #superagent-workspace .sa-layout{grid-template-columns:minmax(0,1fr);gap:18px}
+  #superagent-workspace .sa-navigation{
+    display:flex;flex-direction:row;flex-wrap:wrap;position:static;gap:4px;
+    padding:0 0 9px;border-bottom:1px solid var(--sa-border);
+  }
+  #superagent-workspace .sa-navigation .sa-nav-label{display:none}
+  #superagent-workspace .sa-navigation button{width:auto;min-height:32px;padding:0 10px}
+  #superagent-workspace .sa-wizard-layout,
+  #superagent-workspace .sa-admission-grid{grid-template-columns:minmax(0,1fr);gap:14px}
+  #superagent-workspace .sa-step-nav{flex-direction:row;flex-wrap:wrap;gap:4px}
+  #superagent-workspace .sa-step-nav button{min-height:33px;padding:6px}
+  #superagent-workspace .sa-step-nav button>span:last-child{display:none}
+  #superagent-workspace .sa-admission-summary{position:static}
+  #superagent-workspace .sa-onboarding-flow{grid-template-columns:minmax(0,1fr);gap:0}
+  #superagent-workspace .sa-teams-panel .sa-item .sa-team-row-meta{display:none}
+}
+@media(max-width:490px){
+  #superagent-workspace .sa-ui{padding:18px 15px}
+  #superagent-workspace .sa-pagehead h1{font-size:25px}
+  #superagent-workspace .sa-demand-board{grid-template-columns:minmax(0,1fr)}
+  #superagent-workspace .sa-page-controls{justify-content:flex-start}
+  #superagent-workspace .sa-first-team{padding:24px 20px}
+  #superagent-workspace .sa-roster-summary li>span:last-child{display:none}
+  #superagent-workspace .sa-wizard-footer{align-items:stretch}
+}
+@media(prefers-reduced-motion:reduce){
+  #superagent-workspace *{scroll-behavior:auto!important;transition:none!important}
+}

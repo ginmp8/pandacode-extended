@@ -1,5 +1,5 @@
 import './superagent.css';
-import { escape } from './dom';
+import { escape, icon } from './dom';
 import { GuidedTeamBuilder } from './superagent-team-builder';
 
 // This interface only invokes native policy/authorization decisions. It cannot
@@ -393,17 +393,18 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       item.name.toLowerCase().includes(teamSearch.trim().toLowerCase()) &&
       (teamStatusFilter === 'all' || item.enabled === (teamStatusFilter === 'enabled')));
     const list = visibleTeams.map(item =>
-      '<li class="sa-item"><div><strong>' + safe(item.name) + '</strong><small>' +
+      '<li class="sa-item"><span class="sa-team-tile">' + icon('team') +
+      '</span><div><strong>' + safe(item.name) + '</strong><small>' +
       safe(botName(item.coordinatorBotId)) + ' / ' + safe(botName(item.workerBotId)) +
       '</small><small class="sa-role-counts" aria-label="Configured member counts">' +
-      safe(roleSummary(item)) + '</small><small class="sa-counts" aria-label="Task counts">' +
-      (item.ticketCount ?? 0) + ' tasks · ' + (item.runningCount ?? 0) +
-      ' running · ' + (item.blockedCount ?? 0) + ' blocked</small>' +
-      '<small class="sa-last-activity">Last activity: ' + safe(activityTime(item.lastActivityAt)) +
-      '</small></div><span>' +
+      safe(roleSummary(item)) + '</small></div>' +
+      '<div class="sa-team-row-meta"><span class="sa-team-state">' +
       (item.enabled ? 'Enabled' : 'Off') + '</span>' +
-      '<button type="button" data-sa-select="' + safe(item.id) + '" aria-current="' +
-      (item.id === selected) + '">Details</button></li>').join('');
+      '<small class="sa-counts">' + (item.ticketCount ?? 0) + ' runs</small>' +
+      '<small class="sa-last-activity">' + safe(activityTime(item.lastActivityAt)) +
+      '</small></div><button type="button" data-sa-select="' + safe(item.id) +
+      '" aria-current="' + (item.id === selected) + '">Details ' + icon('chevron') +
+      '</button></li>').join('');
     const optionsFor = (botId: string) => bots.map(bot => '<option value="' + safe(bot.id) + '"' +
       (bot.paused ? ' disabled' : '') + (bot.id === botId ? ' selected' : '') + '>' + safe(bot.name) +
       (bot.paused ? ' (paused)' : '') + '</option>').join('');
@@ -1194,10 +1195,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             effectivePolicy) +
         '</section>' : '';
     const overview = chosen
-      ? '<section class="sa-pane" aria-label="Team overview"><h3>Selected Team</h3>' +
+      ? '<section class="sa-pane sa-team-overview" aria-label="Team overview"><h3>Team members</h3>' +
         '<p>' + safe(chosen.name) + ' · ' + (chosen.enabled ? 'Enabled' : 'Off') +
         ' · Policy revision ' + chosen.policyRevision + '</p>' +
-        '<dl><dt>Coordinator (read-only)</dt><dd>' + safe(botName(chosen.coordinatorBotId)) + '</dd>' +
+        '<div class="sa-overview-policy"><h3>Execution policy</h3><dl><dt>Coordinator (read-only)</dt><dd>' + safe(botName(chosen.coordinatorBotId)) + '</dd>' +
         '<dt>Worker</dt><dd>' + safe(botName(chosen.workerBotId)) + '</dd>' +
         '<dt>Configured members</dt><dd>' + safe(roleSummary(chosen)) + '</dd>' +
         '<dt>Review policy</dt><dd>' + (chosen.councilRequired ? 'Native Council required' : 'Council Off') + '</dd>' +
@@ -1207,7 +1208,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             teamStrategy.executionMode === 'approval' ? 'With Approval · human acceptance' :
             'Choose an execution mode')
           : 'Loading native policy') +
-        '</dd></dl>' +
+        '</dd></dl></div>' +
         '<div class="sa-roster-summary"><h4>Existing bots</h4><ul>' +
           ([{role:'Coordinator',id:chosen.coordinatorBotId},
             ...(chosen.workerBotIds?.length ? chosen.workerBotIds : [chosen.workerBotId])
@@ -1272,42 +1273,47 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const navigation = '<nav class="sa-navigation" aria-label="Orchestration views">' +
       '<p class="sa-nav-label">Workspace</p>' +
       ([
-        ['teams','Teams'],['runs','Demands / Runs'],['review','Review inbox'],
-      ] as const).map(([id,label]) =>
+        ['teams','Teams','team'],['runs','Demands / Runs','kanban'],['review','Review inbox','archive'],
+      ] as const).map(([id,label,glyph]) =>
         '<button type="button" data-sa-view="' + id + '" aria-current="' +
         ((workspaceView === id || (workspaceView === 'team' && id === 'teams') ||
           (id === 'runs' && (workspaceView === 'new-demand' || workspaceView === 'run'))) ? 'page' : 'false') +
-        '">' + label + '</button>').join('') +
+        '">' + icon(glyph) + '<span>' + label + '</span></button>').join('') +
       '<p class="sa-nav-label sa-nav-separator">Team settings</p>' +
       '<button type="button" data-sa-team-settings="members"' +
         (!presets.length ? ' disabled' : '') +
         ' aria-current="' + (workspaceView === 'team' && teamPanel === 'members' ? 'page' : 'false') +
-        '">Members and roles</button>' +
+        '">' + icon('team') + '<span>Members and roles</span></button>' +
       '<button type="button" data-sa-team-settings="execution"' +
         (!presets.length ? ' disabled' : '') +
         ' aria-current="' + (workspaceView === 'team' && teamPanel === 'execution' ? 'page' : 'false') +
-        '">Execution and review</button>' +
+        '">' + icon('settings') + '<span>Execution and review</span></button>' +
       ([
-        ['sources','GitHub sources'],['portable','Import / export'],
-      ] as const).map(([id,label]) =>
+        ['sources','GitHub sources','branch'],['portable','Import / export','file'],
+      ] as const).map(([id,label,glyph]) =>
         '<button type="button" data-sa-view="' + id + '" aria-current="' +
         (workspaceView === id ? 'page' : 'false') + '"' +
-        (!presets.length ? ' disabled' : '') + '>' + label + '</button>').join('') +
+        (!presets.length ? ' disabled' : '') + '>' + icon(glyph) +
+        '<span>' + label + '</span></button>').join('') +
       '</nav>';
     const directory = '<div class="sa-section-head"><div><h2>Teams</h2>' +
       '<p>Each Team is a reusable SuperAgent made from existing PandaCode bots.</p></div>' +
-      '<button class="primary-button" type="button" data-sa-builder-open>New Team</button></div>' +
-      (!presets.length ? '<section class="sa-pane sa-first-team"><h3>Create your first Team</h3>' +
+      (presets.length ? '<button class="primary-button" type="button" data-sa-builder-open>' +
+        icon('plus') + ' New Team</button>' : '') + '</div>' +
+      (!presets.length ? '<section class="sa-pane sa-first-team">' +
+        '<span class="sa-first-team-icon">' + icon('team') + '</span>' +
+        '<h3>Create your first Team</h3>' +
         '<p>Assign a Coordinator, Workers and optional independent Reviewers. ' +
         'Choose Full Auto or With Approval before enabling the Team.</p>' +
         '<p>Creating a Team does not run a task or grant additional permissions.</p>' +
+        '<button type="button" class="primary-button" data-sa-builder-open>' +
+        icon('plus') + ' New Team</button></section>' +
       '<ol class="sa-onboarding-flow" aria-label="From request to reviewed delivery">' +
         '<li><strong>1. Configure the Team</strong><span>Assign your existing bots and select an execution mode.</span></li>' +
         '<li><strong>2. Assign a Demand</strong><span>Describe the outcome and review native permissions.</span></li>' +
         '<li><strong>3. Review evidence</strong><span>Inspect Worker chats, Council findings or human decisions.</span></li>' +
-      '</ol></section>' : '') +
-      guidedBuilder.render(bots) +
-      '<section class="sa-pane sa-teams-panel" aria-label="Saved Teams">' +
+      '</ol>' : '') +
+      (presets.length ? '<section class="sa-pane sa-teams-panel" aria-label="Saved Teams">' +
       '<div class="sa-list-controls"><label>Search Teams<input type="search" data-sa-team-search value="' +
       safe(teamSearch) + '" placeholder="Search teams"></label>' +
       '<label>Team status<select data-sa-team-status>' +
@@ -1319,7 +1325,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         presets.length + ' Teams</p>' +
       '<ul class="sa-list">' + (list || '<li class="sa-empty">' +
       (presets.length ? 'No Teams match these filters.' : 'No Teams created yet.') +
-      '</li>') + '</ul></section>';
+      '</li>') + '</ul></section>' : '');
     const teamView = chosen
       ? '<div class="sa-team-detail-head"><button type="button" data-sa-team-back>All Teams</button>' +
         '<div class="sa-team-detail-title"><div><h2>' + safe(chosen.name) + '</h2>' +
@@ -1344,6 +1350,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       : '<section class="sa-pane"><h3>No Team selected</h3>' +
         '<p>Return to Teams and create or select a Team.</p></section>';
     host.innerHTML = '<div class="sa-ui">' +
+      '<header class="sa-pagehead"><div><span class="sa-eyebrow">Bots / Team workspace</span>' +
+      '<h1>Orchestrations</h1>' +
+      '<p>Configure reusable agent teams, assign work, and review results.</p></div>' +
+      '<div class="sa-page-controls"><button type="button" data-action="superagent-back">' +
+      icon('back') + ' Back to Bots</button></div></header>' +
       (loading ? '<p role="status">Loading orchestrations…</p>' : '') +
       (error ? '<p role="alert" class="sa-error">' + safe(error) + '</p>' : '') +
       (feedback ? '<p role="status" class="sa-feedback">' + safe(feedback) + '</p>' : '') +
@@ -1351,7 +1362,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         safe(confirm.message) + '</p><div class="sa-actions"><button type="button" data-sa-cancel>Cancel</button>' +
         '<button class="primary-button" type="button" data-sa-confirm>Confirm</button></div></section>' : '') +
       '<div class="sa-layout">' + navigation + '<div class="sa-stage">' +
-      (workspaceView === 'teams' ? directory : '') +
+      (workspaceView === 'teams' ?
+        (guidedBuilder.isOpen ? guidedBuilder.render(bots) : directory) : '') +
       (workspaceView === 'team' ? teamView : '') +
       (workspaceView === 'runs'
         ? '<div class="sa-section-head"><div><h2>Demands / Runs</h2>' +
@@ -1361,7 +1373,17 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       (workspaceView === 'new-demand'
         ? '<div class="sa-section-head"><div><h2>Assign a Demand</h2>' +
           '<p>Describe the expected result, then review the native execution policy.</p></div></div>' +
-          (admission || '<section class="sa-pane">Create a Team before admitting work.</section>') : '') +
+          '<div class="sa-admission-grid">' +
+          (admission || '<section class="sa-pane">Create a Team before admitting work.</section>') +
+          '<aside class="sa-pane sa-admission-summary"><h3>Before any work starts</h3>' +
+          '<dl><dt>Team enabled</dt><dd>' + (chosen?.enabled ? 'Yes' : 'No') + '</dd>' +
+          '<dt>Execution</dt><dd>' +
+          (teamStrategy?.executionMode === 'full_auto' ? 'Full Auto' :
+            teamStrategy?.executionMode === 'approval' ? 'With Approval' : 'Not configured') +
+          '</dd><dt>Native admission</dt><dd>Required</dd>' +
+          '<dt>Permissions</dt><dd>Scoped native grants only</dd>' +
+          '<dt>Council</dt><dd>' + (chosen?.councilRequired ? 'Required' : 'Policy dependent') +
+          '</dd></dl></aside></div>' : '') +
       (workspaceView === 'run'
         ? active || '<section class="sa-pane">Open a native Demand from Demands / Runs.</section>' : '') +
       (workspaceView === 'review' ? reviewPanel : '') +

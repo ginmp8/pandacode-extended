@@ -34,6 +34,8 @@ export class GuidedTeamBuilder {
   private councilRequired = false;
   private executionMode: 'approval' | 'full_auto' = 'approval';
 
+  get isOpen(): boolean { return this.visible; }
+
   reset(): void {
     this.visible = false;
     this.step = 1;
@@ -152,6 +154,14 @@ export class GuidedTeamBuilder {
       return true;
     }
     if (!this.visible) return false;
+    if (target.hasAttribute('data-sa-builder-step')) {
+      const requestedStep = Number(target.dataset.saBuilderStep);
+      if (Number.isInteger(requestedStep) && requestedStep >= 1 && requestedStep < this.step) {
+        this.step = requestedStep;
+        this.error = '';
+      }
+      return true;
+    }
     if (target.hasAttribute('data-sa-builder-reviewers')) {
       this.step = 2;
       this.error = '';
@@ -290,16 +300,27 @@ export class GuidedTeamBuilder {
         '<button class="primary-button" type="submit"' +
         (problem ? ' disabled' : '') + '>Create Team (disabled)</button>';
     }
-    return '<section class="sa-pane sa-team-builder" aria-label="Guided Team Builder">' +
-      '<header><h3>New Team · Guided setup</h3>' +
-      '<button type="button" data-sa-builder-cancel>Close builder</button></header>' +
-      '<p role="status">Step ' + this.step + ' of 5 · ' + safe(steps[this.step-1]) + '</p>' +
-      '<form data-sa-form="guided-builder"><section aria-label="Team setup step">' +
-      '<h4 tabindex="-1">' + safe(steps[this.step-1]) + '</h4>' + content + '</section>' +
+    return '<section class="sa-team-builder" aria-label="Guided Team Builder">' +
+      '<button type="button" class="sa-detail-back" data-sa-builder-cancel>← Cancel team setup</button>' +
+      '<div class="sa-section-head"><div><h2>Create a Team</h2>' +
+      '<p>Step ' + this.step + ' of 5 · configure once, reuse for separate Demands.</p></div></div>' +
+      '<div class="sa-wizard-layout"><nav class="sa-step-nav" aria-label="Team setup progress">' +
+      steps.map((label, index) =>
+        '<button type="button" data-sa-builder-step="' + (index + 1) + '"' +
+        (index >= this.step ? ' disabled' : '') +
+        ' aria-current="' + (index + 1 === this.step ? 'step' : 'false') + '">' +
+        '<span class="sa-step-number">' + (index + 1) + '</span><span>' +
+        safe(label) + '</span></button>').join('') + '</nav>' +
+      '<form class="sa-wizard-form" data-sa-form="guided-builder">' +
+      '<header class="sa-wizard-head"><h3>' + safe(steps[this.step-1]) + '</h3>' +
+      '<p>Choose existing PandaCode bots. This form cannot grant tools or run models.</p></header>' +
+      '<section aria-label="Team setup step"><h4 class="sr-only" tabindex="-1">' +
+      safe(steps[this.step-1]) + '</h4>' + content + '</section>' +
       (this.error ? '<p role="alert" class="sa-builder-error">' + safe(this.error) + '</p>' : '') +
-      '<div class="sa-actions">' +
-      (this.step > 1 ? '<button type="button" data-sa-builder-prev>Back</button>' : '') +
-      (this.step < 5 ? '<button type="button" data-sa-builder-next>Next</button>' : '') +
-      '</div></form></section>';
+      '<footer class="sa-wizard-footer">' +
+      '<button type="button" data-sa-builder-prev' + (this.step === 1 ? ' disabled' : '') +
+      '>Back</button>' +
+      (this.step < 5 ? '<button type="button" class="primary-button" data-sa-builder-next>Next</button>' : '') +
+      '</footer></form></div></section>';
   }
 }

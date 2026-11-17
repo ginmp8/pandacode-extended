@@ -81,7 +81,13 @@ source event. On restart, existing `pending` external-effect receipts become
 `uncertain`; they require independent provider reconciliation before any
 future retry. A paused or revoked Team is not re-enabled by a watchdog tick.
 The read-only `--list-unresolved-effects` command pages exact pending/uncertain
-receipt keys, payload SHA-256 digests, Ticket and Team IDs across all Tickets. Use
+receipt keys, payload SHA-256 digests, Ticket and Team IDs across all Tickets.
+For a single reusable Team, use `pandacode serve --list-team-unresolved-effects <team-id>`
+and page with `--before <updated-at-ms> <ticket-id> <effect-key>`. This filters
+before pagination, rejects unknown/invalid Teams, and includes each Ticket's
+current `ticketRevision` for a subsequent revision-guarded operator action.
+Neither view returns private objectives, verifies remote outcomes, or issues
+a grant; re-inspect the Ticket and receipt before any consequential decision. Use
 `--before <updated-at-ms> <ticket-id> <effect-key>` from `nextCursor`
 to inspect older identities, including terminal Tickets outside the recovery
 inbox's first page. The snapshot never queries the remote provider, acknowledges,

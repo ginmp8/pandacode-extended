@@ -260,6 +260,7 @@ pub(crate) fn receipt_history_page(
 pub(crate) struct UnresolvedEffectView {
     pub ticket_id: String,
     pub orchestration_id: String,
+    pub ticket_revision: i64,
     pub effect_key: String,
     pub payload_sha256: String,
     pub state: String,
@@ -272,6 +273,27 @@ pub(crate) type UnresolvedEffectPage = (Vec<UnresolvedEffectView>, Option<(i64, 
 pub(crate) fn unresolved_effects_page(
     store: &Store, limit: i64, before: Option<(i64, &str, &str)>,
 ) -> Result<UnresolvedEffectPage> {
+    unresolved_effects_page_for_team(store, limit, before, None)
+}
+
+/// Team-scoped recovery is a filtered native projection, never a grant to
+/// reconcile or replay an effect from another Team.
+pub(crate) fn unresolved_effects_page_for_team(
+    store: &Store, limit: i64, before: Option<(i64, &str, &str)>,
+    orchestration_id: Option<&str>,
+) -> Result<UnresolvedEffectPage> {
+    if let Some(id) = orchestration_id {
+        if id.is_empty() || id.len() > 128
+            || !id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'))
+        {
+            return Err("Invalid Team identity for unresolved effects.".into());
+        }
+        let exists: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_orchestrations WHERE id=?1)",
+            [id], |row| row.get(0),
+        ).map_err(|err| err.to_string())?;
+        if !exists { return Err("SuperAgent Team not found.".into()); }
+    }
     if !(1..=100).contains(&limit) {
         return Err("Unresolved effect page size must be between 1 and 100.".into());
     }
@@ -289,22 +311,24 @@ pub(crate) fn unresolved_effects_page(
         None => (None, None, None),
     };
     let mut stmt = store.db.prepare(
-        "SELECT r.ticket_id,t.orchestration_id,r.effect_key,r.payload_sha256,
+        "SELECT r.ticket_id,t.orchestration_id,t.revision,r.effect_key,r.payload_sha256,
                 r.state,r.created_at,r.updated_at
          FROM sa_effect_receipts r
          JOIN sa_tickets t ON t.id=r.ticket_id
          WHERE r.state IN ('pending','uncertain')
+           AND (?5 IS NULL OR t.orchestration_id=?5)
            AND (?1 IS NULL OR r.updated_at<?1
                 OR (r.updated_at=?1 AND (r.ticket_id<?2
                      OR (r.ticket_id=?2 AND r.effect_key<?3))))
          ORDER BY r.updated_at DESC,r.ticket_id DESC,r.effect_key DESC LIMIT ?4",
     ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map(
-        params![before_at,before_ticket,before_key,limit+1],
+        params![before_at,before_ticket,before_key,limit+1,orchestration_id],
         |r| Ok(UnresolvedEffectView {
             ticket_id: r.get(0)?, orchestration_id: r.get(1)?,
-            effect_key: r.get(2)?, payload_sha256: r.get(3)?,
-            state: r.get(4)?, created_at: r.get(5)?, updated_at: r.get(6)?,
+            ticket_revision: r.get(2)?, effect_key: r.get(3)?,
+            payload_sha256: r.get(4)?, state: r.get(5)?,
+            created_at: r.get(6)?, updated_at: r.get(7)?,
         }),
     ).map_err(|e| e.to_string())?;
     let mut items = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
@@ -429,6 +453,106 @@ mod tests{
         assert_eq!(serde_json::from_str::<serde_json::Value>(
             &superagent::list_headless_unresolved_effects(&path,None,None,None).unwrap(),
         ).unwrap()["unresolvedTotal"],205);
+    }
+
+
+    #[test]
+    fn team_reconciliation_inbox_scopes_pages_and_ticket_revisions_without_replay() {
+        let (store, ticket_id) = fixture();
+        let first_team: String = store.db.query_row(
+            "SELECT orchestration_id FROM sa_tickets WHERE id=?1",
+            [&ticket_id], |r| r.get(0),
+        ).unwrap();
+        let second_team = superagent::create_configuration(&store, NewOrchestration {
+            name: "Other Effect Team".into(),
+            coordinator_bot_id: "co".into(),
+            worker_bot_id: "wo".into(),
+        }).unwrap();
+        store.db.execute(
+            "INSERT INTO sa_tickets
+             (id,orchestration_id,request_key,objective,actor,source,project_id,
+              worker_bot_id,policy_revision,state,created_at,updated_at)
+             SELECT 'other-team-effect-ticket',?1,'other-team-effect-request',
+                    'OTHER PRIVATE OBJECTIVE',actor,source,project_id,worker_bot_id,
+                    ?2,'blocked',created_at,updated_at
+             FROM sa_tickets WHERE id=?3",
+            params![&second_team.id, second_team.policy_revision, &ticket_id],
+        ).unwrap();
+        let revision: i64 = store.db.query_row(
+            "SELECT revision FROM sa_tickets WHERE id=?1",
+            [&ticket_id], |r| r.get(0),
+        ).unwrap();
+        for index in 0..104_i64 {
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,?2,?3,'uncertain',?4,?4)",
+                params![&ticket_id,format!("team-effect:{index:03}"),
+                    format!("{index:064x}"),1000+index/4],
+            ).unwrap();
+        }
+        for index in 0..3_i64 {
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES('other-team-effect-ticket',?1,?2,'pending',1000,1000)",
+                params![format!("other-team:{index}"),format!("{index:064x}")],
+            ).unwrap();
+        }
+        let path = store.path.clone();
+        let mut cursor: Option<(i64,String,String)> = None;
+        let mut seen = std::collections::HashSet::new();
+        loop {
+            let result:serde_json::Value = serde_json::from_str(
+                &superagent::list_headless_team_unresolved_effects(
+                    &path,&first_team,cursor.as_ref().map(|c|c.0),
+                    cursor.as_ref().map(|c|c.1.as_str()),
+                    cursor.as_ref().map(|c|c.2.as_str()),
+                ).unwrap(),
+            ).unwrap();
+            assert_eq!(result["orchestrationId"],first_team);
+            assert_eq!(result["unresolvedTotal"],104);
+            assert_eq!(result["observationalOnly"],true);
+            assert_eq!(result["automaticReplayAllowed"],false);
+            assert!(!result.to_string().contains("OTHER PRIVATE OBJECTIVE"));
+            for item in result["items"].as_array().unwrap() {
+                assert_eq!(item["ticketId"],ticket_id);
+                assert_eq!(item["ticketRevision"],revision);
+                assert!(seen.insert(item["effectKey"].as_str().unwrap().to_owned()));
+            }
+            let next=&result["nextCursor"];
+            if next.is_null(){break;}
+            cursor=Some((
+                next["updatedAt"].as_i64().unwrap(),
+                next["ticketId"].as_str().unwrap().to_owned(),
+                next["effectKey"].as_str().unwrap().to_owned(),
+            ));
+        }
+        assert_eq!(seen.len(),104);
+        let other:serde_json::Value=serde_json::from_str(
+            &superagent::list_headless_team_unresolved_effects(
+                &path,&second_team.id,None,None,None,
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(other["unresolvedTotal"],3);
+        assert_eq!(other["items"].as_array().unwrap().len(),3);
+        assert_eq!(serde_json::from_str::<serde_json::Value>(
+            &superagent::list_headless_unresolved_effects(&path,None,None,None).unwrap(),
+        ).unwrap()["unresolvedTotal"],107);
+        assert!(superagent::list_headless_team_unresolved_effects(
+            &path,"missing-team",None,None,None,
+        ).is_err());
+        assert!(superagent::list_headless_team_unresolved_effects(
+            &path,"../other",None,None,None,
+        ).is_err());
+        assert!(superagent::list_headless_team_unresolved_effects(
+            &path,&first_team,Some(1),None,None,
+        ).is_err());
+        let pending:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_effect_receipts WHERE state='pending'",
+            [],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(pending,3,"read-only scoped recovery cannot reconcile receipts");
     }
 
     #[test]

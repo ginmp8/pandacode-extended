@@ -35,6 +35,7 @@ enum Command {
     ListReviewInbox { before_updated_at: Option<i64>, before_id: Option<String> },
     ListRecoveryInbox { before_priority: Option<i64>, before_updated_at: Option<i64>, before_id: Option<String> },
     ListUnresolvedEffects { before_updated_at: Option<i64>, before_ticket_id: Option<String>, before_effect_key: Option<String> },
+    ListTeamUnresolvedEffects { orchestration_id: String, before_updated_at: Option<i64>, before_ticket_id: Option<String>, before_effect_key: Option<String> },
     ListDemands {
         state: String, before_updated_at: Option<i64>, before_id: Option<String>,
         search_query: Option<String>, project_id: Option<String>,
@@ -404,6 +405,25 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
+            if let Command::ListTeamUnresolvedEffects {
+                orchestration_id, before_updated_at, before_ticket_id, before_effect_key,
+            } = &command {
+                // Native Team filter applies before pagination, without provider or
+                // startup recovery; a detached operator cannot authorize replay.
+                let result = app.path().app_data_dir()
+                    .map_err(|e| e.to_string())
+                    .and_then(|dir| crate::superagent::list_headless_team_unresolved_effects(
+                        &dir.join("kingcode.sqlite3"), orchestration_id, *before_updated_at,
+                        before_ticket_id.as_deref(), before_effect_key.as_deref(),
+                    ));
+                match result {
+                    Ok(inbox) => { println!("{inbox}"); std::process::exit(0) }
+                    Err(error) => {
+                        eprintln!("SuperAgent Team effect reconciliation inbox failed: {error}");
+                        std::process::exit(1)
+                    }
+                }
+            }
             if let Command::ListReviewInbox { before_updated_at, before_id } = &command {
                 // Native pending-decision cursor; no startup recovery or grants.
                 let result = app.path().app_data_dir()
@@ -626,7 +646,8 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
     match command {
         // Inspection exits before setup_common and must never reach this branch.
         Command::InspectOrchestrations | Command::ListTickets | Command::ListTicketActivity { .. } | Command::ListReviewInbox { .. }
-        | Command::ListRecoveryInbox { .. } | Command::ListUnresolvedEffects { .. } | Command::ListDemands { .. }
+        | Command::ListRecoveryInbox { .. } | Command::ListUnresolvedEffects { .. }
+        | Command::ListTeamUnresolvedEffects { .. } | Command::ListDemands { .. }
         | Command::ListTeamDemands { .. }
         | Command::InspectTicket { .. } | Command::InspectTicketGraph { .. }
         | Command::InspectTeamReadiness { .. } | Command::InspectTeamRoster { .. }
@@ -1128,6 +1149,32 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                     before_updated_at,before_ticket_id,before_effect_key,
                 };
                 ops+=1;
+            }
+            "--list-team-unresolved-effects" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or("--list-team-unresolved-effects needs a Team ID.")?;
+                validate_orchestration_id(orchestration_id)?;
+                let (before_updated_at,before_ticket_id,before_effect_key) =
+                    if args.get(index+2).map(String::as_str)==Some("--before") {
+                        let at=args.get(index+3)
+                            .ok_or("--before needs timestamp, Ticket ID and effect key.")?
+                            .parse::<i64>().ok().filter(|at| *at>0)
+                            .ok_or("Unresolved effect timestamp must be positive.")?;
+                        let ticket=args.get(index+4)
+                            .ok_or("--before needs a Ticket ID.")?;
+                        validate_ticket_id(ticket)?;
+                        let effect=args.get(index+5)
+                            .ok_or("--before needs an effect key.")?;
+                        validate_effect_key(effect)?;
+                        index+=4;
+                        (Some(at),Some(ticket.clone()),Some(effect.clone()))
+                    } else {(None,None,None)};
+                command=Command::ListTeamUnresolvedEffects {
+                    orchestration_id:orchestration_id.clone(),
+                    before_updated_at,before_ticket_id,before_effect_key,
+                };
+                ops+=1;
+                index+=1;
             }
             "--list-review-inbox" => {
                 let (before_updated_at, before_id) =
@@ -1738,7 +1785,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -1779,6 +1826,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>]
                          Filter by each Ticket's admitted native Project before paging;
                          search/project flags may follow --before in either order; redacted.
+  --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>]
+                         Page the read-only, revisioned pending/uncertain effect receipts
+                         belonging to one native Team. No provider call or replay.
   --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>]
                          Page up to 200 native Demands for one Team and exact Ticket state
                          (or all). Project filters use admitted Tickets, not current Teams;
@@ -1959,6 +2009,27 @@ mod tests {
             "--list-unresolved-effects --before 1000 ticket_1",
             "--list-unresolved-effects --stop-ticket ticket_1",
             "--list-unresolved-effects --before 1000 ticket_1 github:issue:42 --before 999 ticket_1 github:issue:41",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
+        assert_eq!(parsed("--list-team-unresolved-effects team_123"),
+            Ok(Command::ListTeamUnresolvedEffects {
+                orchestration_id:"team_123".into(),
+                before_updated_at:None,before_ticket_id:None,before_effect_key:None,
+            }));
+        assert_eq!(parsed("--list-team-unresolved-effects team_123 --before 1000 ticket_1 github:issue:42"),
+            Ok(Command::ListTeamUnresolvedEffects {
+                orchestration_id:"team_123".into(),
+                before_updated_at:Some(1000),before_ticket_id:Some("ticket_1".into()),
+                before_effect_key:Some("github:issue:42".into()),
+            }));
+        for invalid in [
+            "--list-team-unresolved-effects",
+            "--list-team-unresolved-effects ../unsafe",
+            "--list-team-unresolved-effects team_123 --before",
+            "--list-team-unresolved-effects team_123 --before 0 ticket_1 github:issue:42",
+            "--list-team-unresolved-effects team_123 --before 1000 ../ticket github:issue:42",
+            "--list-team-unresolved-effects team_123 --before 1000 ticket_1 ../effect",
+            "--list-team-unresolved-effects team_123 --before 1000 ticket_1",
+            "--list-team-unresolved-effects team_123 --stop-ticket ticket_1",
         ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
         assert_eq!(parsed("--inspect-source-health source_123"),
             Ok(Command::InspectSourceHealth { source_id: "source_123".into() }));
@@ -2441,6 +2512,7 @@ mod tests {
             "--list-ticket-activity",
             "--list-review-inbox",
             "--list-recovery-inbox",
+            "--list-team-unresolved-effects",
             "--list-demands",
             "--inspect-team-readiness",
             "--inspect-team-roster",

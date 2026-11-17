@@ -1251,6 +1251,28 @@ pub(crate) fn list_headless_unresolved_effects(
     before_updated_at: Option<i64>, before_ticket_id: Option<&str>,
     before_effect_key: Option<&str>,
 ) -> Result<String> {
+    list_headless_unresolved_effects_scoped(
+        database_path,None,before_updated_at,before_ticket_id,before_effect_key,
+    )
+}
+
+/// Read the same reconciliation queue with a native Team boundary, preserving
+/// ticket revisions for subsequent CAS-guarded operator decisions.
+pub(crate) fn list_headless_team_unresolved_effects(
+    database_path: &std::path::Path, orchestration_id: &str,
+    before_updated_at: Option<i64>, before_ticket_id: Option<&str>,
+    before_effect_key: Option<&str>,
+) -> Result<String> {
+    list_headless_unresolved_effects_scoped(
+        database_path,Some(orchestration_id),before_updated_at,before_ticket_id,before_effect_key,
+    )
+}
+
+fn list_headless_unresolved_effects_scoped(
+    database_path: &std::path::Path, orchestration_id: Option<&str>,
+    before_updated_at: Option<i64>, before_ticket_id: Option<&str>,
+    before_effect_key: Option<&str>,
+) -> Result<String> {
     let before = match (before_updated_at, before_ticket_id, before_effect_key) {
         (None,None,None) => None,
         (Some(at),Some(ticket),Some(effect)) => Some((at,ticket,effect)),
@@ -1258,13 +1280,18 @@ pub(crate) fn list_headless_unresolved_effects(
     };
     let store = Store::open_read_only(database_path)?;
     let snapshot = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
-    let (items, next) = effects::unresolved_effects_page(&store, 100, before)?;
+    let (items, next) = effects::unresolved_effects_page_for_team(
+        &store, 100, before, orchestration_id,
+    )?;
     let total: i64 = store.db.query_row(
-        "SELECT COUNT(*) FROM sa_effect_receipts WHERE state IN ('pending','uncertain')",
-        [], |r| r.get(0),
+        "SELECT COUNT(*) FROM sa_effect_receipts e
+         JOIN sa_tickets t ON t.id=e.ticket_id
+         WHERE e.state IN ('pending','uncertain')
+           AND (?1 IS NULL OR t.orchestration_id=?1)",
+        [orchestration_id], |r| r.get(0),
     ).map_err(|e| e.to_string())?;
     snapshot.commit().map_err(|e| e.to_string())?;
-    serde_json::to_string_pretty(&serde_json::json!({
+    let mut result = serde_json::json!({
         "unresolvedTotal": total,
         "pageLimit": 100,
         "items": items,
@@ -1274,7 +1301,11 @@ pub(crate) fn list_headless_unresolved_effects(
         "observationalOnly": true,
         "automaticReplayAllowed": false,
         "requiresIndependentRemoteReconciliation": total > 0
-    })).map_err(|e| e.to_string())
+    });
+    if let Some(id) = orchestration_id {
+        result["orchestrationId"] = serde_json::json!(id);
+    }
+    serde_json::to_string_pretty(&result).map_err(|e| e.to_string())
 }
 
 /// One-shot headless Team Demand inspection. Reuse the desktop's native

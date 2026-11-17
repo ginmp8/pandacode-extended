@@ -223,7 +223,8 @@ fn reconcile(store:&Store)->Result<()> {
         let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
         // A prior, independently verified WorkItem may have acquired an
         // uncertain file or GitHub receipt since its approval. Do not finalize.
-        if unsettled_root_effects(&tx,&root)? {
+        if unsettled_root_effects(&tx,&root)?
+            || !root_work_item_proofs_current(&tx,&root)? {
             continue;
         }
         let moved=tx.execute(
@@ -286,6 +287,43 @@ fn reconcile(store:&Store)->Result<()> {
     Ok(())
 }
 
+/// A saved approval is not proof that the *latest* native Worker attempt
+/// still completed. A child can be interrupted or retried after an earlier
+/// approval; neither its dependencies nor its parent Demand may reuse that
+/// immutable receipt for a different attempt.
+fn approved_child_attempt_current(db:&Connection,child_ticket_id:&str)->Result<bool> {
+    db.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sa_work_item_evidence_receipts proof
+           JOIN sa_tickets child ON child.id=proof.child_ticket_id
+           JOIN sa_assignments latest ON latest.id=proof.assignment_id
+           WHERE proof.child_ticket_id=?1 AND child.state='completed'
+             AND latest.ticket_id=child.id AND latest.state='finished'
+             AND latest.result=child.evidence
+             AND latest.attempt=(SELECT MAX(a.attempt) FROM sa_assignments a
+               WHERE a.ticket_id=child.id)
+             AND proof.reviewed_at>=latest.updated_at)",
+        [child_ticket_id],|row|row.get(0),
+    ).map_err(|error|error.to_string())
+}
+
+/// Re-evaluate all native child approvals inside the Demand completion
+/// transaction; the initial frontier query alone is not a finalization gate.
+fn root_work_item_proofs_current(db:&Connection,root:&str)->Result<bool> {
+    let mut query=db.prepare(
+        "SELECT child_ticket_id FROM sa_work_items WHERE ticket_id=?1"
+    ).map_err(|error|error.to_string())?;
+    let children=query.query_map([root],|row|row.get::<_,Option<String>>(0))
+        .map_err(|error|error.to_string())?
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|error|error.to_string())?;
+    for child in children {
+        let Some(child)=child else {return Ok(false)};
+        if !approved_child_attempt_current(db,&child)? {return Ok(false)}
+    }
+    Ok(true)
+}
+
 /// Recheck every predecessor at native child admission. An earlier approval
 /// cannot release new dependent work while descendant effects remain uncertain.
 fn prerequisites_settled(db:&Connection,root:&str,key:&str)->Result<bool> {
@@ -315,7 +353,8 @@ fn prerequisites_settled(db:&Connection,root:&str,key:&str)->Result<bool> {
         .map_err(|error|error.to_string())?;
     for (child,verified) in predecessors {
         let Some(child)=child else {return Ok(false)};
-        if !verified || !evidence::descendant_receipts_settled(db,&child)? {
+        if !verified || !approved_child_attempt_current(db,&child)?
+            || !evidence::descendant_receipts_settled(db,&child)? {
             return Ok(false);
         }
     }
@@ -536,14 +575,17 @@ mod tests {
              CREATE TABLE sa_demand_plans(ticket_id TEXT,state TEXT,created_at INTEGER,
                  policy_revision INTEGER,ticket_revision INTEGER);
              CREATE TABLE sa_tickets(id TEXT,orchestration_id TEXT,state TEXT,
-                 active_assignment_id TEXT,policy_revision INTEGER,project_id TEXT,actor TEXT);
+                 active_assignment_id TEXT,policy_revision INTEGER,project_id TEXT,actor TEXT,
+                 evidence TEXT);
+             CREATE TABLE sa_assignments(id TEXT,ticket_id TEXT,state TEXT,
+                 attempt INTEGER,result TEXT,updated_at INTEGER);
              CREATE TABLE sa_mandates(ticket_id TEXT,revoked INTEGER,expires_at INTEGER,
                  policy_revision INTEGER,project_id TEXT,actor TEXT,
                  allowed_tools TEXT,allowed_side_effects INTEGER);
              CREATE TABLE sa_orchestrations(id TEXT,enabled INTEGER,
                  policy_revision INTEGER,project_id TEXT);
              CREATE TABLE sa_work_item_evidence_receipts(
-                 item_id TEXT,child_ticket_id TEXT,assignment_id TEXT);
+                 item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER);
              CREATE TABLE sa_worker_write_receipts(
                  ticket_id TEXT,state TEXT,assignment_id TEXT);
              CREATE TABLE sa_subagent_nodes(
@@ -559,7 +601,7 @@ mod tests {
         for (index,count) in [(0,31),(1,1),(2,1)] {
             let root=format!("root-{index}");
             db.execute(
-                "INSERT INTO sa_tickets VALUES(?1,'team','queued',NULL,1,'project','local-user')",
+                "INSERT INTO sa_tickets VALUES(?1,'team','queued',NULL,1,'project','local-user',NULL)",
                 [&root],
             ).unwrap();
             db.execute(
@@ -579,9 +621,19 @@ mod tests {
                         ?1,?2,'build',0,'build','worker',0,'completed',?3)",
                     params![&build,&root,&child],
                 ).unwrap();
+                let attempt=format!("attempt-{index}");
                 db.execute(
-                    "INSERT INTO sa_work_item_evidence_receipts VALUES(?1,?2,'attempt')",
-                    params![&build,&child],
+                    "INSERT INTO sa_tickets VALUES(?1,'team','completed',NULL,1,
+                        'project','local-user','native output')",
+                    [&child],
+                ).unwrap();
+                db.execute(
+                    "INSERT INTO sa_assignments VALUES(?1,?2,'finished',1,'native output',50)",
+                    params![&attempt,&child],
+                ).unwrap();
+                db.execute(
+                    "INSERT INTO sa_work_item_evidence_receipts VALUES(?1,?2,?3,60)",
+                    params![&build,&child,&attempt],
                 ).unwrap();
                 db.execute(
                     "INSERT INTO sa_effect_receipts VALUES(?1,'uncertain')",
@@ -620,7 +672,10 @@ mod tests {
              CREATE TABLE sa_work_items(id TEXT,ticket_id TEXT,item_key TEXT,
                child_ticket_id TEXT,state TEXT,requires_write INTEGER);
              CREATE TABLE sa_work_item_evidence_receipts(
-               item_id TEXT,child_ticket_id TEXT,assignment_id TEXT);
+               item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER);
+             CREATE TABLE sa_tickets(id TEXT,state TEXT,evidence TEXT);
+             CREATE TABLE sa_assignments(id TEXT,ticket_id TEXT,state TEXT,
+               attempt INTEGER,result TEXT,updated_at INTEGER);
              CREATE TABLE sa_worker_write_receipts(
                ticket_id TEXT,state TEXT,assignment_id TEXT);
              CREATE TABLE sa_subagent_nodes(
@@ -629,8 +684,11 @@ mod tests {
              INSERT INTO sa_work_items VALUES('build','root','build','child-build','completed',1);
              INSERT INTO sa_work_items VALUES('verify','root','verify',NULL,'pending',0);
              INSERT INTO sa_work_dependencies VALUES('root','verify','build');
+             INSERT INTO sa_tickets VALUES('child-build','completed','native output');
+             INSERT INTO sa_assignments
+               VALUES('final-attempt','child-build','finished',1,'native output',50);
              INSERT INTO sa_work_item_evidence_receipts
-               VALUES('build','child-build','final-attempt');
+               VALUES('build','child-build','final-attempt',60);
              INSERT INTO sa_worker_write_receipts
                VALUES('child-build','applied','final-attempt');"
         ).unwrap();
@@ -663,6 +721,71 @@ mod tests {
              WHERE ticket_id='child-build'",[],
         ).unwrap();
         assert!(!prerequisites_settled(&db,"root","verify").unwrap());
+        db.execute(
+            "UPDATE sa_worker_write_receipts SET state='applied'
+             WHERE ticket_id='child-build'",[],
+        ).unwrap();
+        assert!(prerequisites_settled(&db,"root","verify").unwrap());
+        db.execute(
+            "UPDATE sa_tickets SET state='running' WHERE id='child-build'",[],
+        ).unwrap();
+        assert!(!prerequisites_settled(&db,"root","verify").unwrap());
+        db.execute(
+            "UPDATE sa_tickets SET state='completed' WHERE id='child-build'",[],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO sa_assignments
+             VALUES('later-attempt','child-build','running',2,NULL,75)",[],
+        ).unwrap();
+        assert!(!prerequisites_settled(&db,"root","verify").unwrap());
+    }
+
+    #[test]
+    fn root_completion_refuses_a_stale_or_retried_child_approval() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_work_items(ticket_id TEXT,child_ticket_id TEXT);
+             CREATE TABLE sa_work_item_evidence_receipts(
+                 item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER);
+             CREATE TABLE sa_tickets(id TEXT,state TEXT,evidence TEXT);
+             CREATE TABLE sa_assignments(id TEXT,ticket_id TEXT,state TEXT,
+                 attempt INTEGER,result TEXT,updated_at INTEGER);
+             INSERT INTO sa_work_items VALUES('root','child');
+             INSERT INTO sa_tickets VALUES('child','completed','verified output');
+             INSERT INTO sa_assignments
+               VALUES('first','child','finished',1,'verified output',50);
+             INSERT INTO sa_work_item_evidence_receipts
+               VALUES('item','child','first',60);",
+        ).unwrap();
+        assert!(root_work_item_proofs_current(&db,"root").unwrap());
+        db.execute(
+            "UPDATE sa_tickets SET state='running' WHERE id='child'",[],
+        ).unwrap();
+        assert!(!root_work_item_proofs_current(&db,"root").unwrap());
+        db.execute(
+            "UPDATE sa_tickets SET state='completed' WHERE id='child'",[],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO sa_assignments
+             VALUES('second','child','running',2,NULL,70)",[],
+        ).unwrap();
+        assert!(!root_work_item_proofs_current(&db,"root").unwrap());
+        db.execute(
+            "DELETE FROM sa_assignments WHERE id='second'",[],
+        ).unwrap();
+        assert!(root_work_item_proofs_current(&db,"root").unwrap());
+        db.execute(
+            "UPDATE sa_assignments SET updated_at=70 WHERE id='first'",[],
+        ).unwrap();
+        assert!(!root_work_item_proofs_current(&db,"root").unwrap());
+        db.execute(
+            "UPDATE sa_work_item_evidence_receipts SET reviewed_at=80",[],
+        ).unwrap();
+        assert!(root_work_item_proofs_current(&db,"root").unwrap());
+        db.execute(
+            "INSERT INTO sa_work_items VALUES('root','missing-child')",[],
+        ).unwrap();
+        assert!(!root_work_item_proofs_current(&db,"root").unwrap());
     }
 
     #[test]

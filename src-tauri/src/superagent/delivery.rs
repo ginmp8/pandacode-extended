@@ -47,20 +47,32 @@ fn classify(state:&str,total:i64,verified:i64,unresolved:i64)->&'static str {
     }
 }
 
-/// Count only real worker ToolHost receipts belonging to this native Ticket
-/// or its admitted WorkItem children. A Git status alone is never attribution.
-fn scoped_write_receipts(db:&Connection,ticket_id:&str)->Result<(i64,i64)> {
+/// Count only durable native effects in this Demand, including its WorkItem
+/// children and every admitted nested subagent. A Git status is never proof.
+fn demand_receipts(db:&Connection,ticket_id:&str)->Result<(i64,i64,i64)> {
     db.query_row(
-        "SELECT
-           COALESCE(SUM(CASE WHEN receipt.state='applied' THEN 1 ELSE 0 END),0),
-           COALESCE(SUM(CASE WHEN receipt.state IN ('reserved','uncertain') THEN 1 ELSE 0 END),0)
-         FROM sa_worker_write_receipts receipt
-         WHERE receipt.ticket_id=?1 OR EXISTS (
-           SELECT 1 FROM sa_work_items item
-           WHERE item.ticket_id=?1 AND item.child_ticket_id=receipt.ticket_id
-         )",
+        "WITH RECURSIVE descendants(ticket_id) AS (
+           SELECT ?1
+           UNION
+           SELECT item.child_ticket_id FROM sa_work_items item
+           WHERE item.ticket_id=?1 AND item.child_ticket_id IS NOT NULL
+           UNION
+           SELECT child.child_ticket_id FROM sa_subagent_nodes child
+           JOIN descendants parent ON parent.ticket_id=child.parent_ticket_id
+           WHERE child.child_ticket_id IS NOT NULL
+         )
+         SELECT
+           (SELECT COUNT(*) FROM sa_effect_receipts effect
+            JOIN descendants d ON d.ticket_id=effect.ticket_id
+            WHERE effect.state IN ('pending','uncertain')),
+           (SELECT COUNT(*) FROM sa_worker_write_receipts receipt
+            JOIN descendants d ON d.ticket_id=receipt.ticket_id
+            WHERE receipt.state='applied'),
+           (SELECT COUNT(*) FROM sa_worker_write_receipts receipt
+            JOIN descendants d ON d.ticket_id=receipt.ticket_id
+            WHERE receipt.state IN ('reserved','uncertain'))",
         [ticket_id],
-        |row|Ok((row.get(0)?,row.get(1)?)),
+        |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
     ).map_err(|e|e.to_string())
 }
 
@@ -113,14 +125,8 @@ fn native_observation(store:&Store,ticket_id:&str)->Result<(DeliveryObservation,
            AND item.child_ticket_id=evidence.child_ticket_id",
         [ticket_id],|row|row.get(0),
     ).map_err(|e|e.to_string())?;
-    let unresolved:i64=store.db.query_row(
-        "SELECT COUNT(*) FROM sa_effect_receipts effect
-         WHERE effect.state IN ('pending','uncertain')
-           AND (effect.ticket_id=?1 OR effect.ticket_id IN (
-             SELECT child_ticket_id FROM sa_work_items WHERE ticket_id=?1))",
-        [ticket_id],|row|row.get(0),
-    ).map_err(|e|e.to_string())?;
-    let (applied_file_writes,unresolved_file_writes)=scoped_write_receipts(&store.db,ticket_id)?;
+    let (unresolved,applied_file_writes,unresolved_file_writes)=
+        demand_receipts(&store.db,ticket_id)?;
     let path:Option<String>=store.db.query_row(
         "SELECT path FROM projects WHERE id=?1",
         [&snapshot.project_id],|row|row.get(0),
@@ -213,27 +219,44 @@ pub(crate) fn headless_inspect(database_path:&Path,ticket_id:&str)->Result<Strin
 mod tests {
     use super::*;
     #[test]
-    fn real_scoped_write_receipts_are_tied_to_the_exact_root_and_block_uncertain_delivery() {
+    fn delivery_receipts_include_nested_subagents_without_cross_demand_attribution() {
         let db=Connection::open_in_memory().unwrap();
         db.execute_batch(
             "CREATE TABLE sa_work_items(ticket_id TEXT NOT NULL,child_ticket_id TEXT);
+             CREATE TABLE sa_subagent_nodes(parent_ticket_id TEXT NOT NULL,child_ticket_id TEXT);
              CREATE TABLE sa_worker_write_receipts(ticket_id TEXT NOT NULL,state TEXT NOT NULL);
+             CREATE TABLE sa_effect_receipts(ticket_id TEXT NOT NULL,state TEXT NOT NULL);
              INSERT INTO sa_work_items VALUES('root','child-a');
              INSERT INTO sa_work_items VALUES('root','child-b');
-             INSERT INTO sa_work_items VALUES('other','child-c');
+             INSERT INTO sa_work_items VALUES('other','other-child');
+             INSERT INTO sa_subagent_nodes VALUES('child-a','nested-a');
+             INSERT INTO sa_subagent_nodes VALUES('nested-a','grandchild');
+             INSERT INTO sa_subagent_nodes VALUES('other-child','other-grandchild');
              INSERT INTO sa_worker_write_receipts VALUES('root','applied');
              INSERT INTO sa_worker_write_receipts VALUES('child-a','applied');
-             INSERT INTO sa_worker_write_receipts VALUES('child-a','reserved');
-             INSERT INTO sa_worker_write_receipts VALUES('child-b','uncertain');
-             INSERT INTO sa_worker_write_receipts VALUES('child-b','failed');
-             INSERT INTO sa_worker_write_receipts VALUES('child-c','applied');",
+             INSERT INTO sa_worker_write_receipts VALUES('child-b','reserved');
+             INSERT INTO sa_worker_write_receipts VALUES('nested-a','applied');
+             INSERT INTO sa_worker_write_receipts VALUES('grandchild','uncertain');
+             INSERT INTO sa_worker_write_receipts VALUES('other-child','uncertain');
+             INSERT INTO sa_effect_receipts VALUES('grandchild','pending');
+             INSERT INTO sa_effect_receipts VALUES('other-grandchild','uncertain');",
         ).unwrap();
-        let (applied,uncertain)=scoped_write_receipts(&db,"root").unwrap();
-        assert_eq!((applied,uncertain),(2,2));
-        assert_eq!(scoped_write_receipts(&db,"other").unwrap(),(1,0));
-        assert_eq!(scoped_write_receipts(&db,"absent").unwrap(),(0,0));
-        assert_eq!(classify("completed",2,2,uncertain),"partially_verified");
-        assert_eq!(classify("completed",2,2,0),"native_complete_delivery_unverified");
+        let (effects,applied,unsettled)=demand_receipts(&db,"root").unwrap();
+        assert_eq!((effects,applied,unsettled),(1,3,2));
+        assert_eq!(demand_receipts(&db,"other").unwrap(),(1,0,1));
+        assert_eq!(demand_receipts(&db,"absent").unwrap(),(0,0,0));
+        assert_eq!(classify("completed",2,2,effects+unsettled),"partially_verified");
+
+        db.execute_batch(
+            "UPDATE sa_worker_write_receipts SET state='applied'
+               WHERE ticket_id IN ('child-b','grandchild');
+             UPDATE sa_effect_receipts SET state='applied' WHERE ticket_id='grandchild';",
+        ).unwrap();
+        let (effects,applied,unsettled)=demand_receipts(&db,"root").unwrap();
+        assert_eq!((effects,applied,unsettled),(0,5,0));
+        assert_eq!(classify("completed",2,2,effects+unsettled),
+            "native_complete_delivery_unverified");
+        assert_eq!(demand_receipts(&db,"other").unwrap(),(1,0,1));
     }
 
     #[test]

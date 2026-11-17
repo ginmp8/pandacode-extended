@@ -1723,7 +1723,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (target.hasAttribute('data-sa-back-runs')) {
       workspaceView = 'runs'; inspectedTicket = ''; ticketDetails = null;
-      render(); return;
+      render();
+      if (!allDemandsLoaded)
+        host.querySelector<HTMLButtonElement>('[data-sa-load-all-demands]')?.click();
+      return;
     }
     if (target.hasAttribute('data-sa-create-demand')) {
       workspaceView = presets.length ? 'new-demand' : 'teams';
@@ -1859,13 +1862,26 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       selected = demand.orchestrationId;
       workspaceView = 'run';
       tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
-      inspectedAssignmentId = ''; roleRoster = null; workerOrder = []; reviewerDraft = []; effectiveTeam = null;
+      inspectedAssignmentId = ''; roleRoster = null; workerOrder = []; reviewerDraft = [];
+      effectiveTeam = null; teamStrategy = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       sourceIntegrity = null;
       void work(async () => {
-        tickets = await call<Ticket[]>('superagent_tickets',{
-          orchestrationId:demand.orchestrationId,limit:50,
-        });
+        const [loaded, policy, roster] = await Promise.all([
+          call<Ticket[]>('superagent_tickets',{
+            orchestrationId:demand.orchestrationId,limit:50,
+          }),
+          call<StrategyView>('superagent_strategy_get',{orchestrationId:demand.orchestrationId}),
+          call<TeamRoster>('superagent_roster',{orchestrationId:demand.orchestrationId}),
+        ]);
+        const cfg=presets.find(item=>item.id===demand.orchestrationId);
+        if (selected!==demand.orchestrationId || !cfg ||
+            policy.policyRevision!==cfg.policyRevision ||
+            roster.policyRevision!==cfg.policyRevision) {
+          throw new Error('Native Team policy changed while opening the Demand; reload.');
+        }
+        tickets=loaded; teamStrategy=policy; roleRoster=roster;
+        workerOrder=roster.workerBotIds.slice(1); reviewerDraft=[...roster.reviewerBotIds];
         // The global index can include an older Ticket outside the Team's
         // latest-50 page. Resolve it through the native immutable Ticket
         // identity and verify its Team before exposing any approval controls.

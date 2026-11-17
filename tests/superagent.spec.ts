@@ -20,6 +20,54 @@ async function openOrchestrationWorkspace(page: Page) {
 }
 
 
+
+test('one initial Demand file scope reaches native admission without per-WorkItem clicks', async ({page}) => {
+  test.setTimeout(45_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-initial-demand-scope'; document.body.appendChild(host);
+    const received:Record<string,unknown>[]=[];
+    (window as unknown as {initialDemandScopeCalls:Record<string,unknown>[]}).initialDemandScopeCalls=received;
+    mountSuperagent(host,async (command,args)=>{
+      if(command==='bots_list')return [
+        {id:'coord',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [{
+        id:'team',name:'Scoped Team',coordinatorBotId:'coord',workerBotId:'worker',
+        workerBotIds:['worker'],reviewerBotIds:[],enabled:true,policyRevision:1,
+      }] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_start_demand'){
+        received.push(args ?? {});
+        throw new Error('Native user cancelled exact-path confirmation');
+      }
+      throw new Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-initial-demand-scope');
+  await expect(host.getByRole('combobox',{name:'Dispatch'})).toBeVisible();
+  await host.getByRole('combobox',{name:'Dispatch'}).selectOption('auto');
+  await host.getByRole('textbox',{name:'Task objective'}).fill('Modify one pinned source file');
+  await host.getByRole('textbox',{name:/Optional exact files for this Demand/})
+    .fill('src/safe.ts');
+  await host.getByRole('button',{name:'Start supervised Demand'}).click();
+  await expect.poll(async()=>page.evaluate(()=>
+    (window as unknown as {initialDemandScopeCalls:Record<string,unknown>[]})
+      .initialDemandScopeCalls.length)).toBe(1);
+  expect(await page.evaluate(()=>
+    (window as unknown as {initialDemandScopeCalls:Record<string,unknown>[]})
+      .initialDemandScopeCalls[0])).toMatchObject({
+    orchestrationId:'team',objective:'Modify one pinned source file',
+    allowedPaths:['src/safe.ts'],
+  });
+  await expect(host.getByRole('textbox',{name:/Optional exact files for this Demand/}))
+    .toHaveValue('src/safe.ts');
+  await expect(host.getByText('Native user cancelled exact-path confirmation')).toBeVisible();
+});
+
 test('SuperAgent Team search preserves focus and text selection through rerenders', async ({page}) => {
   test.setTimeout(45_000);
   await page.goto('/?bots=sample');

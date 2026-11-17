@@ -104,3 +104,42 @@ implementation or executed passing validation. Every row remains
   backend/frontend full-auto acceptance, real required automated tests
   passed at the **current published HEAD**, and no blocking functional,
   authorization or recovery debt remains. Do not merge the PR.
+
+
+## Initial Demand scope slice (candidate, 2026-11-17)
+
+- One optional exact-file list is now submitted at **initial manual Demand**
+  admission and requires one trusted local window confirmation before the
+  read-only Coordinator is delivered. A cancelled dialog grants nothing.
+- SQLite v62 records an immutable Demand-scoped receipt pinned to the original
+  Team version, policy, project and checkout. Existing historical Demands gain
+  **no** write permission by migration. A reused request key cannot change the
+  original scope. The original Coordinator Mandate remains read-only.
+- At plan settlement, native profile/checkout/provider checks restrict automatic
+  inheritance to each explicitly write-required, eligible Codex WorkItem. The
+  plan, item-scoped grants and audit receipts are committed transactionally;
+  unsupported Workers are not silently upgraded.
+- The frontend exposes an optional exact-path input only in Supervised Demand
+  mode and passes it to native code; the selected path text is *not* a grant.
+- Native SQLite and Playwright regression tests are authored for immutable scope,
+  transactional rollback, path propagation and native request/cancellation wiring.
+  Their execution is **not claimed** in this source checkpoint.
+- Material remaining debt: general test execution/correction, verified Council,
+  safe source-commit and GitHub delivery, real three-item provider run, other
+  harnesses, independent final review and exact-HEAD checks. The branch
+  remains **partial**, with the original and duplicate automation both active.
+
+### Validation and CI evidence at the start of this iteration
+
+- Prior published HEAD: `b466f193358b8447730b952da25fd719109e20f3`.
+- CI run [44015416191](https://github.com/ginmp8/pandacode-extended/actions/runs/44015416191)
+  completed with **failure**: six `clippy::needless_borrow` diagnostics
+  in `scheduler.rs` caused all six cross-platform Rust Clippy jobs to fail.
+  Linux native Rust unit tests, TypeScript, and the SuperAgent Playwright job
+  were successful **on that previous HEAD only**.
+- The six named diagnostics were addressed in the candidate source. Their fix,
+  the v62 migration, initial consent, native SQL and new Playwright tests
+  require new exact-SHA CI and native runtime verification after publication.
+- No local Cargo toolchain, repository checkout or complete executable app was
+  available in this iteration; authored tests are **not_run** locally and
+  no genuine provider-backed full-auto demand has been exercised.

@@ -991,6 +991,14 @@ impl Store {
                      PRAGMA user_version=61;",
                 ).map_err(|e| e.to_string())?;
             }
+            if version < 62 {
+                // An initial manual Demand scope is a durable separate
+                // consent, not a migration of existing read-only Mandates.
+                migration.execute_batch(crate::superagent::scheduler::DEMAND_WRITE_SCOPES_SCHEMA)
+                    .map_err(|e|e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=62;")
+                    .map_err(|e|e.to_string())?;
+            }
             migration.commit().map_err(|e| e.to_string())?;
         }
         // Recovery can revoke a SuperAgent mandate. Serialize it with the

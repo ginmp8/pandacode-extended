@@ -256,6 +256,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let subagentTree:NativeSubagentTree|null = null, subagentTreeLoaded = false;
   let subagentDepth=2, subagentPerParent=2, subagentTotal=8;
   let demandPreflight: ManualPreflight | null = null;
+  let initialDemandWritePaths = '';
   let preflightObjective = '', preflightMode: 'coordinated' | 'direct' = 'coordinated';
   // Persist the user's editable preset draft across asynchronous list refreshes.
   let draftPresetName = '', draftPresetTemplate = '', draftWorkerAttemptLimit = 2;
@@ -1019,6 +1020,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '>Worker directly</option>' +
       '<option value="auto"' + (demandMode === 'auto' ? ' selected' : '') +
       '>Supervised Demand · native WorkItems</option></select></label>' +
+      (demandMode === 'auto' ?
+        '<label>Optional exact files for this Demand (one project-relative file per line)' +
+        '<textarea name="initialAllowedPaths" rows="3" autocomplete="off" ' +
+        'placeholder="src/feature.ts">' + safe(initialDemandWritePaths) + '</textarea></label>' +
+        '<p>Native local confirmation occurs once before Coordinator planning. ' +
+        'Every eligible write-required WorkItem receives the SAME exact paths ' +
+        'as an immutable child grant. Leave blank for read-only planning and ' +
+        'later per-WorkItem authorization. Shell, MCP and GitHub writes stay denied.</p>'
+        : '') +
       '<button type="button" data-sa-preflight>Review native preflight</button>' +
       '<button class="primary-button" type="submit"' + (chosen.enabled ? '' : ' disabled') +
       '>' + (demandMode === 'auto' ? 'Start supervised Demand' : 'Dispatch manually') +
@@ -1551,6 +1561,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         target.value === 'direct' ? 'direct' : 'coordinated';
       demandPreflight = null;
       host.querySelector('[aria-label="Native demand preflight"]')?.remove();
+      render();
       return;
     }
     if (!(target instanceof HTMLSelectElement) || !target.hasAttribute('data-sa-template')) return;
@@ -1611,6 +1622,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const replacement = host.querySelector<HTMLInputElement>('[data-sa-team-search]');
       replacement?.focus({preventScroll:true});
       if (replacement && selection !== null) replacement.setSelectionRange(selection, selection);
+      return;
+    }
+    if (target instanceof HTMLTextAreaElement && target.name === 'initialAllowedPaths' &&
+        target.closest<HTMLFormElement>('form[data-sa-form="run"]')) {
+      initialDemandWritePaths = target.value;
       return;
     }
     if (target instanceof HTMLTextAreaElement && target.name === 'objective' &&
@@ -1704,7 +1720,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (target.hasAttribute('data-sa-preflight')) {
       if (demandMode === 'auto') {
-        feedback = 'Native Demand admission will recheck the saved Team, original project, Coordinator, member profiles and checkout leases before dispatch. Planned file writes require separate local confirmation.';
+        feedback = 'Native Demand admission rechecks Team, checkout and member profiles. Initial exact file paths, when provided, require one local confirmation before planning; no later Worker clicks are required for that confirmed scope. Unconfirmed writes remain pending.';
         render();
         return;
       }
@@ -2765,9 +2781,22 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         data.get('mode') === 'direct' ? 'superagent_submit' : 'superagent_submit_coordinated';
       if (!selectedConfig?.enabled || !objective) return;
       const key = taskKey;
+      if (command === 'superagent_start_demand') {
+        initialDemandWritePaths = String(data.get('initialAllowedPaths') ?? '');
+      }
+      const initialPaths = initialDemandWritePaths.split(/\r\n?|\n/).filter(Boolean);
+      if (command === 'superagent_start_demand' &&
+          (initialPaths.length > 16 || new Set(initialPaths).size !== initialPaths.length)) {
+        error = 'Supply at most 16 unique exact project-relative paths.'; render(); return;
+      }
       void work(async () => {
-        await call(command,{ orchestrationId:selectedConfig.id, objective, requestKey:key });
+        await call(command,{
+          orchestrationId:selectedConfig.id, objective, requestKey:key,
+          ...(command === 'superagent_start_demand' && initialPaths.length
+            ? {allowedPaths:initialPaths} : {}),
+        });
         taskKey = crypto.randomUUID(); demandObjective = ''; demandPreflight = null;
+        initialDemandWritePaths = '';
         await reload();
       });
     }

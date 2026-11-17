@@ -160,11 +160,6 @@ interface AssignmentInsight {
   assignmentId: string; currentAssignment: boolean; hasResult: boolean;
   mandateRevoked: boolean; runBudgetExpired: boolean; remainingRunBudgetMs: number | null;
 }
-interface ManualPreflight {
-  orchestrationId: string; policyRevision: number; projectId: string;
-  selectedBotId: string; selectedRole: string; eligible: boolean; reason: string | null;
-  allowedTools: string[]; allowedSideEffects: boolean; attemptBudgetMs: number;
-}
 interface Activity { id: number; kind: string; detail: string; at: number }
 interface CouncilObservation {
   nativeStatus: string; nativeRound: number; nativeStale: boolean;
@@ -255,14 +250,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   // Read-only draft PR target preflight; never a publication or durable permission.
   let draftPrRepository = '', draftPrHead = '', draftPrBase = '';
   let draftPrError = '', draftPrVerifiedSha = '', draftPrVerifiedRevision = -1;
-  let demandObjective = '', demandMode: 'coordinated' | 'direct' | 'auto' = 'auto';
+  let demandObjective = '';
   let workPlan: DemandPlanEvidence | null = null, workPlanLoaded = false;
   let workWriteItemKey = '', workWritePaths = '';
   let subagentTree:NativeSubagentTree|null = null, subagentTreeLoaded = false;
   let subagentDepth=2, subagentPerParent=2, subagentTotal=8;
-  let demandPreflight: ManualPreflight | null = null;
   let initialDemandWritePaths = '';
-  let preflightObjective = '', preflightMode: 'coordinated' | 'direct' = 'coordinated';
   const guidedBuilder = new GuidedTeamBuilder();
   let rejectingTicket = '', inspectedTicket = '';
   let inspectedAssignmentId = '';
@@ -969,23 +962,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<p role="status">' + allDemands.length + ' native Demands loaded.</p>' +
         (allDemandsHasMore ? '<button type="button" data-sa-load-older-demands>Load older Demands</button>' : '')) +
       '</section>';
-    const nativePreflight = demandPreflight && demandPreflight.orchestrationId === selected &&
-      preflightObjective === demandObjective.trim() && preflightMode === demandMode
-      ? '<section class="sa-pane" role="region" aria-label="Native demand preflight">' +
-        '<h4>Native demand preflight</h4><p role="status">' +
-        (demandPreflight.eligible ? 'Eligible for manual read-only admission now.' :
-          'Not eligible for immediate admission: ' + safe(demandPreflight.reason)) + '</p>' +
-        '<dl><dt>Selected role and bot</dt><dd>' + safe(demandPreflight.selectedRole) +
-        ' · ' + safe(botName(demandPreflight.selectedBotId)) + '</dd>' +
-        '<dt>Team project / policy revision</dt><dd>' + safe(demandPreflight.projectId) +
-        ' / ' + demandPreflight.policyRevision + '</dd>' +
-        '<dt>Authorized tools / effects</dt><dd>' +
-        safe(demandPreflight.allowedTools.join(', ') || 'none') + ' / ' +
-        (demandPreflight.allowedSideEffects ? 'scoped' : 'no side effects') + '</dd>' +
-        '<dt>Attempt time budget</dt><dd>' +
-        safe(String(Math.floor(demandPreflight.attemptBudgetMs / 60000))) + ' minutes</dd></dl>' +
-        '<p>This is a read-only snapshot, not a grant, Ticket or guaranteed reservation. ' +
-        'Native admission rechecks all policy, availability and checkout limits.</p></section>' : '';
     const teamEditor = chosen ? '<section class="sa-pane" aria-label="Team identity"><h3>Team identity</h3>' +
       '<form data-sa-form="edit"><label>Team name<input name="name" required maxlength="120" value="' + safe(chosen.name) + '"></label>' +
       '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" required>' +
@@ -1009,15 +985,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           : 'Execution policy not configured')
         : 'Inspect the Team execution policy before starting') +
       '. The Coordinator plans dependencies and the scheduler dispatches them to existing bot conversations.</p>' +
-      (demandMode === 'auto' ?
-        '<label>Optional exact files for this Demand (one project-relative file per line)' +
+      '<label>Optional exact files for this Demand (one project-relative file per line)' +
         '<textarea name="initialAllowedPaths" rows="3" autocomplete="off" ' +
         'placeholder="src/feature.ts">' + safe(initialDemandWritePaths) + '</textarea></label>' +
         '<p>Native local confirmation occurs once before Coordinator planning. ' +
         'Every eligible write-required WorkItem receives the SAME exact paths ' +
         'as an immutable child grant. Leave blank for read-only planning and ' +
-        'later per-WorkItem authorization. Shell, MCP and GitHub writes stay denied.</p>'
-        : '') +
+        'later per-WorkItem authorization. Shell, MCP and GitHub writes stay denied.</p>' +
       '<button class="primary-button" type="submit"' +
       (chosen.enabled && teamStrategy?.orchestrationId === chosen.id &&
         teamStrategy.executionMode !== 'off' ? '' : ' disabled') +
@@ -1381,7 +1355,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     // status as if the native Tickets had already been re-read.
     allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
     reviewQueue = []; reviewQueueLoaded = false;
-    demandPreflight = null;
     // Keep updated controls hidden until the mutating operation has settled.
     // Exposing them mid-reload would allow silently discarded submissions.
     if (!busy) render();
@@ -1596,7 +1569,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target instanceof HTMLTextAreaElement && target.name === 'objective' &&
         target.closest<HTMLFormElement>('form[data-sa-form="run"]')) {
       demandObjective = target.value;
-      demandPreflight = null;
       host.querySelector('[aria-label="Native demand preflight"]')?.remove();
     }
     if (target instanceof HTMLTextAreaElement && target.hasAttribute('data-sa-manifest')) {
@@ -1719,28 +1691,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       workspaceView = next as typeof workspaceView;
       render();
       host.querySelector<HTMLButtonElement>('[data-sa-view="' + next + '"]')?.focus({preventScroll:true});
-      return;
-    }
-    if (target.hasAttribute('data-sa-preflight')) {
-      if (demandMode === 'auto') {
-        feedback = 'Native Demand admission rechecks Team, checkout and member profiles. Initial exact file paths, when provided, require one local confirmation before planning; no later Worker clicks are required for that confirmed scope. Unconfirmed writes remain pending.';
-        render();
-        return;
-      }
-      const form = host.querySelector<HTMLFormElement>('form[data-sa-form="run"]');
-      const chosen = current();
-      const objective = form?.querySelector<HTMLTextAreaElement>('textarea[name="objective"]')?.value.trim() ?? '';
-      const coordinated = form?.querySelector<HTMLSelectElement>('select[name="mode"]')?.value !== 'direct';
-      if (!chosen || !objective) return;
-      demandPreflight = null;
-      void work(async () => {
-        demandPreflight = await call<ManualPreflight>('superagent_preflight', {
-          orchestrationId: chosen.id, objective, coordinated,
-        });
-        demandObjective = objective;
-        preflightObjective = objective;
-        preflightMode = coordinated ? 'coordinated' : 'direct';
-      });
       return;
     }
     if (target.hasAttribute('data-sa-load-run-graph')) {
@@ -2779,26 +2729,21 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (form.dataset.saForm === 'run') {
       const selectedConfig = current(), objective = String(data.get('objective') ?? '').trim();
-      const command = 'superagent_start_demand';
       if (!selectedConfig?.enabled || !objective ||
           teamStrategy?.orchestrationId !== selectedConfig.id ||
           teamStrategy.executionMode === 'off') return;
       const key = taskKey;
-      if (command === 'superagent_start_demand') {
-        initialDemandWritePaths = String(data.get('initialAllowedPaths') ?? '');
-      }
+      initialDemandWritePaths = String(data.get('initialAllowedPaths') ?? '');
       const initialPaths = initialDemandWritePaths.split(/\r\n?|\n/).filter(Boolean);
-      if (command === 'superagent_start_demand' &&
-          (initialPaths.length > 16 || new Set(initialPaths).size !== initialPaths.length)) {
+      if (initialPaths.length > 16 || new Set(initialPaths).size !== initialPaths.length) {
         error = 'Supply at most 16 unique exact project-relative paths.'; render(); return;
       }
       void work(async () => {
-        await call(command,{
+        await call('superagent_start_demand',{
           orchestrationId:selectedConfig.id, objective, requestKey:key,
-          ...(command === 'superagent_start_demand' && initialPaths.length
-            ? {allowedPaths:initialPaths} : {}),
+          ...(initialPaths.length ? {allowedPaths:initialPaths} : {}),
         });
-        taskKey = crypto.randomUUID(); demandObjective = ''; demandPreflight = null;
+        taskKey = crypto.randomUUID(); demandObjective = '';
         initialDemandWritePaths = '';
         await reload();
       });

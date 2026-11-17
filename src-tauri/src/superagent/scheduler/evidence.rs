@@ -58,6 +58,9 @@ pub(super) fn record_accepted(store:&Store,now:i64)->Result<usize> {
                AND child.evidence IS NOT NULL AND length(child.evidence)>0
                AND NOT EXISTS(SELECT 1 FROM sa_effect_receipts effect
                  WHERE effect.ticket_id=child.id AND effect.state IN ('pending','uncertain'))
+               AND NOT EXISTS(SELECT 1 FROM sa_worker_write_receipts write_receipt
+                 WHERE write_receipt.ticket_id=child.id
+                   AND write_receipt.state IN ('reserved','uncertain'))
                AND NOT EXISTS(SELECT 1 FROM sa_subagent_nodes descendant
                  WHERE descendant.parent_ticket_id=child.id AND descendant.state<>'completed')
              ORDER BY item.ticket_id,item.ordinal,item.id",
@@ -95,6 +98,9 @@ pub(super) fn record_accepted(store:&Store,now:i64)->Result<usize> {
                    AND audit.kind=?5 AND audit.at=?6)
                  AND NOT EXISTS(SELECT 1 FROM sa_effect_receipts effect
                    WHERE effect.ticket_id=ticket.id AND effect.state IN ('pending','uncertain'))
+                 AND NOT EXISTS(SELECT 1 FROM sa_worker_write_receipts write_receipt
+                   WHERE write_receipt.ticket_id=ticket.id
+                     AND write_receipt.state IN ('reserved','uncertain'))
                  AND NOT EXISTS(SELECT 1 FROM sa_subagent_nodes child
                    WHERE child.parent_ticket_id=ticket.id AND child.state<>'completed'))",
             params![item,child,assignment,digest,kind,approved_at,now,revision,result],
@@ -133,6 +139,7 @@ mod tests {
                child_ticket_id TEXT,state TEXT,last_reason TEXT,updated_at INTEGER);
              CREATE TABLE sa_audit(id INTEGER PRIMARY KEY,ticket_id TEXT,kind TEXT,at INTEGER);
              CREATE TABLE sa_effect_receipts(ticket_id TEXT,state TEXT);
+             CREATE TABLE sa_worker_write_receipts(ticket_id TEXT,state TEXT);
              CREATE TABLE sa_subagent_nodes(parent_ticket_id TEXT,state TEXT);
              INSERT INTO sa_tickets VALUES('child','completed','native output',2);
              INSERT INTO sa_assignments VALUES('attempt','child','finished',1,'native output');
@@ -186,6 +193,31 @@ mod tests {
             "SELECT state FROM sa_work_items WHERE id='item'",[],
             |row|row.get::<_,String>(0),
         ).unwrap(),"completed");
+    }
+
+    #[test]
+    fn unresolved_worker_file_writes_block_dependency_release_even_after_council_pass() {
+        let store=fixture();
+        store.db.execute_batch(
+            "INSERT INTO sa_audit(ticket_id,kind,at) VALUES('child','council_passed',99);
+             INSERT INTO sa_worker_write_receipts VALUES('child','reserved');
+             INSERT INTO sa_worker_write_receipts VALUES('other','uncertain');",
+        ).unwrap();
+        assert_eq!(record_accepted(&store,100).unwrap(),0);
+        assert!(receipt(&store,"item").unwrap().is_none());
+        store.db.execute(
+            "UPDATE sa_worker_write_receipts SET state='uncertain'
+             WHERE ticket_id='child'",[],
+        ).unwrap();
+        assert_eq!(record_accepted(&store,101).unwrap(),0);
+        assert!(receipt(&store,"item").unwrap().is_none());
+        store.db.execute(
+            "UPDATE sa_worker_write_receipts SET state='applied'
+             WHERE ticket_id='child'",[],
+        ).unwrap();
+        assert_eq!(record_accepted(&store,102).unwrap(),1);
+        assert_eq!(record_accepted(&store,103).unwrap(),0);
+        assert!(receipt(&store,"item").unwrap().is_some());
     }
 
     #[test]

@@ -47,6 +47,27 @@ fn classify(state:&str,total:i64,verified:i64,unresolved:i64)->&'static str {
     }
 }
 
+/// Only the latest finished native Worker attempt with a matching independent
+/// approval counts as verified. Immutable historical receipts are not current
+/// after a retry, interruption or changed native output.
+fn verified_work_items(db:&Connection,ticket_id:&str)->Result<i64> {
+    db.query_row(
+        "SELECT COUNT(*) FROM sa_work_item_evidence_receipts proof
+         JOIN sa_work_items item ON item.id=proof.item_id
+         JOIN sa_tickets child ON child.id=proof.child_ticket_id
+         JOIN sa_assignments assignment ON assignment.id=proof.assignment_id
+         WHERE item.ticket_id=?1 AND item.state='completed'
+           AND item.child_ticket_id=proof.child_ticket_id
+           AND child.state='completed'
+           AND assignment.ticket_id=child.id AND assignment.state='finished'
+           AND assignment.result=child.evidence
+           AND assignment.attempt=(SELECT MAX(latest.attempt)
+             FROM sa_assignments latest WHERE latest.ticket_id=child.id)
+           AND proof.reviewed_at>=assignment.updated_at",
+        [ticket_id],|row|row.get(0),
+    ).map_err(|error|error.to_string())
+}
+
 /// Count only durable native effects in this Demand, including its WorkItem
 /// children and every admitted nested subagent. A Git status is never proof.
 fn demand_receipts(db:&Connection,ticket_id:&str)->Result<(i64,i64,i64)> {
@@ -118,13 +139,7 @@ fn native_observation(store:&Store,ticket_id:&str)->Result<(DeliveryObservation,
         "SELECT COUNT(*) FROM sa_work_items WHERE ticket_id=?1",[ticket_id],
         |row|row.get(0),
     ).map_err(|e|e.to_string())?;
-    let verified:i64=store.db.query_row(
-        "SELECT COUNT(*) FROM sa_work_item_evidence_receipts evidence
-         JOIN sa_work_items item ON item.id=evidence.item_id
-         WHERE item.ticket_id=?1 AND item.state='completed'
-           AND item.child_ticket_id=evidence.child_ticket_id",
-        [ticket_id],|row|row.get(0),
-    ).map_err(|e|e.to_string())?;
+    let verified=verified_work_items(&store.db,ticket_id)?;
     let (unresolved,applied_file_writes,unresolved_file_writes)=
         demand_receipts(&store.db,ticket_id)?;
     let path:Option<String>=store.db.query_row(
@@ -257,6 +272,53 @@ mod tests {
         assert_eq!(classify("completed",2,2,effects+unsettled),
             "native_complete_delivery_unverified");
         assert_eq!(demand_receipts(&db,"other").unwrap(),(1,0,1));
+    }
+
+    #[test]
+    fn delivery_never_counts_an_old_receipt_after_worker_retry_or_revocation() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_work_items(
+               id TEXT,ticket_id TEXT,child_ticket_id TEXT,state TEXT);
+             CREATE TABLE sa_work_item_evidence_receipts(
+               item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER);
+             CREATE TABLE sa_tickets(id TEXT,state TEXT,evidence TEXT);
+             CREATE TABLE sa_assignments(
+               id TEXT,ticket_id TEXT,state TEXT,attempt INTEGER,result TEXT,updated_at INTEGER);
+             INSERT INTO sa_work_items VALUES('item','root','child','completed');
+             INSERT INTO sa_work_item_evidence_receipts
+               VALUES('item','child','first',80);
+             INSERT INTO sa_tickets VALUES('child','completed','Worker output');
+             INSERT INTO sa_assignments VALUES('first','child','finished',1,'Worker output',70);",
+        ).unwrap();
+        assert_eq!(verified_work_items(&db,"root").unwrap(),1);
+        assert_eq!(verified_work_items(&db,"other").unwrap(),0);
+        db.execute(
+            "UPDATE sa_tickets SET state='running' WHERE id='child'",[],
+        ).unwrap();
+        assert_eq!(verified_work_items(&db,"root").unwrap(),0);
+        db.execute(
+            "UPDATE sa_tickets SET state='completed' WHERE id='child'",[],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO sa_assignments VALUES('second','child','running',2,NULL,90)",[],
+        ).unwrap();
+        assert_eq!(verified_work_items(&db,"root").unwrap(),0);
+        db.execute(
+            "DELETE FROM sa_assignments WHERE id='second'",[],
+        ).unwrap();
+        db.execute(
+            "UPDATE sa_assignments SET updated_at=90 WHERE id='first'",[],
+        ).unwrap();
+        assert_eq!(verified_work_items(&db,"root").unwrap(),0);
+        db.execute(
+            "UPDATE sa_work_item_evidence_receipts SET reviewed_at=91",[],
+        ).unwrap();
+        assert_eq!(verified_work_items(&db,"root").unwrap(),1);
+        db.execute(
+            "UPDATE sa_tickets SET evidence='changed output' WHERE id='child'",[],
+        ).unwrap();
+        assert_eq!(verified_work_items(&db,"root").unwrap(),0);
     }
 
     #[test]

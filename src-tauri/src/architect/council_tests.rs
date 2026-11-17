@@ -6554,6 +6554,11 @@ fn unforced_nested_s2_admits_only_authenticated_fresh_second_wave_without_approv
         let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
         let score = {
             let store = state.store.lock().unwrap();
+            let child = load(&store, &launch.admission.parent).unwrap().unwrap();
+            let leaf = child.workers.iter()
+                .find(|worker| worker.session_id == launch.sid).unwrap();
+            assert_eq!(leaf.council.as_ref().unwrap().round, 1,
+                "queued S2 escalation must not overtake another child's first-wave review");
             let root = load(&store, &sid).unwrap().unwrap();
             let security = child_council::inspect(&store, &root).unwrap()
                 .into_iter().find(|child| child.bot_id == "security-child").unwrap();

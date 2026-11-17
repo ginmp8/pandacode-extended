@@ -1864,29 +1864,37 @@ pub(super) fn next_leaf_launch(
         children.push(child);
     }
     if global_running >= 8 { return Ok(None); }
-    for mut child in children {
-        if child.status != "running" { continue; }
-        let local_running = child.workers.iter().filter(|w|
-            super::active(&w.status) || agents.contains_key(&w.session_id)).count();
-        if local_running >= child.config.max_parallel { continue; }
-        let Some(leaf) = child.workers.iter_mut().find(|w|
-            w.status == "queued" && !w.abandoned && !agents.contains_key(&w.session_id)) else {
-            continue;
-        };
-        leaf.status = "running".into();
-        leaf.updated_at = storage::now();
-        if let Some(seat) = leaf.council.as_mut() {
-            if seat.started_at == 0 { seat.started_at = leaf.updated_at; }
+    // An early S2 trigger may queue a second wave before sibling children
+    // finish their first wave. Prefer all eligible first-wave leaves across
+    // children, so one slow child cannot be starved by another child's
+    // escalation. Never grant additional capacity or bypass native admission.
+    for desired_round in [1_usize, 2] {
+        for child in &mut children {
+            if child.status != "running" { continue; }
+            let local_running = child.workers.iter().filter(|w|
+                super::active(&w.status) || agents.contains_key(&w.session_id)).count();
+            if local_running >= child.config.max_parallel { continue; }
+            let Some(leaf) = child.workers.iter_mut().find(|w|
+                w.status == "queued" && !w.abandoned
+                    && !agents.contains_key(&w.session_id)
+                    && w.council.as_ref().is_some_and(|seat| seat.round == desired_round)) else {
+                continue;
+            };
+            leaf.status = "running".into();
+            leaf.updated_at = storage::now();
+            if let Some(seat) = leaf.council.as_mut() {
+                if seat.started_at == 0 { seat.started_at = leaf.updated_at; }
+            }
+            let launch = Launch {
+                sid: leaf.session_id.clone(),
+                prompt: leaf.resume_prompt.clone().unwrap_or_else(|| leaf.assignment.clone()),
+                images: None,
+                admission: Admission { parent: child.session_id.clone(), generation: child.generation },
+            };
+            super::save(store, child)?;
+            authorize_leaf(store, &launch.sid, &launch.admission)?;
+            return Ok(Some(launch));
         }
-        let launch = Launch {
-            sid: leaf.session_id.clone(),
-            prompt: leaf.resume_prompt.clone().unwrap_or_else(|| leaf.assignment.clone()),
-            images: None,
-            admission: Admission { parent: child.session_id.clone(), generation: child.generation },
-        };
-        super::save(store, &mut child)?;
-        authorize_leaf(store, &launch.sid, &launch.admission)?;
-        return Ok(Some(launch));
     }
     Ok(None)
 }

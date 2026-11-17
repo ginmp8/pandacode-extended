@@ -50,7 +50,7 @@ interface AssignmentInsight {
 interface ManualPreflight {
   orchestrationId: string; policyRevision: number; projectId: string;
   selectedBotId: string; selectedRole: string; eligible: boolean; reason: string | null;
-  allowedTools: string[]; allowedSideEffects: boolean; attemptBudgetMs: number;
+  canStageBlocked?: boolean; allowedTools: string[]; allowedSideEffects: boolean; attemptBudgetMs: number;
 }
 interface Activity { id: number; kind: string; detail: string; at: number }
 interface CouncilObservation {
@@ -514,13 +514,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         ? chosen.coordinatorBotId : chosen.workerBotId));
     // A preview is a read-only observation, never a grant or authorization.
     const manualAdmissionReady = Boolean(chosen?.enabled && preflightCurrent &&
-      demandPreflight?.eligible && demandPreflight.allowedTools.length === 0 &&
-      !demandPreflight.allowedSideEffects);
+      (demandPreflight?.eligible || demandPreflight?.canStageBlocked === true) &&
+      demandPreflight.allowedTools.length === 0 && !demandPreflight.allowedSideEffects);
     const nativePreflight = preflightCurrent
       ? '<section class="sa-pane" role="region" aria-label="Native demand preflight">' +
         '<h4>Native demand preflight</h4><p role="status">' +
         (demandPreflight.eligible ? 'Eligible for manual read-only admission now.' :
-          'Not eligible for immediate admission: ' + safe(demandPreflight.reason)) + '</p>' +
+          demandPreflight.canStageBlocked
+            ? 'Busy Worker: a blocked Demand may be durably queued for explicit retry.'
+            : 'Not eligible for immediate admission: ' + safe(demandPreflight.reason)) + '</p>' +
         '<dl><dt>Selected role and bot</dt><dd>' + safe(demandPreflight.selectedRole) +
         ' · ' + safe(botName(demandPreflight.selectedBotId)) + '</dd>' +
         '<dt>Team project / policy revision</dt><dd>' + safe(demandPreflight.projectId) +
@@ -557,7 +559,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '>Worker directly</option></select></label>' +
       '<button type="button" data-sa-preflight>Review native preflight</button>' +
       '<button class="primary-button" type="submit"' + (manualAdmissionReady ? '' : ' disabled') +
-      '>Dispatch manually</button></form>' +
+      '>' + (demandPreflight?.canStageBlocked && preflightCurrent
+        ? 'Queue blocked Demand' : 'Dispatch manually') + '</button></form>' +
       (chosen.enabled && !manualAdmissionReady
         ? '<p role="status">Review an eligible native read-only preflight before dispatch. ' +
           'Changes to the objective, role or Team policy require a new review.</p>'
@@ -1759,13 +1762,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           reviewed.selectedBotId !== (coordinated ? selectedConfig.coordinatorBotId : selectedConfig.workerBotId) ||
           preflightObjective !== objective ||
           preflightMode !== (coordinated ? 'coordinated' : 'direct') ||
-          !reviewed.eligible || reviewed.allowedSideEffects || reviewed.allowedTools.length !== 0) {
+          (!reviewed.eligible && !reviewed.canStageBlocked) ||
+          reviewed.allowedSideEffects || reviewed.allowedTools.length !== 0) {
         error = 'Review an eligible native read-only preflight before submitting this Demand.';
         render();
         return;
       }
       const key = taskKey;
-      ask('Start this manual read-only Demand for Team ' + selectedConfig.name +
+      ask((reviewed.canStageBlocked ? 'Queue a blocked manual read-only Demand for Team ' :
+        'Start this manual read-only Demand for Team ') + selectedConfig.name +
         ' at policy revision ' + reviewed.policyRevision +
         '? Native admission will recheck scope and availability. No write grant is issued.', async () => {
         // A cached preview never confers authority. Fresh native preflight is
@@ -1773,7 +1778,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         const latest = await call<ManualPreflight>('superagent_preflight', {
           orchestrationId:selectedConfig.id,objective,coordinated,
         });
-        if (!latest.eligible || latest.orchestrationId !== reviewed.orchestrationId ||
+        if ((!latest.eligible && !latest.canStageBlocked) ||
+            latest.eligible !== reviewed.eligible ||
+            Boolean(latest.canStageBlocked) !== Boolean(reviewed.canStageBlocked) ||
+            latest.orchestrationId !== reviewed.orchestrationId ||
             latest.policyRevision !== reviewed.policyRevision ||
             latest.projectId !== reviewed.projectId ||
             latest.selectedRole !== reviewed.selectedRole ||

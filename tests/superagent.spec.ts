@@ -1510,6 +1510,60 @@ test('manual Demand cannot dispatch a blocked or revision-stale native preflight
   expect(calls.filter(command=>command.includes('submit'))).toHaveLength(0);
 });
 
+test('manual Demand preserves native blocked-Ticket staging without granting write authority', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-stage-blocked-test'; document.body.appendChild(host);
+    const calls:string[]=[];
+    const tickets:Array<Record<string,unknown>>=[];
+    mountSuperagent(host, async (command) => {
+      calls.push(command);
+      if(command==='bots_list') return [
+        {id:'router',name:'Router',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list') return [{
+        id:'team',name:'Queue Team',coordinatorBotId:'router',workerBotId:'worker',
+        enabled:true,policyRevision:3,
+      }] as never;
+      if(command==='superagent_tickets') return tickets as never;
+      if(command==='superagent_preflight') return {
+        orchestrationId:'team',policyRevision:3,projectId:'project',
+        selectedBotId:'worker',selectedRole:'worker',
+        eligible:false,canStageBlocked:true,reason:'Worker or checkout occupied',
+        allowedTools:[],allowedSideEffects:false,attemptBudgetMs:1800000,
+      } as never;
+      if(command==='superagent_submit') {
+        tickets.push({id:'blocked-ticket',orchestrationId:'team',
+          objective:'Queue a second task',state:'blocked',revision:1,evidence:null});
+        return tickets[0] as never;
+      }
+      throw Error('Unexpected native command '+command);
+    });
+    (window as unknown as {saBlockedCalls:()=>string[]}).saBlockedCalls=()=>calls;
+  });
+  const host=page.locator('#sa-stage-blocked-test');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('textbox',{name:'Task objective'}).fill('Queue a second task');
+  await host.getByRole('combobox',{name:'Dispatch'}).selectOption('direct');
+  await expect(host.getByRole('button',{name:'Dispatch manually'})).toBeDisabled();
+  await host.getByRole('button',{name:'Review native preflight'}).click();
+  await expect(host.getByRole('region',{name:'Native demand preflight'}))
+    .toContainText('blocked Demand may be durably queued');
+  await host.getByRole('button',{name:'Queue blocked Demand'}).click();
+  const before=await page.evaluate(() =>
+    (window as unknown as {saBlockedCalls:()=>string[]}).saBlockedCalls());
+  expect(before.filter(name=>name==='superagent_submit')).toHaveLength(0);
+  await host.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(host.locator('.sa-tickets')).toContainText('blocked');
+  const calls=await page.evaluate(() =>
+    (window as unknown as {saBlockedCalls:()=>string[]}).saBlockedCalls());
+  expect(calls.filter(name=>name==='superagent_preflight')).toHaveLength(2);
+  expect(calls.filter(name=>name==='superagent_submit')).toHaveLength(1);
+});
+
 test('native-backed attempt inspector shows recorded sessions and run budgets without granting effects', async ({page}) => {
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {

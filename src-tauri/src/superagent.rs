@@ -1117,6 +1117,7 @@ pub(crate) fn inspect_headless_demand_preflight(
         "selectedRole": status.selected_role,
         "selectedBotId": status.selected_bot_id,
         "eligibleAtSnapshot": status.eligible,
+        "canStageBlocked": status.can_stage_blocked,
         "reason": status.reason,
         "objectiveBytes": objective.trim().len(),
         "allowedTools": status.allowed_tools,
@@ -2260,6 +2261,9 @@ pub struct ManualPreflight {
     pub selected_role: String,
     pub eligible: bool,
     pub reason: Option<String>,
+    /// Only an occupied direct Worker can safely stage a blocked Ticket.
+    /// This is a read-only observation, not an admission or grant.
+    pub can_stage_blocked: bool,
     pub allowed_tools: Vec<String>,
     pub allowed_side_effects: bool,
     pub attempt_budget_ms: i64,
@@ -2276,27 +2280,28 @@ fn manual_preflight(
     let coordinator = bots::get(store, &cfg.coordinator_bot_id)?;
     let worker = bots::get(store, &cfg.worker_bot_id)?;
     let candidate = if coordinate { &coordinator } else { &worker };
-    let reason = if !execution_permitted(cfg.enabled, crate::feature_controls::get().bots_paused) {
-        Some("Team is disabled or bots are globally paused.".to_owned())
-    } else if coordinator.paused || worker.paused || worker.project_id != cfg.project_id {
-        Some("Selected bot is paused or outside the Team project.".to_owned())
-    } else if let Some(issue)=roster::member_execution_issue(&coordinator)
-        .or_else(||roster::member_execution_issue(&worker)) {
-        Some(issue.to_owned())
-    } else if roster::has_additional_members(store, config_id)? {
-        Some("Multi-member execution requires native scoped role admission; manual runner is single-worker.".to_owned())
-    } else if busy || manual_candidate_occupied(store, &candidate.id, &cfg.project_id, &candidate.project_id)? {
-        Some(if coordinate {
-            "Coordinator is occupied; this request cannot be admitted yet.".to_owned()
-        } else {
-            "Worker or checkout is occupied; manual admission may create a blocked Ticket.".to_owned()
-        })
-    } else { None };
+    let (reason, can_stage_blocked) =
+        if !execution_permitted(cfg.enabled, crate::feature_controls::get().bots_paused) {
+            (Some("Team is disabled or bots are globally paused.".to_owned()), false)
+        } else if coordinator.paused || worker.paused || worker.project_id != cfg.project_id {
+            (Some("Selected bot is paused or outside the Team project.".to_owned()), false)
+        } else if let Some(issue)=roster::member_execution_issue(&coordinator)
+            .or_else(||roster::member_execution_issue(&worker)) {
+            (Some(issue.to_owned()), false)
+        } else if roster::has_additional_members(store, config_id)? {
+            (Some("Multi-member execution requires native scoped role admission; manual runner is single-worker.".to_owned()), false)
+        } else if busy || manual_candidate_occupied(store, &candidate.id, &cfg.project_id, &candidate.project_id)? {
+            (Some(if coordinate {
+                "Coordinator is occupied; this request cannot be admitted yet.".to_owned()
+            } else {
+                "Worker or checkout is occupied; manual admission may create a blocked Ticket.".to_owned()
+            }), !coordinate)
+        } else { (None, false) };
     Ok(ManualPreflight {
         orchestration_id: cfg.id, policy_revision: cfg.policy_revision,
         project_id: cfg.project_id, selected_bot_id: candidate.id.clone(),
         selected_role: if coordinate { "coordinator" } else { "worker" }.into(),
-        eligible: reason.is_none(), reason,
+        eligible: reason.is_none(), reason, can_stage_blocked,
         allowed_tools: Vec::new(), allowed_side_effects: false,
         attempt_budget_ms: MAX_ASSIGNMENT_RUN_MS,
     })
@@ -8028,6 +8033,7 @@ mod tests {
         let enabled = change_enabled(&store, &cfg.id, cfg.policy_revision, true).unwrap();
         let direct = manual_preflight(&store, &cfg.id, "Inspect safely", false, false).unwrap();
         assert!(direct.eligible);
+        assert!(!direct.can_stage_blocked);
         assert_eq!(direct.policy_revision, enabled.policy_revision);
         assert_eq!(direct.selected_role, "worker");
         assert_eq!(direct.selected_bot_id, "worker");
@@ -8052,11 +8058,17 @@ mod tests {
         assert!(started);
         let busy = manual_preflight(&store, &cfg.id, "Other task", false, false).unwrap();
         assert!(!busy.eligible);
+        assert!(busy.can_stage_blocked, "busy direct Workers can stage a blocked Ticket");
         assert!(busy.reason.unwrap().contains("occupied"));
+        let coordinated = manual_preflight(&store, &cfg.id, "Other task", true, true).unwrap();
+        assert!(!coordinated.eligible);
+        assert!(!coordinated.can_stage_blocked, "busy Coordinator cannot stage");
         stop(&store, &ticket.id).unwrap();
         assert!(manual_preflight(&store, &cfg.id, "Other task", false, false).unwrap().eligible);
         store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
-        assert!(!manual_preflight(&store, &cfg.id, "Other task", false, false).unwrap().eligible);
+        let denied = manual_preflight(&store, &cfg.id, "Other task", false, false).unwrap();
+        assert!(!denied.eligible);
+        assert!(!denied.can_stage_blocked, "paused Worker cannot stage");
     }
 
     #[test]

@@ -112,6 +112,9 @@ pub struct WorkItemInput {
     /// The Coordinator can request this capability, but cannot authorize it.
     #[serde(default)]
     pub requires_write: bool,
+    /// Untrusted requested subset of a confirmed Demand file scope, never a grant.
+    #[serde(default, skip_serializing_if="Vec::is_empty")]
+    pub write_paths: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -164,6 +167,12 @@ fn validate_items(items: &[WorkItemInput]) -> Result<()> {
             objective.chars().any(|character| character=='\0') || item.worker_bot_id.is_empty() {
             return Err("Each WorkItem needs a bounded objective and an existing Worker.".into());
         }
+        if !item.requires_write && !item.write_paths.is_empty() {
+            return Err("Read-only WorkItems cannot request file paths.".into());
+        }
+        if !item.write_paths.is_empty() {
+            super::write_grants::validate_paths(&item.write_paths)?;
+        }
         if item.depends_on.len()>MAX_ITEMS {
             return Err("A WorkItem has too many prerequisites.".into());
         }
@@ -185,6 +194,16 @@ fn validate_items(items: &[WorkItemInput]) -> Result<()> {
         if before==settled.len() { break; }
     }
     Err("WorkItem dependencies contain a cycle or unknown key.".into())
+}
+
+/// Child grants must be narrowed explicitly; a missing subset fails closed.
+fn scoped_child_paths(initial:&[String],requested:&[String])->Result<String> {
+    super::write_grants::validate_paths(requested)?;
+    let allowed=initial.iter().map(String::as_str).collect::<HashSet<_>>();
+    if requested.iter().any(|path|!allowed.contains(path.as_str())) {
+        return Err("WorkItem requested a file outside the initial Demand scope.".into());
+    }
+    serde_json::to_string(requested).map_err(|e|e.to_string())
 }
 
 fn sha256(items: &[WorkItemInput]) -> Result<String> {
@@ -398,7 +417,7 @@ fn create_plan(store:&Store,ticket_id:&str,revision:i64,items:&[WorkItemInput])-
         [ticket_id],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?,
             row.get(3)?,row.get(4)?)),
     ).optional().map_err(|e|e.to_string())?;
-    let initial_paths_json=if let Some((encoded,team_version,policy_revision,project_id,checkout_root))=
+    let initial_paths=if let Some((encoded,team_version,policy_revision,project_id,checkout_root))=
         initial_scope {
         let root=store.workspace_root(&snapshot.project_id,None)?;
         if team_version!=snapshot.team_version ||
@@ -412,12 +431,18 @@ fn create_plan(store:&Store,ticket_id:&str,revision:i64,items:&[WorkItemInput])-
             .map_err(|_|"Stored initial Demand file scope is malformed.")?;
         super::write_grants::validate_paths_in_root(&root,&paths)?;
         for item in items.iter().filter(|item|item.requires_write) {
+            scoped_child_paths(&paths,&item.write_paths)?;
             if bots::get(store,&item.worker_bot_id)?.provider!="codex" {
                 return Err("policy_unsupported: the selected write WorkItem needs a native Codex Worker.".into());
             }
         }
-        Some(encoded)
-    } else {None};
+        Some(paths)
+    } else {
+        if items.iter().any(|item|!item.write_paths.is_empty()) {
+            return Err("WorkItem file paths require an explicitly authorized initial Demand scope.".into());
+        }
+        None
+    };
     let now=storage::now();
     let tx=store.db.unchecked_transaction().map_err(|error|error.to_string())?;
     let inserted=tx.execute(
@@ -439,9 +464,10 @@ fn create_plan(store:&Store,ticket_id:&str,revision:i64,items:&[WorkItemInput])-
                 item.worker_bot_id,item.requires_write,now],
         ).map_err(|error|error.to_string())?;
         if item.requires_write {
-            if let Some(paths_json)=initial_paths_json.as_deref() {
+            if let Some(authorized)=initial_paths.as_deref() {
+                let child_json=scoped_child_paths(authorized,&item.write_paths)?;
                 inherit_initial_demand_paths(&tx,ticket_id,&item_id,&item.key,
-                    revision,paths_json,now)?;
+                    revision,&child_json,now)?;
             }
         }
     }
@@ -492,14 +518,19 @@ pub async fn superagent_demand_plan(
 
 /// Build a read-only Coordinator request. The optional requiresWrite flag is
 /// untrusted intent that must pass the later local-user confirmation gate.
-fn coordinator_demand_prompt(ticket_id:&str,objective:&str,workers:&[String])->String {
+fn coordinator_demand_prompt(ticket_id:&str,objective:&str,workers:&[String],initial_paths:&[String])->String {
+    let path_guidance=if initial_paths.is_empty() {
+        "No initial file scope was authorized. Leave writePaths empty; write-required WorkItems must await separate native authorization.".to_string()
+    } else {
+        format!("The operator approved ONLY these project files for this Demand:\n- {}\nFor each requiresWrite=true item, select a NONEMPTY writePaths subset of that list. Never request another file.",initial_paths.join("\n- "))
+    };
     let selected=workers.iter().map(|id|format!("- {id}"))
         .collect::<Vec<_>>().join("\n");
-    format!(
+    let base=format!(
         "SuperAgent Demand {}\n\n{}\n\n\
          Output a SINGLE JSON object with one field, workItems, containing 1 to 32 \
          objects with key, objective, workerBotId, dependsOn (array of prerequisite keys) \
-         and requiresWrite (boolean). Use ONLY these existing Worker IDs:\n{}\n\n\
+         and requiresWrite (boolean), writePaths (array of exact project-relative files). Use ONLY these existing Worker IDs:\n{}\n\n\
          Keep every WorkItem inside the admitted user objective. Set requiresWrite=true \
          ONLY when editing source files is necessary. This flag NEVER authorizes any write. \
          Exact native file rights may come only from an already confirmed initial Demand \
@@ -511,7 +542,8 @@ fn coordinator_demand_prompt(ticket_id:&str,objective:&str,workers:&[String])->S
          Ticket, session, independent policy check and completion gate. \
          Output valid JSON only, no Markdown or commentary.",
         ticket_id,objective,selected,
-    )
+    );
+    format!("{base}\n\n{path_guidance}")
 }
 
 /// A single initial operator action starts the configured Team Coordinator.
@@ -634,7 +666,7 @@ pub async fn superagent_start_demand(
         thread:ticket.id.clone(),
         sender_id:"local-user".into(),
         sender_name:"Authorized Team Demand".into(),
-        text:coordinator_demand_prompt(&ticket.id,&ticket.objective,&workers),
+        text:coordinator_demand_prompt(&ticket.id,&ticket.objective,&workers,&paths),
         trusted:true,image_ids:None,moodboard_ids:None,
     }).await;
     if let Err(error)=delivered {
@@ -1004,12 +1036,13 @@ mod tests {
     fn item(key:&str,deps:&[&str])->WorkItemInput {
         WorkItemInput{key:key.into(),objective:format!("Implement {key}"),
             worker_bot_id:"worker".into(),depends_on:deps.iter().map(|s|s.to_string()).collect(),
-            requires_write:false}
+            requires_write:false,write_paths:Vec::new()}
     }
     #[test]
     fn coordinator_can_request_write_work_items_but_cannot_grant_paths() {
         let prompt=coordinator_demand_prompt(
             "demand-1","Implement a bounded change",&["worker-a".into(),"worker-b".into()],
+            &["src/a.rs".into(),"src/b.rs".into()],
         );
         assert!(prompt.contains("requiresWrite (boolean)"));
         assert!(prompt.contains("requiresWrite=true"));
@@ -1020,6 +1053,19 @@ mod tests {
         assert!(!prompt.contains("Plan read-only tasks only"));
     }
 
+    #[test]
+    fn coordinator_child_paths_are_strict_nonempty_subsets_of_authorized_demand_files() {
+        let approved=vec!["src/a.rs".into(),"src/b.rs".into()];
+        let subset=vec!["src/b.rs".into()];
+        assert_eq!(scoped_child_paths(&approved,&subset).unwrap(),r#"["src/b.rs"]"#);
+        assert!(scoped_child_paths(&approved,&[]).is_err());
+        assert!(scoped_child_paths(&approved,&["src/c.rs".into()]).is_err());
+        assert!(scoped_child_paths(&approved,&["../src/a.rs".into()]).is_err());
+        assert!(scoped_child_paths(&approved,&["src/a.rs".into(),"src/a.rs".into()]).is_err());
+        let mut read_only=item("read-only",&[]);
+        read_only.write_paths=subset;
+        assert!(validate_items(&[read_only]).is_err());
+    }
     #[test]
     fn initial_demand_scope_is_immutable_and_item_propagation_rolls_back() {
         let db=rusqlite::Connection::open_in_memory().unwrap();

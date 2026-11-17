@@ -302,6 +302,7 @@ test('Demand preflight reads native manual eligibility without granting or start
   const host=await mountNativeFixture(page,{enabled:true});
   await host.getByRole('button',{name:'Demands / Runs',exact:true}).click();
   await host.getByRole('button',{name:'New Demand'}).click();
+  await expect(host.locator('form[data-sa-form="run"]')).toContainText('each write-required WorkItem must select a nonempty subset');
   const objective=host.getByRole('textbox',{name:'Task objective'});
   await objective.fill('Make an authorized source change');
   await host.getByRole('button',{name:'Review native preflight'}).click();

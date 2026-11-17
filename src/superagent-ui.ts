@@ -1002,8 +1002,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<textarea name="initialAllowedPaths" rows="3" autocomplete="off" ' +
         'placeholder="src/feature.ts">' + safe(initialDemandWritePaths) + '</textarea></label>' +
         '<p>Native local confirmation occurs once before Coordinator planning. ' +
-        'Every eligible write-required WorkItem receives the SAME exact paths ' +
-        'as an immutable child grant. Leave blank for read-only planning and ' +
+        'When paths are provided, each write-required WorkItem must select a nonempty subset. ' +
+        'Native validation denies unapproved files; each child receives only its own immutable subset. ' +
+        'Leave blank for read-only planning and ' +
         'later per-WorkItem authorization. Shell, MCP and GitHub writes stay denied.</p>' +
       '<button class="primary-button" type="submit"' +
       (chosen.enabled && teamStrategy?.orchestrationId === chosen.id &&

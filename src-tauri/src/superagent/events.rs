@@ -1068,6 +1068,28 @@ fn authenticated_event(source: &EventSource, raw: &serde_json::Value)
     if number == 0 || number > 999_999_999_999 {
         return Err("Authenticated GitHub thread number is outside the supported range.".into());
     }
+    // PullRequestEvent exposes both payload.number and pull_request.number.
+    // Only the latter is the normalized thread identity; never correlate a
+    // conflicting top-level number to an operator-linked Ticket.
+    if kind.starts_with("pull_request") {
+        if raw.pointer("/payload/number")
+            .is_some_and(|value| value.as_u64() != Some(number))
+        {
+            return Err("GitHub PR event has conflicting payload thread numbers.".into());
+        }
+        // The event feed's repository identity is independently verified by
+        // the authenticated adapter. If a PR payload carries base.repo.id,
+        // it must agree before the subject becomes durable context. A PR
+        // from a fork still uses its base repository as the source identity.
+        if let (Some(event_repo), Some(base_repo)) = (
+            raw.pointer("/repo/id"),
+            raw.pointer("/payload/pull_request/base/repo/id"),
+        ) {
+            if event_repo.as_u64().is_none() || event_repo.as_u64() != base_repo.as_u64() {
+                return Err("GitHub PR base repository differs from the authenticated event repository.".into());
+            }
+        }
+    }
     let created_at = raw.get("created_at").and_then(|v| v.as_str())
         .ok_or("Authenticated GitHub event has no event timestamp.")?;
     let at = verified_github_event_timestamp(created_at)?;
@@ -1870,6 +1892,63 @@ pub async fn superagent_source_thread_links(
 mod tests {
     use super::*;
 
+
+    #[test]
+    fn pr_payload_identity_conflicts_never_link_or_advance_authenticated_observe() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "pr-identity-ticket", "orch");
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "pull_request.opened").unwrap();
+        let observed = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        link_thread(&store, &observed.id, "pr-identity-ticket", "pull:42").unwrap();
+        let valid = serde_json::json!([{
+            "id": "5000042042", "created_at": "2026-11-12T09:00:00Z",
+            "type": "PullRequestEvent", "repo": {"name": "owner/repo", "id": 101},
+            "actor": {"login": "trusted-bot"},
+            "payload": {"action": "opened", "number": 42,
+                "pull_request": {"number": 42, "base": {"repo": {"id": 101}}}}
+        }]);
+        let mut wrong_number = valid.clone();
+        wrong_number[0]["payload"]["number"] = serde_json::json!(43);
+        let mut wrong_base = valid.clone();
+        wrong_base[0]["payload"]["pull_request"]["base"]["repo"]["id"] =
+            serde_json::json!(202);
+        let mut malformed_number = valid.clone();
+        malformed_number[0]["payload"]["number"] = serde_json::json!("42");
+        for invalid in [&wrong_number, &wrong_base, &malformed_number] {
+            assert!(poll_authenticated_events_with_repository_id(
+                &store, &observed, 0, invalid, "operator", 1, 101,
+            ).is_err());
+            assert_eq!(source(&store, &observed.id).unwrap().last_sequence, 0);
+            assert!(list_decisions(&store, &observed.id, 10).unwrap().is_empty());
+            assert!(linked_decisions(&store, "pr-identity-ticket", 10).unwrap().is_empty());
+            assert_eq!(inspect_source_integrity(&store, &observed.id).unwrap().repository_id, None);
+        }
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &observed, 0, &valid, "operator", 1, 101,
+        ).unwrap().recorded, 1);
+        assert_eq!(poll_authenticated_events_with_repository_id(
+            &store, &observed, 0, &valid, "operator", 1, 101,
+        ).unwrap().duplicates, 1);
+        assert!(poll_authenticated_events_with_repository_id(
+            &store, &observed, 0, &wrong_number, "operator", 1, 101,
+        ).is_err());
+        assert_eq!(list_decisions(&store, &observed.id, 10).unwrap().len(), 1);
+        assert_eq!(linked_decisions(&store, "pr-identity-ticket", 10).unwrap().len(), 1);
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id='pr-identity-ticket'
+             AND kind='source_context_observed'",
+            [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 1, "Conflicting/replayed PR events cannot duplicate Ticket context");
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(source(&reopened, &observed.id).unwrap().last_sequence, 5_000_042_042);
+        assert_eq!(linked_decisions(&reopened, "pr-identity-ticket", 10).unwrap().len(), 1);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 1, "Observe must never admit a second Demand");
+    }
 
     #[test]
     fn native_observe_requires_canonical_event_typed_threads_before_receipts() {

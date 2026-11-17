@@ -21,6 +21,13 @@ accepted by this operator-invoked Events adapter. Each review/comment is only
 recorded against the typed `pull:<number>` subject. It is never a native
 SuperAgent Council pass.
 
+For PR lifecycle/review events, a GitHub Events payload that includes both
+`payload.number` and `payload.pull_request.number` must agree. If the PR
+payload includes a base repository ID, it must match the independently
+attested event repository ID. Conflicting metadata aborts the entire Observe
+window without inserting a receipt, advancing the cursor, or linking new
+Ticket context; a correct replay remains idempotent across restart.
+
 `check_run.completed` remains **unavailable** in Observe because the GitHub
 Events feed does not provide a verified Check Runs stream. PR-to-issue linking
 and CI status require separate source-backed adapters; PR titles/bodies and

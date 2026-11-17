@@ -1771,6 +1771,13 @@ fn admit_triggered_s2_leaves(store: &Store, root: &TeamSnapshot) -> Result<bool>
                     || reviewer_security::validate_recorded_authority(
                         store, &child.session_id, binding,
                     ).is_err()
+                    // Persisted completion and score are not proof of an
+                    // independent native callback. Reject a changed S2 score
+                    // before another child leaf can be launched.
+                    || (leaf.status == "completed" && leaf.council.as_ref()
+                        .and_then(|seat| seat.score).is_some_and(|score|
+                            !score.is_finite()
+                                || super::council::latest_score(store, &leaf.session_id) != Some(score)))
                 {
                     return Err("child_council_stale: triggered S2 leaf authority or identity changed.".into());
                 }

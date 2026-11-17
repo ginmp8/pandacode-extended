@@ -6689,6 +6689,35 @@ fn unforced_nested_s2_admits_only_authenticated_fresh_second_wave_without_approv
         "reentrant scheduling cannot create duplicate S2 reviewers");
     assert!(!verified_council_pass(&store, &root));
 
+    // A persisted second-wave score cannot impersonate the real native
+    // reviewer callback. The sibling is still running, so reject the stale
+    // score before allowing a further scheduling operation.
+    drop(store);
+    {
+        let store = state.store.lock().unwrap();
+        store.message(&first_launch.sid, "assistant",
+            "Fresh child S2 callback.\nCouncil score: 9.8/10").unwrap();
+    }
+    completed_state(&state, &first_launch.sid,
+        Some(&first_launch.admission), true, false, &mut |_| {});
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    let security = child_council::inspect(&store, &root).unwrap()
+        .into_iter().find(|child| child.bot_id == "security-child").unwrap();
+    let mut altered = load(&store, &security.child_session_id).unwrap().unwrap();
+    let leaf = altered.workers.iter_mut()
+        .find(|worker| worker.session_id == first_launch.sid).unwrap();
+    assert_eq!(leaf.council.as_ref().unwrap().score, Some(9.8));
+    leaf.council.as_mut().unwrap().score = Some(10.0);
+    save(&store, &mut altered).unwrap();
+    let denial = child_council::next_leaf_launch(
+        &store, &std::collections::HashMap::new(), &root,
+    ).err().expect("a forged native S2 score must deny further leaf scheduling");
+    assert!(denial.contains("triggered S2 leaf authority"), "{denial}");
+    altered.workers.iter_mut().find(|worker| worker.session_id == first_launch.sid)
+        .unwrap().council.as_mut().unwrap().score = Some(9.8);
+    save(&store, &mut altered).unwrap();
+
     // A second-wave grant revoked while another leaf is already running
     // must block the next native scheduler turn without replacing the grant
     // or creating a duplicate worker. The first-wave trigger stays authentic.
@@ -6704,7 +6733,8 @@ fn unforced_nested_s2_admits_only_authenticated_fresh_second_wave_without_approv
     let denial = child_council::next_leaf_launch(
         &store, &std::collections::HashMap::new(), &root,
     ).err().expect("revoked triggered S2 authority must deny reentrant dispatch");
-    assert!(denial.contains("triggered S2 leaf authority"), "{denial}");
+    assert!(denial.contains("native leaf admission")
+        || denial.contains("triggered S2 leaf authority"), "{denial}");
     let after = load(&store, &security.child_session_id).unwrap().unwrap();
     assert_eq!(after.workers.len(), before.workers.len(),
         "denied native scheduling must not create replacement reviewer seats");

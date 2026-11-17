@@ -3216,6 +3216,21 @@ fn s2_terminal_rounds_valid(team: &TeamSnapshot, config: &CouncilConfig, view: &
     if round == 0 || round > config.max_rounds || view.started > config.max_rounds {
         return false;
     }
+    // All issued S2 seats, including abandoned and unscored attempts, must
+    // retain distinct worker and native session identities across waves.
+    // A session swap must not turn an earlier seat into a fresh vote.
+    let mut issued_workers = HashSet::new();
+    let mut issued_sessions = HashSet::new();
+    for candidate_round in 1..=round {
+        for (worker, _) in in_round(team, candidate_round) {
+            if worker.id.is_empty() || worker.session_id.is_empty()
+                || !issued_workers.insert(worker.id.as_str())
+                || !issued_sessions.insert(worker.session_id.as_str())
+            {
+                return false;
+            }
+        }
+    }
     let mut prior_sessions = HashSet::new();
     for previous in 1..round {
         for (worker, seat) in in_round(team, previous) {

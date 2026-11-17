@@ -2444,6 +2444,31 @@ fn escalated_strategy_requires_fresh_round_sessions_and_frozen_round_ceiling() {
     assert!(refusal.contains("council_s2_terminal_blocked"),
         "terminal completion must identify the reused session: {refusal}");
 
+    let mut reused_worker = team.clone();
+    reused_worker.workers[2].id = team.workers[0].id.clone();
+    assert_ne!(state(&reused_worker), "passed",
+        "a different native session cannot turn a prior S2 worker into a fresh reviewer");
+    assert!(council::finish_refusal_with_criterion_outcomes(&reused_worker, &receipts)
+        .unwrap().contains("council_s2_terminal_blocked"));
+
+    let mut abandoned_attempt = team.clone();
+    let mut retired = team.workers[0].clone();
+    retired.id = "abandoned-first-wave-attempt".into();
+    retired.session_id = team.workers[2].session_id.clone();
+    retired.abandoned = true;
+    retired.status = "failed".into();
+    retired.council.as_mut().unwrap().score = None;
+    abandoned_attempt.workers.push(retired);
+    assert_ne!(state(&abandoned_attempt), "passed",
+        "an abandoned S2 attempt cannot reuse a later wave's native session");
+
+    let mut old_cycle = team.clone();
+    let mut historical = team.workers[0].clone();
+    historical.created_at = team.council_since - 1;
+    old_cycle.workers.push(historical);
+    assert_eq!(state(&old_cycle), "passed",
+        "reviewers from earlier root cycles must remain historical only");
+
     let mut over_budget = team.clone();
     over_budget.config.council.as_mut().unwrap().max_rounds = 1;
     assert_ne!(state(&over_budget), "passed",

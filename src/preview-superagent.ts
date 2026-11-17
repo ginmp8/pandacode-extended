@@ -310,21 +310,8 @@ export async function invokeSuperagent<T>(
         detail:'Preview-only Coordinator plan; no native scheduler or bot session was started.',at:Date.now()}]);
       value=t;break;
     }
-    case 'superagent_submit':
-    case 'superagent_submit_coordinated':{
-      const c=get(args.orchestrationId);if(!c.enabled)throw Error('Orchestration disabled.');
-      const t:Ticket={id:crypto.randomUUID(),orchestrationId:c.id,objective:args.objective,
-        state:'running',revision:0,evidence:null};
-      teamSnapshots.set(t.id,makeTeamSnapshot(c));
-      tickets.set(c.id,[...(tickets.get(c.id)||[]),t]);
-      assignments.set(t.id,[{id:'preview-assignment-'+t.id,botId:c.workerBotId,
-        sessionId:'preview-session-'+t.id,attempt:1,state:'running'}]);
-      activity.set(t.id,[{id:1,kind:'admitted',detail:'Manual read-only preview assignment',at:Date.now()}]);
-      value=t;break;
-    }
     case 'superagent_stop':
     case 'superagent_retry':
-    case 'superagent_dispatch_worker':
     case 'superagent_accept':
     case 'superagent_reject':{
       const t=[...tickets.values()].flat().find(t=>t.id===args.ticketId);
@@ -332,9 +319,6 @@ export async function invokeSuperagent<T>(
       if(command==='superagent_stop') {
         if(['completed','stopped','failed'].includes(t.state))throw Error('Ticket already finished.');
         t.state='stopped';
-      }else if(command==='superagent_dispatch_worker') {
-        if(t.state!=='queued')throw Error('No coordinator plan.');
-        t.state='running';
       }else if(command==='superagent_retry') {
         if(t.state!=='blocked')throw Error('Ticket is not blocked.');
         t.state='running';
@@ -351,28 +335,6 @@ export async function invokeSuperagent<T>(
         detail:'Preview-only state transition',at:Date.now()});
       activity.set(t.id,events);
       value=t;break;
-    }
-    case 'superagent_dispatch_worker_with_write_grant':{
-      const t=[...tickets.values()].flat().find(t=>t.id===args.ticketId);
-      if(!t)throw Error('Ticket not found.');
-      if(t.revision!==args.expectedRevision)throw Error('Ticket revision changed before preview.');
-      const paths=args.allowedPaths;
-      if(!Array.isArray(paths)||paths.length===0||paths.length>16||paths.some((path:unknown)=>typeof path!=='string'))
-        throw Error('Authorize between 1 and 16 exact file paths.');
-      const unique=new Set<string>();
-      for(const path of paths as string[]){
-        const invalidSegment=path.split('/').some(part=>part===''||part==='.'||part==='..'||
-          part.toLowerCase()==='.git'||[...part].some(character=>{
-            const code=character.codePointAt(0)??0;return code<=0x1f||(code>=0x7f&&code<=0x9f);
-          }));
-        if(new TextEncoder().encode(path).length>4096||path.includes('\\')||path.includes('\0')||
-           path.includes(':')||invalidSegment)throw Error('Invalid exact project-relative file path.');
-        if(unique.has(path))throw Error('A write scope cannot repeat a file path.');
-        unique.add(path);
-      }
-      value={previewOnly:true,ticket:t,allowedPaths:[...(paths as string[])],
-        message:'Preview only. No native authorization or worker dispatch occurred.'};
-      break;
     }
     case 'superagent_issue_comment':{
       value={previewOnly:true,message:'Preview only. No GitHub comment was sent.'};

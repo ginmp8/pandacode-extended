@@ -180,11 +180,7 @@ export class GuidedTeamBuilder {
 
   render(bots: TeamBuilderBot[]): string {
     const safe = (input: unknown) => escape(String(input ?? ''));
-    if (!this.visible) {
-      return '<section class="sa-team-builder-launch" aria-label="Team setup options">' +
-        '<button type="button" data-sa-builder-open>Guided Team setup (five steps)</button>' +
-        '<p>Configure existing Workers, Reviewers and native Council before saving a Team Off.</p></section>';
-    }
+    if (!this.visible) return '';
     const selectedBot = (id: string) => bots.find(bot => bot.id === id);
     const name = (id: string) => selectedBot(id)?.name ?? 'Missing bot';
     const selectOptions = (selectedId: string, exclude: string[] = []) =>

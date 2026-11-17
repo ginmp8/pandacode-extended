@@ -498,8 +498,9 @@ export function mountBots(host: HTMLElement, options: BotsOptions): BotsView {
     const state = bot.paused ? 'Paused' : live ? 'Working' : 'Ready';
     const next = bot.heartbeatMinutes && bot.nextHeartbeatAt && !bot.paused ? `check-in ${age(bot.nextHeartbeatAt)}` : '';
     const meta = [bot.role, harness?.name, next].filter(Boolean).map(item => escape(item!)).join('<i aria-hidden="true">·</i>');
-    const superagentThreads = (detail?.threads ?? []).filter(thread =>
-      thread.channelId === 'superagent');
+    const superagentThreads = detail?.bot.id === bot.id
+      ? detail.threads.filter(thread => thread.channelId === 'superagent')
+      : [];
     const assignedWork = superagentThreads.length
       ? '<section class="bp-superagent-chats" aria-label="SuperAgent bot conversations">' +
         '<div class="bp-superagent-chats-head"><strong>SuperAgent tasks</strong><small>' +

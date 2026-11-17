@@ -128,16 +128,42 @@ fn unsettled_root_effects(db:&Connection,root:&str)->Result<bool> {
     ).map_err(|error|error.to_string())
 }
 
+
+/// A late worker retry cannot restore a stopped, revoked, expired or
+/// policy-stale Demand's WorkItem. The root authorization is checked at
+/// the same SQLite update boundary as the resumed WorkItem state.
+fn resume_authorized_retried_children(store:&Store,now:i64)->Result<usize> {
+    store.db.execute(
+        "UPDATE sa_work_items SET state='running',last_reason=NULL,updated_at=?1
+         WHERE state='blocked'
+           AND child_ticket_id IN (SELECT id FROM sa_tickets WHERE state='running')
+           AND EXISTS (
+             SELECT 1 FROM sa_demand_plans plan
+             JOIN sa_tickets root ON root.id=plan.ticket_id
+             JOIN sa_orchestrations team ON team.id=root.orchestration_id
+             JOIN sa_mandates grant ON grant.ticket_id=root.id
+             WHERE plan.ticket_id=sa_work_items.ticket_id
+               AND plan.state='active' AND root.state='queued'
+               AND root.active_assignment_id IS NULL
+               AND root.revision=plan.ticket_revision
+               AND root.policy_revision=plan.policy_revision
+               AND team.enabled=1 AND team.policy_revision=plan.policy_revision
+               AND team.project_id=root.project_id
+               AND grant.revoked=0 AND grant.expires_at>?1
+               AND grant.policy_revision=plan.policy_revision
+               AND grant.project_id=root.project_id AND grant.actor=root.actor
+               AND grant.allowed_tools='[]' AND grant.allowed_side_effects=0
+           )",
+        [now],
+    ).map_err(|e|e.to_string())
+}
+
 fn reconcile(store:&Store)->Result<()> {
     let now=storage::now();
     // An explicitly retried child resumes its original WorkItem and all
     // immutable root grants. A blocked WorkItem may not stay permanently
     // blocked after its original native child gets a new authorized attempt.
-    store.db.execute(
-        "UPDATE sa_work_items SET state='running',last_reason=NULL,updated_at=?1
-         WHERE state='blocked' AND child_ticket_id IN
-           (SELECT id FROM sa_tickets WHERE state='running')",[now],
-    ).map_err(|e|e.to_string())?;
+    resume_authorized_retried_children(store,now)?;
     // Do not accept model-reported completion or a mutable Ticket state.
     // Persist the exact independent human/Council decision first, under the
     // existing native effect/dispatch fence.
@@ -569,6 +595,81 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stale_worker_retry_cannot_revive_work_items_after_parent_stop_or_revocation() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_work_items(
+               id TEXT PRIMARY KEY,ticket_id TEXT,state TEXT,
+               child_ticket_id TEXT,last_reason TEXT,updated_at INTEGER);
+             CREATE TABLE sa_tickets(
+               id TEXT PRIMARY KEY,orchestration_id TEXT,state TEXT,
+               active_assignment_id TEXT,revision INTEGER,policy_revision INTEGER,
+               project_id TEXT,actor TEXT);
+             CREATE TABLE sa_demand_plans(
+               ticket_id TEXT,state TEXT,ticket_revision INTEGER,policy_revision INTEGER);
+             CREATE TABLE sa_orchestrations(
+               id TEXT,enabled INTEGER,policy_revision INTEGER,project_id TEXT);
+             CREATE TABLE sa_mandates(
+               ticket_id TEXT,revoked INTEGER,expires_at INTEGER,
+               policy_revision INTEGER,project_id TEXT,actor TEXT,
+               allowed_tools TEXT,allowed_side_effects INTEGER);
+             INSERT INTO sa_orchestrations VALUES('team',1,1,'project');
+             INSERT INTO sa_tickets VALUES
+               ('active','team','queued',NULL,1,1,'project','local-user'),
+               ('stopped','team','stopped',NULL,1,1,'project','local-user'),
+               ('revoked','team','queued',NULL,1,1,'project','local-user'),
+               ('expired','team','queued',NULL,1,1,'project','local-user'),
+               ('stale','team','queued',NULL,2,1,'project','local-user'),
+               ('child-active','team','running',NULL,1,1,'project','local-user'),
+               ('child-stopped','team','running',NULL,1,1,'project','local-user'),
+               ('child-revoked','team','running',NULL,1,1,'project','local-user'),
+               ('child-expired','team','running',NULL,1,1,'project','local-user'),
+               ('child-stale','team','running',NULL,1,1,'project','local-user');
+             INSERT INTO sa_demand_plans VALUES
+               ('active','active',1,1),('stopped','stopped',1,1),
+               ('revoked','active',1,1),('expired','active',1,1),
+               ('stale','active',1,1);
+             INSERT INTO sa_mandates VALUES
+               ('active',0,500,1,'project','local-user','[]',0),
+               ('stopped',0,500,1,'project','local-user','[]',0),
+               ('revoked',1,500,1,'project','local-user','[]',0),
+               ('expired',0,50,1,'project','local-user','[]',0),
+               ('stale',0,500,1,'project','local-user','[]',0);
+             INSERT INTO sa_work_items VALUES
+               ('item-active','active','blocked','child-active','prior block',1),
+               ('item-stopped','stopped','blocked','child-stopped','prior block',1),
+               ('item-revoked','revoked','blocked','child-revoked','prior block',1),
+               ('item-expired','expired','blocked','child-expired','prior block',1),
+               ('item-stale','stale','blocked','child-stale','prior block',1);"
+        ).unwrap();
+        let store=Store{db,path:std::path::PathBuf::from(":memory:")};
+        assert_eq!(resume_authorized_retried_children(&store,100).unwrap(),1);
+        for (item,state) in [
+            ("item-active","running"),
+            ("item-stopped","blocked"),
+            ("item-revoked","blocked"),
+            ("item-expired","blocked"),
+            ("item-stale","blocked"),
+        ] {
+            let actual:String=store.db.query_row(
+                "SELECT state FROM sa_work_items WHERE id=?1",
+                [item],|row|row.get(0),
+            ).unwrap();
+            assert_eq!(actual,state,item);
+        }
+        // A delayed retry must not re-open a previously active root once
+        // the exact mandate has been revoked.
+        store.db.execute(
+            "UPDATE sa_work_items SET state='blocked' WHERE id='item-active'",[],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sa_mandates SET revoked=1 WHERE ticket_id='active'",[],
+        ).unwrap();
+        assert_eq!(resume_authorized_retried_children(&store,101).unwrap(),0);
+    }
+
 
     #[test]
     fn unsettled_frontier_candidates_cannot_starve_an_independent_demand() {

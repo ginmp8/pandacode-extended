@@ -875,9 +875,15 @@ fn criterion_pinned_input_integrity_requires_native_receipts_and_denies_replay()
     let native_receipt = team.workers[0].reviewer_binding.as_ref().unwrap()
         .skill_evidence.get("pinned-check").unwrap()
         .criterion_receipt.as_ref().unwrap();
-    assert_eq!(native_receipt.schema_version, 2);
+    assert_eq!(native_receipt.schema_version, 3);
     assert_eq!(native_receipt.objective_sha256,
         format!("{:x}", sha2::Sha256::digest(team.objective.as_bytes())));
+    assert_eq!(native_receipt.criterion_policy_sha256,
+        format!("{:x}", sha2::Sha256::digest(
+            serde_json::to_vec(&team.config.council.as_ref().unwrap().criteria[0]).unwrap())));
+    assert_eq!(native_receipt.council_policy_sha256,
+        format!("{:x}", sha2::Sha256::digest(
+            serde_json::to_vec(team.config.council.as_ref().unwrap()).unwrap())));
     assert_eq!(council::inspection(&team, false).unwrap()
         .criterion_observations[0].state, "pinned_input_integrity_verified");
     assert_eq!(council::status(&team).unwrap().state, "passed",
@@ -894,6 +900,26 @@ fn criterion_pinned_input_integrity_requires_native_receipts_and_denies_replay()
     changed_task.objective.push_str(" changed independently of the cycle");
     assert_eq!(council::status(&changed_task).unwrap().state, "fixing",
         "a host check from another task objective cannot authorize this required criterion");
+    let mut changed_criterion_policy = team.clone();
+    changed_criterion_policy.config.council.as_mut().unwrap().criteria[0].target = 9.0;
+    assert_eq!(council::status(&changed_criterion_policy).unwrap().state, "fixing",
+        "a prior host receipt cannot authorize a silently weakened required target");
+    let mut changed_council_policy = team.clone();
+    changed_council_policy.config.council.as_mut().unwrap().criteria_source =
+        council::CouncilCriteriaSource::Hybrid;
+    assert_eq!(council::status(&changed_council_policy).unwrap().state, "fixing",
+        "a host receipt must bind to the entire frozen Council policy");
+    let mut previous_schema = team.clone();
+    let v2_receipt = previous_schema.workers[0].reviewer_binding.as_mut().unwrap()
+        .skill_evidence.get_mut("pinned-check").unwrap()
+        .criterion_receipt.as_mut().unwrap();
+    let mut v2_json = serde_json::to_value(&*v2_receipt).unwrap();
+    v2_json.as_object_mut().unwrap().remove("criterionPolicySha256");
+    v2_json.as_object_mut().unwrap().remove("councilPolicySha256");
+    v2_json["schemaVersion"] = serde_json::json!(2);
+    *v2_receipt = serde_json::from_value(v2_json).unwrap();
+    assert_eq!(council::status(&previous_schema).unwrap().state, "fixing",
+        "v2 receipts remain readable but cannot bypass frozen policy validation");
     let mut old_version = team.clone();
     let legacy_record = old_version.workers[0].reviewer_binding.as_mut().unwrap()
         .skill_evidence.get_mut("pinned-check").unwrap()
@@ -904,7 +930,7 @@ fn criterion_pinned_input_integrity_requires_native_receipts_and_denies_replay()
     *legacy_record = serde_json::from_value(old_json).unwrap();
     assert_eq!(council::status(&old_version).unwrap().state, "fixing",
         "old receipts remain readable but cannot bypass the new task-identity gate");
-    for mutated in ["cycle", "criterion", "lens", "round", "worker", "session", "objective", "artifact", "digest", "kind"] {
+    for mutated in ["cycle", "criterion", "lens", "round", "worker", "session", "objective", "criterion_policy", "council_policy", "artifact", "digest", "kind"] {
         let mut altered = team.clone();
         let record = altered.workers[0].reviewer_binding.as_mut().unwrap()
             .skill_evidence.get_mut("pinned-check").unwrap()
@@ -917,6 +943,8 @@ fn criterion_pinned_input_integrity_requires_native_receipts_and_denies_replay()
             "worker" => record.worker_id = "foreign-worker".into(),
             "session" => record.reviewer_session_id = "foreign-session".into(),
             "objective" => record.objective_sha256 = "0".repeat(64),
+            "criterion_policy" => record.criterion_policy_sha256 = "0".repeat(64),
+            "council_policy" => record.council_policy_sha256 = "0".repeat(64),
             "artifact" => record.artifact_revision = "other-revision".into(),
             "digest" => record.content_sha256 = "0".repeat(64),
             "kind" => record.check_kind = "model_report".into(),

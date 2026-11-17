@@ -13,9 +13,14 @@ pub(crate) struct NativeCriterionEvidenceReceipt {
     pub round: usize,
     pub worker_id: String,
     pub reviewer_session_id: String,
-    /// v1 receipts stay deserializable, but cannot satisfy the new task-identity gate.
+    /// Legacy receipts remain readable but must never authorize a different
+    /// task objective, mandatory criterion policy or frozen Council policy.
     #[serde(default)]
     pub objective_sha256: String,
+    #[serde(default)]
+    pub criterion_policy_sha256: String,
+    #[serde(default)]
+    pub council_policy_sha256: String,
     pub artifact_revision: String,
     pub content_sha256: String,
     pub check_kind: String,
@@ -40,7 +45,7 @@ impl NativeCriterionEvidenceReceipt {
             return None;
         }
         Some(Self {
-            schema_version: 2,
+            schema_version: 3,
             cycle_id: binding.council_cycle_id.clone(),
             criterion_id: criterion.id.clone(),
             criterion_lens: criterion.lens.clone(),
@@ -48,6 +53,12 @@ impl NativeCriterionEvidenceReceipt {
             worker_id: worker.id.clone(),
             reviewer_session_id: worker.session_id.clone(),
             objective_sha256: format!("{:x}", Sha256::digest(team.objective.as_bytes())),
+            criterion_policy_sha256: format!("{:x}", Sha256::digest(
+                serde_json::to_vec(criterion).ok()?,
+            )),
+            council_policy_sha256: format!("{:x}", Sha256::digest(
+                serde_json::to_vec(team.config.council.as_ref()?).ok()?,
+            )),
             artifact_revision: binding.artifact_revision.clone(),
             content_sha256: content_sha256.to_owned(),
             check_kind: INTEGRITY.into(),

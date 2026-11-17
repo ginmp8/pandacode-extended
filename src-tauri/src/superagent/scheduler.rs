@@ -80,9 +80,9 @@ CREATE TRIGGER IF NOT EXISTS sa_work_item_write_scope_no_delete
 "#;
 
 
-//// An initial local confirmation authorizes only these exact files for
-//// write-required items of this ONE Demand. It never makes its Coordinator
-//// writable and never expands the native read-only root Mandate.
+/// An initial local confirmation authorizes only these exact files for
+/// write-required items of this ONE Demand. It never makes its Coordinator
+/// writable and never expands the native read-only root Mandate.
 pub(crate) const DEMAND_WRITE_SCOPES_SCHEMA: &str = r#"
 CREATE TABLE IF NOT EXISTS sa_demand_write_scopes (
     ticket_id TEXT PRIMARY KEY REFERENCES sa_tickets(id) ON DELETE RESTRICT,

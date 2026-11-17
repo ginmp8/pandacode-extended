@@ -36,6 +36,8 @@ let activity: { botId: string; items: Activity[]; done: boolean; loading: boolea
 function threadLabel(detail: BotDetail, channelId: string, externalId: string): string {
   if (channelId === 'desktop') return 'This app';
   if (channelId === 'schedule') return 'Scheduled work';
+  if (channelId === 'superagent')
+    return 'SuperAgent task · ' + (externalId.length > 12 ? '…' + externalId.slice(-8) : externalId);
   const channel = detail.channels.find(item => item.id === channelId);
   const kind = channel ? kindLabel(channel.kind) : 'Removed channel';
   return channel?.kind === 'web' ? kind : `${kind} · ${externalId.length > 14 ? `…${externalId.slice(-8)}` : externalId}`;
@@ -43,11 +45,38 @@ function threadLabel(detail: BotDetail, channelId: string, externalId: string): 
 
 /** Every conversation the bot has: this app, each channel thread, and its scheduled work. Each opens as a task. */
 function conversationsPanel(detail: BotDetail, context: PanelContext): string {
-  const threads = [...detail.threads].sort((a, b) => Number(b.channelId === 'desktop') - Number(a.channelId === 'desktop') || b.updatedAt - a.updatedAt);
+  // The native gateway records SuperAgent WorkItems in bot_threads with the
+  // same bot identity, pinned model, permissions and session ID as any other chat.
+  // Never copy messages into a synthetic SuperAgent transcript.
+  const threads = [...detail.threads].sort((a, b) =>
+    b.updatedAt - a.updatedAt);
+  const assigned = threads.filter(thread => thread.channelId === 'superagent');
+  const ordinary = threads.filter(thread => thread.channelId !== 'superagent');
   const web = detail.channels.find(item => item.kind === 'web' && item.enabled);
-  const row = (thread: BotDetail['threads'][number]) => `<li><span class="bots-item-main"><b>${escape(threadLabel(detail, thread.channelId, thread.externalId))}</b><small>${context.running(thread.sessionId) ? 'Working…' : escape(age(thread.updatedAt))}</small></span><button type="button" class="secondary-button" data-open-task="${escape(thread.sessionId)}">Open</button></li>`;
-  return `${threads.length ? `<ul class="bots-items">${threads.map(row).join('')}</ul>` : '<p class="bots-empty-note">No conversations yet. Open chat to start one.</p>'}
-    ${web ? `<div class="bots-callout">${icon('globe')}<span>Also chat from any browser on this computer.</span><button type="button" class="secondary-button" data-web-open="${escape(web.id)}">Open web chat</button></div>` : ''}`;
+  const row = (thread: BotDetail['threads'][number]) =>
+    '<li><span class="bots-item-main"><b>' +
+      escape(threadLabel(detail, thread.channelId, thread.externalId)) +
+      '</b><small>' + (context.running(thread.sessionId) ? 'Working…' : escape(age(thread.updatedAt))) +
+      '</small></span><button type="button" class="secondary-button" data-open-task="' +
+      escape(thread.sessionId) + '">Open chat</button></li>';
+  return '<section class="bots-superagent-threads" aria-label="SuperAgent tasks">' +
+    '<div class="bots-conversations-heading"><h3>SuperAgent tasks</h3><small>' +
+      assigned.length + ' native conversations</small></div>' +
+    '<p>Managed WorkItems appear here in their original bot-owned chats. ' +
+      'Model, skills and tool permissions remain those of the admitted bot profile.</p>' +
+    (assigned.length
+      ? '<ul class="bots-items">' + assigned.map(row).join('') + '</ul>'
+      : '<p class="bots-empty-note">No SuperAgent tasks assigned to this bot yet.</p>') +
+    '</section><section class="bots-ordinary-threads" aria-label="Other bot conversations">' +
+    '<div class="bots-conversations-heading"><h3>Other conversations</h3></div>' +
+    (ordinary.length
+      ? '<ul class="bots-items">' + ordinary.map(row).join('') + '</ul>'
+      : '<p class="bots-empty-note">No other conversations yet. Open chat to start one.</p>') +
+    '</section>' +
+    (web ? '<div class="bots-callout">' + icon('globe') +
+      '<span>Also chat from any browser on this computer.</span>' +
+      '<button type="button" class="secondary-button" data-web-open="' +
+      escape(web.id) + '">Open web chat</button></div>' : '');
 }
 
 function memoryPanel(detail: BotDetail): string {

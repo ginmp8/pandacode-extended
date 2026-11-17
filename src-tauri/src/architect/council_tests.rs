@@ -3954,6 +3954,62 @@ fn native_child_reservations_are_isolated_idempotent_and_not_root_approval() {
 
 
 #[test]
+fn paused_nested_root_resume_denies_revoked_child_without_mutating_cycle() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["paused-security", "paused-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut council = on(9.0, 3, 0);
+        council.nested_bot_reviewers = ["paused-security", "paused-architecture"]
+            .into_iter().map(|bot| council::CouncilNestedReviewer {
+                bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(council);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(
+        &state, &sid, "Review an immutable artifact", None, None,
+    ).unwrap();
+    let (child_id, previous_status, before_root) = {
+        let store = state.store.lock().unwrap();
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let child_id = child_council::inspect(&store, &started).unwrap()[0]
+            .child_session_id.clone();
+        root.status = "paused".into();
+        save(&store, &mut root).unwrap();
+        let previous_status = store.session(&child_id).unwrap().status;
+        store.db.execute(
+            "UPDATE sessions SET status='interrupted' WHERE id=?1",
+            [&child_id],
+        ).unwrap();
+        (child_id, previous_status, serde_json::to_value(&root).unwrap())
+    };
+    let error = control_state(&state, &sid, "resume").unwrap_err();
+    assert!(error.contains("child_council_revoked"), "{error}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root,
+        "denied Resume must preserve the paused Council cycle and its grants");
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status=?2 WHERE id=?1",
+            rusqlite::params![child_id, previous_status],
+        ).unwrap();
+    }
+    // A genuine pause with intact child reservations remains resumable.
+    assert_eq!(control_state(&state, &sid, "resume").unwrap().status, "running");
+}
+
+#[test]
 fn physical_sqlite_restart_revokes_nested_callbacks_and_denies_false_root_resume() {
     // Use an actual file-backed database; in-memory interruption simulations
     // do not exercise Store::open recovery of both sessions and Architect teams.

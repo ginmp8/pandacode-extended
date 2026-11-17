@@ -1929,6 +1929,11 @@ pub(crate) fn control_state(state: &AppState, session_id: &str, action: &str) ->
                 // and reviewer sessions can no longer be authenticated.
                 if team.status == "interrupted" {
                     child_council::require_resumable_child_cycles(&store, &team)?;
+                } else {
+                    // Pause/failure and root-session interruption are different
+                    // transitions. Independently crashed native children/leaves
+                    // cannot inherit authority through an otherwise valid Resume.
+                    child_council::require_unrevoked_child_sessions_on_resume(&store, &team)?;
                 }
                 apply_pending_setup(&store, &mut team)?;
                 team.generation += 1;

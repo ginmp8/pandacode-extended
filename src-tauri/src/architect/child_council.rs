@@ -281,6 +281,52 @@ pub(super) fn require_resumable_child_cycles(store: &Store, root: &TeamSnapshot)
     Ok(())
 }
 
+/**
+ * An ordinary paused root can preserve its generation while a child or leaf
+ * session is independently interrupted by a crash. Never reactivate that root
+ * until every native task-owned child session is still live. This is a read-only
+ * Resume preflight: it neither recreates reviewer grants nor mutates the
+ * immutable Council cycle. An interrupted root uses the stricter full
+ * reservation preflight above.
+ */
+pub(super) fn require_unrevoked_child_sessions_on_resume(
+    store: &Store, root: &TeamSnapshot,
+) -> Result<()> {
+    let Some(config) = root.config.council.as_ref() else { return Ok(()) };
+    if root.council_since <= 0 || config.nested_bot_reviewers.is_empty() {
+        return Ok(());
+    }
+    for choice in &config.nested_bot_reviewers {
+        let child_id: Option<String> = store.db.query_row(
+            "SELECT worker_id FROM architect_requests
+             WHERE parent_session_id=?1 AND kind='council_child' AND key=?2",
+            params![&root.session_id, key(root, &choice.bot_id)],
+            |row| row.get(0),
+        ).optional().map_err(|error| error.to_string())?;
+        let child_id = child_id.ok_or(
+            "child_council_revoked: required child reservation is missing; start a fresh Council task."
+        )?;
+        if super::parent_of(store, &child_id)?.as_deref() != Some(root.session_id.as_str()) {
+            return Err("child_council_revoked: child ownership changed; start a fresh Council task.".into());
+        }
+        let session = store.session(&child_id)?;
+        if session.archived || session.task_stage == "completed"
+            || matches!(session.status.as_str(), "interrupted" | "error")
+        {
+            return Err("child_council_revoked: child session cannot resume; start a fresh Council task.".into());
+        }
+    }
+    for leaf_id in leaf_sessions(store, &root.session_id)? {
+        let session = store.session(&leaf_id)?;
+        if session.archived || session.task_stage == "completed"
+            || matches!(session.status.as_str(), "interrupted" | "error")
+        {
+            return Err("child_council_revoked: leaf reviewer cannot resume; start a fresh Council task.".into());
+        }
+    }
+    Ok(())
+}
+
 /// Resolve task descendants through native ownership, never a bot's editable
 /// roster or self-reported parent. This is deliberately limited to depth two.
 fn leaf_sessions(store: &Store, root: &str) -> Result<Vec<String>> {

@@ -130,22 +130,6 @@ interface DemandQuery {
 }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
 interface ImportResult { created: string[]; unchanged: string[]; backupPath?: string }
-interface WorkerWriteDispatchRequest extends Record<string, unknown> {
-  ticketId: string; expectedRevision: number; allowedPaths: string[];
-}
-interface WorkerWriteGrant {
-  id: string; ticketId: string; assignmentId: string; sessionId: string;
-  ticketRevision: number; policyRevision: number; projectId: string; projectRoot: string;
-  allowedPaths: string[]; expiresAt: number; revoked: boolean;
-}
-interface WorkerWriteDispatch { ticket: Ticket; grant: WorkerWriteGrant }
-interface PreviewWorkerWriteDispatch {
-  previewOnly: true; ticket: Ticket; allowedPaths: string[]; message: string;
-}
-type WorkerWriteDispatchResult = WorkerWriteDispatch | PreviewWorkerWriteDispatch;
-function isPreviewWorkerWriteDispatch(result: WorkerWriteDispatchResult): result is PreviewWorkerWriteDispatch {
-  return 'previewOnly' in result && result.previewOnly === true;
-}
 interface Mandate {
   actor: string; authorizationId: string; policyRevision: number; projectId: string;
   expiresAt: number; revoked: boolean; allowedTools: string[]; allowedSideEffects: boolean;
@@ -240,8 +224,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let preview: Preview | null = null, inspected: unknown = null;
   let confirm: { message: string; action: () => Promise<void> } | null = null;
   let taskKey = crypto.randomUUID();
-  let writeGrantTicket = '', writeGrantRevision: number | null = null;
-  let writePathsDraft = '', writePathsError = '';
   let commentRepository = '', commentIssueNumber = '', commentDraft = '';
   // Never reuse a potentially private GitHub comment draft in another Ticket.
   // Preserve fields across native refreshes of the *same* Ticket only.
@@ -418,7 +400,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const choices = optionsFor('');
     const chosen = current();
     const inspected = tickets.find(ticket => ticket.id === inspectedTicket);
-    const writeTicket = tickets.find(ticket => ticket.id === writeGrantTicket);
     const canComment = !!inspected && ticketDetails?.ticket.id === inspected.id &&
       inspected.state === 'running' && !ticketDetails.mandate.revoked &&
       ticketDetails.mandate.allowedSideEffects;
@@ -1010,21 +991,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               ? ' disabled aria-describedby="sa-finalization-blocked"' : '') +
             '>Accept evidence</button>' +
             '<button type="button" data-sa-reject="' + safe(ticket.id) + '">Reject evidence</button>' : '') +
-        (ticket.state === 'queued' ? '<button type="button" data-sa-write-request="' +
-          safe(ticket.id) + '">Request file writes</button>' : '') +
-        (ticket.state === 'blocked' ? '<button type="button" data-sa-retry="' + safe(ticket.id) + '">Retry manually</button>' : '') +
+        (ticket.state === 'blocked' ? '<button type="button" data-sa-retry="' +
+          safe(ticket.id) + '">Retry blocked Demand</button>' : '') +
         (!['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)
           ? '<button type="button" data-sa-stop="' + safe(ticket.id) + '">Stop</button>' : '') +
         '</li>').join('') || '<li class="sa-empty">No tickets yet.</li>') + '</ul>' +
-        (writeTicket && writeGrantRevision !== null
-          ? '<section class="sa-write-editor" role="region" aria-label="Scoped write request"><h4>Request scoped file writes</h4>' +
-            '<p>Ticket <code>' + safe(writeTicket.id) + '</code> · Revision ' + writeGrantRevision +
-            '. Submitting opens a native confirmation that lists these exact files; only that dialog can authorize the worker.</p>' +
-            '<form data-sa-form="write-grant"><label>Exact project-relative file paths<textarea data-sa-write-paths name="allowedPaths" rows="5" spellcheck="false">' +
-            safe(writePathsDraft) + '</textarea></label><small>Enter one normalized relative path per line. Blank lines are ignored; path text is preserved exactly. Up to 16 files.</small>' +
-            (writePathsError ? '<p class="sa-write-path-error" role="alert">' + safe(writePathsError) + '</p>' : '') +
-            '<div class="sa-actions"><button type="submit" class="primary-button">Continue to native confirmation</button>' +
-            '<button type="button" data-sa-write-cancel>Cancel</button></div></form></section>' : '') +
         (rejectingTicket ? '<form data-sa-form="reject"><label>Rejection reason<textarea name="reason" maxlength="500" required></textarea></label>' +
           '<div class="sa-actions"><button type="submit" class="primary-button">Submit rejection</button>' +
           '<button type="button" data-sa-reject-cancel>Cancel</button></div></form>' : '') +
@@ -2126,10 +2097,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
-    if (target.hasAttribute('data-sa-write-cancel')) {
-      writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = ''; writePathsError = '';
-      render(); return;
-    }
     if (target.hasAttribute('data-sa-close-details')) {
       inspectedTicket = ''; ticketDetails = null; inspectedAssignmentId = '';
       render(); return;
@@ -2161,16 +2128,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       inspectedAssignmentId = inspectedAssignmentId === target.dataset.saInspectAssignment
         ? '' : target.dataset.saInspectAssignment;
       render();
-      return;
-    }
-    if (target.dataset.saWriteRequest) {
-      const ticket = tickets.find(item => item.id === target.dataset.saWriteRequest);
-      if (ticket?.state === 'queued') {
-        writeGrantTicket = ticket.id; writeGrantRevision = ticket.revision;
-        writePathsDraft = ''; writePathsError = ''; error = ''; feedback = '';
-        render();
-        host.querySelector<HTMLTextAreaElement>('[data-sa-write-paths]')?.focus();
-      }
       return;
     }
     if (target.dataset.saInspectTicket) {
@@ -2352,71 +2309,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           ? 'One native confirmation authorized ' + selectedItems.length +
             ' pending WorkItems, each with the same exact file paths and separate grants.'
           : 'Exact WorkItem file scope confirmed natively. The scheduler will admit the eligible Worker without broader tool rights.';
-      });
-      return;
-    }
-    if (form.dataset.saForm === 'write-grant') {
-      const ticketId = writeGrantTicket;
-      const expectedRevision = writeGrantRevision;
-      const ticket = tickets.find(item => item.id === ticketId);
-      writePathsDraft = String(data.get('allowedPaths') ?? '');
-      const paths = writePathsDraft.split(/\r\n?|\n/).filter(path => path.length > 0);
-      let pathError = '';
-      if (paths.length === 0 || paths.length > 16) {
-        pathError = 'Enter between 1 and 16 exact file paths.';
-      } else {
-        const unique = new Set<string>();
-        for (const path of paths) {
-          const invalidSegment = path.split('/').some(part => part === '' || part === '.' || part === '..' ||
-            part.toLowerCase() === '.git' || [...part].some(character => {
-              const code = character.codePointAt(0) ?? 0;
-              return code <= 0x1f || (code >= 0x7f && code <= 0x9f);
-            }));
-          if (new TextEncoder().encode(path).length > 4096 || path.includes('\\') || path.includes('\0') ||
-              path.includes(':') || invalidSegment) {
-            pathError = 'Use normalized project-relative paths without traversal, .git, drive prefixes, backslashes, or control characters.';
-            break;
-          }
-          if (unique.has(path)) {
-            pathError = 'A write scope cannot repeat a file path.';
-            break;
-          }
-          unique.add(path);
-        }
-      }
-      if (pathError) {
-        writePathsError = pathError; render(); return;
-      }
-      if (!ticket || ticket.state !== 'queued' || expectedRevision === null ||
-          ticket.revision !== expectedRevision) {
-        writePathsError = 'This Ticket changed after you opened the request. Refresh it and review the paths again.';
-        render(); return;
-      }
-      writePathsError = '';
-      const request: WorkerWriteDispatchRequest = {
-        ticketId, expectedRevision, allowedPaths: paths,
-      };
-      void work(async () => {
-        const result = await call<WorkerWriteDispatchResult>(
-          'superagent_dispatch_worker_with_write_grant', request,
-        );
-        if (isPreviewWorkerWriteDispatch(result)) {
-          writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = '';
-          await reload();
-          feedback = 'Preview only: no native confirmation was shown, no write grant was created, and no worker was dispatched. Requested files for Ticket ' +
-            ticketId + ': ' + paths.join(', ') + '.';
-          return;
-        }
-        if (result.ticket.id !== ticketId || result.grant.ticketId !== ticketId ||
-            result.grant.allowedPaths.length !== paths.length ||
-            result.grant.allowedPaths.some((path, index) => path !== paths[index])) {
-          throw new Error('The native response did not match the requested Ticket and file paths.');
-        }
-        writeGrantTicket = ''; writeGrantRevision = null; writePathsDraft = '';
-        await reload();
-        feedback = 'Native confirmation authorized Ticket ' + ticketId + ' at revision ' +
-          expectedRevision + '. Worker state: ' + result.ticket.state + '. Allowed files: ' +
-          result.grant.allowedPaths.join(', ') + '. Grant expires ' + activityTime(result.grant.expiresAt) + '.';
       });
       return;
     }

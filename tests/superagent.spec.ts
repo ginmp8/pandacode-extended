@@ -83,6 +83,8 @@ async function mountNativeFixture(page: Page, options: {
         state:opts.ticketState ?? 'running',revision:2,evidence:null,
       } : null;
     const mutations:Array<{command:string;args:Record<string,unknown>}>=[];
+    const reads:Array<{command:string;args:Record<string,unknown>}>=[];
+    (window as unknown as {saFixtureReads:typeof reads}).saFixtureReads=reads;
     (window as unknown as {saFixtureMutations:typeof mutations;saFixtureEvents:unknown[]})
       .saFixtureMutations=mutations;
     (window as unknown as {saFixtureEvents:unknown[]}).saFixtureEvents=[];
@@ -173,6 +175,15 @@ async function mountNativeFixture(page: Page, options: {
         if(args.enabled&&mode==='off')throw Error('An explicit execution mode is required');
         mutations.push({command,args});cfg.enabled=Boolean(args.enabled);cfg.policyRevision++;
         return cfg as never;
+      }
+      if(command==='superagent_preflight'){
+        reads.push({command,args});
+        return {
+          orchestrationId:cfg.id,policyRevision:cfg.policyRevision,
+          projectId:'project-1',selectedBotId:'coord',selectedRole:'coordinator',
+          eligible:false,reason:'Legacy manual runner cannot admit the selected multi-worker Team.',
+          allowedTools:[],allowedSideEffects:false,attemptBudgetMs:300_000,
+        } as never;
       }
       if(command==='superagent_start_demand'){
         if(!cfg.enabled||mode==='off')throw Error('Team is not enabled');
@@ -284,6 +295,35 @@ test('an enabled Team admits a Demand through the new screen and opens its nativ
   await expect(host.getByRole('region',{name:'Selected native Demand'}))
     .toContainText('running');
   await expect(host.locator('form[data-sa-form="create"]')).toHaveCount(0);
+});
+
+test('Demand preflight reads native manual eligibility without granting or starting work',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{enabled:true});
+  await host.getByRole('button',{name:'Demands / Runs',exact:true}).click();
+  await host.getByRole('button',{name:'New Demand'}).click();
+  const objective=host.getByRole('textbox',{name:'Task objective'});
+  await objective.fill('Make an authorized source change');
+  await host.getByRole('button',{name:'Review native preflight'}).click();
+  const preview=host.getByRole('region',{name:'Native demand preflight'});
+  await expect(preview).toContainText('Manual admission preview');
+  await expect(preview).toContainText('Legacy manual runner cannot admit');
+  await expect(preview).toContainText('not Full Auto readiness');
+  const evidence=await page.evaluate(()=>({
+    reads:(window as unknown as {saFixtureReads:Array<{command:string;args:Record<string,unknown>}>}).saFixtureReads,
+    mutations:(window as unknown as {saFixtureMutations:unknown[]}).saFixtureMutations,
+  }));
+  expect(evidence.reads).toEqual([{
+    command:'superagent_preflight',
+    args:{orchestrationId:'team-1',objective:'Make an authorized source change',coordinated:true},
+  }]);
+  expect(evidence.mutations).toEqual([]);
+  await objective.fill('Change the outcome');
+  await expect(preview).toHaveCount(0);
+  await host.getByRole('button',{name:'Review native preflight'}).click();
+  await expect(preview).toContainText('Manual admission preview');
+  expect(await page.evaluate(()=>(
+    window as unknown as {saFixtureMutations:unknown[]}).saFixtureMutations.length)).toBe(0);
 });
 
 test('Run board separates navigation from task admission and retains Board/List options',async({page})=>{

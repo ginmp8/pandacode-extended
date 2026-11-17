@@ -25,6 +25,12 @@ interface StrategyView {
   pricedCostMeteringAvailable:boolean; nestedChildAdmissionAvailable:boolean;
   enableBlockers:string[];
 }
+interface NativeDemandPreflight {
+  orchestrationId:string; policyRevision:number; projectId:string;
+  selectedBotId:string; selectedRole:string; eligible:boolean;
+  reason:string|null; allowedTools:string[]; allowedSideEffects:boolean;
+  attemptBudgetMs:number;
+}
 interface TeamRoster { orchestrationId:string; policyRevision:number; coordinatorBotId:string;
   workerBotIds:string[]; reviewerBotIds:string[]; councilRequired?:boolean; executionReady:boolean }
 interface EffectiveSkill {
@@ -233,6 +239,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let draftPrRepository = '', draftPrHead = '', draftPrBase = '';
   let draftPrError = '', draftPrVerifiedSha = '', draftPrVerifiedRevision = -1;
   let demandObjective = '';
+  // Native manual admission preview only; never a capability grant or Full Auto verdict.
+  let demandPreflight: {
+    teamId:string; policyRevision:number; objective:string; result:NativeDemandPreflight;
+  } | null = null;
   let workPlan: DemandPlanEvidence | null = null, workPlanLoaded = false;
   let workWriteItemKey = '', workWritePaths = '';
   let subagentTree:NativeSubagentTree|null = null, subagentTreeLoaded = false;
@@ -971,6 +981,23 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           : 'Execution policy not configured')
         : 'Inspect the Team execution policy before starting') +
       '. The Coordinator plans dependencies and the scheduler dispatches them to existing bot conversations.</p>' +
+      '<button type="button" data-sa-native-preflight>Review native preflight</button>' +
+      (demandPreflight && demandPreflight.teamId === chosen.id &&
+        demandPreflight.policyRevision === chosen.policyRevision &&
+        demandPreflight.objective === demandObjective.trim()
+        ? '<section class="sa-pane" role="region" aria-label="Native demand preflight">' +
+          '<h4>Manual admission preview</h4>' +
+          '<p>Read-only native check for the legacy coordinated manual path. This is not Full Auto readiness, file authorization or a test execution grant.</p>' +
+          '<p>Project ' + safe(demandPreflight.result.projectId) +
+          ' · Role ' + safe(demandPreflight.result.selectedRole) +
+          ' · Bot ' + safe(demandPreflight.result.selectedBotId) +
+          ' · Attempt budget ' + safe(demandPreflight.result.attemptBudgetMs) + ' ms</p>' +
+          '<p role="status">' +
+          (demandPreflight.result.eligible
+            ? 'No manual admission blocker observed; native admission will recheck.'
+            : 'Manual admission not eligible: ' + safe(demandPreflight.result.reason ?? 'No reason reported.')) +
+          '</p><p>WorkItem tool eligibility, exact file paths, Council and Full Auto are not evaluated by this preview.</p></section>'
+        : '') +
       '<label>Optional exact files for this Demand (one project-relative file per line)' +
         '<textarea name="initialAllowedPaths" rows="3" autocomplete="off" ' +
         'placeholder="src/feature.ts">' + safe(initialDemandWritePaths) + '</textarea></label>' +
@@ -1516,6 +1543,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target instanceof HTMLSelectElement && target.hasAttribute('data-sa-admission-team')) {
       if (busy || loading || !presets.some(team => team.id === target.value)) return;
       selected = target.value; inspectedTicket = ''; ticketDetails = null;
+      demandPreflight = null;
       roleRoster = null; teamStrategy = null;
       void work(reload);
       return;
@@ -1620,6 +1648,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target instanceof HTMLTextAreaElement && target.name === 'objective' &&
         target.closest<HTMLFormElement>('form[data-sa-form="run"]')) {
       demandObjective = target.value;
+      demandPreflight = null;
       host.querySelector('[aria-label="Native demand preflight"]')?.remove();
     }
     if (target instanceof HTMLTextAreaElement && target.hasAttribute('data-sa-manifest')) {
@@ -1637,6 +1666,37 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   host.addEventListener('click', event => {
     const target = event.target instanceof Element ? event.target.closest<HTMLButtonElement>('button') : null;
     if (!target || !host.contains(target) || target.disabled) return;
+    if (target.hasAttribute('data-sa-native-preflight')) {
+      const cfg = current();
+      const form = host.querySelector<HTMLFormElement>('form[data-sa-form="run"]');
+      const objective = form?.querySelector<HTMLTextAreaElement>('textarea[name="objective"]')
+        ?.value.trim() ?? '';
+      if (!cfg?.enabled || !form || !objective || !teamStrategy ||
+          teamStrategy.orchestrationId !== cfg.id || teamStrategy.executionMode === 'off') {
+        error = 'Select an enabled Team and enter a Demand objective to inspect native manual admission.';
+        render(); return;
+      }
+      const teamId = cfg.id, policyRevision = cfg.policyRevision;
+      demandObjective = objective;
+      demandPreflight = null;
+      void work(async () => {
+        const result = await call<NativeDemandPreflight>('superagent_preflight',{
+          orchestrationId:teamId, objective, coordinated:true,
+        });
+        const currentCfg = current();
+        const liveObjective = host.querySelector<HTMLTextAreaElement>(
+          'form[data-sa-form="run"] textarea[name="objective"]')?.value.trim();
+        if (workspaceView !== 'new-demand' || currentCfg?.id !== teamId ||
+            currentCfg.policyRevision !== policyRevision || liveObjective !== objective ||
+            result.orchestrationId !== teamId || result.policyRevision !== policyRevision ||
+            result.selectedRole !== 'coordinator' || !Array.isArray(result.allowedTools) ||
+            result.allowedTools.length !== 0 || result.allowedSideEffects) {
+          throw new Error('Native manual preflight is stale or no longer read-only. Review the Team and objective again.');
+        }
+        demandPreflight = {teamId,policyRevision,objective,result};
+      });
+      return;
+    }
     if (target.dataset.saOpenAssignmentChat) {
       const assignment = ticketDetails?.assignments.find(item =>
         item.sessionId === target.dataset.saOpenAssignmentChat &&
@@ -2810,6 +2870,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         if (!admitted.id || admitted.orchestrationId !== selectedConfig.id)
           throw new Error('Native Demand admission returned a mismatched Team or missing Ticket.');
         taskKey = crypto.randomUUID(); demandObjective = '';
+        demandPreflight = null;
         initialDemandWritePaths = '';
         inspectedTicket = admitted.id;
         workspaceView = 'run';

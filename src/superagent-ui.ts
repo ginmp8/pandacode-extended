@@ -100,7 +100,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
   let demandTeamFilter = '', demandProjectFilter = '', demandStateFilter = '', demandSearch = '', demandSearchDraft = '';
   let teamSearch = '', teamStatusFilter: 'all' | 'enabled' | 'disabled' = 'all';
-  let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false;
+  let reviewQueue: DemandIndex[] = [], reviewQueueLoaded = false, reviewQueueHasMore = false;
   let globalDemandLayout: 'board' | 'list' = 'board';
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
   let workspaceView: 'teams' | 'runs' | 'review' | 'sources' | 'portable' = 'teams';
@@ -708,7 +708,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             'Awaiting native Council (not approved)') + ' · Revision ' +
           item.revision + '</small></div><button type="button" data-sa-open-demand="' +
           safe(item.id) + '">Open demand</button></li>').join('') ||
-          '<li>No native Tickets currently awaiting a decision.</li>') + '</ul>') +
+          '<li>No native Tickets currently awaiting a decision.</li>') + '</ul>' +
+          '<p role="status">' + reviewQueue.length + ' native pending decisions loaded.</p>' +
+          (reviewQueueHasMore ? '<button type="button" data-sa-load-older-reviews>' +
+            'Load older pending decisions</button>' : '')) +
       '</section>';
     const selectedTeamReview = chosen
       ? '<section class="sa-pane" aria-label="Review inbox"><h3>Review inbox · ' + safe(chosen.name) +
@@ -876,7 +879,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     // Mutations invalidate the cross-Team index. Never show stale global
     // status as if the native Tickets had already been re-read.
     allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
-    reviewQueue = []; reviewQueueLoaded = false;
+    reviewQueue = []; reviewQueueLoaded = false; reviewQueueHasMore = false;
     demandPreflight = null;
     // Keep updated controls hidden until the mutating operation has settled.
     // Exposing them mid-reload would allow silently discarded submissions.
@@ -1287,9 +1290,40 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (target.hasAttribute('data-sa-load-review-inbox')) {
       void work(async () => {
-        reviewQueue = []; reviewQueueLoaded = false;
+        reviewQueue = []; reviewQueueLoaded = false; reviewQueueHasMore = false;
         reviewQueue = await call<DemandIndex[]>('superagent_review_inbox',{limit:200});
+        reviewQueueHasMore = reviewQueue.length === 200;
         reviewQueueLoaded = true;
+      });
+      return;
+    }
+    if (target.hasAttribute('data-sa-load-older-reviews')) {
+      const last = reviewQueue[reviewQueue.length - 1];
+      if (busy || !reviewQueueLoaded || !reviewQueueHasMore || !last) return;
+      if (!Number.isSafeInteger(last.updatedAt) || last.updatedAt <= 0 ||
+          !/^[A-Za-z0-9_-]{1,128}$/.test(last.id)) {
+        error = 'Invalid native review cursor. Refresh the inbox.';
+        render();
+        return;
+      }
+      void work(async () => {
+        const page = await call<DemandIndex[]>('superagent_review_inbox', {
+          limit:200, beforeUpdatedAt:last.updatedAt, beforeId:last.id,
+        });
+        const descends = (newer:DemandIndex, older:DemandIndex) =>
+          older.updatedAt < newer.updatedAt ||
+          (older.updatedAt === newer.updatedAt && older.id < newer.id);
+        const known = new Set(reviewQueue.map(item => item.id));
+        if (!Array.isArray(page) || page.length > 200 ||
+            page.some((item, index) =>
+              !/^[A-Za-z0-9_-]{1,128}$/.test(item.id) ||
+              !Number.isSafeInteger(item.updatedAt) || item.updatedAt <= 0 ||
+              !descends(index === 0 ? last : page[index - 1], item) ||
+              known.has(item.id))) {
+          throw new Error('Native review cursor or page ordering changed; refresh before acting.');
+        }
+        reviewQueue = [...reviewQueue, ...page];
+        reviewQueueHasMore = page.length === 200;
       });
       return;
     }

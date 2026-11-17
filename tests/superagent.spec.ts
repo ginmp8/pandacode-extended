@@ -1729,6 +1729,64 @@ test('native cross-Team review inbox exposes pending states without synthetic Co
   expect(commands.some(c=>/submit|dispatch|accept|reserve/.test(c))).toBe(false);
 });
 
+test('cross-Team review inbox pages native decisions without implicit approval', async ({page}) => {
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-review-pages';document.body.appendChild(host);
+    const at=1794400000000;
+    const rows=Array.from({length:204},(_,index)=>{
+      const id='review-'+String(204-index).padStart(3,'0');
+      return {id,orchestrationId:index%2?'team-a':'team-b',
+        objective:'Native decision '+id,
+        state:index%2?'waiting_approval':'waiting_review',
+        revision:2,updatedAt:at,projectId:'project'};
+    });
+    const seen:Array<{command:string;beforeId?:unknown;beforeUpdatedAt?:unknown}>=[];
+    (window as unknown as {saReviewPageCalls:typeof seen}).saReviewPageCalls=seen;
+    mountSuperagent(host,async (command,args)=>{
+      seen.push({command,beforeId:args?.beforeId,beforeUpdatedAt:args?.beforeUpdatedAt});
+      if(command==='bots_list')return [
+        {id:'router',name:'Router',paused:false},{id:'worker',name:'Worker',paused:false}
+      ] as never;
+      if(command==='superagent_list')return [
+        {id:'team-a',name:'Economy',coordinatorBotId:'router',
+          workerBotId:'worker',enabled:true,policyRevision:1},
+        {id:'team-b',name:'Security',coordinatorBotId:'router',
+          workerBotId:'worker',enabled:true,policyRevision:1}
+      ] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_review_inbox'){
+        if(args?.beforeId===undefined)return rows.slice(0,200) as never;
+        if(args.beforeId!=='review-005'||args.beforeUpdatedAt!==at||args.limit!==200)
+          throw Error('Incorrect native keyset cursor');
+        return rows.slice(200) as never;
+      }
+      throw Error('Unexpected native command: '+command);
+    });
+  });
+  const host=page.locator('#sa-review-pages');
+  await host.getByRole('button',{name:'Review inbox',exact:true}).click();
+  const inbox=host.getByRole('region',{name:'Cross-Team native review inbox'});
+  await inbox.getByRole('button',{name:'Refresh review inbox'}).click();
+  await expect(inbox.getByRole('button',{name:'Open demand'})).toHaveCount(200);
+  await inbox.getByRole('button',{name:'Load older pending decisions'}).click();
+  await expect(inbox.getByRole('button',{name:'Open demand'})).toHaveCount(204);
+  await expect(inbox.getByRole('button',{name:'Load older pending decisions'})).toHaveCount(0);
+  await expect(inbox).toContainText('204 native pending decisions loaded');
+  await expect(inbox).toContainText('Awaiting native Council (not approved)');
+  await expect(inbox.locator('[data-sa-accept]')).toHaveCount(0);
+  const calls=await page.evaluate(()=>
+    (window as unknown as {saReviewPageCalls:Array<{command:string;beforeId?:unknown;beforeUpdatedAt?:unknown}>})
+      .saReviewPageCalls);
+  expect(calls.filter(item=>item.command==='superagent_review_inbox')).toEqual([
+    {command:'superagent_review_inbox',beforeId:undefined,beforeUpdatedAt:undefined},
+    {command:'superagent_review_inbox',beforeId:'review-005',beforeUpdatedAt:1794400000000},
+  ]);
+  expect(calls.some(item=>/submit|dispatch|accept|reserve|grant/.test(item.command))).toBe(false);
+});
+
 test('native Run graph is lazy, revision-bound and read-only', async ({page}) => {
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {

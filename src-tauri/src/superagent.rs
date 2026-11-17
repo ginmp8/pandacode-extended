@@ -597,6 +597,7 @@ fn list_all_demands(store: &Store, limit: i64) -> Result<Vec<DemandIndex>> {
 /// Cross-Team native decision queue, independent of the general 200-row
 /// Demand backlog. Only native states are represented; waiting_review is NOT
 /// human-approvable until an actual task-bound Council verdict is available.
+#[cfg(test)]
 fn list_review_inbox(store: &Store, limit: i64) -> Result<Vec<DemandIndex>> {
     list_review_inbox_page(store, limit, None, None)
 }
@@ -3690,10 +3691,11 @@ pub async fn superagent_all_demands(
 #[tauri::command]
 pub async fn superagent_review_inbox(
     window: tauri::WebviewWindow, state: State<'_, AppState>, limit: Option<i64>,
+    before_updated_at: Option<i64>, before_id: Option<String>,
 ) -> Result<Vec<DemandIndex>> {
     require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
-    list_review_inbox(&store, limit.unwrap_or(200))
+    list_review_inbox_page(&store, limit.unwrap_or(200), before_updated_at, before_id.as_deref())
 }
 
 #[tauri::command]
@@ -5776,7 +5778,7 @@ mod tests {
             &store, &handles, true,
         ).unwrap(), vec![task_session.clone()], "a global pause stops only task-owned providers");
         assert!(headless_cancelled_assignments_with_pause(
-            &store, &[ordinary.clone()], true,
+            &store, std::slice::from_ref(&ordinary), true,
         ).unwrap().is_empty(), "ordinary sessions keep their independent cancellation path");
 
         // A provider can retain a live handle after its native Assignment
@@ -5947,6 +5949,21 @@ mod tests {
         store.db.execute(
             "UPDATE sa_tickets SET state='blocked' WHERE id='review-page-204'", [],
         ).unwrap();
+        // Desktop and headless read the same durable native Ticket-state/cursor ordering.
+        let desktop_first = list_review_inbox_page(&store, 200, None, None).unwrap();
+        assert_eq!(desktop_first.len(), 200);
+        let last = desktop_first.last().unwrap();
+        let desktop_next = list_review_inbox_page(
+            &store, 200, Some(last.updated_at), Some(&last.id),
+        ).unwrap();
+        assert_eq!(desktop_next.len(), 4);
+        let unique: std::collections::HashSet<_> = desktop_first.iter()
+            .chain(desktop_next.iter()).map(|item| item.id.as_str()).collect();
+        assert_eq!(unique.len(), 204);
+        assert!(desktop_first.iter().chain(desktop_next.iter()).all(|item|
+            item.state == "waiting_approval" || item.state == "waiting_review"));
+        assert!(list_review_inbox_page(&store, 200, Some(last.updated_at), None).is_err());
+        assert!(list_review_inbox_page(&store, 200, Some(last.updated_at), Some("../bad")).is_err());
         let first: serde_json::Value = serde_json::from_str(
             &list_headless_review_inbox(&store.path).unwrap()
         ).unwrap();

@@ -35,6 +35,9 @@ export async function invokeSuperagent<T>(
       lastActivityAt:Date.now(),
     }));break;
     case 'superagent_tickets':value=tickets.get(args.orchestrationId)||[];break;
+    case 'superagent_review_inbox':
+      // Preview never creates an authentic native human/Council pending decision.
+      value=[];break;
     case 'superagent_roster':{
       const c=get(args.orchestrationId),members=rosters.get(c.id)??{
         workerBotIds:[c.workerBotId],reviewerBotIds:[],

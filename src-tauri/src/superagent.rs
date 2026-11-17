@@ -2025,10 +2025,16 @@ pub(crate) fn headless_quarantine_terminal_orphan(
 /// assignment history rather than a live-only policy or a bot-thread record:
 /// those can disappear or become invalid after revocation. Ordinary sessions
 /// retain their existing automatic-resume behavior.
+/// A task-owned internal bot thread remains a SuperAgent session even if a
+/// damaged or legacy store has lost its Assignment row. Never let headless
+/// queue/usage-limit recovery or the live-provider cancellation poll fall back
+/// to ordinary session privileges after that authority record disappears.
 pub(crate) fn has_task_assignment_history(store: &Store, session_id: &str) -> Result<bool> {
     store.db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE session_id=?1)",
-        [session_id], |row| row.get(0),
+        "SELECT EXISTS(SELECT 1 FROM sa_assignments WHERE session_id=?1)
+             OR EXISTS(SELECT 1 FROM bot_threads
+                       WHERE session_id=?1 AND channel_id=?2)",
+        params![session_id, CHANNEL], |row| row.get(0),
     ).map_err(|error| error.to_string())
 }
 
@@ -6103,6 +6109,49 @@ mod tests {
         assert!(crate::bots::tools::ensure_ambient_bot_tool_permission(
             &store, &ordinary,
         ).is_ok(), "task settlement cannot alter ordinary bot permissions");
+    }
+
+    #[test]
+    fn orphaned_superagent_thread_is_cancelled_and_never_resumes_as_ordinary_work() {
+        let mut store = fixture();
+        let cfg = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &cfg.id, "Protect the original task session",
+            "orphaned-internal-thread", false,
+        ).unwrap();
+        assert!(launched);
+        let task_session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+        let ordinary = store.create_session("project", "codex", "default", "ask")
+            .unwrap().id;
+        let both = vec![task_session.clone(), ordinary.clone()];
+        assert!(headless_cancelled_assignments_with_pause(&store, &both, false)
+            .unwrap().is_empty(), "healthy native and ordinary sessions stay live");
+
+        // Simulate a corrupted legacy writer removing the native Assignment
+        // without deleting the still-running provider session or bot thread.
+        store.db.execute(
+            "DELETE FROM sa_assignments WHERE session_id=?1", [&task_session],
+        ).unwrap();
+        assert!(has_task_assignment_history(&store, &task_session).unwrap());
+        assert!(!has_task_assignment_history(&store, &ordinary).unwrap());
+        assert!(read_only_policy(&store, &task_session).is_err());
+        assert_eq!(
+            headless_cancelled_assignments_with_pause(&store, &both, false).unwrap(),
+            vec![task_session.clone()],
+            "an orphaned internal task must be cancelled without touching ordinary work",
+        );
+
+        let database_path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&database_path).unwrap();
+        assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "interrupted");
+        assert!(has_task_assignment_history(&reopened, &task_session).unwrap());
+        assert!(!has_task_assignment_history(&reopened, &ordinary).unwrap());
+        assert_eq!(
+            headless_cancelled_assignments_with_pause(&reopened, &both, false).unwrap(),
+            vec![task_session],
+            "restart must not reclassify an orphaned provider as a regular chat",
+        );
     }
 
     #[test]

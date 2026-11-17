@@ -304,8 +304,10 @@ mod tests {
              CREATE TABLE sa_tickets(id TEXT,state TEXT,evidence TEXT);
              CREATE TABLE sa_assignments(
                id TEXT,ticket_id TEXT,state TEXT,attempt INTEGER,result TEXT,updated_at INTEGER);
-             INSERT INTO sa_work_items VALUES('item','root','child','completed');
+             INSERT INTO sa_work_items(id,ticket_id,child_ticket_id,state)
+               VALUES('item','root','child','completed');
              INSERT INTO sa_work_item_evidence_receipts
+               (item_id,child_ticket_id,assignment_id,reviewed_at)
                VALUES('item','child','first',80);
              INSERT INTO sa_tickets VALUES('child','completed','Worker output');
              INSERT INTO sa_assignments VALUES('first','child','finished',1,'Worker output',70);",

@@ -144,11 +144,11 @@ fn native_observation(store:&Store,ticket_id:&str)->Result<(DeliveryObservation,
         repository_head_sha:None,worktree_status_sha256:None,
         worktree_diff_sha256:None,observed_status_entries:None,
         checkout_observation:if allowed {"pending"} else {"unavailable_or_unpinned"}.into(),
-        source_attribution:if applied_file_writes>0 {
+        source_attribution:(if applied_file_writes>0 {
             "native_scoped_file_write_receipts_only"
         } else {
             "not_attributed_to_ticket"
-        }.into(),
+        }).into(),
         test_execution_verified:false,ci_result_verified:false,
         external_delivery_verified:false,
         checked_at:storage::now(),read_only:true,

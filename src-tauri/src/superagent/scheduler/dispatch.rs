@@ -104,6 +104,25 @@ pub(crate) fn revoke_descendants(tx:&Connection,root:&str,now:i64)->Result<()> {
     Ok(())
 }
 
+/// Recheck both native and external unsettled effects inside the same SQLite
+/// transaction that transitions a Demand to completed. Earlier WorkItem
+/// approvals cannot launder an uncertain write after a process restart.
+fn unsettled_root_effects(db:&Connection,root:&str)->Result<bool> {
+    db.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM sa_effect_receipts effect
+           WHERE effect.state IN ('pending','uncertain')
+             AND (effect.ticket_id=?1 OR effect.ticket_id IN (
+               SELECT child_ticket_id FROM sa_work_items WHERE ticket_id=?1))
+           UNION ALL
+           SELECT 1 FROM sa_worker_write_receipts receipt
+           WHERE receipt.state IN ('reserved','uncertain')
+             AND (receipt.ticket_id=?1 OR receipt.ticket_id IN (
+               SELECT child_ticket_id FROM sa_work_items WHERE ticket_id=?1)))",
+        [root],|row|row.get(0),
+    ).map_err(|error|error.to_string())
+}
+
 fn reconcile(store:&Store)->Result<()> {
     let now=storage::now();
     // An explicitly retried child resumes its original WorkItem and all
@@ -190,6 +209,11 @@ fn reconcile(store:&Store)->Result<()> {
             continue;
         }
         let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
+        // A prior, independently verified WorkItem may have acquired an
+        // uncertain file or GitHub receipt since its approval. Do not finalize.
+        if unsettled_root_effects(&tx,&root)? {
+            continue;
+        }
         let moved=tx.execute(
             "UPDATE sa_tickets SET state='completed',revision=revision+1,updated_at=?2
              WHERE id=?1 AND state='queued'
@@ -418,4 +442,50 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
     // after their parent released the protected checkout/Assignment.
     let nested=superagent::subagents::advance(app).await?;
     Ok(progressed+nested)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn root_finalization_rechecks_scoped_writes_and_external_effects() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_work_items(ticket_id TEXT,child_ticket_id TEXT);
+             CREATE TABLE sa_effect_receipts(ticket_id TEXT,state TEXT);
+             CREATE TABLE sa_worker_write_receipts(ticket_id TEXT,state TEXT);
+             INSERT INTO sa_work_items VALUES('root','child-a');
+             INSERT INTO sa_work_items VALUES('other','child-b');
+             INSERT INTO sa_worker_write_receipts VALUES('unrelated','uncertain');",
+        ).unwrap();
+        assert!(!unsettled_root_effects(&db,"root").unwrap());
+        db.execute(
+            "INSERT INTO sa_worker_write_receipts VALUES('child-a','reserved')",[],
+        ).unwrap();
+        assert!(unsettled_root_effects(&db,"root").unwrap());
+        assert!(!unsettled_root_effects(&db,"other").unwrap());
+        db.execute(
+            "UPDATE sa_worker_write_receipts SET state='applied'
+             WHERE ticket_id='child-a'",[],
+        ).unwrap();
+        assert!(!unsettled_root_effects(&db,"root").unwrap());
+        db.execute(
+            "INSERT INTO sa_worker_write_receipts VALUES('root','uncertain')",[],
+        ).unwrap();
+        assert!(unsettled_root_effects(&db,"root").unwrap());
+        db.execute(
+            "UPDATE sa_worker_write_receipts SET state='failed'
+             WHERE ticket_id='root'",[],
+        ).unwrap();
+        db.execute(
+            "INSERT INTO sa_effect_receipts VALUES('child-a','pending')",[],
+        ).unwrap();
+        assert!(unsettled_root_effects(&db,"root").unwrap());
+        db.execute(
+            "UPDATE sa_effect_receipts SET state='applied'
+             WHERE ticket_id='child-a'",[],
+        ).unwrap();
+        assert!(!unsettled_root_effects(&db,"root").unwrap());
+    }
 }

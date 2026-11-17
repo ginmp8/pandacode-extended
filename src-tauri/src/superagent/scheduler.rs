@@ -546,6 +546,42 @@ fn coordinator_demand_prompt(ticket_id:&str,objective:&str,workers:&[String],ini
     format!("{base}\n\n{path_guidance}")
 }
 
+/// An already used Demand request key is not fresh user consent. Compare the
+/// original immutable scope before prompting or accepting an idempotent replay.
+fn replayed_demand_scope_confirmed(
+    db:&rusqlite::Connection,team_id:&str,objective:&str,request_key:&str,
+    requested:Option<(i64,i64,&str,&str,&[String])>,
+)->Result<bool> {
+    let old:Option<(String,String,String,String)>=db.query_row(
+        "SELECT id,objective,actor,source FROM sa_tickets
+         WHERE orchestration_id=?1 AND request_key=?2",
+        params![team_id,request_key],
+        |r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+    ).optional().map_err(|e|e.to_string())?;
+    let Some((id,original,actor,source))=old else {return Ok(false)};
+    if original!=objective.trim() || actor!="local-user" || source!="manual" {
+        return Err("Demand request key cannot change actor, source or objective.".into());
+    }
+    let saved:Option<(i64,i64,String,String,String)>=db.query_row(
+        "SELECT team_version,policy_revision,project_id,checkout_root,allowed_paths
+         FROM sa_demand_write_scopes WHERE ticket_id=?1",
+        [&id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?)),
+    ).optional().map_err(|e|e.to_string())?;
+    match (saved,requested) {
+        (None,None)=>Ok(true),
+        (Some((version,revision,project,checkout,paths)),
+         Some((v,r,p,c,wanted)))=>{
+            let exact=serde_json::to_string(wanted).map_err(|e|e.to_string())?;
+            if version==v && revision==r && project==p && checkout==c && paths==exact {
+                Ok(true)
+            } else {
+                Err("Demand request-key replay cannot change previously authorized file scope.".into())
+            }
+        }
+        _=>Err("Demand request-key replay cannot add, omit or remove original file consent.".into()),
+    }
+}
+
 /// A single initial operator action starts the configured Team Coordinator.
 /// Its JSON plan is strictly validated and may only schedule read-only native
 /// WorkItems for the Workers in the immutable Team; no model grants effects.
@@ -585,7 +621,19 @@ pub async fn superagent_start_demand(
         }
         Some((config.team_version,config.policy_revision,config.project_id.clone()))
     };
-    if initial.is_some() {
+    let prior_consent={
+        let store=state.store.lock().map_err(|e|e.to_string())?;
+        let checkout=initial.as_ref().map(|(_,_,project)|
+            store.workspace_root(project,None).map(|root|root.to_string_lossy().into_owned())
+        ).transpose()?;
+        replayed_demand_scope_confirmed(
+            &store.db,&orchestration_id,&objective,&request_key,
+            initial.as_ref().map(|(v,r,p)|(
+                *v,*r,p.as_str(),checkout.as_deref().unwrap_or(""),paths.as_slice(),
+            )),
+        )?
+    };
+    if initial.is_some() && !prior_consent {
         use tauri_plugin_dialog::{DialogExt,MessageDialogButtons};
         let names=paths.iter().map(|path|format!("  - {path}")).collect::<Vec<_>>().join("\n");
         let dialog=window.dialog()
@@ -1038,6 +1086,32 @@ mod tests {
             worker_bot_id:"worker".into(),depends_on:deps.iter().map(|s|s.to_string()).collect(),
             requires_write:false,write_paths:Vec::new()}
     }
+    #[test]
+    fn replayed_demand_scope_requires_exact_original_native_consent() {
+        let db=rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(r#"
+          CREATE TABLE sa_tickets(id TEXT PRIMARY KEY,orchestration_id TEXT,request_key TEXT,
+            objective TEXT,actor TEXT,source TEXT);
+          CREATE TABLE sa_demand_write_scopes(ticket_id TEXT,team_version INTEGER,
+            policy_revision INTEGER,project_id TEXT,checkout_root TEXT,allowed_paths TEXT);
+          INSERT INTO sa_tickets VALUES('t','team','key','Implement','local-user','manual');
+          INSERT INTO sa_demand_write_scopes VALUES('t',3,7,'project','/root','["src/file.rs"]');
+        "#).unwrap();
+        let scope=vec!["src/file.rs".to_string()];
+        let check=|objective:&str,key:&str,requested:Option<(i64,i64,&str,&str,&[String])>|{
+            replayed_demand_scope_confirmed(&db,"team",objective,key,requested)
+        };
+        assert!(check("Implement","key",Some((3,7,"project","/root",&scope))).unwrap());
+        assert!(!check("Implement","new",Some((3,7,"project","/root",&scope))).unwrap());
+        assert!(check("Implement","key",None).is_err(),"omitting scope must not reuse it silently");
+        assert!(check("Implement","key",
+            Some((3,7,"project","/root",&["src/other.rs".to_string()]))).is_err());
+        assert!(check("Implement","key",Some((4,7,"project","/root",&scope))).is_err());
+        assert!(check("Changed","key",Some((3,7,"project","/root",&scope))).is_err());
+        db.execute("UPDATE sa_tickets SET actor='github' WHERE id='t'",[]).unwrap();
+        assert!(check("Implement","key",Some((3,7,"project","/root",&scope))).is_err());
+    }
+
     #[test]
     fn coordinator_can_request_write_work_items_but_cannot_grant_paths() {
         let prompt=coordinator_demand_prompt(

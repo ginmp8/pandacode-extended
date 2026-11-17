@@ -2103,14 +2103,22 @@ pub fn host(
     };
     tools.extend(coordination::tools(worker));
     if let coordination::Actor::Worker { id, .. } = &actor {
-        let eligible = app.state::<AppState>().store.lock().ok().and_then(|store|
-            load(&store, &parent).ok().flatten().map(|team|
-                team.workers.iter().any(|w| &w.id == id
-                    && w.reviewer_binding.as_ref().and_then(|b| b.snapshot.skills.as_ref())
-                        .is_some_and(|skills| !skills.pins.is_empty()))
-            )
-        ).unwrap_or(false);
-        if eligible { tools.extend(reviewer_skill_evidence::tools()); }
+        let (skills_eligible, file_eligible) = app.state::<AppState>().store.lock().ok()
+            .and_then(|store| load(&store, &parent).ok().flatten().map(|team| {
+                let reviewer = team.workers.iter().find(|w| &w.id == id && w.council.is_some());
+                let skills = reviewer.and_then(|w| w.reviewer_binding.as_ref())
+                    .and_then(|binding| binding.snapshot.skills.as_ref())
+                    .is_some_and(|skills| !skills.pins.is_empty());
+                let file = reviewer.is_some_and(|w| team.config.council.as_ref()
+                    .is_some_and(|config| config.criteria.iter().any(|criterion|
+                        criterion.native_evidence.as_ref().is_some_and(|check|
+                            check.kind == "reviewed_file_sha256")
+                            && w.council.as_ref().is_some_and(|seat|
+                                seat.lens.trim().eq_ignore_ascii_case(criterion.lens.trim())))));
+                (skills, file)
+            })).unwrap_or((false, false));
+        if skills_eligible { tools.extend(reviewer_skill_evidence::tools()); }
+        if file_eligible { tools.push(reviewer_skill_evidence::file_tool()); }
     }
     Some(ToolHost {
         tools,
@@ -2122,7 +2130,7 @@ pub fn host(
                 if stopped.load(Ordering::SeqCst) {
                     return Err("Team agent has stopped.".into());
                 }
-                if matches!(name.as_str(), "pandacode_reviewer_skill_open" | "pandacode_reviewer_skill_verify") {
+                if matches!(name.as_str(), "pandacode_reviewer_skill_open" | "pandacode_reviewer_skill_verify" | "pandacode_reviewer_file_verify") {
                     let (result, changed) = reviewer_skill_evidence::dispatch_state(
                         &app.state::<AppState>(), &sid, generation, &actor, &name, args,
                     )?;

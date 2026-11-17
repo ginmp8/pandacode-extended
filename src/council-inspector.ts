@@ -101,6 +101,7 @@ export function councilInspectionHtml(inspection: CouncilInspection | null): str
     below_target: 'Observed root reviewer score below required target',
     native_evidence_unverified: 'Independent native criterion evidence not verified; approval blocked',
     pinned_input_integrity_verified: 'Native pinned-input integrity verified for this criterion; this does not prove project tests, artifact correctness or Council approval',
+    reviewed_file_sha256_verified: 'Native file SHA-256 matched the required digest for the reviewed revision; this does not prove project tests or Council approval',
     root_scores_observed: 'Root reviewer scores observed; not independently verified artifact evidence',
   };
   const nativeCriterionObservations = inspection.criterionObservations ?? [];

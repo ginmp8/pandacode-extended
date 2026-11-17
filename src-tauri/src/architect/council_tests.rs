@@ -933,6 +933,7 @@ fn criterion_pinned_input_integrity_requires_native_receipts_and_denies_replay()
         required: true, target: 9.5, evidence_required: true,
         native_evidence: Some(council::CouncilCriterionNativeEvidence {
             kind: "pinned_input_integrity".into(), skill_id: "pinned-check".into(),
+            path: None, expected_sha256: None,
         }),
     }];
     assert!(config.validate().is_ok());
@@ -1084,6 +1085,97 @@ fn criterion_pinned_input_integrity_requires_native_receipts_and_denies_replay()
     forged.workers[0].reviewer_binding.as_mut().unwrap().skill_evidence
         .get_mut("pinned-check").unwrap().check_kind = Some("reviewer_claim".into());
     assert_eq!(council::status(&forged).unwrap().state, "fixing");
+}
+
+
+#[test]
+fn required_file_digest_is_host_executed_bounded_and_task_bound() {
+    let (state, sid) = state_fixture();
+    let folder = std::env::temp_dir().join(format!("native-council-file-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&folder).unwrap();
+    let file_path = folder.join("expected.txt");
+    std::fs::write(&file_path, b"reviewed native artifact\n").unwrap();
+    let digest = format!("{:x}", sha2::Sha256::digest(b"reviewed native artifact\n"));
+    let mut config = on(9.0, 3, 2);
+    config.criteria_source = council::CouncilCriteriaSource::User;
+    config.criteria = vec![council::CouncilCriterion {
+        id: "file-proof".into(), lens: "File SHA-256: expected.txt".into(),
+        required: true, target: 9.0, evidence_required: true,
+        native_evidence: Some(council::CouncilCriterionNativeEvidence {
+            kind: "reviewed_file_sha256".into(), skill_id: String::new(),
+            path: Some("expected.txt".into()), expected_sha256: Some(digest.clone()),
+        }),
+    }];
+    config.validate().unwrap();
+    for invalid in ["../secret", "/etc/passwd", "other\\file", "a//b"] {
+        let mut bad = config.clone();
+        bad.criteria[0].native_evidence.as_mut().unwrap().path = Some(invalid.into());
+        assert!(bad.validate().is_err(), "unsafe file scope {invalid} was admitted");
+    }
+    let mut unsupported = config.clone();
+    unsupported.criteria[0].native_evidence.as_mut().unwrap().kind = "project_tests".into();
+    assert!(unsupported.validate().is_err(), "unsupported test execution must not be assumed");
+    let mut bad_hash = config.clone();
+    bad_hash.criteria[0].native_evidence.as_mut().unwrap().expected_sha256 = Some("0".into());
+    assert!(bad_hash.validate().is_err());
+    let mut team = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    team.config.council = Some(config);
+    team.council_since = SINCE;
+    let mut reviewer_ids = Vec::new();
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute("UPDATE sessions SET worktree_path=?2 WHERE id=?1",
+            rusqlite::params![&sid, folder.to_string_lossy().as_ref()]).unwrap();
+        for (i, id) in ["file-a", "file-b"].iter().enumerate() {
+            let root = store.session(&sid).unwrap();
+            let reviewer_session = store.create_session(&root.project_id, "codex", "", &root.mode).unwrap();
+            store.db.execute("UPDATE sessions SET worktree_path=?2 WHERE id=?1",
+                rusqlite::params![&reviewer_session.id, folder.to_string_lossy().as_ref()]).unwrap();
+            store.db.execute(
+                "INSERT INTO architect_workers(parent_session_id,worker_id,session_id) VALUES(?1,?2,?3)",
+                rusqlite::params![&sid, id, &reviewer_session.id],
+            ).unwrap();
+            let mut worker = seat(id, 1, Some(9.8), SINCE + i as i64 + 1);
+            worker.status = "running".into();
+            worker.session_id = reviewer_session.id.clone();
+            worker.council.as_mut().unwrap().lens = "File SHA-256: expected.txt".into();
+            let binding = reviewer_security::ReviewerBinding::native(
+                &team, &worker.id, worker.created_at, &worker.provider, &worker.model,
+                worker.council.as_ref().unwrap(),
+            );
+            reviewer_security::record_native_authority(&store, &sid, &binding).unwrap();
+            worker.reviewer_binding = Some(binding);
+            reviewer_ids.push(worker.id.clone());
+            team.workers.push(worker);
+        }
+        save(&store, &mut team).unwrap();
+    }
+    let generation = team.generation;
+    for id in &reviewer_ids {
+        let actor = coordination::Actor::Worker { id: id.clone(), attempt: 1 };
+        assert!(reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+            &actor, "pandacode_reviewer_file_verify",
+            json!({"criterionId":"wrong"})).is_err());
+        let (result, changed) = reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+            &actor, "pandacode_reviewer_file_verify",
+            json!({"criterionId":"file-proof"})).unwrap();
+        assert_eq!(result["nativeFileDigestVerified"], true);
+        assert!(changed.is_some());
+        let (_, duplicate) = reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+            &actor, "pandacode_reviewer_file_verify",
+            json!({"criterionId":"file-proof"})).unwrap();
+        assert!(duplicate.is_none(), "repeated native checks must be idempotent");
+    }
+    let mut verified = load(&state.store.lock().unwrap(), &sid).unwrap().unwrap();
+    for worker in &mut verified.workers { worker.status = "completed".into(); }
+    assert_eq!(council::status(&verified).unwrap().state, "passed");
+    assert_eq!(council::inspection(&verified, false).unwrap()
+        .criterion_observations[0].state, "reviewed_file_sha256_verified");
+    verified.config.council.as_mut().unwrap().criteria[0].target = 9.8;
+    assert_eq!(council::status(&verified).unwrap().state, "fixing",
+        "a changed required target invalidates prior host proof");
+    std::fs::remove_file(file_path).unwrap();
+    std::fs::remove_dir(folder).unwrap();
 }
 
 #[test]

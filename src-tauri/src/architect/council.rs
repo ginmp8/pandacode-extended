@@ -111,7 +111,20 @@ fn no_extra_reviewers(count: &usize) -> bool {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CouncilCriterionNativeEvidence {
     pub kind: String,
+    #[serde(default)]
     pub skill_id: String,
+    /// One exact relative path within the reviewed checkout.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// Lowercase digest, verified against actual bytes by the native host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_sha256: Option<String>,
+}
+fn valid_evidence_path(path: &str) -> bool {
+    !path.is_empty() && path.len() <= 240
+        && !path.starts_with('/') && !path.contains('\\') && !path.contains(':')
+        && !path.chars().any(char::is_control)
+        && path.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -243,15 +256,32 @@ impl CouncilConfig {
                 return Err("Council required evidence cannot be assigned to an optional criterion.".into());
             }
             if let Some(check) = &criterion.native_evidence {
-                // A methodology-input check cannot satisfy an arbitrary
-                // criterion such as security, test coverage or correctness.
-                if !criterion.evidence_required
-                    || check.kind != "pinned_input_integrity"
-                    || !super::valid_id(&check.skill_id)
-                    || !self.required_check_skill_ids.contains(&check.skill_id)
-                    || !same_lens(&criterion.lens, &format!("Pinned input integrity: {}", check.skill_id))
-                {
-                    return Err("Council native criterion evidence must name a required pinned-input integrity check and its exact lens.".into());
+                if !criterion.evidence_required {
+                    return Err("Council native criterion evidence requires a mandatory criterion check.".into());
+                }
+                match check.kind.as_str() {
+                    "pinned_input_integrity" => {
+                        // Input integrity is not proof of project tests or correctness.
+                        if !super::valid_id(&check.skill_id)
+                            || check.path.is_some() || check.expected_sha256.is_some()
+                            || !self.required_check_skill_ids.contains(&check.skill_id)
+                            || !same_lens(&criterion.lens, &format!("Pinned input integrity: {}", check.skill_id))
+                        {
+                            return Err("Council native criterion evidence must name a required pinned-input integrity check and its exact lens.".into());
+                        }
+                    }
+                    "reviewed_file_sha256" => {
+                        let path = check.path.as_deref().unwrap_or("");
+                        let sha = check.expected_sha256.as_deref().unwrap_or("");
+                        if !check.skill_id.is_empty() || !valid_evidence_path(path)
+                            || sha.len() != 64 || !sha.bytes().all(|ch|
+                                ch.is_ascii_digit() || (b'a'..=b'f').contains(&ch))
+                            || !same_lens(&criterion.lens, &format!("File SHA-256: {path}"))
+                        {
+                            return Err("Council file evidence requires a repository-relative file, lowercase SHA-256 and matching required lens.".into());
+                        }
+                    }
+                    _ => return Err("Council native criterion check is unsupported.".into()),
                 }
             }
             if !criterion.target.is_finite() || !(1.0..=10.0).contains(&criterion.target) {
@@ -549,7 +579,7 @@ pub struct CouncilCriterionObservation {
     pub root_scored_seats: usize,
     pub lowest_root_score: Option<f64>,
     /// optional | awaiting_review | missing_root_score | below_target |
-    /// native_evidence_unverified | pinned_input_integrity_verified | root_scores_observed
+    /// native_evidence_unverified | pinned_input_integrity_verified | reviewed_file_sha256_verified | root_scores_observed
     pub state: &'static str,
 }
 fn criterion_observations(
@@ -571,7 +601,10 @@ fn criterion_observations(
             else if lowest.is_some_and(|score| score < criterion.target.max(config.target)) { "below_target" }
             else if criterion.evidence_required {
                 if native_criterion_check_verified(team, criterion, round) {
-                    "pinned_input_integrity_verified"
+                    if criterion.native_evidence.as_ref().is_some_and(|check|
+                        check.kind == "reviewed_file_sha256") {
+                        "reviewed_file_sha256_verified"
+                    } else { "pinned_input_integrity_verified" }
                 } else { "native_evidence_unverified" }
             }
             else { "root_scores_observed" };
@@ -1252,6 +1285,31 @@ fn native_criterion_check_verified(
     team: &TeamSnapshot, criterion: &CouncilCriterion, round: usize,
 ) -> bool {
     let Some(check) = criterion.native_evidence.as_ref() else { return false };
+    if check.kind == "reviewed_file_sha256" {
+        let Some(expected) = check.expected_sha256.as_deref() else { return false };
+        let reviewers = in_round(team, round)
+            .filter(|(worker, seat)| counts(worker, seat)
+                && worker.status == "completed" && seat.score.is_some()
+                && same_lens(&seat.lens, &criterion.lens))
+            .collect::<Vec<_>>();
+        return !reviewers.is_empty() && reviewers.into_iter().all(|(worker, _)| {
+            if !worker.read_only || worker.abandoned || worker.wrote_at != 0 || !worker.files.is_empty() {
+                return false;
+            }
+            worker.reviewer_binding.as_ref().is_some_and(|binding| {
+                binding.validate(team, worker).is_ok()
+                    && binding.skill_evidence.get(&format!("criterion-file:{}", criterion.id))
+                        .is_some_and(|record| {
+                            record.content_sha256 == expected
+                                && record.artifact_revision == binding.artifact_revision
+                                && record.invoked && record.check_executed && record.evidence_verified
+                                && record.check_kind.as_deref() == Some("reviewed_file_sha256")
+                                && record.criterion_receipt.as_ref().is_some_and(|receipt|
+                                    receipt.valid_file_for(team, worker, criterion, expected))
+                        })
+            })
+        });
+    }
     if check.kind != "pinned_input_integrity"
         || !same_lens(&criterion.lens, &format!("Pinned input integrity: {}", check.skill_id))
     {

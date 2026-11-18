@@ -329,6 +329,21 @@ export function bindSharedChannelCouncil(form: HTMLFormElement | null): void {
     input.dispatchEvent(new Event('input', { bubbles: true }));
   });
   panel.addEventListener('keydown', event => {
+    if (event.key === 'Tab' && panel.matches(':popover-open') && panel.contains(document.activeElement)) {
+      // This is a dialog, not an ordinary form disclosure: keyboard navigation
+      // must not leave the Council settings while its popover is open.
+      const controls = [...panel.querySelectorAll<HTMLElement>(
+        'input:not(:disabled), select:not(:disabled), textarea:not(:disabled), button:not(:disabled), details > summary, a[href]'
+      )].filter(control => control.tabIndex >= 0 && control.getClientRects().length > 0);
+      if (!controls.length) return;
+      const at = controls.indexOf(document.activeElement as HTMLElement);
+      const next = event.shiftKey
+        ? (at <= 0 ? controls.length - 1 : at - 1)
+        : (at < 0 || at === controls.length - 1 ? 0 : at + 1);
+      event.preventDefault();
+      controls[next].focus();
+      return;
+    }
     if (event.key !== 'Escape') return;
     event.preventDefault();
     event.stopPropagation();

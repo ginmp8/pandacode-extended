@@ -53,6 +53,43 @@ test.describe('shared bot channels', () => {
     await expect(composer.locator('.bc-council-controls')).toBeHidden();
   });
 
+  test('channel Council keeps keyboard focus within the popover at narrow widths', async ({ page }) => {
+    test.setTimeout(60_000);
+    await page.setViewportSize({ width: 320, height: 460 });
+    await showBots(page);
+    await sidebar(page).getByRole('button', { name: '#launch' }).click();
+    const composer = page.locator('#shared-channel-composer');
+    const trigger = composer.locator('.bc-council-trigger');
+    const panel = composer.getByRole('dialog', { name: 'Council' });
+    await trigger.click();
+    await expect(panel).toBeVisible();
+
+    const first = panel.getByRole('switch', { name: 'Council' });
+    // The final file-scope input is conditional on selecting configured bots.
+    await panel.locator('input[name="councilMode"][value="selected"]').check();
+    const last = panel.locator('input[name="councilFilePath"]');
+    await expect(last).toBeVisible();
+    await first.focus();
+    await page.keyboard.press('Shift+Tab');
+    await expect(last).toBeFocused();
+    await page.keyboard.press('Tab');
+    await expect(first).toBeFocused();
+
+    // Conditional user-defined criteria participate in the same dialog focus
+    // order rather than trapping the keyboard on a hidden field.
+    await panel.getByRole('combobox', { name: 'Criteria source' }).selectOption('user');
+    const criterionId = panel.locator('input[name="councilCriterionId"]').first();
+    await expect(criterionId).toBeVisible();
+    await criterionId.focus();
+    await page.keyboard.press('Tab');
+    await expect(panel.locator('input[name="councilCriterionLens"]').first()).toBeFocused();
+
+    await page.keyboard.press('Escape');
+    await expect(panel).toBeHidden();
+    await expect(trigger).toBeFocused();
+    await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  });
+
   test('bot collaboration: Council restores selection after a channel refresh without showing settings inline', async ({ page }) => {
     // The full preview initializes channel state before exercising the Council controls.
     test.setTimeout(60_000);

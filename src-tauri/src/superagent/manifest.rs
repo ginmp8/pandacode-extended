@@ -372,6 +372,13 @@ fn export(store: &Store) -> Result<serde_json::Value> {
             .chain(roles.worker_bot_ids.iter())
             .chain(roles.reviewer_bot_ids.iter()) {
             let bot=bots::get(store,id)?;
+            // Portable configuration may represent temporarily paused members:
+            // export must remain available for private backup/migration, while
+            // destination import still rejects paused roles before mutation.
+            // Unsupported persistent execution fields cannot roundtrip safely.
+            if let Some(issue) = super::roster::member_execution_issue(&bot) {
+                return Err(format!("Unsupported portable Team member {}: {issue}", bot.name));
+            }
             // Import resolves portable names against every existing bot, not
             // just this Team. A duplicate (including an unrelated bot) or an
             // invalid legacy name would make this export impossible to restore.
@@ -409,12 +416,9 @@ fn export(store: &Store) -> Result<serde_json::Value> {
     if serde_json::to_vec(&document).map_err(|e| e.to_string())?.len() > MAX_BYTES {
         return Err("SuperAgent export exceeds the 1 MB portable manifest limit.".into());
     }
-    // This document doubles as a private import backup. Check the exact
-    // native import contract before reporting that it can be restored: paused
-    // roles, unsupported harnesses and changed bot identities cannot silently
-    // produce a backup that the same installation is unable to import.
-    resolve(store, &document).map_err(|issue|
-        format!("SuperAgent export cannot be restored with the current bots: {issue}"))?;
+    // Export is a passive backup even when a member is temporarily paused.
+    // Import separately enforces current destination availability before any
+    // role or authority change; exporting never activates an unavailable bot.
     Ok(document)
 }
 
@@ -790,21 +794,23 @@ mod tests {
     }
 
     #[test]
-    fn portable_export_requires_importable_member_profiles_without_changing_team_state() {
+    fn portable_export_preserves_paused_team_backup_but_denies_unsupported_profiles() {
         let store = fixture();
         apply(&store, &document("Portable profile Team"), true).unwrap();
         let valid = export(&store).unwrap();
         assert_eq!(preview(&store, &valid).unwrap().unchanged, vec!["Portable profile Team"]);
 
+        // Pausing affects destination admission, not the right to back up a
+        // disabled Team. Its exported manifest carries no execution grant.
         store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
-        let paused = export(&store).unwrap_err();
-        assert!(paused.contains("Paused primary"), "{paused}");
+        assert_eq!(export(&store).unwrap(), valid);
+        assert!(preview(&store, &valid).unwrap_err().contains("Paused primary"));
         store.db.execute("UPDATE bots SET paused=0 WHERE id='worker'", []).unwrap();
 
         store.db.execute("UPDATE bots SET provider='unsupported-harness' WHERE id='router'", [])
             .unwrap();
         let unsupported = export(&store).unwrap_err();
-        assert!(unsupported.contains("Unsupported portable primary"), "{unsupported}");
+        assert!(unsupported.contains("Unsupported portable Team member"), "{unsupported}");
         store.db.execute("UPDATE bots SET provider='codex' WHERE id='router'", []).unwrap();
 
         let restored = export(&store).unwrap();

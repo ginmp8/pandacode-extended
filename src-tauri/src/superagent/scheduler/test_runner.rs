@@ -148,7 +148,7 @@ pub(super) fn issue(store:&Store,id:&str,grant:TestGrant<'_>)->Result<()> {
 
 /// A saved Full Auto Team mode is itself a mandatory evidence gate, even
 /// for older Demands admitted before native test consent was available.
-pub(super) fn required(db:&rusqlite::Connection,root:&str)->Result<bool> {
+pub(in crate::superagent) fn required(db:&rusqlite::Connection,root:&str)->Result<bool> {
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sa_demand_test_grants WHERE ticket_id=?1)
          OR EXISTS(SELECT 1 FROM sa_ticket_team_snapshots snap

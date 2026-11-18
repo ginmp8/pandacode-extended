@@ -1899,12 +1899,16 @@ fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<Ev
              WHERE l.ticket_id=?1 AND l.subject_key=d.subject_key
                AND linked.repository=observed.repository COLLATE NOCASE
                AND linked.orchestration_id=observed.orchestration_id
-               -- Do not correlate source classes from two real repositories
-               -- merely because their display owner/name is identical.
-               AND (SELECT repository_id FROM sa_source_repository_identity
-                    WHERE source_id=linked.id)
-                   IS (SELECT repository_id FROM sa_source_repository_identity
-                       WHERE source_id=observed.id)
+               -- Historic same-source receipts remain inspectable after upgrade.
+               -- A different source class needs matching, positively attested
+               -- numeric repository IDs; NULL = NULL is not GitHub identity.
+               AND (linked.id=observed.id OR EXISTS (
+                 SELECT 1 FROM sa_source_repository_identity linked_identity
+                 JOIN sa_source_repository_identity observed_identity
+                   ON observed_identity.source_id=observed.id
+                  AND observed_identity.repository_id=linked_identity.repository_id
+                 WHERE linked_identity.source_id=linked.id
+               ))
            )
          ORDER BY d.at DESC,d.source_id DESC,d.delivery_id DESC LIMIT ?3",
     ).map_err(|e| e.to_string())?;
@@ -4338,6 +4342,15 @@ mod tests {
         let associated = link_issue_to_pull(&store, &pull.id, "one", "issue:42", "pull:99").unwrap();
         assert_eq!(associated.subject_key, "pull:99");
         link_thread(&store, &review.id, "one", "issue:42").unwrap();
+        // Case aliases may correlate across classes only after real repository
+        // identity is known for both sources, never on matching names alone.
+        for id in [&issue.id, &review.id] {
+            store.db.execute(
+                "INSERT INTO sa_source_repository_identity
+                 (source_id,repository_id,attested_at) VALUES(?1,101,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
         unlink_thread(&store, &issue.id, "one", "issue:42").unwrap();
         // A legacy alias exposes authenticated receipt metadata only to its
         // explicitly linked Ticket, not an unrelated Demand.
@@ -4554,6 +4567,15 @@ mod tests {
         // No implicit association: other Teams and Tickets still see nothing.
         assert!(linked_decisions(&store, "ticket-one", 50).unwrap().is_empty());
         link_thread(&store, &enabled[0].id, "ticket-one", "pull:42").unwrap();
+        // The three source classes share one verified repository; a plain
+        // owner/name match without IDs must not correlate legacy records.
+        for selected in [&enabled[0], &enabled[1], &enabled[2]] {
+            store.db.execute(
+                "INSERT INTO sa_source_repository_identity
+                 (source_id,repository_id,attested_at) VALUES(?1,101,?2)",
+                params![&selected.id,storage::now()],
+            ).unwrap();
+        }
         let found = linked_decisions(&store, "ticket-one", 50).unwrap();
         assert_eq!(found.len(), 3, "same Team and repository: comment, review, Check Run");
         assert!(found.iter().any(|r| r.event_kind == "issue_comment.created"));
@@ -4585,6 +4607,64 @@ mod tests {
         assert_eq!(headless_linked_activity(&path, "ticket-two", 50).unwrap(), "[]");
         assert!(headless_linked_activity(&path, "ticket-one", 101).is_err());
         assert!(headless_linked_activity(&path, "unknown-ticket", 50).is_err());
+    }
+
+    #[test]
+    fn legacy_source_receipts_need_attested_ids_for_cross_class_ticket_history() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "history-ticket", "orch");
+        let issue = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let comment = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issue_comment.created").unwrap();
+        let reused_name = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.closed").unwrap();
+        let issue = set_mode(&store, &issue.id, issue.policy_revision, "observe").unwrap();
+        let comment = set_mode(&store, &comment.id, comment.policy_revision, "observe").unwrap();
+        let reused_name = set_mode(&store, &reused_name.id,
+            reused_name.policy_revision, "observe").unwrap();
+        observe(&store, &event("legacy-issue", &issue, 1)).unwrap();
+        for (selected, delivery) in [
+            (&comment, "same-name-comment"), (&reused_name, "reused-name-closure"),
+        ] {
+            let mut receipt = event(delivery, selected, 1);
+            receipt.event_kind = selected.event_kind.clone();
+            observe(&store, &receipt).unwrap();
+        }
+        link_thread(&store, &issue.id, "history-ticket", "issue:42").unwrap();
+
+        // A legacy direct link can inspect its own already-stored receipt,
+        // but no second source inherits its authority from a display name.
+        let rows = linked_decisions(&store, "history-ticket", 20).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].delivery_id, "legacy-issue");
+        assert_eq!(list_decisions(&store, &comment.id, 20).unwrap().len(), 1);
+
+        let attest = |source_id: &str, repository_id: i64| {
+            store.db.execute(
+                "INSERT INTO sa_source_repository_identity
+                 (source_id,repository_id,attested_at) VALUES(?1,?2,?3)",
+                params![source_id, repository_id, storage::now()],
+            ).unwrap();
+        };
+        attest(&issue.id, 101);
+        assert_eq!(linked_decisions(&store, "history-ticket", 20).unwrap().len(), 1,
+            "One attested ID cannot match an unknown source");
+        attest(&comment.id, 101);
+        attest(&reused_name.id, 202);
+        let matched = linked_decisions(&store, "history-ticket", 20).unwrap();
+        assert_eq!(matched.len(), 2, "Only equal attested IDs can correlate source classes");
+        assert!(matched.iter().any(|row| row.delivery_id == "same-name-comment"));
+        assert!(matched.iter().all(|row| row.delivery_id != "reused-name-closure"));
+        assert_eq!(store.db.query_row("SELECT COUNT(*) FROM sa_mandates", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 0,
+            "Read-only source context never creates authority");
+        drop(store);
+
+        let reopened = Store::open(&path).unwrap();
+        let persisted = linked_decisions(&reopened, "history-ticket", 20).unwrap();
+        assert_eq!(persisted.len(), 2);
+        assert!(persisted.iter().all(|row| row.delivery_id != "reused-name-closure"));
     }
 
     #[test]

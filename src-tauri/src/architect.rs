@@ -2142,12 +2142,8 @@ pub fn host(
                 let skills = reviewer.and_then(|w| w.reviewer_binding.as_ref())
                     .and_then(|binding| binding.snapshot.skills.as_ref())
                     .is_some_and(|skills| !skills.pins.is_empty());
-                let file = reviewer.is_some_and(|w| team.config.council.as_ref()
-                    .is_some_and(|config| config.criteria.iter().any(|criterion|
-                        criterion.native_evidence.as_ref().is_some_and(|check|
-                            check.kind == "reviewed_file_sha256")
-                            && w.council.as_ref().is_some_and(|seat|
-                                seat.lens.trim().eq_ignore_ascii_case(criterion.lens.trim())))));
+                let file = reviewer.is_some_and(|w|
+                    reviewer_skill_evidence::file_tool_eligible(&team, w));
                 (skills, file)
             })).unwrap_or((false, false));
         if skills_eligible { tools.extend(reviewer_skill_evidence::tools()); }

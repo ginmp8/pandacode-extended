@@ -1152,6 +1152,13 @@ fn required_file_digest_is_host_executed_bounded_and_task_bound() {
         }
         save(&store, &mut team).unwrap();
     }
+    assert!(team.workers.iter().all(|worker|
+        reviewer_skill_evidence::file_tool_eligible(&team, worker)),
+        "required SHA-256 evidence must remain exposed through the native reviewer tool host");
+    let mut writable = team.workers[0].clone();
+    writable.read_only = false;
+    assert!(!reviewer_skill_evidence::file_tool_eligible(&team, &writable),
+        "a write-capable seat must never receive the native read-only file check");
     let generation = team.generation;
     for id in &reviewer_ids {
         let actor = coordination::Actor::Worker { id: id.clone(), attempt: 1 };
@@ -1243,6 +1250,21 @@ fn required_text_fragment_uses_bounded_native_host_receipts_not_model_claims() {
         }
         save(&store, &mut team).unwrap();
     }
+    assert!(team.workers.iter().all(|worker|
+        reviewer_skill_evidence::file_tool_eligible(&team, worker)),
+        "required text-fragment verification must be exposed to the assigned native reviewer");
+    let mut wrong_lens = team.workers[0].clone();
+    wrong_lens.council.as_mut().unwrap().lens = "Unrelated review".into();
+    assert!(!reviewer_skill_evidence::file_tool_eligible(&team, &wrong_lens),
+        "an unrelated reviewer cannot request another criterion's file check");
+    let mut without_binding = team.workers[0].clone();
+    without_binding.reviewer_binding = None;
+    assert!(!reviewer_skill_evidence::file_tool_eligible(&team, &without_binding),
+        "an unbound reviewer cannot receive native evidence tools");
+    let mut optional = team.clone();
+    optional.config.council.as_mut().unwrap().criteria[0].evidence_required = false;
+    assert!(!reviewer_skill_evidence::file_tool_eligible(&optional, &optional.workers[0]),
+        "non-mandatory file checks are not native approval evidence");
     let generation = team.generation;
     let first = coordination::Actor::Worker { id: "text-a".into(), attempt: 1 };
     assert!(reviewer_skill_evidence::dispatch_state(&state, &sid, generation,

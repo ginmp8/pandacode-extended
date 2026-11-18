@@ -174,6 +174,23 @@ pub(super) fn tools() -> Vec<Value> {
         tool("reviewer_skill_verify", "Run a read-only native pinned-input integrity check, not arbitrary skill scripts or project tests.", properties, &["skillId"]),
     ]
 }
+/// Restrict file verification tool visibility to an admitted read-only reviewer
+/// assigned an explicitly required host-executable file criterion. Dispatch
+/// independently validates current native authority and frozen task policy.
+pub(super) fn file_tool_eligible(team: &TeamSnapshot, worker: &Worker) -> bool {
+    if !worker.read_only || worker.abandoned || worker.wrote_at != 0
+        || !worker.files.is_empty() || worker.reviewer_binding.is_none()
+    {
+        return false;
+    }
+    let Some(seat) = worker.council.as_ref() else { return false };
+    team.config.council.as_ref().is_some_and(|config| config.criteria.iter().any(|criterion| {
+        criterion.required && criterion.evidence_required
+            && criterion.native_evidence.as_ref().is_some_and(|check|
+                matches!(check.kind.as_str(), FILE_SHA256 | FILE_TEXT_CONTAINS))
+            && seat.lens.trim().eq_ignore_ascii_case(criterion.lens.trim())
+    }))
+}
 pub(super) fn file_tool() -> Value {
     tool("reviewer_file_verify",
         "Verify an explicitly required checkout-file SHA-256 or exact UTF-8 fragment. Read-only and bounded; never executes project scripts.",

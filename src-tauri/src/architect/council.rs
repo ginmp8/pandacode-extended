@@ -1644,6 +1644,26 @@ fn stale(team: &TeamSnapshot, round: usize) -> bool {
     round > 0 && written_since(team, round_start(team, round))
 }
 
+/// For composed direct + automatic Councils, a numeric quorum is not a
+/// substitute for the frozen source roster. This snapshot check never grants
+/// reviewer authority; native issued grants remain mandatory at dispatch and
+/// final settlement.
+fn m3_sources_match(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> bool {
+    if config.mode() != "m3" { return true; }
+    let mut direct = std::collections::HashSet::new();
+    let mut automatic = 0;
+    for (worker, seat) in in_round(team, round).filter(|(worker, seat)| counts(worker, seat)) {
+        let Some(binding) = worker.reviewer_binding.as_ref() else { return false };
+        match binding.reviewer_bot_id.as_deref() {
+            Some(bot_id) if config.reviewer_bot_ids.iter().any(|id| id == bot_id)
+                && direct.insert(bot_id) => {}
+            None => automatic += 1,
+            _ => return false,
+        }
+    }
+    direct.len() == config.reviewer_bot_ids.len() && automatic == config.automatic_reviewers
+}
+
 /// S3 may reserve adversarial reviewers only after a genuinely settled,
 /// unchanged first wave. Native issued-grant and report checks still run at
 /// dispatch; this snapshot preflight must never treat a model score as proof.
@@ -1655,6 +1675,7 @@ fn s3_phase_one_preflight(team: &TeamSnapshot, config: &CouncilConfig, view: &Ro
         && !severe_findings(team, 1)
         && !reported_conflicts(team, 1)
         && independent_review_attempts(team, 1)
+        && m3_sources_match(team, config, 1)
         && in_round(team, 1)
             .filter(|(worker, seat)| counts(worker, seat))
             .all(|(worker, seat)| worker.read_only && worker.status == "completed"
@@ -2165,6 +2186,8 @@ fn two_phase_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view: &Round
     }
     if view.latest != 2 || !view.complete(1) || !view.complete(2)
         || stale(team, 1) || stale(team, 2)
+        || !m3_sources_match(team, config, 1)
+        || !m3_sources_match(team, config, 2)
     {
         return false;
     }

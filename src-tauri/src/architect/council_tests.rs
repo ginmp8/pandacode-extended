@@ -2965,6 +2965,30 @@ fn mixed_two_phase_revalidates_both_native_reviewer_rounds_before_approval() {
         team.workers.extend([direct, automatic]);
     }
     assert_eq!(council::status(&team).unwrap().state, "passed");
+    // M3/S3 must not treat swapped, missing, or foreign reviewer sources
+    // as a valid two-phase quorum, even when all numeric scores are high.
+    for (label, worker_index, selected_bot) in [
+        ("missing phase-one direct", 0usize, None),
+        ("duplicate phase-one direct", 1, Some("selected-reviewer")),
+        ("missing phase-two direct", 2, None),
+        ("duplicate phase-two direct", 3, Some("selected-reviewer")),
+        ("foreign phase-two bot", 2, Some("foreign-reviewer")),
+    ] {
+        let mut forged = team.clone();
+        forged.workers[worker_index].reviewer_binding.as_mut().unwrap().reviewer_bot_id =
+            selected_bot.map(|id| id.to_string());
+        assert_ne!(council::status(&forged).unwrap().state, "passed",
+            "{label} must not satisfy an M3 native S3 reviewer source");
+        assert!(finish_refusal(&forged).is_some(),
+            "{label} must keep the terminal gate closed");
+    }
+    let mut first_phase = team.clone();
+    first_phase.workers.retain(|worker| worker.council.as_ref()
+        .is_some_and(|seat| seat.round == 1));
+    assert_eq!(council::status(&first_phase).unwrap().state, "dispatch");
+    first_phase.workers[0].reviewer_binding.as_mut().unwrap().reviewer_bot_id = None;
+    assert_ne!(council::status(&first_phase).unwrap().state, "dispatch",
+        "an M3 source-less first phase must not advertise S3 challenge admission");
     for worker in &team.workers {
         reviewer_security::record_native_authority(
             &store, &sid, worker.reviewer_binding.as_ref().unwrap(),

@@ -33,6 +33,7 @@ export function createCouncilCriteriaEditor(
       '<label>Minimum score<input data-criterion-target type="number" min="1" max="10" step="0.1" value="' + escape(String(item.target)) + '"></label>' +
       '<label><input data-criterion-required type="checkbox"' + (item.required ? ' checked' : '') + '> Required criterion</label>' +
       '<label><input data-criterion-evidence type="checkbox"' + (item.evidenceRequired ? ' checked' : '') + '> Require native evidence (blocks until verified)</label>' +
+      (item.nativeEvidence ? '<small class="council-native-check">Native evidence check: ' + escape(item.nativeEvidence.kind) + ' (locked in this editor)</small>' : '') +
       '<button data-criteria-remove type="button" class="ds-btn">Remove criterion</button>';
     rows.append(row);
     return row;
@@ -70,10 +71,14 @@ export function createCouncilCriteriaEditor(
     if (!config) { error('Turn Council on before applying task-scoped review criteria.'); return; }
     const mode = source.value as CouncilCriteriaSource;
     if (mode === 'architect') {
+      if (config.criteria?.some(item => item.nativeEvidence)) {
+        error('Native evidence checks cannot be removed in this editor. Keep the task criteria or explicitly reconfigure the native Council policy.');
+        return;
+      }
       save({ ...config, criteriaSource: undefined, criteria: undefined });
       return;
     }
-    const criteria = [...rows.querySelectorAll<HTMLElement>('[data-criterion-row]')].map(row => ({
+    const criteria: CouncilCriterion[] = [...rows.querySelectorAll<HTMLElement>('[data-criterion-row]')].map(row => ({
       id: row.querySelector<HTMLInputElement>('[data-criterion-id]')!.value.trim(),
       lens: row.querySelector<HTMLInputElement>('[data-criterion-lens]')!.value.trim(),
       target: Number(row.querySelector<HTMLInputElement>('[data-criterion-target]')!.value),
@@ -87,6 +92,18 @@ export function createCouncilCriteriaEditor(
       || new Set(ids).size !== ids.length || new Set(lenses).size !== lenses.length) {
       error('Use unique criterion IDs and lenses, targets from 1 to 10, and at least one required criterion.');
       return;
+    }
+    // Applying the staged editor must not silently erase pinned native checks.
+    // Preserve only checks with the same immutable ID/lens and mandatory gates;
+    // an intentional policy replacement belongs to a separate native change.
+    for (const existing of config.criteria ?? []) {
+      if (!existing.nativeEvidence) continue;
+      const next = criteria.find(item => item.id === existing.id);
+      if (!next || next.lens !== existing.lens || !next.required || !next.evidenceRequired) {
+        error('Native evidence checks cannot be changed or removed in this editor. Keep the criterion ID, lens and required evidence, or explicitly reconfigure the native Council policy.');
+        return;
+      }
+      next.nativeEvidence = existing.nativeEvidence;
     }
     save({ ...config, criteriaSource: mode, criteria });
   });

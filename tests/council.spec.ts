@@ -12,7 +12,7 @@ type ReviewerFixture = { ids: string[]; bots: { id: string; name: string; role: 
 test.setTimeout(60_000);
 
 /** Records every architect_set_council; `refuse` makes the mock refuse a command, like a native error. */
-async function open(page: Page, url = '/', refuse: Record<string, string> = {}, delay = 0, delaySession = '', slow: Record<string, number> = {}, reviewers?: ReviewerFixture, inspection?: object | null, recovery?: 'eligible' | 'denied'): Promise<void> {
+async function open(page: Page, url = '/', refuse: Record<string, string> = {}, delay = 0, delaySession = '', slow: Record<string, number> = {}, reviewers?: ReviewerFixture, inspection?: object | null, recovery?: 'eligible' | 'denied', criteriaPreset?: object): Promise<void> {
   await page.route('**/src/preview.ts*', async route => {
     const response = await route.fetch();
     const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/, `
@@ -30,6 +30,10 @@ async function open(page: Page, url = '/', refuse: Record<string, string> = {}, 
       }
       if (command === 'architect_council_reviewer_options' && ${Boolean(reviewers)}) return ${JSON.stringify(reviewers?.bots ?? [])};
       if (command === 'architect_council_inspect' && ${inspection !== undefined}) return ${JSON.stringify(inspection ?? null)};
+      if (command === 'architect_get' && ${Boolean(criteriaPreset)}) {
+        const team = architect.get(args.sessionId);
+        if (team?.config.council) return { ...team, config: { ...team.config, council: { ...team.config.council, ...${JSON.stringify(criteriaPreset ?? {})} } } };
+      }
       if (command === 'architect_get' && ${Boolean(recovery)}) {
         const current = architect.get(args.sessionId);
         if (current?.config.council) return {
@@ -1086,6 +1090,42 @@ test('Council criteria editor saves task-scoped user criteria without altering l
   await panel(page).getByRole('button', { name: 'Review criteria' }).click();
   await expect(panel(page).getByLabel('Criteria source')).toHaveValue('user');
   await expect(panel(page).getByLabel('Review lens')).toHaveValue('Security');
+});
+
+test('Council criteria editor preserves pinned native checks and refuses silent evidence removal', async ({ page }) => {
+  const nativeEvidence = { kind: 'reviewed_file_text_contains', path: 'policy.txt', expectedText: 'feature: enabled', skillId: '' };
+  await open(page, '/?council', {}, 0, '', {}, undefined, undefined, undefined, {
+    criteriaSource: 'user',
+    criteria: [{
+      id: 'policy', lens: 'File contains: policy.txt', required: true, target: 9.5,
+      evidenceRequired: true, nativeEvidence,
+    }],
+  });
+  await button(page).click();
+  const criteria = panel(page).getByRole('region', { name: 'Task review criteria' });
+  await criteria.getByRole('button', { name: 'Review criteria' }).click();
+  await expect(criteria.getByText('Native evidence check: reviewed_file_text_contains (locked in this editor)')).toBeVisible();
+  await criteria.getByLabel('Require native evidence (blocks until verified)').uncheck();
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect(panel(page).getByRole('alert')).toContainText('Native evidence checks cannot be changed or removed');
+  expect(await calls(page)).toEqual([]);
+
+  await criteria.getByLabel('Require native evidence (blocks until verified)').check();
+  await criteria.getByLabel('Review lens').fill('Security');
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect(panel(page).getByRole('alert')).toContainText('Native evidence checks cannot be changed or removed');
+  expect(await calls(page)).toEqual([]);
+
+  await criteria.getByLabel('Review lens').fill('File contains: policy.txt');
+  await criteria.getByLabel('Minimum score').fill('9.8');
+  await criteria.getByRole('button', { name: 'Apply review criteria' }).click();
+  await expect.poll(async () => (await calls(page)).length).toBe(1);
+  const saved = (await calls(page))[0];
+  expect(saved.criteriaSource).toBe('user');
+  expect(saved.criteria[0]).toEqual({
+    id: 'policy', lens: 'File contains: policy.txt', required: true, target: 9.8,
+    evidenceRequired: true, nativeEvidence,
+  });
 });
 
 test('Council criteria editor rejects duplicate lenses atomically and supports hybrid anchors', async ({ page }) => {

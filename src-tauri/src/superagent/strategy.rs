@@ -379,7 +379,7 @@ mod tests {
         ).is_err());
         // The same native checkout lease protects Full Access Workers.
         assert!(super::super::guard_run_admission(
-            &store,&task,&[ordinary.id.clone()],
+            &store,&task,std::slice::from_ref(&ordinary.id),
         ).is_err());
         assert!(super::super::guard_cloud_attach(&store,&task).is_err());
         assert!(super::super::guard_cloud_attach(&store,&ordinary.id).is_ok());

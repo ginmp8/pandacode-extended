@@ -518,7 +518,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '</dd></dl><p>Git digests are snapshots, not task-attributed commits or delivery approval.</p>'
         : '<p>Not inspected for this Ticket.</p>') + '</section>';
     const demandPlanPanel = '<section class="sa-pane" role="region" aria-label="Demand WorkItems">' +
-      '<h5>Native dependency plan</h5><p>Each Worker uses its original bot/chat permission mode. Full Access needs no separate file or test permission. Native Council review is optional; human acceptance applies only to With Approval.</p> +
+      '<h5>Native dependency plan</h5><p>Each Worker uses its original bot/chat permission mode. Full Access needs no separate file or test permission. Native Council review is optional; human acceptance applies only to With Approval.</p>' +
       '<button type="button" data-sa-load-work-plan>Inspect WorkItems</button>' +
       (workPlanLoaded && workPlan?.ticketId === inspectedTicket
         ? '<p role="status">Plan ' + safe(workPlan.state) +

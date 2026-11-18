@@ -362,6 +362,19 @@ fn snapshot_hash(db:&rusqlite::Connection,root:&str,checkout:&Path)->Result<Stri
     Ok(format!("{:x}",sha.finalize()))
 }
 
+/// A persisted "passed" label is not an executed test receipt. A native
+/// zero-exit process must have a completed attempt and bounded result digests;
+/// interrupted or partially written rows cannot satisfy Full Auto delivery.
+fn completed_passing_test_receipt(
+    state:&str,started:i64,finished:Option<i64>,exit:Option<i32>,
+    stdout:Option<&str>,stderr:Option<&str>,
+)->bool {
+    let valid_digest=|value:Option<&str>|value.is_some_and(|hash|
+        hash.len()==64 && hash.bytes().all(|byte|byte.is_ascii_hexdigit()));
+    state=="passed" && started>0 && finished.is_some_and(|end|end>=started)
+        && exit==Some(0) && valid_digest(stdout) && valid_digest(stderr)
+}
+
 /// True only for an executed passing test against the current plan/checkout.
 pub(in crate::superagent) fn verified(db:&rusqlite::Connection,root:&str)->Result<bool> {
     // A named receipt avoids a fragile positional eight-string tuple.
@@ -369,11 +382,14 @@ pub(in crate::superagent) fn verified(db:&rusqlite::Connection,root:&str)->Resul
         checkout:String,command:String,manifest:String,
         run_plan:String,snapshot:String,current_plan:String,
         state:String,worker_proofs:String,
+        started_at:i64,finished_at:Option<i64>,exit_code:Option<i32>,
+        stdout_sha256:Option<String>,stderr_sha256:Option<String>,
     }
     let row:Option<VerifiedTestRow>=db.query_row(
         "SELECT grant.checkout_root,grant.command,grant.manifest_sha256,
            run.plan_sha256,run.snapshot_sha256,plan.plan_sha256,run.state,
-           run.worker_proofs_sha256
+           run.worker_proofs_sha256,run.started_at,run.finished_at,
+           run.exit_code,run.stdout_sha256,run.stderr_sha256
          FROM sa_demand_test_grants grant
          JOIN sa_demand_plans plan ON plan.ticket_id=grant.ticket_id
          JOIN sa_demand_test_runs run ON run.ticket_id=grant.ticket_id
@@ -382,10 +398,16 @@ pub(in crate::superagent) fn verified(db:&rusqlite::Connection,root:&str)->Resul
             checkout:r.get(0)?,command:r.get(1)?,manifest:r.get(2)?,
             run_plan:r.get(3)?,snapshot:r.get(4)?,current_plan:r.get(5)?,
             state:r.get(6)?,worker_proofs:r.get(7)?,
+            started_at:r.get(8)?,finished_at:r.get(9)?,exit_code:r.get(10)?,
+            stdout_sha256:r.get(11)?,stderr_sha256:r.get(12)?,
         }),
     ).optional().map_err(|e|e.to_string())?;
     let Some(row)=row else {return Ok(false)};
-    if row.state!="passed" || row.run_plan!=row.current_plan {return Ok(false);}
+    if row.run_plan!=row.current_plan ||
+        !completed_passing_test_receipt(
+            &row.state,row.started_at,row.finished_at,row.exit_code,
+            row.stdout_sha256.as_deref(),row.stderr_sha256.as_deref(),
+        ) {return Ok(false);}
     let path=Path::new(&row.checkout);
     if !std::fs::canonicalize(path).is_ok_and(|p|p==path) {return Ok(false);}
     Ok(manifest_hash(path,&row.command).ok().as_deref()==Some(row.manifest.as_str())
@@ -567,8 +589,15 @@ fn bounded_test_timeout(now_ms:i64,expires_at_ms:i64)->Option<Duration> {
 /// read-only connection while a test child is running. Stop, expiry, policy
 /// changes and failed DB reads all cancel the live process group.
 fn test_effect_live(db:&rusqlite::Connection,job:&Reserved)->bool {
+    test_effect_live_with_pause(db,job,crate::feature_controls::get().bots_paused)
+}
+
+fn test_effect_live_with_pause(db:&rusqlite::Connection,job:&Reserved,paused:bool)->bool {
     let now=storage::now();
-    if now>=job.expires {return false;}
+    // A user pause applies to an already-running test process, not only the
+    // next scheduler tick. run_process_guarded rechecks this predicate and
+    // kills the sandboxed child process group when pause/revocation is seen.
+    if paused || now>=job.expires {return false;}
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sa_tickets root
           JOIN sa_mandates m ON m.ticket_id=root.id
@@ -1265,6 +1294,28 @@ mod tests {
     }
 
     #[test]
+    fn passing_test_requires_a_finished_zero_exit_and_complete_digest_receipts() {
+        let sha=digest(b"captured output");
+        assert!(completed_passing_test_receipt(
+            "passed",10,Some(10),Some(0),Some(&sha),Some(&sha)));
+        for (state,start,end,exit,stdout,stderr) in [
+            ("running",10,Some(11),Some(0),Some(sha.as_str()),Some(sha.as_str())),
+            ("failed",10,Some(11),Some(0),Some(sha.as_str()),Some(sha.as_str())),
+            ("passed",0,Some(11),Some(0),Some(sha.as_str()),Some(sha.as_str())),
+            ("passed",10,None,Some(0),Some(sha.as_str()),Some(sha.as_str())),
+            ("passed",11,Some(10),Some(0),Some(sha.as_str()),Some(sha.as_str())),
+            ("passed",10,Some(11),Some(1),Some(sha.as_str()),Some(sha.as_str())),
+            ("passed",10,Some(11),None,Some(sha.as_str()),Some(sha.as_str())),
+            ("passed",10,Some(11),Some(0),None,Some(sha.as_str())),
+            ("passed",10,Some(11),Some(0),Some(sha.as_str()),Some("corrupt")),
+        ] {
+            assert!(!completed_passing_test_receipt(
+                state,start,end,exit,stdout,stderr),
+                "Incomplete native test evidence must not verify a Demand");
+        }
+    }
+
+    #[test]
     fn demand_test_deadline_uses_milliseconds_without_expanding_authority() {
         let now=1_700_000_000_000_i64;
         assert_eq!(bounded_test_timeout(now,now),None);
@@ -1353,7 +1404,9 @@ mod tests {
             manifest:"hash".into(),snapshot:"snapshot".into(),
             expires,plan:"plan".into(),db_path:std::path::PathBuf::new(),
         };
-        assert!(test_effect_live(&db,&job));
+        assert!(test_effect_live_with_pause(&db,&job,false));
+        assert!(!test_effect_live_with_pause(&db,&job,true),
+            "Pausing bots must invalidate a running native test effect");
         db.execute("UPDATE sa_mandates SET revoked=1",[]).unwrap();
         assert!(!test_effect_live(&db,&job));
         db.execute("UPDATE sa_mandates SET revoked=0",[]).unwrap();

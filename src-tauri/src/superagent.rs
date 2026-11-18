@@ -1570,6 +1570,30 @@ pub(crate) fn list_headless_recovery_inbox_page(
                           LEFT JOIN sessions live ON live.id=a.session_id
                           WHERE a.ticket_id=t.id AND a.state='running'
                             AND live.id IS NULL)
+                      -- The recovery index must find an active provider whose
+                      -- task-owned channel binding was deleted or remapped.
+                      -- Native read_only_policy already refuses this session;
+                      -- otherwise the read-only inbox incorrectly appears clear.
+                      OR NOT EXISTS(
+                        SELECT 1 FROM sa_assignments a
+                        JOIN bot_threads thread ON thread.session_id=a.session_id
+                          AND thread.bot_id=a.bot_id AND thread.channel_id=?6
+                        WHERE a.id=t.active_assignment_id AND a.ticket_id=t.id
+                          AND a.state='running'
+                          AND (
+                            (a.attempt=1 AND thread.external_id=t.id)
+                            OR (a.attempt=1 AND thread.external_id=t.id || ':attempt:1'
+                                AND EXISTS(SELECT 1 FROM sa_audit initial
+                                  WHERE initial.ticket_id=t.id AND initial.kind='admitted'
+                                    AND initial.detail IN ('blocked: worker occupied',
+                                      'blocked: explicit headless staging'))
+                                AND EXISTS(SELECT 1 FROM sa_audit retry
+                                  WHERE retry.ticket_id=t.id AND retry.kind='manual_retry'))
+                            OR (a.attempt>1 AND
+                                thread.external_id=t.id || ':attempt:' || a.attempt)
+                            OR (a.attempt>1 AND
+                                thread.external_id=t.id || ':worker:' || a.attempt)
+                          ))
                       OR (SELECT COUNT(*) FROM sa_assignments a
                           WHERE a.ticket_id=t.id AND a.state='running')<>1
                       OR NOT EXISTS(SELECT 1 FROM sa_assignments a
@@ -1613,7 +1637,7 @@ pub(crate) fn list_headless_recovery_inbox_page(
              LIMIT 201",
         ).map_err(|e| e.to_string())?;
         let rows = stmt.query_map(
-            params![observed_at,cutoff,before_priority,before_updated_at,before_id],
+            params![observed_at,cutoff,before_priority,before_updated_at,before_id,CHANNEL],
             |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?)),
         ).map_err(|e| e.to_string())?;
         rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
@@ -5386,6 +5410,65 @@ mod tests {
             "SELECT state FROM sa_assignments WHERE ticket_id=?1",
             [&ticket.id], |row| row.get::<_, String>(0)
         ).unwrap(), "running");
+    }
+
+    #[test]
+    fn headless_recovery_inbox_detects_detached_task_thread_before_watchdog() {
+        for fault in ["missing_thread", "remapped_identity"] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &cfg.id, "Private detached task thread objective",
+                "recovery-task-thread", false,
+            ).unwrap();
+            assert!(launched);
+            let session = assignment_session(&store, &ticket.id).unwrap().unwrap();
+            assert!(matches!(read_only_policy(&store, &session), Ok(Some(_))));
+            let path = store.path.clone();
+            let before: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            assert!(before["items"].as_array().unwrap().is_empty(), "{fault}");
+            let audit_count = history(&store, &ticket.id, 100).unwrap().len();
+
+            let changed = match fault {
+                "missing_thread" => store.db.execute(
+                    "DELETE FROM bot_threads WHERE session_id=?1 AND channel_id=?2",
+                    params![&session, CHANNEL],
+                ).unwrap(),
+                "remapped_identity" => store.db.execute(
+                    "UPDATE bot_threads SET external_id='unrelated-task'
+                     WHERE session_id=?1 AND channel_id=?2",
+                    params![&session, CHANNEL],
+                ).unwrap(),
+                _ => unreachable!(),
+            };
+            assert_eq!(changed, 1, "{fault}");
+            assert!(read_only_policy(&store, &session).is_err(), "{fault}");
+
+            let found: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            assert_eq!(found["items"].as_array().unwrap().len(), 1, "{fault}");
+            assert_eq!(found["items"][0]["ticketId"], ticket.id, "{fault}");
+            assert_eq!(found["items"][0]["recovery"]["assignmentStateConsistent"], true);
+            assert_eq!(found["items"][0]["recovery"]["activeNativeReadOnlyAdmissionValid"], false);
+            assert_eq!(found["items"][0]["recovery"]["nextOperatorAction"],
+                "stop_or_quarantine_revoked_native_execution");
+            assert_eq!(found["items"][0]["recovery"]["automaticReplayAllowed"], false);
+            assert_eq!(found["automaticRecoveryPerformed"], false);
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "running");
+            assert_eq!(history(&store, &ticket.id, 100).unwrap().len(), audit_count);
+            drop(store);
+
+            let reopened = Store::open_read_only(&path).unwrap();
+            assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "running");
+            let again: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            assert_eq!(again["items"][0]["ticketId"], ticket.id);
+            assert!(!again.to_string().contains("Private detached task thread objective"));
+        }
     }
 
     #[test]

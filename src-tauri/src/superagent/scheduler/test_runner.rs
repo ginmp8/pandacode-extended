@@ -131,7 +131,7 @@ fn digest(bytes:&[u8])->String {format!("{:x}",Sha256::digest(bytes))}
 
 /// Fixed command vectors only. Cargo is locked/offline. The npm command runs
 /// the project's explicitly confirmed test script, never model-provided argv.
-pub(super) fn manifest_hash(root:&Path,command:&str)->Result<String> {
+pub(in crate::superagent) fn manifest_hash(root:&Path,command:&str)->Result<String> {
     let name=match command {
         "npm test"=>"package.json","cargo test"=>"Cargo.toml",
         _=>return Err("Only npm test or cargo test is supported.".into()),
@@ -179,7 +179,7 @@ pub(super) fn replay_matches(db:&rusqlite::Connection,team:&str,key:&str,
 
 /// Parameters already confirmed by the local-user consent. Keep the complete
 /// native test grant together so callers cannot accidentally permute scope.
-pub(super) struct TestGrant<'a> {
+pub(in crate::superagent) struct TestGrant<'a> {
     pub team_version:i64,
     pub policy_revision:i64,
     pub project_id:&'a str,
@@ -189,7 +189,7 @@ pub(super) struct TestGrant<'a> {
 }
 
 /// Called only from trusted main-window admission AFTER the one-time dialog.
-pub(super) fn issue(store:&Store,id:&str,grant:TestGrant<'_>)->Result<()> {
+pub(in crate::superagent) fn issue(store:&Store,id:&str,grant:TestGrant<'_>)->Result<()> {
     let TestGrant{
         team_version,policy_revision:policy,project_id:project,
         checkout_root:checkout,command,manifest_sha256:hash,

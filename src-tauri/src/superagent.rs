@@ -2079,7 +2079,7 @@ pub(crate) fn inspect_headless_team_roster(
         "policyRevision":config.policy_revision,
         "enabled":config.enabled,
         "members":members,
-        "manualSingleWorkerTopology":roster.execution_ready,
+        "manualSingleWorkerTopology":roster.worker_bot_ids.len() == 1 && roster.execution_ready,
         "multiRoleExecutionAvailable":false,
         "allowedTools":[],
         "allowedSideEffects":false,
@@ -5107,7 +5107,7 @@ fn update_configuration_roles_with_policy(
     let council_required = !reviewer_bot_ids.is_empty();
     // A versioned Team edit affects future Tickets only. Existing Ticket
     // snapshots, mandates, Council cycles and exact grants remain immutable.
-    // Primary identities and checkout cannot change once history exists.
+    // Coordinator and checkout changes are restricted after historic admission.
     let name = input.name.trim();
     if name.is_empty() || name.len()>120 || name.chars().any(char::is_control) {
         return Err("Choose a valid orchestration name of at most 120 characters.".into());
@@ -5136,7 +5136,7 @@ fn update_configuration_roles_with_policy(
         "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
         [id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
-    // Changing Worker list order does not change execution authority.
+    // Versioned Workers are peers, with no specially privileged first Worker.
     let primary_changed = current.coordinator_bot_id != coordinator.id;
     if has_history && current.project_id != project_id {
         return Err("Historical Tickets prevent changing the Team's checkout project.".into());
@@ -9660,7 +9660,7 @@ mod tests {
     }
 
     #[test]
-    fn unsettled_effect_blocks_primary_rebinding_even_after_ticket_stop() {
+    fn unsettled_effect_blocks_coordinator_rebinding_even_after_ticket_stop() {
         let mut store = fixture();
         let enabled_team = enabled(&store);
         let (ticket, _) = admit(&mut store, &enabled_team.id,
@@ -9678,12 +9678,12 @@ mod tests {
         ).unwrap();
         let proposed = NewOrchestration {
             name: "Updated future Team".into(),
-            coordinator_bot_id: "router".into(),
-            worker_bot_id: "worker-two".into(),
+            coordinator_bot_id: "worker-two".into(),
+            worker_bot_id: "worker".into(),
         };
         let err = update_configuration_roles_with_policy(
             &store, &disabled.id, disabled.policy_revision, &proposed,
-            vec!["worker-two".into()], Vec::new(), false,
+            vec!["worker".into()], Vec::new(), false,
         ).unwrap_err();
         assert!(err.contains("unsettled Demand"), "{err}");
         assert_eq!(configuration(&store, &disabled.id).unwrap().worker_bot_id, "worker");
@@ -9707,6 +9707,7 @@ mod tests {
     fn settled_native_history_can_rotate_future_roles_without_rebinding_old_ticket() {
         let mut store = fixture();
         add_worker(&store, "worker-two");
+        add_worker(&store, "lead-two");
         let initial = enabled(&store);
         let (old_ticket, launched) = admit(&mut store, &initial.id,
             "Original Demand", "settled-role-original", false).unwrap();
@@ -9715,7 +9716,7 @@ mod tests {
         stop(&store, &old_ticket.id).unwrap();
         let proposed = NewOrchestration {
             name: "Rotated reusable Team".into(),
-            coordinator_bot_id: "router".into(),
+            coordinator_bot_id: "lead-two".into(),
             worker_bot_id: "worker-two".into(),
         };
         assert!(update_configuration_roles_with_policy(
@@ -9769,6 +9770,7 @@ mod tests {
         assert!(!dispatched, "a busy worker must not start an external runtime");
         let admitted = ticket_team_snapshot(&reopened, &new_ticket.id).unwrap();
         assert_eq!(admitted.worker_bot_ids[0], "worker-two");
+        assert_eq!(admitted.coordinator_bot_id, "lead-two");
         assert_eq!(ticket_team_snapshot(&reopened, &old_ticket.id).unwrap(), historical);
     }
 
@@ -9984,7 +9986,7 @@ mod tests {
         let snapshot=ticket_team_snapshot(&store,&ticket.id).unwrap();
         assert_eq!(snapshot.team_version,active.team_version);
         assert_eq!(snapshot.worker_bot_ids,vec!["worker","worker-2"]);
-        assert_eq!(snapshot.reviewer_bot_ids,vec!["reviewer"]);
+        assert_eq!(snapshot.reviewer_bot_ids,vec!["reviewer","reviewer-two"]);
         assert_eq!(snapshot.policy.autonomy,"off");
         assert_eq!(snapshot.policy.max_concurrent_tasks,1);
         assert!(snapshot.policy.council_enabled);
@@ -10019,7 +10021,7 @@ mod tests {
     }
 
     #[test]
-    fn orchestration_with_ticket_history_rejects_team_edits_and_blocks_deletion() {
+    fn orchestration_with_unsettled_history_rejects_coordinator_rebinding_and_deletion() {
         let mut store=fixture();
         let config=enabled(&store);
         let (ticket,_)=admit(&mut store,&config.id,"Immutable history","policy-guard",false).unwrap();
@@ -10027,7 +10029,7 @@ mod tests {
         let disabled=change_enabled(&store,&config.id,config.policy_revision,false).unwrap();
         add_worker(&store,"worker-2");
         let input=NewOrchestration {
-            name:"Future Team".into(),coordinator_bot_id:"router".into(),worker_bot_id:"worker-2".into(),
+            name:"Future Team".into(),coordinator_bot_id:"worker-2".into(),worker_bot_id:"worker".into(),
         };
         assert!(update_configuration(&store,&config.id,disabled.policy_revision,&input).is_err());
         let after=configuration(&store,&config.id).unwrap();

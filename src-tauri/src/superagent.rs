@@ -9957,7 +9957,7 @@ mod tests {
         for id in ["worker-2","reviewer","reviewer-two"] {
             store.db.execute(
                 "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
-                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)"
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
                 params![id,storage::now()],
             ).unwrap();
         }

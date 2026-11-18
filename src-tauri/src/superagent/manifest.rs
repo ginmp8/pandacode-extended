@@ -409,6 +409,12 @@ fn export(store: &Store) -> Result<serde_json::Value> {
     if serde_json::to_vec(&document).map_err(|e| e.to_string())?.len() > MAX_BYTES {
         return Err("SuperAgent export exceeds the 1 MB portable manifest limit.".into());
     }
+    // This document doubles as a private import backup. Check the exact
+    // native import contract before reporting that it can be restored: paused
+    // roles, unsupported harnesses and changed bot identities cannot silently
+    // produce a backup that the same installation is unable to import.
+    resolve(store, &document).map_err(|issue|
+        format!("SuperAgent export cannot be restored with the current bots: {issue}"))?;
     Ok(document)
 }
 
@@ -781,6 +787,39 @@ mod tests {
             [], |row| Ok((row.get(0)?,row.get(1)?)),
         ).unwrap();
         assert_eq!((enabled, revision), (0, 1));
+    }
+
+    #[test]
+    fn portable_export_requires_importable_member_profiles_without_changing_team_state() {
+        let store = fixture();
+        apply(&store, &document("Portable profile Team"), true).unwrap();
+        let valid = export(&store).unwrap();
+        assert_eq!(preview(&store, &valid).unwrap().unchanged, vec!["Portable profile Team"]);
+
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        let paused = export(&store).unwrap_err();
+        assert!(paused.contains("Paused primary"), "{paused}");
+        store.db.execute("UPDATE bots SET paused=0 WHERE id='worker'", []).unwrap();
+
+        store.db.execute("UPDATE bots SET provider='unsupported-harness' WHERE id='router'", [])
+            .unwrap();
+        let unsupported = export(&store).unwrap_err();
+        assert!(unsupported.contains("Unsupported portable primary"), "{unsupported}");
+        store.db.execute("UPDATE bots SET provider='codex' WHERE id='router'", []).unwrap();
+
+        let restored = export(&store).unwrap();
+        assert_eq!(restored, valid);
+        assert_eq!(preview(&store, &restored).unwrap().unchanged,
+            vec!["Portable profile Team"]);
+        let count: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(count, 0, "Export validation must never admit tasks");
+        let unchanged: (i64, i64) = store.db.query_row(
+            "SELECT enabled,policy_revision FROM sa_orchestrations WHERE name='Portable profile Team'",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(unchanged, (0, 1), "Failed export must not rewrite Team policy");
     }
 
     #[test]

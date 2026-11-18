@@ -4123,6 +4123,17 @@ mod tests {
         observe(&store,&event("verified-501",&observed,501)).unwrap();
         link_thread(&store,&observed.id,"ticket-one","issue:42").unwrap();
         link_thread(&store,&other.id,"ticket-one","issue:42").unwrap();
+        assert_eq!(linked_decisions(&store,"ticket-one",50).unwrap().len(),1,
+            "Unattested source names cannot correlate receipts across event classes");
+        // Both sources must independently attest the same GitHub repository
+        // before removing a direct link can fall back to another explicit link.
+        for selected in [&observed, &other] {
+            store.db.execute(
+                "INSERT INTO sa_source_repository_identity
+                 (source_id,repository_id,attested_at) VALUES(?1,101,?2)",
+                params![&selected.id,storage::now()],
+            ).unwrap();
+        }
         assert_eq!(linked_decisions(&store,"ticket-one",50).unwrap().len(),1);
         assert!(unlink_thread(&store,&observed.id,"ticket-two","issue:42").is_err());
         assert!(unlink_thread(&store,&observed.id,"ticket-one","pull:42").is_err());

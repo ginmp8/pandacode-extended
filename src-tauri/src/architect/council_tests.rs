@@ -4716,6 +4716,17 @@ fn paused_started_child_recovery_revokes_partial_transcripts_and_reissues_native
             "UPDATE sessions SET status='interrupted' WHERE id=?1",
             [&old_child],
         ).unwrap();
+        // A provider may independently crash after Pause and persist an
+        // interrupted/error leaf session even when its worker is stopped.
+        // Recovery must revoke, never Resume or count, either old session.
+        store.db.execute(
+            "UPDATE sessions SET status='interrupted' WHERE id=?1",
+            [&old_leaves[0]],
+        ).unwrap();
+        store.db.execute(
+            "UPDATE sessions SET status='error' WHERE id=?1",
+            [&old_leaves[1]],
+        ).unwrap();
         // A completed result, even with stopped status, cannot be treated as
         // unfinished work or downgraded to permit a replacement.
         child.workers[0].council.as_mut().unwrap().score = Some(9.5);

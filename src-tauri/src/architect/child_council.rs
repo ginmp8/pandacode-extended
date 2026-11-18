@@ -222,7 +222,7 @@ fn read(store: &Store, root: &TeamSnapshot, child: &CouncilNestedReviewer) -> Re
         return Err("child_council_stale: reserved child task description changed.".into());
     }
     if stored.status == "running" {
-        validate_admitted(store, root, child, &record, &stored)?;
+        validate_admitted(store, root, child, &record, &stored, false)?;
         return Ok(Some(record));
     }
     let pending_native_requests: i64 = store.db.query_row(
@@ -547,7 +547,7 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
             // permission-bearing Resume of the old child.
             let mut admission_root = root.clone();
             admission_root.generation = old_team.generation;
-            validate_admitted(store, &admission_root, choice, &previous, &old_team)
+            validate_admitted(store, &admission_root, choice, &previous, &old_team, true)
                 .map_err(|reason| format!("child_council_recovery_denied: invalid admitted leaf roster ({reason})."))?;
         }
         let claims: i64 = store.db.query_row(
@@ -733,6 +733,7 @@ pub(super) fn stop_leaves(
 fn validate_admitted(
     store: &Store, root: &TeamSnapshot, choice: &CouncilNestedReviewer,
     record: &FrozenChildReservation, team: &TeamSnapshot,
+    allow_revoked_leaf_session: bool,
 ) -> Result<()> {
     let invalid = || "child_council_stale: native leaf admission no longer matches its frozen task.";
     if team.status != "running" || team.generation != root.generation
@@ -770,7 +771,17 @@ fn validate_admitted(
         // A persisted running worker is not authority to resume an interrupted
         // or failed native session after restart. Reject before any callback,
         // sibling launch, composite receipt or root approval.
-        if matches!(session.status.as_str(), "interrupted" | "error") {
+        // Interrupted provider sessions are never eligible for ordinary review,
+        // launch, callbacks or Resume. Only explicit recovery of a fully
+        // stopped, unscored first wave under a paused root may inspect their
+        // original native grants before permanently detaching those sessions.
+        if matches!(session.status.as_str(), "interrupted" | "error")
+            && !(allow_revoked_leaf_session && root.status == "paused"
+                && matches!(leaf.status.as_str(), "queued" | "stopped")
+                && leaf.council.as_ref().is_some_and(|seat|
+                    seat.round == 1 && seat.score.is_none())
+                && !leaf.reported && !leaf.abandoned)
+        {
             return Err("child_council_revoked: native leaf session was interrupted or failed.".into());
         }
         if !ids.insert(&leaf.id) || !sessions.insert(&leaf.session_id)

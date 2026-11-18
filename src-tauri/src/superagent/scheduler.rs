@@ -287,7 +287,7 @@ fn manual_demand_mandate_current(
 /// Bind an explicit local confirmation to the already issued read-only
 /// Coordinator Ticket. No model callback or imported Team can call this path.
 /// Failure is fail-closed: the caller must not deliver the Coordinator turn.
-fn issue_initial_demand_write_scope(
+pub(in crate::superagent) fn issue_initial_demand_write_scope(
     store:&Store,ticket_id:&str,allowed_paths:&[String],
     expected_team_version:i64,expected_policy_revision:i64,
     expected_project_id:&str,

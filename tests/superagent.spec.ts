@@ -69,7 +69,7 @@ test('Orchestrations keeps the reference page and five-step wizard layout', asyn
  * effect is performed; every mutation is recorded so incorrect dispatch fails. */
 async function mountNativeFixture(page: Page, options: {
   reviewers?: number; council?: boolean; mode?: 'approval'|'full'|'off'; enabled?: boolean;
-  withTicket?: boolean; ticketState?: string;
+  withTicket?: boolean; ticketState?: string; blockedHasPlan?: boolean; revoked?: boolean;
 }={}) {
   await page.evaluate(async opts => {
     const {mountSuperagent}=await import('/src/superagent-ui.ts');
@@ -130,7 +130,7 @@ async function mountNativeFixture(page: Page, options: {
       if(!entry)throw Error('No native Ticket matches the requested identity');
       return {ticket:entry,
         mandate:{actor:'local-user',authorizationId:'fixture',policyRevision:cfg.policyRevision,
-          projectId:'project-1',expiresAt:Date.now()+100000,revoked:false,
+          projectId:'project-1',expiresAt:Date.now()+100000,revoked:opts.revoked===true,
           allowedTools:[],allowedSideEffects:false},
         assignments:[{id:isChild?'child-attempt':'attempt-1',botId:'worker',
           sessionId:isChild?'child-session-1':'worker-session-1',
@@ -156,7 +156,9 @@ async function mountNativeFixture(page: Page, options: {
         ?[{...ticket,updatedAt:Date.now(),projectId:'project-1'}]:[]) as never;
       if(command==='superagent_source_thread_links')return [] as never;
       if(command==='superagent_snapshot')return snapshot(String(args.ticketId)) as never;
-      if(command==='superagent_demand_plan')return {
+      if(command==='superagent_demand_plan'){
+        if(ticket?.state==='blocked' && !opts.blockedHasPlan) return null as never;
+        return {
         ticketId:'demand-1',ticketRevision:ticket?.revision ?? 2,
         teamVersion:cfg.teamVersion,policyRevision:cfg.policyRevision,
         planSha256:'native-plan',state:'active',
@@ -164,7 +166,8 @@ async function mountNativeFixture(page: Page, options: {
           objective:'Implement isolated native WorkItem',dependsOn:[],state:'running',
           childTicketId:'child-1',childTicketState:'running',lastReason:null,
           requiresWrite:false,writeAuthorized:false}],
-      } as never;
+        } as never;
+      }
       if(command==='superagent_roster_update'){
         if(cfg.policyRevision!==args.expectedRevision||cfg.enabled)
           throw Error('Stale native roster policy revision or active Team');
@@ -652,6 +655,19 @@ test('blocked Demand offers genuine Retry and a fresh-run alternative',async({pa
   const writes=await page.evaluate(()=>
     (window as unknown as {saFixtureMutations:Array<{command:string;args:Record<string,unknown>}>}).saFixtureMutations);
   expect(writes.map(x=>x.command)).toEqual(['superagent_retry']);
+});
+
+test('blocked DAG and a revoked mandate cannot expose invalid native Retry',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{
+    mode:'full',enabled:true,withTicket:true,ticketState:'blocked',blockedHasPlan:true,
+  });
+  await host.getByRole('button',{name:'Demands / Runs',exact:true}).click();
+  await host.getByRole('button',{name:'Resolve demand'}).click();
+  const panel=host.getByRole('region',{name:'Demand needs attention'});
+  await expect(panel.getByRole('button',{name:'Retry current Demand'})).toHaveCount(0);
+  await expect(panel.getByRole('button',{name:'Start new Demand'})).toBeVisible();
+  await expect(panel).toContainText('Native retry is not available');
 });
 
 test('failed Demand cannot be falsely approved and pre-fills a separately authorized new run',async({page})=>{

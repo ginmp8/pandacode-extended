@@ -5537,7 +5537,7 @@ fn retry_blocked(
     )?;
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-         VALUES(?1,'manual_retry','user-requested bounded read-only worker attempt',?2)",
+         VALUES(?1,'manual_retry','user-requested original native bot-mode worker attempt',?2)",
         params![ticket_id,now],
     ).map_err(|e| e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
@@ -5856,20 +5856,51 @@ pub async fn superagent_dispatch_worker_with_write_grant(
     })
 }
 
+/// A retry must preserve the same native provider permissions as the original
+/// admitted bot session, without an extra SuperAgent permission level.
+fn native_retry_instructions(mode:&str)->&'static str {
+    if is_full_access_autonomy(mode) {
+        "Use existing native Full Access for this Worker session, including its
+         provider tools and Skills; obey the original Ticket/project, stop and
+         policy constraints. Report actual changes/tests, not model-only claims."
+    } else if mode=="approval" {
+        "Keep this bot's native chat/tool permission mode and native approvals.
+         Completed work still requires explicit human WorkItem acceptance."
+    } else {
+        "Read-only assignment. Report evidence and remaining gaps;
+         do not claim task approval."
+    }
+}
+
+#[cfg(test)]
+mod retry_mode_tests {
+    use super::native_retry_instructions;
+    #[test]
+    fn retry_prompt_preserves_native_full_and_approval_semantics() {
+        assert!(native_retry_instructions("full").contains("Full Access"));
+        assert!(!native_retry_instructions("full").contains("Read-only assignment"));
+        assert!(native_retry_instructions("approval").contains("native approvals"));
+        assert!(!native_retry_instructions("approval").contains("Full Access"));
+        assert!(native_retry_instructions("off").contains("Read-only assignment"));
+    }
+}
+
 #[tauri::command]
 pub async fn superagent_retry(window: tauri::WebviewWindow, 
     app: tauri::AppHandle, state: State<'_,AppState>, ticket_id: String,
 ) -> Result<Ticket> {
     require_main_window(&window)?;
-    let (ticket,thread,worker_id)={
+    let (ticket,thread,worker_id,mode)={
         let active: Vec<String> = state.agents.lock().map_err(|e|e.to_string())?
             .keys().cloned().collect();
         let mut store=state.store.lock().map_err(|e|e.to_string())?;
         let bot_id=ticket_worker(&store,&ticket_id)?;
         let ticket = get_ticket(&store, &ticket_id)?;
         let cfg = configuration(&store, &ticket.orchestration_id)?;
+        let mode=ticket_team_snapshot(&store,&ticket_id)?.policy.autonomy;
         let busy=active_manual_conflict(&store,&active,&bot_id,&cfg.project_id)?;
-        retry_blocked(&mut store,&ticket_id,busy)?
+        let (ticket,thread,worker_id)=retry_blocked(&mut store,&ticket_id,busy)?;
+        (ticket,thread,worker_id,mode)
     };
     let delivered=bots::gateway::deliver(&app,bots::gateway::Inbound {
         bot_id: worker_id,
@@ -5877,7 +5908,7 @@ pub async fn superagent_retry(window: tauri::WebviewWindow,
         thread,
         sender_id: "local-user".into(),
         sender_name: "Manual retry".into(),
-        text: format!("SuperAgent ticket {} (manual retry)\n\n{}\n\nRead-only assignment. Report evidence and remaining gaps; do not claim approval.",ticket.id,ticket.objective),
+        text: format!("SuperAgent ticket {} (manual retry)\n\n{}\n\n{}",ticket.id,ticket.objective,native_retry_instructions(&mode)),
         trusted: true,
         image_ids: None,
         moodboard_ids: None,

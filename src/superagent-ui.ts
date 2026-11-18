@@ -267,6 +267,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     teamId:string; policyRevision:number; objective:string; result:NativeDemandPreflight;
   } | null = null;
   let workPlan: DemandPlanEvidence | null = null, workPlanLoaded = false;
+  let directRetryEligible = false;
   let workWriteItemKey = '', workWritePaths = '';
   let subagentTree:NativeSubagentTree|null = null, subagentTreeLoaded = false;
   let subagentDepth=2, subagentPerParent=2, subagentTotal=8;
@@ -1014,6 +1015,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '>Start Demand</button></form>' +
       '<p class="sa-mode-note">Native admission checks the Team policy, bot eligibility and each Worker\'s existing provider permissions before dispatch.</p></section>' : '';
     const attentionTicket=tickets.find(ticket => ticket.id === inspectedTicket);
+    const nativeRetryAvailable=attentionTicket?.state==='blocked' && directRetryEligible &&
+      ticketDetails?.ticket.id===attentionTicket.id &&
+      !ticketDetails.mandate.revoked && ticketDetails.mandate.expiresAt>Date.now() &&
+      Boolean(chosen?.enabled);
     const attentionPanel=attentionTicket &&
       ['blocked','failed','interrupted','inconclusive'].includes(attentionTicket.state)
       ? '<section class="sa-attention-panel" role="region" aria-label="Demand needs attention">' +
@@ -1021,9 +1026,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<p>This native run is not verified as delivered. Inspect its evidence before ' +
         'recovery. A new Demand always requires fresh native admission.</p></div>' +
         '<div class="sa-actions">' +
-        (attentionTicket.state === 'blocked'
+        (nativeRetryAvailable
           ? '<button type="button" data-sa-retry="' + safe(attentionTicket.id) +
             '">Retry current Demand</button>' : '') +
+        (attentionTicket.state==='blocked' && !nativeRetryAvailable
+          ? '<p class="sa-attention-note">Native retry is not available for this ' +
+            'orchestrated or revoked attempt. Inspect blocked work or start a new Demand.</p>'
+          : '') +
         '<button type="button" class="primary-button" data-sa-restart-demand="' +
           safe(attentionTicket.id) + '">Start new Demand</button>' +
         '<button type="button" data-sa-inspect-ticket="' + safe(attentionTicket.id) +
@@ -1518,6 +1527,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     // Use existing native read endpoints, not model-generated summaries. A
     // revision change refreshes the snapshot before a later human decision.
     effectReceipts = []; effectReceiptsLoaded = false;
+    directRetryEligible = false;
     runGraph = null; runGraphLoaded = false;
     delivery=null; deliveryLoaded=false;
     providerChildren=null;providerChildrenLoaded=false;
@@ -1525,12 +1535,25 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       call<TicketDetails>('superagent_snapshot', { ticketId:id, limit:50 }),
       call<ThreadLink[]>('superagent_source_thread_links', { ticketId:id }),
     ]);
+    let directRetryCandidate=false;
+    if (snapshot.ticket.state==='blocked') {
+      try {
+        // A native DAG root cannot be retried through the direct-Ticket command.
+        // Inspection failures are not permission for an implicit retry.
+        const plan=await call<DemandPlanEvidence | null>(
+          'superagent_demand_plan',{ticketId:id});
+        directRetryCandidate=plan===null;
+      } catch {
+        directRetryCandidate=false;
+      }
+    }
     if (inspectedTicket === id) {
       if (snapshot.ticket.id !== id || snapshot.ticket.orchestrationId !== selected) {
         ticketDetails = null; threadLinks = []; inspectedAssignmentId = '';
         throw new Error('Native Ticket identity or Team changed; reload before acting.');
       }
       ticketDetails = snapshot;
+      directRetryEligible = directRetryCandidate;
       if (!snapshot.assignments.some(item => item.id === inspectedAssignmentId)) {
         inspectedAssignmentId = '';
       }

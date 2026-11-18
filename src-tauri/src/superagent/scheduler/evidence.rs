@@ -214,7 +214,7 @@ mod tests {
              CREATE TABLE sa_work_items(id TEXT PRIMARY KEY,ticket_id TEXT,ordinal INTEGER,
                child_ticket_id TEXT,state TEXT,last_reason TEXT,updated_at INTEGER,
                requires_write INTEGER NOT NULL DEFAULT 0);
-             CREATE TABLE sa_audit(id INTEGER PRIMARY KEY,ticket_id TEXT,kind TEXT,at INTEGER);
+             CREATE TABLE sa_audit(id INTEGER PRIMARY KEY,ticket_id TEXT,kind TEXT,at INTEGER,detail TEXT NOT NULL DEFAULT '');
              CREATE TABLE sa_effect_receipts(ticket_id TEXT,state TEXT);
              CREATE TABLE sa_worker_write_receipts(ticket_id TEXT,state TEXT,assignment_id TEXT);
              CREATE TABLE sa_subagent_nodes(parent_ticket_id TEXT,child_ticket_id TEXT,state TEXT);

@@ -1660,7 +1660,8 @@ mod tests {
                  'assignment-1','child','finished','done',1,9);
              CREATE TABLE sa_work_item_evidence_receipts(
                  item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,
-                 evidence_sha256 TEXT,reviewed_at INTEGER);
+                 evidence_sha256 TEXT,reviewed_at INTEGER,
+                 approval_kind TEXT NOT NULL DEFAULT 'human_accepted');
              CREATE TABLE sa_worker_write_receipts(
                  ticket_id TEXT,assignment_id TEXT,state TEXT);
              CREATE TABLE sa_demand_test_runs(
@@ -1670,6 +1671,7 @@ mod tests {
         let digest=digest(b"done");
         db.execute(
             "INSERT INTO sa_work_item_evidence_receipts
+                 (item_id,child_ticket_id,assignment_id,evidence_sha256,reviewed_at)
              VALUES('item','child','assignment-1',?1,10)",
             [&digest],
         ).unwrap();

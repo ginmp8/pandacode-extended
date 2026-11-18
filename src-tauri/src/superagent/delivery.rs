@@ -353,7 +353,8 @@ mod tests {
                requires_write INTEGER NOT NULL DEFAULT 0);
              CREATE TABLE sa_work_item_evidence_receipts(
                item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER,
-               evidence_sha256 TEXT NOT NULL DEFAULT '');
+               evidence_sha256 TEXT NOT NULL DEFAULT '',
+               approval_kind TEXT NOT NULL DEFAULT 'human_accepted');
              CREATE TABLE sa_worker_write_receipts(ticket_id TEXT,assignment_id TEXT,state TEXT);
              CREATE TABLE sa_tickets(id TEXT,state TEXT,evidence TEXT);
              CREATE TABLE sa_assignments(

@@ -827,7 +827,7 @@ mod tests {
              CREATE TABLE sa_orchestrations(id TEXT,enabled INTEGER,
                  policy_revision INTEGER,project_id TEXT);
              CREATE TABLE sa_work_item_evidence_receipts(
-                 item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER,evidence_sha256 TEXT NOT NULL DEFAULT '');
+                 item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER,evidence_sha256 TEXT NOT NULL DEFAULT '',approval_kind TEXT NOT NULL DEFAULT 'human_accepted');
              CREATE TABLE sa_worker_write_receipts(
                  ticket_id TEXT,state TEXT,assignment_id TEXT);
              CREATE TABLE sa_subagent_nodes(
@@ -918,7 +918,7 @@ mod tests {
              CREATE TABLE sa_work_items(id TEXT,ticket_id TEXT,item_key TEXT,
                child_ticket_id TEXT,state TEXT,requires_write INTEGER);
              CREATE TABLE sa_work_item_evidence_receipts(
-               item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER,evidence_sha256 TEXT NOT NULL DEFAULT '');
+               item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER,evidence_sha256 TEXT NOT NULL DEFAULT '',approval_kind TEXT NOT NULL DEFAULT 'human_accepted');
              CREATE TABLE sa_tickets(id TEXT,state TEXT,evidence TEXT);
              CREATE TABLE sa_assignments(id TEXT,ticket_id TEXT,state TEXT,
                attempt INTEGER,result TEXT,updated_at INTEGER);
@@ -996,7 +996,7 @@ mod tests {
         db.execute_batch(
             "CREATE TABLE sa_work_items(ticket_id TEXT,child_ticket_id TEXT);
              CREATE TABLE sa_work_item_evidence_receipts(
-                 item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER,evidence_sha256 TEXT NOT NULL DEFAULT '');
+                 item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,reviewed_at INTEGER,evidence_sha256 TEXT NOT NULL DEFAULT '',approval_kind TEXT NOT NULL DEFAULT 'human_accepted');
              CREATE TABLE sa_tickets(id TEXT,state TEXT,evidence TEXT);
              CREATE TABLE sa_assignments(id TEXT,ticket_id TEXT,state TEXT,
                  attempt INTEGER,result TEXT,updated_at INTEGER);

@@ -150,10 +150,7 @@ fn update(store: &Store, orchestration_id: &str, expected_revision: i64,
     let previous = load_team_version_snapshot(&store.db, orchestration_id, current.team_version)?;
     let execution_mode = input.execution_mode.as_deref()
         .unwrap_or(previous.policy.autonomy.as_str());
-    if execution_mode == "full_auto" &&
-        (!current.council_required || current.reviewer_bot_ids.len() < 2) {
-        return Err("Full Auto requires the native Council and at least two independent reviewers.".into());
-    }
+    // Council is an optional review policy, not a Full Access requirement.
     if execution_mode == "approval" && current.council_required {
         return Err("With Approval requires human acceptance; disable automatic Council finalization before selecting this mode.".into());
     }

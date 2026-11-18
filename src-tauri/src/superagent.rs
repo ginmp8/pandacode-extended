@@ -2886,6 +2886,15 @@ mod ordinary_turn_checks_security_tests {
     use super::*;
 
     #[test]
+    fn full_auto_reuses_native_full_access_not_a_new_permission_tier() {
+        for mode in ["ask", "auto", "review", "plan", "full"] {
+            assert_eq!(native_worker_mode(mode, "full_auto"), Some("full"));
+            assert_eq!(native_worker_mode(mode, "approval"), Some(mode));
+            assert_eq!(native_worker_mode(mode, "off"), None);
+        }
+    }
+
+    #[test]
     fn task_sessions_do_not_inherit_turn_end_process_access_after_stop() {
         let db = Connection::open_in_memory().unwrap();
         db.execute_batch("CREATE TABLE sa_assignments (session_id TEXT NOT NULL, state TEXT NOT NULL);").unwrap();
@@ -3565,10 +3574,7 @@ fn admit_role_with_grant_inner(
     )?;
     // Team strategy is pinned from the last immutable config version; a new
     // Ticket must never silently reset its retry/time/resource settings.
-    if configured_snapshot.policy.autonomy == "full_auto" &&
-        (!config.council_required || config.reviewer_bot_ids.len() < 2) {
-        return Err("Full Auto is not authorized without independent native Council review.".into());
-    }
+    // Worker Full Access and optional Council review are independent choices.
     if configured_snapshot.policy.autonomy == "approval" && config.council_required {
         return Err("With Approval cannot bypass its human acceptance gate.".into());
     }
@@ -3614,6 +3620,10 @@ fn admit_role_with_grant_inner(
             params![assignment_id,ticket_id,current_candidate.id,session_id,now],
         ).map_err(|e| e.to_string())?;
         if !coordinate {
+            record_native_worker_mode(
+                store, &ticket_id, session_id, &current_worker,
+                &team_snapshot.policy.autonomy,
+            )?;
             council_adapter::admit_required(
                 store,&tx,&ticket_id,assignment_id,session_id,0,&team_snapshot,
             )?;
@@ -3827,6 +3837,61 @@ fn assignment_role_authorized(
     })
 }
 
+/// Reuse the existing bot/chat permission vocabulary for new Workers.
+fn native_worker_mode<'a>(bot_mode: &'a str, execution: &str) -> Option<&'a str> {
+    match execution {
+        "full_auto" => Some("full"),
+        "approval" => Some(bot_mode),
+        _ => None, // Historical read-only task sessions retain their policy.
+    }
+}
+
+/// Issued within Ticket/Assignment admission. The receipt is not a new tool
+/// permission class: native provider adapters still enforce the actual mode.
+fn record_native_worker_mode(
+    store: &Store, ticket_id: &str, session_id: &str, bot: &bots::Bot, execution: &str,
+) -> Result<()> {
+    let Some(mode) = native_worker_mode(&bot.mode, execution) else { return Ok(()); };
+    if !storage::valid_permission_mode(mode) {
+        return Err("Worker uses an unsupported native bot permission mode.".into());
+    }
+    let session = store.session(session_id)?;
+    if session.project_id != bot.project_id || session.provider != bot.provider
+        || session.model != bot.model {
+        return Err("Worker session changed before native permission admission.".into());
+    }
+    let changed = store.db.execute(
+        "UPDATE sessions SET mode=?2,updated_at=?3
+         WHERE id=?1 AND status NOT IN ('running','waiting')",
+        params![session_id,mode,storage::now()],
+    ).map_err(|error| error.to_string())?;
+    if changed != 1 {
+        return Err("Worker became active before native mode admission.".into());
+    }
+    // Both this audit and sessions.mode roll back with native admission.
+    store.db.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'native_worker_mode',?2,?3)",
+        params![ticket_id,format!("{session_id}:{mode}"),storage::now()],
+    ).map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn native_worker_mode_recorded(
+    store: &Store, ticket_id: &str, session_id: &str, mode: &str,
+) -> Result<bool> {
+    if !storage::valid_permission_mode(mode) { return Ok(false); }
+    store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_audit audit
+         JOIN sa_assignments assignment ON assignment.ticket_id=audit.ticket_id
+         WHERE audit.ticket_id=?1 AND audit.kind='native_worker_mode'
+           AND audit.detail=?2 AND assignment.session_id=?3
+           AND audit.at>=assignment.created_at)",
+        params![ticket_id,format!("{session_id}:{mode}"),session_id],
+        |row| row.get(0),
+    ).map_err(|error| error.to_string())
+}
+
 /// Verify the actual provider session against the immutable admitted Team role.
 /// Changes to session-level model, provider, mode or reasoning cannot inherit a
 /// valid bot's permissions merely because the assignment and thread still match.
@@ -3856,11 +3921,19 @@ fn admitted_session_matches_profile(
         }
         None => true, // Historical snapshots cannot invent path evidence.
     };
+    // Only a NEW Full Auto Worker with an actual admission receipt may
+    // override the bot's standing chat mode; the ordinary bot is unchanged.
+    let mode_matches = if role == "worker" && snapshot.policy.autonomy == "full_auto"
+        && native_worker_mode_recorded(store, ticket_id, &session.id, &session.mode)? {
+        session.mode == "full"
+    } else {
+        config.get("mode").and_then(serde_json::Value::as_str) == Some(session.mode.as_str())
+    };
     Ok(path_matches
         && config.get("projectId").and_then(serde_json::Value::as_str) == Some(session.project_id.as_str())
         && config.get("provider").and_then(serde_json::Value::as_str) == Some(session.provider.as_str())
         && config.get("model").and_then(serde_json::Value::as_str) == Some(session.model.as_str())
-        && config.get("mode").and_then(serde_json::Value::as_str) == Some(session.mode.as_str())
+        && mode_matches
         && config.get("reasoningEffort").and_then(serde_json::Value::as_str)
             == Some(session.reasoning_effort.as_deref().unwrap_or("")))
 }
@@ -3981,6 +4054,16 @@ pub(crate) fn read_only_policy(
         {
             return Err("policy_unsupported: assigned bot is paused or moved outside its mandate.".into());
         }
+        // The provider's native permission adapter (Full Access, Ask, etc.)
+        // is authoritative for newly admitted Worker sessions only. Never
+        // upgrade a coordinator, old Ticket or session missing this receipt.
+        let native_worker = is_worker
+            && native_worker_mode(&active_bot.mode, &snapshot.policy.autonomy)
+                == Some(assigned_session.mode.as_str())
+            && native_worker_mode_recorded(
+                store, &scope.ticket_id, session_id, &assigned_session.mode,
+            )?;
+        if native_worker { return Ok(None); }
         return Ok(Some(crate::architect::reviewer_security::ReviewerToolPolicy::NativeReadOnly));
     }
     // A settled or detached assignment still owns this provider session.
@@ -4207,7 +4290,8 @@ pub(crate) fn on_run_finished(store: &Store, session_id: &str, successful: bool,
     // Reuse the same Ticket-snapshot validation as the provider/tool boundary.
     // A Team edit can advance the mutable config revision without rewriting
     // the admitted Ticket's mandate or active write grant.
-    let authorized = read_only_policy(store,session_id).ok().flatten().is_some();
+    // None is the valid native-bot policy for a receipt-bound Worker.
+    let authorized = read_only_policy(store,session_id).is_ok();
     let provenance_ok = if coordinator { true } else if let Some(snapshot) = &team_snapshot {
         bots::get(store, &snapshot.coordinator_bot_id)
             .and_then(|bot| coordinator_plan_current(store, &task_id, &snapshot.coordinator_bot_id, &bot.project_id))
@@ -4767,10 +4851,7 @@ fn change_enabled(
         // A requested wider hard parallel limit or unmetered cost/token ceiling
         // must fail closed, rather than pretending to enforce an unsupported cap.
         let configured=load_team_version_snapshot(&store.db,orchestration_id,current.team_version)?;
-        if configured.policy.autonomy == "full_auto" &&
-            (!current.council_required || current.reviewer_bot_ids.len() < 2) {
-            return Err("Full Auto requires a versioned native Council with at least two reviewers.".into());
-        }
+        // Full Access does not require Council or any reviewer seats.
         if configured.policy.autonomy == "approval" && current.council_required {
             return Err("With Approval needs human acceptance; disable automatic Council finalization.".into());
         }
@@ -5377,6 +5458,9 @@ fn retry_blocked(
     let _dispatch_fence=effects::lock_dispatch(&store.path)?;
     let tx=store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let session_id=bots::thread_session(store,&worker,CHANNEL,&thread,"SuperAgent · Manual retry")?.0;
+    record_native_worker_mode(
+        store, ticket_id, &session_id, &worker, &snapshot.policy.autonomy,
+    )?;
     let now=storage::now();
     tx.execute(
         "INSERT INTO sa_assignments(id,ticket_id,bot_id,session_id,state,attempt,created_at,updated_at)
@@ -5517,6 +5601,9 @@ fn prepare_coordinated_worker_inner(
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let session_id = bots::thread_session(store, &worker, CHANNEL, &thread,
         "SuperAgent · Coordinated worker")?.0;
+    record_native_worker_mode(
+        store, ticket_id, &session_id, &worker, &snapshot.policy.autonomy,
+    )?;
     let project_root = if let Some(paths) = allowed_paths {
         let session = store.session(&session_id)?;
         let root = store.workspace_root(&session.project_id,Some(&session_id))?;

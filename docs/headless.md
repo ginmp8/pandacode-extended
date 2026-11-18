@@ -557,6 +557,20 @@ terminated; its late completion is denied by the native state and mandate
 checks. These commands do not create, retry, or resume tasks, and authenticated
 event intake remains unavailable.
 
+### Explicit Team enable (local operator)
+
+```sh
+pandacode serve --enable-orchestration <team-id> <expected-policy-revision>
+```
+
+This local operator action uses the same native revision-checked eligibility
+checks as the desktop Team enable control. It rejects paused bots,
+unsupported harness profiles, configured multi-member execution that lacks native
+scoped admission, and stale revisions. Enabling makes an eligible Team available
+for **future explicitly submitted manual Demands only**. It creates no Ticket,
+Mandate, provider session, GitHub Auto subscription or external effect.
+A repeated enable with the same current revision is a no-op.
+
 ### Emergency Team disable (local operator)
 
 ```sh

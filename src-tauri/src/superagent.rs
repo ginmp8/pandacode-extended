@@ -1902,6 +1902,23 @@ pub(crate) fn headless_reject_ticket(
     headless_ticket_status(&reject(&store, ticket_id, expected_revision, reason)?)
 }
 
+/// Explicit local operator enable uses the same native policy CAS and
+/// harness/profile admission checks as desktop. Enabled means available for
+/// future manual Demands, never an inferred Ticket, grant or provider launch.
+pub(crate) fn headless_enable_orchestration(
+    database_path: &std::path::Path, orchestration_id: &str, expected_revision: i64,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let updated = change_enabled(&store, orchestration_id, expected_revision, true)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": updated.id,
+        "enabled": updated.enabled,
+        "policyRevision": updated.policy_revision,
+        "grantIssued": false,
+        "providerDispatched": false,
+    })).map_err(|e| e.to_string())
+}
+
 /// Local operator emergency disable. Reuse the desktop's native CAS,
 /// audit, lease settlement and revocation without invoking restart recovery
 /// against a live host. Never dispatch work or implicitly re-enable a Team.
@@ -9614,6 +9631,43 @@ mod tests {
             "SELECT COUNT(*) FROM sa_effect_receipts WHERE state='applied'",
             [], |r| r.get::<_, i64>(0),
         ).unwrap(), 0);
+    }
+
+    #[test]
+    fn headless_enable_is_revision_bound_and_never_creates_task_authority() {
+        let store = fixture();
+        let cfg = create_configuration(&store, NewOrchestration {
+            name: "Headless-enabled Team".into(),
+            coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        assert!(!cfg.enabled);
+        assert!(headless_enable_orchestration(&store.path, &cfg.id, 0).is_err());
+        let enabled: serde_json::Value = serde_json::from_str(
+            &headless_enable_orchestration(&store.path, &cfg.id, cfg.policy_revision).unwrap(),
+        ).unwrap();
+        assert_eq!(enabled["orchestrationId"], cfg.id);
+        assert_eq!(enabled["enabled"], true);
+        assert_eq!(enabled["policyRevision"], cfg.policy_revision + 1);
+        assert_eq!(enabled["grantIssued"], false);
+        assert_eq!(enabled["providerDispatched"], false);
+        let again: serde_json::Value = serde_json::from_str(
+            &headless_enable_orchestration(&store.path, &cfg.id, cfg.policy_revision + 1).unwrap(),
+        ).unwrap();
+        assert_eq!(again["policyRevision"], cfg.policy_revision + 1);
+        assert!(headless_enable_orchestration(&store.path, &cfg.id, cfg.policy_revision).is_err());
+        for table in ["sa_tickets", "sa_mandates", "sa_assignments"] {
+            let count: i64 = store.db.query_row(
+                &format!("SELECT COUNT(*) FROM {table}"), [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(count, 0, "{table} must not be created by enabling a Team");
+        }
+        headless_disable_orchestration(&store.path, &cfg.id, cfg.policy_revision + 1).unwrap();
+        store.db.execute("UPDATE bots SET paused=1 WHERE id='worker'", []).unwrap();
+        assert!(headless_enable_orchestration(&store.path, &cfg.id, cfg.policy_revision + 2).is_err());
+        assert!(!configuration(&store, &cfg.id).unwrap().enabled);
+        assert_eq!(configuration(&store, &cfg.id).unwrap().policy_revision,
+            cfg.policy_revision + 2);
     }
 
     #[test]

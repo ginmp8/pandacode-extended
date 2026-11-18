@@ -76,6 +76,7 @@ enum Command {
     QuarantinePendingEffect { ticket_id: String, expected_revision: i64, effect_key: String, payload_sha256: String },
     QuarantineTerminalOrphan { ticket_id: String, expected_revision: i64 },
     DisableOrchestration { orchestration_id: String, expected_revision: i64 },
+    EnableOrchestration { orchestration_id: String, expected_revision: i64 },
     RenameOrchestration { orchestration_id: String, expected_revision: i64, name: String },
     SetTeamStrategy { orchestration_id: String, expected_revision: i64, strategy: String, purpose_file: PathBuf },
     SetTeamRoster { orchestration_id: String, expected_revision: i64, roster_file: PathBuf },
@@ -615,6 +616,7 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 | Command::QuarantinePendingEffect { .. }
                 | Command::QuarantineTerminalOrphan { .. }
                 | Command::DisableOrchestration { .. }
+                | Command::EnableOrchestration { .. }
                 | Command::RenameOrchestration { .. }
                 | Command::SetTeamStrategy { .. }
                 | Command::SetTeamRoster { .. }
@@ -649,6 +651,10 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                                     &database, ticket_id, *expected_revision),
                             Command::DisableOrchestration { orchestration_id, expected_revision } =>
                                 crate::superagent::headless_disable_orchestration(
+                                    &database, orchestration_id, *expected_revision,
+                                ),
+                            Command::EnableOrchestration { orchestration_id, expected_revision } =>
+                                crate::superagent::headless_enable_orchestration(
                                     &database, orchestration_id, *expected_revision,
                                 ),
                             Command::RenameOrchestration { orchestration_id, expected_revision, name } =>
@@ -725,6 +731,7 @@ fn start(app: &tauri::AppHandle, dir: &std::path::Path, command: Command, import
         | Command::QuarantinePendingEffect { .. }
         | Command::QuarantineTerminalOrphan { .. }
         | Command::DisableOrchestration { .. }
+                | Command::EnableOrchestration { .. }
         | Command::RenameOrchestration { .. }
         | Command::SetTeamStrategy { .. }
         | Command::SetTeamRoster { .. }
@@ -1693,6 +1700,19 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 2;
             }
+            "--enable-orchestration" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or("--enable-orchestration needs a Team ID and policy revision.")?;
+                validate_orchestration_id(orchestration_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--enable-orchestration needs an expected policy revision.")?;
+                command = Command::EnableOrchestration {
+                    orchestration_id: orchestration_id.clone(),
+                    expected_revision: parse_team_revision(revision)?,
+                };
+                ops += 1;
+                index += 2;
+            }
             "--rename-orchestration" => {
                 let orchestration_id = args.get(index + 1)
                     .ok_or_else(|| format!("--rename-orchestration needs a Team ID, revision and new name.\\n\\n{}", help()))?;
@@ -1961,7 +1981,7 @@ fn parse_ticket_revision(value: &str) -> Result<i64, String> {
 fn help() -> String {
     "PandaCode headless host (docs/headless.md)
 
-Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
+Usage: pandacode serve [--sign-in [--device-name <name>]] [--sign-out] [--full-access | --no-full-access] [--export-bots <file>] [--import-bots <file>] [--sync-bots <sources.json>] [--import-orchestrations <file> | --export-orchestrations <file>] [--inspect-orchestrations | --list-tickets | --list-ticket-activity <id> [--before <audit-id>] | --list-review-inbox [--before <ms> <ticket-id>] | --list-recovery-inbox [--before <priority> <ms> <ticket-id>] | --list-team-unresolved-effects <team-id> [--before <ms> <ticket-id> <effect-key>] | --list-demands <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --list-team-demands <id> <state> [--before <ms> <ticket-id>] [--search <fragment>] [--project <id>] | --inspect-team-readiness <id> | --preflight-demand <team-id> <direct|coordinated> <objective-file> | --inspect-team-roster <id> | --inspect-source-health <id> | --observe-source <id> | --observe-team-sources <team-id> | --observe-check-run <id> <check-run-id> | --queue-demand <team-id> <request-key> <objective-file> | --inspect-ticket <id> | --inspect-ticket-graph <id> | --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only] | --inspect-ticket-source <id> | --link-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --link-issue-pull <source-id> <ticket-id> <issue:123> <pull:123> | --unlink-source-thread <source-id> <ticket-id> <issue:123|pull:123> | --accept-ticket <id> <revision> | --reject-ticket <id> <revision> <reason> | --stop-ticket <id> | --stop-ticket-at-revision <id> <revision> | --quarantine-detached-ticket <id> <revision> | --quarantine-expired-ticket <id> <revision> | --quarantine-pending-effect <id> <revision> <effect-key> <payload-sha256> | --quarantine-terminal-orphan <id> <revision> | --disable-orchestration <id> <revision> | --enable-orchestration <id> <revision> | --rename-orchestration <id> <revision> <name> | --set-team-strategy <id> <revision> <strategy> <purpose-file>]
 
 Runs this computer as an always-on PandaCode Connect host: your devices see it as a
 computer and can start, watch, steer and approve tasks on it. Linux servers run it
@@ -2079,6 +2099,9 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --disable-orchestration <id> <revision>
                          Turn a Team Off and atomically revoke its mandates;
                          live provider calls may finish but native authority stays revoked.
+  --enable-orchestration <id> <revision>
+                         Explicitly enable a valid Team for future manual Demands;
+                         no provider, Ticket or grant starts automatically.
   --rename-orchestration <id> <revision> <name>
                          Explicit local, revision-guarded Team rename only while disabled
                          and all Tickets/effects are settled; does not change bots, roles
@@ -2704,6 +2727,18 @@ mod tests {
         assert_eq!(parsed("--disable-orchestration team_123 3"), Ok(Command::DisableOrchestration {
             orchestration_id: "team_123".into(), expected_revision: 3,
         }));
+        assert_eq!(parsed("--enable-orchestration team_123 3"), Ok(Command::EnableOrchestration {
+            orchestration_id: "team_123".into(), expected_revision: 3,
+        }));
+        for invalid in [
+            "--enable-orchestration",
+            "--enable-orchestration team_123",
+            "--enable-orchestration team_123 0",
+            "--enable-orchestration team_123 -1",
+            "--enable-orchestration team_123 nope",
+            "--enable-orchestration ../unsafe 3",
+            "--enable-orchestration team_123 3 --list-tickets",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
         assert!(parsed("--disable-orchestration team_123").is_err());
         assert!(parsed("--disable-orchestration team_123 nope").is_err());
         assert!(parsed("--disable-orchestration ../team 3").is_err());
@@ -2763,11 +2798,13 @@ mod tests {
         // A new Team has policy revision 1, while new Tickets have revision 0.
         for invalid in [
             "--disable-orchestration team_123 0",
+            "--enable-orchestration team_123 0",
             "--rename-orchestration team_123 0 Renamed",
             "--set-team-roster team_123 0 roster.json",
             "--set-team-attempt-limit team_123 0 2",
             "--set-team-strategy team_123 0 balanced purpose.txt",
             "--disable-orchestration team_123 -1",
+            "--enable-orchestration team_123 -1",
             "--rename-orchestration team_123 -1 Renamed",
             "--set-team-roster team_123 -1 roster.json",
             "--set-team-attempt-limit team_123 -1 2",
@@ -2831,6 +2868,7 @@ mod tests {
             "--stop-ticket-at-revision",
             "--quarantine-detached-ticket",
             "--disable-orchestration",
+            "--enable-orchestration",
             "--rename-orchestration",
             "--set-team-strategy",
             "--sync-bots",

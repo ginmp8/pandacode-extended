@@ -541,9 +541,17 @@ mod tests {
         assert_eq!(reset.worker_bot_ids,vec!["worker-a"]);
         let enabled=super::super::change_enabled(&store,&config.id,reset.policy_revision,true).unwrap();
         assert!(enabled.enabled);
-        let expanded=set(&store,&config.id,enabled.policy_revision,&input).unwrap();
+        // Switching Council from Off to required is a policy change: the
+        // existing enabled Team must be disabled before editing future roles.
+        assert!(set(&store,&config.id,enabled.policy_revision,&input)
+            .unwrap_err().contains("Disable the Team"));
+        let disabled=super::super::change_enabled(&store,&config.id,enabled.policy_revision,false)
+            .unwrap();
+        let expanded=set(&store,&config.id,disabled.policy_revision,&input).unwrap();
         assert!(expanded.execution_ready);
-        assert!(super::super::configuration(&store,&config.id).unwrap().enabled);
+        let active=super::super::change_enabled(&store,&config.id,expanded.policy_revision,true)
+            .unwrap();
+        assert!(active.enabled);
         let manual=super::super::manual_preflight(&store,&config.id,"Manual task",false,false)
             .unwrap();
         assert!(!manual.eligible);

@@ -485,6 +485,11 @@ impl OrchestrationInput {
         let worker_bot_ids = self.worker_bot_ids
             .unwrap_or_else(|| vec![self.worker_bot_id.clone()]);
         let reviewer_bot_ids = self.reviewer_bot_ids.unwrap_or_default();
+        // Legacy API hint cannot turn off configured native reviewer seats.
+        // A request to require Council without any seats is invalid.
+        if self.council_required == Some(true) && reviewer_bot_ids.is_empty() {
+            return Err("Choose native Council reviewers before requiring review.".into());
+        }
         if worker_bot_ids.first().map(String::as_str) != Some(self.worker_bot_id.as_str()) {
             return Err("The legacy workerBotId must match the first ordered workerBotIds entry.".into());
         }
@@ -4799,7 +4804,8 @@ fn duplicate_configuration(
         return Err("Choose a unique Team name before duplicating.".into());
     }
     valid_team_roles(&source.coordinator_bot_id,&source.worker_bot_ids,&source.reviewer_bot_ids)?;
-    if source.council_required
+    let council_required = !source.reviewer_bot_ids.is_empty();
+    if council_required
         && !(2..=MAX_REVIEWERS_PER_TEAM).contains(&source.reviewer_bot_ids.len())
     {
         return Err("Council-required Teams need between two and eight reviewers.".into());
@@ -4817,11 +4823,13 @@ fn duplicate_configuration(
     if coordinator.paused || workers.iter().any(|bot| bot.paused)
         || reviewers.iter().any(|bot| bot.paused)
     {
-        return Err("Source Team members are no longer eligible for one worker project scope.".into());
+        return Err("Source Team has paused or unavailable members.".into());
     }
     let id = storage::id();
     let now = storage::now();
-    let project_id = &workers[0].project_id;
+    // The duplicate preserves the saved Team root planning project. Each
+    // selected Worker still owns its own native project and session scope.
+    let project_id = &source.project_id;
     tx.execute(
         "INSERT INTO sa_orchestrations(id,name,coordinator_bot_id,worker_bot_id,project_id,created_at,updated_at)
          VALUES(?1,?2,?3,?4,?5,?6,?6)",
@@ -4829,7 +4837,7 @@ fn duplicate_configuration(
     ).map_err(|e| e.to_string())?;
     let mut snapshot = make_team_snapshot(
         &tx,&id,1,name,project_id,1,&source.coordinator_bot_id,
-        &source.worker_bot_ids,&source.reviewer_bot_ids,source.council_required,
+        &source.worker_bot_ids,&source.reviewer_bot_ids,council_required,
         TeamSnapshotProvenance::Native,
     )?;
     // A duplicate retains the selected mode and bounded strategy, but never
@@ -6345,7 +6353,7 @@ mod tests {
     #[test]
     fn headless_roster_inspection_preserves_multi_role_profiles_without_admission() {
         let store=fixture();
-        for id in ["additional-worker","reviewer"] {
+        for id in ["additional-worker","reviewer","reviewer-two"] {
             store.db.execute(
                 "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
                  VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
@@ -6362,20 +6370,21 @@ mod tests {
         // The versioned Team is canonical; the legacy sidecar is not.
         let configured=roster::set(&store,&config.id,config.policy_revision,&roster::RosterInput {
             worker_bot_ids:vec!["worker".into(),"additional-worker".into()],
-            reviewer_bot_ids:vec!["reviewer".into()],council_required:None,
+            reviewer_bot_ids:vec!["reviewer".into(),"reviewer-two".into()],council_required:None,
         }).unwrap();
         let path=store.path.clone();
         drop(store);
         let output=inspect_headless_team_roster(&path,&config.id).unwrap();
         let view:serde_json::Value=serde_json::from_str(&output).unwrap();
         assert_eq!(view["policyRevision"],configured.policy_revision);
-        assert_eq!(view["members"].as_array().unwrap().len(),4);
+        assert_eq!(view["members"].as_array().unwrap().len(),5);
         assert_eq!(view["members"][0]["role"],"coordinator");
         assert_eq!(view["members"][1]["role"],"worker");
         assert_eq!(view["members"][2]["botId"],"additional-worker");
         assert_eq!(view["members"][2]["assignedSkillIds"],serde_json::json!(["scope-skill"]));
         assert_eq!(view["members"][2]["skillLibraryStatus"],"not_scanned");
         assert_eq!(view["members"][3]["role"],"reviewer");
+        assert_eq!(view["members"][4]["role"],"reviewer");
         assert_eq!(view["manualSingleWorkerTopology"],false);
         assert_eq!(view["multiRoleExecutionAvailable"],false);
         assert_eq!(view["authorizationIssued"],false);
@@ -8474,7 +8483,7 @@ mod tests {
         }).unwrap();
 
         // Correlated role counts must not inflate native Ticket aggregates.
-        for id in ["worker-extra", "reviewer-extra"] {
+        for id in ["worker-extra", "reviewer-extra", "reviewer-second"] {
             store.db.execute(
                 "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
                  VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
@@ -8483,7 +8492,7 @@ mod tests {
         }
         let updated=roster::set(&store,&other.id,other.policy_revision,&roster::RosterInput {
             worker_bot_ids:vec!["worker".into(),"worker-extra".into()],
-            reviewer_bot_ids:vec!["reviewer-extra".into()],council_required:None,
+            reviewer_bot_ids:vec!["reviewer-extra".into(),"reviewer-second".into()],council_required:None,
         }).unwrap();
         assert!(updated.policy_revision>other.policy_revision);
         let before = orchestration_overview(&store).unwrap();
@@ -8491,9 +8500,9 @@ mod tests {
         let first = before.iter().find(|item| item.config.id == config.id).unwrap();
         let second = before.iter().find(|item| item.config.id == other.id).unwrap();
         assert_eq!((first.worker_count, first.reviewer_count), (1, 0));
-        assert_eq!((second.worker_count, second.reviewer_count), (2, 1));
+        assert_eq!((second.worker_count, second.reviewer_count), (2, 2));
         assert_eq!(serde_json::to_value(second).unwrap()["workerCount"], 2);
-        assert_eq!(serde_json::to_value(second).unwrap()["reviewerCount"], 1);
+        assert_eq!(serde_json::to_value(second).unwrap()["reviewerCount"], 2);
         for item in &before {
             assert_eq!(item.ticket_count, 0);
             assert_eq!(item.running_count, 0);
@@ -9780,11 +9789,11 @@ mod tests {
         assert!(valid(vec!["worker".into()],vec!["worker".into()]).into_parts().is_err());
         assert!(valid(vec!["worker".into()],vec!["router".into()]).into_parts().is_err());
         let (_,workers,reviewers,required)=valid(
-            vec!["worker".into(),"worker-2".into()],vec!["reviewer".into()],
+            vec!["worker".into(),"worker-2".into()],vec!["reviewer".into(),"reviewer-2".into()],
         ).into_parts().unwrap();
         assert_eq!(workers,vec!["worker","worker-2"]);
-        assert_eq!(reviewers,vec!["reviewer"]);
-        assert_eq!(required,None);
+        assert_eq!(reviewers,vec!["reviewer","reviewer-2"]);
+        assert_eq!(required,Some(true));
     }
 
     #[test]
@@ -9902,10 +9911,10 @@ mod tests {
     #[test]
     fn ordered_roles_are_snapshotted_and_reviewer_or_coordinator_cannot_run_as_worker() {
         let mut store=fixture();
-        for id in ["worker-2","reviewer"] {
+        for id in ["worker-2","reviewer","reviewer-two"] {
             store.db.execute(
                 "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
-                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)"
                 params![id,storage::now()],
             ).unwrap();
         }
@@ -9913,18 +9922,20 @@ mod tests {
             name:"Ordered Team".into(),coordinator_bot_id:"router".into(),
             worker_bot_id:"worker".into(),
             worker_bot_ids:Some(vec!["worker".into(),"worker-2".into()]),
-            reviewer_bot_ids:Some(vec!["reviewer".into()]),
+            reviewer_bot_ids:Some(vec!["reviewer".into(),"reviewer-two".into()]),
             council_required:None,
         };
         let (legacy,workers,reviewers,required)=input.into_parts().unwrap();
-        assert_eq!(required,None);
+        assert_eq!(required,Some(true));
         let created=create_configuration_roles(&store,legacy,workers,reviewers).unwrap();
         assert_eq!(created.team_version,1);
         assert_eq!(created.worker_bot_ids,vec!["worker","worker-2"]);
-        assert_eq!(created.reviewer_bot_ids,vec!["reviewer"]);
+        assert_eq!(created.reviewer_bot_ids,vec!["reviewer","reviewer-two"]);
         let active = change_enabled(&store, &created.id, created.policy_revision, true).unwrap();
+        // Admit the Coordinator first; this tests future Worker/reviewer role
+        // eligibility without fabricating a completed native Council review.
         let (ticket,launched)=admit_role_with_selected(
-            &mut store,&created.id,"Use ordered team","ordered-team",false,false,false,Some("worker"),
+            &mut store,&created.id,"Use ordered team","ordered-team",false,true,false,Some("worker"),
         ).unwrap();
         assert!(launched);
         let snapshot=ticket_team_snapshot(&store,&ticket.id).unwrap();
@@ -9933,14 +9944,16 @@ mod tests {
         assert_eq!(snapshot.reviewer_bot_ids,vec!["reviewer"]);
         assert_eq!(snapshot.policy.autonomy,"off");
         assert_eq!(snapshot.policy.max_concurrent_tasks,1);
-        assert!(!snapshot.policy.council_enabled);
+        assert!(snapshot.policy.council_enabled);
         assert_eq!(snapshot.roles.iter().map(|role|role.role.as_str()).collect::<Vec<_>>(),
-            vec!["coordinator","worker","worker","reviewer"]);
+            vec!["coordinator","worker","worker","reviewer","reviewer"]);
         assert!(snapshot.roles.iter().all(|role|role.effective_config.is_some()));
-        assert!(assignment_role_authorized(&store,&ticket.id,"worker",1).unwrap());
-        assert!(assignment_role_authorized(&store,&ticket.id,"worker-2",1).unwrap());
-        assert!(!assignment_role_authorized(&store,&ticket.id,"router",1).unwrap());
-        assert!(!assignment_role_authorized(&store,&ticket.id,"reviewer",1).unwrap());
+        assert!(assignment_role_authorized(&store,&ticket.id,"router",1).unwrap());
+        assert!(!assignment_role_authorized(&store,&ticket.id,"worker",1).unwrap());
+        assert!(assignment_role_authorized(&store,&ticket.id,"worker",2).unwrap());
+        assert!(assignment_role_authorized(&store,&ticket.id,"worker-2",2).unwrap());
+        assert!(!assignment_role_authorized(&store,&ticket.id,"reviewer",2).unwrap());
+        assert!(!assignment_role_authorized(&store,&ticket.id,"reviewer-two",2).unwrap());
     }
 
     #[test]

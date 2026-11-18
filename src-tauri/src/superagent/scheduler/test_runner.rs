@@ -113,9 +113,16 @@ pub(super) fn issue(store:&Store,id:&str,command:&str,
     tx.commit().map_err(|e|e.to_string())
 }
 
+/// A saved Full Auto Team mode is itself a mandatory evidence gate, even
+/// for older Demands admitted before native test consent was available.
 pub(super) fn required(db:&rusqlite::Connection,root:&str)->Result<bool> {
-    db.query_row("SELECT EXISTS(SELECT 1 FROM sa_demand_test_grants WHERE ticket_id=?1)",
-        [root],|r|r.get(0)).map_err(|e|e.to_string())
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_demand_test_grants WHERE ticket_id=?1)
+         OR EXISTS(SELECT 1 FROM sa_ticket_team_snapshots snap
+           WHERE snap.ticket_id=?1 AND snap.source_kind='native'
+             AND json_extract(snap.snapshot_json,'$.policy.autonomy')='full_auto')",
+        [root],|r|r.get(0),
+    ).map_err(|e|e.to_string())
 }
 
 fn snapshot_hash(db:&rusqlite::Connection,root:&str,checkout:&Path)->Result<String> {
@@ -369,6 +376,49 @@ mod tests {
         assert_eq!(manifest_hash(&root,"cargo test").unwrap().len(),64);
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn full_auto_requires_executed_native_test_evidence_even_without_a_grant() {
+        let db=rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_tickets(id TEXT PRIMARY KEY);
+             INSERT INTO sa_tickets VALUES('root');
+             CREATE TABLE sa_ticket_team_snapshots(
+               ticket_id TEXT,source_kind TEXT,snapshot_json TEXT);
+             INSERT INTO sa_ticket_team_snapshots VALUES
+               ('root','native','{\"policy\":{\"autonomy\":\"full_auto\"}}');
+             CREATE TABLE sa_demand_plans(ticket_id TEXT,plan_sha256 TEXT);
+             INSERT INTO sa_demand_plans VALUES('root','plan');
+             CREATE TABLE sa_work_items(ticket_id TEXT, item_key TEXT, state TEXT);
+             INSERT INTO sa_work_items VALUES
+               ('root','plan','completed'),('root','implementation','completed'),
+               ('root','review','completed');
+            ",
+        ).unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        let finished:i64=db.query_row(
+            "SELECT COUNT(*) FROM sa_work_items
+             WHERE ticket_id='root' AND state='completed'",
+            [],|r|r.get(0),
+        ).unwrap();
+        assert_eq!(finished,3,"Three completed WorkItems are not test evidence");
+        assert!(required(&db,"root").unwrap());
+        assert!(!required(&db,"unrelated").unwrap());
+        assert!(!verified(&db,"root").unwrap());
+        db.execute(
+            "UPDATE sa_ticket_team_snapshots
+             SET snapshot_json='{\"policy\":{\"autonomy\":\"approval\"}}'
+             WHERE ticket_id='root'",[],
+        ).unwrap();
+        assert!(!required(&db,"root").unwrap());
+        db.execute(
+            "INSERT INTO sa_demand_test_grants VALUES(
+              'root',1,1,'project','/missing','npm test',?1,100)",
+            ["f".repeat(64)],
+        ).unwrap();
+        assert!(required(&db,"root").unwrap());
+        assert!(!verified(&db,"root").unwrap());
+    }
+
     #[test]
     fn immutable_grants_and_replay_fail_closed() {
         let db=rusqlite::Connection::open_in_memory().unwrap();

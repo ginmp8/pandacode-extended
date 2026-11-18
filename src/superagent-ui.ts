@@ -1038,9 +1038,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       'The native scheduler executes the selected command after verified WorkItem results. ' +
       'A project test script executes code; no unrestricted shell or GitHub effects are granted. ' +
       'A failed or uncertain run cannot be silently replayed.</p>' +
+      (teamStrategy?.executionMode === 'full_auto' && !initialDemandTestCommand
+        ? '<p role="status">Full Auto requires a native test command in the initial authorization.</p>'
+        : '') +
       '<button class="primary-button" type="submit"' +
       (chosen.enabled && teamStrategy?.orchestrationId === chosen.id &&
-        teamStrategy.executionMode !== 'off' ? '' : ' disabled') +
+        teamStrategy.executionMode !== 'off' &&
+        (teamStrategy.executionMode !== 'full_auto' || initialDemandTestCommand)
+        ? '' : ' disabled') +
       '>Start Demand</button></form>' +
       '<p class="sa-mode-note">Native admission checks the Team policy, bot eligibility and every scoped permission before dispatch.</p></section>' : '';
     const active = chosen && inspectedTicket ? '<section class="sa-pane sa-run-detail" aria-label="Selected native Demand">' +
@@ -3037,7 +3042,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const selectedConfig = current(), objective = String(data.get('objective') ?? '').trim();
       if (!selectedConfig?.enabled || !objective ||
           teamStrategy?.orchestrationId !== selectedConfig.id ||
-          teamStrategy.executionMode === 'off') return;
+          teamStrategy.executionMode === 'off' ||
+          (teamStrategy.executionMode === 'full_auto' && !initialDemandTestCommand)) return;
       const key = taskKey;
       initialDemandWritePaths = String(data.get('initialAllowedPaths') ?? '');
       initialDemandTestCommand = String(data.get('initialTestCommand') ?? '');

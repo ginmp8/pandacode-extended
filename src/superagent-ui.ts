@@ -767,7 +767,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
                   ([['balanced','Balanced'],['economy','Economy'],['performance','Performance'],
                     ['security_critical','Security-critical'],['custom','Custom']] as const)
                     .map(([value,label]) => '<option value="' + value + '"' +
-                      (roleRoster.strategy === value ? ' selected' : '') + '>' + label + '</option>').join('') +
+                      (roleRoster?.strategy === value ? ' selected' : '') + '>' + label + '</option>').join('') +
                   '</select></label>' +
                 '<p>Descriptive Team intent only. Optimization does not change native bot models, tool permissions, costs or required tests and reviews.</p>' +
                 '<button type="submit"' + (policyEditBlocker ||

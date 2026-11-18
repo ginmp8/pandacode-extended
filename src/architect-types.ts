@@ -19,7 +19,8 @@ export interface CouncilNestedReviewer {
 export type CouncilCriterionNativeEvidence =
   | { kind: 'pinned_input_integrity'; skillId: string }
   | { kind: 'reviewed_file_sha256'; path: string; expectedSha256: string; skillId?: '' }
-  | { kind: 'reviewed_file_text_contains'; path: string; expectedText: string; skillId?: '' };
+  | { kind: 'reviewed_file_text_contains'; path: string; expectedText: string; skillId?: '' }
+  | { kind: 'reviewed_file_json_valid'; path: string; skillId?: '' };
 export interface CouncilCriterion { id: string; lens: string; required: boolean; target: number; evidenceRequired?: boolean; nativeEvidence?: CouncilCriterionNativeEvidence }
 export interface CouncilConfig {
   target: number;
@@ -130,7 +131,7 @@ export interface CouncilInspection {
   criterionObservations?: {
     id: string; round: number; rootScoredSeats: number; lowestRootScore: number | null;
     state: 'optional' | 'awaiting_review' | 'missing_root_score' | 'below_target' |
-      'native_evidence_unverified' | 'pinned_input_integrity_verified' | 'reviewed_file_sha256_verified' | 'reviewed_file_text_contains_verified' | 'root_scores_observed';
+      'native_evidence_unverified' | 'pinned_input_integrity_verified' | 'reviewed_file_sha256_verified' | 'reviewed_file_text_contains_verified' | 'reviewed_file_json_verified' | 'root_scores_observed';
   }[];
   attempts: CouncilInspectionAttempt[];
   /** Optional for older native builds / existing preview fixtures. */

@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 const INTEGRITY: &str = "pinned_input_integrity";
 const FILE_SHA256: &str = "reviewed_file_sha256";
 const FILE_TEXT_CONTAINS: &str = "reviewed_file_text_contains";
+const FILE_JSON_VALID: &str = "reviewed_file_json_valid";
 const MAX_EVIDENCE_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -84,8 +85,10 @@ impl NativeCriterionEvidenceReceipt {
         let binding = worker.reviewer_binding.as_ref()?;
         let seat = worker.council.as_ref()?;
         let check = criterion.native_evidence.as_ref()?;
-        if (check.kind != FILE_SHA256 && check.kind != FILE_TEXT_CONTAINS)
+        if !matches!(check.kind.as_str(), FILE_SHA256 | FILE_TEXT_CONTAINS | FILE_JSON_VALID)
             || !check.skill_id.is_empty()
+            || (check.kind == FILE_JSON_VALID
+                && (check.expected_sha256.is_some() || check.expected_text.is_some()))
             || (check.kind == FILE_SHA256
                 && check.expected_sha256.as_deref() != Some(actual_sha256))
             || (check.kind == FILE_TEXT_CONTAINS
@@ -188,13 +191,13 @@ pub(super) fn file_tool_eligible(team: &TeamSnapshot, worker: &Worker) -> bool {
     team.config.council.as_ref().is_some_and(|config| config.criteria.iter().any(|criterion| {
         criterion.required && criterion.evidence_required
             && criterion.native_evidence.as_ref().is_some_and(|check|
-                matches!(check.kind.as_str(), FILE_SHA256 | FILE_TEXT_CONTAINS))
+                matches!(check.kind.as_str(), FILE_SHA256 | FILE_TEXT_CONTAINS | FILE_JSON_VALID))
             && seat.lens.trim().eq_ignore_ascii_case(criterion.lens.trim())
     }))
 }
 pub(super) fn file_tool() -> Value {
     tool("reviewer_file_verify",
-        "Verify an explicitly required checkout-file SHA-256 or exact UTF-8 fragment. Read-only and bounded; never executes project scripts.",
+        "Verify an explicitly required checkout-file SHA-256, exact UTF-8 fragment, or JSON syntax. Read-only and bounded; never executes project scripts.",
         json!({"criterionId":{"type":"string","description":"Exact immutable required Council criterion ID."}}),
         &["criterionId"])
 }
@@ -377,7 +380,7 @@ fn dispatch_file_state(
     config.validate()?;
     let criterion = config.criteria.iter().find(|c| c.id == request.criterion_id
         && c.native_evidence.as_ref().is_some_and(|check|
-            check.kind == FILE_SHA256 || check.kind == FILE_TEXT_CONTAINS))
+            matches!(check.kind.as_str(), FILE_SHA256 | FILE_TEXT_CONTAINS | FILE_JSON_VALID))
         .ok_or("reviewer_file_evidence_denied: no required native file check.")?.clone();
     if !worker.council.as_ref().is_some_and(|seat|
         seat.lens.trim().eq_ignore_ascii_case(criterion.lens.trim()))
@@ -431,6 +434,12 @@ fn dispatch_file_state(
             return Err("reviewer_file_evidence_unverified: required exact file fragment not found.".into());
         }
     }
+    if check.kind == FILE_JSON_VALID {
+        // Validate the actual bounded checkout bytes, never a reviewer claim or
+        // a command supplied through a criterion. This attests syntax only.
+        serde_json::from_slice::<serde_json::Value>(&bytes)
+            .map_err(|_| "reviewer_file_evidence_unverified: required JSON file has invalid syntax.".to_string())?;
+    }
     let receipt = NativeCriterionEvidenceReceipt::from_host_file_check(
         &team, worker, &criterion, &digest)
         .ok_or("reviewer_file_evidence_denied: native criterion authority no longer matches.")?;
@@ -453,7 +462,8 @@ fn dispatch_file_state(
         "artifactRevision": revision,
         "nativeFileDigestVerified": check.kind == FILE_SHA256,
         "nativeTextMatchVerified": check.kind == FILE_TEXT_CONTAINS,
-        "note": "A bounded native file check is not a project test or a correctness verdict."
+        "nativeJsonSyntaxVerified": check.kind == FILE_JSON_VALID,
+        "note": "A bounded native file check (including JSON syntax) is not a project test or a correctness verdict."
     }), changed.then_some(team)))
 }
 

@@ -551,7 +551,9 @@ mod tests {
                  'operator',1,?1,?2)",
             params![now-10,now+60_000],
         ).unwrap();
-        assert!(status(&store,"source").unwrap().enabled);
+        // This fixture has only the source tables, not a complete Team;
+        // it proves source-grant authenticity, not runnable Full Auto.
+        assert!(status(&store,"source").unwrap().grant_active);
         let (first,first_decision)=decision("first",77);
         record(&store,&first,&first_decision,&src,"operator").unwrap();
         let accepted:i64=store.db.query_row(

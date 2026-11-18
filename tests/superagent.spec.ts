@@ -68,7 +68,7 @@ test('Orchestrations keeps the reference page and five-step wizard layout', asyn
 /** A narrow, revision-guarded fake native service. No provider, file or GitHub
  * effect is performed; every mutation is recorded so incorrect dispatch fails. */
 async function mountNativeFixture(page: Page, options: {
-  reviewers?: number; mode?: 'approval'|'full_auto'|'off'; enabled?: boolean;
+  reviewers?: number; council?: boolean; mode?: 'approval'|'full_auto'|'off'; enabled?: boolean;
   withTicket?: boolean; ticketState?: string;
 }={}) {
   await page.evaluate(async opts => {
@@ -90,7 +90,7 @@ async function mountNativeFixture(page: Page, options: {
     const cfg={
       id:'team-1',name:'Native Team',coordinatorBotId:'coord',workerBotId:'worker',
       workerBotIds:['worker'],reviewerBotIds:['rev1','rev2'].slice(0,requestedReviewers),
-      councilRequired:opts.mode==='full_auto',enabled:opts.enabled===true,
+      councilRequired:opts.council===true,enabled:opts.enabled===true,
       policyRevision:1,teamVersion:1,workerCount:1,reviewerCount:requestedReviewers,
       ticketCount:0,runningCount:0,blockedCount:0,
     };
@@ -179,8 +179,6 @@ async function mountNativeFixture(page: Page, options: {
       if(command==='superagent_strategy_update'){
         if(cfg.policyRevision!==args.expectedRevision||cfg.enabled)throw Error('Stale Team strategy revision');
         const input=args.input as {executionMode:string};
-        if(input.executionMode==='full_auto'&&(!cfg.councilRequired||cfg.reviewerBotIds.length<2))
-          throw Error('Full Auto requires independent Council');
         if(input.executionMode==='approval'&&cfg.councilRequired)
           throw Error('With Approval requires human acceptance');
         mutations.push({command,args});
@@ -366,16 +364,18 @@ test('With Approval Team persists its native execution mode and remains Off',asy
   await expect(host.locator('form[data-sa-form="strategy-update"]')).toBeVisible();
 });
 
-test('Full Auto wizard leads to two independent reviewers rather than granting hidden access',async({page})=>{
+test('Full Auto wizard allows zero reviewers and configures native Full Access',async({page})=>{
   await page.goto('/?bots=sample');
   const host=await openWorkspace(page);
-  const builder=await completeWizard(host,'Review-gated Team','full_auto');
-  await expect(builder.getByRole('button',{name:'Choose independent reviewers'})).toBeVisible();
+  const builder=await completeWizard(host,'Access Team','full_auto');
+  await expect(builder.getByRole('checkbox',{name:/Require native Council review/})).not.toBeChecked();
+  await expect(builder).toContainText('Council is Off');
   await builder.getByRole('button',{name:'Next'}).click();
-  await expect(builder.getByRole('alert')).toContainText('at least two selected Reviewers');
-  await builder.getByRole('button',{name:'Choose independent reviewers'}).click();
-  await expect(builder).toContainText('Step 2 of 5');
-  await expect(host.locator('.sa-teams-panel .sa-item')).toHaveCount(0);
+  await expect(builder).toContainText('Step 5 of 5');
+  await builder.getByRole('button',{name:'Create Team (disabled)'}).click();
+  await expect(host.getByRole('region',{name:'Guided Team Builder'})).toHaveCount(0);
+  await openTeam(host,'Access Team');
+  await expect(host).toContainText('Full Auto');
 });
 
 test('an enabled Team admits a Demand through the new screen and opens its native Run',async({page})=>{
@@ -449,7 +449,7 @@ test('Run board separates navigation from task admission and retains Board/List 
   await expect(host.locator('form[data-sa-form="run"]')).toHaveCount(0);
 });
 
-test('native execution mode switch enables required Council before writing Full Auto',async({page})=>{
+test('native Full Auto mode does not modify Council settings',async({page})=>{
   await page.goto('/?bots=sample');
   const host=await mountNativeFixture(page);
   await openTeam(host,'Native Team');
@@ -462,13 +462,12 @@ test('native execution mode switch enables required Council before writing Full 
   const calls=await page.evaluate(()=>
     (window as unknown as {saFixtureMutations:Array<{command:string;args:Record<string,unknown>}>})
       .saFixtureMutations);
-  expect(calls.map(entry=>entry.command)).toEqual(['superagent_roster_update','superagent_strategy_update']);
+  expect(calls.map(entry=>entry.command)).toEqual(['superagent_strategy_update']);
   expect(calls[0].args.expectedRevision).toBe(1);
-  expect(calls[1].args.expectedRevision).toBe(2);
-  expect((calls[1].args.input as {executionMode:string}).executionMode).toBe('full_auto');
+  expect((calls[0].args.input as {executionMode:string}).executionMode).toBe('full_auto');
 });
 
-test('switching Full Auto back to With Approval removes Council before changing mode',async({page})=>{
+test('switching Full Auto back to With Approval leaves independent Council off',async({page})=>{
   await page.goto('/?bots=sample');
   const host=await mountNativeFixture(page,{mode:'full_auto'});
   await openTeam(host,'Native Team');
@@ -479,22 +478,23 @@ test('switching Full Auto back to With Approval removes Council before changing 
   await expect(host).toHaveAttribute('aria-busy','false');
   const commands=await page.evaluate(()=>
     (window as unknown as {saFixtureMutations:Array<{command:string}>}).saFixtureMutations.map(x=>x.command));
-  expect(commands).toEqual(['superagent_roster_update','superagent_strategy_update']);
+  expect(commands).toEqual(['superagent_strategy_update']);
   await expect(form.getByRole('radio',{name:/With Approval/})).toBeChecked();
 });
 
-test('Full Auto configuration rejects insufficient reviewers without native mutation',async({page})=>{
+test('native Full Auto configuration accepts zero Council reviewers',async({page})=>{
   await page.goto('/?bots=sample');
-  const host=await mountNativeFixture(page,{reviewers:1});
+  const host=await mountNativeFixture(page,{reviewers:0});
   await openTeam(host,'Native Team');
   await host.locator('.sa-subtabs').getByRole('button',{name:'Execution and review'}).click();
   const form=host.locator('form[data-sa-form="strategy-update"]');
   await form.getByRole('radio',{name:/Full Auto/}).check();
   await form.getByRole('button',{name:'Save future-Team policy'}).click();
-  await expect(host.getByRole('alert')).toContainText('needs two independent reviewer bots');
-  await expect(host.getByRole('region',{name:'Configured Team roles'})).toBeVisible();
-  expect(await page.evaluate(()=>(
-    window as unknown as {saFixtureMutations:unknown[]}).saFixtureMutations.length)).toBe(0);
+  await expect(host).toHaveAttribute('aria-busy','false');
+  const calls=await page.evaluate(()=>
+    (window as unknown as {saFixtureMutations:Array<{command:string}>}).saFixtureMutations.map(x=>x.command));
+  expect(calls).toEqual(['superagent_strategy_update']);
+  await expect(form.getByRole('radio',{name:/Full Auto/})).toBeChecked();
 });
 
 test('native run inspector opens the exact assigned bot conversation',async({page})=>{

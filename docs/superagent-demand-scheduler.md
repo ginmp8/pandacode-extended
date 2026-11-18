@@ -87,3 +87,25 @@ parent's file-write grants. The native scheduler records child/grandchild
 Ticket/Assignment ancestry and waits for the required child’s own verified
 completion. It exposes the graph in the Demand inspector; root Stop revokes
 all descendants. See [the subagent contract](superagent-native-subagents.md).
+
+## 2026-11-18 native Full Access correction (PR #157)
+
+The user clarified that Full Auto means existing PandaCode native **Full Access**
+for new executor Worker task sessions, **not** a second tool permission system.
+The native `full` session mode is selected through existing bot/harness
+adapters; unrelated existing bot chats and their saved modes are not mutated.
+A new admission-bound audit receipt distinguishes sessions issued under this
+corrected policy from historical read-only SuperAgent sessions. Council is
+independent and optional; selecting Full Auto by itself requires **zero**
+reviewers. If Council is explicitly required, its native reviewer validation
+still applies. With Approval uses native bot session modes and separate
+human WorkItem acceptance.
+
+**Current integration gaps remain:** the legacy WorkItem exact-file admission,
+ToolHost-only write evidence, explicit native test command grants and
+human/Council-only final WorkItem proof are not yet removed/reconciled across
+the full scheduler and delivery pipeline. This change proves a permission
+routing slice, **not** a working provider-backed no-prompt Full Access Demand.
+Do not consider Full Auto complete until normal shell/MCP/file tools, tests,
+optional Council, multi-WorkItem completion, and safe stop/recovery are verified
+at the current PR HEAD. See owner clarification on issue #148.

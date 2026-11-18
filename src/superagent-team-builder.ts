@@ -146,7 +146,12 @@ export class GuidedTeamBuilder {
         if (!(target instanceof HTMLInputElement) ||
             !['approval','full_auto'].includes(target.value)) return false;
         this.executionMode = target.value as 'approval' | 'full_auto';
-        this.councilRequired = this.executionMode === 'full_auto';
+        if (this.executionMode === 'approval') this.councilRequired = false;
+        break;
+      case 'builderCouncilRequired':
+        if (!(target instanceof HTMLInputElement) || target.type !== 'checkbox') return false;
+        if (this.executionMode !== 'full_auto') return false;
+        this.councilRequired = target.checked;
         break;
       default: return false;
     }
@@ -288,15 +293,18 @@ export class GuidedTeamBuilder {
           '><span><strong>With Approval</strong><small>Every completed WorkItem waits for an explicit human decision before dependents advance.</small></span></label>' +
         '<label class="sa-mode-option"><input type="radio" name="builderExecutionMode" value="full_auto"' +
           (this.executionMode === 'full_auto' ? ' checked' : '') +
-          '><span><strong>Full Auto</strong><small>Plan and dispatch native WorkItems automatically. Independent native Council must verify each result to complete it.</small></span></label>' +
+          '><span><strong>Full Auto</strong><small>Use existing native Full Access for new Worker task sessions. Native Council is optional.</small></span></label>' +
         '</fieldset>' +
-        '<p>' + (this.executionMode === 'full_auto'
-          ? 'Select at least two distinct native reviewer bots in Members. Without verified Council, work stops rather than being accepted.'
-          : 'Human acceptance is required. No Council verdict can silently replace it.') + '</p>' +
-        (this.executionMode === 'full_auto' && this.reviewers.length < 2
-          ? '<button type="button" data-sa-builder-reviewers>Choose independent reviewers</button>'
-          : '') +
-        '<p>Both policies preserve each bot\'s model, skills and native conversation. Tool and GitHub effects still require specific native grants.</p>' +
+        (this.executionMode === 'full_auto'
+          ? '<label class="sa-council-toggle"><input type="checkbox" name="builderCouncilRequired"' +
+            (this.councilRequired ? ' checked' : '') +
+            '> Require native Council review (optional)</label>' +
+            (this.councilRequired
+              ? '<p>Required Council needs at least two distinct reviewers in Members.</p>'
+              : '<p>Council is Off; Full Access does not require reviewers.</p>')
+          : '<p>Human WorkItem acceptance is required; tool permissions use the bot\'s native chat mode.</p>') +
+        '<p>New sessions use native permissions; existing bot models, skills, preferences and chats are unchanged.</p>' +
+
         '<p>Saving a Team leaves it Off until explicitly enabled; no request or permission is created by configuration.</p>';
     } else {
       const problem = this.problem(bots, 4);

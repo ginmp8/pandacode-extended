@@ -1019,7 +1019,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       safe(demandObjective) + '</textarea></label>' +
       '<p class="sa-execution-explainer"><strong>Native Team orchestration</strong> · ' +
       (teamStrategy?.orchestrationId === chosen.id
-        ? (teamStrategy.executionMode === 'full_auto' ? 'Full Auto · native Council'
+        ? (teamStrategy.executionMode === 'full_auto' ? 'Full Auto · native Full Access'
           : teamStrategy.executionMode === 'approval' ? 'With Approval · human decision'
           : 'Execution policy not configured')
         : 'Inspect the Team execution policy before starting') +
@@ -1190,13 +1190,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               '><span><strong>With Approval</strong><small>WorkItems pause for native human acceptance. Council automatic finalization must be disabled.</small></span></label>' +
             '<label class="sa-mode-option"><input type="radio" name="executionMode" value="full_auto"' +
               (teamStrategy.executionMode === 'full_auto' ? ' checked' : '') +
-              '><span><strong>Full Auto</strong><small>Native dependency dispatch with two or more Council reviewers; only a verified pass settles each WorkItem.</small></span></label>' +
+              '><span><strong>Full Auto</strong><small>Native Full Access on Worker task sessions; Council is optional and configured independently.</small></span></label>' +
             '</fieldset>' +
-            '<p class="sa-mode-note">The Team must be Off to change modes. Full Auto requires at least two independent native Council reviewers; With Approval waits for a human decision. Neither mode grants additional tools or file/GitHub rights.</p>' +
-            (roleRoster?.orchestrationId === chosen.id && roleRoster.reviewerBotIds.length < 2
-              ? '<div class="sa-mode-requirement" role="note">Full Auto needs two independent reviewers. ' +
-                '<button type="button" data-sa-edit-reviewers>Configure reviewers</button></div>'
-              : '') +
+            '<p class="sa-mode-note">Full Auto uses existing bot/chat native Full Access for new Workers, without changing other chats. Council is optional. With Approval preserves native tool permissions plus human WorkItem acceptance.</p>' +
             '<label>Optimization priority<select name="priority">' +
             (['balanced','cost','latency','throughput','quality'] as const).map(priority =>
               '<option value="' + priority + '"' +
@@ -1322,22 +1318,18 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<dl><dt>Team status</dt><dd>' + (chosen.enabled ? 'Enabled' : 'Off') + '</dd>' +
         '<dt>Execution</dt><dd>' +
         (teamStrategy?.orchestrationId === chosen.id
-          ? (teamStrategy.executionMode === 'full_auto' ? 'Full Auto · independent Council' :
+          ? (teamStrategy.executionMode === 'full_auto' ? 'Full Auto · native Full Access' :
             teamStrategy.executionMode === 'approval' ? 'With Approval · human acceptance' :
             'Not configured')
           : 'Loading native policy') + '</dd>' +
         '<dt>Council review</dt><dd>' +
-        (chosen.councilRequired ? 'Required' : 'Policy dependent') + '</dd>' +
+        (chosen.councilRequired ? 'Required' : 'Off (optional)') + '</dd>' +
         '<dt>Project</dt><dd>' +
         safe(bots.find(bot => bot.id === chosen.workerBotId)?.projectId ?? 'Unavailable') +
         '</dd><dt>Scoped write grants</dt><dd>Per-Demand native authorization</dd></dl>' +
         '<div class="sa-actions"><button type="button" data-sa-enable="' + safe(chosen.id) +
         '">' + (chosen.enabled ? 'Disable Team' : 'Enable Team') + '</button>' +
         '<button type="button" data-sa-view="runs">View runs</button></div>' +
-        (teamStrategy?.orchestrationId === chosen.id &&
-          teamStrategy.executionMode === 'full_auto' &&
-          (chosen.reviewerCount ?? chosen.reviewerBotIds?.length ?? 0) < 2
-          ? '<p role="note">Full Auto requires at least two independent reviewers before the Team can be enabled.</p>' : '') +
         '</section></div>'
       : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
     const globalReviewPanel = '<section class="sa-pane sa-cross-team-review" ' +
@@ -2899,30 +2891,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         error = 'The native roster is stale. Refresh this Team before updating its execution mode.';
         render(); return;
       }
-      if (input.executionMode === 'full_auto' && roster.reviewerBotIds.length < 2) {
-        error = 'Full Auto needs two independent reviewer bots. Configure them in Members and roles before saving.';
+      if (input.executionMode === 'approval' && roster.councilRequired) {
+        error = 'Disable required Council in Members before selecting With Approval.';
         teamPanel = 'members'; render(); return;
       }
       void work(async () => {
-        let expectedRevision = loaded.policyRevision;
-        const requiresCouncil = input.executionMode === 'full_auto';
-        let councilChanged = false;
+        const expectedRevision = loaded.policyRevision;
         try {
-          if (roster.councilRequired !== requiresCouncil) {
-            const changed = await call<TeamRoster>('superagent_roster_update',{
-              orchestrationId:cfg.id, expectedRevision,
-              input:{workerBotIds:[...roster.workerBotIds],
-                reviewerBotIds:[...roster.reviewerBotIds],
-                councilRequired:requiresCouncil},
-            });
-            if (changed.orchestrationId !== cfg.id ||
-                changed.councilRequired !== requiresCouncil ||
-                changed.policyRevision <= expectedRevision) {
-              throw new Error('Native Council policy did not confirm the requested mode transition.');
-            }
-            expectedRevision = changed.policyRevision;
-            councilChanged = true;
-          }
           const saved = await call<StrategyView>('superagent_strategy_update',{
             orchestrationId:cfg.id, expectedRevision, input,
           });
@@ -2936,12 +2911,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             ? 'Execution mode saved, but the Team remains Off: ' + saved.enableBlockers.join('; ')
             : 'Execution mode saved. Enable the Team to admit new Demands.';
         } catch (cause) {
-          if (councilChanged) {
-            await reload();
-            throw new Error('Council settings were updated safely, but execution mode was not. ' +
-              'The Team remains Off; review the current native policy and retry. ' +
-              (cause instanceof Error ? cause.message : String(cause)));
-          }
           throw cause;
         }
       });

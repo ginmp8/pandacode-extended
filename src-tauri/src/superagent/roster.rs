@@ -43,6 +43,66 @@ CREATE TABLE IF NOT EXISTS sa_ticket_attempt_limits(
     max_worker_attempts INTEGER NOT NULL CHECK(max_worker_attempts BETWEEN 1 AND 4)
 );
 "#;
+/// v50: scenario and optimization direction are descriptive configuration,
+/// never a tool grant, price promise, or permission to bypass acceptance.
+pub(crate) const TEAM_STRATEGY_SCHEMA:&str=r#"
+CREATE TABLE IF NOT EXISTS sa_team_strategies(
+    orchestration_id TEXT PRIMARY KEY REFERENCES sa_orchestrations(id) ON DELETE CASCADE,
+    purpose TEXT NOT NULL CHECK(length(purpose)<=400),
+    strategy TEXT NOT NULL CHECK(strategy IN ('balanced','economy','performance','security_critical','custom'))
+);
+CREATE TABLE IF NOT EXISTS sa_ticket_strategies(
+    ticket_id TEXT PRIMARY KEY REFERENCES sa_tickets(id) ON DELETE RESTRICT,
+    policy_revision INTEGER NOT NULL CHECK(policy_revision>0),
+    purpose TEXT NOT NULL CHECK(length(purpose)<=400),
+    strategy TEXT NOT NULL CHECK(strategy IN ('balanced','economy','performance','security_critical','custom')),
+    captured_at INTEGER NOT NULL
+);
+"#;
+pub(super) fn validate_team_strategy(purpose:&str,strategy:&str)->Result<(String,String)> {
+    let purpose=purpose.trim();
+    if purpose.chars().count()>400 ||
+        purpose.chars().any(|c| c.is_control() && c!='\n') {
+        return Err("Team purpose must be at most 400 characters and contain no unsafe controls.".into());
+    }
+    if !matches!(strategy,"balanced"|"economy"|"performance"|"security_critical"|"custom") {
+        return Err("Unsupported Team optimization strategy.".into());
+    }
+    Ok((purpose.into(),strategy.into()))
+}
+fn read_team_strategy(store:&Store,id:&str)->Result<(String,String)> {
+    let saved:Option<(String,String)>=store.db.query_row(
+        "SELECT purpose,strategy FROM sa_team_strategies WHERE orchestration_id=?1",
+        [id],|row|Ok((row.get(0)?,row.get(1)?)),
+    ).optional().map_err(|e|e.to_string())?;
+    match saved {
+        Some((purpose,strategy))=>validate_team_strategy(&purpose,&strategy)
+            .and_then(|(p,s)|if p==purpose {Ok((p,s))} else {
+                Err("Stored Team purpose is not canonical.".into())
+            }),
+        None=>Ok(("".into(),"balanced".into())),
+    }
+}
+#[derive(Debug,Clone,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase")]
+pub struct AdmittedTeamStrategy {
+    pub policy_revision:i64,
+    pub purpose:String,
+    pub strategy:String,
+    pub captured_at:i64,
+}
+pub(super) fn ticket_strategy(store:&Store,ticket_id:&str)->Result<Option<AdmittedTeamStrategy>> {
+    store.db.query_row(
+        "SELECT s.policy_revision,s.purpose,s.strategy,s.captured_at
+         FROM sa_ticket_strategies s JOIN sa_tickets t
+           ON t.id=s.ticket_id AND t.policy_revision=s.policy_revision
+         WHERE s.ticket_id=?1",
+        [ticket_id],|row|Ok(AdmittedTeamStrategy {
+            policy_revision:row.get(0)?,purpose:row.get(1)?,
+            strategy:row.get(2)?,captured_at:row.get(3)?,
+        }),
+    ).optional().map_err(|e|e.to_string())
+}
 const MAX_WORKERS:usize=8;
 const MAX_REVIEWERS:usize=4;
 
@@ -61,6 +121,8 @@ pub struct TeamRoster {
     pub worker_bot_ids:Vec<String>,
     pub reviewer_bot_ids:Vec<String>,
     pub max_worker_attempts:i64,
+    pub purpose:String,
+    pub strategy:String,
     pub execution_ready:bool,
 }
 /// A bounded, configuration-only snapshot of actual Team member profiles.
@@ -182,6 +244,16 @@ pub(super) fn capture_ticket_profile(
     ).map_err(|e|e.to_string())?;
     if pinned!=1 {
         return Err("Task worker-attempt budget could not be frozen.".into());
+    }
+    let (purpose,strategy)=read_team_strategy(store,&configuration.id)?;
+    let inserted=store.db.execute(
+        "INSERT INTO sa_ticket_strategies(ticket_id,policy_revision,purpose,strategy,captured_at)
+         SELECT ?1,?2,?3,?4,?5 FROM sa_tickets
+         WHERE id=?1 AND orchestration_id=?6 AND policy_revision=?2",
+        params![ticket_id,configuration.policy_revision,purpose,strategy,at,configuration.id],
+    ).map_err(|e|e.to_string())?;
+    if inserted!=1 {
+        return Err("Task strategy could not be pinned to the admitted Team revision.".into());
     }
     Ok(())
 }
@@ -359,6 +431,8 @@ pub(crate) fn read(store:&Store,id:&str)->Result<TeamRoster> {
         worker_bot_ids:workers,
         reviewer_bot_ids:reviewers,
         max_worker_attempts:team_worker_attempt_limit(store,id)?,
+        purpose:read_team_strategy(store,id)?.0,
+        strategy:read_team_strategy(store,id)?.1,
         execution_ready:ready,
     })
 }
@@ -653,6 +727,11 @@ pub(super) fn duplicate_with_roster(
          VALUES(?1,?2)",
         params![created.id,source_roles.max_worker_attempts],
     ).map_err(|e|e.to_string())?;
+    tx.execute(
+        "INSERT INTO sa_team_strategies(orchestration_id,purpose,strategy)
+         VALUES(?1,?2,?3)",
+        params![&created.id,&source_roles.purpose,&source_roles.strategy],
+    ).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e| e.to_string())?;
     configuration(store, &created.id)
 }
@@ -743,6 +822,56 @@ pub(super) fn set_worker_attempt_limit(
     ).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;
     read(store,id)
+}
+
+/// A strategy edit changes future Demand metadata only. It never changes
+/// native bot profiles, execution modes, existing Tickets, or grant authority.
+fn set_team_strategy(
+    store:&Store,id:&str,expected_revision:i64,purpose:&str,strategy:&str,
+)->Result<TeamRoster> {
+    let (purpose,strategy)=validate_team_strategy(purpose,strategy)?;
+    let current=read(store,id)?;
+    let cfg=configuration(store,id)?;
+    if cfg.enabled || current.policy_revision!=expected_revision {
+        return Err("Disable the Team and reload its policy revision before changing strategy.".into());
+    }
+    if current.purpose==purpose && current.strategy==strategy {
+        return Ok(current);
+    }
+    let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
+    let changed=tx.execute(
+        "UPDATE sa_orchestrations SET policy_revision=policy_revision+1,updated_at=?3
+         WHERE id=?1 AND enabled=0 AND policy_revision=?2
+           AND NOT EXISTS(
+              SELECT 1 FROM sa_tickets t WHERE t.orchestration_id=?1
+                AND (t.state NOT IN ('completed','failed','stopped','interrupted','inconclusive')
+                  OR EXISTS(SELECT 1 FROM sa_assignments a
+                            WHERE a.ticket_id=t.id AND a.state='running')
+                  OR EXISTS(SELECT 1 FROM sa_effect_receipts e
+                            WHERE e.ticket_id=t.id AND e.state IN ('pending','uncertain')))
+           )",
+        params![id,expected_revision,storage::now()],
+    ).map_err(|e|e.to_string())?;
+    if changed!=1 {
+        return Err("Team policy or unsettled Demand changed before the strategy edit.".into());
+    }
+    tx.execute(
+        "INSERT INTO sa_team_strategies(orchestration_id,purpose,strategy)
+         VALUES(?1,?2,?3) ON CONFLICT(orchestration_id)
+         DO UPDATE SET purpose=excluded.purpose,strategy=excluded.strategy",
+        params![id,purpose,strategy],
+    ).map_err(|e|e.to_string())?;
+    tx.commit().map_err(|e|e.to_string())?;
+    read(store,id)
+}
+#[tauri::command]
+pub async fn superagent_team_strategy_update(
+    window:tauri::WebviewWindow,state:State<'_,AppState>,
+    orchestration_id:String,expected_revision:i64,purpose:String,strategy:String,
+)->Result<TeamRoster> {
+    require_main_window(&window)?;
+    let store=state.store.lock().map_err(|e|e.to_string())?;
+    set_team_strategy(&store,&orchestration_id,expected_revision,&purpose,&strategy)
 }
 
 #[tauri::command]
@@ -1509,6 +1638,74 @@ mod tests {
         assert_eq!(read(&reopened,&cfg.id).unwrap().reviewer_bot_ids,valid.reviewer_bot_ids);
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets",[],|row|row.get::<_,i64>(0)).unwrap(),0);
+    }
+
+    #[test]
+    fn team_strategy_is_versioned_portable_and_pinned_per_demand_after_restart() {
+        let path=std::env::temp_dir().join(format!("sa-strategy-{}.sqlite3",storage::id()));
+        let mut store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('p','Strategy','/tmp/sa-strategy')",[]
+        ).unwrap();
+        for id in ["lead","worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'p','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let original=super::super::create_configuration(&store,NewOrchestration {
+            name:"Scenario Team".into(),coordinator_bot_id:"lead".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        assert_eq!(read(&store,&original.id).unwrap().strategy,"balanced");
+        assert!(set_team_strategy(&store,&original.id,original.policy_revision,
+            "Scope","unrestricted").is_err());
+        assert!(set_team_strategy(&store,&original.id,original.policy_revision,
+            &"x".repeat(401),"performance").is_err());
+        assert_eq!(configuration(&store,&original.id).unwrap().policy_revision,1);
+        let configured=set_team_strategy(&store,&original.id,original.policy_revision,
+            "Build secure integrations","performance").unwrap();
+        assert_eq!(configured.policy_revision,2);
+        assert_eq!(configured.purpose,"Build secure integrations");
+        assert_eq!(set_team_strategy(&store,&original.id,2,
+            "Build secure integrations","performance").unwrap().policy_revision,2);
+        assert!(set_team_strategy(&store,&original.id,1,
+            "Stale mutation","economy").is_err());
+        let active=super::super::change_enabled(&store,&original.id,2,true).unwrap();
+        let (ticket,started)=super::super::admit(
+            &mut store,&original.id,"Inspect the integration","strategy-run",false,
+        ).unwrap();
+        assert!(started);
+        let admitted=super::super::ticket_snapshot(&store,&ticket.id,20).unwrap()
+            .admitted_strategy.unwrap();
+        assert_eq!(admitted.policy_revision,active.policy_revision);
+        assert_eq!(admitted.strategy,"performance");
+        assert_eq!(admitted.purpose,"Build secure integrations");
+        assert!(set_team_strategy(&store,&original.id,active.policy_revision,
+            "Changed","economy").is_err());
+        super::super::stop(&store,&ticket.id).unwrap();
+        let off=super::super::change_enabled(
+            &store,&original.id,active.policy_revision,false,
+        ).unwrap();
+        let revised=set_team_strategy(&store,&original.id,off.policy_revision,
+            "Economize future runs","economy").unwrap();
+        assert!(revised.policy_revision>admitted.policy_revision);
+        assert_eq!(super::super::ticket_snapshot(&store,&ticket.id,20).unwrap()
+            .admitted_strategy.unwrap(),admitted,
+            "Settled Ticket must keep the original strategy snapshot");
+        let cloned=duplicate_with_roster(&store,&original.id,revised.policy_revision,
+            "Scenario Team copy".into()).unwrap();
+        assert!(!cloned.enabled);
+        assert_eq!(read(&store,&cloned.id).unwrap().strategy,"economy");
+        assert_eq!(read(&store,&cloned.id).unwrap().purpose,"Economize future runs");
+        assert!(super::super::ticket_snapshot(&store,&ticket.id,20).unwrap()
+            .admitted_strategy.is_some());
+        drop(store);
+        let reopened=Store::open_read_only(&path).unwrap();
+        assert_eq!(ticket_strategy(&reopened,&ticket.id).unwrap(),Some(admitted));
+        assert_eq!(read(&reopened,&original.id).unwrap().strategy,"economy");
+        assert_eq!(read(&reopened,&cloned.id).unwrap().strategy,"economy");
     }
 
 }

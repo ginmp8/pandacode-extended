@@ -116,6 +116,52 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
   });
 });
 
+test('Team strategy changes through native CAS and persists after refresh',async({page})=>{
+  await page.goto('/?bots=sample');
+  await page.evaluate(async()=>{
+    const {mountSuperagent}=await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-team-strategy-test';document.body.appendChild(host);
+    const team={id:'team',name:'Reusable',coordinatorBotId:'coordinator',workerBotId:'worker',
+      enabled:false,policyRevision:2};
+    let roster={orchestrationId:'team',policyRevision:2,coordinatorBotId:'coordinator',
+      workerBotIds:['worker'],reviewerBotIds:[],maxWorkerAttempts:2,
+      purpose:'',strategy:'balanced',executionReady:true};
+    const calls:unknown[]=[];
+    (window as unknown as {saStrategyCalls:unknown[]}).saStrategyCalls=calls;
+    mountSuperagent(host,async(command,args)=>{
+      if(command==='bots_list')return [{id:'coordinator',name:'Coordinator',paused:false},
+        {id:'worker',name:'Worker',paused:false}] as never;
+      if(command==='superagent_list')return [team] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_roster')return roster as never;
+      if(command==='superagent_team_strategy_update'){
+        calls.push(args);
+        if(args?.orchestrationId!=='team' || args?.expectedRevision!==2)
+          throw Error('Unscoped native strategy mutation');
+        roster={...roster,policyRevision:3,purpose:String(args.purpose),strategy:String(args.strategy)};
+        team.policyRevision=3;
+        return roster as never;
+      }
+      throw Error('Unexpected native command '+command);
+    });
+  });
+  const host=page.locator('#sa-team-strategy-test');
+  await host.getByRole('button',{name:'Teams',exact:true}).click();
+  await host.getByRole('button',{name:'Load native members'}).click();
+  await host.locator('form[data-sa-form="team-strategy"] textarea[name="purpose"]')
+    .fill('Automate reliable tests');
+  await host.locator('form[data-sa-form="team-strategy"] select[name="strategy"]')
+    .selectOption('performance');
+  await host.getByRole('button',{name:'Save Team purpose and strategy'}).click();
+  await expect(host.locator('form[data-sa-form="team-strategy"] textarea[name="purpose"]'))
+    .toHaveValue('Automate reliable tests');
+  await expect(host.locator('form[data-sa-form="team-strategy"] select[name="strategy"]'))
+    .toHaveValue('performance');
+  const calls=await page.evaluate(()=>(window as unknown as {saStrategyCalls:unknown[]}).saStrategyCalls);
+  expect(calls).toEqual([{orchestrationId:'team',expectedRevision:2,
+    purpose:'Automate reliable tests',strategy:'performance'}]);
+});
+
 test('native policy blocker prevents edits hidden by the paginated Ticket view',async({page})=>{
   await page.goto('/?bots=sample');
   await page.evaluate(async()=>{

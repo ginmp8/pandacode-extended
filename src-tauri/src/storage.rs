@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 49;
+pub const SCHEMA_VERSION: i64 = 50;
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
 
@@ -744,6 +744,14 @@ impl Store {
                      SELECT id,policy_revision,2 FROM sa_tickets;
                      PRAGMA user_version=49;",
                 ).map_err(|e|e.to_string())?;
+            }
+            if version < 50 {
+                // Additive descriptive Team scenario and immutable per-Ticket
+                // strategy snapshot. Historical Tickets remain unknown.
+                migration.execute_batch(crate::superagent::roster::TEAM_STRATEGY_SCHEMA)
+                    .map_err(|e|e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=50;")
+                    .map_err(|e|e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
         }

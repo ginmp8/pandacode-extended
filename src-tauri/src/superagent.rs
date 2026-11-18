@@ -844,6 +844,8 @@ pub struct TaskSnapshot {
     /// Legacy Tickets admitted before schema v46 report None.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub admitted_profile: Option<roster::AdmittedTeamProfile>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub admitted_strategy: Option<roster::AdmittedTeamStrategy>,
     /// Read-side policy drift only: a Team edit cannot reauthorize or rewrite a Demand.
     pub current_team_policy_revision: i64,
     pub team_policy_changed_since_admission: bool,
@@ -908,6 +910,7 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
         attempt_insights,
         activity: history(store, ticket_id, limit)?,
         admitted_profile: roster::ticket_profile(store, ticket_id)?,
+        admitted_strategy: roster::ticket_strategy(store, ticket_id)?,
     };
     tx.commit().map_err(|e| e.to_string())?;
     Ok(result)
@@ -8829,7 +8832,15 @@ mod tests {
             ).unwrap();
         }
         let affected_team = enabled(&store);
-        let unaffected_team = enabled(&store);
+        let other = create_configuration(&store, NewOrchestration {
+            name: "Independent Team".into(),
+            coordinator_bot_id: "router".into(), worker_bot_id: "worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "UPDATE sa_orchestrations SET enabled=1,policy_revision=policy_revision+1 WHERE id=?1",
+            [&other.id],
+        ).unwrap();
+        let unaffected_team = configuration(&store, &other.id).unwrap();
         let (affected, started) = admit(
             &mut store, &affected_team.id, "Scoped task", "secondary-reset-1", true,
         ).unwrap();

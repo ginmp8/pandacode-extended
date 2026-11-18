@@ -15,7 +15,7 @@ interface Config {
   policyEditBlocker?: string | null;
 }
 interface TeamRoster { orchestrationId:string; policyRevision:number; coordinatorBotId:string;
-  workerBotIds:string[]; reviewerBotIds:string[]; maxWorkerAttempts:number; executionReady:boolean }
+  workerBotIds:string[]; reviewerBotIds:string[]; maxWorkerAttempts:number; purpose:string; strategy:string; executionReady:boolean }
 interface EffectiveSkill {
   id:string; libraryStatus:string; safetyStatus:string;
   harnessEligibility:string; invocationEvidence:string;
@@ -72,6 +72,7 @@ interface AdmittedTeamProfile {
 interface TicketDetails {
   ticket: Ticket; mandate: Mandate; assignments: Assignment[];
   admittedProfile?: AdmittedTeamProfile | null;
+  admittedStrategy?: {policyRevision:number;purpose:string;strategy:string;capturedAt:number} | null;
   currentTeamPolicyRevision?: number;
   teamPolicyChangedSinceAdmission?: boolean;
   attemptInsights?: AssignmentInsight[];
@@ -304,6 +305,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<h5>Team configuration at Demand admission</h5>' +
         '<p>Historical native configuration, not provider capability, a tool grant, Skill invocation or Council approval. ' +
         'Editing the reusable Team cannot rewrite this Demand.</p>' +
+        (ticketDetails.admittedStrategy
+          ? '<p>Admitted Team strategy: ' + safe(ticketDetails.admittedStrategy.strategy) +
+            ' · Purpose: ' + safe(ticketDetails.admittedStrategy.purpose || 'not specified') +
+            ' · Policy revision ' + safe(ticketDetails.admittedStrategy.policyRevision) + '</p>'
+          : '<p>Historical Team strategy unavailable for this legacy Demand.</p>') +
         (ticketDetails.admittedProfile &&
          ticketDetails.admittedProfile.policyRevision === ticketDetails.mandate.policyRevision
           ? '<p>Admitted policy revision ' + ticketDetails.admittedProfile.policyRevision +
@@ -753,6 +759,22 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
                 '<button type="submit"' + (policyEditBlocker ? ' disabled aria-describedby="sa-budget-edit-blocker"' : '') +
                   '>Save Worker attempt budget</button></form>' +
               (policyEditBlocker ? '<p id="sa-budget-edit-blocker" role="status">Team budget edit blocked: ' +
+                safe(policyEditBlocker) + '</p>' : '') +
+              '<form data-sa-form="team-strategy">' +
+                '<label>Team purpose<textarea name="purpose" rows="3" maxlength="400">' +
+                  safe(roleRoster.purpose) + '</textarea></label>' +
+                '<label>Optimization strategy<select name="strategy">' +
+                  ([['balanced','Balanced'],['economy','Economy'],['performance','Performance'],
+                    ['security_critical','Security-critical'],['custom','Custom']] as const)
+                    .map(([value,label]) => '<option value="' + value + '"' +
+                      (roleRoster.strategy === value ? ' selected' : '') + '>' + label + '</option>').join('') +
+                  '</select></label>' +
+                '<p>Descriptive Team intent only. Optimization does not change native bot models, tool permissions, costs or required tests and reviews.</p>' +
+                '<button type="submit"' + (policyEditBlocker ||
+                  roleRoster.policyRevision !== chosen.policyRevision
+                  ? ' disabled aria-describedby="sa-strategy-edit-blocker"' : '') +
+                  '>Save Team purpose and strategy</button></form>' +
+              (policyEditBlocker ? '<p id="sa-strategy-edit-blocker" role="status">Team strategy edit blocked: ' +
                 safe(policyEditBlocker) + '</p>' : '') +
               '<p role="status">' + (roleRoster.executionReady ?
                 'Single-worker manual execution available after explicit enable.' :
@@ -1911,6 +1933,23 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         roleRoster=await call<TeamRoster>('superagent_roster_update',{
           orchestrationId:cfg.id, expectedRevision:cfg.policyRevision,
           input:{workerBotIds,reviewerBotIds},
+        });
+        await reload();
+        workspaceView='teams';
+      });
+      return;
+    }
+    if (form.dataset.saForm === 'team-strategy') {
+      const cfg=current();
+      if (!cfg || !roleRoster || roleRoster.orchestrationId!==cfg.id ||
+          roleRoster.policyRevision!==cfg.policyRevision || cfg.enabled || cfg.policyEditBlocker) return;
+      const purpose=String(data.get('purpose') ?? '').trim();
+      const strategy=String(data.get('strategy') ?? '');
+      if ([...purpose].length>400 || /[\x00-\x09\x0b-\x1f\x7f]/.test(purpose) ||
+          !['balanced','economy','performance','security_critical','custom'].includes(strategy)) return;
+      void work(async () => {
+        roleRoster=await call<TeamRoster>('superagent_team_strategy_update',{
+          orchestrationId:cfg.id,expectedRevision:cfg.policyRevision,purpose,strategy,
         });
         await reload();
         workspaceView='teams';

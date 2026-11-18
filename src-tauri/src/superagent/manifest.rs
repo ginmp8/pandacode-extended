@@ -39,6 +39,10 @@ struct Preset {
     /// Config-only v5 policy. Not a permission grant or automatic retry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max_worker_attempts: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    strategy: Option<String>,
     council: Council,
 }
 
@@ -89,6 +93,8 @@ struct Resolved {
     reviewer_ids: Vec<String>,
     project_id: String,
     max_worker_attempts: i64,
+    purpose: String,
+    strategy: String,
     existing: bool,
 }
 
@@ -104,7 +110,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
     }
     let manifest: Manifest = serde_json::from_value(document.clone())
         .map_err(|e| format!("Invalid SuperAgent companion manifest: {e}"))?;
-    if !matches!(manifest.schema_version, 1..=5) || manifest.orchestrations.len() > MAX_PRESETS {
+    if !matches!(manifest.schema_version, 1..=6) || manifest.orchestrations.len() > MAX_PRESETS {
         return Err("Unsupported SuperAgent manifest schema or too many presets.".into());
     }
     let bots = bots::list(store)?;
@@ -124,10 +130,25 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
         // Old portable versions retain the exact original two-attempt policy.
         // Version 5 must explicitly pin a bounded effective Team retry ceiling.
         let max_worker_attempts = match (manifest.schema_version, preset.max_worker_attempts) {
-            (5, Some(value @ 1..=4)) => i64::from(value),
-            (5, _) => return Err("Version 5 requires a worker-attempt limit between 1 and 4.".into()),
+            (5 | 6, Some(value @ 1..=4)) => i64::from(value),
+            (5 | 6, _) => return Err(format!(
+                "Version {} requires a worker-attempt limit between 1 and 4.",
+                manifest.schema_version
+            )),
             (_, None) => 2,
             (_, Some(_)) => return Err("Worker-attempt policy requires SuperAgent manifest version 5.".into()),
+        };
+        let (purpose,strategy) = if manifest.schema_version==6 {
+            let purpose=preset.purpose.as_deref()
+                .ok_or("Version 6 requires an explicit Team purpose.")?;
+            let strategy=preset.strategy.as_deref()
+                .ok_or("Version 6 requires an explicit Team optimization strategy.")?;
+            super::roster::validate_team_strategy(purpose,strategy)?
+        } else {
+            if preset.purpose.is_some() || preset.strategy.is_some() {
+                return Err("Team strategy metadata requires SuperAgent manifest version 6.".into());
+            }
+            ("".into(),"balanced".into())
         };
         let lookup = |name: &str| -> Result<&bots::Bot> {
             if !valid_name(name) { return Err("Invalid portable bot name.".into()); }
@@ -238,6 +259,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
                 || roles.worker_bot_ids.iter().skip(1).cloned().collect::<Vec<_>>() != extra_ids
                 || roles.reviewer_bot_ids != reviewer_ids
                 || roles.max_worker_attempts != max_worker_attempts
+                || roles.purpose != purpose || roles.strategy != strategy
             {
                 return Err(format!("Existing orchestration conflicts with imported preset: {}",preset.name));
             }
@@ -250,6 +272,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
             reviewer_ids,
             project_id: worker.project_id.clone(),
             max_worker_attempts,
+            purpose,strategy,
             existing: existing.is_some(),
         });
     }
@@ -306,6 +329,11 @@ fn apply(store: &Store, document: &serde_json::Value, confirmed: bool) -> Result
              VALUES(?1,?2)",
             params![&id,candidate.max_worker_attempts],
         ).map_err(|e| format!("Atomic Team attempt-budget import aborted: {e}"))?;
+        tx.execute(
+            "INSERT INTO sa_team_strategies(orchestration_id,purpose,strategy)
+             VALUES(?1,?2,?3)",
+            params![&id,candidate.purpose,candidate.strategy],
+        ).map_err(|e| format!("Atomic Team strategy import aborted: {e}"))?;
         result.created.push(candidate.name);
     }
     tx.commit().map_err(|e| e.to_string())?;
@@ -407,11 +435,13 @@ fn export(store: &Store) -> Result<serde_json::Value> {
             max_concurrent_tasks: 1,
             max_attempts_per_assignment: 2,
             max_worker_attempts: Some(roles.max_worker_attempts as u8),
+            purpose:Some(roles.purpose),
+            strategy:Some(roles.strategy),
             council: Council { enabled: false },
         });
     }
     let document = serde_json::to_value(Manifest {
-        schema_version:5,orchestrations:presets,
+        schema_version:6,orchestrations:presets,
     }).map_err(|e| e.to_string())?;
     if serde_json::to_vec(&document).map_err(|e| e.to_string())?.len() > MAX_BYTES {
         return Err("SuperAgent export exceeds the 1 MB portable manifest limit.".into());
@@ -553,7 +583,7 @@ mod tests {
         let snapshot: serde_json::Value = serde_json::from_slice(
             &std::fs::read(path).unwrap(),
         ).unwrap();
-        assert_eq!(snapshot["schemaVersion"], 5);
+        assert_eq!(snapshot["schemaVersion"], 6);
         assert_eq!(snapshot["orchestrations"].as_array().unwrap().len(), 0);
         let repeat = apply_with_backup(&store, &root, &document("Software Development"), true).unwrap();
         assert_eq!(repeat.unchanged, vec!["Software Development"]);
@@ -864,7 +894,48 @@ mod tests {
 
 
     #[test]
-    fn portable_v5_worker_budget_roundtrip_and_legacy_compatibility() {
+    fn portable_v6_strategy_roundtrip_rejects_conflicting_and_legacy_metadata() {
+        let origin=fixture();
+        apply(&origin,&document("Scenario transfer"),true).unwrap();
+        let id:String=origin.db.query_row(
+            "SELECT id FROM sa_orchestrations WHERE name='Scenario transfer'",
+            [],|r|r.get(0),
+        ).unwrap();
+        super::super::roster::set_team_strategy(&origin,&id,1,
+            "Fix critical issues","security_critical").unwrap();
+        let portable=export(&origin).unwrap();
+        assert_eq!(portable["schemaVersion"],json!(6));
+        assert_eq!(portable["orchestrations"][0]["purpose"],json!("Fix critical issues"));
+        assert_eq!(portable["orchestrations"][0]["strategy"],json!("security_critical"));
+        let destination=fixture();
+        assert_eq!(apply(&destination,&portable,true).unwrap().created,vec!["Scenario transfer"]);
+        let imported:String=destination.db.query_row(
+            "SELECT id FROM sa_orchestrations WHERE name='Scenario transfer'",
+            [],|r|r.get(0),
+        ).unwrap();
+        let roles=super::super::roster::read(&destination,&imported).unwrap();
+        assert_eq!(roles.purpose,"Fix critical issues");
+        assert_eq!(roles.strategy,"security_critical");
+        assert_eq!(apply(&destination,&portable,true).unwrap().unchanged,vec!["Scenario transfer"]);
+        let mut conflicting=portable.clone();
+        conflicting["orchestrations"][0]["purpose"]=json!("Other purpose");
+        assert!(preview(&destination,&conflicting).unwrap_err().contains("conflicts"));
+        let mut invalid=portable.clone();
+        invalid["orchestrations"][0]["strategy"]=json!("unrestricted");
+        assert!(preview(&destination,&invalid).is_err());
+        let mut legacy=portable.clone();
+        legacy["schemaVersion"]=json!(5);
+        assert!(preview(&destination,&legacy).unwrap_err().contains("version 6"));
+        for field in ["purpose","strategy"] {
+            legacy["orchestrations"][0].as_object_mut().unwrap().remove(field);
+        }
+        assert!(preview(&destination,&legacy).unwrap_err().contains("conflicts"));
+        assert_eq!(super::super::roster::read(&destination,&imported).unwrap().strategy,
+            "security_critical");
+    }
+
+    #[test]
+    fn portable_v6_worker_budget_roundtrip_and_legacy_compatibility() {
         let origin=fixture();
         apply(&origin,&document("Capped Team"),true).unwrap();
         let source_id:String=origin.db.query_row(
@@ -877,7 +948,7 @@ mod tests {
         ).unwrap();
         assert_eq!(updated.max_worker_attempts,3);
         let exported=export(&origin).unwrap();
-        assert_eq!(exported["schemaVersion"],5);
+        assert_eq!(exported["schemaVersion"],6);
         assert_eq!(exported["orchestrations"][0]["maxWorkerAttempts"],json!(3));
         assert_eq!(exported["orchestrations"][0]["maxAttemptsPerAssignment"],json!(2));
         assert!(!exported.to_string().contains("authorization_id"));
@@ -902,7 +973,7 @@ mod tests {
         }
         let mut absent=exported.clone();
         absent["orchestrations"][0].as_object_mut().unwrap().remove("maxWorkerAttempts");
-        assert!(preview(&target,&absent).unwrap_err().contains("Version 5"));
+        assert!(preview(&target,&absent).unwrap_err().contains("Version 6"));
         let mut inconsistent=exported.clone();
         inconsistent["orchestrations"][0]["maxWorkerAttempts"]=json!(2);
         assert!(preview(&target,&inconsistent).unwrap_err().contains("conflicts"));
@@ -910,6 +981,8 @@ mod tests {
         legacy_v4["schemaVersion"]=json!(4);
         assert!(preview(&target,&legacy_v4).is_err());
         legacy_v4["orchestrations"][0].as_object_mut().unwrap().remove("maxWorkerAttempts");
+        legacy_v4["orchestrations"][0].as_object_mut().unwrap().remove("purpose");
+        legacy_v4["orchestrations"][0].as_object_mut().unwrap().remove("strategy");
         assert!(preview(&target,&legacy_v4).unwrap_err().contains("conflicts"));
         let mut legacy_new=legacy_v4.clone();
         legacy_new["orchestrations"][0]["name"]=json!("Legacy two attempts");
@@ -927,14 +1000,14 @@ mod tests {
     }
 
     #[test]
-    fn portable_v5_profiles_pin_reasoning_and_accept_legacy_v3_imports() {
+    fn portable_v6_profiles_pin_reasoning_and_accept_legacy_v3_imports() {
         let origin=fixture();
         origin.db.execute(
             "UPDATE bots SET skills='[\"required-skill\"]', reasoning_effort='high' WHERE id='worker'",[],
         ).unwrap();
         apply(&origin,&document("Pinned Team"),true).unwrap();
         let portable=export(&origin).unwrap();
-        assert_eq!(portable["schemaVersion"], 5);
+        assert_eq!(portable["schemaVersion"], 6);
         assert_eq!(portable["orchestrations"][0]["botProfiles"][1]["reasoningEffort"],
             json!("high"));
         assert_eq!(portable["orchestrations"][0]["botProfiles"][1]["skills"],
@@ -983,6 +1056,8 @@ mod tests {
         let mut legacy_v3=portable.clone();
         legacy_v3["schemaVersion"]=json!(3);
         legacy_v3["orchestrations"][0].as_object_mut().unwrap().remove("maxWorkerAttempts");
+        legacy_v3["orchestrations"][0].as_object_mut().unwrap().remove("purpose");
+        legacy_v3["orchestrations"][0].as_object_mut().unwrap().remove("strategy");
         assert!(preview(&target,&legacy_v3).unwrap_err().contains("version 4"));
         for profile in legacy_v3["orchestrations"][0]["botProfiles"]
             .as_array_mut().unwrap() {

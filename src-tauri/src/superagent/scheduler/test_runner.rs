@@ -155,7 +155,7 @@ fn snapshot_hash(db:&rusqlite::Connection,root:&str,checkout:&Path)->Result<Stri
 }
 
 /// True only for an executed passing test against the current plan/checkout.
-pub(super) fn verified(db:&rusqlite::Connection,root:&str)->Result<bool> {
+pub(in crate::superagent) fn verified(db:&rusqlite::Connection,root:&str)->Result<bool> {
     let row:Option<(String,String,String,String,String,String,String)>=db.query_row(
         "SELECT grant.checkout_root,grant.command,grant.manifest_sha256,
            run.plan_sha256,run.snapshot_sha256,plan.plan_sha256,run.state
@@ -261,12 +261,19 @@ fn reserve(store:&Store)->Result<Option<Reserved>> {
     Ok(None)
 }
 
+/// Native mandate deadlines are Unix milliseconds, while process timeouts
+/// are Durations. Never interpret an allowed lifetime as whole seconds.
+fn bounded_test_timeout(now_ms:i64,expires_at_ms:i64)->Option<Duration> {
+    let remaining_ms=expires_at_ms.checked_sub(now_ms)?;
+    (remaining_ms>0).then(||Duration::from_millis(remaining_ms as u64)
+        .min(Duration::from_secs(120)))
+}
+
 fn execute(job:&Reserved)->Outcome {
     let blank=digest(b"");
-    let remaining=job.expires.saturating_sub(storage::now());
-    if remaining<=0 {
+    let Some(timeout)=bounded_test_timeout(storage::now(),job.expires) else {
         return Outcome{state:"uncertain",code:None,stdout:blank.clone(),stderr:blank};
-    }
+    };
     let mut cmd=match job.command.as_str() {
         "npm test" if cfg!(windows) =>return Outcome {
             state:"failed",code:None,stdout:blank.clone(),stderr:blank,
@@ -287,7 +294,7 @@ fn execute(job:&Reserved)->Outcome {
     };
     cmd.current_dir(&job.checkout);
     match crate::workspace::run_process(
-        cmd,"Demand test",64*1024,Duration::from_secs((remaining as u64).min(120)),
+        cmd,"Demand test",64*1024,timeout,
     ) {
         Ok(output)=>Outcome {
             state:if output.status.success() {"passed"} else {"failed"},
@@ -358,6 +365,17 @@ pub(super) async fn advance(app:&tauri::AppHandle)->Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn demand_test_deadline_uses_milliseconds_without_expanding_authority() {
+        let now=1_700_000_000_000_i64;
+        assert_eq!(bounded_test_timeout(now,now),None);
+        assert_eq!(bounded_test_timeout(now,now-1),None);
+        assert_eq!(bounded_test_timeout(now,now+50),Some(Duration::from_millis(50)));
+        assert_eq!(bounded_test_timeout(now,now+3_000),Some(Duration::from_secs(3)));
+        assert_eq!(bounded_test_timeout(now,now+180_000),Some(Duration::from_secs(120)));
+        assert_eq!(bounded_test_timeout(i64::MIN,i64::MAX),None);
+    }
+
     #[test]
     fn test_command_is_literal_and_manifest_bound() {
         let root=std::env::temp_dir().join(format!("sa-test-{}",storage::id()));

@@ -834,6 +834,8 @@ mod tests {
                  parent_ticket_id TEXT,child_ticket_id TEXT,state TEXT);
              CREATE TABLE sa_effect_receipts(ticket_id TEXT,state TEXT);
              CREATE TABLE sa_work_item_write_scopes(item_id TEXT,root_ticket_revision INTEGER);
+             CREATE TABLE sa_ticket_team_snapshots(
+                 ticket_id TEXT,source_kind TEXT,snapshot_json TEXT);
              INSERT INTO sa_orchestrations VALUES('team',1,1,'project');"
         ).unwrap();
         let expiry=storage::now().saturating_add(1_000_000);

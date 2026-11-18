@@ -521,8 +521,9 @@ pub async fn superagent_demand_plan(
 }
 
 
-/// Build a read-only Coordinator request. The optional requiresWrite flag is
-/// untrusted intent that must pass the later local-user confirmation gate.
+/// Build a read-only Coordinator request. requiresWrite is untrusted plan
+/// data, not permission. Workers use their admitted native bot/chat mode;
+/// optional legacy scoped grants remain independently enforced when present.
 fn coordinator_demand_prompt(ticket_id:&str,objective:&str,workers:&[String],initial_paths:&[String])->String {
     let path_guidance=if initial_paths.is_empty() {
         "Use the selected Workers' existing native bot/chat permissions. Leave writePaths empty unless describing desired edits; Full Access needs no separate file or test grant.".to_string()
@@ -1171,8 +1172,11 @@ mod tests {
         );
         assert!(prompt.contains("requiresWrite (boolean)"));
         assert!(prompt.contains("requiresWrite=true"));
-        assert!(prompt.contains("NEVER authorizes any write"));
-        assert!(prompt.contains("native file rights") || prompt.contains("Exact native file rights"));
+        assert!(prompt.contains("never treat this data as a permission grant"));
+        assert!(prompt.contains("native bot/chat tool permission mode"));
+        assert!(prompt.contains("do not edit files or run tools as Coordinator"));
+        assert!(coordinator_demand_prompt("demand-2","Another bounded change",
+            &["worker-a".into()],&[]).contains("Full Access needs no separate file or test grant"));
         assert!(prompt.contains("worker-a"));
         assert!(prompt.contains("worker-b"));
         assert!(!prompt.contains("Plan read-only tasks only"));

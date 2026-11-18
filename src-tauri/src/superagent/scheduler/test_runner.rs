@@ -1522,7 +1522,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn full_requires_executed_native_test_evidence_even_without_a_grant() {
+    fn full_access_uses_native_bot_tests_and_requires_receipt_only_for_explicit_test_grants() {
         let db=rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch(
             "CREATE TABLE sa_tickets(id TEXT PRIMARY KEY);
@@ -1546,12 +1546,21 @@ mod tests {
             [],|r|r.get(0),
         ).unwrap();
         assert_eq!(finished,3,"Three completed WorkItems are not test evidence");
-        assert!(required(&db,"root").unwrap());
+        // Full Access delegates testing to the bot's native provider tools.
+        // An optional dedicated runner has a separate evidence requirement
+        // only after the operator actually grants that runner authority.
+        assert!(!required(&db,"root").unwrap());
         assert!(!required(&db,"unrelated").unwrap());
         assert!(!verified(&db,"root").unwrap());
         db.execute(
             "UPDATE sa_ticket_team_snapshots
              SET snapshot_json='{\"policy\":{\"autonomy\":\"approval\"}}'
+             WHERE ticket_id='root'",[],
+        ).unwrap();
+        assert!(!required(&db,"root").unwrap());
+        db.execute(
+            "UPDATE sa_ticket_team_snapshots
+             SET snapshot_json='{\"policy\":{\"autonomy\":\"full\"}}'
              WHERE ticket_id='root'",[],
         ).unwrap();
         assert!(!required(&db,"root").unwrap());

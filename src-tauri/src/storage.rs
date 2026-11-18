@@ -4325,6 +4325,117 @@ mod tests {
     }
 
     #[test]
+    fn v65_startup_reconciles_persisted_uncertain_full_auto_test_once() {
+        // Simulate a pre-v65 database that already marked a native process
+        // uncertain but never terminalized its Full Auto Demand. The real
+        // Store::open migration/recovery path must preserve the receipt and
+        // require no provider process or second user prompt.
+        let directory=std::env::temp_dir().join(format!("legacy-test-recovery-{}",id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path=directory.join("store.sqlite3");
+        let at=now();
+        let sha="a".repeat(64);
+        {
+            let store=Store::open(&path).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_orchestrations
+                 (id,name,coordinator_bot_id,worker_bot_id,project_id,enabled,
+                  policy_revision,created_at,updated_at)
+                 VALUES('team','Test Team','coordinator','worker','project',1,2,?1,?1)",
+                [at],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_tickets
+                 (id,orchestration_id,request_key,objective,actor,source,
+                  project_id,worker_bot_id,policy_revision,state,revision,created_at,updated_at)
+                 VALUES('root','team','request','Test recovery','local-user','manual',
+                        'project','worker',2,'queued',3,?1,?1)",
+                [at],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_mandates
+                 (ticket_id,actor,authorization_id,policy_revision,project_id,
+                  expires_at,revoked,allowed_tools,allowed_side_effects,created_at)
+                 VALUES('root','local-user','user-mandate',2,'project',?1,0,'[]',0,?2)",
+                params![at+120_000,at],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_team_versions
+                 (orchestration_id,version,name,project_id,snapshot_json,
+                  snapshot_sha256,created_at)
+                 VALUES('team',1,'Test Team','project','{}',?1,?2)",
+                params![sha,at],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_ticket_team_snapshots
+                 (ticket_id,orchestration_id,team_version,policy_revision,
+                  snapshot_json,snapshot_sha256,source_kind,created_at)
+                 VALUES('root','team',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}',
+                        ?1,'native',?2)",
+                params![sha,at],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_demand_plans
+                 (ticket_id,ticket_revision,team_version,policy_revision,
+                  plan_sha256,state,created_at,updated_at)
+                 VALUES('root',3,1,2,?1,'active',?2,?2)",
+                params![sha,at],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_demand_test_grants
+                 (ticket_id,team_version,policy_revision,project_id,checkout_root,
+                  command,manifest_sha256,authorized_at)
+                 VALUES('root',1,2,'project','/unused','npm test',?1,?2)",
+                params![sha,at],
+            ).unwrap();
+            store.db.execute(
+                "INSERT INTO sa_demand_test_runs
+                 (ticket_id,plan_sha256,snapshot_sha256,command,state,started_at,finished_at)
+                 VALUES('root',?1,?2,'npm test','uncertain',?3,NULL)",
+                params![sha,"b".repeat(64),at],
+            ).unwrap();
+            store.db.execute_batch(
+                "ALTER TABLE sa_demand_test_runs DROP COLUMN worker_proofs_sha256;
+                 ALTER TABLE sa_demand_test_attempts DROP COLUMN worker_proofs_sha256;
+                 PRAGMA user_version=64;",
+            ).unwrap();
+        }
+        for pass in 0..2 {
+            let reopened=Store::open(&path).unwrap();
+            let (ticket,revision,plan,mandate,test,finished):(
+                String,i64,String,i64,String,Option<i64>,
+            )=reopened.db.query_row(
+                "SELECT ticket.state,ticket.revision,plan.state,mandate.revoked,
+                        run.state,run.finished_at
+                 FROM sa_tickets ticket
+                 JOIN sa_demand_plans plan ON plan.ticket_id=ticket.id
+                 JOIN sa_mandates mandate ON mandate.ticket_id=ticket.id
+                 JOIN sa_demand_test_runs run ON run.ticket_id=ticket.id
+                 WHERE ticket.id='root'",
+                [],|row|Ok((
+                    row.get(0)?,row.get(1)?,row.get(2)?,
+                    row.get(3)?,row.get(4)?,row.get(5)?,
+                )),
+            ).unwrap();
+            assert_eq!((ticket.as_str(),revision,plan.as_str(),mandate,test.as_str()),
+                ("inconclusive",4,"blocked",1,"uncertain"),"startup {pass}");
+            assert_eq!(finished,None,"Uncertain effects may not acquire fake completion");
+            let audits:i64=reopened.db.query_row(
+                "SELECT COUNT(*) FROM sa_audit
+                 WHERE ticket_id='root' AND kind='native_test_prior_uncertain_reconciled'",
+                [],|row|row.get(0),
+            ).unwrap();
+            assert_eq!(audits,1,"Exactly one durable terminal decision");
+            assert_eq!(
+                reopened.db.pragma_query_value(None,"user_version",
+                    |row|row.get::<_,i64>(0)).unwrap(),
+                SCHEMA_VERSION,
+            );
+        }
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn schema_version_constant_matches_the_newest_migration_step() {
         let source = include_str!("storage.rs");
         let newest = source

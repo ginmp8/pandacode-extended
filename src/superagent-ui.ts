@@ -506,7 +506,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             safe(delivery.repositoryHeadSha ?? 'unavailable') + '</code></dd>' +
           '<dt>Source attribution</dt><dd>' + safe(delivery.sourceAttribution) + '</dd>' +
           '<dt>Native test requirement</dt><dd>' +
-            (delivery.nativeTestRequired ? 'Explicit test runner configured' : 'No separate test-runner grant') + '</dd>' +
+            (delivery.nativeTestRequired ? 'Executed native test evidence required' : 'No applicable test requirement') + '</dd>' +
           '<dt>Durable native test state</dt><dd>' +
             safe(delivery.nativeTestState === 'passed' && !delivery.testExecutionVerified
               ? 'Previous pass is stale or cannot be verified'

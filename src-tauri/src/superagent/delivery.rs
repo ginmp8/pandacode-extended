@@ -58,7 +58,26 @@ fn native_test_state(db:&Connection,ticket_id:&str)->Result<&'static str> {
         [ticket_id],|row|row.get(0),
     ).optional().map_err(|e|e.to_string())?;
     match stored {
-        None=>Ok("not_authorized"),
+        None=>{
+            if super::scheduler::test_runner::required(db,ticket_id)? {
+                // No runner grant is needed for Full Access. The provider's
+                // original native command receipts are the source of truth.
+                let native:Option<String>=db.query_row(
+                    "SELECT state FROM sa_native_worker_test_receipts
+                     WHERE ticket_id=?1
+                     ORDER BY COALESCE(finished_at,started_at) DESC,tool_id DESC LIMIT 1",
+                    [ticket_id],|row|row.get(0),
+                ).optional().map_err(|e|e.to_string())?;
+                match native.as_deref() {
+                    Some("running")=>Ok("running"),
+                    Some("passed") if super::scheduler::test_runner::verified(db,ticket_id)?=>
+                        Ok("passed"),
+                    Some("failed")=>Ok("failed"),
+                    Some("uncertain"|"passed")=>Ok("uncertain"),
+                    _=>Ok("authorized_not_run"),
+                }
+            } else {Ok("not_authorized")}
+        },
         Some(None)=>Ok("authorized_not_run"),
         Some(Some(state))=>match state.as_str() {
             "running"=>Ok("running"),

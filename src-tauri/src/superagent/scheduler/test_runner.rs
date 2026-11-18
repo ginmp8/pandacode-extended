@@ -472,6 +472,16 @@ pub(crate) fn observe_native_tool(
     if std::fs::canonicalize(cwd).ok().as_deref()!=Some(checkout.as_path()) {
         return Ok(());
     }
+    // Codex may stream hundreds of command output deltas. Only the first
+    // started event needs a Git snapshot; duplicate progress is not a test.
+    if tool.status=="running" {
+        let observed:bool=store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_native_worker_test_receipts
+             WHERE assignment_id=?1 AND tool_id=?2)",
+            params![assignment,tool.id],|r|r.get(0),
+        ).map_err(|e|e.to_string())?;
+        if observed {return Ok(());}
+    }
     let content=native_content_sha256(&checkout)?;
     let now=storage::now();
     if tool.status=="running" {

@@ -1150,10 +1150,13 @@ fn headless_recovery_summary(store: &Store, ticket: &Ticket, now: i64) -> Result
         // Contain the live provider before reconciling an uncertain effect;
         // neither action may imply that the remote operation succeeded.
         "stop_or_quarantine_revoked_native_execution"
+    } else if !consistent {
+        // A terminal Ticket can still have a live orphan provider attempt.
+        // Contain that native execution before acting on uncertain remote
+        // effects; reconciliation cannot race an unrevoked provider.
+        "investigate_native_assignment_state"
     } else if pending + uncertain > 0 {
         "reconcile_authoritative_remote_effects"
-    } else if !consistent {
-        "investigate_native_assignment_state"
     } else if running > 0 {
         "verify_live_serve_provider_before_intervention"
     } else if ticket.state == "waiting_review" {
@@ -5226,6 +5229,76 @@ mod tests {
             "investigate_native_assignment_state");
     }
 
+
+    #[test]
+    fn headless_recovery_contains_terminal_orphans_before_reconciling_remote_effects() {
+        for initial_state in ["pending", "uncertain"] {
+            let mut store = fixture();
+            let cfg = enabled(&store);
+            let (ticket, launched) = admit(
+                &mut store, &cfg.id, "Private remote operation",
+                "terminal-orphan-and-effect", false,
+            ).unwrap();
+            assert!(launched);
+            // Simulate an interrupted legacy settlement: the Ticket became
+            // terminal, but an Assignment/provider attempt was left running.
+            store.db.execute(
+                "UPDATE sa_tickets SET state='completed',revision=revision+1
+                 WHERE id=?1", [&ticket.id],
+            ).unwrap();
+            let now = storage::now();
+            store.db.execute(
+                "INSERT INTO sa_effect_receipts
+                 (ticket_id,effect_key,payload_sha256,state,created_at,updated_at)
+                 VALUES(?1,'remote-effect',?2,?3,?4,?4)",
+                params![&ticket.id, "a".repeat(64), initial_state, now],
+            ).unwrap();
+            let revision = get_ticket(&store, &ticket.id).unwrap().revision;
+            let audit_before = history(&store, &ticket.id, 30).unwrap().len();
+            let path = store.path.clone();
+
+            let before: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            let recovery = &before["items"][0]["recovery"];
+            assert_eq!(before["items"].as_array().unwrap().len(), 1);
+            assert_eq!(before["items"][0]["ticketId"], ticket.id);
+            assert_eq!(recovery["activeNativeAssignments"], 1);
+            assert_eq!(recovery["assignmentStateConsistent"], false);
+            assert_eq!(recovery["requiresLiveHostVerification"], true);
+            assert_eq!(recovery["requiresIndependentRemoteReconciliation"], true);
+            assert_eq!(recovery["nextOperatorAction"],
+                "investigate_native_assignment_state",
+                "Do not reconcile while a terminal Ticket has an orphan provider: {initial_state}");
+            assert_eq!(before["automaticRecoveryPerformed"], false);
+            assert_eq!(history(&store, &ticket.id, 30).unwrap().len(), audit_before);
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().revision, revision);
+
+            // The existing local-operator quarantine is a separately
+            // revision-checked action, not a side effect of listing.
+            let quarantined: serde_json::Value = serde_json::from_str(
+                &headless_quarantine_terminal_orphan(
+                    &path, &ticket.id, revision,
+                ).unwrap(),
+            ).unwrap();
+            assert_eq!(quarantined["quarantinedAssignments"], 1);
+            assert_eq!(quarantined["providerStoppedByCommand"], false);
+            assert_eq!(quarantined["externalEffectReplayAllowed"], false);
+            let after: serde_json::Value = serde_json::from_str(
+                &list_headless_recovery_inbox(&path).unwrap(),
+            ).unwrap();
+            assert_eq!(after["items"][0]["recovery"]["activeNativeAssignments"], 0);
+            assert_eq!(after["items"][0]["recovery"]["uncertainExternalEffects"], 1);
+            assert_eq!(after["items"][0]["recovery"]["nextOperatorAction"],
+                "reconcile_authoritative_remote_effects");
+            assert_eq!(get_ticket(&store, &ticket.id).unwrap().state, "completed");
+            drop(store);
+            let reopened = Store::open_read_only(&path).unwrap();
+            assert_eq!(effects::receipt_history(&reopened, &ticket.id, 1)
+                .unwrap()[0].state, "uncertain");
+            assert_eq!(get_ticket(&reopened, &ticket.id).unwrap().state, "completed");
+        }
+    }
 
     #[test]
     fn headless_recovery_inbox_finds_detached_live_provider_session_before_watchdog() {

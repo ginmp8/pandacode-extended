@@ -762,44 +762,45 @@ mod tests {
     fn failed_tests_require_new_evidence_and_have_finite_durable_retries() {
         let db=rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch(
-            "CREATE TABLE sa_tickets(id TEXT PRIMARY KEY);
-             INSERT INTO sa_tickets VALUES('demand');
-             CREATE TABLE sa_demand_test_grants(ticket_id TEXT PRIMARY KEY);
-             INSERT INTO sa_demand_test_grants VALUES('demand');",
-        ).unwrap();
-        // Use the same journal and current-result constraints as production.
-        db.execute_batch(
             "CREATE TABLE sa_demand_test_runs(
                ticket_id TEXT PRIMARY KEY,plan_sha256 TEXT,snapshot_sha256 TEXT,
-               worker_proofs_sha256 TEXT,command TEXT,state TEXT,started_at INTEGER,finished_at INTEGER,
-               exit_code INTEGER,stdout_sha256 TEXT,stderr_sha256 TEXT);
+               worker_proofs_sha256 TEXT,command TEXT,state TEXT,started_at INTEGER,
+               finished_at INTEGER,exit_code INTEGER,stdout_sha256 TEXT,stderr_sha256 TEXT);
              CREATE TABLE sa_demand_test_attempts(
                ticket_id TEXT NOT NULL,attempt INTEGER NOT NULL,
-               plan_sha256 TEXT,snapshot_sha256 TEXT,command TEXT,
-               state TEXT,started_at INTEGER,finished_at INTEGER,
+               plan_sha256 TEXT,snapshot_sha256 TEXT,worker_proofs_sha256 TEXT,
+               command TEXT,state TEXT,started_at INTEGER,finished_at INTEGER,
                exit_code INTEGER,stdout_sha256 TEXT,stderr_sha256 TEXT,
                PRIMARY KEY(ticket_id,attempt));",
         ).unwrap();
-        assert!(retry_allowed(&db,"demand","first",&"a".repeat(64)).unwrap());
+        let first="a".repeat(64);
+        assert!(retry_allowed(&db,"demand","first",&first).unwrap());
         db.execute(
             "INSERT INTO sa_demand_test_runs VALUES(
-               'demand','plan','first',?1,'npm test','failed',1,2,1,'a','b')",["a".repeat(64)],
+               'demand','plan','first',?1,'npm test','failed',1,2,1,'a','b')",
+            [&first],
         ).unwrap();
-        assert!(!retry_allowed(&db,"demand","first").unwrap());
+        assert!(!retry_allowed(&db,"demand","first",&"b".repeat(64)).unwrap());
+        assert!(!retry_allowed(&db,"demand","changed-git",&first).unwrap());
         assert!(retry_allowed(&db,"demand","second",&"b".repeat(64)).unwrap());
-        for (attempt,old,new) in [(1,"first","second"),(2,"second","third")] {
+        for (attempt,old,new,next_worker) in [
+            (1,"first","second","b".repeat(64)),
+            (2,"second","third","c".repeat(64)),
+        ] {
             db.execute(
                 "INSERT INTO sa_demand_test_attempts
-                 SELECT ticket_id,?1,plan_sha256,snapshot_sha256,worker_proofs_sha256,command,state,
-                        started_at,finished_at,exit_code,stdout_sha256,stderr_sha256
+                 SELECT ticket_id,?1,plan_sha256,snapshot_sha256,worker_proofs_sha256,
+                        command,state,started_at,finished_at,exit_code,
+                        stdout_sha256,stderr_sha256
                  FROM sa_demand_test_runs WHERE ticket_id='demand'",
                 [attempt],
             ).unwrap();
             db.execute(
-                "UPDATE sa_demand_test_runs SET snapshot_sha256=?1,worker_proofs_sha256=?2,
-                    state='failed',started_at=started_at+2,finished_at=finished_at+2
+                "UPDATE sa_demand_test_runs SET snapshot_sha256=?1,
+                    worker_proofs_sha256=?2,state='failed',
+                    started_at=started_at+2,finished_at=finished_at+2
                  WHERE ticket_id='demand'",
-                params![new,format!("{}",(b'a'+attempt as u8) as char).repeat(64)],
+                params![new,next_worker],
             ).unwrap();
             let archived:String=db.query_row(
                 "SELECT snapshot_sha256 FROM sa_demand_test_attempts
@@ -807,12 +808,10 @@ mod tests {
                 [attempt],|r|r.get(0),
             ).unwrap();
             assert_eq!(archived,old);
-            assert!(!retry_allowed(&db,"demand",new,&format!("{}",(b'a'+attempt as u8) as char).repeat(64)).unwrap());
+            assert!(!retry_allowed(&db,"demand",new,&"d".repeat(64)).unwrap());
         }
         assert!(!retry_allowed(&db,"demand","fourth",&"d".repeat(64)).unwrap());
-        db.execute(
-            "UPDATE sa_demand_test_runs SET state='uncertain'",[],
-        ).unwrap();
+        db.execute("UPDATE sa_demand_test_runs SET state='uncertain'",[]).unwrap();
         assert!(!retry_allowed(&db,"demand","fifth",&"e".repeat(64)).unwrap());
     }
 

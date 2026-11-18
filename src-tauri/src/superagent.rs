@@ -8612,8 +8612,11 @@ mod tests {
         ).is_err(), "CLI cannot bypass native strategy validation");
         assert_eq!(get_ticket(&store,"strategy-cli-history").unwrap().objective,
             "Private original objective");
-        assert_eq!(get_ticket(&store,"strategy-cli-history").unwrap().policy_revision,
-            team.policy_revision);
+        let recorded_policy_revision: i64 = store.db.query_row(
+            "SELECT policy_revision FROM sa_tickets WHERE id=?1",
+            ["strategy-cli-history"], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(recorded_policy_revision, team.policy_revision);
         store.db.execute(
             "UPDATE sa_tickets SET state='waiting_review'
              WHERE id='strategy-cli-history'", [],

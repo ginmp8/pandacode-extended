@@ -2020,6 +2020,10 @@ pub(super) fn phase_one_challenge_handoff(
         children
     };
     if (children.is_empty() && !view.complete(1)) || stale(team, 1)
+        // An abandoned or aliased first-phase reviewer is not a fresh
+        // independent report, even when its earlier score remains persisted.
+        || !independent_review_attempts(team, 1)
+        || reported_conflicts(team, 1)
         || (root_needed > 0 && lowest(team, 1).is_none_or(|score| score < config.target))
         || !criterion_blockers(team, config, 1).is_empty()
         || !unverified_required_skill_checks(team, 1).is_empty()
@@ -2030,7 +2034,10 @@ pub(super) fn phase_one_challenge_handoff(
     let mut sources = Vec::new();
     let mut verified_reports = 0usize;
     for (worker, seat) in in_round(team, 1).filter(|(worker, seat)| counts(worker, seat)) {
-        if !worker.read_only || worker.status != "completed" || seat.score.is_none() {
+        if !worker.read_only || worker.status != "completed" || worker.abandoned
+            || worker.wrote_at != 0 || !worker.files.is_empty()
+            || seat.score.is_none() || seat.reported_conflict
+        {
             return Err("S3 challenge handoff requires completed native read-only reports.".into());
         }
         let binding = worker.reviewer_binding.as_ref()

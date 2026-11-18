@@ -1788,6 +1788,21 @@ fn s3_challenge_handoff_requires_genuine_pinned_reports_and_never_transfers_scor
     assert!(!payload.contains("9.4"));
     assert!(!payload.contains("9.5"));
     assert!(council::phase_one_challenge_handoff(&store, &team, 1, None).unwrap().is_none());
+    // Even with persisted passing scores, abandoned or writable work cannot
+    // become a phase-two challenge handoff. A conflicting first-phase report
+    // must be resolved before fresh reviewers consume its findings.
+    for violation in 0..5 {
+        let mut invalid = team.clone();
+        match violation {
+            0 => invalid.workers[0].abandoned = true,
+            1 => invalid.workers[0].read_only = false,
+            2 => invalid.workers[0].wrote_at = team.council_since + 4,
+            3 => invalid.workers[0].council.as_mut().unwrap().reported_conflict = true,
+            _ => invalid.workers[1].session_id = invalid.workers[0].session_id.clone(),
+        }
+        assert!(council::phase_one_challenge_handoff(&store, &invalid, 2, None).is_err(),
+            "an unsafe or reused first-phase reviewer must not authorize a challenge handoff: {violation}");
+    }
     // A later coordination turn is no longer an authenticated scored report,
     // even if the previous native score remains in the team snapshot.
     store.message(&sessions[0], "coordination", "New phase-one turn").unwrap();

@@ -404,7 +404,7 @@ mod tests {
         let roster=set(&store,&cfg.id,cfg.policy_revision,&RosterInput {
             worker_bot_ids:vec!["worker".into(),"another-worker".into()],
             reviewer_bot_ids:vec!["reviewer".into(),"reviewer-two".into()], council_required:None }).unwrap_err();
-        assert!(roster.contains("Paused bots"));
+        assert!(roster.contains("Paused Team members"));
         store.db.execute("UPDATE bots SET paused=0 WHERE id='reviewer'",[]).unwrap();
         let roster=set(&store,&cfg.id,cfg.policy_revision,&RosterInput {
             worker_bot_ids:vec!["worker".into(),"another-worker".into()],
@@ -524,10 +524,10 @@ mod tests {
         let saved=set(&store,&config.id,config.policy_revision,&input).unwrap();
         assert_eq!(saved.worker_bot_ids,input.worker_bot_ids);
         assert_eq!(saved.reviewer_bot_ids,input.reviewer_bot_ids);
-        assert!(!saved.execution_ready);
-        // Multiple configured Workers may be enabled for the native scheduler,
-        // but the legacy manual single-Worker admission remains unavailable.
-        assert!(!saved.execution_ready);
+        assert!(saved.execution_ready);
+        // Valid multi-Worker Teams are ready for coordinated native dispatch,
+        // but the legacy direct manual single-Worker API remains restricted.
+        assert!(saved.execution_ready);
         assert!(set(&store,&config.id,config.policy_revision,&input).is_err());
         let duplicate=RosterInput {worker_bot_ids:vec!["worker-a".into(),"worker-b".into()],
             reviewer_bot_ids:vec!["worker-b".into()], council_required:None };
@@ -542,10 +542,13 @@ mod tests {
         let enabled=super::super::change_enabled(&store,&config.id,reset.policy_revision,true).unwrap();
         assert!(enabled.enabled);
         let expanded=set(&store,&config.id,enabled.policy_revision,&input).unwrap();
-        assert!(!expanded.execution_ready);
+        assert!(expanded.execution_ready);
         assert!(super::super::configuration(&store,&config.id).unwrap().enabled);
-        assert!(!super::super::manual_preflight(&store,&config.id,"Manual task",false,false)
-            .unwrap().eligible);
+        let manual=super::super::manual_preflight(&store,&config.id,"Manual task",false,false)
+            .unwrap();
+        assert!(!manual.eligible);
+        assert!(manual.reason.as_deref().unwrap_or_default()
+            .contains("use the Coordinator Demand workflow"));
     }
     #[test]
     fn historical_tickets_remain_immutable_across_active_and_unresolved_future_team_edits() {
@@ -583,7 +586,7 @@ mod tests {
         // policy even when the reusable Team advances to a new revision.
         let revision=set(&store,&config.id,config.policy_revision,&expanded).unwrap();
         assert_eq!(revision.policy_revision,config.policy_revision+1);
-        assert!(!revision.execution_ready);
+        assert!(revision.execution_ready);
         let original:(i64,String,String)=store.db.query_row(
             "SELECT policy_revision,worker_bot_id,objective FROM sa_tickets WHERE id='prior-demand'",
             [],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),

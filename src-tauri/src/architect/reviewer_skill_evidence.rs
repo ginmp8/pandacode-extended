@@ -380,7 +380,7 @@ fn dispatch_file_state(
     config.validate()?;
     let criterion = config.criteria.iter().find(|c| c.id == request.criterion_id
         && c.native_evidence.as_ref().is_some_and(|check|
-            matches!(check.kind.as_str(), FILE_SHA256 | FILE_TEXT_CONTAINS | FILE_JSON_VALID))
+            matches!(check.kind.as_str(), FILE_SHA256 | FILE_TEXT_CONTAINS | FILE_JSON_VALID)))
         .ok_or("reviewer_file_evidence_denied: no required native file check.")?.clone();
     if !worker.council.as_ref().is_some_and(|seat|
         seat.lens.trim().eq_ignore_ascii_case(criterion.lens.trim()))

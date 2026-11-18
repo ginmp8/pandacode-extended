@@ -1918,6 +1918,7 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
             .filter(|(worker, seat)| counts(worker, seat) && !unsettled(&worker.status) && seat.score.is_some())
         {
             if !worker.read_only || worker.status != "completed" || worker.abandoned || worker.wrote_at != 0
+                || !worker.files.is_empty()
                 || !seen.insert(worker.id.as_str()) || worker.session_id.is_empty()
                 || !seen_sessions.insert(worker.session_id.as_str())
             {
@@ -1942,6 +1943,14 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
         return false;
     }
     if !independent_review_attempts(team, view.latest) { return false; }
+    // A scored reviewer can never provide approval after recording file changes,
+    // even when a later escalation wave is otherwise clean.
+    if (1..=view.latest).flat_map(|round| in_round(team, round))
+        .filter(|(worker, seat)| counts(worker, seat) && seat.score.is_some())
+        .any(|(worker, _)| !worker.read_only || worker.wrote_at != 0 || !worker.files.is_empty())
+    {
+        return false;
+    }
     // Even when no escalation was triggered, a writable, abandoned or
     // subsequently modified reviewer cannot supply native S2 approval.
     if !view.complete(view.latest) || !in_round(team, view.latest)
@@ -2176,7 +2185,7 @@ fn two_phase_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view: &Round
         }
         for (worker, seat) in in_round(team, round).filter(|(worker, seat)| counts(worker, seat)) {
             if !worker.read_only || worker.status != "completed" || worker.abandoned
-                || worker.wrote_at != 0 || seat.score.is_none()
+                || worker.wrote_at != 0 || !worker.files.is_empty() || seat.score.is_none()
                 || !reviewer_ids.insert(worker.id.as_str())
                 || worker.session_id.is_empty()
                 || !session_ids.insert(worker.session_id.as_str())

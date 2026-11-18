@@ -2070,6 +2070,12 @@ fn s2_and_s3_reject_abandoned_reviewer_replay_even_when_both_scored_rounds_pass(
             second_a, second_b,
         ]);
         assert_eq!(council::status(&team).unwrap().state, "passed", "{strategy:?} baseline");
+        for index in [0, 2] {
+            let mut changed = team.clone();
+            changed.workers[index].files.push("unexpected-reviewer-write.rs".into());
+            assert_ne!(council::status(&changed).unwrap().state, "passed",
+                "{strategy:?} must reject a scored reviewer with recorded changes in either wave");
+        }
         let mut abandoned = seat("discarded-first", 1, None, SINCE + 5);
         abandoned.council.as_mut().unwrap().lens = "lens first-a".into();
         abandoned.abandoned = true;
@@ -2088,6 +2094,21 @@ fn s2_and_s3_reject_abandoned_reviewer_replay_even_when_both_scored_rounds_pass(
         assert_ne!(council::status(&identity_replay).unwrap().state, "passed",
             "{strategy:?} cannot reuse a discarded first-wave worker identity");
     }
+}
+
+#[test]
+fn automatic_s2_clean_wave_rejects_scored_reviewer_file_changes() {
+    let mut config = on(9.0, 3, 2);
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    let clean = team_with(config, vec![
+        seat("s2-first", 1, Some(9.7), SINCE + 1),
+        seat("s2-second", 1, Some(9.6), SINCE + 2),
+    ]);
+    assert_eq!(council::status(&clean).unwrap().state, "passed");
+    let mut changed = clean;
+    changed.workers[0].files.push("unexpected-reviewer-write.rs".into());
+    assert_ne!(council::status(&changed).unwrap().state, "passed",
+        "an automatic S2 wave cannot approve a scored reviewer that modified files");
 }
 
 #[test]

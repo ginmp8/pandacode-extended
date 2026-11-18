@@ -4463,17 +4463,24 @@ fn admitted_but_unlaunched_child_recovery_revokes_old_leaf_sessions_without_reus
         &std::sync::atomic::AtomicBool::new(false),
     ).unwrap();
     assert_eq!(pending["completed"], false);
-    let (old_child, old_leaves, original_cycle) = {
+    let (old_child, old_leaves, sibling_child, sibling_leaves, original_cycle) = {
         let store = state.store.lock().unwrap();
         let root = load(&store, &sid).unwrap().unwrap();
-        let old = child_council::inspect(&store, &root).unwrap()[0].child_session_id.clone();
+        let views = child_council::inspect(&store, &root).unwrap();
+        let old = views.iter().find(|view| view.bot_id == "queued-security")
+            .unwrap().child_session_id.clone();
+        let sibling = views.iter().find(|view| view.bot_id == "queued-architecture")
+            .unwrap().child_session_id.clone();
+        let sibling_team = load(&store, &sibling).unwrap().unwrap();
         let child = load(&store, &old).unwrap().unwrap();
         assert_eq!(child.status, "running");
         assert_eq!(child.workers.len(), 2);
         assert!(child.workers.iter().all(|leaf| leaf.status == "queued"
             && leaf.council.as_ref().unwrap().started_at == 0));
         (old, child.workers.iter().map(|leaf| leaf.session_id.clone())
-            .collect::<Vec<_>>(), root.council_since)
+            .collect::<Vec<_>>(), sibling,
+            sibling_team.workers.iter().map(|leaf| leaf.session_id.clone())
+                .collect::<Vec<_>>(), root.council_since)
     };
     // Exercise the actual native pause transition, including the generation
     // change and stopped-but-never-launched leaf state.
@@ -4513,6 +4520,18 @@ fn admitted_but_unlaunched_child_recovery_revokes_old_leaf_sessions_without_reus
             .into_iter().find(|view| view.bot_id == "queued-security").unwrap();
         assert_ne!(fresh.child_session_id, old_child);
         assert!(load(&store, &fresh.child_session_id).unwrap().unwrap().workers.is_empty());
+        // A paused sibling is also revoked when its original native
+        // generation no longer matches the root. Neither one can be reused.
+        let fresh_sibling = child_council::inspect(&store, &root).unwrap()
+            .into_iter().find(|view| view.bot_id == "queued-architecture").unwrap();
+        assert_ne!(fresh_sibling.child_session_id, sibling_child);
+        assert!(load(&store, &fresh_sibling.child_session_id).unwrap().unwrap().workers.is_empty());
+        assert_eq!(store.session(&sibling_child).unwrap().status, "interrupted");
+        for leaf in &sibling_leaves {
+            assert_eq!(store.session(leaf).unwrap().status, "interrupted");
+            assert!(parent_of(&store, leaf).unwrap().is_none(),
+                "stale sibling leaf authority must also be revoked");
+        }
         assert_eq!(store.session(&old_child).unwrap().status, "interrupted");
         for leaf in &old_leaves {
             assert_eq!(store.session(leaf).unwrap().status, "interrupted");

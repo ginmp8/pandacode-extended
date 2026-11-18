@@ -483,9 +483,17 @@ pub(super) fn recover_unstarted_children(store: &Store, root: &TeamSnapshot) -> 
             "child_council_recovery_denied: required frozen child reservation is missing."
         )?;
         let old = store.session(&old_id)?;
-        if old.status != "interrupted" {
-            // Noninterrupted children are independently checked by the full
-            // native preflight before this transaction can commit.
+        let old_team = super::load(store, &old_id)?
+            .ok_or("child_council_recovery_denied: child state is missing.")?;
+        // Native Pause changes the root generation without updating a live
+        // child's already-issued reviewer grants. An unlaunched sibling must
+        // be rotated too, or a partial recovery strands it at stale authority.
+        // Never rotate a started sibling: it requires a fresh Council cycle.
+        let stale_unlaunched_pause = root.status == "paused"
+            && old.status != "interrupted"
+            && old_team.status == "running"
+            && old_team.generation < root.generation;
+        if old.status != "interrupted" && !stale_unlaunched_pause {
             continue;
         }
         let previous: FrozenChildReservation = serde_json::from_str(&frozen_json)
@@ -494,8 +502,6 @@ pub(super) fn recover_unstarted_children(store: &Store, root: &TeamSnapshot) -> 
         let expected = frozen_with_recovery_status(
             store, root, choice, &old_id, &child_config, true,
         )?;
-        let old_team = super::load(store, &old_id)?
-            .ok_or("child_council_recovery_denied: child state is missing.")?;
         // A crash may interrupt a child after its leaf roster is admitted,
         // but before any reviewer is launched. Recover only that zero-work
         // state: started, scored, reported or externally resumed leaves must
@@ -614,8 +620,14 @@ pub(super) fn recover_unstarted_children(store: &Store, root: &TeamSnapshot) -> 
                 }
             }
         }
-        // The old task stays interrupted and task-owned. A new session gets a
-        // new native identity, with no chat, worker, grant or earlier score.
+        // Revoke paused-but-unlaunched siblings as well as crash-interrupted
+        // children. Neither their retained sessions nor late callbacks can
+        // regain authority after the replacement.
+        store.db.execute(
+            "UPDATE sessions SET status='interrupted' WHERE id=?1",
+            [&old_id],
+        ).map_err(|e| e.to_string())?;
+        // Fresh task-owned session: no chat, worker, grant or earlier score.
         let fresh = store.create_session(&parent.project_id, &old.provider, &old.model, "plan")?;
         store.db.execute(
             "UPDATE sessions SET title=?2,task_description=?3,worktree_path=?4,reasoning_effort=?5 WHERE id=?1",

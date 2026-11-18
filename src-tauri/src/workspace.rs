@@ -3702,7 +3702,7 @@ mod superagent_process_guard_tests {
         let command = Command::new("an-intentionally-nonexistent-executable");
         let error = run_process_guarded(
             command, "Demand test", 1024, Duration::from_secs(1), || false,
-        ).unwrap_err();
+        ).err().expect("revoked launch must fail");
         assert!(error.contains("revoked before launch"), "{error}");
     }
 
@@ -3716,7 +3716,7 @@ mod superagent_process_guard_tests {
         let error = run_process_guarded(
             command, "Demand test", 1024, Duration::from_secs(3),
             || checks.fetch_add(1, Ordering::SeqCst) < 3,
-        ).unwrap_err();
+        ).err().expect("revoked child must be killed");
         assert!(error.contains("revoked during execution"), "{error}");
         assert!(checks.load(Ordering::SeqCst) >= 4);
     }

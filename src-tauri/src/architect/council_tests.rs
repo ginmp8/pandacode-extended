@@ -5990,6 +5990,23 @@ fn non_channel_native_task_review_request_is_idempotent_and_requires_real_counci
     ).unwrap();
     assert_eq!(first, repeat);
     assert_eq!(first.schema_version, 1);
+    // Different assignment keys or artifact digests must never share one
+    // task-bound Council verdict, even if both are admitted before dispatch.
+    for (assignment, digest) in [
+        ("assignment-2", artifact.clone()),
+        ("assignment-3", "b".repeat(64)),
+    ] {
+        let denied = council_requests::admit_native_task(
+            &store, &sid, &project, assignment, &digest,
+        ).unwrap_err();
+        assert!(denied.contains("one root Council cycle"), "{denied}");
+    }
+    let admitted_count: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_native_task'",
+        [&sid], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(admitted_count, 1, "different assignment IDs cannot mint parallel authorities");
     // A completed root may read its earlier task binding, but cannot mint
     // a new request against the old Council cycle/proof.
     let mut completed = load(&store, &sid).unwrap().unwrap();
@@ -6132,6 +6149,32 @@ fn native_task_terminal_requires_real_completed_reviewer_callbacks() {
     }
     call(&state, &sid, "pandacode_finish_team", json!({"summary":"Reviewed."})).unwrap();
     let store = state.store.lock().unwrap();
+    // Reconstruct a legacy/conflicting sibling request directly in storage.
+    // Even a legitimate completed native Council must not let its approval
+    // certify two distinct task/artifact identities.
+    let raw: String = store.db.query_row(
+        "SELECT content FROM architect_requests
+         WHERE parent_session_id=?1 AND key='native-council-task:native-approved-task'",
+        [&sid], |row| row.get(0),
+    ).unwrap();
+    let mut sibling: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    sibling["request"]["requestId"] = json!("legacy-sibling-request");
+    sibling["request"]["assignmentKey"] = json!("legacy-sibling-task");
+    sibling["request"]["artifactSha256"] = json!("d".repeat(64));
+    store.db.execute(
+        "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+         VALUES(?1,'native-council-task:legacy-sibling-task','council_native_task',?2,?1)",
+        rusqlite::params![sid, sibling.to_string()],
+    ).unwrap();
+    let denied = council_requests::record_native_terminal(
+        &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
+    ).unwrap_err();
+    assert!(denied.contains("multiple or invalid task assignments"), "{denied}");
+    store.db.execute(
+        "DELETE FROM architect_requests
+         WHERE parent_session_id=?1 AND key='native-council-task:legacy-sibling-task'",
+        [&sid],
+    ).unwrap();
     let receipt = council_requests::record_native_terminal(
         &store, &sid, &project, "native-approved-task", &artifact, &request.request_id,
     ).unwrap();

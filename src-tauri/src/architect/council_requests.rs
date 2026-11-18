@@ -441,11 +441,24 @@ pub(crate) fn admit_native_task(
     let body = serde_json::to_string(&NativeTaskRecord {
         request: candidate.clone(), receipt: None,
     }).map_err(|e| e.to_string())?;
-    store.db.execute(
+    // One immutable reviewed artifact and assignment per root Council cycle.
+    // An older request for a different cycle remains historical, but a second
+    // assignment in the current cycle must not inherit the same native verdict.
+    // The SQL predicate makes this guard atomic across SQLite connections.
+    let inserted = store.db.execute(
         "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
-         VALUES(?1,?2,'council_native_task',?3,?1)",
-        params![session_id, key, body],
+         SELECT ?1,?2,'council_native_task',?3,?1
+         WHERE NOT EXISTS (
+             SELECT 1 FROM architect_requests
+              WHERE parent_session_id=?1 AND kind='council_native_task'
+                AND (json_extract(content,'$.request.cycleId')=?4
+                     OR json_type(content,'$.request.cycleId') IS NULL)
+         )",
+        params![session_id, key, body, &candidate.cycle_id],
     ).map_err(|e| format!("council_task_conflict: {e}"))?;
+    if inserted != 1 {
+        return Err("council_task_conflict: one root Council cycle cannot authorize multiple task assignments or artifacts.".into());
+    }
     Ok(candidate)
 }
 
@@ -480,6 +493,19 @@ fn native_terminal_expected(
     let inspected = inspect_native_task(
         store, session_id, project_id, assignment_key, artifact_sha256, request_id,
     )?;
+    // Legacy/conflicting durable records must also fail closed at terminal
+    // settlement. An old multi-request cycle cannot reuse one root pass for
+    // another assignment merely because both requests predate admission guards.
+    let related_requests: i64 = store.db.query_row(
+        "SELECT COUNT(*) FROM architect_requests
+         WHERE parent_session_id=?1 AND kind='council_native_task'
+           AND (json_extract(content,'$.request.cycleId')=?2
+                OR json_type(content,'$.request.cycleId') IS NULL)",
+        params![session_id, &inspected.request.cycle_id], |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if related_requests != 1 {
+        return Err("council_task_conflict: root Council cycle has multiple or invalid task assignments.".into());
+    }
     let native = &inspected.native;
     // A user exception is never relabeled "passed"; it needs its own
     // attributed, reasoned consumer contract before it can be emitted here.

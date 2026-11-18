@@ -69,6 +69,7 @@ pub struct AutoStatus {
     pub operator_login:Option<String>,
     pub pending:i64,
     pub blocked:i64,
+    pub grant_active:bool,
     pub scope_authorized:bool,
     pub approved_file_count:usize,
     pub native_test_command:Option<String>,
@@ -156,15 +157,16 @@ fn status(store:&Store,source_id:&str)->Result<AutoStatus> {
         [source_id],|r|Ok((r.get(0)?,r.get(1)?)),
     ).map_err(|e|e.to_string())?;
     let authorized_scope=scope::current(store,&src).ok().flatten();
-    let enabled=eligible(&src) && rev==src.policy_revision &&
-        scope::ready(store,&src).unwrap_or(false);
+    let grant_active=eligible(&src) && rev==src.policy_revision &&
+        active_grant(store,&src,now)?.is_some();
+    let enabled=grant_active && scope::ready(store,&src).unwrap_or(false);
     Ok(AutoStatus {
         source_id:src.id,enabled,
         mode:if enabled {"auto".into()} else {src.mode.clone()},
         repository:src.repository,actor_filter:src.actor_filter,
         event_kind:src.event_kind,max_daily_tasks,used_last_day,expires_at,
         operator_login,pending,blocked,
-        scope_authorized:authorized_scope.is_some(),
+        grant_active,scope_authorized:authorized_scope.is_some(),
         approved_file_count:authorized_scope.as_ref().map_or(0,|scope|scope.allowed_paths.len()),
         native_test_command:authorized_scope.map(|scope|scope.command),
     })
@@ -456,6 +458,31 @@ mod tests {
         ).map_err(|e|e.to_string())?;
         enqueue_authenticated(&tx,source,event,decision,storage::now(),operator)?;
         tx.commit().map_err(|e|e.to_string())
+    }
+
+    #[test]
+    fn old_read_only_auto_grant_remains_revocable_when_full_auto_scope_is_missing() {
+        let (store,_src)=fixture();
+        let now=storage::now();
+        store.db.execute(
+            "INSERT INTO sa_auto_source_grants(
+                source_id,source_revision,repository,actor_filter,event_kind,
+                operator_login,max_daily_tasks,authorized_at,expires_at)
+             VALUES('source',1,'owner/repo','contributor','issues.opened',
+                'operator',2,?1,?2)",
+            params![now-10,now+60_000],
+        ).unwrap();
+        let legacy=status(&store,"source").unwrap();
+        assert!(legacy.grant_active,"A live legacy source grant must be revocable");
+        assert!(!legacy.enabled,"A source without native execution scope cannot run Full Auto");
+        assert!(!legacy.scope_authorized);
+        store.db.execute(
+            "UPDATE sa_auto_source_grants SET revoked_at=?1 WHERE source_id='source'",
+            [now],
+        ).unwrap();
+        let revoked=status(&store,"source").unwrap();
+        assert!(!revoked.grant_active);
+        assert!(!revoked.enabled);
     }
 
     #[test]

@@ -1478,7 +1478,10 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                         before_at = Some(at);
                         before_source_id = Some(source.clone());
                         before_delivery_id = Some(delivery.clone());
-                        index += 3;
+                        // The cursor has four arguments after the Ticket ID:
+                        // --before, timestamp, source ID and delivery ID.
+                        // The common case and loop each advance once more.
+                        index += 4;
                     }
                     _ => {}
                 }

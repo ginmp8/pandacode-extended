@@ -208,6 +208,21 @@ async function mountNativeFixture(page: Page, options: {
           objective:String(args.objective),state:'running',revision:2,evidence:null};
         return ticket as never;
       }
+      if(command==='superagent_retry'){
+        if(!ticket||ticket.state!=='blocked')throw Error('Only a blocked native Demand can retry');
+        mutations.push({command,args});ticket.state='running';ticket.revision++;
+        return ticket as never;
+      }
+      if(command==='superagent_accept'||command==='superagent_reject'){
+        if(!ticket||ticket.state!=='waiting_approval'||ticket.revision!==args.expectedRevision)
+          throw Error('Stale native approval');
+        if(command==='superagent_reject'&&!String(args.reason??'').trim())
+          throw Error('Rejecting evidence requires a reason');
+        mutations.push({command,args});
+        ticket.state=command==='superagent_accept'?'completed':'blocked';
+        ticket.revision++;
+        return ticket as never;
+      }
       if(command==='superagent_stop'){
         if(!ticket||ticket.revision!==args.expectedRevision)throw Error('Stale Demand');
         mutations.push({command,args});ticket.state='stopped';ticket.revision++;
@@ -592,6 +607,7 @@ test('Council checkbox and wizard Council checkbox keep controls beside their la
   const council=host.locator('label').filter({hasText:'Council review is managed by the selected execution mode'});
   await expect(council.getByRole('checkbox')).toBeVisible();
   expect(await council.evaluate(el=>getComputedStyle(el).flexDirection)).toBe('row');
+  await host.getByRole('button',{name:'Teams',exact:true}).click();
   await host.getByRole('button',{name:'New Team',exact:true}).click();
   const builder=host.getByRole('region',{name:'Guided Team Builder'});
   await builder.getByRole('textbox',{name:'Team name'}).fill('Checkbox alignment Team');
@@ -652,6 +668,25 @@ test('failed Demand cannot be falsely approved and pre-fills a separately author
   const writes=await page.evaluate(()=>
     (window as unknown as {saFixtureMutations:Array<{command:string}>}).saFixtureMutations);
   expect(writes).toEqual([]);
+});
+
+test('With Approval exposes a native reasoned rejection without self-approval',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{
+    mode:'approval',enabled:true,withTicket:true,ticketState:'waiting_approval',
+  });
+  await host.getByRole('button',{name:'Demands / Runs',exact:true}).click();
+  await host.locator('[data-sa-open-demand="demand-1"]').click();
+  const details=host.getByRole('region',{name:'Selected native Demand'});
+  await expect(details.getByRole('button',{name:'Accept evidence'})).toBeVisible();
+  await details.getByRole('button',{name:'Reject evidence'}).click();
+  await details.getByRole('textbox',{name:'Rejection reason'}).fill('Native test evidence is missing');
+  await details.getByRole('button',{name:'Submit rejection'}).click();
+  const actions=await page.evaluate(()=>
+    (window as unknown as {saFixtureMutations:Array<{command:string;args:Record<string,unknown>}>}).saFixtureMutations);
+  expect(actions).toEqual([{command:'superagent_reject',args:{
+    ticketId:'demand-1',expectedRevision:2,reason:'Native test evidence is missing',
+  }}]);
 });
 
 test('native bot Conversations identifies SuperAgent threads and never calls them removed channels',async({page})=>{

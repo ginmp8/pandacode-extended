@@ -245,6 +245,70 @@ mod tests {
     }
 
     #[test]
+    fn native_full_access_finishes_without_council_or_fabricated_approval() {
+        let path=std::env::temp_dir().join(format!(
+            "sa-native-complete-{}.sqlite3",storage::id(),
+        ));
+        let checkout=std::env::temp_dir().join(format!(
+            "sa-native-result-checkout-{}",storage::id(),
+        ));
+        std::fs::create_dir_all(&checkout).unwrap();
+        let mut store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('project','Fixture',?1)",
+            [checkout.to_string_lossy().as_ref() as &str],
+        ).unwrap();
+        for bot in ["coordinator","worker"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'project','codex','default','plan',?2,?2)",
+                params![bot,storage::now()],
+            ).unwrap();
+        }
+        let team=super::super::create_configuration(
+            &store,super::super::NewOrchestration {
+                name:"Council-free native access".into(),
+                coordinator_bot_id:"coordinator".into(),
+                worker_bot_id:"worker".into(),
+            },
+        ).unwrap();
+        let mode=update(&store,&team.id,team.policy_revision,StrategyUpdate {
+            priority:"balanced".into(),attempt_timeout_ms:MAX_ASSIGNMENT_RUN_MS,
+            max_attempts_per_assignment:2,max_concurrent_tasks:1,
+            token_ceiling:None,estimated_cost_ceiling_minor:None,
+            subagent_delegation_enabled:false,execution_mode:Some("full".into()),
+        }).unwrap();
+        super::super::change_enabled(&store,&team.id,mode.policy_revision,true).unwrap();
+        let (ticket,launched)=super::super::admit(
+            &mut store,&team.id,"Native provider task","native-full-no-council",false,
+        ).unwrap();
+        assert!(launched);
+        let task=super::super::assignment_session(&store,&ticket.id).unwrap().unwrap();
+        assert_eq!(store.session(&task).unwrap().mode,"full");
+        assert!(super::super::on_run_finished(
+            &store,&task,true,"The native provider turn finished",
+        ).unwrap());
+        assert_eq!(super::super::get_ticket(&store,&ticket.id).unwrap().state,"completed");
+        assert!(!super::super::on_run_finished(
+            &store,&task,true,"A stale duplicate callback",
+        ).unwrap());
+        let native:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1
+             AND kind='native_worker_finished'",
+            [&ticket.id],|row|row.get(0),
+        ).unwrap();
+        let fabricated:i64=store.db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE ticket_id=?1
+             AND kind IN ('human_accepted','council_passed','council_human_accepted')",
+            [&ticket.id],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(native,1);
+        assert_eq!(fabricated,0);
+        assert!(super::super::native_worker_chat_context(&store,&task).is_err());
+        std::fs::remove_dir_all(checkout).unwrap();
+    }
+
+    #[test]
     fn native_full_worker_retains_chat_mode_and_task_guards_without_council() {
         let path=std::env::temp_dir().join(format!(
             "sa-native-mode-{}.sqlite3",storage::id(),

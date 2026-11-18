@@ -393,6 +393,44 @@ mod tests {
     }
 
     #[test]
+    fn configured_council_is_mandatory_even_with_approval_mode() {
+        let path=std::env::temp_dir().join(format!("sa-review-{}.sqlite3",storage::id()));
+        let store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('review-project','Fixture','/tmp/sa-review')",[],
+        ).unwrap();
+        for id in ["coordinator","worker","reviewer-a","reviewer-b"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'review-project','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let team=super::super::create_configuration_roles_with_policy(
+            &store,super::super::NewOrchestration {
+                name:"Review required".into(),coordinator_bot_id:"coordinator".into(),
+                worker_bot_id:"worker".into(),
+            },vec!["worker".into()],
+            vec!["reviewer-a".into(),"reviewer-b".into()],
+            false,
+        ).unwrap();
+        assert!(team.council_required,
+            "Selecting reviewer seats cannot silently disable Council");
+        let policy=update(&store,&team.id,team.policy_revision,StrategyUpdate {
+            priority:"balanced".into(),attempt_timeout_ms:MAX_ASSIGNMENT_RUN_MS,
+            max_attempts_per_assignment:2,max_concurrent_tasks:1,
+            token_ceiling:None,estimated_cost_ceiling_minor:None,
+            subagent_delegation_enabled:false,execution_mode:Some("approval".into()),
+        }).unwrap();
+        assert_eq!(policy.execution_mode,"approval");
+        let enabled=super::super::change_enabled(
+            &store,&team.id,policy.policy_revision,true,
+        ).unwrap();
+        assert!(enabled.council_required);
+        assert_eq!(enabled.reviewer_bot_ids.len(),2);
+    }
+
+    #[test]
     fn execution_mode_rejects_unknown_or_ambiguous_values() {
         let mut request = StrategyUpdate {
             priority: "balanced".into(), attempt_timeout_ms: 300_000,

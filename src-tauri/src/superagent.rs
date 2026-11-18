@@ -9773,6 +9773,49 @@ mod tests {
     }
 
     #[test]
+    fn peer_workers_across_projects_keep_distinct_native_ticket_and_session_scope() {
+        let mut store=fixture();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path)
+             VALUES('ui-project','UI','/tmp/disposable-superagent-ui')",[],
+        ).unwrap();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('frontend','Frontend','ui-project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        let team=create_configuration_roles(&store,NewOrchestration {
+            name:"Peer Workers".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        },vec!["worker".into(),"frontend".into()],vec![]).unwrap();
+        assert_eq!(team.project_id,"project");
+        assert_eq!(team.worker_bot_ids,vec!["worker","frontend"]);
+        change_enabled(&store,&team.id,team.policy_revision,true).unwrap();
+
+        let (ticket,launched)=admit_role_with_selected(
+            &mut store,&team.id,"Inspect UI work","peer-frontend",false,false,false,
+            Some("frontend"),
+        ).unwrap();
+        assert!(launched);
+        let project:String=store.db.query_row(
+            "SELECT project_id FROM sa_tickets WHERE id=?1",
+            [&ticket.id],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(project,"ui-project");
+        assert_eq!(mandate(&store,&ticket.id).unwrap().project_id,"ui-project");
+        let session=assignment_session(&store,&ticket.id).unwrap().unwrap();
+        assert_eq!(store.session(&session).unwrap().project_id,"ui-project");
+        let pinned=ticket_team_snapshot(&store,&ticket.id).unwrap();
+        assert_eq!(pinned.project_id,"project",
+            "Team root project is a legacy projection, not a child tool grant");
+        assert!(pinned.roles.iter().any(|role|role.bot_id=="frontend"
+            && role.effective_config.as_ref()
+                .and_then(|profile|profile.get("projectId"))
+                .and_then(serde_json::Value::as_str)==Some("ui-project")));
+        stop(&store,&ticket.id).unwrap();
+    }
+
+    #[test]
     fn team_role_bounds_order_and_cross_role_duplicates_are_validated() {
         let valid = |workers: Vec<String>, reviewers: Vec<String>| OrchestrationInput {
             name:"Roles".into(),coordinator_bot_id:"router".into(),

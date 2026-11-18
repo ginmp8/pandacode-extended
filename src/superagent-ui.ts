@@ -892,6 +892,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       ' · Updated ' + safe(activityTime(demand.updatedAt)) +
       '</small></div><button type="button" data-sa-open-demand="' + safe(demand.id) +
       '">Open demand</button>' +
+      (['blocked','failed','interrupted','inconclusive'].includes(demand.state)
+        ? '<button type="button" class="sa-attention-action" data-sa-quick-attention="' +
+          safe(demand.id) + '">Resolve demand</button>' : '') +
       (!['completed','failed','stopped','interrupted','inconclusive'].includes(demand.state)
         ? '<button type="button" data-sa-stop-global-demand="' + safe(demand.id) +
           '">Stop demand</button>' : '') + '</li>';
@@ -1009,12 +1012,30 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         teamStrategy.executionMode !== 'off' ? '' : ' disabled') +
       '>Start Demand</button></form>' +
       '<p class="sa-mode-note">Native admission checks the Team policy, bot eligibility and each Worker\'s existing provider permissions before dispatch.</p></section>' : '';
+    const attentionTicket=tickets.find(ticket => ticket.id === inspectedTicket);
+    const attentionPanel=attentionTicket &&
+      ['blocked','failed','interrupted','inconclusive'].includes(attentionTicket.state)
+      ? '<section class="sa-attention-panel" role="region" aria-label="Demand needs attention">' +
+        '<div><h4>Needs attention · ' + safe(attentionTicket.state) + '</h4>' +
+        '<p>This native run is not verified as delivered. Inspect its evidence before ' +
+        'recovery. A new Demand always requires fresh native admission.</p></div>' +
+        '<div class="sa-actions">' +
+        (attentionTicket.state === 'blocked'
+          ? '<button type="button" data-sa-retry="' + safe(attentionTicket.id) +
+            '">Retry current Demand</button>' : '') +
+        '<button type="button" class="primary-button" data-sa-restart-demand="' +
+          safe(attentionTicket.id) + '">Start new Demand</button>' +
+        '<button type="button" data-sa-inspect-ticket="' + safe(attentionTicket.id) +
+          '">Inspect native evidence</button>' +
+        '</div></section>'
+      : '';
     const active = chosen && inspectedTicket ? '<section class="sa-pane sa-run-detail" aria-label="Selected native Demand">' +
       '<div class="sa-run-head"><button type="button" data-sa-back-runs>All Demands</button>' +
       '<p class="sa-eyebrow">NATIVE DEMAND / RUN</p><h2>' +
         safe(tickets.find(ticket => ticket.id === inspectedTicket)?.objective ?? 'Loading native Demand') + '</h2>' +
       '<p>Team ' + safe(chosen.name) + ' · ' + safe(tickets.find(ticket => ticket.id === inspectedTicket)?.state ?? 'Loading') +
         ' · Ticket ' + safe(inspectedTicket) + '</p></div>' +
+      attentionPanel +
       '<ol class="sa-run-milestones" aria-label="Native Run lifecycle">' +
         '<li><span>01 · Admission</span><strong>' +
           (ticketDetails?.ticket.id === inspectedTicket ? 'Native Ticket recorded' : 'Loading native record') +
@@ -1053,8 +1074,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               ? ' disabled aria-describedby="sa-finalization-blocked"' : '') +
             '>Accept evidence</button>' +
             '<button type="button" data-sa-reject="' + safe(ticket.id) + '">Reject evidence</button>' : '') +
-        (ticket.state === 'blocked' ? '<button type="button" data-sa-retry="' +
-          safe(ticket.id) + '">Retry blocked Demand</button>' : '') +
         (!['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)
           ? '<button type="button" data-sa-stop="' + safe(ticket.id) + '">Stop</button>' : '') +
         '</li>').join('') || '<li class="sa-empty">No tickets yet.</li>') + '</ul>' +
@@ -1411,6 +1430,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               'Execution mode not configured')
             : 'Loading native policy') + '</p></div>' +
         '<div class="sa-detail-actions">' +
+        '<button type="button" class="sa-enable-toggle" data-sa-enable="' + safe(chosen.id) +
+        '" aria-label="' + (chosen.enabled ? 'Disable Team' : 'Enable Team') + '">' +
+        (chosen.enabled ? 'Disable Team' : 'Enable Team') + '</button>' +
         '<button type="button" data-sa-team-tab="members">' + icon('settings') +
         ' Configure</button>' +
         '<button class="primary-button" type="button" data-sa-create-demand>' +
@@ -2082,6 +2104,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
+    if (target.dataset.saQuickAttention) {
+      // Board state alone cannot authorize Retry/approval. Inspect the actual
+      // native Ticket before exposing any current-revision decision.
+      target.closest('.sa-demand-card')
+        ?.querySelector<HTMLButtonElement>('[data-sa-open-demand]')?.click();
+      return;
+    }
     if (target.dataset.saOpenDemand) {
       const demand = allDemands.find(item => item.id === target.dataset.saOpenDemand) ??
         reviewQueue.find(item => item.id === target.dataset.saOpenDemand);
@@ -2505,6 +2534,23 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (t?.state === 'queued') ask('Dispatch the worker using the original coordinator evidence?', async () => {
         await call('superagent_dispatch_worker',{ ticketId:t.id }); await reload();
       });
+      return;
+    }
+    if (target.dataset.saRestartDemand) {
+      const t=tickets.find(item => item.id === target.dataset.saRestartDemand);
+      const team=t && presets.find(item => item.id === t.orchestrationId);
+      if (!t || !team || !['blocked','failed','interrupted','inconclusive'].includes(t.state)) return;
+      // Only prepare a fresh request; this never resurrects the old mandate.
+      selected=team.id;
+      demandObjective=t.objective;
+      taskKey=crypto.randomUUID();
+      demandPreflight=null;
+      inspectedTicket=''; ticketDetails=null;
+      workspaceView='new-demand';
+      error=team.enabled ? '' : 'Enable this Team before starting a new Demand.';
+      render();
+      host.querySelector<HTMLTextAreaElement>('form[data-sa-form="run"] textarea[name="objective"]')
+        ?.focus({preventScroll:true});
       return;
     }
     if (target.dataset.saRetry) {

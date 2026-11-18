@@ -571,3 +571,42 @@
 #superagent-workspace .sa-sources-panel .sa-event-sources{border:0;padding:0}
 @media(max-width:950px){#superagent-workspace .sa-overview-top{grid-template-columns:minmax(0,1fr)}}
 @media(max-width:740px){#superagent-workspace .sa-member-model{display:none}#superagent-workspace .sa-team-detail-title{align-items:flex-start}#superagent-workspace .sa-detail-actions{justify-content:flex-start}}
+
+/* Reference-aligned checkbox placement and visible validation feedback. */
+.sa-ui label:has(> input[type="checkbox"]),
+#superagent-workspace .sa-ui label:has(> input[type="checkbox"]){
+  display:flex!important;flex-direction:row!important;align-items:center!important;
+  justify-content:flex-start;width:auto;gap:9px!important;text-align:left;
+}
+.sa-ui label:has(> input[type="checkbox"])>input[type="checkbox"]{
+  width:16px!important;height:16px!important;min-width:16px;flex:none;
+  margin:0!important;padding:0!important;accent-color:var(--text);
+}
+.sa-ui .sa-error,.sa-ui .sa-builder-error,.sa-ui .sa-write-path-error{
+  display:block;box-sizing:border-box;padding:11px 13px;
+  border:1px solid color-mix(in srgb,#d0a348 48%,transparent);
+  border-left:3px solid #d0a348;border-radius:9px;
+  background:color-mix(in srgb,#d0a348 14%,var(--ds-card,var(--panel)));
+  color:var(--text);font-size:12.5px;line-height:1.5;overflow-wrap:anywhere;
+}
+.sa-ui>.sa-error{position:sticky;top:6px;z-index:5}
+.sa-ui>.sa-feedback{
+  padding:10px 12px;border-radius:8px;border-left:3px solid var(--good,#42b965);
+  background:color-mix(in srgb,var(--good,#42b965) 9%,var(--ds-card,var(--panel)));
+  color:var(--text);font-size:12px;
+}
+.sa-ui .sa-attention-panel{
+  display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:16px;
+  padding:15px 16px;border:1px solid color-mix(in srgb,#d0a348 48%,var(--ds-border));
+  border-left:3px solid #d0a348;border-radius:10px;
+  background:color-mix(in srgb,#d0a348 9%,var(--sa-panel,var(--panel)));
+}
+.sa-ui .sa-attention-panel h4{font-size:13px;font-weight:650;margin:0 0 5px}
+.sa-ui .sa-attention-panel p{margin:0;color:var(--text);font-size:12px;max-width:54ch}
+.sa-ui .sa-attention-panel .sa-actions{gap:8px}
+.sa-ui .sa-attention-action{border-color:#d0a348;color:var(--text)}
+.sa-ui .sa-enable-toggle{font-weight:600}
+@media(max-width:740px){
+  .sa-ui .sa-attention-panel{align-items:stretch}
+  .sa-ui .sa-attention-panel .sa-actions{width:100%}
+}

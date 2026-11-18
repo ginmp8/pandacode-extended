@@ -885,6 +885,51 @@ fn block_unrepairable_full_auto(
     Ok(true)
 }
 
+/// A cancelled, panicked, or authorization-stale native process is not a
+/// failed test that may be repaired or replayed. Preserve the uncertain run
+/// and make only its originally pinned Full Auto Demand inconclusive.
+fn finalize_uncertain_full_auto(
+    db:&rusqlite::Connection,job:&Reserved,now:i64,
+)->Result<bool> {
+    let moved=db.execute(
+        "UPDATE sa_tickets SET state='inconclusive',revision=revision+1,
+            updated_at=?4
+         WHERE id=?1 AND state='queued' AND active_assignment_id IS NULL
+           AND EXISTS(SELECT 1 FROM sa_demand_plans plan
+             JOIN sa_ticket_team_snapshots snapshot ON snapshot.ticket_id=plan.ticket_id
+             JOIN sa_demand_test_runs run ON run.ticket_id=plan.ticket_id
+             WHERE plan.ticket_id=sa_tickets.id
+               AND plan.state='active' AND plan.plan_sha256=?2
+               AND plan.ticket_revision=sa_tickets.revision
+               AND plan.policy_revision=sa_tickets.policy_revision
+               AND snapshot.source_kind='native'
+               AND snapshot.team_version=plan.team_version
+               AND snapshot.policy_revision=plan.policy_revision
+               AND json_extract(snapshot.snapshot_json,'$.policy.autonomy')='full_auto'
+               AND run.state='uncertain' AND run.snapshot_sha256=?3
+               AND run.plan_sha256=?2 AND run.finished_at IS NOT NULL)",
+        params![job.root,job.plan,job.snapshot,now],
+    ).map_err(|e|e.to_string())?;
+    if moved==0 {return Ok(false);}
+    let blocked=db.execute(
+        "UPDATE sa_demand_plans SET state='blocked',updated_at=?2
+         WHERE ticket_id=?1 AND state='active' AND plan_sha256=?3",
+        params![job.root,now,job.plan],
+    ).map_err(|e|e.to_string())?;
+    if blocked!=1 {return Err("Uncertain native test plan could not be blocked.".into());}
+    db.execute(
+        "UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1 AND revoked=0",
+        [&job.root],
+    ).map_err(|e|e.to_string())?;
+    db.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'native_test_inconclusive',
+            'Native test effect was uncertain; original Full Auto mandate revoked',?2)",
+        params![job.root,now],
+    ).map_err(|e|e.to_string())?;
+    Ok(true)
+}
+
 /// A test started against one immutable set of accepted native Worker
 /// assignments. An edited child output, replacement Assignment or withdrawn
 /// approval must never settle as passing evidence, even if Git did not move.
@@ -955,6 +1000,10 @@ fn settle(store:&Store,job:&Reserved,result:Outcome)->Result<()> {
                     ).map_err(|e|e.to_string())?;
                 }
             }
+        } else if state=="uncertain" {
+            // A live process may have exited without attributable evidence.
+            // Never retry it silently or leave a nonterminal Full Auto root.
+            finalize_uncertain_full_auto(&tx,job,now)?;
         }
     }
     tx.commit().map_err(|e|e.to_string())
@@ -972,7 +1021,13 @@ pub(super) async fn advance(app:&tauri::AppHandle)->Result<usize> {
     let Some(job)=reserved else {return Ok(0)};
     let for_process=job.clone();
     let outcome=tauri::async_runtime::spawn_blocking(move ||execute(&for_process))
-        .await.map_err(|e|e.to_string())?;
+        .await.unwrap_or_else(|_|{
+            // A worker panic is not a test failure with a repairable exit code.
+            // Settle as uncertain under the native fence; no process replay.
+            let blank=digest(b"");
+            Outcome {state:"uncertain",code:None,stdout:blank.clone(),stderr:blank,
+                category:"native_test_join_failed",diagnostic:"not_executed".into()}
+        });
     let state=app.state::<AppState>();
     let store=state.store.lock().map_err(|e|e.to_string())?;
     let _fence=super::super::effects::lock_dispatch(&store.path)?;
@@ -1139,6 +1194,74 @@ mod tests {
         assert_eq!(db.query_row(
             "SELECT revision FROM sa_tickets WHERE id='full'",
             [],|row|row.get::<_,i64>(0)).unwrap(),4);
+    }
+
+    #[test]
+    fn uncertain_native_test_blocks_only_the_pinned_full_auto_demand() {
+        let db=rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_tickets(id TEXT PRIMARY KEY,state TEXT,
+               revision INTEGER,active_assignment_id TEXT,policy_revision INTEGER,
+               updated_at INTEGER);
+             CREATE TABLE sa_demand_plans(ticket_id TEXT PRIMARY KEY,state TEXT,
+               plan_sha256 TEXT,ticket_revision INTEGER,team_version INTEGER,
+               policy_revision INTEGER,updated_at INTEGER);
+             CREATE TABLE sa_ticket_team_snapshots(ticket_id TEXT,source_kind TEXT,
+               team_version INTEGER,policy_revision INTEGER,snapshot_json TEXT);
+             CREATE TABLE sa_demand_test_runs(ticket_id TEXT PRIMARY KEY,state TEXT,
+               plan_sha256 TEXT,snapshot_sha256 TEXT,finished_at INTEGER);
+             CREATE TABLE sa_mandates(ticket_id TEXT PRIMARY KEY,revoked INTEGER);
+             CREATE TABLE sa_audit(ticket_id TEXT,kind TEXT,detail TEXT,at INTEGER);
+             INSERT INTO sa_tickets VALUES
+               ('auto','queued',2,NULL,3,1),('manual','queued',2,NULL,3,1),
+               ('stopped','stopped',2,NULL,3,1),('other','queued',2,NULL,3,1);
+             INSERT INTO sa_demand_plans VALUES
+               ('auto','active','plan',2,1,3,1),
+               ('manual','active','plan',2,1,3,1),
+               ('stopped','active','plan',2,1,3,1),
+               ('other','active','other-plan',2,1,3,1);
+             INSERT INTO sa_ticket_team_snapshots VALUES
+               ('auto','native',1,3,'{\"policy\":{\"autonomy\":\"full_auto\"}}'),
+               ('manual','native',1,3,'{\"policy\":{\"autonomy\":\"approval\"}}'),
+               ('stopped','native',1,3,'{\"policy\":{\"autonomy\":\"full_auto\"}}'),
+               ('other','native',1,3,'{\"policy\":{\"autonomy\":\"full_auto\"}}');
+             INSERT INTO sa_demand_test_runs VALUES
+               ('auto','uncertain','plan','snapshot',10),
+               ('manual','uncertain','plan','snapshot',10),
+               ('stopped','uncertain','plan','snapshot',10),
+               ('other','uncertain','other-plan','snapshot',10);
+             INSERT INTO sa_mandates VALUES
+               ('auto',0),('manual',0),('stopped',1),('other',0);",
+        ).unwrap();
+        for (root,expect) in [("auto",true),("manual",false),
+            ("stopped",false),("other",false)] {
+            let job=Reserved {
+                root:root.into(),command:"npm test".into(),
+                checkout:"/unused".into(),manifest:"hash".into(),
+                snapshot:"snapshot".into(),expires:100,
+                plan:"plan".into(),db_path:std::path::PathBuf::new(),
+            };
+            assert_eq!(finalize_uncertain_full_auto(&db,&job,11).unwrap(),expect);
+            assert!(!finalize_uncertain_full_auto(&db,&job,12).unwrap());
+            let (ticket,plan,revoked):(String,String,i64)=db.query_row(
+                "SELECT t.state,p.state,m.revoked FROM sa_tickets t
+                 JOIN sa_demand_plans p ON p.ticket_id=t.id
+                 JOIN sa_mandates m ON m.ticket_id=t.id
+                 WHERE t.id=?1",[root],
+                |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+            ).unwrap();
+            assert_eq!(ticket,if expect {"inconclusive"} else if root=="stopped" {
+                "stopped"
+            } else {"queued"});
+            assert_eq!(plan,if expect {"blocked"} else {"active"});
+            assert_eq!(revoked,if expect || root=="stopped" {1} else {0});
+        }
+        assert_eq!(db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE kind='native_test_inconclusive'",
+            [],|row|row.get::<_,i64>(0)).unwrap(),1);
+        assert_eq!(db.query_row(
+            "SELECT state FROM sa_demand_test_runs WHERE ticket_id='auto'",
+            [],|row|row.get::<_,String>(0)).unwrap(),"uncertain");
     }
 
     #[test]

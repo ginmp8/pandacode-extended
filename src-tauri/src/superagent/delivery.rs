@@ -26,6 +26,8 @@ pub struct DeliveryObservation {
     pub observed_status_entries:Option<usize>,
     pub checkout_observation:String,
     pub source_attribution:String,
+    pub native_test_required:bool,
+    pub native_test_state:String,
     pub test_execution_verified:bool,
     pub ci_result_verified:bool,
     pub external_delivery_verified:bool,
@@ -44,6 +46,27 @@ fn classify(state:&str,total:i64,verified:i64,unresolved:i64)->&'static str {
             =>"native_complete_delivery_unverified",
         _ if verified>0=>"partially_verified",
         _=>"in_progress",
+    }
+}
+
+/// Read only the durable native test state for this specific Demand.
+fn native_test_state(db:&Connection,ticket_id:&str)->Result<&'static str> {
+    let stored:Option<Option<String>>=db.query_row(
+        "SELECT run.state FROM sa_demand_test_grants grant
+         LEFT JOIN sa_demand_test_runs run ON run.ticket_id=grant.ticket_id
+         WHERE grant.ticket_id=?1",
+        [ticket_id],|row|row.get(0),
+    ).optional().map_err(|e|e.to_string())?;
+    match stored {
+        None=>Ok("not_authorized"),
+        Some(None)=>Ok("authorized_not_run"),
+        Some(Some(state))=>match state.as_str() {
+            "running"=>Ok("running"),
+            "passed"=>Ok("passed"),
+            "failed"=>Ok("failed"),
+            "uncertain"=>Ok("uncertain"),
+            _=>Err("Stored native test state is invalid.".into()),
+        },
     }
 }
 
@@ -186,6 +209,8 @@ fn native_observation(store:&Store,ticket_id:&str)->Result<(DeliveryObservation,
         } else {
             "not_attributed_to_ticket"
         }).into(),
+        native_test_required:super::scheduler::test_runner::required(&store.db,ticket_id)?,
+        native_test_state:native_test_state(&store.db,ticket_id)?.into(),
         test_execution_verified:super::scheduler::test_runner::verified(&store.db,ticket_id)?,
         ci_result_verified:false,
         external_delivery_verified:false,
@@ -250,6 +275,33 @@ pub(crate) fn headless_inspect(database_path:&Path,ticket_id:&str)->Result<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn delivery_native_test_inspector_distinguishes_missing_running_failed_and_stale_receipts() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_demand_test_grants(ticket_id TEXT PRIMARY KEY);
+             CREATE TABLE sa_demand_test_runs(ticket_id TEXT PRIMARY KEY,state TEXT);
+             INSERT INTO sa_demand_test_grants VALUES('root');
+             INSERT INTO sa_demand_test_grants VALUES('other');
+             INSERT INTO sa_demand_test_runs VALUES('other','passed');",
+        ).unwrap();
+        assert_eq!(native_test_state(&db,"unknown").unwrap(),"not_authorized");
+        assert_eq!(native_test_state(&db,"root").unwrap(),"authorized_not_run");
+        assert_eq!(native_test_state(&db,"other").unwrap(),"passed");
+        for state in ["running","failed","uncertain","passed"] {
+            db.execute("INSERT OR REPLACE INTO sa_demand_test_runs
+                VALUES('root',?1)",[state]).unwrap();
+            assert_eq!(native_test_state(&db,"root").unwrap(),state);
+            assert_eq!(native_test_state(&db,"other").unwrap(),"passed",
+                "One Demand must not read another Demand's test state");
+        }
+        db.execute(
+            "UPDATE sa_demand_test_runs SET state='invalid' WHERE ticket_id='root'",[],
+        ).unwrap();
+        assert!(native_test_state(&db,"root").is_err(),
+            "Malformed receipts must not be presented as an executed pass");
+    }
+
     #[test]
     fn delivery_receipts_include_nested_subagents_without_cross_demand_attribution() {
         let db=Connection::open_in_memory().unwrap();

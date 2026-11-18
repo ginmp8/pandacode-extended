@@ -4480,6 +4480,64 @@ fn paused_nested_root_resume_denies_revoked_child_without_mutating_cycle() {
             "UPDATE bots SET name='paused-security' WHERE id='paused-security'", [],
         ).unwrap();
     }
+    // A duplicate claim hidden under an earlier cycle key does not affect the
+    // current-cycle count, but it must still revoke Resume for this child ID.
+    let historical_claim = format!("native-council-child:{}:duplicate", started.council_since.saturating_sub(1));
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+             VALUES(?1,?2,'council_child','{}',?3)",
+            rusqlite::params![&sid, &historical_claim, &child_id],
+        ).unwrap();
+    }
+    let denied = control_state(&state, &sid, "resume").unwrap_err();
+    assert!(denied.contains("claimed by multiple Council seats"), "{denied}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root);
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+            rusqlite::params![&sid, &historical_claim],
+        ).unwrap();
+    }
+    // A blocked task-owned child cannot acquire an unrelated native dispatch
+    // request while the root is paused and then be silently resumed.
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "INSERT INTO architect_requests(parent_session_id,key,kind,content,worker_id)
+             VALUES(?1,'foreign-request','dispatch','{}','foreign-worker')",
+            [&child_id],
+        ).unwrap();
+    }
+    let denied = control_state(&state, &sid, "resume").unwrap_err();
+    assert!(denied.contains("unexpected native requests"), "{denied}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root);
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute(
+            "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key='foreign-request'",
+            [&child_id],
+        ).unwrap();
+    }
+    // The session row alone is insufficient: a terminal child team snapshot
+    // cannot be promoted by the root Resume path.
+    {
+        let store = state.store.lock().unwrap();
+        let mut child = load(&store, &child_id).unwrap().unwrap();
+        child.status = "completed".into();
+        save(&store, &mut child).unwrap();
+    }
+    let denied = control_state(&state, &sid, "resume").unwrap_err();
+    assert!(denied.contains("child lifecycle is no longer resumable"), "{denied}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before_root);
+    {
+        let store = state.store.lock().unwrap();
+        let mut child = load(&store, &child_id).unwrap().unwrap();
+        child.status = "blocked".into();
+        save(&store, &mut child).unwrap();
+    }
     // A genuine pause with intact child reservations remains resumable.
     assert_eq!(control_state(&state, &sid, "resume").unwrap().status, "running");
 }

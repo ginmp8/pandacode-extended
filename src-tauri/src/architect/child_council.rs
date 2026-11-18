@@ -339,8 +339,33 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
         // A paused root must not adopt a child whose persisted reviewer
         // ownership rows have been deleted, duplicated or substituted. The
         // descendant loop sees only existing rows and misses an absent owner.
+        // Historical or duplicate claims of the same child session must not
+        // become another authenticated parent seat after a paused Resume.
+        // The current-cycle roster count above cannot see an older key.
+        let claims: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests
+             WHERE parent_session_id=?1 AND kind='council_child' AND worker_id=?2",
+            params![&root.session_id, &child_id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if claims != 1 {
+            return Err("child_council_revoked: child session is claimed by multiple Council seats; start a fresh Council task.".into());
+        }
         let child_team = super::load(store, &child_id)?
             .ok_or("child_council_revoked: task-owned child team is missing.")?;
+        // Resume must not reactivate a terminal/interrupted child snapshot or
+        // accept a task-owned child with extra unadmitted native requests.
+        if !matches!(child_team.status.as_str(), "blocked" | "running")
+            || (child_team.status == "blocked" && !child_team.workers.is_empty())
+        {
+            return Err("child_council_revoked: child lifecycle is no longer resumable; start a fresh Council task.".into());
+        }
+        let issued: i64 = store.db.query_row(
+            "SELECT COUNT(*) FROM architect_requests WHERE parent_session_id=?1",
+            [&child_id], |row| row.get(0),
+        ).map_err(|error| error.to_string())?;
+        if issued != child_team.workers.len() as i64 {
+            return Err("child_council_revoked: child has unexpected native requests; start a fresh Council task.".into());
+        }
         let mut worker_ids = HashSet::new();
         let mut leaf_ids = HashSet::new();
         let valid_leaf_roster = child_team.workers.iter().all(|leaf| {

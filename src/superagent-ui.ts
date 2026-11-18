@@ -1487,17 +1487,47 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (target.hasAttribute('data-sa-load-older-demands')) {
       const last = allDemands[allDemands.length - 1];
-      if (!allDemandsLoaded || !allDemandsHasMore || !last) return;
+      if (busy || !allDemandsLoaded || !allDemandsHasMore || !last) return;
+      if (!Number.isSafeInteger(last.updatedAt) || last.updatedAt <= 0 ||
+          !/^[A-Za-z0-9_-]{1,128}$/.test(last.id)) {
+        error = 'Invalid native Demand cursor. Refresh the index.';
+        render();
+        return;
+      }
+      const team = demandTeamFilter, state = demandStateFilter;
+      const project = demandProjectFilter, search = demandSearch;
       void work(async () => {
         const loaded = await fetchDemandPage({
           limit:200, beforeUpdatedAt:last.updatedAt, beforeId:last.id,
-          orchestrationId:demandTeamFilter || undefined,
-          stateFilter:demandStateFilter || undefined,
-          searchQuery:demandSearch || undefined,
-          projectId:demandProjectFilter || undefined,
+          orchestrationId:team || undefined,
+          stateFilter:state || undefined,
+          searchQuery:search || undefined,
+          projectId:project || undefined,
         });
-        const seen = new Set(allDemands.map(item => item.id));
-        allDemands = [...allDemands, ...loaded.filter(item => !seen.has(item.id))];
+        const descends = (newer:DemandIndex, older:DemandIndex) =>
+          older.updatedAt < newer.updatedAt ||
+          (older.updatedAt === newer.updatedAt && older.id < newer.id);
+        const known = new Set(allDemands.map(item => item.id));
+        const pageIds = new Set<string>();
+        if (!Array.isArray(loaded) || loaded.length > 200 ||
+            loaded.some((item, index) => {
+              if (!item || !/^[A-Za-z0-9_-]{1,128}$/.test(item.id) ||
+                  !Number.isSafeInteger(item.updatedAt) || item.updatedAt <= 0 ||
+                  !descends(index === 0 ? last : loaded[index - 1], item) ||
+                  (team && item.orchestrationId !== team) ||
+                  (state && item.state !== state) ||
+                  (project && item.projectId !== project) ||
+                  known.has(item.id) || pageIds.has(item.id)) return true;
+              pageIds.add(item.id);
+              return false;
+            }) ||
+            !allDemandsLoaded || allDemands[allDemands.length - 1]?.id !== last.id ||
+            allDemands[allDemands.length - 1]?.updatedAt !== last.updatedAt ||
+            team !== demandTeamFilter || state !== demandStateFilter ||
+            project !== demandProjectFilter || search !== demandSearch) {
+          throw new Error('Native Demand page overlaps, changed scope or is out of order; refresh the index.');
+        }
+        allDemands = [...allDemands, ...loaded];
         allDemandsHasMore = loaded.length === 200;
       });
       return;

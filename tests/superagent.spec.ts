@@ -1307,6 +1307,73 @@ test('cross-Team native Demand pages load older Tickets without inferring new wo
   expect(cursors[1]).toMatchObject({limit:200,beforeUpdatedAt:1801,beforeId:'demand-199'});
 });
 
+test('cross-Team Demand pagination rejects overlapping, reordered and foreign Team receipts', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');
+    host.id='sa-invalid-demand-pages';
+    document.body.appendChild(host);
+    type Mode = 'duplicate' | 'out-of-order' | 'foreign' | 'valid';
+    (window as unknown as {saDemandPageMode:Mode}).saDemandPageMode='duplicate';
+    const calls:string[]=[];
+    (window as unknown as {saDemandPageCalls:string[]}).saDemandPageCalls=calls;
+    const demand=(index:number)=>({
+      id:'demand-'+index,orchestrationId:'team',objective:'Task '+index,
+      state:'blocked',revision:1,updatedAt:2000-index,projectId:'p',
+    });
+    mountSuperagent(host,async(command,args)=>{
+      calls.push(command);
+      if(command==='bots_list')return [
+        {id:'router',name:'Router',paused:false},
+        {id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if(command==='superagent_list')return [{
+        id:'team',name:'Delivery Team',coordinatorBotId:'router',
+        workerBotId:'worker',enabled:true,policyRevision:1,projectId:'p',
+      }] as never;
+      if(command==='superagent_tickets')return [] as never;
+      if(command==='superagent_all_demands'){
+        const query=args?.query as Record<string,unknown> | undefined;
+        if(query?.orchestrationId!=='team')return [] as never;
+        if(!query.beforeId)return Array.from({length:200},(_,i)=>demand(i)) as never;
+        if(query.beforeId!=='demand-199' || query.beforeUpdatedAt!==1801)
+          throw Error('Incorrect native keyset cursor');
+        const mode=(window as unknown as {saDemandPageMode:Mode}).saDemandPageMode;
+        if(mode==='duplicate')return [demand(198)] as never;
+        if(mode==='out-of-order')return [{...demand(200),updatedAt:1802}] as never;
+        if(mode==='foreign')return [{...demand(200),orchestrationId:'other'}] as never;
+        return [demand(200)] as never;
+      }
+      throw Error('Unexpected native call: '+command);
+    });
+  });
+  const host=page.locator('#sa-invalid-demand-pages');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  const global=host.getByRole('region',{name:'All Demands across Teams'});
+  await global.getByRole('combobox',{name:'Filter Demands by Team'}).selectOption('team');
+  await expect(global).toContainText('200 native Demands loaded.');
+  for(const mode of ['duplicate','out-of-order','foreign'] as const){
+    await page.evaluate(value=>{
+      (window as unknown as {saDemandPageMode:string}).saDemandPageMode=value;
+    },mode);
+    await global.getByRole('button',{name:'Load older Demands'}).click();
+    await expect(host.getByRole('alert')).toContainText('Native Demand page overlaps');
+    await expect(global).toContainText('200 native Demands loaded.');
+  }
+  await page.evaluate(()=>{
+    (window as unknown as {saDemandPageMode:string}).saDemandPageMode='valid';
+  });
+  await global.getByRole('button',{name:'Load older Demands'}).click();
+  await expect(global).toContainText('201 native Demands loaded.');
+  await expect(global.getByRole('button',{name:'Load older Demands'})).toHaveCount(0);
+  const calls=await page.evaluate(()=>
+    (window as unknown as {saDemandPageCalls:string[]}).saDemandPageCalls);
+  expect(calls.filter(command=>command==='superagent_all_demands')).toHaveLength(5);
+  expect(calls.filter(command=>command==='superagent_stop'||command==='superagent_submit')).toHaveLength(0);
+});
+
 test('native Team filter pages independently and resets pagination when changing Teams', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

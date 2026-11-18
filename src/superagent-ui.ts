@@ -1022,7 +1022,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     const blockedWorkReasons=attentionTicket && workPlan?.ticketId===attentionTicket.id &&
       workPlanLoaded ? workPlan.items.filter(item=>item.state==='blocked' && item.lastReason)
         .slice(0,3) : [];
-    const attentionMandate=ticketDetails?.ticket.id===attentionTicket?.id
+    const attentionMandate=ticketDetails && ticketDetails.ticket.id===attentionTicket?.id
       ? ticketDetails.mandate : null;
     const attentionPanel=attentionTicket &&
       ['blocked','failed','interrupted','inconclusive'].includes(attentionTicket.state)

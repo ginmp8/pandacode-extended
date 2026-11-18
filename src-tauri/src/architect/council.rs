@@ -1648,20 +1648,28 @@ fn stale(team: &TeamSnapshot, round: usize) -> bool {
 /// substitute for the frozen source roster. This snapshot check never grants
 /// reviewer authority; native issued grants remain mandatory at dispatch and
 /// final settlement.
-fn m3_sources_match(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> bool {
-    if config.mode() != "m3" { return true; }
+// A partially admitted M3 round may still need another legitimate seat.
+// Reject over-quota, repeated, unknown or unbound sources before advertising
+// further dispatch; the complete quorum check below also requires every seat.
+fn m3_source_counts(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> Option<(usize, usize)> {
+    if config.mode() != "m3" { return Some((0, 0)); }
     let mut direct = std::collections::HashSet::new();
-    let mut automatic = 0;
-    for (worker, seat) in in_round(team, round).filter(|(worker, seat)| counts(worker, seat)) {
-        let Some(binding) = worker.reviewer_binding.as_ref() else { return false };
+    let mut automatic = 0usize;
+    for (worker, _) in in_round(team, round).filter(|(worker, seat)| counts(worker, seat)) {
+        let binding = worker.reviewer_binding.as_ref()?;
         match binding.reviewer_bot_id.as_deref() {
             Some(bot_id) if config.reviewer_bot_ids.iter().any(|id| id == bot_id)
                 && direct.insert(bot_id) => {}
-            None => automatic += 1,
-            _ => return false,
+            None if automatic < config.automatic_reviewers => automatic += 1,
+            _ => return None,
         }
     }
-    direct.len() == config.reviewer_bot_ids.len() && automatic == config.automatic_reviewers
+    Some((direct.len(), automatic))
+}
+fn m3_sources_match(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> bool {
+    if config.mode() != "m3" { return true; }
+    m3_source_counts(team, config, round).is_some_and(|(direct, automatic)|
+        direct == config.reviewer_bot_ids.len() && automatic == config.automatic_reviewers)
 }
 
 /// S3 may reserve adversarial reviewers only after a genuinely settled,
@@ -1732,6 +1740,14 @@ pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: O
             }
             return Ok(2);
         }
+    }
+    // An invalid M3 source roster cannot create extra S3 first-phase seats
+    // merely because the numeric round is incomplete. Recovery must correct
+    // the corrupted task snapshot; it cannot mint new reviewer authority.
+    if config.strategy == CouncilExecutionStrategy::TwoPhase && latest == 1
+        && m3_source_counts(team, config, 1).is_none()
+    {
+        return Err("S3 first-phase reviewer sources do not match the authorized Council roster.".into());
     }
     if current && room && (replaced || !done) {
         return Ok(latest);
@@ -2919,7 +2935,9 @@ fn status_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Coun
         "passed"
     } else if view.at_limit(config) {
         "limit"
-    } else if !view.complete(round) || (config.strategy == CouncilExecutionStrategy::Escalated
+    } else if (!view.complete(round) && (config.strategy != CouncilExecutionStrategy::TwoPhase
+        || round != 1 || m3_source_counts(team, config, 1).is_some()))
+        || (config.strategy == CouncilExecutionStrategy::Escalated
         && (!forced_escalation_satisfied(team, config, view)
             || !automatic_escalation_satisfied(team, config, view))
         && low.is_some_and(|score| score >= config.target) && !stale)

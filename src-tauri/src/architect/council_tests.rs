@@ -2986,9 +2986,16 @@ fn mixed_two_phase_revalidates_both_native_reviewer_rounds_before_approval() {
     first_phase.workers.retain(|worker| worker.council.as_ref()
         .is_some_and(|seat| seat.round == 1));
     assert_eq!(council::status(&first_phase).unwrap().state, "dispatch");
+    // A valid partially filled wave must still admit its missing source.
+    let mut pending = first_phase.clone();
+    pending.workers.retain(|worker| worker.id == "phase-1-direct");
+    assert_eq!(council::status(&pending).unwrap().state, "dispatch");
+    assert_eq!(council::round_for(&pending, pending.config.council.as_ref().unwrap(), None).unwrap(), 1);
     first_phase.workers[0].reviewer_binding.as_mut().unwrap().reviewer_bot_id = None;
     assert_ne!(council::status(&first_phase).unwrap().state, "dispatch",
         "an M3 source-less first phase must not advertise S3 challenge admission");
+    assert!(council::round_for(&first_phase, first_phase.config.council.as_ref().unwrap(), None).is_err(),
+        "a malformed M3 source roster must not admit another S3 reviewer");
     for worker in &team.workers {
         reviewer_security::record_native_authority(
             &store, &sid, worker.reviewer_binding.as_ref().unwrap(),

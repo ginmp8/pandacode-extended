@@ -66,3 +66,14 @@ observation remain explicitly unknown, never inferred or backfilled from a
 later API response. A sidecar write failure rolls back the complete receipt
 and cursor. This schema change is additive; operators should retain a
 pre-upgrade backup, as older builds cannot open a v45 database.
+
+## Replay after disabling and re-enabling Observe
+
+A Check Run attested during an earlier Observe policy revision remains an
+immutable duplicate if the operator later disables and re-enables that source.
+Replaying it does not increase the local observation counter, rewrite its
+recorded conclusion, or create a task. A Check Run **not previously recorded**
+whose completion predates the current Observe activation is still denied,
+even if the API returns it after reactivation. Off still makes no authenticated
+requests. This behavior is verified by a native SQLite restart regression,
+not by a real GitHub provider run.

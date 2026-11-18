@@ -1717,8 +1717,11 @@ fn observe_authenticated_check_run_with_repository_id(
     let activated_at: i64 = store.db.query_row(
         "SELECT updated_at FROM sa_event_sources WHERE id=?1", [&latest.id], |r| r.get(0),
     ).map_err(|e| e.to_string())?;
-    if at < activated_at || at > storage::now().saturating_add(5 * 60 * 1000) {
-        return Err("Check Run predates Observe activation or has a future completion timestamp.".into());
+    // A replay of a previously attested Check Run retains its original receipt
+    // after an Off -> Observe policy change. Never admit an unseen Check Run
+    // completed before the *current* Observe activation.
+    if at > storage::now().saturating_add(5 * 60 * 1000) {
+        return Err("Check Run has a future completion timestamp.".into());
     }
 
     let tx = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
@@ -1733,6 +1736,9 @@ fn observe_authenticated_check_run_with_repository_id(
         "SELECT sequence FROM sa_event_decisions WHERE source_id=?1 AND delivery_id=?2",
         params![&current.id, &delivery_id], |r| r.get(0),
     ).optional().map_err(|e| e.to_string())?;
+    if at < activated_at && previously_recorded.is_none() {
+        return Err("Check Run predates Observe activation; no new receipt admitted.".into());
+    }
     let sequence = match previously_recorded {
         Some(previous) => previous,
         None => current.last_sequence.checked_add(1)
@@ -3778,6 +3784,64 @@ mod tests {
         assert_eq!(revoked.mode, "off");
         assert!(observe_authenticated_check_run(&store, &on, 240, &run, "operator").is_err());
         assert_eq!(list_decisions(&store, &on.id, 10).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn check_run_replay_after_reactivation_keeps_original_receipt_without_admitting_old_runs() {
+        let (store, path) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "check_run.completed").unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        // Simulate a real source activated well before the completed Check Run
+        // without a wall-clock sleep or altering the immutable receipt itself.
+        store.db.execute(
+            "UPDATE sa_event_sources SET updated_at=?2 WHERE id=?1",
+            params![&on.id, storage::now() - 10_000],
+        ).unwrap();
+        let sha = "0123456789012345678901234567890123456789";
+        let run = serde_json::json!({
+            "id": 803, "status": "completed", "conclusion": "failure",
+            "head_sha": sha,
+            "completed_at": (chrono::Utc::now() - chrono::Duration::seconds(5)).to_rfc3339(),
+            "app": {"slug": "trusted-bot"},
+            "pull_requests": [{"number": 42, "head": {"sha": sha},
+                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo", "id": 1}}}]
+        });
+        let first = observe_authenticated_check_run(&store, &on, 803, &run, "operator").unwrap();
+        assert_eq!(first.decision, "observed_permitted");
+        assert!(!first.duplicate);
+        let disabled = set_mode(&store, &on.id, on.policy_revision, "off").unwrap();
+        assert!(observe_authenticated_check_run(&store, &disabled, 803, &run, "operator").is_err());
+        let enabled = set_mode(&store, &disabled.id, disabled.policy_revision, "observe").unwrap();
+        drop(store);
+        let restarted = Store::open(&path).unwrap();
+        let current = source(&restarted, &enabled.id).unwrap();
+        let activation: i64 = restarted.db.query_row(
+            "SELECT updated_at FROM sa_event_sources WHERE id=?1", [&current.id], |r| r.get(0),
+        ).unwrap();
+        let completed_at = chrono::DateTime::parse_from_rfc3339(
+            run["completed_at"].as_str().unwrap()).unwrap().timestamp_millis();
+        assert!(completed_at < activation, "replay must exercise reactivation's time fence");
+        let replay = observe_authenticated_check_run(
+            &restarted, &current, 803, &run, "operator").unwrap();
+        assert!(replay.duplicate);
+        assert_eq!(replay.sequence, first.sequence);
+        assert_eq!(replay.policy_revision, first.policy_revision);
+
+        let mut unseen = run.clone();
+        unseen["id"] = serde_json::json!(804);
+        assert!(observe_authenticated_check_run(
+            &restarted, &current, 804, &unseen, "operator").is_err(),
+            "a pre-reactivation unseen Check Run cannot be admitted as new evidence");
+        let mut changed = run.clone();
+        changed["conclusion"] = serde_json::json!("success");
+        assert!(observe_authenticated_check_run(
+            &restarted, &current, 803, &changed, "operator").is_err(),
+            "reactivation cannot rewrite the immutable result");
+        assert_eq!(list_decisions(&restarted, &current.id, 10).unwrap().len(), 1);
+        assert_eq!(source(&restarted, &current.id).unwrap().last_sequence, first.sequence);
+        assert_eq!(restarted.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |r| r.get::<_, i64>(0)).unwrap(), 0);
     }
 
     #[test]

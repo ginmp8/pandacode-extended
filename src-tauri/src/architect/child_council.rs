@@ -451,7 +451,9 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
 }
 
 /// Explicit recovery replaces interrupted child reservations or fully stopped
-/// read-only child attempts with no scored/reported result. Partial provider
+/// read-only child attempts with no scored/reported result. After an abrupt
+/// unpaused native root interruption, an unscored started leaf may also be
+/// revoked only when its own native session is interrupted/error. Partial provider
 /// transcripts remain on revoked old sessions: they are never copied into the
 /// fresh Council or treated as approval. No active root/leaf agent is allowed.
 /// The caller holds the store lock and validates task-scoped native authority.
@@ -467,6 +469,13 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
     let parent = store.session(&root.session_id)?;
     if parent.archived || parent.task_stage == "completed" {
         return Err("child_council_recovery_denied: root task is settled.".into());
+    }
+    // Crash recovery is not a way to bypass an active, unpaused root.
+    // The caller also checks the actual live-agent registry before entry.
+    if root.status == "interrupted"
+        && !matches!(parent.status.as_str(), "interrupted" | "error")
+    {
+        return Err("child_council_recovery_denied: native root interruption is not confirmed.".into());
     }
     crate::bots::shared_channels::validate_delivery_council(store, &root.session_id, config)?;
     let transaction = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
@@ -505,7 +514,8 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
         // frozen cycle. An admitted reviewer may have started, but every
         // started leaf must have been STOPPED by an explicit root Pause;
         // nothing can have scored, reported, written or settled. A real
-        // interrupted/error native leaf still fails validate_admitted below.
+        // interrupted/error native leaf is verified only for explicit revocation
+        // after an actual root Pause or a confirmed native root interruption.
         let pristine = old_team.status == "blocked" && old_team.workers.is_empty()
             && old_team.objective.is_empty() && old_team.generation == 0
             && old_team.council_since == 0;
@@ -515,12 +525,16 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
             && old_team.generation <= root.generation
             && old_team.council_since == root.council_since
             && old_team.workers.iter().all(|leaf| {
-                matches!(leaf.status.as_str(), "queued" | "stopped") && !leaf.abandoned
+                (matches!(leaf.status.as_str(), "queued" | "stopped")
+                    || (root.status == "interrupted" && leaf.status == "running"
+                        && leaf.council.as_ref().is_some_and(|seat| seat.started_at > 0)))
+                    && !leaf.abandoned
                     && leaf.council.as_ref().is_some_and(|seat|
                         seat.round == 1 && seat.score.is_none()
                         && (seat.started_at == 0
                             || (root.status == "paused" && leaf.status == "stopped"
-                                && old_team.generation < root.generation))
+                                && old_team.generation < root.generation)
+                            || (root.status == "interrupted" && leaf.status == "running"))
                         && !seat.closed_by_selection && !seat.reported_severe_finding
                         && !seat.reported_conflict)
                     && leaf.summary.is_empty() && leaf.error.is_none()
@@ -601,6 +615,14 @@ pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -
                 ).map_err(|e| e.to_string())?;
                 let started = leaf.council.as_ref()
                     .is_some_and(|seat| seat.started_at > 0);
+                // An unpaused abrupt crash cannot be inferred solely from
+                // persisted worker status. Every started leaf must have a
+                // separately interrupted native session, not an active host.
+                if root.status == "interrupted" && started
+                    && !matches!(session.status.as_str(), "interrupted" | "error")
+                {
+                    return Err("child_council_recovery_denied: started leaf has no native interruption.".into());
+                }
                 if (!started && (messages != 0 || session.resume_id.is_some()))
                     || session.archived || session.task_stage == "completed"
                     || task != leaf.assignment
@@ -776,8 +798,14 @@ fn validate_admitted(
         // stopped, unscored first wave under a paused root may inspect their
         // original native grants before permanently detaching those sessions.
         if matches!(session.status.as_str(), "interrupted" | "error")
-            && !(allow_revoked_leaf_session && root.status == "paused"
-                && matches!(leaf.status.as_str(), "queued" | "stopped")
+            && !(allow_revoked_leaf_session
+                && ((root.status == "paused"
+                        && matches!(leaf.status.as_str(), "queued" | "stopped"))
+                    || (root.status == "interrupted"
+                        && leaf.council.as_ref().is_some_and(|seat|
+                            (seat.started_at == 0
+                                && matches!(leaf.status.as_str(), "queued" | "stopped"))
+                            || (seat.started_at > 0 && leaf.status == "running"))))
                 && leaf.council.as_ref().is_some_and(|seat|
                     seat.round == 1 && seat.score.is_none())
                 && !leaf.reported && !leaf.abandoned)

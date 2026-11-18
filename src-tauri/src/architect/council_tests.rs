@@ -4929,6 +4929,160 @@ fn paused_started_child_recovery_revokes_partial_transcripts_and_reissues_native
     assert_eq!(root.council_since, old_cycle);
 }
 
+
+#[test]
+fn interrupted_root_recovery_requires_native_crash_and_revokes_started_leaf_grants() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["crashed-security", "crashed-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut policy = on(9.0, 3, 0);
+        policy.nested_bot_reviewers = ["crashed-security", "crashed-architecture"]
+            .into_iter().map(|bot| council::CouncilNestedReviewer {
+                bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(policy);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid, "Native root crash recovery", None, None).unwrap();
+    let (pending, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Admit child reviewers before abrupt crash"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    let (old_children, old_leaves, original_cycle) = {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let mut views = child_council::inspect(&store, &root).unwrap();
+        views.sort_by_key(|view| if view.bot_id == "crashed-security" { 0 } else { 1 });
+        let mut child_ids = Vec::new();
+        let mut leaf_ids = Vec::new();
+        for view in views {
+            let child_id = view.child_session_id;
+            let mut child = load(&store, &child_id).unwrap().unwrap();
+            if view.bot_id == "crashed-security" {
+                child.workers[0].status = "running".into();
+                child.workers[0].council.as_mut().unwrap().started_at = storage::now();
+                save(&store, &mut child).unwrap();
+            }
+            leaf_ids.extend(child.workers.iter().map(|leaf| leaf.session_id.clone()));
+            child_ids.push(child_id);
+        }
+        store.message(&leaf_ids[0], "user", "Abandoned native provider partial context").unwrap();
+        store.db.execute(
+            "UPDATE sessions SET resume_id='never-reuse-interrupted-provider' WHERE id=?1",
+            [&leaf_ids[0]],
+        ).unwrap();
+        (child_ids, leaf_ids, root.council_since)
+    };
+    {
+        let store = state.store.lock().unwrap();
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        root.status = "interrupted".into();
+        save(&store, &mut root).unwrap();
+        for child in &old_children {
+            store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1",
+                [child]).unwrap();
+        }
+    }
+    // A team snapshot saying "interrupted" is not sufficient authority to
+    // replace live provider sessions or an otherwise healthy native root.
+    let denied = control_state(&state, &sid, "recover").unwrap_err();
+    assert!(denied.contains("native root interruption"), "{denied}");
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1",
+            [&sid]).unwrap();
+    }
+    let before = serde_json::to_value(saved(&state, &sid)).unwrap();
+    let denied = control_state(&state, &sid, "recover").unwrap_err();
+    assert!(denied.contains("started leaf has no native interruption"), "{denied}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before);
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1",
+            [&old_leaves[0]]).unwrap();
+        // Scored or reported work cannot be relabeled as an unscored crash.
+        let mut child = load(&store, &old_children[0]).unwrap().unwrap();
+        child.workers[0].council.as_mut().unwrap().score = Some(9.5);
+        save(&store, &mut child).unwrap();
+    }
+    let scored_denial = control_state(&state, &sid, "recover").unwrap_err();
+    assert!(scored_denial.contains("child_council_recovery_denied"), "{scored_denial}");
+    {
+        let store = state.store.lock().unwrap();
+        let mut child = load(&store, &old_children[0]).unwrap().unwrap();
+        child.workers[0].council.as_mut().unwrap().score = None;
+        save(&store, &mut child).unwrap();
+    }
+    assert_eq!(control_state(&state, &sid, "recover").unwrap().status, "interrupted");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), before,
+        "recovery must not mutate or approve the interrupted root Council");
+    let fresh_children = {
+        let store = state.store.lock().unwrap();
+        let mut stmt = store.db.prepare(
+            "SELECT worker_id FROM architect_requests
+             WHERE parent_session_id=?1 AND kind='council_child'"
+        ).unwrap();
+        let fresh = stmt.query_map([&sid], |row| row.get::<_, String>(0)).unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>().unwrap();
+        assert_eq!(fresh.len(), 2);
+        for id in &fresh {
+            assert!(!old_children.contains(id));
+            let team = load(&store, id).unwrap().unwrap();
+            assert!(team.workers.is_empty() && team.status == "blocked");
+        }
+        for id in &old_children {
+            assert_eq!(store.session(id).unwrap().status, "interrupted");
+        }
+        for id in &old_leaves {
+            assert_eq!(store.session(id).unwrap().status, "interrupted");
+            assert!(parent_of(&store, id).unwrap().is_none(),
+                "revoked native leaf ownership must not survive crash recovery");
+        }
+        assert!(store.messages(&old_leaves[0], None).unwrap()
+            .iter().any(|msg| msg.content.contains("Abandoned native provider")));
+        fresh
+    };
+    let resumed = control_state(&state, &sid, "resume").unwrap();
+    assert_eq!(resumed.council_since, original_cycle);
+    assert_eq!(resumed.status, "running");
+    // Simulate the host starting a fresh root session after explicit Resume;
+    // this does not resurrect the detached old leaf identities.
+    {
+        let store = state.store.lock().unwrap();
+        store.db.execute("UPDATE sessions SET status='idle' WHERE id=?1",
+            [&sid]).unwrap();
+    }
+    let (pending, _) = dispatch_state(
+        &state, &sid, resumed.generation, "pandacode_finish_team",
+        json!({"summary":"Admit fresh child leaves after native crash"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    let views = child_council::inspect(&store, &root).unwrap();
+    assert!(views.iter().any(|view| fresh_children.contains(&view.child_session_id)));
+    for view in views {
+        let team = load(&store, &view.child_session_id).unwrap().unwrap();
+        assert!(team.workers.iter().all(|leaf| leaf.read_only
+            && leaf.reviewer_binding.is_some()
+            && !old_leaves.contains(&leaf.session_id)));
+    }
+}
+
 #[test]
 fn explicit_native_child_recovery_rejects_foreign_work_and_preserves_old_authority() {
     let (state, sid) = state_fixture();

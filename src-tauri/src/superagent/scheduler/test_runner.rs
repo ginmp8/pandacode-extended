@@ -722,6 +722,53 @@ fn queue_failed_test_repair(
     Ok(true)
 }
 
+/// An exhausted or unauthorized Full Auto repair must be a durable blocked
+/// Demand, not an active plan with no ready WorkItems. Manual approval-mode
+/// Demands keep their existing behavior. The caller owns the SQLite transaction
+/// and cross-process dispatch fence.
+fn block_unrepairable_full_auto(
+    db:&rusqlite::Connection,job:&Reserved,now:i64,reason:&str,
+)->Result<bool> {
+    let affected=db.execute(
+        "UPDATE sa_tickets SET state='blocked',revision=revision+1,updated_at=?4
+         WHERE id=?1 AND state='queued' AND active_assignment_id IS NULL
+           AND EXISTS(
+             SELECT 1 FROM sa_demand_plans plan
+             JOIN sa_mandates mandate ON mandate.ticket_id=plan.ticket_id
+             JOIN sa_ticket_team_snapshots snap ON snap.ticket_id=plan.ticket_id
+             JOIN sa_demand_test_runs run ON run.ticket_id=plan.ticket_id
+             WHERE plan.ticket_id=sa_tickets.id
+               AND plan.state='active' AND plan.plan_sha256=?2
+               AND plan.ticket_revision=sa_tickets.revision
+               AND plan.policy_revision=sa_tickets.policy_revision
+               AND mandate.actor=sa_tickets.actor
+               AND mandate.project_id=sa_tickets.project_id
+               AND mandate.policy_revision=plan.policy_revision
+               AND mandate.allowed_tools='[]'
+               AND mandate.allowed_side_effects=0
+               AND mandate.revoked=0 AND mandate.expires_at>?4
+               AND snap.source_kind='native'
+               AND json_extract(snap.snapshot_json,'$.policy.autonomy')='full_auto'
+               AND run.state='failed' AND run.snapshot_sha256=?3
+               AND run.plan_sha256=?2 AND run.finished_at IS NOT NULL
+           )",
+        params![job.root,job.plan,job.snapshot,now],
+    ).map_err(|e|e.to_string())?;
+    if affected==0 {return Ok(false);}
+    let moved=db.execute(
+        "UPDATE sa_demand_plans SET state='blocked',updated_at=?2
+         WHERE ticket_id=?1 AND state='active' AND plan_sha256=?3",
+        params![job.root,now,job.plan],
+    ).map_err(|e|e.to_string())?;
+    if moved!=1 {return Err("Failed to persist blocked native test plan.".into());}
+    db.execute(
+        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+         VALUES(?1,'demand_test_repair_blocked',?2,?3)",
+        params![job.root,reason,now],
+    ).map_err(|e|e.to_string())?;
+    Ok(true)
+}
+
 /// A test started against one immutable set of accepted native Worker
 /// assignments. An edited child output, replacement Assignment or withdrawn
 /// approval must never settle as passing evidence, even if Git did not move.
@@ -771,12 +818,26 @@ fn settle(store:&Store,job:&Reserved,result:Outcome)->Result<()> {
             // a failed test without its permitted correction reservation.
             let queued=queue_failed_test_repair(&tx,job,&result,now)?;
             if !queued {
-                tx.execute(
-                    "INSERT INTO sa_audit(ticket_id,kind,detail,at)
-                     VALUES(?1,'demand_test_repair_unavailable',
-                       'No bounded correction within the original native scope',?2)",
-                    params![job.root,now],
+                let archived:i64=tx.query_row(
+                    "SELECT COUNT(*) FROM sa_demand_test_attempts WHERE ticket_id=?1",
+                    [&job.root],|row|row.get(0),
                 ).map_err(|e|e.to_string())?;
+                let reason=if result.category=="sandbox_unavailable" {
+                    "unsupported_test_environment"
+                } else if archived>=2 {
+                    "test_retry_budget_exhausted"
+                } else {
+                    "no_authorized_repair_scope_or_capacity"
+                };
+                if !block_unrepairable_full_auto(&tx,job,now,reason)? {
+                    // An approval-mode Demand is not switched to Full Auto
+                    // failure semantics; its existing human path is unchanged.
+                    tx.execute(
+                        "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+                         VALUES(?1,'demand_test_repair_unavailable',?2,?3)",
+                        params![job.root,reason,now],
+                    ).map_err(|e|e.to_string())?;
+                }
             }
         }
     }
@@ -806,6 +867,83 @@ pub(super) async fn advance(app:&tauri::AppHandle)->Result<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn exhausted_full_auto_test_blocks_once_without_touching_manual_or_revoked_demands() {
+        let db=rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_tickets(id TEXT PRIMARY KEY,state TEXT,
+               revision INTEGER,active_assignment_id TEXT,policy_revision INTEGER,
+               actor TEXT,project_id TEXT,updated_at INTEGER);
+             CREATE TABLE sa_demand_plans(ticket_id TEXT PRIMARY KEY,
+               state TEXT,plan_sha256 TEXT,ticket_revision INTEGER,
+               policy_revision INTEGER,updated_at INTEGER);
+             CREATE TABLE sa_mandates(ticket_id TEXT PRIMARY KEY,actor TEXT,
+               project_id TEXT,policy_revision INTEGER,allowed_tools TEXT,
+               allowed_side_effects INTEGER,revoked INTEGER,expires_at INTEGER);
+             CREATE TABLE sa_ticket_team_snapshots(ticket_id TEXT,source_kind TEXT,
+               snapshot_json TEXT);
+             CREATE TABLE sa_demand_test_runs(ticket_id TEXT PRIMARY KEY,
+               state TEXT,snapshot_sha256 TEXT,plan_sha256 TEXT,finished_at INTEGER);
+             CREATE TABLE sa_audit(ticket_id TEXT,kind TEXT,detail TEXT,at INTEGER);
+             INSERT INTO sa_tickets VALUES
+               ('auto','queued',5,NULL,2,'user','project',1),
+               ('manual','queued',5,NULL,2,'user','project',1),
+               ('revoked','queued',5,NULL,2,'user','project',1),
+               ('stale','queued',6,NULL,2,'user','project',1);
+             INSERT INTO sa_demand_plans VALUES
+               ('auto','active','plan',5,2,1),
+               ('manual','active','plan',5,2,1),
+               ('revoked','active','plan',5,2,1),
+               ('stale','active','plan',5,2,1);
+             INSERT INTO sa_ticket_team_snapshots VALUES
+               ('auto','native','{\"policy\":{\"autonomy\":\"full_auto\"}}'),
+               ('manual','native','{\"policy\":{\"autonomy\":\"approval\"}}'),
+               ('revoked','native','{\"policy\":{\"autonomy\":\"full_auto\"}}'),
+               ('stale','native','{\"policy\":{\"autonomy\":\"full_auto\"}}');
+             INSERT INTO sa_demand_test_runs VALUES
+               ('auto','failed','snapshot','plan',1),
+               ('manual','failed','snapshot','plan',1),
+               ('revoked','failed','snapshot','plan',1),
+               ('stale','failed','snapshot','plan',1);",
+        ).unwrap();
+        for id in ["auto","manual","revoked","stale"] {
+            db.execute(
+                "INSERT INTO sa_mandates VALUES(?1,'user','project',2,'[]',0,?2,?3)",
+                params![id,if id=="revoked" {1} else {0},storage::now()+60_000],
+            ).unwrap();
+        }
+        let now=storage::now();
+        for (ticket,expected) in [("auto",true),("manual",false),
+            ("revoked",false),("stale",false)] {
+            let job=Reserved {
+                root:ticket.into(),command:"npm test".into(),checkout:"/unused".into(),
+                manifest:"manifest".into(),snapshot:"snapshot".into(),
+                expires:now+60_000,plan:"plan".into(),
+                db_path:std::path::PathBuf::new(),
+            };
+            assert_eq!(block_unrepairable_full_auto(
+                &db,&job,now,"test_retry_budget_exhausted").unwrap(),expected);
+            assert!(!block_unrepairable_full_auto(
+                &db,&job,now,"test_retry_budget_exhausted").unwrap());
+            let (ticket_state,plan_state):(String,String)=db.query_row(
+                "SELECT ticket.state,plan.state FROM sa_tickets ticket
+                 JOIN sa_demand_plans plan ON plan.ticket_id=ticket.id
+                 WHERE ticket.id=?1",
+                [ticket],|row|Ok((row.get(0)?,row.get(1)?)),
+            ).unwrap();
+            assert_eq!(ticket_state,if expected {"blocked"} else {"queued"});
+            assert_eq!(plan_state,if expected {"blocked"} else {"active"});
+        }
+        let count:i64=db.query_row(
+            "SELECT COUNT(*) FROM sa_audit WHERE kind='demand_test_repair_blocked'",
+            [],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(count,1,"Only the authorized Full Auto Demand is terminalized");
+        assert_eq!(db.query_row(
+            "SELECT state FROM sa_demand_test_runs WHERE ticket_id='auto'",
+            [],|row|row.get::<_,String>(0)).unwrap(),"failed");
+    }
+
     #[test]
     fn demand_test_deadline_uses_milliseconds_without_expanding_authority() {
         let now=1_700_000_000_000_i64;

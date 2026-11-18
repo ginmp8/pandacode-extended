@@ -379,6 +379,11 @@ test('Full Access wizard allows zero reviewers and configures native Full Access
   await expect(host.locator('.sa-team-policy'))
     .toContainText('Native Full Access; no separate WorkItem permission');
   await expect(host.locator('.sa-team-policy')).not.toContainText('Scoped write grants');
+  await host.getByRole('button',{name:'Assign Demand',exact:true}).click();
+  await expect(host.locator('.sa-admission-summary'))
+    .toContainText('Native Full Access · no separate WorkItem grant');
+  await expect(host.locator('.sa-admission-summary'))
+    .toContainText('Off · zero reviewers allowed');
 });
 
 test('an enabled Team admits a Demand through the new screen and opens its native Run',async({page})=>{

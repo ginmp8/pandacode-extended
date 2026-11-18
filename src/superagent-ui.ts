@@ -1464,8 +1464,14 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           (teamStrategy?.executionMode === 'full' ? 'Full Access' :
             teamStrategy?.executionMode === 'approval' ? 'With Approval' : 'Not configured') +
           '</dd><dt>Native admission</dt><dd>Required</dd>' +
-          '<dt>Permissions</dt><dd>Scoped native grants only</dd>' +
-          '<dt>Council</dt><dd>' + (chosen?.councilRequired ? 'Required' : 'Policy dependent') +
+          '<dt>Permissions</dt><dd>' +
+          (teamStrategy?.executionMode === 'full'
+            ? 'Native Full Access · no separate WorkItem grant'
+            : teamStrategy?.executionMode === 'approval'
+              ? 'Native bot permissions · human WorkItem acceptance'
+              : 'Not configured') +
+          '</dd><dt>Council</dt><dd>' +
+          (chosen?.councilRequired ? 'Required · native reviewers' : 'Off · zero reviewers allowed') +
           '</dd></dl></aside></div>' : '') +
       (workspaceView === 'run'
         ? active || '<section class="sa-pane">Open a native Demand from Demands / Runs.</section>' : '') +

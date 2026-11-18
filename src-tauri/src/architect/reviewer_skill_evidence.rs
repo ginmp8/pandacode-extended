@@ -179,7 +179,8 @@ pub(super) fn tools() -> Vec<Value> {
 /// independently validates current native authority and frozen task policy.
 pub(super) fn file_tool_eligible(team: &TeamSnapshot, worker: &Worker) -> bool {
     if !worker.read_only || worker.abandoned || worker.wrote_at != 0
-        || !worker.files.is_empty() || worker.reviewer_binding.is_none()
+        || !worker.files.is_empty() || worker.reviewer_binding.as_ref()
+            .is_none_or(|binding| binding.validate(team, worker).is_err())
     {
         return false;
     }
@@ -390,6 +391,17 @@ fn dispatch_file_state(
         .ok_or("reviewer_file_evidence_unavailable: reviewed checkout unavailable.")?;
     let root_path = std::fs::canonicalize(checkout)
         .map_err(|_| "reviewer_file_evidence_unavailable: reviewed checkout unavailable.".to_string())?;
+    // Frozen, checkout-relative evidence paths must not traverse mutable links.
+    // Even an in-checkout symlink can later be redirected to a private file.
+    let mut candidate = root_path.clone();
+    for component in std::path::Path::new(relative).components() {
+        candidate.push(component.as_os_str());
+        let metadata = std::fs::symlink_metadata(&candidate)
+            .map_err(|_| "reviewer_file_evidence_unavailable: required file unavailable.".to_string())?;
+        if metadata.file_type().is_symlink() {
+            return Err("reviewer_file_evidence_denied: required file traverses a symbolic link.".into());
+        }
+    }
     let target = std::fs::canonicalize(root_path.join(relative))
         .map_err(|_| "reviewer_file_evidence_unavailable: required file unavailable.".to_string())?;
     if !target.starts_with(&root_path) || !target.is_file() {

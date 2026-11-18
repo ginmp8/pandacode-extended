@@ -1257,6 +1257,10 @@ fn required_text_fragment_uses_bounded_native_host_receipts_not_model_claims() {
     wrong_lens.council.as_mut().unwrap().lens = "Unrelated review".into();
     assert!(!reviewer_skill_evidence::file_tool_eligible(&team, &wrong_lens),
         "an unrelated reviewer cannot request another criterion's file check");
+    let mut stale_binding = team.workers[0].clone();
+    stale_binding.reviewer_binding.as_mut().unwrap().artifact_revision.push_str(":stale");
+    assert!(!reviewer_skill_evidence::file_tool_eligible(&team, &stale_binding),
+        "a stale reviewer binding must not expose native file verification");
     let mut without_binding = team.workers[0].clone();
     without_binding.reviewer_binding = None;
     assert!(!reviewer_skill_evidence::file_tool_eligible(&team, &without_binding),
@@ -1271,6 +1275,22 @@ fn required_text_fragment_uses_bounded_native_host_receipts_not_model_claims() {
         &first, "pandacode_reviewer_file_verify", json!({"criterionId":"text-proof"})).is_err(),
         "an absent fragment cannot be attested by a reviewer claim");
     std::fs::write(&path, b"feature: enabled\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::symlink;
+        let allowed_content = folder.join("actual-policy.txt");
+        std::fs::write(&allowed_content, b"feature: enabled\n").unwrap();
+        std::fs::remove_file(&path).unwrap();
+        symlink(&allowed_content, &path).unwrap();
+        let denied = reviewer_skill_evidence::dispatch_state(&state, &sid, generation,
+            &first, "pandacode_reviewer_file_verify",
+            json!({"criterionId":"text-proof"})).unwrap_err();
+        assert!(denied.contains("symbolic link"),
+            "even an in-checkout symlink cannot redirect a required file check: {denied}");
+        std::fs::remove_file(&path).unwrap();
+        std::fs::remove_file(allowed_content).unwrap();
+        std::fs::write(&path, b"feature: enabled\n").unwrap();
+    }
     for id in ["text-a", "text-b"] {
         let actor = coordination::Actor::Worker { id: id.into(), attempt: 1 };
         let (receipt, changed) = reviewer_skill_evidence::dispatch_state(&state, &sid, generation,

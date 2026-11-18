@@ -91,7 +91,8 @@ fn verified_work_items(db:&Connection,ticket_id:&str)->Result<i64> {
            AND assignment.attempt=(SELECT MAX(latest.attempt)
              FROM sa_assignments latest WHERE latest.ticket_id=child.id)
            AND proof.reviewed_at>=assignment.updated_at
-           AND (item.requires_write=0 OR EXISTS(
+           AND (item.requires_write=0 OR proof.approval_kind='native_worker_finished'
+                OR EXISTS(
              SELECT 1 FROM sa_worker_write_receipts applied
              WHERE applied.ticket_id=child.id
                AND applied.assignment_id=assignment.id

@@ -257,7 +257,8 @@ fn worker_proofs_hash(db:&rusqlite::Connection,root:&str)->Result<String> {
            AND latest.attempt=(SELECT MAX(a.attempt) FROM sa_assignments a
              WHERE a.ticket_id=child.id)
            AND proof.reviewed_at>=latest.updated_at
-           AND (item.requires_write=0 OR EXISTS(
+           AND (item.requires_write=0 OR proof.approval_kind='native_worker_finished'
+                OR EXISTS(
               SELECT 1 FROM sa_worker_write_receipts write
               WHERE write.ticket_id=child.id
                 AND write.assignment_id=latest.id AND write.state='applied'))

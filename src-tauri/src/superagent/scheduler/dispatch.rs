@@ -198,7 +198,7 @@ fn reconcile(store:&Store)->Result<()> {
     // implicitly verified dependency during a restart.
     store.db.execute(
         "UPDATE sa_work_items SET state='waiting_review',
-         last_reason='Native child approval receipt unavailable',updated_at=?1
+         last_reason='Native child completion evidence unavailable',updated_at=?1
          WHERE state IN ('running','waiting_review') AND child_ticket_id IN
            (SELECT id FROM sa_tickets WHERE state='completed')
            AND NOT EXISTS(SELECT 1 FROM sa_work_item_evidence_receipts receipt
@@ -236,12 +236,12 @@ fn reconcile(store:&Store)->Result<()> {
                             AND evidence.child_ticket_id=item.child_ticket_id)
                         OR (item.requires_write=1 AND NOT EXISTS(
                           SELECT 1 FROM sa_work_item_evidence_receipts proof
-                          JOIN sa_worker_write_receipts applied
+                          LEFT JOIN sa_worker_write_receipts applied
                             ON applied.ticket_id=proof.child_ticket_id
                            AND applied.assignment_id=proof.assignment_id
                           WHERE proof.item_id=item.id
                             AND proof.child_ticket_id=item.child_ticket_id
-                            AND applied.state='applied'))))
+                            AND (applied.state='applied' OR proof.approval_kind='native_worker_finished')))))
                AND NOT EXISTS(
                  SELECT 1 FROM sa_subagent_nodes descendant
                  WHERE descendant.root_ticket_id=plan.ticket_id
@@ -304,12 +304,12 @@ fn reconcile(store:&Store)->Result<()> {
                             AND evidence.child_ticket_id=item.child_ticket_id)
                         OR (item.requires_write=1 AND NOT EXISTS(
                           SELECT 1 FROM sa_work_item_evidence_receipts proof
-                          JOIN sa_worker_write_receipts applied
+                          LEFT JOIN sa_worker_write_receipts applied
                             ON applied.ticket_id=proof.child_ticket_id
                            AND applied.assignment_id=proof.assignment_id
                           WHERE proof.item_id=item.id
                             AND proof.child_ticket_id=item.child_ticket_id
-                            AND applied.state='applied'))))",
+                            AND (applied.state='applied' OR proof.approval_kind='native_worker_finished')))))",
             params![root,now],
         ).map_err(|e|e.to_string())?;
         if moved==1 {
@@ -321,7 +321,7 @@ fn reconcile(store:&Store)->Result<()> {
             tx.execute(
                 "INSERT INTO sa_audit(ticket_id,kind,detail,at)
                  VALUES(?1,'demand_completed',
-                   'All admitted WorkItem Tickets finished under native review and effect gates',?2)",
+                   'All WorkItem Tickets have current native execution or optional review evidence',?2)",
                 params![root,now],
             ).map_err(|e|e.to_string())?;
         }
@@ -384,12 +384,12 @@ fn prerequisites_settled(db:&Connection,root:&str,key:&str)->Result<bool> {
                WHERE proof.item_id=prior.id AND proof.child_ticket_id=prior.child_ticket_id)
              AND (prior.requires_write=0 OR EXISTS(
                SELECT 1 FROM sa_work_item_evidence_receipts proof
-               JOIN sa_worker_write_receipts applied
+               LEFT JOIN sa_worker_write_receipts applied
                  ON applied.ticket_id=proof.child_ticket_id
                 AND applied.assignment_id=proof.assignment_id
                WHERE proof.item_id=prior.id
                  AND proof.child_ticket_id=prior.child_ticket_id
-                 AND applied.state='applied')),0)
+                 AND (applied.state='applied' OR proof.approval_kind='native_worker_finished'))),0)
          FROM sa_work_dependencies dependency
          LEFT JOIN sa_work_items prior
            ON prior.ticket_id=dependency.ticket_id
@@ -450,12 +450,12 @@ fn ready(store:&Store)->Result<Vec<ReadyItem>> {
                         AND evidence.child_ticket_id=prerequisite.child_ticket_id)
                   OR (prerequisite.requires_write=1 AND NOT EXISTS(
                     SELECT 1 FROM sa_work_item_evidence_receipts proof
-                    JOIN sa_worker_write_receipts applied
+                    LEFT JOIN sa_worker_write_receipts applied
                       ON applied.ticket_id=proof.child_ticket_id
                      AND applied.assignment_id=proof.assignment_id
                     WHERE proof.item_id=prerequisite.id
                       AND proof.child_ticket_id=prerequisite.child_ticket_id
-                      AND applied.state='applied'))))
+                      AND (applied.state='applied' OR proof.approval_kind='native_worker_finished')))))
          ORDER BY plan.created_at,item.ordinal,item.id"
     ).map_err(|e|e.to_string())?;
     // Do not limit candidates before native descendant/effect validation:

@@ -722,6 +722,24 @@ fn queue_failed_test_repair(
     Ok(true)
 }
 
+/// A test started against one immutable set of accepted native Worker
+/// assignments. An edited child output, replacement Assignment or withdrawn
+/// approval must never settle as passing evidence, even if Git did not move.
+fn run_worker_proofs_current(
+    db:&rusqlite::Connection,root:&str,snapshot:&str,
+)->bool {
+    let frozen:Option<String>=db.query_row(
+        "SELECT worker_proofs_sha256 FROM sa_demand_test_runs
+         WHERE ticket_id=?1 AND snapshot_sha256=?2 AND state='running'",
+        params![root,snapshot],|r|r.get(0),
+    ).optional().ok().flatten();
+    match frozen {
+        Some(expected) if expected.len()==64 =>
+            worker_proofs_hash(db,root).ok().as_deref()==Some(expected.as_str()),
+        _=>false,
+    }
+}
+
 fn settle(store:&Store,job:&Reserved,result:Outcome)->Result<()> {
     let now=storage::now();
     // Use the same effect-time authorization predicate at settlement.
@@ -729,6 +747,7 @@ fn settle(store:&Store,job:&Reserved,result:Outcome)->Result<()> {
     // turn a cancelled process into durable passing test evidence.
     let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
     let current=test_effect_live(&tx,job)
+        && run_worker_proofs_current(&tx,&job.root,&job.snapshot)
         && manifest_hash(Path::new(&job.checkout),&job.command)
             .ok().as_deref()==Some(job.manifest.as_str())
         && snapshot_hash(&tx,&job.root,Path::new(&job.checkout))
@@ -1068,6 +1087,55 @@ mod tests {
         assert!(!retry_allowed(&db,"root","changed-with-new-worker",&worker_b).unwrap());
         db.execute("UPDATE sa_demand_test_runs SET state='passed'",[]).unwrap();
         assert!(!retry_allowed(&db,"root","changed-with-new-worker",&worker_b).unwrap());
+    }
+
+    #[test]
+    fn changed_native_worker_attempt_cannot_settle_an_old_test_pass() {
+        let db=rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_tickets(id TEXT PRIMARY KEY,state TEXT,evidence TEXT);
+             INSERT INTO sa_tickets VALUES('child','completed','done');
+             CREATE TABLE sa_work_items(
+                 id TEXT,ticket_id TEXT,child_ticket_id TEXT,state TEXT,
+                 ordinal INTEGER,requires_write INTEGER);
+             INSERT INTO sa_work_items VALUES(
+                 'item','root','child','completed',0,0);
+             CREATE TABLE sa_assignments(
+                 id TEXT,ticket_id TEXT,state TEXT,result TEXT,
+                 attempt INTEGER,updated_at INTEGER);
+             INSERT INTO sa_assignments VALUES(
+                 'assignment-1','child','finished','done',1,9);
+             CREATE TABLE sa_work_item_evidence_receipts(
+                 item_id TEXT,child_ticket_id TEXT,assignment_id TEXT,
+                 evidence_sha256 TEXT,reviewed_at INTEGER);
+             CREATE TABLE sa_worker_write_receipts(
+                 ticket_id TEXT,assignment_id TEXT,state TEXT);
+             CREATE TABLE sa_demand_test_runs(
+                 ticket_id TEXT,state TEXT,snapshot_sha256 TEXT,
+                 worker_proofs_sha256 TEXT);",
+        ).unwrap();
+        let digest=digest(b"done");
+        db.execute(
+            "INSERT INTO sa_work_item_evidence_receipts
+             VALUES('item','child','assignment-1',?1,10)",
+            [&digest],
+        ).unwrap();
+        let proof=worker_proofs_hash(&db,"root").unwrap();
+        db.execute(
+            "INSERT INTO sa_demand_test_runs VALUES('root','running','snapshot',?1)",
+            [&proof],
+        ).unwrap();
+        assert!(run_worker_proofs_current(&db,"root","snapshot"));
+        db.execute("UPDATE sa_tickets SET evidence='edited' WHERE id='child'",[]).unwrap();
+        assert!(!run_worker_proofs_current(&db,"root","snapshot"));
+        db.execute("UPDATE sa_tickets SET evidence='done' WHERE id='child'",[]).unwrap();
+        db.execute(
+            "INSERT INTO sa_assignments VALUES(
+             'assignment-2','child','finished','done',2,11)",[],
+        ).unwrap();
+        assert!(!run_worker_proofs_current(&db,"root","snapshot"));
+        db.execute("UPDATE sa_demand_test_runs SET state='uncertain'",[]).unwrap();
+        assert!(!run_worker_proofs_current(&db,"root","snapshot"));
     }
 
     #[test]

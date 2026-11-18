@@ -839,7 +839,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '</li>';
     }).join('');
     const sourcePanel = '<section class="sa-event-sources" aria-label="GitHub event sources">' +
-      '<h4>GitHub event sources</h4><p>Authenticated GitHub Events polling is bounded and read-only in Observe mode. Off and authenticated Observe remain available. Auto requires local confirmation and expires in 24 hours. Full Access uses the existing bot's native permission mode and does not require a second file or test grant. No source grants GitHub comments, pushes, merges or releases.</p>' +
+      '<h4>GitHub event sources</h4><p>Authenticated GitHub Events polling is bounded and read-only in Observe mode. Off and authenticated Observe remain available. Auto requires local confirmation and expires in 24 hours. Full Access uses the bot native permission mode and does not require a second file or test grant. No source grants GitHub comments, pushes, merges or releases.</p>' +
       (!sourcesLoaded ? '<button type="button" data-sa-load-sources>Load sources</button>'
         : '<form data-sa-form="source"><div class="sa-grid">' +
           '<label>Repository (owner/name)<input name="repository" maxlength="200" required></label>' +

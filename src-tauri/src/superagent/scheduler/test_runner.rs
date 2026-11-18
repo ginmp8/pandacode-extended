@@ -226,12 +226,20 @@ pub(in crate::superagent) fn issue(store:&Store,id:&str,grant:TestGrant<'_>)->Re
     tx.commit().map_err(|e|e.to_string())
 }
 
-/// An explicit native test-runner request still requires its real receipt.
-/// Native bot Full Access does not create an additional permission grant,
-/// and without such a request the Worker uses its normal provider tools.
+/// A finished native Worker turn is not executed test evidence. Full Access
+/// uses ordinary provider tools, but a write Demand cannot be delivered until
+/// tested content has a real native test receipt. A second tool permission is
+/// never inferred or created by this evidence requirement.
 pub(in crate::superagent) fn required(db:&rusqlite::Connection,root:&str)->Result<bool> {
     db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sa_demand_test_grants WHERE ticket_id=?1)",
+        "SELECT EXISTS(SELECT 1 FROM sa_demand_test_grants WHERE ticket_id=?1)
+           OR EXISTS(
+             SELECT 1 FROM sa_ticket_team_snapshots snapshot
+             JOIN sa_work_items item ON item.ticket_id=snapshot.ticket_id
+             WHERE snapshot.ticket_id=?1 AND snapshot.source_kind='native'
+               AND json_extract(snapshot.snapshot_json,'$.policy.autonomy')
+                   IN ('full','full_auto')
+               AND item.requires_write=1)",
         [root],|r|r.get(0),
     ).map_err(|e|e.to_string())
 }
@@ -1573,7 +1581,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn full_access_uses_native_bot_tests_and_requires_receipt_only_for_explicit_test_grants() {
+    fn full_access_write_demand_needs_executed_test_without_new_tool_grant() {
         let db=rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch(
             "CREATE TABLE sa_tickets(id TEXT PRIMARY KEY);
@@ -1584,8 +1592,10 @@ mod tests {
                ('root','native','{\"policy\":{\"autonomy\":\"full\"}}');
              CREATE TABLE sa_demand_plans(ticket_id TEXT,plan_sha256 TEXT);
              INSERT INTO sa_demand_plans VALUES('root','plan');
-             CREATE TABLE sa_work_items(ticket_id TEXT, item_key TEXT, state TEXT);
-             INSERT INTO sa_work_items VALUES
+             CREATE TABLE sa_work_items(
+               ticket_id TEXT,item_key TEXT,state TEXT,
+               requires_write INTEGER NOT NULL DEFAULT 0);
+             INSERT INTO sa_work_items(ticket_id,item_key,state) VALUES
                ('root','plan','completed'),('root','implementation','completed'),
                ('root','review','completed');
             ",
@@ -1597,12 +1607,18 @@ mod tests {
             [],|r|r.get(0),
         ).unwrap();
         assert_eq!(finished,3,"Three completed WorkItems are not test evidence");
-        // Full Access delegates testing to the bot's native provider tools.
-        // An optional dedicated runner has a separate evidence requirement
-        // only after the operator actually grants that runner authority.
+        // Read-only native work does not imply a test requirement.
         assert!(!required(&db,"root").unwrap());
-        assert!(!required(&db,"unrelated").unwrap());
-        assert!(!verified(&db,"root").unwrap());
+        db.execute(
+            "UPDATE sa_work_items SET requires_write=1
+             WHERE ticket_id='root' AND item_key='implementation'",[],
+        ).unwrap();
+        assert!(required(&db,"root").unwrap(),
+            "Three completed Worker results cannot replace executed tests");
+        assert!(!required(&db,"unrelated").unwrap(),
+            "No cross-Ticket test requirement inheritance");
+        assert!(!verified(&db,"root").unwrap(),
+            "No executed receipt: delivery must remain unverified");
         db.execute(
             "UPDATE sa_ticket_team_snapshots
              SET snapshot_json='{\"policy\":{\"autonomy\":\"approval\"}}'
@@ -1614,7 +1630,7 @@ mod tests {
              SET snapshot_json='{\"policy\":{\"autonomy\":\"full\"}}'
              WHERE ticket_id='root'",[],
         ).unwrap();
-        assert!(!required(&db,"root").unwrap());
+        assert!(required(&db,"root").unwrap());
         db.execute(
             "INSERT INTO sa_demand_test_grants VALUES(
               'root',1,1,'project','/missing','npm test',?1,100)",

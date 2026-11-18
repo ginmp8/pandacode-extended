@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 63;
+pub const SCHEMA_VERSION: i64 = 64;
 pub(crate) const COUNCIL_REVIEW_SNAPSHOT_DIRECTORY: &str = "council-review-snapshots";
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
@@ -1003,6 +1003,14 @@ impl Store {
                 migration.execute_batch(crate::superagent::scheduler::test_runner::SCHEMA)
                     .map_err(|e|e.to_string())?;
                 migration.execute_batch("PRAGMA user_version=63;")
+                    .map_err(|e|e.to_string())?;
+            }
+            if version < 64 {
+                // v63 databases already have the single-current-result table.
+                // Add immutable failed-attempt history without replaying tests.
+                migration.execute_batch(crate::superagent::scheduler::test_runner::SCHEMA)
+                    .map_err(|e|e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=64;")
                     .map_err(|e|e.to_string())?;
             }
             migration.commit().map_err(|e| e.to_string())?;
@@ -4219,6 +4227,43 @@ mod tests {
         assert_eq!(reopened.session(&session_id).unwrap().id, session_id);
         drop(reopened);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn v64_adds_test_attempt_history_to_existing_v63_databases() {
+        let directory=std::env::temp_dir().join(format!("test-retry-migration-{}",id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path=directory.join("store.sqlite3");
+        {
+            let store=Store::open(&path).unwrap();
+            store.db.execute_batch(
+                "DROP TRIGGER sa_test_attempt_immutable;
+                 DROP TRIGGER sa_test_attempt_no_delete;
+                 DROP TABLE sa_demand_test_attempts;
+                 PRAGMA user_version=63;",
+            ).unwrap();
+        }
+        let migrated=Store::open(&path).unwrap();
+        let present:bool=migrated.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+             WHERE type='table' AND name='sa_demand_test_attempts')",
+            [],|r|r.get(0),
+        ).unwrap();
+        assert!(present,"v63 must acquire finite immutable test history");
+        assert_eq!(
+            migrated.db.pragma_query_value(None,"user_version",|r|r.get::<_,i64>(0)).unwrap(),
+            SCHEMA_VERSION,
+        );
+        drop(migrated);
+        let reopened=Store::open(&path).unwrap();
+        let still_present:bool=reopened.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master
+             WHERE type='trigger' AND name='sa_test_attempt_immutable')",
+            [],|r|r.get(0),
+        ).unwrap();
+        assert!(still_present,"repeat startup must retain history immutability");
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

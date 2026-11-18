@@ -47,6 +47,66 @@ CREATE TRIGGER IF NOT EXISTS sa_test_attempt_no_delete
  BEGIN SELECT RAISE(ABORT,'Test attempt history is durable'); END;
 "#;
 
+/// Recover a native test that had a reserved process when PandaCode exited.
+/// The process may have taken effect: preserve an uncertain receipt and never
+/// run it again. For a pinned Full Auto Demand, also make the root terminally
+/// inconclusive so a restart cannot leave an active plan with no ready work.
+/// Called inside Store's existing startup recovery transaction and dispatch fence.
+pub(crate) fn recover_interrupted(db:&rusqlite::Connection)->Result<usize> {
+    let now=storage::now();
+    let roots={
+        let mut stmt=db.prepare(
+            "SELECT DISTINCT root.id,root.revision FROM sa_demand_test_runs run
+             JOIN sa_demand_plans plan ON plan.ticket_id=run.ticket_id
+             JOIN sa_tickets root ON root.id=plan.ticket_id
+             JOIN sa_ticket_team_snapshots snapshot ON snapshot.ticket_id=root.id
+             WHERE run.state='running' AND run.plan_sha256=plan.plan_sha256
+               AND plan.state='active' AND root.state='queued'
+               AND root.active_assignment_id IS NULL
+               AND root.revision=plan.ticket_revision
+               AND root.policy_revision=plan.policy_revision
+               AND snapshot.source_kind='native'
+               AND snapshot.team_version=plan.team_version
+               AND snapshot.policy_revision=plan.policy_revision
+               AND json_extract(snapshot.snapshot_json,'$.policy.autonomy')='full_auto'"
+        ).map_err(|e|e.to_string())?;
+        let rows=stmt.query_map([],|row|Ok((
+            row.get::<_,String>(0)?,row.get::<_,i64>(1)?,
+        ))).map_err(|e|e.to_string())?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(|e|e.to_string())?
+    };
+    for (root,revision) in roots {
+        let moved=db.execute(
+            "UPDATE sa_tickets SET state='inconclusive',
+                revision=revision+1,updated_at=?3
+             WHERE id=?1 AND revision=?2 AND state='queued'
+               AND active_assignment_id IS NULL",
+            params![root,revision,now],
+        ).map_err(|e|e.to_string())?;
+        if moved==0 {continue;}
+        let blocked=db.execute(
+            "UPDATE sa_demand_plans SET state='blocked',updated_at=?2
+             WHERE ticket_id=?1 AND state='active' AND ticket_revision=?3",
+            params![root,now,revision],
+        ).map_err(|e|e.to_string())?;
+        if blocked!=1 {
+            return Err("Interrupted native test plan could not be blocked.".into());
+        }
+        db.execute(
+            "INSERT INTO sa_audit(ticket_id,kind,detail,at)
+             VALUES(?1,'native_test_restart_inconclusive',
+                'Native test was running on restart; execution uncertain, no replay',?2)",
+            params![root,now],
+        ).map_err(|e|e.to_string())?;
+    }
+    db.execute(
+        "UPDATE sa_demand_test_runs SET state='uncertain',finished_at=?1
+         WHERE state='running'",
+        [now],
+    ).map_err(|e|e.to_string())
+}
+
 fn digest(bytes:&[u8])->String {format!("{:x}",Sha256::digest(bytes))}
 
 /// Fixed command vectors only. Cargo is locked/offline. The npm command runs
@@ -991,6 +1051,78 @@ mod tests {
         assert_eq!(db.query_row(
             "SELECT state FROM sa_demand_test_runs WHERE ticket_id='auto'",
             [],|row|row.get::<_,String>(0)).unwrap(),"failed");
+    }
+
+    #[test]
+    fn restart_settles_full_auto_test_without_replay_or_cross_ticket_transition() {
+        let db=rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_tickets(
+               id TEXT PRIMARY KEY,state TEXT,revision INTEGER,
+               active_assignment_id TEXT,policy_revision INTEGER,updated_at INTEGER);
+             CREATE TABLE sa_demand_plans(
+               ticket_id TEXT PRIMARY KEY,state TEXT,plan_sha256 TEXT,
+               ticket_revision INTEGER,team_version INTEGER,policy_revision INTEGER,
+               updated_at INTEGER);
+             CREATE TABLE sa_ticket_team_snapshots(
+               ticket_id TEXT,source_kind TEXT,team_version INTEGER,
+               policy_revision INTEGER,snapshot_json TEXT);
+             CREATE TABLE sa_demand_test_runs(
+               ticket_id TEXT PRIMARY KEY,state TEXT,plan_sha256 TEXT,finished_at INTEGER);
+             CREATE TABLE sa_audit(ticket_id TEXT,kind TEXT,detail TEXT,at INTEGER);
+             INSERT INTO sa_tickets VALUES
+               ('full','queued',3,NULL,2,1),
+               ('manual','queued',3,NULL,2,1),
+               ('stopped','stopped',3,NULL,2,1),
+               ('stale','queued',4,NULL,2,1),
+               ('passed','queued',3,NULL,2,1);
+             INSERT INTO sa_demand_plans VALUES
+               ('full','active','plan',3,1,2,1),
+               ('manual','active','plan',3,1,2,1),
+               ('stopped','active','plan',3,1,2,1),
+               ('stale','active','plan',3,1,2,1),
+               ('passed','active','plan',3,1,2,1);
+             INSERT INTO sa_ticket_team_snapshots VALUES
+               ('full','native',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}'),
+               ('manual','native',1,2,'{\"policy\":{\"autonomy\":\"approval\"}}'),
+               ('stopped','native',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}'),
+               ('stale','native',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}'),
+               ('passed','native',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}');
+             INSERT INTO sa_demand_test_runs VALUES
+               ('full','running','plan',NULL),
+               ('manual','running','plan',NULL),
+               ('stopped','running','plan',NULL),
+               ('stale','running','plan',NULL),
+               ('passed','passed','plan',9);",
+        ).unwrap();
+        assert_eq!(recover_interrupted(&db).unwrap(),4);
+        assert_eq!(recover_interrupted(&db).unwrap(),0,
+            "Restart cannot replay a previous uncertain test");
+        for (root,ticket_state,plan_state,test_state) in [
+            ("full","inconclusive","blocked","uncertain"),
+            ("manual","queued","active","uncertain"),
+            ("stopped","stopped","active","uncertain"),
+            ("stale","queued","active","uncertain"),
+            ("passed","queued","active","passed"),
+        ] {
+            let state:(String,String,String)=db.query_row(
+                "SELECT t.state,p.state,r.state FROM sa_tickets t
+                 JOIN sa_demand_plans p ON p.ticket_id=t.id
+                 JOIN sa_demand_test_runs r ON r.ticket_id=t.id
+                 WHERE t.id=?1",[root],
+                |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+            ).unwrap();
+            assert_eq!(state,(ticket_state.into(),plan_state.into(),test_state.into()),"{root}");
+        }
+        let audits:i64=db.query_row(
+            "SELECT COUNT(*) FROM sa_audit
+             WHERE kind='native_test_restart_inconclusive' AND ticket_id='full'",
+            [],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(audits,1,"One terminal decision per interrupted Demand");
+        assert_eq!(db.query_row(
+            "SELECT revision FROM sa_tickets WHERE id='full'",
+            [],|row|row.get::<_,i64>(0)).unwrap(),4);
     }
 
     #[test]

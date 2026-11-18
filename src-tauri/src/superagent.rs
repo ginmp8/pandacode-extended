@@ -5446,6 +5446,34 @@ pub async fn superagent_submit(window: tauri::WebviewWindow,
     get_ticket(&store, &ticket.id)
 }
 
+/// A native blocked-Ticket retry cannot bypass a parent Demand's original
+/// authority. The root DAG itself has no provider Worker attempt to replay.
+fn retry_plan_membership(db:&Connection,ticket_id:&str)->Result<(bool,bool)> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_demand_plans WHERE ticket_id=?1),
+                EXISTS(SELECT 1 FROM sa_work_items WHERE child_ticket_id=?1)",
+        [ticket_id],|row|Ok((row.get(0)?,row.get(1)?)),
+    ).map_err(|error|error.to_string())
+}
+
+#[cfg(test)]
+mod retry_plan_membership_tests {
+    use super::*;
+    #[test]
+    fn native_retry_does_not_confuse_a_root_dag_with_an_attributed_child() {
+        let db=Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_demand_plans(ticket_id TEXT PRIMARY KEY);
+             CREATE TABLE sa_work_items(child_ticket_id TEXT);
+             INSERT INTO sa_demand_plans VALUES('root');
+             INSERT INTO sa_work_items VALUES('child');",
+        ).unwrap();
+        assert_eq!(retry_plan_membership(&db,"root").unwrap(),(true,false));
+        assert_eq!(retry_plan_membership(&db,"child").unwrap(),(false,true));
+        assert_eq!(retry_plan_membership(&db,"ordinary").unwrap(),(false,false));
+    }
+}
+
 /// An occupied worker leaves its ticket blocked, not discarded. Only another
 /// explicit local request may retry it, under the original immutable mandate.
 /// Each attempt uses a separate native session; a late callback from a failed
@@ -5458,6 +5486,10 @@ fn retry_blocked(
     let ticket = get_ticket(store,ticket_id)?;
     if ticket.state != "blocked" {
         return Err("Only a blocked SuperAgent ticket can be retried manually.".into());
+    }
+    let (is_plan_root,is_work_item_child)=retry_plan_membership(&store.db,ticket_id)?;
+    if is_plan_root {
+        return Err("A blocked native Demand DAG cannot be replayed as a Worker retry; create a newly authorized Demand.".into());
     }
     let config = configuration(store,&ticket.orchestration_id)?;
     if !config.enabled || crate::feature_controls::get().bots_paused {
@@ -5514,6 +5546,12 @@ fn retry_blocked(
     let thread=format!("{ticket_id}:attempt:{attempt}");
     let assignment_id=storage::id();
     let _dispatch_fence=effects::lock_dispatch(&store.path)?;
+    // Check the original parent Mandate and Team policy at the same dispatch
+    // fence as the child retry. A blocked/revoked/stopped root never lends its
+    // former Full Access authority to a new Worker attempt.
+    if is_work_item_child && !scheduler::parent_active(store,ticket_id)? {
+        return Err("The parent Demand is no longer authorized to retry its Worker.".into());
+    }
     let tx=store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let session_id=bots::thread_session(store,&worker,CHANNEL,&thread,"SuperAgent · Manual retry")?.0;
     record_native_worker_mode(

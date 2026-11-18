@@ -7464,6 +7464,138 @@ fn nested_m7_child_triggered_s2_requires_all_three_authenticated_sources() {
     assert_nested_child_triggered_s2_with_root_sources("m7");
 }
 
+
+/// Exercise M6/M7 S3 through the same native callback and gate path as M5.
+/// Each enabled source must return a fresh phase-two reviewer report; a child
+/// composite never replaces a direct bot or automatic root challenge.
+fn assert_nested_mixed_s3_callbacks(include_automatic: bool) {
+    crate::providers::with_test_executable_override("codex", || {
+        let (state, sid) = state_fixture();
+        {
+            let store = state.store.lock().unwrap();
+            let project = store.session(&sid).unwrap().project_id;
+            for bot in ["quality-direct", "security-child"] {
+                store.db.execute(
+                    "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                     VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                    rusqlite::params![bot, project, storage::now()],
+                ).unwrap();
+            }
+            let mut root = load(&store, &sid).unwrap().unwrap();
+            let mut config = on(9.0, 3, 0);
+            config.strategy = council::CouncilExecutionStrategy::TwoPhase;
+            config.reviewer_bot_ids = vec!["quality-direct".into()];
+            config.automatic_reviewers = usize::from(include_automatic);
+            config.nested_bot_reviewers = vec![council::CouncilNestedReviewer {
+                bot_id: "security-child".into(),
+                child_reviewers: 2, child_target: 9.5, child_max_rounds: 2,
+            }];
+            assert_eq!(config.mode(), if include_automatic { "m7" } else { "m6" });
+            config.validate().unwrap();
+            root.config.council = Some(config);
+            root.status = "ready".into();
+            root.round = 0;
+            save(&store, &mut root).unwrap();
+        }
+        let (started, _) = start_state(&state, &sid,
+            "Verify two independent native phases for mixed Council", None, None).unwrap();
+        let assignments = |round: usize| {
+            let mut direct = reviewer_assignment(
+                &format!("quality-root-phase-{round}"), "Quality");
+            direct["councilReviewerSource"] = json!("direct_bot");
+            let mut selected = vec![direct];
+            if include_automatic {
+                let mut automatic = reviewer_assignment(
+                    &format!("automatic-root-phase-{round}"), "Compatibility");
+                automatic["councilReviewerSource"] = json!("automatic");
+                selected.push(automatic);
+            }
+            selected
+        };
+        call(&state, &sid, "pandacode_dispatch_workers",
+            json!({"assignments": assignments(1)})).unwrap();
+        for _ in 0..if include_automatic { 2 } else { 1 } {
+            let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+            let (run, _) = claim(&state, action);
+            assert!(run.config.reviewer_boundary);
+            finish(&state, &run, "Verified native first-phase root review.\nCouncil score: 9.7/10", true);
+        }
+        let (pending, _) = dispatch_state(&state, &sid, started.generation,
+            "pandacode_finish_team", json!({"summary":"First phase child callbacks pending"}),
+            &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        assert_eq!(pending["completed"], false);
+        for _ in 0..2 {
+            let leaf = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+            {
+                let store = state.store.lock().unwrap();
+                store.message(&leaf.sid, "assistant",
+                    "Authentic child first phase.\nCouncil score: 9.6/10").unwrap();
+            }
+            completed_state(&state, &leaf.sid, Some(&leaf.admission), true, false, &mut |_| {});
+        }
+        let (pending, _) = dispatch_state(&state, &sid, started.generation,
+            "pandacode_finish_team", json!({"summary":"Admit child S3 challenges"}),
+            &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        assert_eq!(pending["completed"], false);
+        for _ in 0..2 {
+            let leaf = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+            {
+                let store = state.store.lock().unwrap();
+                store.message(&leaf.sid, "assistant",
+                    "Fresh independent child S3 challenge.\nCouncil score: 9.8/10").unwrap();
+            }
+            completed_state(&state, &leaf.sid, Some(&leaf.admission), true, false, &mut |_| {});
+        }
+        let (pending, _) = dispatch_state(&state, &sid, started.generation,
+            "pandacode_finish_team", json!({"summary":"Root challenges still required"}),
+            &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        assert_eq!(pending["completed"], false,
+            "completed child challenges never replace root source-specific S3 proof");
+        call(&state, &sid, "pandacode_dispatch_workers",
+            json!({"assignments": assignments(2)})).unwrap();
+        for _ in 0..if include_automatic { 2 } else { 1 } {
+            let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+            let (run, _) = claim(&state, action);
+            assert!(run.config.reviewer_boundary);
+            finish(&state, &run, "Independent root S3 challenge.\nCouncil score: 9.8/10", true);
+        }
+        let (finished, _) = dispatch_state(&state, &sid, started.generation,
+            "pandacode_finish_team", json!({"summary":"All native S3 sources verified"}),
+            &std::sync::atomic::AtomicBool::new(false)).unwrap();
+        assert_eq!(finished["completed"], true);
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let seats = root.workers.iter().filter(|w| w.council.is_some()).collect::<Vec<_>>();
+        assert_eq!(seats.len(), if include_automatic { 4 } else { 2 });
+        assert_eq!(seats.iter().map(|w| w.session_id.as_str())
+            .collect::<std::collections::HashSet<_>>().len(), seats.len());
+        assert_eq!(root.council_status.as_ref().unwrap().round, 2);
+        assert!(verified_council_pass(&store, &root));
+        let parents = child_council::verified_parent_seats(&store, &root).unwrap().unwrap();
+        let challenges = child_council::verified_s3_receipts(&store, &root).unwrap().unwrap();
+        assert!(council::status_for_authenticated_children_s3(
+            &root, &parents, &challenges).is_some());
+        let key = format!("native-council-child-s3-receipt:{}:security-child", root.council_since);
+        store.db.execute(
+            "DELETE FROM architect_requests
+             WHERE parent_session_id=?1 AND key=?2 AND kind='council_child_s3_receipt'",
+            rusqlite::params![sid, key],
+        ).unwrap();
+        assert!(!verified_council_pass(&store, &root),
+            "a revoked child S3 challenge must invalidate the root result");
+    });
+}
+
+#[test]
+fn nested_m6_s3_rejects_missing_challenges_and_requires_native_direct_bot_callbacks() {
+    assert_nested_mixed_s3_callbacks(false);
+}
+
+#[test]
+fn nested_m7_s3_requires_fresh_direct_automatic_and_child_challenges() {
+    assert_nested_mixed_s3_callbacks(true);
+}
+
 #[test]
 fn nested_m6_direct_bot_and_child_require_independent_native_callbacks() {
     assert_nested_mixed_root_callbacks(false);

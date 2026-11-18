@@ -222,13 +222,15 @@ fn reserve(store:&Store)->Result<Option<Reserved>> {
                AND pinned.team_version=grant.team_version
                AND pinned.policy_revision=grant.policy_revision
                AND pinned.source_kind='native')
-         ORDER BY plan.created_at LIMIT 16",
+         ORDER BY plan.created_at",
     ).map_err(|e|e.to_string())?;
     let rows=stmt.query_map([now],|r|Ok((
         r.get::<_,String>(0)?,r.get::<_,String>(1)?,
         r.get::<_,String>(2)?,r.get::<_,String>(3)?,
         r.get::<_,i64>(4)?,r.get::<_,String>(5)?,
     ))).map_err(|e|e.to_string())?;
+    // Inspect all eligible Demands: limiting before checking existing receipts
+    // can starve an independent Demand behind already-passed runs.
     let candidates=rows.collect::<rusqlite::Result<Vec<_>>>()
         .map_err(|e|e.to_string())?;
     drop(stmt);

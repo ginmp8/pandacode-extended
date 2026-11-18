@@ -1078,7 +1078,7 @@ pub(crate) fn run_process(
     limit: usize,
     timeout: Duration,
 ) -> Result<GitOutput, String> {
-    run_bounded(command, tool, limit, 16 * 1024, timeout, None)
+    run_bounded(command, tool, limit, 16 * 1024, timeout, None, None)
 }
 
 /// Like `run_process`, but feeds `input` to stdin (from a thread, then closes it) and keeps
@@ -1090,7 +1090,20 @@ pub(crate) fn run_process_with_input(
     timeout: Duration,
     input: Option<&[u8]>,
 ) -> Result<GitOutput, String> {
-    run_bounded(command, tool, limit, limit, timeout, input)
+    run_bounded(command, tool, limit, limit, timeout, input, None)
+}
+
+/// A process with live native Task authority can be interrupted at the
+/// actual effect boundary. The predicate must read native authorization,
+/// not an agent response or a renderer-side flag.
+pub(crate) fn run_process_guarded(
+    command: Command,
+    tool: &str,
+    limit: usize,
+    timeout: Duration,
+    still_authorized: impl Fn() -> bool,
+) -> Result<GitOutput, String> {
+    run_bounded(command, tool, limit, 16 * 1024, timeout, None, Some(&still_authorized))
 }
 
 fn run_bounded(
@@ -1100,7 +1113,11 @@ fn run_bounded(
     stderr_limit: usize,
     timeout: Duration,
     input: Option<&[u8]>,
+    still_authorized: Option<&dyn Fn() -> bool>,
 ) -> Result<GitOutput, String> {
+    if still_authorized.is_some_and(|check| !check()) {
+        return Err(format!("{tool} authorization revoked before launch."));
+    }
     crate::child_env::sanitize(&mut command);
     #[cfg(unix)]
     command.process_group(0);
@@ -1141,6 +1158,12 @@ fn run_bounded(
     // Most git calls finish in a few ms; back off from 1 ms so they aren't rounded up to 10.
     let mut pause = Duration::from_millis(1);
     let status = loop {
+        if still_authorized.is_some_and(|check| !check()) {
+            stop_process_group(process_id);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("{tool} authorization revoked during execution."));
+        }
         match child.try_wait() {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => {
@@ -3667,5 +3690,34 @@ mod tests {
             unrelated.to_str().unwrap(),
         ]);
         assert!(legacy_worktree_parent(&unrelated, std::slice::from_ref(&fixture.root)).is_none());
+    }
+}
+
+#[cfg(test)]
+mod superagent_process_guard_tests {
+    use super::*;
+
+    #[test]
+    fn revoked_process_never_launches() {
+        let command = Command::new("an-intentionally-nonexistent-executable");
+        let error = run_process_guarded(
+            command, "Demand test", 1024, Duration::from_secs(1), || false,
+        ).unwrap_err();
+        assert!(error.contains("revoked before launch"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn revoked_process_group_is_terminated_while_running() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mut command = Command::new("sleep");
+        command.arg("5");
+        let checks = AtomicUsize::new(0);
+        let error = run_process_guarded(
+            command, "Demand test", 1024, Duration::from_secs(3),
+            || checks.fetch_add(1, Ordering::SeqCst) < 3,
+        ).unwrap_err();
+        assert!(error.contains("revoked during execution"), "{error}");
+        assert!(checks.load(Ordering::SeqCst) >= 4);
     }
 }

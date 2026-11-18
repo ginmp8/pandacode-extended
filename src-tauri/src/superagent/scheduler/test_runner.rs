@@ -174,7 +174,7 @@ pub(in crate::superagent) fn verified(db:&rusqlite::Connection,root:&str)->Resul
 }
 
 #[derive(Clone)]
-struct Reserved {root:String,command:String,checkout:String,manifest:String,snapshot:String,expires:i64}
+struct Reserved {root:String,command:String,checkout:String,manifest:String,snapshot:String,expires:i64,plan:String,db_path:std::path::PathBuf}
 struct Outcome {state:&'static str,code:Option<i32>,stdout:String,stderr:String}
 
 /// Native state + live effect gate; a receipt is reserved once and never
@@ -255,7 +255,7 @@ fn reserve(store:&Store)->Result<Option<Reserved>> {
                  VALUES(?1,'demand_test_started',?2,?3)",
                 params![root,format!("Native {command}; pinned WorkItems and Git snapshot"),now],
             ).map_err(|e|e.to_string())?;
-            return Ok(Some(Reserved{root,command,checkout,manifest,snapshot,expires}));
+            return Ok(Some(Reserved{root,command,checkout,manifest,snapshot,expires,plan,db_path:store.path.clone()}));
         }
     }
     Ok(None)
@@ -267,6 +267,34 @@ fn bounded_test_timeout(now_ms:i64,expires_at_ms:i64)->Option<Duration> {
     let remaining_ms=expires_at_ms.checked_sub(now_ms)?;
     (remaining_ms>0).then(||Duration::from_millis(remaining_ms as u64)
         .min(Duration::from_secs(120)))
+}
+
+/// Re-check the frozen native plan, Team and mandate from a separate
+/// read-only connection while a test child is running. Stop, expiry, policy
+/// changes and failed DB reads all cancel the live process group.
+fn test_effect_live(db:&rusqlite::Connection,job:&Reserved)->bool {
+    let now=storage::now();
+    if now>=job.expires {return false;}
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_tickets root
+          JOIN sa_mandates m ON m.ticket_id=root.id
+          JOIN sa_demand_plans plan ON plan.ticket_id=root.id
+          JOIN sa_orchestrations team ON team.id=root.orchestration_id
+          WHERE root.id=?1 AND root.state='queued'
+            AND root.active_assignment_id IS NULL
+            AND root.revision=plan.ticket_revision
+            AND plan.state='active' AND plan.plan_sha256=?2
+            AND root.policy_revision=plan.policy_revision
+            AND m.revoked=0 AND m.expires_at>?3
+            AND m.expires_at=?4
+            AND m.policy_revision=plan.policy_revision
+            AND m.actor=root.actor AND m.project_id=root.project_id
+            AND m.allowed_tools='[]' AND m.allowed_side_effects=0
+            AND team.enabled=1 AND team.policy_revision=plan.policy_revision
+            AND team.project_id=root.project_id)",
+        params![job.root,job.plan,now,job.expires],
+        |r|r.get(0),
+    ).unwrap_or(false)
 }
 
 fn execute(job:&Reserved)->Outcome {
@@ -293,8 +321,12 @@ fn execute(job:&Reserved)->Outcome {
         _=>return Outcome{state:"failed",code:None,stdout:blank.clone(),stderr:blank},
     };
     cmd.current_dir(&job.checkout);
-    match crate::workspace::run_process(
+    let Ok(read_only)=Store::open_read_only(&job.db_path) else {
+        return Outcome{state:"uncertain",code:None,stdout:blank.clone(),stderr:blank};
+    };
+    match crate::workspace::run_process_guarded(
         cmd,"Demand test",64*1024,timeout,
+        ||test_effect_live(&read_only.db,job),
     ) {
         Ok(output)=>Outcome {
             state:if output.status.success() {"passed"} else {"failed"},
@@ -376,6 +408,46 @@ mod tests {
         assert_eq!(bounded_test_timeout(i64::MIN,i64::MAX),None);
     }
 
+    #[test]
+    fn revoked_or_expired_native_test_cannot_reuse_an_old_plan() {
+        let db=rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_tickets(
+               id TEXT PRIMARY KEY,orchestration_id TEXT,actor TEXT,project_id TEXT,
+               state TEXT,revision INTEGER,policy_revision INTEGER,active_assignment_id TEXT);
+             CREATE TABLE sa_mandates(
+               ticket_id TEXT,revoked INTEGER,expires_at INTEGER,policy_revision INTEGER,
+               actor TEXT,project_id TEXT,allowed_tools TEXT,allowed_side_effects INTEGER);
+             CREATE TABLE sa_demand_plans(
+               ticket_id TEXT,state TEXT,plan_sha256 TEXT,ticket_revision INTEGER,
+               policy_revision INTEGER);
+             CREATE TABLE sa_orchestrations(
+               id TEXT,enabled INTEGER,policy_revision INTEGER,project_id TEXT);
+             INSERT INTO sa_orchestrations VALUES('team',1,2,'project');
+             INSERT INTO sa_tickets VALUES
+               ('root','team','local-user','project','queued',7,2,NULL);
+             INSERT INTO sa_demand_plans VALUES('root','active','plan',7,2);",
+        ).unwrap();
+        let expires=storage::now()+60_000;
+        db.execute(
+            "INSERT INTO sa_mandates VALUES
+              ('root',0,?1,2,'local-user','project','[]',0)",[expires],
+        ).unwrap();
+        let job=Reserved {
+            root:"root".into(),command:"npm test".into(),checkout:"/project".into(),
+            manifest:"hash".into(),snapshot:"snapshot".into(),
+            expires,plan:"plan".into(),db_path:std::path::PathBuf::new(),
+        };
+        assert!(test_effect_live(&db,&job));
+        db.execute("UPDATE sa_mandates SET revoked=1",[]).unwrap();
+        assert!(!test_effect_live(&db,&job));
+        db.execute("UPDATE sa_mandates SET revoked=0",[]).unwrap();
+        db.execute("UPDATE sa_demand_plans SET plan_sha256='stale'",[]).unwrap();
+        assert!(!test_effect_live(&db,&job));
+        db.execute("UPDATE sa_demand_plans SET plan_sha256='plan'",[]).unwrap();
+        db.execute("UPDATE sa_tickets SET state='stopped'",[]).unwrap();
+        assert!(!test_effect_live(&db,&job));
+    }
     #[test]
     fn test_command_is_literal_and_manifest_bound() {
         let root=std::env::temp_dir().join(format!("sa-test-{}",storage::id()));

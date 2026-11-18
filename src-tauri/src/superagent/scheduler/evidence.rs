@@ -73,14 +73,14 @@ pub(super) fn record_accepted(store:&Store,now:i64)->Result<usize> {
                      WHERE latest.ticket_id=child.id)
                  ORDER BY assignment.id LIMIT 1),
                 (SELECT audit.kind FROM sa_audit audit WHERE audit.ticket_id=child.id
-                   AND audit.kind IN ('human_accepted','council_passed','council_human_accepted')
+                   AND audit.kind IN ('human_accepted','council_passed','council_human_accepted','native_worker_finished')
                     AND audit.at >= (
                       SELECT latest.updated_at FROM sa_assignments latest
                       WHERE latest.ticket_id=child.id
                       ORDER BY latest.attempt DESC LIMIT 1)
                   ORDER BY audit.id DESC LIMIT 1),
                 (SELECT audit.at FROM sa_audit audit WHERE audit.ticket_id=child.id
-                   AND audit.kind IN ('human_accepted','council_passed','council_human_accepted')
+                   AND audit.kind IN ('human_accepted','council_passed','council_human_accepted','native_worker_finished')
                     AND audit.at >= (
                       SELECT latest.updated_at FROM sa_assignments latest
                       WHERE latest.ticket_id=child.id
@@ -114,6 +114,28 @@ pub(super) fn record_accepted(store:&Store,now:i64)->Result<usize> {
             else {continue};
         if approved_at<=0 || revision<1 {continue}
         let digest=format!("{:x}",Sha256::digest(result.as_bytes()));
+        if kind=="native_worker_finished" {
+            // A completed provider turn is not an independent Council verdict.
+            // Bind it to the original admitted native Full Access Worker.
+            let snapshot=super::super::ticket_team_snapshot(store,&child)?;
+            if !super::super::is_full_access_autonomy(&snapshot.policy.autonomy)
+                || snapshot.policy.council_required {continue;}
+            let session: String=store.db.query_row(
+                "SELECT session_id FROM sa_assignments WHERE id=?1",
+                [&assignment],|row|row.get(0),
+            ).map_err(|e|e.to_string())?;
+            if store.session(&session)?.mode!="full"
+                || !super::super::native_worker_mode_recorded(store,&child,&session,"full")? {
+                continue;
+            }
+            let writes:bool=store.db.query_row(
+                "SELECT requires_write=1 FROM sa_work_items WHERE id=?1",
+                [&item],|row|row.get(0),
+            ).map_err(|e|e.to_string())?;
+            if writes && !super::super::native_worker_write_attested(store,&session)? {
+                continue;
+            }
+        }
         let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
         if !descendant_receipts_settled(&tx,&child)? {continue}
         tx.execute(
@@ -130,14 +152,16 @@ pub(super) fn record_accepted(store:&Store,now:i64)->Result<usize> {
                  AND native.result=ticket.evidence
                  AND native.attempt=(SELECT MAX(a.attempt) FROM sa_assignments a
                    WHERE a.ticket_id=ticket.id)
-                 AND (item.requires_write=0 OR EXISTS(
+                 AND (item.requires_write=0 OR ?5='native_worker_finished'
+                      OR EXISTS(
                    SELECT 1 FROM sa_worker_write_receipts applied
                    WHERE applied.ticket_id=ticket.id
                      AND applied.assignment_id=native.id
                      AND applied.state='applied'))
                  AND EXISTS(SELECT 1 FROM sa_audit audit WHERE audit.ticket_id=ticket.id
                    AND audit.kind=?5 AND audit.at=?6
-                    AND audit.at>=native.updated_at)
+                   AND audit.at>=native.updated_at
+                   AND (?5<>'native_worker_finished' OR audit.detail=?4))
                  AND NOT EXISTS(SELECT 1 FROM sa_effect_receipts effect
                    WHERE effect.ticket_id=ticket.id AND effect.state IN ('pending','uncertain'))
                  AND NOT EXISTS(SELECT 1 FROM sa_worker_write_receipts write_receipt
@@ -155,7 +179,8 @@ pub(super) fn record_accepted(store:&Store,now:i64)->Result<usize> {
                 AND proof.approval_kind=?5 AND proof.reviewed_at=?6
                 AND proof.reviewed_at >= (SELECT latest.updated_at
                     FROM sa_assignments latest WHERE latest.id=proof.assignment_id)
-                AND (item.requires_write=0 OR EXISTS(
+                AND (item.requires_write=0 OR proof.approval_kind='native_worker_finished'
+                     OR EXISTS(
                   SELECT 1 FROM sa_worker_write_receipts applied
                   WHERE applied.ticket_id=proof.child_ticket_id
                     AND applied.assignment_id=proof.assignment_id

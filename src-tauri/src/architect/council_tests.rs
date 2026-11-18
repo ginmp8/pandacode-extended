@@ -2097,6 +2097,41 @@ fn s2_and_s3_reject_abandoned_reviewer_replay_even_when_both_scored_rounds_pass(
 }
 
 #[test]
+fn unforced_s2_rejects_untriggered_and_replayed_clean_waves() {
+    let mut config = on(9.0, 4, 2);
+    config.strategy = council::CouncilExecutionStrategy::Escalated;
+    let mut second_a = seat("on-demand-second-a", 2, Some(9.8), SINCE + 3);
+    second_a.council.as_mut().unwrap().lens = "lens on-demand-first-a".into();
+    let mut second_b = seat("on-demand-second-b", 2, Some(9.7), SINCE + 4);
+    second_b.council.as_mut().unwrap().lens = "lens on-demand-first-b".into();
+    let mut team = team_with(config, vec![
+        seat("on-demand-first-a", 1, Some(9.6), SINCE + 1),
+        seat("on-demand-first-b", 1, Some(9.5), SINCE + 2),
+        second_a, second_b,
+    ]);
+    assert_ne!(council::status(&team).unwrap().state, "passed",
+        "an unforced second wave must not be accepted without a first-wave trigger");
+    assert!(finish_refusal(&team).is_some());
+
+    team.workers[0].council.as_mut().unwrap().score = Some(8.4);
+    assert_eq!(council::status(&team).unwrap().state, "passed",
+        "a fresh, clean wave may resolve a real below-target S2 trigger");
+
+    let mut third_a = seat("on-demand-third-a", 3, Some(9.8), SINCE + 5);
+    third_a.council.as_mut().unwrap().lens = "lens on-demand-first-a".into();
+    let mut third_b = seat("on-demand-third-b", 3, Some(9.8), SINCE + 6);
+    third_b.council.as_mut().unwrap().lens = "lens on-demand-first-b".into();
+    team.workers.extend([third_a, third_b]);
+    assert_ne!(council::status(&team).unwrap().state, "passed",
+        "a third wave may not reuse an earlier trigger after a clean second wave");
+    assert!(finish_refusal(&team).is_some());
+
+    team.workers[2].council.as_mut().unwrap().score = Some(8.2);
+    assert_eq!(council::status(&team).unwrap().state, "passed",
+        "a second distinct below-target wave may trigger a third independent S2 review");
+}
+
+#[test]
 fn automatic_s2_clean_wave_rejects_scored_reviewer_file_changes() {
     let mut config = on(9.0, 3, 2);
     config.strategy = council::CouncilExecutionStrategy::Escalated;

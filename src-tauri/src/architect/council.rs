@@ -2009,8 +2009,11 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
             || severe_findings(team, round)
             || reported_conflicts(team, round)
     });
-    let Some(trigger_round) = last_trigger else { return true };
-    if view.latest <= trigger_round || !view.complete(view.latest) {
+    // An unforced S2 follow-up needs an observed trigger in the immediately
+    // preceding wave. A clean first wave cannot authorize an extra review
+    // merely because an old or restored snapshot contains more high scores.
+    let Some(trigger_round) = last_trigger else { return view.latest == 1 };
+    if view.latest != trigger_round + 1 || !view.complete(view.latest) {
         return false;
     }
     // A severe scored finding requires an observed correction after that

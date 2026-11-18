@@ -100,6 +100,8 @@ interface SourceDecision {
   decision: string; sequence: number; policyRevision: number; at: number;
   checkConclusion?: string; checkHeadSha?: string; checkCompletedAt?: number;
 }
+interface LinkedActivityCursor { at: number; sourceId: string; deliveryId: string }
+interface LinkedActivityPage { decisions: SourceDecision[]; nextCursor?: LinkedActivityCursor | null }
 interface SourceIntegrity {
   sourceId: string; repository: string; mode: 'off' | 'observe';
   policyRevision: number; cursorKind: string; lastSequence: number;
@@ -148,6 +150,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let decisions: SourceDecision[] = [], threadLinks: ThreadLink[] = [];
   let sourceIntegrity: SourceIntegrity | null = null;
   let linkedDecisions: SourceDecision[] = [], linkedDecisionsLoaded = false;
+  let linkedDecisionsHasMore = false;
   const safe = (value: unknown) => escape(String(value ?? ''));
   const fetchDemandPage = (query: DemandQuery) =>
     call<DemandIndex[]>('superagent_all_demands', {query});
@@ -399,7 +402,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             safe(entry.eventKind) + ' · ' + safe(entry.subjectKey) + ' · ' +
             safe(entry.decision) + observedCheck(entry) +
             ' · Delivery ' + safe(entry.deliveryId) + '</li>').join('') || '<li>No authenticated Observe decisions match linked threads.</li>') +
-          '</ol>' : '') + '</section>' +
+          '</ol>' : '') +
+         (linkedDecisionsLoaded && linkedDecisionsHasMore
+           ? '<button type="button" data-sa-load-older-linked-activity>Load older linked activity</button>' : '') +
+         '</section>' +
         (sourcesLoaded && sources.length
           ? '<form data-sa-form="thread-link"><label>Event source<select name="sourceId" required>' +
             sources.map(src => '<option value="' + safe(src.id) + '">' +
@@ -941,7 +947,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         inspectedAssignmentId = '';
       }
       threadLinks = links;
-      linkedDecisions = []; linkedDecisionsLoaded = false;
+      linkedDecisions = []; linkedDecisionsLoaded = false; linkedDecisionsHasMore = false;
       // Keep the ticket row and its grant/history pinned to one native revision.
       const index = tickets.findIndex(ticket => ticket.id === id);
       if (index >= 0) tickets[index] = snapshot.ticket;
@@ -966,7 +972,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (!presets.some(config => config.id === selected)) {
         selected = presets[0]?.id ?? '';
         inspectedTicket = ''; threadLinks = [];
-        linkedDecisions = []; linkedDecisionsLoaded = false; roleRoster = null; workerOrder = []; reviewerDraft = []; effectiveTeam = null;
+        linkedDecisions = []; linkedDecisionsLoaded = false; linkedDecisionsHasMore = false; roleRoster = null; workerOrder = []; reviewerDraft = []; effectiveTeam = null;
         sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
         sourceIntegrity = null;
       }
@@ -1370,8 +1376,56 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (ticketId && ticketDetails) void work(async () => {
         const receipts = await call<SourceDecision[]>('superagent_source_thread_activity',
           {ticketId, limit:50});
+        if (!Array.isArray(receipts) || receipts.length > 50) {
+          throw new Error('Invalid native linked source receipt page.');
+        }
         if (inspectedTicket === ticketId) {
           linkedDecisions = receipts; linkedDecisionsLoaded = true;
+          linkedDecisionsHasMore = receipts.length === 50;
+        }
+      });
+      return;
+    }
+    if (target.hasAttribute('data-sa-load-older-linked-activity')) {
+      const ticketId = inspectedTicket;
+      const last = linkedDecisions[linkedDecisions.length - 1];
+      if (!ticketId || busy || !linkedDecisionsLoaded || !linkedDecisionsHasMore || !last) return;
+      const validKey = (key:string) => /^[A-Za-z0-9_-]{1,128}$/.test(key);
+      if (!Number.isSafeInteger(last.at) || last.at <= 0 ||
+          !validKey(last.sourceId) || !validKey(last.deliveryId)) {
+        error = 'Invalid native linked activity cursor; reload the inspector.';
+        render();
+        return;
+      }
+      void work(async () => {
+        const before:LinkedActivityCursor = {
+          at:last.at, sourceId:last.sourceId, deliveryId:last.deliveryId,
+        };
+        const page = await call<LinkedActivityPage>('superagent_source_thread_activity_page', {
+          ticketId, limit:50, before,
+        });
+        const older = (a:SourceDecision, b:SourceDecision) =>
+          b.at < a.at || (b.at === a.at && (b.sourceId < a.sourceId ||
+            (b.sourceId === a.sourceId && b.deliveryId < a.deliveryId)));
+        const known = new Set(linkedDecisions.map(row => row.sourceId + ':' + row.deliveryId));
+        if (!page || !Array.isArray(page.decisions) || page.decisions.length > 50 ||
+            page.decisions.some((row,index) =>
+              !row || !Number.isSafeInteger(row.at) || row.at <= 0 ||
+              !validKey(row.sourceId) || !validKey(row.deliveryId) ||
+              known.has(row.sourceId + ':' + row.deliveryId) ||
+              !older(index ? page.decisions[index-1] : last,row))) {
+          throw new Error('Native linked activity page overlaps or is out of order.');
+        }
+        const continuation = page.nextCursor;
+        const end = page.decisions[page.decisions.length-1];
+        if (continuation && (!end || continuation.at !== end.at ||
+            continuation.sourceId !== end.sourceId ||
+            continuation.deliveryId !== end.deliveryId)) {
+          throw new Error('Native linked activity continuation is inconsistent.');
+        }
+        if (inspectedTicket === ticketId) {
+          linkedDecisions = [...linkedDecisions,...page.decisions];
+          linkedDecisionsHasMore = Boolean(continuation);
         }
       });
       return;

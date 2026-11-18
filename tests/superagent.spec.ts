@@ -735,6 +735,65 @@ test('SuperAgent links explicit GitHub source threads to the selected Ticket wit
     ()=>(window as unknown as {saDispatchCount:()=>number}).saDispatchCount())).toBe(0);
 });
 
+test('SuperAgent inspector pages verified linked history without duplicate tasks or repeated receipts', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host=document.createElement('div');host.id='sa-paged-linked-history';document.body.appendChild(host);
+    const ticket={id:'ticket',orchestrationId:'team',objective:'Keep history private',
+      state:'queued',revision:1,evidence:null};
+    const calls:string[]=[];
+    const decisions=Array.from({length:52},(_,index)=>({
+      sourceId:'source',deliveryId:'receipt-'+String(52-index).padStart(3,'0'),
+      eventKind:'issues.opened',subjectKey:'issue:42',decision:'observed_permitted',
+      sequence:52-index,policyRevision:1,at:1700000000000,
+    }));
+    mountSuperagent(host,async(command,args)=>{
+      calls.push(command);
+      if(command==='bots_list')return [{id:'a',name:'Coordinator',paused:false},
+        {id:'b',name:'Worker',paused:false}] as never;
+      if(command==='superagent_list')return [{id:'team',name:'Team',coordinatorBotId:'a',
+        workerBotId:'b',enabled:true,policyRevision:1}] as never;
+      if(command==='superagent_tickets')return [ticket] as never;
+      if(command==='superagent_snapshot')return {ticket,
+        mandate:{actor:'local-user',authorizationId:'manual',policyRevision:1,projectId:'fixture',
+          expiresAt:1800000000000,revoked:false,allowedTools:[],allowedSideEffects:false},
+        assignments:[],activity:[]} as never;
+      if(command==='superagent_source_thread_links')return [{
+        sourceId:'source',ticketId:'ticket',repository:'test/fixture',
+        subjectKey:'issue:42',createdAt:1700000000000}] as never;
+      if(command==='superagent_source_thread_activity')return decisions.slice(0,50) as never;
+      if(command==='superagent_source_thread_activity_page'){
+        const before=args?.before as {at:number;sourceId:string;deliveryId:string};
+        if(args?.ticketId!=='ticket'||before?.deliveryId!=='receipt-003'||
+            before?.sourceId!=='source'||before?.at!==1700000000000)
+          throw Error('Invalid native continuation request');
+        return {decisions:decisions.slice(50),nextCursor:null} as never;
+      }
+      throw Error('Unexpected command: '+command);
+    });
+    (window as unknown as {saLinkedCalls:()=>string[]}).saLinkedCalls=()=>calls;
+  });
+  const host=page.locator('#sa-paged-linked-history');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  await host.getByRole('button',{name:'View evidence'}).click();
+  await host.getByRole('button',{name:'Load linked source decisions'}).click();
+  const region=host.getByRole('region',{name:'Observed linked GitHub activity'});
+  await expect(region).toContainText('receipt-052');
+  await expect(region).not.toContainText('receipt-002');
+  await region.getByRole('button',{name:'Load older linked activity'}).click();
+  await expect(region).toContainText('receipt-001');
+  await expect(region.locator('ol li')).toHaveCount(52);
+  await expect(region.getByRole('button',{name:'Load older linked activity'})).toHaveCount(0);
+  const calls=await page.evaluate(
+    ()=>(window as unknown as {saLinkedCalls:()=>string[]}).saLinkedCalls());
+  expect(calls.filter(command=>command==='superagent_source_thread_activity_page')).toHaveLength(1);
+  expect(calls.filter(command=>command==='superagent_source_thread_activity')).toHaveLength(1);
+  expect(calls.some(command=>command.includes('dispatch')||
+    command.includes('grant')||command.includes('admit'))).toBe(false);
+});
+
 test('Bots Orchestrations is a persistent main workspace with native-backed Teams and Runs', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

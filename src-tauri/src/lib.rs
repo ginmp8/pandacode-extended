@@ -1289,7 +1289,15 @@ fn save_agent_activity(
                     tool,
                 })
                 .map_err(|error| error.to_string())
-                .and_then(|content| db.tool_message(&activity.session_id, &tool.id, &content))
+                .and_then(|content| {
+                    db.tool_message(&activity.session_id, &tool.id, &content)?;
+                    // Provider-native tool evidence uses the same session; a
+                    // failed attestation must not alter the agent's permission.
+                    let _ = superagent::scheduler::test_runner::observe_native_tool(
+                        db, &activity.session_id, tool,
+                    );
+                    Ok(())
+                })
             } else {
                 bounded_tail(&mut activity.text, 8192);
                 db.message(&activity.session_id, &activity.kind, &activity.text)

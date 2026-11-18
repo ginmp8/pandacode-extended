@@ -161,7 +161,7 @@ pub struct Store {
 type Result<T> = std::result::Result<T, String>;
 /// The newest `PRAGMA user_version`. Every migration step below must run for any
 /// database older than this, so the guard reads this constant, never a literal.
-pub const SCHEMA_VERSION: i64 = 67;
+pub const SCHEMA_VERSION: i64 = 68;
 pub(crate) const COUNCIL_REVIEW_SNAPSHOT_DIRECTORY: &str = "council-review-snapshots";
 
 const SIDEBAR_ORDER: &str = "pinned DESC,sidebar_order IS NULL,sidebar_order,COALESCE(MAX(last_response_at,last_prompt_at),last_response_at,last_prompt_at,created_at) DESC,id";
@@ -1073,6 +1073,13 @@ impl Store {
                 migration.execute_batch("PRAGMA user_version=67;")
                     .map_err(|e| e.to_string())?;
             }
+            if version < 68 {
+                // New proof data only; never a second native tool grant.
+                migration.execute_batch(crate::superagent::scheduler::test_runner::SCHEMA)
+                    .map_err(|e|e.to_string())?;
+                migration.execute_batch("PRAGMA user_version=68;")
+                    .map_err(|e|e.to_string())?;
+            }
             migration.commit().map_err(|e| e.to_string())?;
         }
         // Recovery can revoke a SuperAgent mandate. Serialize it with the
@@ -1088,6 +1095,7 @@ impl Store {
         // Full Access roots must also receive one safe terminal decision rather
         // than remain queued behind an uncertain, unrepeatable test receipt.
         crate::superagent::scheduler::test_runner::recover_interrupted(&recovery)?;
+        crate::superagent::scheduler::test_runner::recover_interrupted_native_tests(&recovery)?;
         // Only rows from before typed coordination existed are eligible for the
         // narrowly scoped legacy display projection. New user copies stay user text.
         Self::record_legacy_prompt_cutoff(&recovery)?;

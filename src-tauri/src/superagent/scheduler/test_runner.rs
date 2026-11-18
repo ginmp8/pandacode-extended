@@ -45,6 +45,28 @@ CREATE TRIGGER IF NOT EXISTS sa_test_attempt_immutable
 CREATE TRIGGER IF NOT EXISTS sa_test_attempt_no_delete
  BEFORE DELETE ON sa_demand_test_attempts
  BEGIN SELECT RAISE(ABORT,'Test attempt history is durable'); END;
+-- Receipts from the existing native provider tool channel, never permissions.
+CREATE TABLE IF NOT EXISTS sa_native_worker_test_receipts(
+ assignment_id TEXT NOT NULL REFERENCES sa_assignments(id) ON DELETE RESTRICT,
+ tool_id TEXT NOT NULL CHECK(length(tool_id)>0 AND length(tool_id)<=512),
+ ticket_id TEXT NOT NULL REFERENCES sa_tickets(id) ON DELETE RESTRICT,
+ item_id TEXT NOT NULL REFERENCES sa_work_items(id) ON DELETE RESTRICT,
+ session_id TEXT NOT NULL,
+ command TEXT NOT NULL CHECK(command IN ('cargo test','npm test')),
+ content_sha256 TEXT NOT NULL CHECK(length(content_sha256)=64),
+ started_at INTEGER NOT NULL CHECK(started_at>0),
+ finished_at INTEGER,exit_code INTEGER,output_sha256 TEXT,
+ state TEXT NOT NULL CHECK(state IN ('running','passed','failed','uncertain')),
+ PRIMARY KEY(assignment_id,tool_id)
+);
+CREATE INDEX IF NOT EXISTS sa_native_worker_tests_ticket
+ ON sa_native_worker_test_receipts(ticket_id,state,finished_at);
+CREATE TRIGGER IF NOT EXISTS sa_native_worker_test_terminal_immutable
+ BEFORE UPDATE ON sa_native_worker_test_receipts WHEN OLD.state<>'running'
+ BEGIN SELECT RAISE(ABORT,'Native test evidence is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS sa_native_worker_test_no_delete
+ BEFORE DELETE ON sa_native_worker_test_receipts
+ BEGIN SELECT RAISE(ABORT,'Native test evidence cannot be deleted'); END;
 "#;
 
 /// Recover a native test that had a reserved process when PandaCode exited.
@@ -395,6 +417,151 @@ fn completed_passing_test_receipt(
         && exit==Some(0) && valid_digest(stdout) && valid_digest(stderr)
 }
 
+/// Only an exact native provider command with its original working directory
+/// is eligible; arbitrary model text and shell command chains are not tests.
+fn native_test_command(tool:&crate::providers::ToolActivity)->Option<(&str,&str)> {
+    if tool.name!="Command" {return None;}
+    let (cmd,cwd)=tool.input.split_once("\nWorking directory: ")?;
+    if !matches!(cmd,"cargo test"|"npm test") || cwd.is_empty()
+        || cwd.contains('\n') || cwd.contains('\r') {return None;}
+    Some((cmd,cwd))
+}
+
+/// Git HEAD, index/worktree diff, status and untracked file bytes identify the
+/// actual tested source without requiring a WorkItem approval before testing.
+fn native_content_sha256(checkout:&Path)->Result<String> {
+    let (head,status,diff,_)=super::super::delivery::observe_git(checkout)?;
+    let untracked=untracked_inputs_hash(checkout)?;
+    let mut hash=Sha256::new();
+    for value in [&head,&status,&diff,&untracked] {
+        hash.update((value.len() as u64).to_le_bytes());
+        hash.update(value.as_bytes());
+    }
+    Ok(format!("{:x}",hash.finalize()))
+}
+
+/// Called from the ordinary native bot tool-event persistence path. It creates
+/// no tool authority, no command execution and no synthetic success. A missing
+/// start or structured exitCode is never treated as passing test evidence.
+pub(crate) fn observe_native_tool(
+    store:&Store,session_id:&str,tool:&crate::providers::ToolActivity,
+)->Result<()> {
+    let Some((command,cwd))=native_test_command(tool) else {return Ok(());};
+    if !matches!(tool.status.as_str(),"running"|"completed"|"failed") {
+        return Ok(());
+    }
+    if !super::super::native_worker_chat_context(store,session_id)? {
+        return Ok(());
+    }
+    let current:Option<(String,String,String,String)>=store.db.query_row(
+        "SELECT item.ticket_id,item.id,a.id,child.project_id
+         FROM sa_assignments a
+         JOIN sa_tickets child ON child.id=a.ticket_id AND child.active_assignment_id=a.id
+         JOIN sa_work_items item ON item.child_ticket_id=child.id
+         JOIN sa_demand_plans plan ON plan.ticket_id=item.ticket_id
+         JOIN sa_tickets root ON root.id=item.ticket_id
+         JOIN sa_ticket_team_snapshots snap ON snap.ticket_id=root.id
+         WHERE a.session_id=?1 AND a.state='running' AND child.state='running'
+           AND item.state='running' AND root.state='queued' AND plan.state='active'
+           AND snap.source_kind='native'
+           AND json_extract(snap.snapshot_json,'$.policy.autonomy') IN ('full','full_auto')",
+        [session_id],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
+    ).optional().map_err(|e|e.to_string())?;
+    let Some((root,item,assignment,project))=current else {return Ok(());};
+    let checkout=store.workspace_root(&project,None)?;
+    if std::fs::canonicalize(cwd).ok().as_deref()!=Some(checkout.as_path()) {
+        return Ok(());
+    }
+    let content=native_content_sha256(&checkout)?;
+    let now=storage::now();
+    if tool.status=="running" {
+        store.db.execute(
+            "INSERT OR IGNORE INTO sa_native_worker_test_receipts
+             (assignment_id,tool_id,ticket_id,item_id,session_id,command,
+              content_sha256,started_at,state)
+             VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'running')",
+            params![assignment,tool.id,root,item,session_id,command,content,now],
+        ).map_err(|e|e.to_string())?;
+        return Ok(());
+    }
+    let prior:Option<(String,String)>=store.db.query_row(
+        "SELECT content_sha256,command FROM sa_native_worker_test_receipts
+         WHERE assignment_id=?1 AND tool_id=?2 AND session_id=?3
+           AND item_id=?4 AND ticket_id=?5 AND state='running'",
+        params![assignment,tool.id,session_id,item,root],
+        |r|Ok((r.get(0)?,r.get(1)?)),
+    ).optional().map_err(|e|e.to_string())?;
+    let Some((before,original))=prior else {return Ok(());};
+    let outcome=if before!=content || original!=command {"uncertain"}
+        else if tool.status=="completed" && tool.exit_code==Some(0) {"passed"}
+        else if tool.exit_code.is_some() {"failed"} else {"uncertain"};
+    let output_sha256=format!("{:x}",Sha256::digest(tool.output.as_bytes()));
+    store.db.execute(
+        "UPDATE sa_native_worker_test_receipts
+         SET state=?3,exit_code=?4,finished_at=?5,output_sha256=?6
+         WHERE assignment_id=?1 AND tool_id=?2 AND state='running'
+           AND session_id=?7 AND item_id=?8 AND ticket_id=?9
+           AND command=?10 AND content_sha256=?11",
+        params![assignment,tool.id,outcome,tool.exit_code,now,output_sha256,
+                session_id,item,root,command,before],
+    ).map_err(|e|e.to_string())?;
+    Ok(())
+}
+
+pub(crate) fn recover_interrupted_native_tests(db:&rusqlite::Connection)->Result<usize> {
+    db.execute(
+        "UPDATE sa_native_worker_test_receipts
+         SET state='uncertain',finished_at=COALESCE(finished_at,?1)
+         WHERE state='running'",
+        [storage::now()],
+    ).map_err(|e|e.to_string())
+}
+
+/// Reconcile a native provider test against a current accepted Worker attempt,
+/// real persisted tool result, and the exact source bytes still on disk.
+fn verified_native_worker_tool(db:&rusqlite::Connection,root:&str)->Result<bool> {
+    if worker_proofs_hash(db,root).is_err() {return Ok(false);}
+    let candidate:Option<(String,String)>=db.query_row(
+        "SELECT receipt.content_sha256,project.path
+         FROM sa_native_worker_test_receipts receipt
+         JOIN sa_work_items item ON item.id=receipt.item_id
+           AND item.ticket_id=receipt.ticket_id AND item.state='completed'
+         JOIN sa_tickets child ON child.id=item.child_ticket_id AND child.state='completed'
+         JOIN sa_assignments assignment ON assignment.id=receipt.assignment_id
+           AND assignment.ticket_id=child.id AND assignment.state='finished'
+           AND assignment.session_id=receipt.session_id
+         JOIN sessions session ON session.id=receipt.session_id AND session.mode='full'
+         JOIN projects project ON project.id=session.project_id
+         JOIN sa_work_item_evidence_receipts proof ON proof.item_id=item.id
+           AND proof.child_ticket_id=child.id AND proof.assignment_id=assignment.id
+         JOIN messages message ON message.session_id=receipt.session_id
+           AND message.tool_id=receipt.tool_id AND message.role='tool'
+         WHERE receipt.ticket_id=?1 AND receipt.state='passed'
+           AND receipt.exit_code=0 AND receipt.started_at>0
+           AND receipt.finished_at>=receipt.started_at
+           AND length(receipt.output_sha256)=64
+           AND assignment.result=child.evidence
+           AND proof.reviewed_at>=assignment.updated_at
+           AND assignment.attempt=(SELECT MAX(latest.attempt)
+              FROM sa_assignments latest WHERE latest.ticket_id=child.id)
+           AND json_valid(message.content)
+           AND json_extract(message.content,'$.type')='tool_activity'
+           AND json_extract(message.content,'$.status')='completed'
+           AND json_extract(message.content,'$.exitCode')=0
+           AND json_extract(message.content,'$.name')='Command'
+           AND NOT EXISTS(SELECT 1 FROM sa_native_worker_test_receipts later
+             WHERE later.ticket_id=receipt.ticket_id
+               AND later.started_at>receipt.finished_at
+               AND later.state IN ('running','failed','uncertain'))
+         ORDER BY receipt.finished_at DESC,receipt.tool_id DESC LIMIT 1",
+        [root],|r|Ok((r.get(0)?,r.get(1)?)),
+    ).optional().map_err(|e|e.to_string())?;
+    let Some((before,checkout))=candidate else {return Ok(false);};
+    let path=Path::new(&checkout);
+    if std::fs::canonicalize(path).ok().as_deref()!=Some(path) {return Ok(false);}
+    Ok(native_content_sha256(path).ok().as_deref()==Some(before.as_str()))
+}
+
 /// True only for an executed passing test against the current plan/checkout.
 pub(in crate::superagent) fn verified(db:&rusqlite::Connection,root:&str)->Result<bool> {
     // A named receipt avoids a fragile positional eight-string tuple.
@@ -422,7 +589,9 @@ pub(in crate::superagent) fn verified(db:&rusqlite::Connection,root:&str)->Resul
             stdout_sha256:r.get(11)?,stderr_sha256:r.get(12)?,
         }),
     ).optional().map_err(|e|e.to_string())?;
-    let Some(row)=row else {return Ok(false)};
+    // Legacy explicit runner receipts remain authoritative when issued.
+    // New Full Access Demands use provider-native test receipts instead.
+    let Some(row)=row else {return verified_native_worker_tool(db,root)};
     if row.run_plan!=row.current_plan ||
         !completed_passing_test_receipt(
             &row.state,row.started_at,row.finished_at,row.exit_code,
@@ -1986,6 +2155,27 @@ mod tests {
             diagnostic:"test_failure".into(),
         };
         assert!(!queue_failed_test_repair(&db,&job,&failed,10).unwrap());
+    }
+
+    #[test]
+    fn native_test_parser_requires_exact_command_and_provider_checkout() {
+        let original=crate::providers::ToolActivity {
+            id:"call".into(),name:"Command".into(),status:"completed".into(),
+            input:"cargo test".into(),output:"All tests passed".into(),
+            write_paths:None,exit_code:None,
+        };
+        assert!(native_test_command(&original).is_none());
+        let runnable=crate::providers::ToolActivity {
+            input:"cargo test\nWorking directory: /repo".into(),..original.clone()
+        };
+        assert_eq!(native_test_command(&runnable),Some(("cargo test","/repo")));
+        for unsafe_command in ["cargo test; true","npm test || true",
+                               "cargo test --ignore-rust-version"] {
+            let input=format!("{unsafe_command}\nWorking directory: /repo");
+            assert!(native_test_command(&crate::providers::ToolActivity {
+                input,..original.clone()
+            }).is_none());
+        }
     }
 
     #[test]

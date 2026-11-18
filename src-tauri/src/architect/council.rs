@@ -1766,18 +1766,17 @@ pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: O
     if view.at_limit(config) {
         return Err(format!("The Council round limit of {} is reached. Finish and report the scores plainly, or ask the user to raise the limit.", config.max_rounds));
     }
-    // In non-nested S2, a low first-wave score is a deterministic escalation
-    // trigger. Admit a fresh native round from already enabled sources without
-    // requiring an unrelated writer edit. The terminal gate still checks all
-    // independent reviewer identities, sessions, required evidence and scores.
-    // Unresolved severe findings still require correction before a new round.
+    // Non-nested on-demand S2 may expand only after a completed, current
+    // wave exhibits a deterministic failure/evidence trigger. A clean wave
+    // cannot schedule phantom extra reviewers, even on replayed snapshots.
     if config.strategy == CouncilExecutionStrategy::Escalated
         && !config.force_escalation && config.nested_bot_reviewers.is_empty()
-        && latest == 1 && current && view.complete(1)
-        && lowest(team, 1).is_some_and(|score| score < config.target)
-        && !severe_findings(team, 1)
+        && latest > 0 && current && view.complete(latest) && !replaced
     {
-        return Ok(2);
+        if s2_unforced_trigger(team, config, latest) {
+            return Ok(latest + 1);
+        }
+        return Err("S2 on-demand Council has no eligible escalation trigger; start a new task cycle to review new work.".into());
     }
     // Any current round with a score below the target, full or complete: a fresh round needs a change.
     if let Some(low) = lowest(team, latest).filter(|low| current && *low < config.target) {
@@ -1965,6 +1964,16 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
         passing_rounds += 1;
     }
     passing_rounds >= 2
+}
+
+/// An additional native S2 wave requires an observed on-demand trigger.
+/// Conflicting or severe reports require an observed correction before more
+/// reviewers consume the same artifact. Every permitted wave stays bounded.
+fn s2_unforced_trigger(team: &TeamSnapshot, config: &CouncilConfig, round: usize) -> bool {
+    !severe_findings(team, round) && !reported_conflicts(team, round)
+        && (lowest(team, round).is_some_and(|score| score < config.target)
+            || !criterion_blockers(team, config, round).is_empty()
+            || !unverified_required_skill_checks(team, round).is_empty())
 }
 
 /// An S2 score, required-criterion or mandatory native skill-evidence failure
@@ -2941,9 +2950,12 @@ fn status_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Coun
     } else if (!view.complete(round) && (config.strategy != CouncilExecutionStrategy::TwoPhase
         || round != 1 || m3_source_counts(team, config, 1).is_some()))
         || (config.strategy == CouncilExecutionStrategy::Escalated
-        && (!forced_escalation_satisfied(team, config, view)
-            || !automatic_escalation_satisfied(team, config, view))
-        && low.is_some_and(|score| score >= config.target) && !stale)
+            && config.force_escalation && !forced_escalation_satisfied(team, config, view)
+            && low.is_some_and(|score| score >= config.target) && !stale)
+        || (config.strategy == CouncilExecutionStrategy::Escalated
+            && !config.force_escalation && config.nested_bot_reviewers.is_empty()
+            && view.complete(round) && !stale && !view.at_limit(config)
+            && s2_unforced_trigger(team, config, round))
         || (config.strategy == CouncilExecutionStrategy::TwoPhase && round == 1
             && s3_phase_one_preflight(team, config, view)) {
         "dispatch"

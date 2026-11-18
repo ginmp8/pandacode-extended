@@ -2111,11 +2111,25 @@ fn unforced_s2_rejects_untriggered_and_replayed_clean_waves() {
     ]);
     assert_ne!(council::status(&team).unwrap().state, "passed",
         "an unforced second wave must not be accepted without a first-wave trigger");
+    assert_ne!(council::status(&team).unwrap().state, "dispatch",
+        "an unsupported second wave must not advertise further review");
     assert!(finish_refusal(&team).is_some());
+
+    let mut first_only = team.clone();
+    first_only.workers.truncate(2);
+    assert_eq!(council::status(&first_only).unwrap().state, "passed");
+    assert!(council::round_for(&first_only, first_only.config.council.as_ref().unwrap(), None)
+        .is_err(), "a clean first wave cannot launch a spontaneous second wave");
+    first_only.workers[0].council.as_mut().unwrap().score = Some(8.4);
+    assert_eq!(council::status(&first_only).unwrap().state, "dispatch");
+    assert_eq!(council::round_for(&first_only, first_only.config.council.as_ref().unwrap(), None)
+        .unwrap(), 2, "a genuine below-target first wave admits fresh S2 reviewers");
 
     team.workers[0].council.as_mut().unwrap().score = Some(8.4);
     assert_eq!(council::status(&team).unwrap().state, "passed",
         "a fresh, clean wave may resolve a real below-target S2 trigger");
+    assert!(council::round_for(&team, team.config.council.as_ref().unwrap(), None)
+        .is_err(), "a clean second wave cannot start an unsupported third wave");
 
     let mut third_a = seat("on-demand-third-a", 3, Some(9.8), SINCE + 5);
     third_a.council.as_mut().unwrap().lens = "lens on-demand-first-a".into();
@@ -2126,6 +2140,13 @@ fn unforced_s2_rejects_untriggered_and_replayed_clean_waves() {
         "a third wave may not reuse an earlier trigger after a clean second wave");
     assert!(finish_refusal(&team).is_some());
 
+    let mut triggered_third = team.clone();
+    triggered_third.workers.truncate(4);
+    triggered_third.workers[2].council.as_mut().unwrap().score = Some(8.2);
+    assert_eq!(council::status(&triggered_third).unwrap().state, "dispatch");
+    assert_eq!(council::round_for(
+        &triggered_third, triggered_third.config.council.as_ref().unwrap(), None,
+    ).unwrap(), 3, "a second genuine failure authorizes a fresh bounded third wave");
     team.workers[2].council.as_mut().unwrap().score = Some(8.2);
     assert_eq!(council::status(&team).unwrap().state, "passed",
         "a second distinct below-target wave may trigger a third independent S2 review");

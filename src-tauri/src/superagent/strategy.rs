@@ -256,7 +256,7 @@ mod tests {
         let mut store=Store::open(&path).unwrap();
         store.db.execute(
             "INSERT INTO projects(id,name,path) VALUES('project','Fixture',?1)",
-            [checkout.to_string_lossy().as_ref()],
+            [checkout.to_string_lossy().as_ref() as &str],
         ).unwrap();
         for bot in ["coordinator","worker"] {
             store.db.execute(

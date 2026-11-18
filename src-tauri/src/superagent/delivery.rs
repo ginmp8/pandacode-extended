@@ -301,6 +301,12 @@ mod tests {
         db.execute_batch(
             "CREATE TABLE sa_demand_test_grants(ticket_id TEXT PRIMARY KEY);
              CREATE TABLE sa_demand_test_runs(ticket_id TEXT PRIMARY KEY,state TEXT);
+             -- Native Full Access test eligibility is also queried for
+             -- grantless Tickets. The fixture must include those read tables.
+             CREATE TABLE sa_ticket_team_snapshots(
+               ticket_id TEXT PRIMARY KEY,source_kind TEXT,snapshot_json TEXT);
+             CREATE TABLE sa_work_items(
+               ticket_id TEXT NOT NULL,requires_write INTEGER NOT NULL);
              INSERT INTO sa_demand_test_grants VALUES('root');
              INSERT INTO sa_demand_test_grants VALUES('other');
              INSERT INTO sa_demand_test_runs VALUES('other','passed');",

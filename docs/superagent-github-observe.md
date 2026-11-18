@@ -147,6 +147,16 @@ not a durable GitHub subscription or Auto authorization. Source configuration
 still defaults Off, and no Ticket, Worker, Council or external write is created.
 
 
+## Stable authenticated operator during Observe
+
+The native Events and Checks API adapters recheck `gh api user` after
+their bounded GitHub reads and before committing any Observe receipt. If the
+signed-in GitHub account changed, is missing, or cannot be reauthenticated,
+the observation fails closed: the source policy, cursor, receipts and linked
+Ticket context remain unchanged. Case-only variations of the same login
+are accepted. This is an additional read-only authentication check, not a
+GitHub subscription, permission grant, Council verdict or Auto trigger.
+
 ## Pinned authenticated repository identity (schema v48)
 
 Every explicit authenticated GitHub Events or Checks API observation resolves the repository's numeric GitHub ID through `gh api repos/<owner>/<repo>`. The first successful observation pins that ID to the source within the same SQLite transaction as decisions and cursor updates. Subsequent polls reject a changed ID, including a repository deleted and recreated under the same name, without altering existing receipts or advancing the cursor. Disabling and re-enabling Observe does not reset the pin.

@@ -830,9 +830,6 @@ fn authenticated_login(raw: &serde_json::Value) -> Result<String> {
     Ok(login.to_owned())
 }
 
-/// Resolve the exact repository identity through an independently
-/// authenticated GitHub repository metadata request. A renamed repository
-/// or an alias that redirects elsewhere cannot silently reuse this source.
 /// A local GitHub CLI login can change while a bounded read is in flight.
 /// Recheck the signed-in operator before any Observe receipt is committed,
 /// or the earlier identity could misclassify the new operator's own events.
@@ -851,6 +848,9 @@ fn recheck_authenticated_operator(root: &std::path::Path, expected: &str) -> Res
     require_same_authenticated_operator(expected, &crate::github::json(&response)?)
 }
 
+/// Resolve the exact repository identity through an independently
+/// authenticated GitHub repository metadata request. A renamed repository
+/// or an alias that redirects elsewhere cannot silently reuse this source.
 fn authenticated_repository_id(raw: &serde_json::Value, requested: &str) -> Result<u64> {
     let name = raw.get("full_name").and_then(|value| value.as_str())
         .ok_or("Authenticated GitHub repository has no full name.")?;

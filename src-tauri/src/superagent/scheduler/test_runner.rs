@@ -93,6 +93,13 @@ pub(crate) fn recover_interrupted(db:&rusqlite::Connection)->Result<usize> {
         if blocked!=1 {
             return Err("Interrupted native test plan could not be blocked.".into());
         }
+        // A terminal uncertain test must not retain a live root authority.
+        // Existing native guards also require an active Ticket; revocation
+        // provides a durable second boundary for later startup/reconciliation.
+        db.execute(
+            "UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1 AND revoked=0",
+            [&root],
+        ).map_err(|e|e.to_string())?;
         db.execute(
             "INSERT INTO sa_audit(ticket_id,kind,detail,at)
              VALUES(?1,'native_test_restart_inconclusive',
@@ -1069,6 +1076,9 @@ mod tests {
                policy_revision INTEGER,snapshot_json TEXT);
              CREATE TABLE sa_demand_test_runs(
                ticket_id TEXT PRIMARY KEY,state TEXT,plan_sha256 TEXT,finished_at INTEGER);
+             CREATE TABLE sa_mandates(ticket_id TEXT PRIMARY KEY,revoked INTEGER);
+             INSERT INTO sa_mandates VALUES
+               ('full',0),('manual',0),('stopped',0),('stale',0),('passed',0);
              CREATE TABLE sa_audit(ticket_id TEXT,kind TEXT,detail TEXT,at INTEGER);
              INSERT INTO sa_tickets VALUES
                ('full','queued',3,NULL,2,1),
@@ -1120,6 +1130,12 @@ mod tests {
             [],|row|row.get(0),
         ).unwrap();
         assert_eq!(audits,1,"One terminal decision per interrupted Demand");
+        for (ticket,revoked) in [("full",1),("manual",0),("stopped",0),
+            ("stale",0),("passed",0)] {
+            assert_eq!(db.query_row(
+                "SELECT revoked FROM sa_mandates WHERE ticket_id=?1",
+                [ticket],|row|row.get::<_,i64>(0)).unwrap(),revoked);
+        }
         assert_eq!(db.query_row(
             "SELECT revision FROM sa_tickets WHERE id='full'",
             [],|row|row.get::<_,i64>(0)).unwrap(),4);

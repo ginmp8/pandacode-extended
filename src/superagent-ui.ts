@@ -494,7 +494,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '<button type="button" data-sa-inspect-delivery>Inspect native delivery</button>' +
       (deliveryLoaded && delivery?.ticketId===inspectedTicket
         ? '<dl><dt>Native delivery state</dt><dd>' + safe(delivery.deliveryState) + '</dd>' +
-          '<dt>Verified WorkItems</dt><dd>' + safe(delivery.verifiedWorkItems) +
+          '<dt>WorkItems with current native evidence</dt><dd>' + safe(delivery.verifiedWorkItems) +
             ' / ' + safe(delivery.totalWorkItems) + '</dd>' +
           '<dt>Unresolved external effects</dt><dd>' + safe(delivery.unresolvedExternalEffects) + '</dd>' +
           '<dt>Applied native scoped file writes</dt><dd>' +
@@ -506,7 +506,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             safe(delivery.repositoryHeadSha ?? 'unavailable') + '</code></dd>' +
           '<dt>Source attribution</dt><dd>' + safe(delivery.sourceAttribution) + '</dd>' +
           '<dt>Native test requirement</dt><dd>' +
-            (delivery.nativeTestRequired ? 'Required by native policy' : 'Not required') + '</dd>' +
+            (delivery.nativeTestRequired ? 'Explicit test runner configured' : 'No separate test-runner grant') + '</dd>' +
           '<dt>Durable native test state</dt><dd>' +
             safe(delivery.nativeTestState === 'passed' && !delivery.testExecutionVerified
               ? 'Previous pass is stale or cannot be verified'
@@ -518,22 +518,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '</dd></dl><p>Git digests are snapshots, not task-attributed commits or delivery approval.</p>'
         : '<p>Not inspected for this Ticket.</p>') + '</section>';
     const demandPlanPanel = '<section class="sa-pane" role="region" aria-label="Demand WorkItems">' +
-      '<h5>Native dependency plan</h5><p>Each WorkItem has a separate native Ticket and review gate. ' +
-      'No Coordinator text can issue write authorization.</p>' +
+      '<h5>Native dependency plan</h5><p>Each Worker uses its original bot/chat permission mode. Full Access needs no separate file or test permission. Native Council review is optional; human acceptance applies only to With Approval.</p> +
       '<button type="button" data-sa-load-work-plan>Inspect WorkItems</button>' +
       (workPlanLoaded && workPlan?.ticketId === inspectedTicket
         ? '<p role="status">Plan ' + safe(workPlan.state) +
           ' · Team version ' + safe(workPlan.teamVersion) +
           ' · SHA-256 ' + safe(workPlan.planSha256) + '</p>' +
-          (workPlan.state === 'active' && tickets.some(ticket =>
-            ticket.id === workPlan?.ticketId && ticket.state === 'queued') &&
-            workPlan.items.filter(item => item.requiresWrite && !item.writeAuthorized &&
-              item.state === 'pending' && !item.childTicketId).length > 1
-            ? '<p>Authorize the SAME exact file paths for every pending write WorkItem ' +
-              'with one native confirmation. Each child keeps a separate immutable grant; ' +
-              'other files, shell and GitHub actions remain denied.</p>' +
-              '<button type="button" data-sa-authorize-demand-work>' +
-              'Authorize shared paths for pending WorkItems</button>' : '') +
           '<ol class="sa-tickets">' + workPlan.items.map(item =>
             '<li><strong>' + safe(item.key) + '</strong> · ' + safe(item.state) +
             ' · Worker ' + safe(botName(item.workerBotId)) +
@@ -543,43 +533,22 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             ' · Native state: ' + safe(item.childTicketState ?? 'not started') +
             (item.lastReason ? ' · ' + safe(item.lastReason) : '') + '</small>' +
             (item.evidenceSha256
-              ? '<small>Native ' + safe(item.approvalKind ?? 'approval') +
+              ? '<small>' +
+                (item.approvalKind === 'native_worker_finished'
+                  ? 'Native Full Access Worker completed (not Council-reviewed)'
+                  : 'Native ' + safe(item.approvalKind ?? 'approval')) +
                 ' · Evidence SHA-256 <code>' + safe(item.evidenceSha256) + '</code>' +
-                ' · Reviewed ' + safe(activityTime(item.evidenceVerifiedAt ?? undefined)) + '</small>'
+                (item.approvalKind === 'native_worker_finished' ? ' · Recorded ' : ' · Reviewed ') +
+                safe(activityTime(item.evidenceVerifiedAt ?? undefined)) + '</small>'
               : item.childTicketState === 'completed'
-                ? '<small>Approval receipt unavailable; dependencies remain gated</small>' : '') +
+                ? '<small>Native completion evidence unavailable; dependencies remain gated</small>' : '') +
             '<small class="sa-item-progress" aria-label="WorkItem progress">' +
               safe(workItemProgressHint(item, workPlan?.items ?? [])) + '</small>' +
-            (item.requiresWrite && !item.writeAuthorized && item.state === 'pending'
-              ? ' <button type="button" data-sa-authorize-work="' + safe(item.key) +
-                '">Authorize exact file paths</button>' : '') +
-            (item.requiresWrite && item.writeAuthorized
-              ? ' <small>Exact file scope confirmed locally</small>' : '') +
             (item.childTicketId
               ? ' <button type="button" data-sa-open-workitem-chat="' +
                 safe(item.childTicketId) + '">Open Worker chat</button>'
               : '') +
-            '</li>').join('') + '</ol>' +
-          ((workWriteItemKey === '*' && workPlan.items.filter(item =>
-            item.requiresWrite && item.state === 'pending' &&
-            !item.writeAuthorized && !item.childTicketId).length > 1) ||
-            (workWriteItemKey !== '*' && workPlan.items.some(item =>
-              item.key === workWriteItemKey && item.requiresWrite &&
-              item.state === 'pending' && !item.writeAuthorized))
-            ? '<form data-sa-form="work-write-scope" aria-label="WorkItem file authorization">' +
-              '<p>Native local-user confirmation required for ' +
-              (workWriteItemKey === '*'
-                ? workPlan.items.filter(item => item.requiresWrite && !item.writeAuthorized &&
-                    item.state === 'pending' && !item.childTicketId).length +
-                  ' pending WorkItems. The same exact file paths will be granted to each.'
-                : safe(workWriteItemKey) + '.') +
-              ' Other tool and GitHub rights remain denied.</p>' +
-              '<label>Exact project-relative paths, one per line' +
-              '<textarea name="allowedPaths" rows="4" spellcheck="false" required>' +
-              safe(workWritePaths) + '</textarea></label>' +
-              '<button type="submit" class="primary-button">Review native authorization</button>' +
-              '<button type="button" data-sa-work-write-cancel>Cancel</button></form>' : '')
-        : workPlanLoaded ? '<p>No native WorkItem plan belongs to this Ticket.</p>'
+            '</li>').join('') + '</ol>'        : workPlanLoaded ? '<p>No native WorkItem plan belongs to this Ticket.</p>'
           : '<p>Plan not loaded.</p>') +
       '</section>';
     const effectiveWorkerIds=ticketDetails?.teamSnapshot?.workerBotIds;

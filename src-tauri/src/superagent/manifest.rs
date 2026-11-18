@@ -128,7 +128,7 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
             return Err("Unsupported SuperAgent autonomy, Council or execution policy.".into());
         }
         // Old portable versions retain the exact original two-attempt policy.
-        // Version 5 must explicitly pin a bounded effective Team retry ceiling.
+        // Versions 5 and 6 explicitly pin a bounded effective Team retry ceiling.
         let max_worker_attempts = match (manifest.schema_version, preset.max_worker_attempts) {
             (5 | 6, Some(value @ 1..=4)) => i64::from(value),
             (5 | 6, _) => return Err(format!(
@@ -143,7 +143,11 @@ fn resolve(store: &Store, document: &serde_json::Value) -> Result<Vec<Resolved>>
                 .ok_or("Version 6 requires an explicit Team purpose.")?;
             let strategy=preset.strategy.as_deref()
                 .ok_or("Version 6 requires an explicit Team optimization strategy.")?;
-            super::roster::validate_team_strategy(purpose,strategy)?
+            let canonical=super::roster::validate_team_strategy(purpose,strategy)?;
+            if canonical.0!=purpose {
+                return Err("Portable Team purpose must be trimmed before import.".into());
+            }
+            canonical
         } else {
             if preset.purpose.is_some() || preset.strategy.is_some() {
                 return Err("Team strategy metadata requires SuperAgent manifest version 6.".into());

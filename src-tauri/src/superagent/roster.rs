@@ -424,6 +424,7 @@ pub(crate) fn read(store:&Store,id:&str)->Result<TeamRoster> {
         return Err("Malformed Team role identity; no authority granted.".into());
     }
     let ready=workers.len()==1 && reviewers.is_empty();
+    let (purpose,strategy)=read_team_strategy(store,id)?;
     Ok(TeamRoster {
         orchestration_id:config.id,
         policy_revision:config.policy_revision,
@@ -431,8 +432,8 @@ pub(crate) fn read(store:&Store,id:&str)->Result<TeamRoster> {
         worker_bot_ids:workers,
         reviewer_bot_ids:reviewers,
         max_worker_attempts:team_worker_attempt_limit(store,id)?,
-        purpose:read_team_strategy(store,id)?.0,
-        strategy:read_team_strategy(store,id)?.1,
+        purpose,
+        strategy,
         execution_ready:ready,
     })
 }
@@ -826,7 +827,7 @@ pub(super) fn set_worker_attempt_limit(
 
 /// A strategy edit changes future Demand metadata only. It never changes
 /// native bot profiles, execution modes, existing Tickets, or grant authority.
-fn set_team_strategy(
+pub(super) fn set_team_strategy(
     store:&Store,id:&str,expected_revision:i64,purpose:&str,strategy:&str,
 )->Result<TeamRoster> {
     let (purpose,strategy)=validate_team_strategy(purpose,strategy)?;

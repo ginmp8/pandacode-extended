@@ -234,6 +234,20 @@ pub(crate) fn receipt_history_page(
     if !exists {
         return Err("SuperAgent Ticket not found.".into());
     }
+    if let Some((created_at, key)) = before {
+        // A well-formed cursor cannot claim another Ticket's receipt, or an
+        // already-applied receipt in the unresolved-only view.
+        let anchored: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_effect_receipts
+             WHERE ticket_id=?1 AND created_at=?2 AND effect_key=?3
+               AND (?4=0 OR state IN ('pending','uncertain')))",
+            params![ticket_id, created_at, key, i64::from(unresolved_only)],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !anchored {
+            return Err("Effect receipt cursor is not visible to this Ticket and filter.".into());
+        }
+    }
     let (before_at, before_key) = match before {
         Some((created_at, key)) => (Some(created_at), Some(key)),
         None => (None, None),
@@ -318,6 +332,24 @@ pub(crate) fn unresolved_effects_page_for_team(
             || !effect_key.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
         {
             return Err("Invalid unresolved effect cursor.".into());
+        }
+    }
+    if let Some((at, ticket_id, effect_key)) = before {
+        // A fabricated, cross-Team or reconciled boundary cannot skip an
+        // unresolved effect during local recovery inspection.
+        let anchored: bool = store.db.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM sa_effect_receipts r
+               JOIN sa_tickets t ON t.id=r.ticket_id
+               WHERE r.updated_at=?1 AND r.ticket_id=?2 AND r.effect_key=?3
+                 AND r.state IN ('pending','uncertain')
+                 AND (?4 IS NULL OR t.orchestration_id=?4)
+             )",
+            params![at, ticket_id, effect_key, orchestration_id],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if !anchored {
+            return Err("Unresolved effect cursor is not visible in this recovery queue.".into());
         }
     }
     let (before_at, before_ticket, before_key) = match before {
@@ -452,6 +484,16 @@ mod tests{
         assert!(superagent::list_headless_unresolved_effects(&path,Some(0),Some(&id),Some("effect:000")).is_err());
         assert!(superagent::list_headless_unresolved_effects(&path,Some(1000),Some("../bad"),Some("effect:000")).is_err());
         assert!(superagent::list_headless_unresolved_effects(&path,Some(1000),Some(&id),None).is_err());
+        assert!(superagent::list_headless_unresolved_effects(
+            &path, Some(1000), Some(&id), Some("invented:effect"),
+        ).is_err(), "syntactically valid but unowned cursor cannot skip recoverable effects");
+        assert!(superagent::list_headless_unresolved_effects(
+            &path, Some(9000), Some(&id), Some("already-applied"),
+        ).is_err(), "applied receipts cannot anchor an unresolved recovery page");
+        // The first receipt of another Ticket has a valid timestamp and key,
+        // but must not page through the current Ticket's own receipt history.
+        assert!(receipt_history_page(&store, &id, 10,
+            Some((1000, "effect:001")), false).is_err());
         let pending:i64=store.db.query_row(
             "SELECT COUNT(*) FROM sa_effect_receipts WHERE state='pending'",
             [],|r|r.get(0),
@@ -561,6 +603,12 @@ mod tests{
         ).is_err());
         assert!(superagent::list_headless_team_unresolved_effects(
             &path,&first_team,Some(1),None,None,
+        ).is_err());
+        assert!(superagent::list_headless_team_unresolved_effects(
+            &path,&first_team,Some(1000),Some("other-team-effect-ticket"),Some("other-team:0"),
+        ).is_err(), "another Team's real pending receipt is not a valid local cursor");
+        assert!(superagent::list_headless_team_unresolved_effects(
+            &path,&first_team,Some(1000),Some(&ticket_id),Some("fabricated:receipt"),
         ).is_err());
         let pending:i64=store.db.query_row(
             "SELECT COUNT(*) FROM sa_effect_receipts WHERE state='pending'",
@@ -727,6 +775,11 @@ mod tests{
         assert_eq!(unresolved_count(&read, &id).unwrap(), 8);
         assert!(receipt_history_page(&read, &id, 100, Some((0, "effect:010")), false).is_err());
         assert!(receipt_history_page(&read, &id, 100, Some((10001, "../bad")), false).is_err());
+        assert!(receipt_history_page(&read, &id, 100,
+            Some((10_000, "invented:effect")), false).is_err());
+        assert!(receipt_history_page(&read, &id, 100,
+            Some((10_000, "effect:002")), true).is_err(),
+            "an applied effect cannot anchor unresolved-only pagination");
         assert!(receipt_history_page(&read, "another-ticket", 100, None, false).is_err());
         let unchanged: i64 = read.db.query_row(
             "SELECT COUNT(*) FROM sa_effect_receipts WHERE ticket_id=?1 AND state='uncertain'",

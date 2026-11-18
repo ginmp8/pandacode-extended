@@ -538,6 +538,23 @@ fn require_source_cursor_integrity(
     Ok(())
 }
 
+/// Reject unusable Observe sources before the authenticated network call.
+/// The receipt transaction rechecks policy and cursor state after the fetch,
+/// because this preflight is not an authorization grant or a concurrency lease.
+fn require_observe_preflight(store: &Store, selected: &EventSource) -> Result<()> {
+    let integrity = inspect_source_integrity(store, &selected.id)?;
+    if integrity.mode != "observe" || integrity.policy_revision != selected.policy_revision {
+        return Err("Source policy changed; observation denied before GitHub request.".into());
+    }
+    if !integrity.cursor_consistent {
+        return Err("Source cursor is behind durable receipts; observation denied before GitHub request.".into());
+    }
+    if integrity.receipt_capacity_reached {
+        return Err("Source receipt capacity exhausted; observation denied before GitHub request.".into());
+    }
+    Ok(())
+}
+
 /// Read-only headless inspection must not trigger Store::open recovery while
 /// another server owns the native bot/assignment runtime.
 pub(crate) fn headless_inspect_source_integrity(
@@ -1405,8 +1422,9 @@ where
                 "SELECT updated_at FROM sa_event_sources WHERE id=?1",
                 [&selected.id], |row| row.get(0),
             ).map_err(|e| e.to_string())?;
-            // No network call for Off or Checks-only sources. Native source policy,
-            // pinned identity and sequence are rechecked at receipt admission.
+            // Deny corrupted/filled receipt sources before any authenticated
+            // request. Receipt admission repeats the authoritative checks.
+            require_observe_preflight(store, &selected)?;
             let (signed_in, response, pages, repository_id) = fetch(&selected, since)?;
             poll_authenticated_events_with_repository_id(
                 store, &selected, since, &response, &signed_in, pages, repository_id,
@@ -1462,6 +1480,7 @@ pub(crate) fn headless_observe_source(
     if snapshot.event_kind == "check_run.completed" {
         return Err("GitHub Events cannot verify Check Runs; use the authenticated Checks adapter.".into());
     }
+    require_observe_preflight(&store, &snapshot)?;
     let since: i64 = store.db.query_row(
         "SELECT updated_at FROM sa_event_sources WHERE id=?1",
         [source_id], |row| row.get(0),
@@ -1491,6 +1510,7 @@ pub async fn superagent_source_poll_authenticated(
         if selected.event_kind == "check_run.completed" {
             return Err("GitHub Events polling cannot attest check-run completion; use an authenticated Checks API adapter.".into());
         }
+        require_observe_preflight(&store, &selected)?;
         let since: i64 = store.db.query_row(
             "SELECT updated_at FROM sa_event_sources WHERE id=?1", [&source_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
@@ -2766,6 +2786,17 @@ mod tests {
         let damaged = inspect_source_integrity(&store, &off.id).unwrap();
         assert!(!damaged.cursor_consistent);
         assert_eq!(damaged.next_action, "investigate_cursor_receipt_mismatch");
+        // A damaged persisted cursor denies Observe *before* gh is invoked,
+        // including team batches and the standalone headless entrypoint.
+        let mut network_calls = 0;
+        let err = observe_team_sources_with(&store, "orch", |_, _| {
+            network_calls += 1;
+            panic!("Corrupted Observe source must not reach GitHub");
+        }).unwrap_err();
+        assert_eq!(network_calls, 0);
+        assert!(err.contains("Source cursor is behind durable receipts"));
+        assert!(headless_observe_source(&path, &active.id).unwrap_err()
+            .contains("Source cursor is behind durable receipts"));
         assert!(poll_authenticated_events(&store, &active, 0, &event("5000000202")).is_err());
         assert_eq!(list_decisions(&store, &off.id, 10).unwrap().len(), 1);
         assert_eq!(source(&store, &off.id).unwrap().last_sequence, 0);

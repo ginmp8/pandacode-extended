@@ -1566,7 +1566,7 @@ pub(crate) fn list_headless_recovery_inbox_page(
     let snapshot = store.db.unchecked_transaction().map_err(|e| e.to_string())?;
     let observed_at = storage::now();
     let cutoff = observed_at.saturating_sub(MAX_ASSIGNMENT_RUN_MS);
-    let ids = {
+    let ids: Vec<(String, i64, i64)> = {
         let mut stmt = store.db.prepare(
             "WITH candidates AS (
                SELECT t.id,t.updated_at,
@@ -5085,7 +5085,6 @@ mod tests {
         ).unwrap();
         assert_eq!(again["items"].as_array().unwrap().len(), 2);
         assert_eq!(again["items"][0]["ticketId"], running.id);
-        drop(reopened);
         let db = rusqlite::Connection::open(&path).unwrap();
         db.execute("UPDATE sa_effect_receipts SET state='applied' WHERE ticket_id=?1",
             [&running.id]).unwrap();

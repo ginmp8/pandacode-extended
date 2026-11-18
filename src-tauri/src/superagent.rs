@@ -3413,6 +3413,19 @@ fn stop_with_expected_revision(
 /// its Ticket/Mandate/Assignment evidence remains independent of bot history.
 /// Called inside the bot reset's existing transaction; never makes a new runner.
 pub(crate) fn invalidate_bot(store: &Store, bot_id: &str, removed: bool) -> Result<()> {
+    // Existing Team-role references use ON DELETE RESTRICT. Reject a Bot
+    // deletion *before* revoking Ticket mandates or clearing Bot sessions;
+    // otherwise the eventual FK failure leaves a live Bot with lost work.
+    // A reset is different: its identity remains and its task grants are revoked.
+    if removed {
+        let referenced: bool = store.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_team_roles WHERE bot_id=?1)",
+            [bot_id], |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if referenced {
+            return Err("Remove this bot from disabled SuperAgent Team roles before deleting it.".into());
+        }
+    }
     // Resetting either selected bot invalidates every nonterminal mandate:
     // coordinator sessions are just as ephemeral as worker sessions, and a
     // previously finished plan must not authorize a worker after reset.
@@ -8843,16 +8856,60 @@ mod tests {
         assert!(mandate(&store, &affected.id).unwrap().revoked);
         assert!(!mandate(&store, &unaffected.id).unwrap().revoked);
         let previous_revision = get_ticket(&store, &affected.id).unwrap().revision;
-        invalidate_bot(&store, "secondary-reviewer", true).unwrap();
+        // Deleting a configured secondary bot must fail before any mutation;
+        // the FK-restricted role still owns its identity and durable history.
+        assert!(bots::delete(&store, "secondary-reviewer").unwrap_err()
+            .contains("Remove this bot from disabled SuperAgent Team roles"));
+        assert!(bots::get(&store, "secondary-reviewer").is_ok());
+        assert_eq!(get_ticket(&store, &affected.id).unwrap().revision, previous_revision);
+        assert!(configuration(&store, &affected_team.id).unwrap().enabled);
+        invalidate_bot(&store, "secondary-reviewer", false).unwrap();
         assert_eq!(get_ticket(&store, &affected.id).unwrap().revision, previous_revision + 1);
-        assert!(!configuration(&store, &affected_team.id).unwrap().enabled);
         assert!(configuration(&store, &unaffected_team.id).unwrap().enabled);
         let path = store.path.clone();
         drop(store);
         let reopened = Store::open(&path).unwrap();
         assert!(mandate(&reopened, &affected.id).unwrap().revoked);
         assert!(!mandate(&reopened, &unaffected.id).unwrap().revoked);
-        assert!(!configuration(&reopened, &affected_team.id).unwrap().enabled);
+        assert!(configuration(&reopened, &affected_team.id).unwrap().enabled);
+        assert!(bots::get(&reopened, "secondary-reviewer").is_ok());
+    }
+
+    #[test]
+    fn reset_snapshotted_member_without_current_roster_revokes_original_ticket() {
+        let mut store = fixture();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('historical-reviewer','Historical Reviewer','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        let team = enabled(&store);
+        let (ticket, launched) = admit(
+            &mut store, &team.id, "Pinned legacy task", "pinned-reviewer", true,
+        ).unwrap();
+        assert!(!launched);
+        let original = roster::ticket_profile(&store, &ticket.id).unwrap().unwrap();
+        let mut members = original.members;
+        let bot = bots::get(&store, "historical-reviewer").unwrap();
+        members.push(roster::AdmittedMemberProfile {
+            role: "reviewer".into(), position: 0, bot_id: bot.id,
+            project_id: bot.project_id, project_path: None, resolved_project_path: None,
+            provider: bot.provider, model: bot.model, mode: bot.mode,
+            reasoning_effort: bot.reasoning_effort, assigned_skill_ids: bot.skills,
+        });
+        store.db.execute(
+            "UPDATE sa_ticket_profiles SET profiles_json=?2 WHERE ticket_id=?1",
+            params![ticket.id, serde_json::to_string(&members).unwrap()],
+        ).unwrap();
+        // Historical member was pinned by admission but is no longer in the
+        // current Team roster. Reset must still revoke its Ticket Mandate.
+        assert!(!roster::has_additional_members(&store, &team.id).unwrap());
+        invalidate_bot(&store, "historical-reviewer", false).unwrap();
+        assert!(mandate(&store, &ticket.id).unwrap().revoked);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert!(mandate(&reopened, &ticket.id).unwrap().revoked);
     }
 
     #[test]

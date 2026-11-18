@@ -7158,26 +7158,36 @@ fn nested_m4_triggered_s2_passes_only_after_fresh_native_child_callbacks() {
         "revoking the authenticated second-wave receipt must revoke terminal approval");
 }
 
-#[test]
-fn nested_m5_child_triggered_s2_requires_fresh_native_child_receipts_and_root_quorum() {
+fn assert_nested_child_triggered_s2_with_root_sources(mode: &str) {
+    crate::providers::with_test_executable_override("codex", || {
+        run_nested_child_triggered_s2_with_root_sources(mode);
+    });
+}
+
+fn run_nested_child_triggered_s2_with_root_sources(mode: &str) {
     let (state, sid) = state_fixture();
     {
         let store = state.store.lock().unwrap();
         let project = store.session(&sid).unwrap().project_id;
-        store.db.execute(
-            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
-             VALUES('security-child','security-child',?1,'codex','default','plan',?2,?2)",
-            rusqlite::params![project, storage::now()],
-        ).unwrap();
+        for bot in ["security-child", "quality-direct"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
         let mut root = load(&store, &sid).unwrap().unwrap();
         let mut config = on(9.0, 3, 0);
         config.strategy = council::CouncilExecutionStrategy::Escalated;
-        config.automatic_reviewers = 1;
+        config.automatic_reviewers = usize::from(matches!(mode, "m5" | "m7"));
+        if matches!(mode, "m6" | "m7") {
+            config.reviewer_bot_ids = vec!["quality-direct".into()];
+        }
         config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
             bot_id: "security-child".into(), child_reviewers: 2,
             child_target: 9.5, child_max_rounds: 2,
         });
-        assert_eq!(config.mode(), "m5");
+        assert_eq!(config.mode(), mode);
         config.validate().unwrap();
         root.config.council = Some(config);
         root.status = "ready".into();
@@ -7187,13 +7197,26 @@ fn nested_m5_child_triggered_s2_requires_fresh_native_child_receipts_and_root_qu
     let (started, _) = start_state(
         &state, &sid, "Authenticate an M5 child-triggered S2 review", None, None,
     ).unwrap();
-    call(&state, &sid, "pandacode_dispatch_workers", json!({
-        "assignments": [reviewer_assignment("root-automatic", "correctness")]
-    })).unwrap();
-    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
-    let (root_run, _) = claim(&state, action);
-    assert!(root_run.config.reviewer_boundary);
-    finish(&state, &root_run, "Clean independent root review.\nCouncil score: 9.7/10", true);
+    let mut assignments = Vec::new();
+    if matches!(mode, "m6" | "m7") {
+        let mut direct = reviewer_assignment("direct-root", "Quality");
+        direct["councilReviewerSource"] = json!("direct_bot");
+        assignments.push(direct);
+    }
+    if matches!(mode, "m5" | "m7") {
+        let mut automatic = reviewer_assignment("root-automatic", "correctness");
+        automatic["councilReviewerSource"] = json!("automatic");
+        assignments.push(automatic);
+    }
+    call(&state, &sid, "pandacode_dispatch_workers",
+        json!({"assignments": assignments})).unwrap();
+    for _ in 0..assignments.len() {
+        let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        let (root_run, _) = claim(&state, action);
+        assert!(root_run.config.reviewer_boundary);
+        finish(&state, &root_run,
+            "Clean independent root review.\nCouncil score: 9.7/10", true);
+    }
     let (pending, _) = dispatch_state(
         &state, &sid, started.generation, "pandacode_finish_team",
         json!({"summary":"Wait for native child reviewers"}),
@@ -7249,6 +7272,23 @@ fn nested_m5_child_triggered_s2_requires_fresh_native_child_receipts_and_root_qu
     assert_eq!(saved.council_status.as_ref().unwrap().state, "passed");
     assert_eq!(saved.council_status.as_ref().unwrap().lowest, Some(9.7));
     assert!(verified_council_pass(&store, &saved));
+    let root_seats = saved.workers.iter().filter(|worker| worker.council.is_some())
+        .collect::<Vec<_>>();
+    assert_eq!(root_seats.len(), if mode == "m7" { 2 } else { 1 },
+        "no phantom root reviewers may appear in M5/M6/M7");
+    assert_eq!(root_seats.iter().filter(|worker| worker.reviewer_binding.as_ref()
+        .and_then(|binding| binding.reviewer_bot_id.as_deref())
+        == Some("quality-direct")).count(), usize::from(matches!(mode, "m6" | "m7")),
+        "direct reviewer identity must remain bound to the configured bot");
+    if matches!(mode, "m6" | "m7") {
+        let mut forged = saved.clone();
+        let direct = forged.workers.iter_mut().find(|worker| worker.reviewer_binding.as_ref()
+            .and_then(|binding| binding.reviewer_bot_id.as_deref())
+            == Some("quality-direct")).unwrap();
+        direct.reviewer_binding.as_mut().unwrap().roster_bot_ids.clear();
+        assert!(!verified_council_pass(&store, &forged),
+            "a real child S2 receipt cannot approve an unauthorized direct root reviewer");
+    }
     let inspected = child_council::inspect(&store, &saved).unwrap().pop().unwrap();
     assert!(inspected.verified_child_receipt.is_none(),
         "the failing original child wave remains non-passing");
@@ -7269,6 +7309,21 @@ fn nested_m5_child_triggered_s2_requires_fresh_native_child_receipts_and_root_qu
     ).unwrap();
     assert!(!verified_council_pass(&store, &saved),
         "revoking the child S2 receipt must revoke the mixed root verdict");
+}
+
+#[test]
+fn nested_m5_child_triggered_s2_requires_fresh_native_child_receipts_and_root_quorum() {
+    assert_nested_child_triggered_s2_with_root_sources("m5");
+}
+
+#[test]
+fn nested_m6_child_triggered_s2_requires_authenticated_direct_and_child_receipts() {
+    assert_nested_child_triggered_s2_with_root_sources("m6");
+}
+
+#[test]
+fn nested_m7_child_triggered_s2_requires_all_three_authenticated_sources() {
+    assert_nested_child_triggered_s2_with_root_sources("m7");
 }
 
 #[test]

@@ -1851,6 +1851,42 @@ fn native_s3_uses_fresh_read_only_challengers_and_never_passes_phase_one_alone()
 }
 
 #[test]
+fn s2_and_s3_reject_abandoned_reviewer_replay_even_when_both_scored_rounds_pass() {
+    for strategy in [council::CouncilExecutionStrategy::Escalated, council::CouncilExecutionStrategy::TwoPhase] {
+        let mut config = on(9.0, 3, 2);
+        config.strategy = strategy;
+        config.force_escalation = strategy == council::CouncilExecutionStrategy::Escalated;
+        let mut second_a = seat("second-a", 2, Some(9.7), SINCE + 3);
+        second_a.council.as_mut().unwrap().lens = "lens first-a".into();
+        let mut second_b = seat("second-b", 2, Some(9.8), SINCE + 4);
+        second_b.council.as_mut().unwrap().lens = "lens first-b".into();
+        let mut team = team_with(config, vec![
+            seat("first-a", 1, Some(9.5), SINCE + 1),
+            seat("first-b", 1, Some(9.6), SINCE + 2),
+            second_a, second_b,
+        ]);
+        assert_eq!(council::status(&team).unwrap().state, "passed", "{strategy:?} baseline");
+        let mut abandoned = seat("discarded-first", 1, None, SINCE + 5);
+        abandoned.council.as_mut().unwrap().lens = "lens first-a".into();
+        abandoned.abandoned = true;
+        abandoned.status = "stopped".into();
+        abandoned.session_id = "revoked-native-session".into();
+        team.workers.push(abandoned);
+        assert_eq!(council::status(&team).unwrap().state, "passed",
+            "{strategy:?} must not reject legitimate fresh scores merely because a discarded attempt exists");
+
+        let mut session_replay = team.clone();
+        session_replay.workers[2].session_id = "revoked-native-session".into();
+        assert_ne!(council::status(&session_replay).unwrap().state, "passed",
+            "{strategy:?} cannot reuse a discarded first-wave session as an independent reviewer");
+        let mut identity_replay = team;
+        identity_replay.workers[2].id = "discarded-first".into();
+        assert_ne!(council::status(&identity_replay).unwrap().state, "passed",
+            "{strategy:?} cannot reuse a discarded first-wave worker identity");
+    }
+}
+
+#[test]
 fn s3_selected_bots_can_cross_challenge_only_with_new_native_worker_sessions() {
     let mut config = on(9.0, 3, 0);
     config.reviewer_bot_ids = vec!["reviewer-a".into(), "reviewer-b".into()];

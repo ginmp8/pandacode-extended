@@ -1843,6 +1843,18 @@ fn verdict(team: &TeamSnapshot) -> Option<(String, bool)> {
     let config = team.config.council.as_ref()?;
     verdict_in(team, config, &Rounds::of(team, config))
 }
+/// A retired or unscored reviewer admission still consumed a native identity.
+/// Neither S2 escalation nor an S3 adversarial phase may reuse it as a new
+/// independent reviewer, even if that attempt was later abandoned.
+fn independent_review_attempts(team: &TeamSnapshot, through_round: usize) -> bool {
+    let mut reviewer_ids = std::collections::HashSet::new();
+    let mut session_ids = std::collections::HashSet::new();
+    (1..=through_round).flat_map(|round| in_round(team, round)).all(|(worker, _)| {
+        !worker.id.is_empty() && reviewer_ids.insert(worker.id.as_str())
+            && (worker.session_id.is_empty() || session_ids.insert(worker.session_id.as_str()))
+    })
+}
+
 /// A user-forced S2 escalation needs two fresh, independent native Council rounds
 /// passing on the same artifact. Each round retains the existing source, score,
 /// required-criterion and independently verified skill-evidence gates.
@@ -1861,6 +1873,7 @@ fn forced_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view
     {
         return false;
     }
+    if !independent_review_attempts(team, view.latest) { return false; }
     // Two passing rounds must have distinct worker identities AND native sessions.
     // A renamed persisted worker cannot masquerade as a fresh independent review.
     let mut seen = std::collections::HashSet::new();
@@ -1904,6 +1917,7 @@ fn automatic_escalation_satisfied(team: &TeamSnapshot, config: &CouncilConfig, v
     if view.latest > config.max_rounds {
         return false;
     }
+    if !independent_review_attempts(team, view.latest) { return false; }
     // Even when no escalation was triggered, a writable, abandoned or
     // subsequently modified reviewer cannot supply native S2 approval.
     if !view.complete(view.latest) || !in_round(team, view.latest)
@@ -2116,6 +2130,7 @@ fn two_phase_satisfied(team: &TeamSnapshot, config: &CouncilConfig, view: &Round
     }
     let mut reviewer_ids = std::collections::HashSet::new();
     let mut session_ids = std::collections::HashSet::new();
+    if !independent_review_attempts(team, 2) { return false; }
     let challenged_bots = phase_one_selected_bot_ids(team);
     for round in 1..=2 {
         if lowest(team, round).is_none_or(|score| score < config.target)

@@ -677,6 +677,16 @@ pub(super) fn create_with_roster(
 pub(super) fn create_with_attempt_policy(
     store:&Store,input:NewOrchestration,roster:Option<RosterInput>,limit:i64,
 )->Result<Orchestration> {
+    create_with_attempt_policy_and_strategy(store,input,roster,limit,"","balanced")
+}
+
+/// Create a disabled Team with its descriptive policy in one transaction.
+/// A suggested strategy cannot create an assignment, mandate or tool grant.
+pub(super) fn create_with_attempt_policy_and_strategy(
+    store:&Store,input:NewOrchestration,roster:Option<RosterInput>,limit:i64,
+    purpose:&str,strategy:&str,
+)->Result<Orchestration> {
+    let (purpose,strategy)=validate_team_strategy(purpose,strategy)?;
     if !(1..=4).contains(&limit) {
         return Err("Worker-attempt limit must be between 1 and 4.".into());
     }
@@ -690,6 +700,11 @@ pub(super) fn create_with_attempt_policy(
         "INSERT INTO sa_team_attempt_limits(orchestration_id,max_worker_attempts)
          VALUES(?1,?2)",
         params![&cfg.id,limit],
+    ).map_err(|e|e.to_string())?;
+    tx.execute(
+        "INSERT INTO sa_team_strategies(orchestration_id,purpose,strategy)
+         VALUES(?1,?2,?3)",
+        params![&cfg.id,&purpose,&strategy],
     ).map_err(|e|e.to_string())?;
     tx.commit().map_err(|e|e.to_string())?;
     configuration(store,&cfg.id)
@@ -1454,6 +1469,57 @@ mod tests {
             "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0),
         ).unwrap(),0,"configuration must never infer work");
     }
+    #[test]
+    fn team_creation_pins_strategy_atomically_without_execution() {
+        let path=std::env::temp_dir().join(format!("sa-strategy-create-{}.sqlite3",storage::id()));
+        let store=Store::open(&path).unwrap();
+        store.db.execute(
+            "INSERT INTO projects(id,name,path) VALUES('p','Team','/tmp/sa-strategy-create')",[]
+        ).unwrap();
+        for id in ["lead","worker","reviewer"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,'p','codex','default','plan',?2,?2)",
+                params![id,storage::now()],
+            ).unwrap();
+        }
+        let new_team=||NewOrchestration {
+            name:"Strategy Team".into(),coordinator_bot_id:"lead".into(),
+            worker_bot_id:"worker".into(),
+        };
+        let roles=||RosterInput {
+            worker_bot_ids:vec!["worker".into()],
+            reviewer_bot_ids:vec!["reviewer".into()],
+        };
+        assert!(create_with_attempt_policy_and_strategy(
+            &store,new_team(),Some(roles()),3,"Safe","unauthorized"
+        ).unwrap_err().contains("Unsupported Team optimization"));
+        assert!(create_with_attempt_policy_and_strategy(
+            &store,new_team(),Some(roles()),3,"invalid\0purpose","performance"
+        ).unwrap_err().contains("unsafe controls"));
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_orchestrations",[],|row|row.get::<_,i64>(0)
+        ).unwrap(),0,"invalid strategy must never leave a partial Team");
+        let created=create_with_attempt_policy_and_strategy(
+            &store,new_team(),Some(roles()),3,
+            "Verify native execution before acceptance","security_critical",
+        ).unwrap();
+        assert!(!created.enabled);
+        assert_eq!(created.policy_revision,1);
+        let saved=read(&store,&created.id).unwrap();
+        assert_eq!(saved.purpose,"Verify native execution before acceptance");
+        assert_eq!(saved.strategy,"security_critical");
+        assert_eq!(saved.max_worker_attempts,3);
+        assert_eq!(saved.reviewer_bot_ids,vec!["reviewer".to_string()]);
+        let reopened=Store::open_read_only(&path).unwrap();
+        let after_restart=read(&reopened,&created.id).unwrap();
+        assert_eq!(after_restart.purpose,saved.purpose);
+        assert_eq!(after_restart.strategy,saved.strategy);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets",[],|row|row.get::<_,i64>(0)
+        ).unwrap(),0,"Team creation must not infer an authorized Demand");
+    }
+
     #[test]
     fn duplicate_team_is_atomic_revision_guarded_and_never_copies_runtime_authority() {
         let path=std::env::temp_dir().join(format!("sa-clone-{}.sqlite3",storage::id()));

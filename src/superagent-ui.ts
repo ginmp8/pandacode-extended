@@ -129,6 +129,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let preflightObjective = '', preflightMode: 'coordinated' | 'direct' = 'coordinated';
   // Persist the user's editable preset draft across asynchronous list refreshes.
   let draftPresetName = '', draftPresetTemplate = '', draftWorkerAttemptLimit = 2;
+  let draftPresetPurpose = '', draftPresetStrategy = 'balanced';
   // Team roles are an unsaved draft until native create confirms the exact roster.
   let draftCoordinatorBotId = '', draftWorkerBotId = '';
   let draftAdditionalWorkerIds: string[] = [], draftReviewerBotIds: string[] = [];
@@ -904,6 +905,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           [1,2,3,4].map(limit => '<option value="' + limit + '"' +
             (draftWorkerAttemptLimit === limit ? ' selected' : '') + '>' +
             limit + '</option>').join('') + '</select></label>' +
+          '<label>Team purpose<textarea name="purpose" rows="3" maxlength="400">' +
+          safe(draftPresetPurpose) + '</textarea></label>' +
+          '<label>Optimization strategy<select name="strategy">' +
+          ([['balanced','Balanced'],['economy','Economy'],['performance','Performance'],
+            ['security_critical','Security-critical'],['custom','Custom']] as const)
+            .map(([value,label]) => '<option value="' + value + '"' +
+              (draftPresetStrategy === value ? ' selected' : '') + '>' + label + '</option>').join('') +
+          '</select></label>' +
+          '<p>Suggestions describe future Demands only; no tools or work are authorized.</p>' +
           '<p>Hard cap including the first attempt. Economy and Security-critical suggest 1; ' +
           'Balanced and Issue Resolution suggest 2; Performance and Software Development suggest 3. ' +
           'No automatic retry, tool grant or execution is enabled.</p>' +
@@ -935,7 +945,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         'button, input, select, textarea',
       ).forEach(control => {
         const localDraft = control.matches(
-          'form[data-sa-form="create"] [data-sa-template], form[data-sa-form="create"] input[name="name"], form[data-sa-form="create"] select[name="maxWorkerAttempts"]',
+          'form[data-sa-form="create"] [data-sa-template], form[data-sa-form="create"] input[name="name"], form[data-sa-form="create"] select[name="maxWorkerAttempts"], form[data-sa-form="create"] textarea[name="purpose"], form[data-sa-form="create"] select[name="strategy"]',
         );
         control.disabled = !localDraft;
       });
@@ -1189,6 +1199,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if ([1,2,3,4].includes(limit)) draftWorkerAttemptLimit = limit;
       return;
     }
+    if (target instanceof HTMLSelectElement && target.name === 'strategy' &&
+        target.closest('form[data-sa-form="create"]')) {
+      draftPresetStrategy = target.value;
+      return;
+    }
     if (!(target instanceof HTMLSelectElement) || !target.hasAttribute('data-sa-template')) return;
     draftPresetTemplate = target.value;
     draftPresetName = target.value;
@@ -1196,8 +1211,22 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       ['Performance','Software Development'].includes(target.value) ? 3 : 2;
     const field = target.form?.querySelector<HTMLInputElement>('input[name="name"]');
     if (field) field.value = draftPresetName;
+    const examples: Record<string, {purpose:string;strategy:string}> = {
+      'Software Development': {purpose:'Implement software changes with reproducible tests and explicit native scope.',strategy:'balanced'},
+      'Issue Resolution': {purpose:'Diagnose and resolve issues with traceable regression evidence.',strategy:'balanced'},
+      'Economy': {purpose:'Minimize resource usage without skipping mandatory checks.',strategy:'economy'},
+      'Balanced': {purpose:'Balance delivery quality, execution time and resource cost.',strategy:'balanced'},
+      'Performance': {purpose:'Prioritize thorough verification within explicit time and cost budgets.',strategy:'performance'},
+      'Security-critical': {purpose:'Prioritize scoped permissions and security verification for every change.',strategy:'security_critical'},
+    };
+    draftPresetPurpose = examples[target.value]?.purpose ?? '';
+    draftPresetStrategy = examples[target.value]?.strategy ?? 'balanced';
     const budget = target.form?.querySelector<HTMLSelectElement>('select[name="maxWorkerAttempts"]');
     if (budget) budget.value = String(draftWorkerAttemptLimit);
+    const purpose = target.form?.querySelector<HTMLTextAreaElement>('textarea[name="purpose"]');
+    if (purpose) purpose.value = draftPresetPurpose;
+    const strategy = target.form?.querySelector<HTMLSelectElement>('select[name="strategy"]');
+    if (strategy) strategy.value = draftPresetStrategy;
   });
   host.addEventListener('input', event => {
     const target = event.target;
@@ -1226,6 +1255,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target instanceof HTMLInputElement && target.name === 'name' &&
         target.closest<HTMLFormElement>('form[data-sa-form="create"]')) {
       draftPresetName = target.value;
+    }
+    if (target instanceof HTMLTextAreaElement && target.name === 'purpose' &&
+        target.closest<HTMLFormElement>('form[data-sa-form="create"]')) {
+      draftPresetPurpose = target.value;
     }
     if (target instanceof HTMLTextAreaElement && target.hasAttribute('data-sa-manifest')) {
       importText = target.value; preview = null; inspected = null;
@@ -2034,7 +2067,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const additionalWorkers=data.getAll('additionalWorkers').map(String);
       const reviewerBotIds=data.getAll('reviewers').map(String);
       const maxWorkerAttempts=Number(data.get('maxWorkerAttempts'));
+      const purpose=String(data.get('purpose') ?? '');
+      const strategy=String(data.get('strategy') ?? 'balanced');
       void work(async () => {
+        if (purpose.length > 400 || /[\x00-\x09\x0B-\x1F\x7F]/.test(purpose))
+          throw new Error('Team purpose must be at most 400 characters and contain no unsafe controls.');
+        if (!['balanced','economy','performance','security_critical','custom'].includes(strategy))
+          throw new Error('Choose a supported optimization strategy.');
         if (![1,2,3,4].includes(maxWorkerAttempts))
           throw new Error('Choose a Worker-attempt limit from 1 to 4.');
         if (!input.name || !input.coordinatorBotId || !input.workerBotId)
@@ -2047,8 +2086,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         const roster=additionalWorkers.length || reviewerBotIds.length
           ? {workerBotIds:[input.workerBotId,...additionalWorkers],reviewerBotIds}
           : undefined;
-        const created = await call<Config>('superagent_create',{ input,roster,maxWorkerAttempts });
+        const created = await call<Config>('superagent_create',{
+          input,roster,maxWorkerAttempts,purpose,strategy,
+        });
         draftPresetName = ''; draftPresetTemplate = ''; draftWorkerAttemptLimit = 2;
+        draftPresetPurpose = ''; draftPresetStrategy = 'balanced';
         draftCoordinatorBotId = ''; draftWorkerBotId = '';
         draftAdditionalWorkerIds = []; draftReviewerBotIds = []; draftMembersExpanded = false;
         selected = created.id; workspaceView = 'runs'; await reload();

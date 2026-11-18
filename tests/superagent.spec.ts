@@ -85,6 +85,9 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
   await expect(host.getByRole('combobox',{name:'Maximum attempts per Demand'})).toHaveValue('1');
   await host.getByRole('combobox',{name:'Example preset'}).selectOption('Performance');
   await expect(host.getByRole('combobox',{name:'Maximum attempts per Demand'})).toHaveValue('3');
+  await expect(host.getByRole('combobox',{name:'Optimization strategy'})).toHaveValue('performance');
+  await expect(host.getByRole('textbox',{name:'Team purpose'}))
+    .toHaveValue('Prioritize thorough verification within explicit time and cost budgets.');
   await host.getByRole('textbox',{name:'Name',exact:true}).fill('Persisted roles');
   await host.getByRole('combobox',{name:'Coordinator'}).selectOption('coordinator');
   await host.getByRole('combobox',{name:'Worker',exact:true}).selectOption('worker');
@@ -105,6 +108,9 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
   await expect(host.locator('select[name="coordinatorBotId"]')).toHaveValue('coordinator');
   await expect(host.locator('select[name="workerBotId"]')).toHaveValue('worker');
   await expect(host.locator('select[name="maxWorkerAttempts"]')).toHaveValue('3');
+  await expect(host.getByRole('combobox',{name:'Optimization strategy'})).toHaveValue('performance');
+  await expect(host.getByRole('textbox',{name:'Team purpose'}))
+    .toHaveValue('Prioritize thorough verification within explicit time and cost budgets.');
   await host.getByRole('button',{name:'Create disabled preset'}).click();
   await expect(host.getByRole('button',{name:'Demands / Runs'})).toHaveAttribute('aria-current','page');
   const payload = await page.evaluate(() =>
@@ -113,6 +119,8 @@ test('new multi-role Team draft survives workspace redraw and submits exact nati
     input:{name:'Persisted roles',coordinatorBotId:'coordinator',workerBotId:'worker'},
     roster:{workerBotIds:['worker','worker-b'],reviewerBotIds:['reviewer']},
     maxWorkerAttempts:3,
+    purpose:'Prioritize thorough verification within explicit time and cost budgets.',
+    strategy:'performance',
   });
 });
 

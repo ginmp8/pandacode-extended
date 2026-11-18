@@ -1834,7 +1834,9 @@ pub(crate) fn headless_set_team_strategy(
     serde_json::to_string_pretty(&serde_json::json!({
         "orchestrationId": updated.orchestration_id,
         "policyRevision": updated.policy_revision,
-        "purpose": updated.purpose,
+        // The purpose was read from a private local file; do not reflect it
+        // into terminal logs or captured automation output.
+        "purposeConfigured": !updated.purpose.is_empty(),
         "strategy": updated.strategy,
         "grantIssued": false,
         "providerDispatched": false,
@@ -8600,7 +8602,9 @@ mod tests {
         ).unwrap();
         let outcome: serde_json::Value = serde_json::from_str(&output).unwrap();
         assert_eq!(outcome["policyRevision"], team.policy_revision + 1);
-        assert_eq!(outcome["purpose"], "Release engineering");
+        assert_eq!(outcome["purposeConfigured"], true);
+        assert!(outcome.get("purpose").is_none());
+        assert!(!output.contains("Release engineering"), "private purpose must not reach stdout");
         assert_eq!(outcome["strategy"], "economy");
         assert_eq!(outcome["grantIssued"], false);
         assert_eq!(outcome["providerDispatched"], false);

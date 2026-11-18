@@ -764,7 +764,9 @@ the update. A stale revision or invalid strategy fails without a partial write;
 the command never issues grants, selects a different model, or dispatches a
 provider. Earlier admitted Tickets retain their immutable strategy snapshots.
 The CLI opens the existing SQLite database without startup recovery, protecting
-concurrent headless sessions from an unrelated interruption.
+concurrent headless sessions from an unrelated interruption. Its JSON result
+reports `purposeConfigured` but never echoes the private purpose file content;
+the saved value remains inspectable through authorized native Team configuration.
 
 ### Headless operator association of a GitHub Ticket context link
 

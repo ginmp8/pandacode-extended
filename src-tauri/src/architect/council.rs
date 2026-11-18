@@ -1633,6 +1633,24 @@ fn stale(team: &TeamSnapshot, round: usize) -> bool {
     round > 0 && written_since(team, round_start(team, round))
 }
 
+/// S3 may reserve adversarial reviewers only after a genuinely settled,
+/// unchanged first wave. Native issued-grant and report checks still run at
+/// dispatch; this snapshot preflight must never treat a model score as proof.
+fn s3_phase_one_preflight(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> bool {
+    view.complete(1) && !stale(team, 1)
+        && lowest(team, 1).is_some_and(|score| score >= config.target)
+        && criterion_blockers(team, config, 1).is_empty()
+        && unverified_required_skill_checks(team, 1).is_empty()
+        && !severe_findings(team, 1)
+        && !reported_conflicts(team, 1)
+        && independent_review_attempts(team, 1)
+        && in_round(team, 1)
+            .filter(|(worker, seat)| counts(worker, seat))
+            .all(|(worker, seat)| worker.read_only && worker.status == "completed"
+                && !worker.abandoned && worker.wrote_at == 0
+                && worker.files.is_empty() && seat.score.is_some())
+}
+
 /// The round a new reviewer takes its seat in: the seat it replaces, else the latest round while it
 /// is open, current and has room, else the next one if the limit allows. A complete round below the
 /// target with nothing changed since is not re-rolled.
@@ -1693,13 +1711,8 @@ pub(super) fn round_for(team: &TeamSnapshot, config: &CouncilConfig, replaces: O
         if latest >= 2 {
             return Err("S3 two-phase Council has completed its challenge allocation; start a new Council cycle to re-review a changed artifact.".into());
         }
-        if latest == 1 && (!view.complete(1) || stale(team, 1)
-            || lowest(team, 1).is_none_or(|score| score < config.target)
-            || !criterion_blockers(team, config, 1).is_empty()
-            || !unverified_required_skill_checks(team, 1).is_empty()
-            || severe_findings(team, 1))
-        {
-            return Err("S3 challenge reviewers require a complete, passing, independently evidenced, unchanged first phase.".into());
+        if latest == 1 && !s3_phase_one_preflight(team, config, &view) {
+            return Err("S3 challenge reviewers require a complete, passing, conflict-free and independently verified read-only first phase.".into());
         }
     }
     if view.at_limit(config) {
@@ -2211,13 +2224,12 @@ fn verdict_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Opt
         return Some(("Composed Council reached its round limit without distinct authenticated completed reviewer seats; only an attributed user exception can settle it.".into(), false));
     }
     if config.strategy == CouncilExecutionStrategy::TwoPhase {
-        if round == 1 && view.complete(1) && !stale(team, 1)
-            && lowest(team, 1).is_some_and(|score| score >= config.target)
-            && criterion_blockers(team, config, 1).is_empty()
-            && unverified_required_skill_checks(team, 1).is_empty()
-            && !severe_findings(team, 1)
-        {
-            return Some(("S3 phase one passed; launch a fresh independent, read-only Council challenge round against the same artifact and first-phase findings before approval.".into(), false));
+        if round == 1 {
+            return Some((if s3_phase_one_preflight(team, config, view) {
+                "S3 phase one passed; launch a fresh independent, read-only Council challenge round against the same artifact and first-phase findings before approval."
+            } else {
+                "S3 phase one cannot authorize terminal approval or the adversarial phase until every original reviewer is complete, read-only, independent, conflict-free and evidenced."
+            }.into(), false));
         }
         if round >= 2 && !two_phase_satisfied(team, config, view) {
             return Some(("S3 two-phase Council cannot pass without two complete, fresh, independent read-only phases on the unchanged artifact, with both criteria and evidence gates satisfied.".into(), false));
@@ -2869,10 +2881,7 @@ fn status_in(team: &TeamSnapshot, config: &CouncilConfig, view: &Rounds) -> Coun
             || !automatic_escalation_satisfied(team, config, view))
         && low.is_some_and(|score| score >= config.target) && !stale)
         || (config.strategy == CouncilExecutionStrategy::TwoPhase && round == 1
-            && view.complete(1) && !stale && low.is_some_and(|score| score >= config.target)
-            && criterion_blockers(team, config, 1).is_empty()
-            && unverified_required_skill_checks(team, 1).is_empty()
-            && !severe_findings(team, 1)) {
+            && s3_phase_one_preflight(team, config, view)) {
         "dispatch"
     } else {
         "fixing"

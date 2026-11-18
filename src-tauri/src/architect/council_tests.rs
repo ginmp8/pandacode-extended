@@ -1908,6 +1908,44 @@ fn native_s3_uses_fresh_read_only_challengers_and_never_passes_phase_one_alone()
 }
 
 #[test]
+fn s3_phase_one_conflicts_and_untrusted_scores_cannot_admit_a_challenge_or_finish() {
+    let mut config = on(9.0, 3, 2);
+    config.strategy = council::CouncilExecutionStrategy::TwoPhase;
+    let baseline = team_with(config.clone(), vec![
+        seat("initial-security", 1, Some(9.6), SINCE + 1),
+        seat("initial-quality", 1, Some(9.5), SINCE + 2),
+    ]);
+    assert_eq!(council::status(&baseline).unwrap().state, "dispatch");
+    assert_eq!(council::round_for(&baseline, &config, None).unwrap(), 2);
+    assert!(finish_refusal(&baseline).unwrap().contains("S3 phase one passed"));
+
+    let mut conflict = baseline.clone();
+    conflict.workers[0].council.as_mut().unwrap().reported_conflict = true;
+    let mut abandoned = baseline.clone();
+    abandoned.workers[0].abandoned = true;
+    let mut failed = baseline.clone();
+    failed.workers[0].status = "error".into();
+    let mut writable = baseline.clone();
+    writable.workers[0].read_only = false;
+    let mut changed = baseline.clone();
+    changed.workers[0].files.push("unexpected-write.txt".into());
+    for (case, invalid) in [
+        ("unresolved contradiction", conflict),
+        ("scored abandoned reviewer", abandoned),
+        ("failed reviewer with a retained score", failed),
+        ("writable reviewer", writable),
+        ("reviewer with changed files", changed),
+    ] {
+        assert_ne!(council::status(&invalid).unwrap().state, "dispatch",
+            "{case} must not advertise an authorized S3 challenge");
+        assert!(finish_refusal(&invalid).is_some(),
+            "{case} must not allow the Architect to finish after phase one");
+        assert_ne!(council::round_for(&invalid, &config, None).ok(), Some(2),
+            "{case} must not reserve a phase-two reviewer");
+    }
+}
+
+#[test]
 fn s2_and_s3_reject_abandoned_reviewer_replay_even_when_both_scored_rounds_pass() {
     for strategy in [council::CouncilExecutionStrategy::Escalated, council::CouncilExecutionStrategy::TwoPhase] {
         let mut config = on(9.0, 3, 2);

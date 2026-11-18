@@ -1428,6 +1428,81 @@ test('cross-Team Demand pagination rejects overlapping, reordered and foreign Te
   expect(calls.filter(command=>command==='superagent_stop'||command==='superagent_submit')).toHaveLength(0);
 });
 
+test('native Demand first page denies foreign Team, state, project and duplicate receipts', async ({page}) => {
+  test.setTimeout(60_000);
+  await page.goto('/?bots=sample');
+  await page.evaluate(async () => {
+    const {mountSuperagent} = await import('/src/superagent-ui.ts');
+    const host = document.createElement('div'); host.id = 'sa-first-page-boundary';
+    document.body.appendChild(host);
+    type Mode = 'foreign-team' | 'wrong-state' | 'wrong-project' | 'duplicate' | 'valid';
+    let mode: Mode = 'foreign-team';
+    const calls: string[] = [];
+    (window as unknown as {setSaFirstPageMode:(next:Mode)=>void}).setSaFirstPageMode =
+      next => { mode = next; };
+    (window as unknown as {saFirstPageCalls:string[]}).saFirstPageCalls = calls;
+    mountSuperagent(host, async (command, args) => {
+      calls.push(command);
+      if (command === 'bots_list') return [
+        {id:'lead',name:'Lead',paused:false},{id:'worker',name:'Worker',paused:false},
+      ] as never;
+      if (command === 'superagent_list') return [
+        {id:'team-a',name:'Economy',coordinatorBotId:'lead',
+          workerBotId:'worker',enabled:false,policyRevision:2},
+        {id:'team-b',name:'Performance',coordinatorBotId:'lead',
+          workerBotId:'worker',enabled:false,policyRevision:2},
+      ] as never;
+      if (command === 'superagent_tickets') return [] as never;
+      if (command === 'superagent_all_demands') {
+        const query = args?.query as Record<string,unknown> | undefined;
+        if (query?.orchestrationId !== 'team-a') return [] as never;
+        const row = {id:'demand-a',orchestrationId:'team-a',objective:'Native scoped demand',
+          state:'blocked',projectId:'project-a',revision:2,updatedAt:2000};
+        if (mode === 'foreign-team') return [{...row,orchestrationId:'team-b'}] as never;
+        if (mode === 'wrong-state') return [{...row,state:'completed'}] as never;
+        if (mode === 'wrong-project') return [{...row,projectId:'project-b'}] as never;
+        if (mode === 'duplicate') return [row,row] as never;
+        return [row] as never;
+      }
+      throw Error('Unexpected native operation: '+command);
+    });
+  });
+  const host = page.locator('#sa-first-page-boundary');
+  await host.getByRole('button',{name:'Demands / Runs'}).click();
+  const global = host.getByRole('region',{name:'All Demands across Teams'});
+  const rejected = 'Native Demand index returned invalid, duplicate or out-of-scope records';
+  await global.getByRole('combobox',{name:'Filter Demands by Team'}).selectOption('team-a');
+  await expect(host.getByRole('alert')).toContainText(rejected);
+  await expect(global.getByRole('button',{name:'Open demand'})).toHaveCount(0);
+  await page.evaluate(() =>
+    (window as unknown as {setSaFirstPageMode:(mode:'wrong-state')=>void})
+      .setSaFirstPageMode('wrong-state'));
+  await global.getByRole('combobox',{name:'Filter Demands by State'}).selectOption('blocked');
+  await expect(host.getByRole('alert')).toContainText(rejected);
+  await page.evaluate(() =>
+    (window as unknown as {setSaFirstPageMode:(mode:'wrong-project')=>void})
+      .setSaFirstPageMode('wrong-project'));
+  await global.getByRole('textbox',{name:'Exact admitted Project ID'}).fill('project-a');
+  await global.getByRole('button',{name:'Apply project filter'}).click();
+  await expect(host.getByRole('alert')).toContainText(rejected);
+  await page.evaluate(() =>
+    (window as unknown as {setSaFirstPageMode:(mode:'duplicate')=>void})
+      .setSaFirstPageMode('duplicate'));
+  await global.getByRole('button',{name:'Refresh selected Team'}).click();
+  await expect(host.getByRole('alert')).toContainText(rejected);
+  await expect(global.getByRole('button',{name:'Stop demand'})).toHaveCount(0);
+  await page.evaluate(() =>
+    (window as unknown as {setSaFirstPageMode:(mode:'valid')=>void})
+      .setSaFirstPageMode('valid'));
+  await global.getByRole('button',{name:'Refresh selected Team'}).click();
+  await expect(global).toContainText('1 native Demands loaded.');
+  await expect(global).toContainText('Native scoped demand');
+  const calls = await page.evaluate(() =>
+    (window as unknown as {saFirstPageCalls:string[]}).saFirstPageCalls);
+  expect(calls.filter(command => command === 'superagent_all_demands')).toHaveLength(5);
+  expect(calls.some(command => /submit|dispatch|stop|grant|accept/.test(command))).toBe(false);
+});
+
 test('native Team filter pages independently and resets pagination when changing Teams', async ({page}) => {
   test.setTimeout(60_000);
   await page.goto('/?bots=sample');

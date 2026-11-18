@@ -154,8 +154,34 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let linkedDecisions: SourceDecision[] = [], linkedDecisionsLoaded = false;
   let linkedDecisionsHasMore = false;
   const safe = (value: unknown) => escape(String(value ?? ''));
-  const fetchDemandPage = (query: DemandQuery) =>
-    call<DemandIndex[]>('superagent_all_demands', {query});
+  const fetchDemandPage = async (query: DemandQuery): Promise<DemandIndex[]> => {
+    const page = await call<DemandIndex[]>('superagent_all_demands', {query});
+    // A first page is untrusted until its native filter scope and identities
+    // match this request. Never expose foreign rows or their Stop controls.
+    // Continuations additionally validate their cursor against the last row.
+    if (!query.beforeId) {
+      const seen = new Set<string>();
+      if (!Array.isArray(page) || page.length > (query.limit ?? 200) ||
+          page.some(item => {
+            if (!item || typeof item.id !== 'string' ||
+                !/^[A-Za-z0-9_-]{1,128}$/.test(item.id) ||
+                typeof item.orchestrationId !== 'string' ||
+                !/^[A-Za-z0-9_-]{1,128}$/.test(item.orchestrationId) ||
+                !Number.isSafeInteger(item.updatedAt) || item.updatedAt <= 0 ||
+                !Number.isSafeInteger(item.revision) || item.revision < 0 ||
+                typeof item.objective !== 'string' ||
+                (query.orchestrationId && item.orchestrationId !== query.orchestrationId) ||
+                (query.stateFilter && item.state !== query.stateFilter) ||
+                (query.projectId && item.projectId !== query.projectId) ||
+                seen.has(item.id)) return true;
+            seen.add(item.id);
+            return false;
+          })) {
+        throw new Error('Native Demand index returned invalid, duplicate or out-of-scope records; refresh the index.');
+      }
+    }
+    return page;
+  };
   const current = () => presets.find(item => item.id === selected);
   const botName = (id: string) => bots.find(bot => bot.id === id)?.name ?? 'Missing bot';
   const activityTime = (timestamp?: number): string => typeof timestamp === 'number' &&

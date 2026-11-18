@@ -11,6 +11,7 @@ use sha2::{Digest,Sha256};
 use tauri::{Manager,State};
 
 mod intake;
+pub(crate) mod scope;
 pub(crate) use intake::tick;
 
 const GRANT_TTL_MS:i64=24*60*60*1000;
@@ -68,6 +69,9 @@ pub struct AutoStatus {
     pub operator_login:Option<String>,
     pub pending:i64,
     pub blocked:i64,
+    pub scope_authorized:bool,
+    pub approved_file_count:usize,
+    pub native_test_command:Option<String>,
 }
 
 fn eligible(src:&events::EventSource)->bool {
@@ -151,14 +155,18 @@ fn status(store:&Store,source_id:&str)->Result<AutoStatus> {
          FROM sa_auto_intake WHERE source_id=?1",
         [source_id],|r|Ok((r.get(0)?,r.get(1)?)),
     ).map_err(|e|e.to_string())?;
+    let authorized_scope=scope::current(store,&src).ok().flatten();
     let enabled=eligible(&src) && rev==src.policy_revision &&
-        active_grant(store,&src,now)?.is_some();
+        scope::ready(store,&src).unwrap_or(false);
     Ok(AutoStatus {
         source_id:src.id,enabled,
         mode:if enabled {"auto".into()} else {src.mode.clone()},
         repository:src.repository,actor_filter:src.actor_filter,
         event_kind:src.event_kind,max_daily_tasks,used_last_day,expires_at,
         operator_login,pending,blocked,
+        scope_authorized:authorized_scope.is_some(),
+        approved_file_count:authorized_scope.as_ref().map_or(0,|scope|scope.allowed_paths.len()),
+        native_test_command:authorized_scope.map(|scope|scope.command),
     })
 }
 
@@ -249,6 +257,7 @@ pub async fn superagent_auto_status(
 pub async fn superagent_auto_authorize(
     window:tauri::WebviewWindow,state:State<'_,AppState>,
     source_id:String,expected_revision:i64,max_daily_tasks:u8,
+    allowed_paths:Option<Vec<String>>,allowed_test:Option<String>,
 )->Result<AutoStatus> {
     require_main_window(&window)?;
     if !(1..=MAX_DAILY).contains(&max_daily_tasks) {
@@ -258,7 +267,9 @@ pub async fn superagent_auto_authorize(
     // local grant. Changing gh credentials cannot silently grant an Auto run.
     let login=tokio::task::spawn_blocking(authenticated_login)
         .await.map_err(|e|e.to_string())??;
-    let (src,team_name)={
+    let paths=allowed_paths.unwrap_or_default();
+    let command=allowed_test.unwrap_or_default();
+    let (src,team_name,approved_scope)={
         let store=state.store.lock().map_err(|e|e.to_string())?;
         let src=events::source(&store,&source_id)?;
         let team=configuration(&store,&src.orchestration_id)?;
@@ -270,22 +281,32 @@ pub async fn superagent_auto_authorize(
         if active_grant(&store,&src,storage::now())?.is_some() {
             return Err("Auto is already authorized; revoke before changing its scope.".into());
         }
-        (src,team.name)
+        let scope=scope::preflight(&store,&src,&paths,&command)?;
+        (src,team.name,scope)
     };
     use tauri_plugin_dialog::{DialogExt,MessageDialogButtons};
+    let execution_details=if let Some(scope)=&approved_scope {
+        format!("\nApproved exact source files: {}\nNative test command: {}\n\
+                Test manifest SHA-256: {}\n\
+                The source scope will be copied into each new immutable Demand. \
+                Every actual Worker ToolHost still validates its own exact grant.\n",
+            scope.allowed_paths.join(", "),scope.command,scope.manifest)
+    } else {
+        "\nRead-only planning only. No file writes or native test effects authorized.\n".into()
+    };
     let dialog=window.dialog().message(format!(
-        "Authorize bounded automatic read-only Demand admission?\n\n\
+        "Authorize bounded authenticated GitHub Auto admission?\n\n\
          Team: {team_name}\nRepository: {}\nAllowed GitHub actor: {}\n\
          Event: issues.opened\nSigned-in operator: {login}\n\
          Maximum Demands per rolling 24h: {max_daily_tasks}\n\
-         Grant expiration: 24 hours\n\n\
-         Only authenticated new issue events can create read-only native Tickets. \
-         This does NOT authorize file writes, shell/MCP tools, comments, pushes, \
-         merges or releases; any required WorkItem file writes need fresh local confirmation.",
+         Grant expiration: 24 hours\n{execution_details}\n\
+         Incoming GitHub text never grants tools or expands file scope. \
+         No shell, MCP, GitHub comments, pushes, merges or releases are authorized. \
+         Stop, expiry, source revocation or policy drift blocks later effects.",
         src.repository,src.actor_filter,
-    )).title("Authorize GitHub Auto (read-only)")
+    )).title("Authorize GitHub Auto")
         .buttons(MessageDialogButtons::OkCancelCustom(
-            "Authorize read-only Auto".into(),"Cancel".into()
+            "Authorize bounded Auto".into(),"Cancel".into()
         ));
     #[cfg(desktop)]
     let dialog=dialog.parent(&window);
@@ -300,6 +321,9 @@ pub async fn superagent_auto_authorize(
         current.event_kind!=src.event_kind ||
         active_grant(&store,&current,storage::now())?.is_some() {
         return Err("GitHub source or Team changed during authorization; reload and retry.".into());
+    }
+    if scope::preflight(&store,&current,&paths,&command)? != approved_scope {
+        return Err("GitHub Auto source scope changed while local consent was open.".into());
     }
     let now=storage::now();
     let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
@@ -316,6 +340,7 @@ pub async fn superagent_auto_authorize(
         params![src.id,src.policy_revision,src.repository,src.actor_filter,
             login,i64::from(max_daily_tasks),now,now+GRANT_TTL_MS],
     ).map_err(|e|e.to_string())?;
+    scope::persist(&tx,&current,approved_scope.as_ref(),now)?;
     tx.commit().map_err(|e|e.to_string())?;
     status(&store,&source_id)
 }
@@ -375,7 +400,7 @@ pub async fn superagent_auto_revoke(
 mod tests {
     use super::*;
 
-    fn fixture()->(Store,events::EventSource) {
+    pub(super) fn fixture()->(Store,events::EventSource) {
         let db=rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch(
             "PRAGMA foreign_keys=ON;
@@ -387,6 +412,7 @@ mod tests {
         ).unwrap();
         db.execute_batch(events::SCHEMA).unwrap();
         db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch(scope::SCHEMA).unwrap();
         let now=storage::now();
         db.execute(
             "INSERT INTO sa_event_sources(

@@ -48,7 +48,10 @@ enum Command {
     InspectTicket { ticket_id: String },
     InspectTicketGraph { ticket_id: String },
     InspectTicketEffects { ticket_id: String, before_created_at: Option<i64>, before_key: Option<String>, unresolved_only: bool },
-    InspectTicketSource { ticket_id: String },
+    InspectTicketSource {
+        ticket_id: String, paginated: bool, before_at: Option<i64>,
+        before_source_id: Option<String>, before_delivery_id: Option<String>,
+    },
     InspectSourceHealth { source_id: String },
     InspectSourceDecisions {
         source_id: String, paginated: bool,
@@ -178,13 +181,29 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                     }
                 }
             }
-            if let Command::InspectTicketSource { ticket_id } = &command {
-                // No GitHub network, grants, provider launch or startup recovery.
+            if let Command::InspectTicketSource {
+                ticket_id, paginated, before_at, before_source_id, before_delivery_id,
+            } = &command {
+                // No GitHub network, grant, provider launch or startup recovery.
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
-                    .and_then(|dir| crate::superagent::events::headless_linked_activity(
-                        &dir.join("kingcode.sqlite3"), ticket_id, 50,
-                    ));
+                    .and_then(|dir| {
+                        let database = dir.join("kingcode.sqlite3");
+                        if *paginated {
+                            let cursor = before_at.map(|at|
+                                crate::superagent::events::LinkedActivityCursor {
+                                    at, source_id:before_source_id.clone().unwrap_or_default(),
+                                    delivery_id:before_delivery_id.clone().unwrap_or_default(),
+                                });
+                            crate::superagent::events::headless_linked_activity_page(
+                                &database, ticket_id, 50, cursor.as_ref(),
+                            )
+                        } else {
+                            crate::superagent::events::headless_linked_activity(
+                                &database, ticket_id, 50,
+                            )
+                        }
+                    });
                 match result {
                     Ok(activity) => { println!("{activity}"); std::process::exit(0) }
                     Err(error) => {
@@ -1435,7 +1454,38 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 let ticket_id = args.get(index + 1)
                     .ok_or_else(|| format!("--inspect-ticket-source needs a Ticket ID.\n\n{}", help()))?;
                 validate_ticket_id(ticket_id)?;
-                command = Command::InspectTicketSource { ticket_id: ticket_id.clone() };
+                let mut paginated = false;
+                let mut before_at = None;
+                let mut before_source_id = None;
+                let mut before_delivery_id = None;
+                match args.get(index + 2).map(String::as_str) {
+                    Some("--page") => {
+                        paginated = true;
+                        index += 1;
+                    }
+                    Some("--before") => {
+                        let at = args.get(index + 3)
+                            .ok_or("--before needs timestamp, source ID and delivery ID.")?
+                            .parse::<i64>().ok().filter(|at| *at > 0)
+                            .ok_or("--before needs a positive native receipt timestamp.")?;
+                        let source = args.get(index + 4)
+                            .ok_or("--before needs a source ID.")?;
+                        let delivery = args.get(index + 5)
+                            .ok_or("--before needs a delivery ID.")?;
+                        validate_ticket_id(source)?;
+                        validate_ticket_id(delivery)?;
+                        paginated = true;
+                        before_at = Some(at);
+                        before_source_id = Some(source.clone());
+                        before_delivery_id = Some(delivery.clone());
+                        index += 3;
+                    }
+                    _ => {}
+                }
+                command = Command::InspectTicketSource {
+                    ticket_id:ticket_id.clone(), paginated,
+                    before_at,before_source_id,before_delivery_id,
+                };
                 ops += 1;
                 index += 1;
             }
@@ -1869,9 +1919,10 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
   --inspect-ticket-effects <id> [--before <ms> <effect-key>] [--unresolved-only]
                          Page 100 native effect receipt keys, payload digests and
                          states, optionally unresolved only; never replay or mark applied; exit.
-  --inspect-ticket-source <id>
-                          Read up to 50 verified linked source receipts without GitHub polling,
-                          task execution or startup recovery; exit.
+  --inspect-ticket-source <id> [--page | --before <ms> <source-id> <delivery-id>]
+                          Read 50 linked receipts with native keyset pagination;
+                          --page returns nextCursor, --before continues from that cursor.
+                          No GitHub polling, task execution or startup recovery; exit.
   --link-source-thread <source-id> <ticket-id> <issue:123|pull:123>
                           Add an exact operator-asserted source/Ticket context link through
                           native policy; no provider, grant, GitHub call or task launch.
@@ -2248,10 +2299,31 @@ mod tests {
             assert!(parsed(invalid).is_err(), "{invalid}");
         }
         assert_eq!(parsed("--inspect-ticket-source ticket_123"),
-            Ok(Command::InspectTicketSource { ticket_id: "ticket_123".into() }));
-        assert!(parsed("--inspect-ticket-source").is_err());
-        assert!(parsed("--inspect-ticket-source ../unsafe").is_err());
-        assert!(parsed("--inspect-ticket-source ticket_123 --stop-ticket ticket_123").is_err());
+            Ok(Command::InspectTicketSource {
+                ticket_id:"ticket_123".into(),paginated:false,
+                before_at:None,before_source_id:None,before_delivery_id:None,
+            }));
+        assert_eq!(parsed("--inspect-ticket-source ticket_123 --page"),
+            Ok(Command::InspectTicketSource {
+                ticket_id:"ticket_123".into(),paginated:true,
+                before_at:None,before_source_id:None,before_delivery_id:None,
+            }));
+        assert_eq!(parsed("--inspect-ticket-source ticket_123 --before 5000 source_1 receipt_1"),
+            Ok(Command::InspectTicketSource {
+                ticket_id:"ticket_123".into(),paginated:true,
+                before_at:Some(5000),before_source_id:Some("source_1".into()),
+                before_delivery_id:Some("receipt_1".into()),
+            }));
+        for invalid in [
+            "--inspect-ticket-source",
+            "--inspect-ticket-source ../unsafe",
+            "--inspect-ticket-source ticket_123 --stop-ticket ticket_123",
+            "--inspect-ticket-source ticket_123 --before",
+            "--inspect-ticket-source ticket_123 --before 0 source_1 receipt_1",
+            "--inspect-ticket-source ticket_123 --before 5000 ../source receipt_1",
+            "--inspect-ticket-source ticket_123 --before 5000 source_1",
+            "--inspect-ticket-source ticket_123 --page --before 5000 source_1 receipt_1",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
         assert_eq!(parsed("--link-source-thread source_123 ticket_123 issue:42"),
             Ok(Command::LinkSourceThread {
                 source_id:"source_123".into(),ticket_id:"ticket_123".into(),

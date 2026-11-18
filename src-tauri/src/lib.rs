@@ -4455,6 +4455,7 @@ pub fn run() {
                 superagent::events::superagent_source_unlink_thread,
                 superagent::events::superagent_source_thread_links,
                 superagent::events::superagent_source_thread_activity,
+                superagent::events::superagent_source_thread_activity_page,
                 superagent::superagent_list,
                 superagent::roster::superagent_roster,
                 superagent::roster::superagent_roster_update,

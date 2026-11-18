@@ -178,6 +178,23 @@ pub struct SourceDecisionPage {
     pub next_cursor: Option<SourceDecisionCursor>,
 }
 
+/// Stable, source-aware keyset for task-linked GitHub activity.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LinkedActivityCursor {
+    pub at: i64,
+    pub source_id: String,
+    pub delivery_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LinkedActivityPage {
+    pub decisions: Vec<EventDecisionRecord>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<LinkedActivityCursor>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceThreadLink {
@@ -1872,17 +1889,27 @@ pub async fn superagent_source_link_issue_pull(
 /// Authenticated Observe receipts associated with an explicit, same-Team
 /// source-thread link. This is context metadata only: no work admission,
 /// policy changes, private GitHub content or inferred source authority.
-fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<EventDecisionRecord>> {
+/// Read task-linked GitHub evidence across source classes without ever
+/// trusting a PR title, webhook body or a cursor from another Ticket.
+/// Receipt timestamps can tie: the source and immutable delivery ID complete
+/// the descending keyset so no activity vanishes between adjacent pages.
+fn linked_decisions_page(
+    store: &Store, ticket_id: &str, limit: i64,
+    before: Option<&LinkedActivityCursor>,
+) -> Result<LinkedActivityPage> {
     if !(1..=100).contains(&limit) {
         return Err("Linked source decision page size must be between 1 and 100.".into());
     }
+    if before.is_some_and(|cursor| cursor.at <= 0
+        || !token_ok(&cursor.source_id, 128)
+        || !token_ok(&cursor.delivery_id, 128))
+    {
+        return Err("Invalid linked source decision page cursor.".into());
+    }
     let ticket = super::get_ticket(store, ticket_id)?;
-    // One explicit repository/thread link reveals only bounded receipt
-    // metadata already authenticated for this Team, even if issue comments,
-    // PR reviews and Checks use distinct configured source IDs. EXISTS avoids
-    // multiplying the timeline when the operator links multiple event kinds.
-    // Event sequence numbers are source-local (Checks use a local counter);
-    // sort by native receipt time instead of comparing unrelated cursors.
+    // A same-source legacy receipt remains visible after upgrade. A different
+    // event class needs matching, positive GitHub repository IDs, never a name
+    // match or two NULL identity records.
     let mut stmt = store.db.prepare(
         "SELECT d.source_id,d.delivery_id,d.actor,d.event_kind,d.subject_key,
                 d.sequence,d.decision,d.policy_revision,d.at,
@@ -1893,15 +1920,15 @@ fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<Ev
            ON checks.source_id=d.source_id AND checks.delivery_id=d.delivery_id
          WHERE observed.orchestration_id=?2
            AND d.decision='observed_permitted'
+           AND (?4 IS NULL OR d.at<?4
+             OR (d.at=?4 AND d.source_id<?5)
+             OR (d.at=?4 AND d.source_id=?5 AND d.delivery_id<?6))
            AND EXISTS (
              SELECT 1 FROM sa_source_thread_links l
              JOIN sa_event_sources linked ON linked.id=l.source_id
              WHERE l.ticket_id=?1 AND l.subject_key=d.subject_key
                AND linked.repository=observed.repository COLLATE NOCASE
                AND linked.orchestration_id=observed.orchestration_id
-               -- Historic same-source receipts remain inspectable after upgrade.
-               -- A different source class needs matching, positively attested
-               -- numeric repository IDs; NULL = NULL is not GitHub identity.
                AND (linked.id=observed.id OR EXISTS (
                  SELECT 1 FROM sa_source_repository_identity linked_identity
                  JOIN sa_source_repository_identity observed_identity
@@ -1910,9 +1937,14 @@ fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<Ev
                  WHERE linked_identity.source_id=linked.id
                ))
            )
-         ORDER BY d.at DESC,d.source_id DESC,d.delivery_id DESC LIMIT ?3",
+         ORDER BY d.at DESC,d.source_id DESC,d.delivery_id DESC LIMIT ?3"
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![ticket_id, ticket.orchestration_id, limit], |row| {
+    let rows = stmt.query_map(params![
+        ticket_id, ticket.orchestration_id, limit + 1,
+        before.map(|cursor| cursor.at),
+        before.map(|cursor| cursor.source_id.as_str()),
+        before.map(|cursor| cursor.delivery_id.as_str()),
+    ], |row| {
         Ok(EventDecisionRecord {
             source_id:row.get(0)?, delivery_id:row.get(1)?, actor:row.get(2)?,
             event_kind:row.get(3)?, subject_key:row.get(4)?, sequence:row.get(5)?,
@@ -1921,7 +1953,22 @@ fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<Ev
             check_completed_at:row.get(11)?,
         })
     }).map_err(|e| e.to_string())?;
-    rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
+    let mut decisions = rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e| e.to_string())?;
+    let has_more = decisions.len() > limit as usize;
+    decisions.truncate(limit as usize);
+    let next_cursor = if has_more {
+        decisions.last().map(|last| LinkedActivityCursor {
+            at:last.at, source_id:last.source_id.clone(),
+            delivery_id:last.delivery_id.clone(),
+        })
+    } else { None };
+    Ok(LinkedActivityPage { decisions, next_cursor })
+}
+
+/// Legacy consumers still receive the same bounded array, not a new shape.
+fn linked_decisions(store: &Store, ticket_id: &str, limit: i64) -> Result<Vec<EventDecisionRecord>> {
+    Ok(linked_decisions_page(store, ticket_id, limit, None)?.decisions)
 }
 
 /// Explicit one-shot local operator link, using the exact desktop native transaction.
@@ -1977,6 +2024,16 @@ pub(crate) fn headless_linked_activity(path: &std::path::Path, ticket_id: &str, 
         .map_err(|e| e.to_string())
 }
 
+/// Read-only headless paging never runs Store::open restart recovery.
+pub(crate) fn headless_linked_activity_page(
+    path: &std::path::Path, ticket_id: &str, limit: i64,
+    before: Option<&LinkedActivityCursor>,
+) -> Result<String> {
+    let store = Store::open_read_only(path)?;
+    serde_json::to_string_pretty(&linked_decisions_page(&store, ticket_id, limit, before)?)
+        .map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub async fn superagent_source_thread_activity(
     window: tauri::WebviewWindow, state: State<'_, AppState>,
@@ -1985,6 +2042,18 @@ pub async fn superagent_source_thread_activity(
     require_main_window(&window)?;
     let store = state.store.lock().map_err(|e| e.to_string())?;
     linked_decisions(&store, &ticket_id, limit)
+}
+
+/// The persistent workspace can request subsequent verified activity pages.
+/// This never polls GitHub, launches a bot, issues a grant or runs recovery.
+#[tauri::command]
+pub async fn superagent_source_thread_activity_page(
+    window: tauri::WebviewWindow, state: State<'_, AppState>,
+    ticket_id: String, limit: i64, before: Option<LinkedActivityCursor>,
+) -> Result<LinkedActivityPage> {
+    require_main_window(&window)?;
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    linked_decisions_page(&store, &ticket_id, limit, before.as_ref())
 }
 
 #[tauri::command]
@@ -4421,6 +4490,59 @@ mod tests {
             "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0),
         ).unwrap();
         assert_eq!(count, 2, "Observing linked events must not admit a new demand");
+    }
+
+    #[test]
+    fn linked_activity_keyset_pages_preserve_ties_scope_and_restart() {
+        let (store, path) = fixture();
+        insert_manual_ticket(&store, "paged-ticket", "orch");
+        insert_manual_ticket(&store, "other-ticket", "orch");
+        let off = create_source(&store, "orch", "test/fixture", "trusted-bot",
+            "issues.opened").unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        link_thread(&store, &on.id, "paged-ticket", "issue:42").unwrap();
+        for sequence in 1..=8 {
+            let delivery = format!("page-{sequence}");
+            observe(&store, &event(&delivery, &on, sequence)).unwrap();
+        }
+        // Force a timestamp tie to verify both keyset tie-breakers.
+        store.db.execute("UPDATE sa_event_decisions SET at=?1 WHERE source_id=?2",
+            params![storage::now(), &on.id]).unwrap();
+        let mut foreign = event("foreign-thread", &on, 9);
+        foreign.subject_key = "issue:43".into();
+        observe(&store, &foreign).unwrap();
+
+        // Every page has a stable total order, including equal-millisecond
+        // timestamps. A second Ticket cannot read these receipts.
+        let expected: Vec<String> = linked_decisions(&store, "paged-ticket", 50)
+            .unwrap().into_iter().map(|row| row.delivery_id).collect();
+        assert_eq!(expected.len(), 8);
+        assert!(linked_decisions_page(&store, "other-ticket", 3, None)
+            .unwrap().decisions.is_empty());
+        let mut before: Option<LinkedActivityCursor> = None;
+        let mut found = Vec::new();
+        loop {
+            let page = linked_decisions_page(&store, "paged-ticket", 3, before.as_ref()).unwrap();
+            assert!(page.decisions.len() <= 3);
+            found.extend(page.decisions.into_iter().map(|row| row.delivery_id));
+            before = page.next_cursor;
+            if before.is_none() { break; }
+        }
+        assert_eq!(found, expected);
+        assert!(!found.contains(&"foreign-thread".to_string()));
+        assert!(linked_decisions_page(&store, "paged-ticket", 2,
+            Some(&LinkedActivityCursor { at:0, source_id:on.id.clone(),
+                delivery_id:"page-1".into() })).is_err());
+        let first = linked_decisions_page(&store, "paged-ticket", 3, None).unwrap();
+        let continuation = first.next_cursor.unwrap();
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        let second = linked_decisions_page(&reopened, "paged-ticket", 3,
+            Some(&continuation)).unwrap();
+        assert_eq!(second.decisions.len(), 3);
+        assert_eq!(reopened.db.query_row(
+            "SELECT COUNT(*) FROM sa_assignments", [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
     }
 
     #[test]

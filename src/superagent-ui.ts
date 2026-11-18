@@ -1000,7 +1000,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           ' · Role ' + safe(demandPreflight.result.selectedRole) +
           ' · Bot ' + safe(demandPreflight.result.selectedBotId) +
           ' · Attempt budget ' + safe(demandPreflight.result.attemptBudgetMs) + ' ms</p>' +
-          '<p role="status">' +
+          '<p role="' + (demandPreflight.result.eligible ? 'status' : 'alert') +
+          '"' + (demandPreflight.result.eligible ? '' : ' class="sa-error"') + '>' +
           (demandPreflight.result.eligible
             ? 'No manual admission blocker observed; native admission will recheck.'
             : 'Manual admission not eligible: ' + safe(demandPreflight.result.reason ?? 'No reason reported.')) +
@@ -1302,9 +1303,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               : 'Execution policy not configured')
           : 'Load native Team policy') +
         '</dd></dl>' +
-        '<div class="sa-actions"><button type="button" data-sa-enable="' + safe(chosen.id) +
-        '">' + (chosen.enabled ? 'Disable Team' : 'Enable Team') + '</button>' +
-        '<button type="button" data-sa-view="runs">View runs</button></div>' +
+        '<div class="sa-actions"><button type="button" data-sa-view="runs">View runs</button></div>' +
         '</section></div>'
       : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
     const globalReviewPanel = '<section class="sa-pane sa-cross-team-review" ' +
@@ -2290,7 +2289,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (!selected || selected.mode !== 'observe' || selected.eventKind !== 'check_run.completed') return;
       const runId = Number(raw);
       if (!/^[1-9][0-9]{0,15}$/.test(raw) || !Number.isSafeInteger(runId)) {
-        feedback = 'Enter a positive, bounded Check Run ID from the configured repository.';
+        error = 'Enter a positive, bounded Check Run ID from the configured repository.';
+        feedback = '';
         render();
         return;
       }
@@ -2894,9 +2894,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           teamStrategy = saved;
           await reload();
           teamPanel = 'execution';
-          feedback = saved.enableBlockers.length
-            ? 'Execution mode saved, but the Team remains Off: ' + saved.enableBlockers.join('; ')
-            : 'Execution mode saved. Enable the Team to admit new Demands.';
+          if (saved.enableBlockers.length) {
+            error = 'Team is not executable: ' + saved.enableBlockers.join('; ');
+            feedback = '';
+          } else {
+            feedback = 'Execution mode saved. Enable the Team to admit new Demands.';
+          }
         } catch (cause) {
           throw cause;
         }

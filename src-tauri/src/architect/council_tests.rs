@@ -4617,6 +4617,125 @@ fn admitted_but_unlaunched_child_recovery_revokes_old_leaf_sessions_without_reus
         && leaf.reviewer_binding.is_some() && leaf.wrote_at == 0));
 }
 
+
+#[test]
+fn paused_started_child_recovery_revokes_partial_transcripts_and_reissues_native_grants() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        for bot in ["resumed-security", "resumed-architecture"] {
+            store.db.execute(
+                "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+                 VALUES(?1,?1,?2,'codex','default','plan',?3,?3)",
+                rusqlite::params![bot, project, storage::now()],
+            ).unwrap();
+        }
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut policy = on(9.0, 3, 0);
+        policy.nested_bot_reviewers = ["resumed-security", "resumed-architecture"]
+            .into_iter().map(|bot| council::CouncilNestedReviewer {
+                bot_id: bot.into(), child_reviewers: 2, child_target: 9.0, child_max_rounds: 2,
+            }).collect();
+        root.config.council = Some(policy);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(&state, &sid, "Recover a stopped partial review", None, None).unwrap();
+    let (pending, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Admit task-isolated child reviewers"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    let (old_child, old_leaves, old_cycle) = {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let old = child_council::inspect(&store, &root).unwrap()
+            .into_iter().find(|view| view.bot_id == "resumed-security")
+            .unwrap().child_session_id;
+        let mut child = load(&store, &old).unwrap().unwrap();
+        let leaves = child.workers.iter().map(|leaf| leaf.session_id.clone()).collect::<Vec<_>>();
+        // Simulate a provider that has actually started and persisted partial
+        // context, but has not submitted a score or a reviewer result.
+        child.workers[0].status = "running".into();
+        child.workers[0].council.as_mut().unwrap().started_at = storage::now();
+        save(&store, &mut child).unwrap();
+        store.message(&leaves[0], "user", "Task-local partial review transcript").unwrap();
+        store.db.execute(
+            "UPDATE sessions SET resume_id='abandoned-provider-context' WHERE id=?1",
+            [&leaves[0]],
+        ).unwrap();
+        (old, leaves, root.council_since)
+    };
+    // Native Pause sends stops and advances generation. Recovery cannot
+    // discard an active agent; this fixture has no live agent processes.
+    let paused = control_state(&state, &sid, "pause").unwrap();
+    let frozen_root = serde_json::to_value(&paused).unwrap();
+    {
+        let store = state.store.lock().unwrap();
+        let mut child = load(&store, &old_child).unwrap().unwrap();
+        assert!(child.workers.iter().all(|leaf| leaf.status == "stopped"));
+        store.db.execute(
+            "UPDATE sessions SET status='interrupted' WHERE id=?1",
+            [&old_child],
+        ).unwrap();
+        // A completed result, even with stopped status, cannot be treated as
+        // unfinished work or downgraded to permit a replacement.
+        child.workers[0].council.as_mut().unwrap().score = Some(9.5);
+        save(&store, &mut child).unwrap();
+    }
+    let denied = control_state(&state, &sid, "recover").unwrap_err();
+    assert!(denied.contains("child_council_recovery_denied"), "{denied}");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), frozen_root);
+    {
+        let store = state.store.lock().unwrap();
+        let mut child = load(&store, &old_child).unwrap().unwrap();
+        child.workers[0].council.as_mut().unwrap().score = None;
+        save(&store, &mut child).unwrap();
+    }
+    assert!(control_state(&state, &sid, "resume").unwrap_err().contains("child_council_revoked"));
+    assert_eq!(control_state(&state, &sid, "recover").unwrap().status, "paused");
+    assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), frozen_root);
+    let fresh_id = {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        assert_eq!(root.council_since, old_cycle);
+        let fresh = child_council::inspect(&store, &root).unwrap()
+            .into_iter().find(|view| view.bot_id == "resumed-security").unwrap();
+        assert_ne!(fresh.child_session_id, old_child);
+        assert_eq!(store.session(&old_child).unwrap().status, "interrupted");
+        assert!(load(&store, &fresh.child_session_id).unwrap().unwrap().workers.is_empty());
+        assert!(store.messages(&old_leaves[0], None).unwrap()
+            .iter().any(|msg| msg.content.contains("Task-local partial review transcript")));
+        for leaf in &old_leaves {
+            assert_eq!(store.session(leaf).unwrap().status, "interrupted");
+            assert!(parent_of(&store, leaf).unwrap().is_none());
+        }
+        fresh.child_session_id
+    };
+    let resumed = control_state(&state, &sid, "resume").unwrap();
+    assert_eq!(resumed.council_since, old_cycle);
+    let (pending, _) = dispatch_state(
+        &state, &sid, resumed.generation, "pandacode_finish_team",
+        json!({"summary":"Admit fresh leaves after stopping partial review"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    let store = state.store.lock().unwrap();
+    let root = load(&store, &sid).unwrap().unwrap();
+    let child = load(&store, &fresh_id).unwrap().unwrap();
+    assert_eq!(child.workers.len(), 2);
+    for leaf in &child.workers {
+        assert!(!old_leaves.contains(&leaf.session_id));
+        assert!(leaf.read_only && leaf.reviewer_binding.is_some() && leaf.wrote_at == 0);
+        assert!(store.messages(&leaf.session_id, None).unwrap().is_empty(),
+            "fresh review seats must not inherit the interrupted provider transcript");
+    }
+    assert_eq!(root.council_since, old_cycle);
+}
+
 #[test]
 fn explicit_native_child_recovery_rejects_foreign_work_and_preserves_old_authority() {
     let (state, sid) = state_fixture();

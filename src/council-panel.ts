@@ -470,7 +470,7 @@ export function createCouncil(host: CouncilHost) {
     return entry.tail;
   }
 
-  async function recoverUnstartedChild(sessionId: string): Promise<void> {
+  async function recoverInterruptedChild(sessionId: string): Promise<void> {
     const team = host.team(sessionId);
     if (recoveringChildren.has(sessionId)
       || !team?.config.council?.nestedBotReviewers?.length
@@ -541,8 +541,8 @@ export function createCouncil(host: CouncilHost) {
       recovery.className = 'council-recovery';
       recovery.setAttribute('aria-label', 'Child Council recovery');
       recovery.hidden = true;
-      recovery.innerHTML = '<button type="button" class="ds-btn" data-council-recover>Recover unstarted child Council</button>' +
-        '<small>Only an interrupted child reservation with no admitted reviewers is eligible. Other interrupted reviews remain blocked; resume the team separately.</small>' +
+      recovery.innerHTML = '<button type="button" class="ds-btn" data-council-recover>Recover interrupted child Council</button>' +
+        '<small>Eligible unstarted children or fully stopped, unscored read-only reviews restart with fresh sessions. Completed, active or revoked reviewer work is never reused; resume the team separately.</small>' +
         '<p class="council-recovery-feedback" aria-live="polite" hidden></p>';
       panel.querySelector<HTMLElement>('.council-foot')!.before(recovery);
       // Opening or changing the disclosure alters the popover's natural height.
@@ -723,7 +723,7 @@ export function createCouncil(host: CouncilHost) {
     };
     const onClick = (event: MouseEvent) => {
       if ((event.target as Element).closest('[data-council-recover]')) {
-        void recoverUnstartedChild(sessionId);
+        void recoverInterruptedChild(sessionId);
         return;
       }
       const option = (event.target as Element).closest<HTMLElement>('[data-value], [data-reviewers-source]');

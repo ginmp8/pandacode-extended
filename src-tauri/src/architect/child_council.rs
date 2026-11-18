@@ -450,12 +450,12 @@ pub(super) fn require_unrevoked_child_sessions_on_resume(
     Ok(())
 }
 
-/// Explicit recovery may replace a crash-interrupted child that never admitted
-/// a leaf. It never renews an old reviewer grant, restores a conversation or
-/// changes the root cycle. Old child ownership is retained as a revocation
-/// tombstone, preventing an orphaned bot chat from claiming the session.
-/// The caller must hold the store lock and exclude all live root/leaf agents.
-pub(super) fn recover_unstarted_children(store: &Store, root: &TeamSnapshot) -> Result<usize> {
+/// Explicit recovery replaces interrupted child reservations or fully stopped
+/// read-only child attempts with no scored/reported result. Partial provider
+/// transcripts remain on revoked old sessions: they are never copied into the
+/// fresh Council or treated as approval. No active root/leaf agent is allowed.
+/// The caller holds the store lock and validates task-scoped native authority.
+pub(super) fn recover_interrupted_children(store: &Store, root: &TeamSnapshot) -> Result<usize> {
     let config = root.config.council.as_ref().ok_or("Council is off.")?;
     if !matches!(root.status.as_str(), "paused" | "failed" | "interrupted")
         || root.council_since <= 0 || config.nested_bot_reviewers.is_empty()
@@ -485,15 +485,14 @@ pub(super) fn recover_unstarted_children(store: &Store, root: &TeamSnapshot) -> 
         let old = store.session(&old_id)?;
         let old_team = super::load(store, &old_id)?
             .ok_or("child_council_recovery_denied: child state is missing.")?;
-        // Native Pause changes the root generation without updating a live
-        // child's already-issued reviewer grants. An unlaunched sibling must
-        // be rotated too, or a partial recovery strands it at stale authority.
-        // Never rotate a started sibling: it requires a fresh Council cycle.
-        let stale_unlaunched_pause = root.status == "paused"
+        // A paused root has a newer generation than its admitted child.
+        // Once every provider process has stopped, fresh task-scoped grants
+        // may replace an unfinished child without reviving the old attempt.
+        let stale_paused_child = root.status == "paused"
             && old.status != "interrupted"
             && old_team.status == "running"
             && old_team.generation < root.generation;
-        if old.status != "interrupted" && !stale_unlaunched_pause {
+        if old.status != "interrupted" && !stale_paused_child {
             continue;
         }
         let previous: FrozenChildReservation = serde_json::from_str(&frozen_json)
@@ -502,24 +501,26 @@ pub(super) fn recover_unstarted_children(store: &Store, root: &TeamSnapshot) -> 
         let expected = frozen_with_recovery_status(
             store, root, choice, &old_id, &child_config, true,
         )?;
-        // A crash may interrupt a child after its leaf roster is admitted,
-        // but before any reviewer is launched. Recover only that zero-work
-        // state: started, scored, reported or externally resumed leaves must
-        // remain revoked until a new task cycle is explicitly authorized.
+        // Only the first native leaf wave can be restarted in the same
+        // frozen cycle. An admitted reviewer may have started, but every
+        // started leaf must have been STOPPED by an explicit root Pause;
+        // nothing can have scored, reported, written or settled. A real
+        // interrupted/error native leaf still fails validate_admitted below.
         let pristine = old_team.status == "blocked" && old_team.workers.is_empty()
             && old_team.objective.is_empty() && old_team.generation == 0
             && old_team.council_since == 0;
-        let admitted_unstarted = old_team.status == "running"
+        let admitted_without_result = old_team.status == "running"
             && old_team.workers.len() == choice.child_reviewers
             && old_team.objective == root.objective
-            // Native Pause advances the root generation and turns queued
-            // leaves into stopped seats, without starting any provider work.
             && old_team.generation <= root.generation
             && old_team.council_since == root.council_since
             && old_team.workers.iter().all(|leaf| {
                 matches!(leaf.status.as_str(), "queued" | "stopped") && !leaf.abandoned
                     && leaf.council.as_ref().is_some_and(|seat|
-                        seat.round == 1 && seat.score.is_none() && seat.started_at == 0
+                        seat.round == 1 && seat.score.is_none()
+                        && (seat.started_at == 0
+                            || (root.status == "paused" && leaf.status == "stopped"
+                                && old_team.generation < root.generation))
                         && !seat.closed_by_selection && !seat.reported_severe_finding
                         && !seat.reported_conflict)
                     && leaf.summary.is_empty() && leaf.error.is_none()
@@ -529,14 +530,14 @@ pub(super) fn recover_unstarted_children(store: &Store, root: &TeamSnapshot) -> 
         if previous != expected
             || super::parent_of(store, &old_id)?.as_deref() != Some(root.session_id.as_str())
             || old_team.config != child_config
-            || (!pristine && !admitted_unstarted)
+            || (!pristine && !admitted_without_result)
             || old_team.pending_setup.is_some() || old_team.pending_turn.is_some()
             || old_team.summary.is_some() || old_team.council_accepted.is_some()
             || !old_team.briefings.is_empty()
         {
-            return Err("child_council_recovery_denied: interrupted child has started, changed or unauthorized work.".into());
+            return Err("child_council_recovery_denied: interrupted child has completed, changed or unauthorized work.".into());
         }
-        if admitted_unstarted {
+        if admitted_without_result {
             // All previously issued seats must have real recorded native
             // authority and exact project/cycle/leaf ownership. Do not
             // recover a forged child by merely counting its worker entries.
@@ -575,7 +576,7 @@ pub(super) fn recover_unstarted_children(store: &Store, root: &TeamSnapshot) -> 
             "SELECT COALESCE(task_description,'') FROM sessions WHERE id=?1",
             [&old_id], |row| row.get(0),
         ).map_err(|e| e.to_string())?;
-        let expected_leaves = if admitted_unstarted { choice.child_reviewers as i64 } else { 0 };
+        let expected_leaves = if admitted_without_result { choice.child_reviewers as i64 } else { 0 };
         if claims != 1 || owned != 1 || descendants != expected_leaves
             || requests != expected_leaves || messages != 0
             || description != RESERVATION_DESCRIPTION
@@ -583,11 +584,11 @@ pub(super) fn recover_unstarted_children(store: &Store, root: &TeamSnapshot) -> 
         {
             return Err("child_council_recovery_denied: interrupted child has existing work or competing authority.".into());
         }
-        // An admitted but never launched reviewer must have no conversation,
-        // resumed provider state or completed task. Leave its immutable native
-        // grant as historical evidence while removing its ownership edge;
-        // both the old session and any late callback become ineligible.
-        if admitted_unstarted {
+        // Preserve old partial provider transcripts and immutable grants
+        // for audit, but never reuse them. Only a stopped/started leaf may
+        // have provider messages or a resume token; a never-started leaf may
+        // not inherit those artifacts from an unrelated conversation.
+        if admitted_without_result {
             for leaf in &old_team.workers {
                 let session = store.session(&leaf.session_id)?;
                 let messages: i64 = store.db.query_row(
@@ -598,11 +599,13 @@ pub(super) fn recover_unstarted_children(store: &Store, root: &TeamSnapshot) -> 
                     "SELECT COALESCE(task_description,'') FROM sessions WHERE id=?1",
                     [&leaf.session_id], |row| row.get(0),
                 ).map_err(|e| e.to_string())?;
-                if messages != 0 || session.resume_id.is_some()
+                let started = leaf.council.as_ref()
+                    .is_some_and(|seat| seat.started_at > 0);
+                if (!started && (messages != 0 || session.resume_id.is_some()))
                     || session.archived || session.task_stage == "completed"
                     || task != leaf.assignment
                 {
-                    return Err("child_council_recovery_denied: admitted leaf has already started or its task changed.".into());
+                    return Err("child_council_recovery_denied: admitted leaf has changed or unauthorized history.".into());
                 }
             }
             for leaf in &old_team.workers {
@@ -620,9 +623,9 @@ pub(super) fn recover_unstarted_children(store: &Store, root: &TeamSnapshot) -> 
                 }
             }
         }
-        // Revoke paused-but-unlaunched siblings as well as crash-interrupted
-        // children. Neither their retained sessions nor late callbacks can
-        // regain authority after the replacement.
+        // Revocation precedes fresh reservation in this transaction. Both
+        // stopped partial reviews and unlaunched siblings lose native ownership;
+        // late callbacks cannot become valid parent/child evidence.
         store.db.execute(
             "UPDATE sessions SET status='interrupted' WHERE id=?1",
             [&old_id],
@@ -654,7 +657,7 @@ pub(super) fn recover_unstarted_children(store: &Store, root: &TeamSnapshot) -> 
         recovered += 1;
     }
     if recovered == 0 {
-        return Err("child_council_recovery_denied: no pristine interrupted child needs recovery.".into());
+        return Err("child_council_recovery_denied: no eligible interrupted child needs recovery.".into());
     }
     // Roll back every replacement if any sibling has stale or unauthorized
     // native evidence. Root status and Council revision remain unchanged.

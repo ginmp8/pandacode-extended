@@ -933,11 +933,11 @@ test('Council inspector denial remains accessible on narrow screens', async ({ p
 });
 
 
-test('existing Council modal exposes only native unstarted child recovery on resting nested tasks', async ({ page }) => {
+test('existing Council modal exposes native interrupted child recovery on resting nested tasks', async ({ page }) => {
   await page.setViewportSize({ width: 360, height: 640 });
   await open(page, '/?council', {}, 0, '', {}, undefined, undefined, 'eligible');
   await button(page).click();
-  const recovery = panel(page).getByRole('button', { name: 'Recover unstarted child Council' });
+  const recovery = panel(page).getByRole('button', { name: 'Recover interrupted child Council' });
   await expect(recovery).toBeVisible();
   await recovery.focus();
   await page.keyboard.press('Enter');
@@ -951,19 +951,19 @@ test('existing Council modal exposes only native unstarted child recovery on res
 
   await open(page, '/?council');
   await button(page).click();
-  await expect(panel(page).getByRole('button', { name: 'Recover unstarted child Council' })).toBeHidden();
+  await expect(panel(page).getByRole('button', { name: 'Recover interrupted child Council' })).toBeHidden();
 });
 
 test('native child recovery denial is visible but cannot silently resume or approve', async ({ page }) => {
   await open(page, '/?council', {}, 0, '', {}, undefined, undefined, 'denied');
   await button(page).click();
-  await panel(page).getByRole('button', { name: 'Recover unstarted child Council' }).click();
+  await panel(page).getByRole('button', { name: 'Recover interrupted child Council' }).click();
   await expect(panel(page).locator('.council-recovery-feedback[role="alert"]'))
     .toContainText('child_council_recovery_denied: interrupted child has existing work');
   expect(await page.evaluate(() => (window as any).__councilRecoverCalls)).toEqual([
     { sessionId: 'session-1', action: 'recover' },
   ]);
-  await expect(panel(page).getByRole('button', { name: 'Recover unstarted child Council' })).toBeEnabled();
+  await expect(panel(page).getByRole('button', { name: 'Recover interrupted child Council' })).toBeEnabled();
 });
 
 test('existing Council modal sends only the explicit native S2 strategy and preserves S1 defaults', async ({ page }) => {

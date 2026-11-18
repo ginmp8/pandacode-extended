@@ -1953,7 +1953,7 @@ pub(crate) fn control_state(state: &AppState, session_id: &str, action: &str) ->
                 {
                     return Err("child_council_recovery_denied: root or reviewer agents are still running.".into());
                 }
-                child_council::recover_unstarted_children(&store, &team)?;
+                child_council::recover_interrupted_children(&store, &team)?;
                 // A separate explicit Resume admits new leaf work; this action
                 // does not alter the root's status, revision or approval gate.
                 return Ok(team);

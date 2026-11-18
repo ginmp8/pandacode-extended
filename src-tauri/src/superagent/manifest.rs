@@ -779,7 +779,7 @@ mod tests {
         assert!(!config.enabled);
         assert!(super::super::change_enabled(&store,&id,config.policy_revision,true).is_err());
         let exported=export(&store).unwrap();
-        assert_eq!(exported["schemaVersion"], 5);
+        assert_eq!(exported["schemaVersion"], 6);
         assert_eq!(exported["orchestrations"][0]["extraWorkerBots"],json!(["Worker B","Worker C"]));
         assert_eq!(exported["orchestrations"][0]["reviewerBots"],json!(["Reviewer A","Reviewer B"]));
         assert!(!exported.to_string().contains("worker-project"));

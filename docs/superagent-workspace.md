@@ -245,3 +245,33 @@ redacted and read-only. Missing or invalid Tickets and cursors fail closed.
 Validation: `native_desktop_activity_pages_are_ticket_scoped_strict_and_restart_durable`
 (Rust) and `desktop native Ticket activity pages are keyset-bound` (Playwright).
 These tests do not constitute proof of native Council or tool authorization.
+
+## Versioned Team purpose and strategy (v50, partial UX-P2)
+
+The native Team roster now stores a bounded purpose (up to 400 characters)
+and one of `balanced`, `economy`, `performance`, `security_critical`
+or `custom`. The disabled Team's **Save Team purpose and strategy** action
+uses the same main-window authorization, policy-revision compare-and-swap,
+unsettled-Demand prohibition and transaction boundary as the Worker attempt
+budget. Invalid or stale edits fail before changing the saved intent.
+
+An admitted Demand freezes the effective Team purpose and strategy in a
+revision-bound `sa_ticket_strategies` record **in the same transaction** as
+its Ticket, role profile, Mandate and first Assignment. Subsequent Team edits
+do not rewrite that snapshot. Pre-v50 Tickets deliberately show unavailable
+strategy provenance; their authorization and provider behavior remain unchanged.
+Duplicating a Team includes the strategy, but never copies runtime state.
+
+Portable SuperAgent manifest **v6** carries both fields, validates them before
+import, rejects conflicts with existing Teams and imports new Teams disabled.
+Versions 1–5 remain importable with empty purpose and balanced strategy.
+No strategy value grants tools, changes existing bot models, selects providers,
+infers costs, initiates GitHub work, supplies a Council verdict or launches a
+multi-worker runtime. An actual optimization scheduler remains out of scope for
+this validated configuration slice.
+
+Evidence targets: `team_strategy_is_versioned_portable_and_pinned_per_demand_after_restart`,
+`portable_v6_strategy_roundtrip_rejects_conflicting_and_legacy_metadata`
+(Rust), and `Team strategy changes through native CAS and persists after
+refresh` (Playwright). Execution results must be checked on the **exact
+published commit**, not inferred from these test declarations.

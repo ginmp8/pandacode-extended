@@ -1360,18 +1360,19 @@ pub(super) fn verified_parent_seats(
     Ok((ready && artifact_pinned).then_some(seats))
 }
 
-/// An automatically triggered M4 S2 child-only Council can settle only after
-/// each failing first-wave child has supplied fresh native second-wave proof.
-/// A clean sibling keeps its original authenticated composite; no phantom root
-/// worker or unselected reviewer source may replace either child.
-pub(super) fn verified_triggered_s2_m4_parent_seats(
+/// Reauthenticate triggered S2 child seats for M4-M7 without manufacturing
+/// votes. Passing first-wave children retain their original composite while
+/// failed children require fresh native second-wave receipts. Mixed-mode root
+/// reviewers remain subject to the existing root authority and score gates.
+pub(super) fn verified_triggered_s2_parent_seats(
     store: &Store, root: &TeamSnapshot,
 ) -> Result<Option<Vec<AuthenticatedParentSeat>>> {
     let Some(config) = root.config.council.as_ref() else { return Ok(None) };
     if config.strategy != super::council::CouncilExecutionStrategy::Escalated
-        || config.force_escalation || config.mode() != "m4"
+        || config.force_escalation
+        || !matches!(config.mode(), "m4" | "m5" | "m6" | "m7")
         || !(super::active(&root.status) || root.status == "completed")
-        || !root.workers.is_empty()
+        || (config.mode() == "m4" && !root.workers.is_empty())
         || !root_artifact_revision(store, root, false)?
         || !super::council_evidence_is_current(store, root)
     {

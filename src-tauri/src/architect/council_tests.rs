@@ -7101,6 +7101,119 @@ fn nested_m4_triggered_s2_passes_only_after_fresh_native_child_callbacks() {
 }
 
 #[test]
+fn nested_m5_child_triggered_s2_requires_fresh_native_child_receipts_and_root_quorum() {
+    let (state, sid) = state_fixture();
+    {
+        let store = state.store.lock().unwrap();
+        let project = store.session(&sid).unwrap().project_id;
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('security-child','security-child',?1,'codex','default','plan',?2,?2)",
+            rusqlite::params![project, storage::now()],
+        ).unwrap();
+        let mut root = load(&store, &sid).unwrap().unwrap();
+        let mut config = on(9.0, 3, 0);
+        config.strategy = council::CouncilExecutionStrategy::Escalated;
+        config.automatic_reviewers = 1;
+        config.nested_bot_reviewers.push(council::CouncilNestedReviewer {
+            bot_id: "security-child".into(), child_reviewers: 2,
+            child_target: 9.5, child_max_rounds: 2,
+        });
+        assert_eq!(config.mode(), "m5");
+        config.validate().unwrap();
+        root.config.council = Some(config);
+        root.status = "ready".into();
+        root.round = 0;
+        save(&store, &mut root).unwrap();
+    }
+    let (started, _) = start_state(
+        &state, &sid, "Authenticate an M5 child-triggered S2 review", None, None,
+    ).unwrap();
+    call(&state, &sid, "pandacode_dispatch_workers", json!({
+        "assignments": [reviewer_assignment("root-automatic", "correctness")]
+    })).unwrap();
+    let action = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+    let (root_run, _) = claim(&state, action);
+    assert!(root_run.config.reviewer_boundary);
+    finish(&state, &root_run, "Clean independent root review.\nCouncil score: 9.7/10", true);
+    let (pending, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Wait for native child reviewers"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(pending["completed"], false);
+    for _ in 0..2 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                "Below-target first-wave child report.\nCouncil score: 8.5/10").unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    }
+    {
+        let store = state.store.lock().unwrap();
+        let root = load(&store, &sid).unwrap().unwrap();
+        let child = child_council::inspect(&store, &root).unwrap().pop().unwrap();
+        assert_eq!(child.automatic_escalation_triggers, vec!["below_target"]);
+        assert!(child.verified_escalation_receipt.is_none());
+        assert!(!verified_council_pass(&store, &root),
+            "a passing root and an admitted child wave are not approval");
+        assert!(authenticated_hierarchical_status(&store, &root).is_none());
+    }
+    let mut second_wave_sessions = std::collections::HashSet::new();
+    for _ in 0..2 {
+        let launch = next_action_state(&state, &mut |_| {}).unwrap().unwrap();
+        let round = {
+            let store = state.store.lock().unwrap();
+            let child = load(&store, &launch.admission.parent).unwrap().unwrap();
+            child.workers.iter().find(|worker| worker.session_id == launch.sid)
+                .unwrap().council.as_ref().unwrap().round
+        };
+        assert_eq!(round, 2, "a triggered child must use fresh S2 leaves");
+        assert!(second_wave_sessions.insert(launch.sid.clone()));
+        {
+            let store = state.store.lock().unwrap();
+            store.message(&launch.sid, "assistant",
+                "Fresh independent child S2 callback.\nCouncil score: 9.8/10").unwrap();
+        }
+        completed_state(&state, &launch.sid, Some(&launch.admission), true, false, &mut |_| {});
+    }
+    let (result, _) = dispatch_state(
+        &state, &sid, started.generation, "pandacode_finish_team",
+        json!({"summary":"Validate native M5 child escalation evidence"}),
+        &std::sync::atomic::AtomicBool::new(false),
+    ).unwrap();
+    assert_eq!(result["completed"], true,
+        "fresh child callbacks plus the original native root quorum must pass M5 S2");
+    let store = state.store.lock().unwrap();
+    let saved = load(&store, &sid).unwrap().unwrap();
+    assert_eq!(saved.council_status.as_ref().unwrap().state, "passed");
+    assert_eq!(saved.council_status.as_ref().unwrap().lowest, Some(9.7));
+    assert!(verified_council_pass(&store, &saved));
+    let inspected = child_council::inspect(&store, &saved).unwrap().pop().unwrap();
+    assert!(inspected.verified_child_receipt.is_none(),
+        "the failing original child wave remains non-passing");
+    assert!(inspected.verified_escalation_receipt.is_some());
+    assert_eq!(inspected.leaf_attempts.len(), 4);
+    let child = load(&store, &inspected.child_session_id).unwrap().unwrap();
+    let first_sessions = child.workers.iter()
+        .filter(|worker| worker.council.as_ref().is_some_and(|seat| seat.round == 1))
+        .map(|worker| worker.session_id.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    assert!(second_wave_sessions.iter().all(|sid| !first_sessions.contains(sid.as_str())),
+        "escalation cannot reuse an original leaf session");
+    store.db.execute(
+        "DELETE FROM architect_requests WHERE parent_session_id=?1 AND key=?2",
+        rusqlite::params![sid, format!(
+            "native-council-child-s2-receipt:{}:security-child", saved.council_since
+        )],
+    ).unwrap();
+    assert!(!verified_council_pass(&store, &saved),
+        "revoking the child S2 receipt must revoke the mixed root verdict");
+}
+
+#[test]
 fn nested_m6_direct_bot_and_child_require_independent_native_callbacks() {
     assert_nested_mixed_root_callbacks(false);
 }

@@ -588,9 +588,10 @@ fn authenticated_hierarchical_status(
         return None;
     }
     let children = if config.strategy == council::CouncilExecutionStrategy::Escalated
-        && !config.force_escalation && config.mode() == "m4"
+        && !config.force_escalation
+        && matches!(config.mode(), "m4" | "m5" | "m6" | "m7")
     {
-        match child_council::verified_triggered_s2_m4_parent_seats(store, team) {
+        match child_council::verified_triggered_s2_parent_seats(store, team) {
             Ok(Some(seats)) => seats,
             Ok(None) => child_council::verified_parent_seats(store, team).ok().flatten()?,
             Err(_) => return None,

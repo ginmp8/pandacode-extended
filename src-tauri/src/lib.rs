@@ -4466,6 +4466,7 @@ pub fn run() {
                 superagent::superagent_stop,
                 bots::shared_channels::bot_shared_channels,
                 bots::shared_channels::bot_shared_channel_detail,
+                bots::shared_channels::bot_shared_channel_council_inspect,
                 bots::shared_channels::bot_shared_channel_create,
                 bots::shared_channels::bot_shared_channel_update,
                 bots::shared_channels::bot_shared_channel_archive,

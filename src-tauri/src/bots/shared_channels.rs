@@ -488,6 +488,54 @@ fn council_view(store: &Store, delivery_id: &str, session_id: &str, delivery_sta
     Ok(Some(ChannelCouncilView { cycle_id, session_id: session_id.to_owned(), state, round, target, lowest, artifact_revision: revision, notice, reviewers, followup_status, followup_url, followup_error, acceptance_reason, accepted_by }))
 }
 
+/// Read one channel-owned Council projection through its durable delivery identity.
+/// This is a read-only view, not a new Council verdict or an approval capability.
+/// An unrelated task id, changed review policy or superseded cycle is never inspected.
+pub(crate) fn inspect_channel_delivery(
+    store: &Store, channel_id: &str, delivery_id: &str,
+) -> Result<serde_json::Value> {
+    // The local user may inspect an archived channel's historical Council,
+    // but its delivery must have originated in this exact channel.
+    shared_channel(store, channel_id)?;
+    let delivery: Option<(String, String, String, String, String)> = store.db.query_row(
+        "SELECT d.session_id,c.source_message_id,c.artifact_revision,c.executor_bot_id,d.bot_id
+         FROM bot_shared_channel_deliveries d
+         JOIN extended_channel_council_deliveries c
+           ON c.delivery_id=d.id AND c.channel_id=d.channel_id
+              AND c.source_message_id=d.message_id
+         WHERE d.id=?1 AND d.channel_id=?2",
+        params![delivery_id,channel_id],
+        |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?,row.get(4)?)),
+    ).optional().map_err(|e| e.to_string())?;
+    let Some((session_id, message_id, artifact_revision, executor, assigned_bot)) = delivery else {
+        return Err("channel_council_inspection_denied: delivery does not belong to this channel.".into());
+    };
+    let thread: Option<String> = store.db.query_row(
+        "SELECT external_id FROM bot_threads WHERE session_id=?1",
+        [&session_id], |row| row.get(0),
+    ).optional().map_err(|e| e.to_string())?;
+    if executor != assigned_bot
+        || thread.as_deref() != Some(&format!("channel-council:{delivery_id}"))
+    {
+        return Err("channel_council_inspection_denied: task ownership changed.".into());
+    }
+    let requested = council_request(store, &message_id)?
+        .ok_or("channel_council_inspection_denied: original Council opt-in is unavailable.")?;
+    let team = crate::architect::load(store, &session_id)?
+        .ok_or("channel_council_inspection_denied: native task no longer exists.")?;
+    if team.config.council.as_ref() != Some(&requested.council)
+        || artifact_revision != format!("cycle:{}", team.council_since)
+    {
+        return Err("channel_council_inspection_stale: policy or cycle differs from the channel delivery.".into());
+    }
+    let inspection = crate::architect::council_inspection_state(store, &session_id)?
+        .ok_or("channel_council_inspection_denied: no native Council exists.")?;
+    if inspection.session_id != session_id || inspection.cycle_started_at != team.council_since {
+        return Err("channel_council_inspection_stale: native Council identity changed.".into());
+    }
+    serde_json::to_value(inspection).map_err(|e| e.to_string())
+}
+
 /// The channel and its latest `limit` history rows (posts, replies and assignments), oldest first.
 pub(crate) fn detail(store: &Store, id: &str, limit: usize) -> Result<SharedChannelDetail> {
     let limit = limit.clamp(1, 10_000);
@@ -1298,6 +1346,16 @@ pub async fn bot_shared_channels(state: State<'_,AppState>) -> Result<Vec<Shared
 pub async fn bot_shared_channel_detail(state: State<'_,AppState>, channel_id:String, limit:Option<usize>) -> Result<SharedChannelDetail> {
     let store = state.store.lock().map_err(|e|e.to_string())?;
     detail(&store,&channel_id,limit.unwrap_or(HISTORY_PAGE))
+}
+
+/// A channel's historical Council can only be inspected by its delivery id.
+/// No arbitrary task id is accepted from webview markup or message content.
+#[tauri::command]
+pub async fn bot_shared_channel_council_inspect(
+    state: State<'_,AppState>, channel_id: String, delivery_id: String,
+) -> Result<serde_json::Value> {
+    let store = state.store.lock().map_err(|e| e.to_string())?;
+    inspect_channel_delivery(&store, &channel_id, &delivery_id)
 }
 
 #[tauri::command]

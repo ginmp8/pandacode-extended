@@ -245,7 +245,7 @@ test.describe('shared bot channels', () => {
     await page.route('**/src/preview.ts*', async route => {
       const response = await route.fetch();
       const body = (await response.text()).replace(/switch\s*\(command\)\s*\{/,
-        'if (command === "architect_council_inspect" && args.sessionId === "channel-cycle-task") return ' +
+        'if (command === "bot_shared_channel_council_inspect" && args.channelId === "channel-one" && args.deliveryId === "delivery-one") return ' +
         JSON.stringify(inspection) + '; switch (command) {');
       await route.fulfill({ response, body });
     });
@@ -282,6 +282,12 @@ test.describe('shared bot channels', () => {
     await expect(dialog.getByText('Tokens unknown', { exact: false })).toBeVisible();
     await expect(dialog.getByText('<script>alert(1)</script>', { exact: false })).toBeVisible();
     await expect(dialog.locator('script')).toHaveCount(0);
+    // The browser must use the channel's delivery identity rather than allowing
+    // an arbitrary DOM session id to select an unrelated Council.
+    await expect(page.getByRole('button', { name: 'Inspect Council evidence' }))
+      .toHaveAttribute('data-delivery-id', 'delivery-one');
+    await expect(page.getByRole('button', { name: 'Inspect Council evidence' }))
+      .not.toHaveAttribute('data-session-id', /.+/);
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden();
     await expect(page.getByRole('textbox', { name: 'Message channel' })).toBeVisible();

@@ -1377,6 +1377,59 @@ fn fresh_bot_message_keeps_active_desktop_queue_memory_and_schedules() {
 }
 
 #[test]
+fn channel_council_inspector_requires_owning_delivery_and_frozen_cycle() {
+    let f = fixture();
+    upgrade(&f.store.db).unwrap();
+    let reviewer = bot(&f);
+    let channel = shared_channels::create(&f.store, "review", std::slice::from_ref(&reviewer.id)).unwrap();
+    let unrelated = shared_channels::create(&f.store, "unrelated", std::slice::from_ref(&reviewer.id)).unwrap();
+    let council = crate::architect::CouncilConfig::default();
+    let message_id = crate::storage::id();
+    let delivery_id = crate::storage::id();
+    f.store.db.execute(
+        "INSERT INTO bot_shared_channel_messages(id,channel_id,kind,text,status,created_at)
+         VALUES(?1,?2,'user','Review task','in_progress',?3)",
+        params![message_id,channel.id,crate::storage::now()],
+    ).unwrap();
+    f.store.db.execute(
+        "INSERT INTO extended_channel_council_requests(message_id,council_json,executor_ids,created_at)
+         VALUES(?1,?2,?3,?4)",
+        params![message_id,serde_json::to_string(&council).unwrap(),
+            serde_json::to_string(&vec![reviewer.id.clone()]).unwrap(),crate::storage::now()],
+    ).unwrap();
+    shared_channels::provision_channel_delivery(
+        &f.store, &channel.id, &message_id, &reviewer.id, "Review task",
+        shared_channels::ChannelDeliveryAdmission { created_at: crate::storage::now(), depth: 0 },
+        &delivery_id,
+    ).unwrap();
+    let session_id: String = f.store.db.query_row(
+        "SELECT session_id FROM bot_shared_channel_deliveries WHERE id=?1",
+        [&delivery_id], |row| row.get(0),
+    ).unwrap();
+    let mut team = crate::architect::load(&f.store, &session_id).unwrap().unwrap();
+    team.council_since = 1234;
+    f.store.db.execute(
+        "UPDATE architect_teams SET content=?2 WHERE session_id=?1",
+        params![session_id,serde_json::to_string(&team).unwrap()],
+    ).unwrap();
+    shared_channels::bind_delivery_cycle(&f.store, &session_id, team.council_since).unwrap();
+    let inspection = shared_channels::inspect_channel_delivery(&f.store, &channel.id, &delivery_id).unwrap();
+    assert_eq!(inspection["sessionId"], session_id);
+    assert_eq!(inspection["verifiedPass"], false, "a read-only report is not an approval");
+
+    assert!(shared_channels::inspect_channel_delivery(&f.store, &unrelated.id, &delivery_id)
+        .unwrap_err().contains("does not belong"));
+    assert!(shared_channels::inspect_channel_delivery(&f.store, &channel.id, "foreign-delivery")
+        .unwrap_err().contains("does not belong"));
+    f.store.db.execute(
+        "UPDATE extended_channel_council_deliveries SET artifact_revision='cycle:old'
+         WHERE delivery_id=?1", [&delivery_id],
+    ).unwrap();
+    assert!(shared_channels::inspect_channel_delivery(&f.store, &channel.id, &delivery_id)
+        .unwrap_err().contains("stale"), "an old channel cycle must not inspect a new task review");
+}
+
+#[test]
 fn restarted_councils_recover_independent_live_and_approved_deliveries_once() {
     let f = fixture();
     let db_path = f.root.join("council-restart.sqlite");

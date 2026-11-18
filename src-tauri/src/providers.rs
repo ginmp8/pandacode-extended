@@ -243,6 +243,10 @@ pub struct ToolActivity {
     /// An empty list denotes a command whose write targets are not reported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub write_paths: Option<Vec<String>>,
+    /// Only a structured exit status reported by the native provider. Missing
+    /// statuses must never be interpreted as an executed passing test.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
 }
 
 // The serializer stops as soon as the preview fills: no multi-megabyte temporary
@@ -1737,6 +1741,7 @@ impl Protocol {
             input: String::new(),
             output: String::new(),
             write_paths: None,
+            exit_code: None,
         });
         if let Some(name) = name.filter(|name| !name.is_empty()) {
             tool.name = limited(name, 256);
@@ -1768,6 +1773,19 @@ impl Protocol {
         event.tool = Some(tool);
         step.events.push(event);
     }
+    /// Annotate the exact native tool event with a structured process exit code.
+    /// Model text, a tool's completed label and stdout cannot fabricate this.
+    fn native_exit_code(&mut self, id: &str, exit: Option<i64>, step: &mut Step) {
+        let Some(code) = exit.and_then(|value| i32::try_from(value).ok()) else { return; };
+        let Some(tool) = self.tools.get_mut(id) else { return; };
+        tool.exit_code = Some(code);
+        if let Some(event) = step.events.iter_mut().rev()
+            .find(|event| event.tool.as_ref().is_some_and(|value| value.id == id))
+        {
+            event.tool = Some(tool.clone());
+        }
+    }
+
     fn tool_paths(&mut self, id: &str, paths: Option<Vec<String>>, step: &mut Step) {
         let Some(paths) = paths else { return; };
         let mut bounded = Vec::new();
@@ -1847,6 +1865,7 @@ impl Protocol {
                 };
                 self.tool_update(id, Some("Command"), Some(status), input, output, step);
                 self.tool_paths(id, Some(vec![]), step);
+                self.native_exit_code(id, item["exitCode"].as_i64(), step);
             }
             "fileChange" => {
                 let (input, output) = if let Some(changes) = item["changes"].as_array() {
@@ -5905,6 +5924,7 @@ mod tests {
         let done=p.receive(json!({"method":"item/completed","params":{"item":{"type":"commandExecution","id":"cmd1","status":"completed","aggregatedOutput":"test failed: expected 4, got 5","exitCode":1}}})).unwrap();
         let tool = activity(&done);
         assert_eq!(tool["status"], "failed");
+        assert_eq!(tool["exitCode"], 1);
         assert!(tool["input"].as_str().unwrap().contains("/tmp/project"));
         assert!(tool["output"]
             .as_str()

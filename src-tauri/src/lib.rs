@@ -427,6 +427,7 @@ mod task_agent_tests {
             input: "README.md".into(),
             output: "Project details".into(),
             write_paths: None,
+            exit_code: None,
         });
         save_agent_activity(&store, &assistant, &mut tool, None).unwrap();
         let mut boundary = event(&task.id, "message_start", "");
@@ -488,6 +489,7 @@ mod task_agent_tests {
             input: "README.md".into(),
             output: String::new(),
             write_paths: None,
+            exit_code: None,
         });
         save_agent_activity(&store, &assistant, &mut tool, None).unwrap();
         let mut boundary = event(&task.id, "message_start", "");

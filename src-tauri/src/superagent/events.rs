@@ -1801,6 +1801,7 @@ pub(crate) fn headless_observe_check_run(
     if selected.mode != "observe" || selected.event_kind != "check_run.completed" {
         return Err("Source is Off or is not configured for Check Runs.".into());
     }
+    require_observe_preflight(&store, &selected)?;
     let (signed_in, raw, repository_id) = fetch_authenticated_check_run(&selected.repository, check_run_id)?;
     let receipt = observe_authenticated_check_run_with_repository_id(
         &store, &selected, check_run_id, &raw, &signed_in, repository_id,
@@ -1823,6 +1824,7 @@ pub async fn superagent_source_observe_check_run(
         if selected.mode != "observe" || selected.event_kind != "check_run.completed" {
             return Err("Source is Off or is not configured for Check Runs.".into());
         }
+        require_observe_preflight(&store, &selected)?;
         selected
     };
     let repository = selected.repository.clone();
@@ -3659,6 +3661,44 @@ mod tests {
             "SELECT COUNT(*) FROM sa_tickets", [], |row| row.get(0),
         ).unwrap();
         assert_eq!(tickets, 0, "Observe must not launch work from GitHub comments");
+    }
+
+    #[test]
+    fn check_run_headless_preflight_rejects_corrupt_cursor_before_github_after_restart() {
+        let (store, path) = fixture();
+        let off = create_source(&store, "orch", "owner/repo", "trusted-bot",
+            "check_run.completed").unwrap();
+        let on = set_mode(&store, &off.id, off.policy_revision, "observe").unwrap();
+        let sha = "0123456789012345678901234567890123456789";
+        let run = serde_json::json!({
+            "id": 801, "status": "completed", "conclusion": "success",
+            "head_sha": sha, "completed_at": chrono::Utc::now().to_rfc3339(),
+            "app": {"slug": "trusted-bot"},
+            "pull_requests": [{"number": 42, "head": {"sha": sha},
+                "base": {"repo": {"url": "https://api.github.com/repos/owner/repo", "id": 1}}}]
+        });
+        let receipt = observe_authenticated_check_run(&store, &on, 801, &run, "operator").unwrap();
+        assert_eq!(receipt.sequence, 1);
+        assert!(require_observe_preflight(&store, &source(&store, &on.id).unwrap()).is_ok(),
+            "valid Check Run cursor should still allow an explicit authenticated lookup");
+
+        // Simulate a corrupted persisted cursor. A new Check Run lookup must
+        // be rejected locally, not send a GitHub request before discovering it.
+        store.db.execute(
+            "UPDATE sa_event_sources SET last_sequence=0 WHERE id=?1", [&on.id],
+        ).unwrap();
+        assert!(!inspect_source_integrity(&store, &on.id).unwrap().cursor_consistent);
+        drop(store);
+        let reopened = Store::open(&path).unwrap();
+        assert_eq!(list_decisions(&reopened, &on.id, 10).unwrap().len(), 1);
+        drop(reopened);
+        let denied = headless_observe_check_run(&path, &on.id, 802).unwrap_err();
+        assert!(denied.contains("before GitHub request"), "{denied}");
+        let after = Store::open(&path).unwrap();
+        assert_eq!(source(&after, &on.id).unwrap().last_sequence, 0);
+        assert_eq!(list_decisions(&after, &on.id, 10).unwrap().len(), 1);
+        assert_eq!(after.db.query_row("SELECT COUNT(*) FROM sa_tickets", [],
+            |row| row.get::<_, i64>(0)).unwrap(), 0);
     }
 
     #[test]

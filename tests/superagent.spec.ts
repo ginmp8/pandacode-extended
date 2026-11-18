@@ -376,6 +376,9 @@ test('Full Access wizard allows zero reviewers and configures native Full Access
   await expect(host.getByRole('region',{name:'Guided Team Builder'})).toHaveCount(0);
   await openTeam(host,'Access Team');
   await expect(host).toContainText('Full Access');
+  await expect(host.locator('.sa-team-policy'))
+    .toContainText('Native Full Access; no separate WorkItem permission');
+  await expect(host.locator('.sa-team-policy')).not.toContainText('Scoped write grants');
 });
 
 test('an enabled Team admits a Demand through the new screen and opens its native Run',async({page})=>{

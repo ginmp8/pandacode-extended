@@ -1008,7 +1008,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       (chosen.enabled && teamStrategy?.orchestrationId === chosen.id &&
         teamStrategy.executionMode !== 'off' ? '' : ' disabled') +
       '>Start Demand</button></form>' +
-      '<p class="sa-mode-note">Native admission checks the Team policy, bot eligibility and every scoped permission before dispatch.</p></section>' : '';
+      '<p class="sa-mode-note">Native admission checks the Team policy, bot eligibility and each Worker\'s existing provider permissions before dispatch.</p></section>' : '';
     const active = chosen && inspectedTicket ? '<section class="sa-pane sa-run-detail" aria-label="Selected native Demand">' +
       '<div class="sa-run-head"><button type="button" data-sa-back-runs>All Demands</button>' +
       '<p class="sa-eyebrow">NATIVE DEMAND / RUN</p><h2>' +
@@ -1247,8 +1247,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<dt>Assigned Skills</dt><dd>' +
         safe(inspectedMemberBot?.skills?.join(', ') || 'None assigned') + '</dd>' +
         '<dt>Bot status</dt><dd>' + (inspectedMemberBot?.paused ? 'Paused' : 'Configured') + '</dd>' +
-        '<dt>Write permission</dt><dd>' +
-        (inspectedMemberRole === 'Worker' ? 'Native scoped grant required' : 'Read-only') +
+        '<dt>Tool permissions</dt><dd>' +
+        (inspectedMemberRole === 'Worker'
+          ? (teamStrategy?.orchestrationId === chosen.id
+            ? (teamStrategy.executionMode === 'full'
+              ? 'Native Full Access · provider tools'
+              : teamStrategy.executionMode === 'approval'
+                ? 'Native bot permissions · human WorkItem acceptance'
+                : 'Execution policy not configured')
+            : 'Native bot mode · load Team policy')
+          : 'Read-only Coordinator or reviewer role') +
         '</dd></dl>' +
         '<p>Native bot configuration is not proof of harness eligibility or completed work.</p>' +
         '</aside></div>' +
@@ -1266,7 +1274,15 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         (chosen.councilRequired ? 'Required' : 'Off (optional)') + '</dd>' +
         '<dt>Project</dt><dd>' +
         safe(bots.find(bot => bot.id === chosen.workerBotId)?.projectId ?? 'Unavailable') +
-        '</dd><dt>Scoped write grants</dt><dd>Per-Demand native authorization</dd></dl>' +
+        '</dd><dt>Worker tool policy</dt><dd>' +
+        (teamStrategy?.orchestrationId === chosen.id
+          ? (teamStrategy.executionMode === 'full'
+            ? 'Native Full Access; no separate WorkItem permission'
+            : teamStrategy.executionMode === 'approval'
+              ? 'Native bot tools with human WorkItem acceptance'
+              : 'Execution policy not configured')
+          : 'Load native Team policy') +
+        '</dd></dl>' +
         '<div class="sa-actions"><button type="button" data-sa-enable="' + safe(chosen.id) +
         '">' + (chosen.enabled ? 'Disable Team' : 'Enable Team') + '</button>' +
         '<button type="button" data-sa-view="runs">View runs</button></div>' +

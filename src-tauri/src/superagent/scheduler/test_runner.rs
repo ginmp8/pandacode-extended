@@ -95,9 +95,23 @@ pub(super) fn replay_matches(db:&rusqlite::Connection,team:&str,key:&str,
     }
 }
 
+/// Parameters already confirmed by the local-user consent. Keep the complete
+/// native test grant together so callers cannot accidentally permute scope.
+pub(super) struct TestGrant<'a> {
+    pub team_version:i64,
+    pub policy_revision:i64,
+    pub project_id:&'a str,
+    pub checkout_root:&'a str,
+    pub command:&'a str,
+    pub manifest_sha256:&'a str,
+}
+
 /// Called only from trusted main-window admission AFTER the one-time dialog.
-pub(super) fn issue(store:&Store,id:&str,command:&str,
-    team_version:i64,policy:i64,project:&str,checkout:&str,hash:&str)->Result<()> {
+pub(super) fn issue(store:&Store,id:&str,grant:TestGrant<'_>)->Result<()> {
+    let TestGrant{
+        team_version,policy_revision:policy,project_id:project,
+        checkout_root:checkout,command,manifest_sha256:hash,
+    }=grant;
     let now=storage::now();
     let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
     let n=tx.execute(

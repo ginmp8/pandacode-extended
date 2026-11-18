@@ -566,6 +566,94 @@ test('native Team settings and Demand pages remain reachable in a compact viewpo
   await expect(host.locator('form[data-sa-form="create"]')).toHaveCount(0);
 });
 
+test('Team details expose the native enable toggle beside Configure on every tab',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{mode:'full'});
+  await openTeam(host,'Native Team');
+  const header=host.locator('.sa-team-detail-title .sa-detail-actions');
+  await expect(header.getByRole('button',{name:'Enable Team'})).toBeVisible();
+  await host.locator('.sa-subtabs').getByRole('button',{name:'Members and roles'}).click();
+  await expect(header.getByRole('button',{name:'Enable Team'})).toBeVisible();
+  await header.getByRole('button',{name:'Enable Team'}).click();
+  await host.getByRole('alertdialog',{name:'Confirm orchestration action'})
+    .getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(header.getByRole('button',{name:'Disable Team'})).toBeVisible();
+  const writes=await page.evaluate(()=>
+    (window as unknown as {saFixtureMutations:Array<{command:string;args:Record<string,unknown>}>}).saFixtureMutations);
+  expect(writes).toEqual([{command:'superagent_set_enabled',
+    args:{orchestrationId:'team-1',expectedRevision:1,enabled:true}}]);
+});
+
+test('Council checkbox and wizard Council checkbox keep controls beside their labels',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{mode:'full'});
+  await openTeam(host,'Native Team');
+  await host.locator('.sa-subtabs').getByRole('button',{name:'Members and roles'}).click();
+  const council=host.locator('label').filter({hasText:'Council review is managed by the selected execution mode'});
+  await expect(council.getByRole('checkbox')).toBeVisible();
+  expect(await council.evaluate(el=>getComputedStyle(el).flexDirection)).toBe('row');
+  await host.getByRole('button',{name:'New Team',exact:true}).click();
+  const builder=host.getByRole('region',{name:'Guided Team Builder'});
+  await builder.getByRole('textbox',{name:'Team name'}).fill('Checkbox alignment Team');
+  await builder.getByRole('button',{name:'Next'}).click();
+  await builder.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Coordinator'});
+  await builder.getByRole('combobox',{name:'Primary Worker'}).selectOption({label:'Worker'});
+  await builder.getByRole('button',{name:'Next'}).click();
+  await builder.getByRole('button',{name:'Next'}).click();
+  await builder.getByRole('radio',{name:/Full Access/}).check();
+  const toggle=builder.locator('label.sa-council-toggle');
+  await expect(toggle.getByRole('checkbox')).toBeVisible();
+  expect(await toggle.evaluate(el=>getComputedStyle(el).flexDirection)).toBe('row');
+});
+
+test('Team Builder validation is a highlighted visible warning, not muted footer text',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page);
+  await host.getByRole('button',{name:'New Team',exact:true}).click();
+  const builder=host.getByRole('region',{name:'Guided Team Builder'});
+  await builder.getByRole('button',{name:'Next'}).click();
+  const warning=builder.getByRole('alert');
+  await expect(warning).toContainText('Choose a Team name');
+  const visual=await warning.evaluate(el=>({
+    background:getComputedStyle(el).backgroundColor,
+    left:getComputedStyle(el).borderLeftWidth,
+  }));
+  expect(visual.background).not.toBe('rgba(0, 0, 0, 0)');
+  expect(parseFloat(visual.left)).toBeGreaterThanOrEqual(2);
+});
+
+test('blocked Demand offers genuine Retry and a fresh-run alternative',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{mode:'full',enabled:true,withTicket:true,ticketState:'blocked'});
+  await host.getByRole('button',{name:'Demands / Runs',exact:true}).click();
+  await host.getByRole('button',{name:'Resolve demand'}).click();
+  const attention=host.getByRole('region',{name:'Demand needs attention'});
+  await expect(attention.getByRole('button',{name:'Retry current Demand'})).toBeVisible();
+  await expect(attention.getByRole('button',{name:'Start new Demand'})).toBeVisible();
+  await attention.getByRole('button',{name:'Retry current Demand'}).click();
+  await host.getByRole('alertdialog',{name:'Confirm orchestration action'})
+    .getByRole('button',{name:'Confirm',exact:true}).click();
+  const writes=await page.evaluate(()=>
+    (window as unknown as {saFixtureMutations:Array<{command:string;args:Record<string,unknown>}>}).saFixtureMutations);
+  expect(writes.map(x=>x.command)).toEqual(['superagent_retry']);
+});
+
+test('failed Demand cannot be falsely approved and pre-fills a separately authorized new run',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{mode:'full',enabled:true,withTicket:true,ticketState:'failed'});
+  await host.getByRole('button',{name:'Demands / Runs',exact:true}).click();
+  await host.getByRole('button',{name:'Resolve demand'}).click();
+  const attention=host.getByRole('region',{name:'Demand needs attention'});
+  await expect(attention.getByRole('button',{name:'Retry current Demand'})).toHaveCount(0);
+  await expect(attention.getByRole('button',{name:'Start new Demand'})).toBeVisible();
+  await attention.getByRole('button',{name:'Start new Demand'}).click();
+  await expect(host.getByRole('heading',{name:'Assign a Demand'})).toBeVisible();
+  await expect(host.getByRole('textbox',{name:'Task objective'})).toHaveValue('Fix the native example');
+  const writes=await page.evaluate(()=>
+    (window as unknown as {saFixtureMutations:Array<{command:string}>}).saFixtureMutations);
+  expect(writes).toEqual([]);
+});
+
 test('native bot Conversations identifies SuperAgent threads and never calls them removed channels',async({page})=>{
   await page.goto('/?bots=sample');
   await page.evaluate(async()=>{

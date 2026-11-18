@@ -2886,9 +2886,9 @@ mod ordinary_turn_checks_security_tests {
     use super::*;
 
     #[test]
-    fn full_auto_reuses_native_full_access_not_a_new_permission_tier() {
+    fn full_reuses_native_full_access_not_a_new_permission_tier() {
         for mode in ["ask", "auto", "review", "plan", "full"] {
-            assert_eq!(native_worker_mode(mode, "full_auto"), Some("full"));
+            assert_eq!(native_worker_mode(mode, "full"), Some("full"));
             assert_eq!(native_worker_mode(mode, "approval"), Some(mode));
             assert_eq!(native_worker_mode(mode, "off"), None);
         }
@@ -3578,7 +3578,7 @@ fn admit_role_with_grant_inner(
     if configured_snapshot.policy.autonomy == "approval" && config.council_required {
         return Err("With Approval cannot bypass its human acceptance gate.".into());
     }
-    if !matches!(configured_snapshot.policy.autonomy.as_str(), "off" | "approval" | "full_auto") {
+    if !matches!(configured_snapshot.policy.autonomy.as_str(), "off" | "approval" | "full" | "full_auto") {
         return Err("Ticket admission rejected an unknown execution policy.".into());
     }
     team_snapshot.policy.autonomy = configured_snapshot.policy.autonomy;
@@ -3838,9 +3838,15 @@ fn assignment_role_authorized(
 }
 
 /// Reuse the existing bot/chat permission vocabulary for new Workers.
+/// Historical immutable Team snapshots retain their original serialized label.
+/// New policy versions and all public APIs use the existing native "full" mode.
+pub(crate) fn is_full_access_autonomy(mode: &str) -> bool {
+    mode == "full" || mode == "full_auto"
+}
+
 fn native_worker_mode<'a>(bot_mode: &'a str, execution: &str) -> Option<&'a str> {
     match execution {
-        "full_auto" => Some("full"),
+        mode if is_full_access_autonomy(mode) => Some("full"),
         "approval" => Some(bot_mode),
         _ => None, // Historical read-only task sessions retain their policy.
     }
@@ -3920,9 +3926,9 @@ fn admitted_session_matches_profile(
         }
         None => true, // Historical snapshots cannot invent path evidence.
     };
-    // Only a NEW Full Auto Worker with an actual admission receipt may
+    // Only a NEW Full Access Worker with an actual admission receipt may
     // override the bot's standing chat mode; the ordinary bot is unchanged.
-    let mode_matches = if role == "worker" && snapshot.policy.autonomy == "full_auto"
+    let mode_matches = if role == "worker" && is_full_access_autonomy(&snapshot.policy.autonomy)
         && native_worker_mode_recorded(store, ticket_id, &session.id, &session.mode)? {
         session.mode == "full"
     } else {
@@ -4862,7 +4868,7 @@ fn change_enabled(
         if configured.policy.autonomy == "approval" && current.council_required {
             return Err("With Approval needs human acceptance; disable automatic Council finalization.".into());
         }
-        if !matches!(configured.policy.autonomy.as_str(), "off" | "approval" | "full_auto") {
+        if !matches!(configured.policy.autonomy.as_str(), "off" | "approval" | "full" | "full_auto") {
             return Err("Unrecognized Team execution policy; admission denied.".into());
         }
         if configured.policy.max_concurrent_tasks!=1

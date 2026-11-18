@@ -461,7 +461,7 @@ mod tests {
     }
 
     #[test]
-    fn old_read_only_auto_grant_remains_revocable_when_full_auto_scope_is_missing() {
+    fn old_read_only_auto_grant_remains_revocable_when_full_scope_is_missing() {
         let (store,_src)=fixture();
         let now=storage::now();
         store.db.execute(
@@ -474,7 +474,7 @@ mod tests {
         ).unwrap();
         let legacy=status(&store,"source").unwrap();
         assert!(legacy.grant_active,"A live legacy source grant must be revocable");
-        assert!(!legacy.enabled,"A source without native execution scope cannot run Full Auto");
+        assert!(!legacy.enabled,"A source without native execution scope cannot run Full Access");
         assert!(!legacy.scope_authorized);
         store.db.execute(
             "UPDATE sa_auto_source_grants SET revoked_at=?1 WHERE source_id='source'",
@@ -552,7 +552,7 @@ mod tests {
             params![now-10,now+60_000],
         ).unwrap();
         // This fixture has only the source tables, not a complete Team;
-        // it proves source-grant authenticity, not runnable Full Auto.
+        // it proves source-grant authenticity, not runnable Full Access.
         assert!(status(&store,"source").unwrap().grant_active);
         let (first,first_decision)=decision("first",77);
         record(&store,&first,&first_decision,&src,"operator").unwrap();

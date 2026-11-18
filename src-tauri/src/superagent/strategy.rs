@@ -73,8 +73,8 @@ impl StrategyUpdate {
             || self.estimated_cost_ceiling_minor.is_some_and(|value| value == 0) {
             return Err("Optional resource ceilings must be positive.".into());
         }
-        if self.execution_mode.as_deref().is_some_and(|mode| !matches!(mode, "approval" | "full_auto")) {
-            return Err("Execution mode must be approval or full_auto.".into());
+        if self.execution_mode.as_deref().is_some_and(|mode| !matches!(mode, "approval" | "full")) {
+            return Err("Choose the existing Full Access mode or With Approval.".into());
         }
         Ok(StrategySettings {
             priority: self.priority.clone(),
@@ -129,7 +129,9 @@ fn read(store: &Store, orchestration_id: &str) -> Result<StrategyView> {
         policy_revision: cfg.policy_revision,
         team_version: cfg.team_version,
         settings: snapshot.policy.strategy,
-        execution_mode: snapshot.policy.autonomy,
+        execution_mode: if super::is_full_access_autonomy(&snapshot.policy.autonomy) {
+            "full".into()
+        } else { snapshot.policy.autonomy },
         max_attempts_per_assignment: snapshot.policy.max_attempts_per_assignment,
         max_concurrent_tasks: snapshot.policy.max_concurrent_tasks,
         executable_parallel_workers: 1,
@@ -148,8 +150,11 @@ fn update(store: &Store, orchestration_id: &str, expected_revision: i64,
         return Err("Disable this Team and reload its exact policy revision before editing strategy.".into());
     }
     let previous = load_team_version_snapshot(&store.db, orchestration_id, current.team_version)?;
-    let execution_mode = input.execution_mode.as_deref()
-        .unwrap_or(previous.policy.autonomy.as_str());
+    let execution_mode = input.execution_mode.as_deref().unwrap_or_else(|| {
+        if super::is_full_access_autonomy(&previous.policy.autonomy) {
+            "full"
+        } else { previous.policy.autonomy.as_str() }
+    });
     // Council is an optional review policy, not a Full Access requirement.
     if execution_mode == "approval" && current.council_required {
         return Err("With Approval requires human acceptance; disable automatic Council finalization before selecting this mode.".into());
@@ -240,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn native_full_auto_worker_retains_chat_mode_and_task_guards_without_council() {
+    fn native_full_worker_retains_chat_mode_and_task_guards_without_council() {
         let path=std::env::temp_dir().join(format!(
             "sa-native-mode-{}.sqlite3",storage::id(),
         ));
@@ -271,7 +276,7 @@ mod tests {
             priority:"balanced".into(),
             attempt_timeout_ms:MAX_ASSIGNMENT_RUN_MS,
             max_attempts_per_assignment:2,max_concurrent_tasks:1,
-            execution_mode:Some("full_auto".into()),
+            execution_mode:Some("full".into()),
             token_ceiling:None,estimated_cost_ceiling_minor:None,
             subagent_delegation_enabled:false,
         }).unwrap();
@@ -327,7 +332,7 @@ mod tests {
             max_attempts_per_assignment: 2, max_concurrent_tasks: 1,
             token_ceiling: None, estimated_cost_ceiling_minor: None,
             subagent_delegation_enabled: false,
-            execution_mode: Some("full_auto".into()),
+            execution_mode: Some("full".into()),
         };
         assert!(request.validate().is_ok());
         request.execution_mode = Some("approval".into());

@@ -49,7 +49,7 @@ CREATE TRIGGER IF NOT EXISTS sa_test_attempt_no_delete
 
 /// Recover a native test that had a reserved process when PandaCode exited.
 /// The process may have taken effect: preserve an uncertain receipt and never
-/// run it again. For a pinned Full Auto Demand, also make the root terminally
+/// run it again. For a pinned Full Access Demand, also make the root terminally
 /// inconclusive so a restart cannot leave an active plan with no ready work.
 /// Called inside Store's existing startup recovery transaction and dispatch fence.
 pub(crate) fn recover_interrupted(db:&rusqlite::Connection)->Result<usize> {
@@ -70,7 +70,7 @@ pub(crate) fn recover_interrupted(db:&rusqlite::Connection)->Result<usize> {
                AND snapshot.source_kind='native'
                AND snapshot.team_version=plan.team_version
                AND snapshot.policy_revision=plan.policy_revision
-               AND json_extract(snapshot.snapshot_json,'$.policy.autonomy')='full_auto'"
+               AND json_extract(snapshot.snapshot_json,'$.policy.autonomy') IN ('full','full_auto')"
         ).map_err(|e|e.to_string())?;
         let rows=stmt.query_map([],|row|Ok((
             row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,String>(2)?,
@@ -104,7 +104,7 @@ pub(crate) fn recover_interrupted(db:&rusqlite::Connection)->Result<usize> {
             [&root],
         ).map_err(|e|e.to_string())?;
         // Keep legacy uncertain receipts immutable while terminalizing the
-        // original exact pinned Full Auto root. Never infer subprocess success.
+        // original exact pinned Full Access root. Never infer subprocess success.
         let (kind,detail)=if prior_state=="uncertain" {
             legacy_reconciled+=1;
             ("native_test_prior_uncertain_reconciled",
@@ -226,14 +226,12 @@ pub(in crate::superagent) fn issue(store:&Store,id:&str,grant:TestGrant<'_>)->Re
     tx.commit().map_err(|e|e.to_string())
 }
 
-/// A saved Full Auto Team mode is itself a mandatory evidence gate, even
-/// for older Demands admitted before native test consent was available.
+/// An explicit native test-runner request still requires its real receipt.
+/// Native bot Full Access does not create an additional permission grant,
+/// and without such a request the Worker uses its normal provider tools.
 pub(in crate::superagent) fn required(db:&rusqlite::Connection,root:&str)->Result<bool> {
     db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sa_demand_test_grants WHERE ticket_id=?1)
-         OR EXISTS(SELECT 1 FROM sa_ticket_team_snapshots snap
-           WHERE snap.ticket_id=?1 AND snap.source_kind='native'
-             AND json_extract(snap.snapshot_json,'$.policy.autonomy')='full_auto')",
+        "SELECT EXISTS(SELECT 1 FROM sa_demand_test_grants WHERE ticket_id=?1)",
         [root],|r|r.get(0),
     ).map_err(|e|e.to_string())
 }
@@ -377,7 +375,7 @@ fn snapshot_hash(db:&rusqlite::Connection,root:&str,checkout:&Path)->Result<Stri
 
 /// A persisted "passed" label is not an executed test receipt. A native
 /// zero-exit process must have a completed attempt and bounded result digests;
-/// interrupted or partially written rows cannot satisfy Full Auto delivery.
+/// interrupted or partially written rows cannot satisfy Full Access delivery.
 fn completed_passing_test_receipt(
     state:&str,started:i64,finished:Option<i64>,exit:Option<i32>,
     stdout:Option<&str>,stderr:Option<&str>,
@@ -783,13 +781,13 @@ fn queue_failed_test_repair(
 )->Result<bool> {
     if outcome.state!="failed" || outcome.code.is_none()
         || outcome.category=="environment_failure" {return Ok(false);}
-    let full_auto:bool=db.query_row(
+    let full:bool=db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sa_ticket_team_snapshots
          WHERE ticket_id=?1 AND source_kind='native'
-           AND json_extract(snapshot_json,'$.policy.autonomy')='full_auto')",
+           AND json_extract(snapshot_json,'$.policy.autonomy') IN ('full','full_auto'))",
         [&job.root],|r|r.get(0),
     ).map_err(|e|e.to_string())?;
-    if !full_auto {return Ok(false);}
+    if !full {return Ok(false);}
     let archived:i64=db.query_row(
         "SELECT COUNT(*) FROM sa_demand_test_attempts WHERE ticket_id=?1",
         [&job.root],|r|r.get(0),
@@ -880,11 +878,11 @@ fn queue_failed_test_repair(
     Ok(true)
 }
 
-/// An exhausted or unauthorized Full Auto repair must be a durable blocked
+/// An exhausted or unauthorized Full Access repair must be a durable blocked
 /// Demand, not an active plan with no ready WorkItems. Manual approval-mode
 /// Demands keep their existing behavior. The caller owns the SQLite transaction
 /// and cross-process dispatch fence.
-fn block_unrepairable_full_auto(
+fn block_unrepairable_full(
     db:&rusqlite::Connection,job:&Reserved,now:i64,reason:&str,
 )->Result<bool> {
     let affected=db.execute(
@@ -906,7 +904,7 @@ fn block_unrepairable_full_auto(
                AND mandate.allowed_side_effects=0
                AND mandate.revoked=0 AND mandate.expires_at>?4
                AND snap.source_kind='native'
-               AND json_extract(snap.snapshot_json,'$.policy.autonomy')='full_auto'
+               AND json_extract(snap.snapshot_json,'$.policy.autonomy') IN ('full','full_auto')
                AND run.state='failed' AND run.snapshot_sha256=?3
                AND run.plan_sha256=?2 AND run.finished_at IS NOT NULL
            )",
@@ -929,8 +927,8 @@ fn block_unrepairable_full_auto(
 
 /// A cancelled, panicked, or authorization-stale native process is not a
 /// failed test that may be repaired or replayed. Preserve the uncertain run
-/// and make only its originally pinned Full Auto Demand inconclusive.
-fn finalize_uncertain_full_auto(
+/// and make only its originally pinned Full Access Demand inconclusive.
+fn finalize_uncertain_full(
     db:&rusqlite::Connection,job:&Reserved,now:i64,
 )->Result<bool> {
     let moved=db.execute(
@@ -947,7 +945,7 @@ fn finalize_uncertain_full_auto(
                AND snapshot.source_kind='native'
                AND snapshot.team_version=plan.team_version
                AND snapshot.policy_revision=plan.policy_revision
-               AND json_extract(snapshot.snapshot_json,'$.policy.autonomy')='full_auto'
+               AND json_extract(snapshot.snapshot_json,'$.policy.autonomy') IN ('full','full_auto')
                AND run.state='uncertain' AND run.snapshot_sha256=?3
                AND run.plan_sha256=?2 AND run.finished_at IS NOT NULL)",
         params![job.root,job.plan,job.snapshot,now],
@@ -966,7 +964,7 @@ fn finalize_uncertain_full_auto(
     db.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
          VALUES(?1,'native_test_inconclusive',
-            'Native test effect was uncertain; original Full Auto mandate revoked',?2)",
+            'Native test effect was uncertain; original Full Access mandate revoked',?2)",
         params![job.root,now],
     ).map_err(|e|e.to_string())?;
     Ok(true)
@@ -1032,8 +1030,8 @@ fn settle(store:&Store,job:&Reserved,result:Outcome)->Result<()> {
                 } else {
                     "no_authorized_repair_scope_or_capacity"
                 };
-                if !block_unrepairable_full_auto(&tx,job,now,reason)? {
-                    // An approval-mode Demand is not switched to Full Auto
+                if !block_unrepairable_full(&tx,job,now,reason)? {
+                    // An approval-mode Demand is not switched to Full Access
                     // failure semantics; its existing human path is unchanged.
                     tx.execute(
                         "INSERT INTO sa_audit(ticket_id,kind,detail,at)
@@ -1044,8 +1042,8 @@ fn settle(store:&Store,job:&Reserved,result:Outcome)->Result<()> {
             }
         } else if state=="uncertain" {
             // A live process may have exited without attributable evidence.
-            // Never retry it silently or leave a nonterminal Full Auto root.
-            finalize_uncertain_full_auto(&tx,job,now)?;
+            // Never retry it silently or leave a nonterminal Full Access root.
+            finalize_uncertain_full(&tx,job,now)?;
         }
     }
     tx.commit().map_err(|e|e.to_string())
@@ -1081,7 +1079,7 @@ pub(super) async fn advance(app:&tauri::AppHandle)->Result<usize> {
 mod tests {
     use super::*;
     #[test]
-    fn exhausted_full_auto_test_blocks_once_without_touching_manual_or_revoked_demands() {
+    fn exhausted_full_test_blocks_once_without_touching_manual_or_revoked_demands() {
         let db=rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch(
             "CREATE TABLE sa_tickets(id TEXT PRIMARY KEY,state TEXT,
@@ -1109,10 +1107,10 @@ mod tests {
                ('revoked','active','plan',5,2,1),
                ('stale','active','plan',5,2,1);
              INSERT INTO sa_ticket_team_snapshots VALUES
-               ('auto','native','{\"policy\":{\"autonomy\":\"full_auto\"}}'),
+               ('auto','native','{\"policy\":{\"autonomy\":\"full\"}}'),
                ('manual','native','{\"policy\":{\"autonomy\":\"approval\"}}'),
-               ('revoked','native','{\"policy\":{\"autonomy\":\"full_auto\"}}'),
-               ('stale','native','{\"policy\":{\"autonomy\":\"full_auto\"}}');
+               ('revoked','native','{\"policy\":{\"autonomy\":\"full\"}}'),
+               ('stale','native','{\"policy\":{\"autonomy\":\"full\"}}');
              INSERT INTO sa_demand_test_runs VALUES
                ('auto','failed','snapshot','plan',1),
                ('manual','failed','snapshot','plan',1),
@@ -1134,9 +1132,9 @@ mod tests {
                 expires:now+60_000,plan:"plan".into(),
                 db_path:std::path::PathBuf::new(),
             };
-            assert_eq!(block_unrepairable_full_auto(
+            assert_eq!(block_unrepairable_full(
                 &db,&job,now,"test_retry_budget_exhausted").unwrap(),expected);
-            assert!(!block_unrepairable_full_auto(
+            assert!(!block_unrepairable_full(
                 &db,&job,now,"test_retry_budget_exhausted").unwrap());
             let (ticket_state,plan_state):(String,String)=db.query_row(
                 "SELECT ticket.state,plan.state FROM sa_tickets ticket
@@ -1151,14 +1149,14 @@ mod tests {
             "SELECT COUNT(*) FROM sa_audit WHERE kind='demand_test_repair_blocked'",
             [],|row|row.get(0),
         ).unwrap();
-        assert_eq!(count,1,"Only the authorized Full Auto Demand is terminalized");
+        assert_eq!(count,1,"Only the authorized Full Access Demand is terminalized");
         assert_eq!(db.query_row(
             "SELECT state FROM sa_demand_test_runs WHERE ticket_id='auto'",
             [],|row|row.get::<_,String>(0)).unwrap(),"failed");
     }
 
     #[test]
-    fn restart_settles_full_auto_test_without_replay_or_cross_ticket_transition() {
+    fn restart_settles_full_test_without_replay_or_cross_ticket_transition() {
         let db=rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch(
             "CREATE TABLE sa_tickets(
@@ -1195,13 +1193,13 @@ mod tests {
                ('legacy_uncertain','active','plan',3,1,2,1),
                ('revoked_uncertain','active','plan',3,1,2,1);
              INSERT INTO sa_ticket_team_snapshots VALUES
-               ('full','native',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}'),
+               ('full','native',1,2,'{\"policy\":{\"autonomy\":\"full\"}}'),
                ('manual','native',1,2,'{\"policy\":{\"autonomy\":\"approval\"}}'),
-               ('stopped','native',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}'),
-               ('stale','native',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}'),
-               ('passed','native',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}'),
-               ('legacy_uncertain','native',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}'),
-               ('revoked_uncertain','native',1,2,'{\"policy\":{\"autonomy\":\"full_auto\"}}');
+               ('stopped','native',1,2,'{\"policy\":{\"autonomy\":\"full\"}}'),
+               ('stale','native',1,2,'{\"policy\":{\"autonomy\":\"full\"}}'),
+               ('passed','native',1,2,'{\"policy\":{\"autonomy\":\"full\"}}'),
+               ('legacy_uncertain','native',1,2,'{\"policy\":{\"autonomy\":\"full\"}}'),
+               ('revoked_uncertain','native',1,2,'{\"policy\":{\"autonomy\":\"full\"}}');
              INSERT INTO sa_demand_test_runs VALUES
                ('full','running','plan',NULL),
                ('manual','running','plan',NULL),
@@ -1269,7 +1267,7 @@ mod tests {
     }
 
     #[test]
-    fn uncertain_native_test_blocks_only_the_pinned_full_auto_demand() {
+    fn uncertain_native_test_blocks_only_the_pinned_full_demand() {
         let db=rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch(
             "CREATE TABLE sa_tickets(id TEXT PRIMARY KEY,state TEXT,
@@ -1293,10 +1291,10 @@ mod tests {
                ('stopped','active','plan',2,1,3,1),
                ('other','active','other-plan',2,1,3,1);
              INSERT INTO sa_ticket_team_snapshots VALUES
-               ('auto','native',1,3,'{\"policy\":{\"autonomy\":\"full_auto\"}}'),
+               ('auto','native',1,3,'{\"policy\":{\"autonomy\":\"full\"}}'),
                ('manual','native',1,3,'{\"policy\":{\"autonomy\":\"approval\"}}'),
-               ('stopped','native',1,3,'{\"policy\":{\"autonomy\":\"full_auto\"}}'),
-               ('other','native',1,3,'{\"policy\":{\"autonomy\":\"full_auto\"}}');
+               ('stopped','native',1,3,'{\"policy\":{\"autonomy\":\"full\"}}'),
+               ('other','native',1,3,'{\"policy\":{\"autonomy\":\"full\"}}');
              INSERT INTO sa_demand_test_runs VALUES
                ('auto','uncertain','plan','snapshot',10),
                ('manual','uncertain','plan','snapshot',10),
@@ -1313,8 +1311,8 @@ mod tests {
                 snapshot:"snapshot".into(),expires:100,
                 plan:"plan".into(),db_path:std::path::PathBuf::new(),
             };
-            assert_eq!(finalize_uncertain_full_auto(&db,&job,11).unwrap(),expect);
-            assert!(!finalize_uncertain_full_auto(&db,&job,12).unwrap());
+            assert_eq!(finalize_uncertain_full(&db,&job,11).unwrap(),expect);
+            assert!(!finalize_uncertain_full(&db,&job,12).unwrap());
             let (ticket,plan,revoked):(String,String,i64)=db.query_row(
                 "SELECT t.state,p.state,m.revoked FROM sa_tickets t
                  JOIN sa_demand_plans p ON p.ticket_id=t.id
@@ -1523,7 +1521,7 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
     #[test]
-    fn full_auto_requires_executed_native_test_evidence_even_without_a_grant() {
+    fn full_requires_executed_native_test_evidence_even_without_a_grant() {
         let db=rusqlite::Connection::open_in_memory().unwrap();
         db.execute_batch(
             "CREATE TABLE sa_tickets(id TEXT PRIMARY KEY);
@@ -1531,7 +1529,7 @@ mod tests {
              CREATE TABLE sa_ticket_team_snapshots(
                ticket_id TEXT,source_kind TEXT,snapshot_json TEXT);
              INSERT INTO sa_ticket_team_snapshots VALUES
-               ('root','native','{\"policy\":{\"autonomy\":\"full_auto\"}}');
+               ('root','native','{\"policy\":{\"autonomy\":\"full\"}}');
              CREATE TABLE sa_demand_plans(ticket_id TEXT,plan_sha256 TEXT);
              INSERT INTO sa_demand_plans VALUES('root','plan');
              CREATE TABLE sa_work_items(ticket_id TEXT, item_key TEXT, state TEXT);
@@ -1699,7 +1697,7 @@ mod tests {
             "CREATE TABLE sa_ticket_team_snapshots(
                ticket_id TEXT,source_kind TEXT,snapshot_json TEXT);
              INSERT INTO sa_ticket_team_snapshots VALUES
-               ('root','native','{\"policy\":{\"autonomy\":\"full_auto\"}}');
+               ('root','native','{\"policy\":{\"autonomy\":\"full\"}}');
              CREATE TABLE sa_demand_plans(
                ticket_id TEXT,team_version INTEGER,policy_revision INTEGER,
                ticket_revision INTEGER,state TEXT);

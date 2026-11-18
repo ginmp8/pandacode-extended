@@ -637,18 +637,9 @@ pub async fn superagent_start_demand(
         Some((config.team_version,config.policy_revision,config.project_id.clone(),
             canonical.to_string_lossy().into_owned(),manifest))
     } else {None};
-    // A Full Auto policy may not admit a Demand that can never acquire
-    // real test evidence. Approval-mode and older manual Teams retain their
-    // existing optional test behavior.
-    {
-        let store=state.store.lock().map_err(|e|e.to_string())?;
-        let config=configuration(&store,&orchestration_id)?;
-        let snapshot=super::load_team_version_snapshot(
-            &store.db,&config.id,config.team_version)?;
-        if snapshot.policy.autonomy=="full_auto" && test_initial.is_none() {
-            return Err("Full Auto requires a native test command in the initial Demand authorization.".into());
-        }
-    }
+    // Full Access is a native Worker permission. Tests may run using the
+    // selected bot's ordinary tools; a separate test-command grant is not
+    // required to authorize the Team or start a Demand.
     let prior_consent={
         let store=state.store.lock().map_err(|e|e.to_string())?;
         let checkout=initial.as_ref().map(|(_,_,project)|

@@ -47,17 +47,10 @@ fn pin_checkout(store:&Store,project:&str)->Result<String> {
 }
 
 /// Validate a new *local user* decision without changing the database.
-/// A Team's Full Auto policy cannot silently become read-only automation.
+/// A Team's Full Access policy cannot silently become read-only automation.
 pub(super) fn preflight(store:&Store,src:&events::EventSource,
     paths:&[String],command:&str)->Result<Option<NativeScope>> {
     let team=configuration(store,&src.orchestration_id)?;
-    let snapshot=super::super::load_team_version_snapshot(
-        &store.db,&team.id,team.team_version,
-    )?;
-    if snapshot.policy.autonomy=="full_auto" &&
-        (paths.is_empty() || command.is_empty()) {
-        return Err("Full Auto GitHub intake requires an explicit initial file scope and native test command.".into());
-    }
     if paths.is_empty() && command.is_empty() {return Ok(None);}
     if paths.is_empty() || command.is_empty() {
         return Err("Auto source execution consent must include BOTH exact file paths and a native test command.".into());
@@ -166,11 +159,10 @@ pub(super) fn current(store:&Store,src:&events::EventSource)->Result<Option<Nati
 pub(super) fn ready(store:&Store,src:&events::EventSource)->Result<bool> {
     if active_grant(store,src,storage::now())?.is_none() {return Ok(false);}
     let team=configuration(store,&src.orchestration_id)?;
-    let snapshot=super::super::load_team_version_snapshot(
-        &store.db,&team.id,team.team_version,
-    )?;
-    if snapshot.policy.autonomy!="full_auto" {return Ok(true);}
-    Ok(current(store,src)?.is_some())
+    // A valid authenticated source grant is enough for the native bot's
+    // Full Access. An optional legacy scope is still checked if present.
+    let _ = current(store,src)?;
+    Ok(true)
 }
 
 /// The Coordinator is STILL read-only. Before delivering its first message,
@@ -179,13 +171,7 @@ pub(super) fn ready(store:&Store,src:&events::EventSource)->Result<bool> {
 pub(super) fn issue_for_ticket(store:&Store,src:&events::EventSource,
     ticket_id:&str)->Result<Vec<String>> {
     let team=configuration(store,&src.orchestration_id)?;
-    let snapshot=super::super::load_team_version_snapshot(
-        &store.db,&team.id,team.team_version,
-    )?;
     let scope=current(store,src)?;
-    if snapshot.policy.autonomy=="full_auto" && scope.is_none() {
-        return Err("Full Auto source lacks initial native file and test consent.".into());
-    }
     let Some(scope)=scope else {return Ok(Vec::new());};
     if !ticket_authorized(store,ticket_id)? {
         return Err("Auto root source authority was revoked before Demand scope issuance.".into());

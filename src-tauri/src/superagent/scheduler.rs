@@ -588,11 +588,12 @@ fn replayed_demand_scope_confirmed(
 /// WorkItems for the Workers in the immutable Team; no model grants effects.
 #[tauri::command]
 pub async fn superagent_start_demand(
-    window:tauri::WebviewWindow,app:tauri::AppHandle,state:State<'_,AppState>,
+    window:tauri::WebviewWindow,state:State<'_,AppState>,
     orchestration_id:String,objective:String,request_key:String,
     allowed_paths:Option<Vec<String>>,allowed_test:Option<String>,
 )->Result<super::Ticket> {
     super::require_main_window(&window)?;
+    let app=window.app_handle().clone();
     if crate::feature_controls::get().bots_paused {
         return Err("Bots are globally paused; Demand admission denied.".into());
     }
@@ -740,9 +741,13 @@ pub async fn superagent_start_demand(
                     let _=super::fail_launch(&store,&ticket.id,"Test checkout or manifest changed.");
                     return Err("Initial test scope changed before Coordinator dispatch.".into());
                 }
-                if let Err(error)=test_runner::issue(
-                    &store,&ticket.id,test.as_deref().unwrap_or(""),*version,
-                    *policy,project,checkout,hash,
+                if let Err(error)=test_runner::issue(&store,&ticket.id,
+                    test_runner::TestGrant{
+                        team_version:*version,policy_revision:*policy,
+                        project_id:project,checkout_root:checkout,
+                        command:test.as_deref().unwrap_or(""),
+                        manifest_sha256:hash,
+                    },
                 ) {
                     let _=super::fail_launch(&store,&ticket.id,&error);
                     return Err(format!("Initial test authorization failed for {}: {error}",ticket.id));

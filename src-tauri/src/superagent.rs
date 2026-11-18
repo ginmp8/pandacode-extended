@@ -17,6 +17,7 @@ pub(crate) mod headless_dispatch;
 pub(crate) mod strategy;
 pub(crate) mod delivery;
 pub(crate) mod children;
+pub(crate) mod demand_archive;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -1368,6 +1369,7 @@ fn list_tickets(store: &Store, config_id: &str, limit: i64) -> Result<Vec<Ticket
         "SELECT id,orchestration_id,request_key,objective,actor,state,revision,
                 active_assignment_id,evidence,created_at,updated_at
          FROM sa_tickets WHERE orchestration_id=?1
+           AND NOT EXISTS (SELECT 1 FROM sa_demand_archives a WHERE a.ticket_id=sa_tickets.id)
          ORDER BY created_at DESC,id DESC LIMIT ?2"
     ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![config_id,limit], ticket_row)
@@ -1386,6 +1388,7 @@ pub struct DemandQuery {
     state_filter: Option<String>,
     search_query: Option<String>,
     project_id: Option<String>,
+    archived: Option<bool>,
 }
 
 /// Bounded cross-Team demand index for the trusted local workspace. The
@@ -1402,6 +1405,7 @@ pub struct DemandIndex {
     pub updated_at: i64,
     /// The immutable project at Ticket admission, not the mutable Team project.
     pub project_id: String,
+    pub archived: bool,
 }
 
 /// Test-only compatibility helper for pagination oracles; production callers
@@ -1437,7 +1441,7 @@ fn list_all_demands_page_searched(
 ) -> Result<Vec<DemandIndex>> {
     list_all_demands_page_for_project(
         store, limit, before_updated_at, before_id, DemandPageFilters {
-            orchestration_id, state_filter, search_query, project_id: None,
+            orchestration_id, state_filter, search_query, project_id: None, archived: false,
         },
     )
 }
@@ -1447,6 +1451,7 @@ struct DemandPageFilters<'a> {
     state_filter: Option<&'a str>,
     search_query: Option<&'a str>,
     project_id: Option<&'a str>,
+    archived: bool,
 }
 
 /// Scope by each Ticket's admitted project, before keyset pagination.
@@ -1454,7 +1459,7 @@ fn list_all_demands_page_for_project(
     store: &Store, limit: i64, before_updated_at: Option<i64>, before_id: Option<&str>,
     filters: DemandPageFilters<'_>,
 ) -> Result<Vec<DemandIndex>> {
-    let DemandPageFilters { orchestration_id, state_filter, search_query, project_id } = filters;
+    let DemandPageFilters { orchestration_id, state_filter, search_query, project_id, archived } = filters;
     if let Some(id) = project_id {
         if id.is_empty() || id.len() > 128
             || !id.bytes().all(|byte| byte.is_ascii_alphanumeric()
@@ -1496,20 +1501,24 @@ fn list_all_demands_page_for_project(
         configuration(store, id)?;
     }
     let mut stmt = store.db.prepare(
-        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at,t.project_id
+        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at,t.project_id,
+                a.ticket_id IS NOT NULL
          FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
+         LEFT JOIN sa_demand_archives a ON a.ticket_id=t.id
          WHERE (?2 IS NULL OR t.updated_at < ?2
                 OR (t.updated_at=?2 AND t.id < ?3))
            AND (?4 IS NULL OR t.orchestration_id=?4)
            AND (?5 IS NULL OR t.state=?5)
            AND (?6 IS NULL OR instr(lower(t.objective),lower(?6)) > 0)
            AND (?7 IS NULL OR t.project_id=?7)
+           AND ((?8=1 AND a.ticket_id IS NOT NULL)
+                OR (?8=0 AND a.ticket_id IS NULL))
          ORDER BY t.updated_at DESC,t.id DESC LIMIT ?1",
     ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id,state_filter,search_query,project_id], |row| Ok(DemandIndex {
+    let rows = stmt.query_map(params![limit,before_updated_at,before_id,orchestration_id,state_filter,search_query,project_id,archived], |row| Ok(DemandIndex {
         id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
         state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
-        project_id: row.get(6)?,
+        project_id: row.get(6)?, archived: row.get(7)?,
     })).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
@@ -1543,7 +1552,7 @@ fn list_review_inbox_page(
         return Err("Review cursor needs a positive timestamp and bounded Ticket ID.".into());
     }
     let mut stmt = store.db.prepare(
-        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at,t.project_id
+        "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at,t.project_id,0
          FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
          WHERE t.state IN ('waiting_approval','waiting_review')
            AND (?2 IS NULL OR t.updated_at < ?2
@@ -1553,7 +1562,7 @@ fn list_review_inbox_page(
     let rows = stmt.query_map(params![limit,before_updated_at,before_id], |row| Ok(DemandIndex {
         id: row.get(0)?, orchestration_id: row.get(1)?, objective: row.get(2)?,
         state: row.get(3)?, revision: row.get(4)?, updated_at: row.get(5)?,
-        project_id: row.get(6)?,
+        project_id: row.get(6)?, archived: false,
     })).map_err(|e| e.to_string())?;
     rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())
 }
@@ -1687,6 +1696,8 @@ pub struct AssignmentInsight {
 #[serde(rename_all = "camelCase")]
 pub struct TaskSnapshot {
     pub ticket: Ticket,
+    /// Reversible display-only archive; does not change native Task state.
+    pub archived: bool,
     /// Exact immutable roles admitted for this Ticket, including legacy
     /// provenance and a digest-validated reference to its Team version.
     pub team_snapshot: TeamSnapshot,
@@ -1749,6 +1760,7 @@ fn ticket_snapshot(store: &Store, ticket_id: &str, limit: i64) -> Result<TaskSna
         unresolved_external_effects,
         council: council_adapter::inspect(store, &ticket)?,
         team_snapshot: admitted_team,
+        archived: demand_archive::archived(store,ticket_id)?,
         ticket,
         mandate: native_mandate,
         assignments: native_assignments,
@@ -2187,7 +2199,7 @@ pub(crate) fn list_headless_team_demands_project_searched(
     let state_filter = if state == "all" { None } else { Some(state) };
     let page = list_all_demands_page_for_project(
         &store, 200, before_updated_at, before_id, DemandPageFilters {
-            orchestration_id: Some(orchestration_id), state_filter, search_query, project_id,
+            orchestration_id: Some(orchestration_id), state_filter, search_query, project_id, archived: false,
         },
     )?;
     let may_have_more = page.len() == 200;
@@ -2237,7 +2249,7 @@ pub(crate) fn list_headless_all_demands_project_searched(
     let state_filter = if state == "all" { None } else { Some(state) };
     let page = list_all_demands_page_for_project(
         &store, 200, before_updated_at, before_id, DemandPageFilters {
-            orchestration_id: None, state_filter, search_query, project_id,
+            orchestration_id: None, state_filter, search_query, project_id, archived: false,
         },
     )?;
     let may_have_more = page.len() == 200;
@@ -5314,12 +5326,12 @@ pub async fn superagent_all_demands(
     query: Option<DemandQuery>,
 ) -> Result<Vec<DemandIndex>> {
     require_main_window(&window)?;
-    let (limit, before_updated_at, before_id, orchestration_id, state_filter, search_query, project_id) =
+    let (limit, before_updated_at, before_id, orchestration_id, state_filter, search_query, project_id, archived) =
         if let Some(q) = query {
             (q.limit, q.before_updated_at, q.before_id, q.orchestration_id, q.state_filter,
-                q.search_query, q.project_id)
+                q.search_query, q.project_id, q.archived.unwrap_or(false))
         } else {
-            (limit, before_updated_at, before_id, orchestration_id, state_filter, None, None)
+            (limit, before_updated_at, before_id, orchestration_id, state_filter, None, None, false)
         };
     let store = state.store.lock().map_err(|e| e.to_string())?;
     list_all_demands_page_for_project(
@@ -5329,6 +5341,7 @@ pub async fn superagent_all_demands(
             state_filter: state_filter.as_deref(),
             search_query: search_query.as_deref(),
             project_id: project_id.as_deref(),
+            archived,
         },
     )
 }
@@ -6137,6 +6150,28 @@ pub async fn superagent_stop(
     Ok(ticket)
 }
 
+/// Delete from the visible Demand boards by archiving only a settled native
+/// Demand. This never deletes immutable audit evidence or provider chats.
+#[tauri::command]
+pub async fn superagent_archive_demand(
+    window: tauri::WebviewWindow, state: State<'_,AppState>,
+    ticket_id: String, expected_revision: i64,
+) -> Result<()> {
+    require_main_window(&window)?;
+    let store=state.store.lock().map_err(|e|e.to_string())?;
+    demand_archive::set(&store,&ticket_id,expected_revision,true)
+}
+
+#[tauri::command]
+pub async fn superagent_restore_demand(
+    window: tauri::WebviewWindow, state: State<'_,AppState>,
+    ticket_id: String, expected_revision: i64,
+) -> Result<()> {
+    require_main_window(&window)?;
+    let store=state.store.lock().map_err(|e|e.to_string())?;
+    demand_archive::set(&store,&ticket_id,expected_revision,false)
+}
+
 #[tauri::command]
 pub async fn superagent_revoke_worker_write_grant(
     window: tauri::WebviewWindow,
@@ -6153,6 +6188,67 @@ pub async fn superagent_revoke_worker_write_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn native_demand_archive_is_reversible_and_preserves_task_history() {
+        let mut store=fixture();
+        let team=enabled(&store);
+        let (ticket,launched)=admit(
+            &mut store,&team.id,"A mistaken but recoverable Demand",
+            "archival-lifecycle",false,
+        ).unwrap();
+        assert!(launched);
+        // A running Ticket cannot disappear from the Team or cross-Team board.
+        assert!(demand_archive::set(&store,&ticket.id,ticket.revision,true).is_err());
+        assert!(!demand_archive::archived(&store,&ticket.id).unwrap());
+        let (stopped,_) = stop(&store,&ticket.id).unwrap();
+        assert_eq!(stopped.state,"stopped");
+        assert!(demand_archive::set(&store,&ticket.id,ticket.revision,true).is_err(),
+            "A stale observed revision is not archive authority");
+
+        let listing=|archived:bool|list_all_demands_page_for_project(
+            &store,50,None,None,DemandPageFilters {
+                orchestration_id:Some(&team.id),state_filter:None,search_query:None,
+                project_id:None,archived,
+            },
+        ).unwrap();
+        assert_eq!(listing(false).len(),1);
+        demand_archive::set(&store,&ticket.id,stopped.revision,true).unwrap();
+        assert!(demand_archive::archived(&store,&ticket.id).unwrap());
+        assert!(listing(false).is_empty());
+        let archived=listing(true);
+        assert_eq!(archived.len(),1);
+        assert_eq!(archived[0].id,ticket.id);
+        assert!(archived[0].archived);
+        assert!(list_tickets(&store,&team.id,50).unwrap().is_empty());
+        let record=ticket_snapshot(&store,&ticket.id,50).unwrap();
+        assert!(record.archived);
+        assert_eq!(record.ticket.state,"stopped");
+        assert!(!record.assignments.is_empty());
+        assert!(record.activity.iter().any(|entry|entry.kind=="demand_archived"));
+        let audit_count=record.activity.len();
+        demand_archive::set(&store,&ticket.id,stopped.revision,true).unwrap();
+        assert_eq!(history(&store,&ticket.id,50).unwrap().len(),audit_count,
+            "Duplicate archive must not fabricate another audit decision");
+        demand_archive::set(&store,&ticket.id,stopped.revision,false).unwrap();
+        assert!(!demand_archive::archived(&store,&ticket.id).unwrap());
+        assert_eq!(listing(false).len(),1);
+        assert!(listing(true).is_empty());
+        assert_eq!(list_tickets(&store,&team.id,50).unwrap().len(),1);
+        assert!(mandate(&store,&ticket.id).unwrap().revoked,
+            "Restoring visibility must never restore revoked execution rights");
+        assert!(ticket_snapshot(&store,&ticket.id,50).unwrap().activity.iter()
+            .any(|entry|entry.kind=="demand_restored"));
+        let other=create_configuration(&store,NewOrchestration{
+            name:"Independent Team".into(),coordinator_bot_id:"router".into(),
+            worker_bot_id:"worker".into(),
+        }).unwrap();
+        assert!(list_all_demands_page_for_project(&store,50,None,None,
+            DemandPageFilters {
+                orchestration_id:Some(&other.id),state_filter:None,search_query:None,
+                project_id:None,archived:false,
+            }).unwrap().is_empty(),"A Team board may not show another Team's Demand");
+    }
+
     #[test]
     fn global_demand_stop_rejects_stale_revision_and_revokes_exact_assignment() {
         let mut store = fixture();
@@ -7271,7 +7367,7 @@ mod tests {
                     orchestration_id: Some(&team.id),
                     state_filter: Some("blocked"),
                     search_query: None,
-                    project_id: project,
+                    project_id: project, archived: false,
                 },
             )
         };

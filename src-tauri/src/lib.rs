@@ -4579,6 +4579,8 @@ pub fn run() {
                 superagent::manifest::superagent_manifest_preview,
                 superagent::manifest::superagent_manifest_import,
                 superagent::superagent_stop,
+            superagent::superagent_archive_demand,
+            superagent::superagent_restore_demand,
                 bots::shared_channels::bot_shared_channels,
                 bots::shared_channels::bot_shared_channel_detail,
                 bots::shared_channels::bot_shared_channel_create,

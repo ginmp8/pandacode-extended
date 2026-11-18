@@ -72,6 +72,7 @@ test('Orchestrations keeps the reference page and five-step wizard layout', asyn
 async function mountNativeFixture(page: Page, options: {
   reviewers?: number; council?: boolean; mode?: 'approval'|'full'|'off'; enabled?: boolean;
   withTicket?: boolean; ticketState?: string; blockedHasPlan?: boolean; revoked?: boolean;
+  withOtherTeam?: boolean;
 }={}) {
   await page.evaluate(async opts => {
     const {mountSuperagent}=await import('/src/superagent-ui.ts');
@@ -97,6 +98,12 @@ async function mountNativeFixture(page: Page, options: {
       ticketCount:0,runningCount:0,blockedCount:0,
     };
     let mode=opts.mode ?? 'approval';
+    let archivedTicket=false;
+    const otherCfg={...cfg,id:'team-2',name:'Other Private Team',ticketCount:1};
+    const otherTicket=opts.withOtherTeam ? {
+      id:'demand-other',orchestrationId:'team-2',objective:'Private demand from another Team',
+      state:'completed',revision:1,evidence:null,
+    } : null;
     let ticket: {id:string;orchestrationId:string;objective:string;state:string;revision:number;evidence:null}|null =
       opts.withTicket ? {
         id:'demand-1',orchestrationId:cfg.id,objective:'Fix the native example',
@@ -104,6 +111,9 @@ async function mountNativeFixture(page: Page, options: {
       } : null;
     const mutations:Array<{command:string;args:Record<string,unknown>}>=[];
     const reads:Array<{command:string;args:Record<string,unknown>}>=[];
+    const demandQueries:Array<Record<string,unknown>>=[];
+    (window as unknown as {saFixtureDemandQueries:typeof demandQueries})
+      .saFixtureDemandQueries=demandQueries;
     (window as unknown as {saFixtureReads:typeof reads}).saFixtureReads=reads;
     (window as unknown as {saFixtureMutations:typeof mutations;saFixtureEvents:unknown[]})
       .saFixtureMutations=mutations;
@@ -130,7 +140,7 @@ async function mountNativeFixture(page: Page, options: {
       const entry=isChild ? {id:'child-1',orchestrationId:cfg.id,objective:'Implement isolated native WorkItem',
         state:'running',revision:1,evidence:null} : ticket;
       if(!entry)throw Error('No native Ticket matches the requested identity');
-      return {ticket:entry,
+      return {ticket:entry,archived:!isChild && archivedTicket,
         mandate:{actor:'local-user',authorizationId:'fixture',policyRevision:cfg.policyRevision,
           projectId:'project-1',expiresAt:Date.now()+100000,revoked:opts.revoked===true,
           allowedTools:[],allowedSideEffects:false},
@@ -145,14 +155,32 @@ async function mountNativeFixture(page: Page, options: {
     };
     mountSuperagent(host,async(command,args={})=>{
       if(command==='bots_list')return bots as never;
-      if(command==='superagent_list')return [{...cfg,ticketCount:ticket?1:0,runningCount:ticket?.state==='running'?1:0}] as never;
-      if(command==='superagent_tickets')return (ticket&&args.orchestrationId===cfg.id?[ticket]:[]) as never;
+      if(command==='superagent_list')return [
+        {...cfg,ticketCount:ticket?1:0,runningCount:ticket?.state==='running'?1:0},
+        ...(otherTicket?[otherCfg]:[]),
+      ] as never;
+      if(command==='superagent_tickets')return (
+        args.orchestrationId===cfg.id && ticket && !archivedTicket ? [ticket] :
+        args.orchestrationId==='team-2' && otherTicket ? [otherTicket] : []
+      ) as never;
       if(command==='superagent_strategy_get')return policy() as never;
       if(command==='superagent_roster')return roster() as never;
-      if(command==='superagent_all_demands')return (ticket?[{id:ticket.id,
-        orchestrationId:ticket.orchestrationId,objective:ticket.objective,
-        state:ticket.state,revision:ticket.revision,updatedAt:Date.now(),
-        projectId:'project-1'}]:[]) as never;
+      if(command==='superagent_all_demands'){
+        const query=(args.query ?? args) as {orchestrationId?:string;archived?:boolean};
+        demandQueries.push(query as Record<string,unknown>);
+        const items=[
+          ...(ticket?[{id:ticket.id,orchestrationId:ticket.orchestrationId,
+            objective:ticket.objective,state:ticket.state,revision:ticket.revision,
+            updatedAt:Date.now(),projectId:'project-1',archived:archivedTicket}]:[]),
+          ...(otherTicket?[{id:otherTicket.id,orchestrationId:otherTicket.orchestrationId,
+            objective:otherTicket.objective,state:otherTicket.state,
+            revision:otherTicket.revision,updatedAt:Date.now()-1000,
+            projectId:'project-2',archived:false}]:[]),
+        ];
+        return items.filter(item=>
+          (!query.orchestrationId || item.orchestrationId===query.orchestrationId)
+          && item.archived===Boolean(query.archived)) as never;
+      }
       if(command==='superagent_review_inbox')return (ticket&&
         ['waiting_review','waiting_approval'].includes(ticket.state)
         ?[{...ticket,updatedAt:Date.now(),projectId:'project-1'}]:[]) as never;
@@ -230,9 +258,25 @@ async function mountNativeFixture(page: Page, options: {
         return ticket as never;
       }
       if(command==='superagent_stop'){
-        if(!ticket||ticket.revision!==args.expectedRevision)throw Error('Stale Demand');
+        if(!ticket||ticket.revision!==args.expectedRevision ||
+            ['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state))
+          throw Error('Stale or terminal Demand');
         mutations.push({command,args});ticket.state='stopped';ticket.revision++;
         return ticket as never;
+      }
+      if(command==='superagent_archive_demand'){
+        if(!ticket||ticket.revision!==args.expectedRevision ||
+            !['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state))
+          throw Error('Cancel Demand before deleting');
+        if(archivedTicket)throw Error('Demand already archived');
+        mutations.push({command,args});archivedTicket=true;
+        return undefined as never;
+      }
+      if(command==='superagent_restore_demand'){
+        if(!ticket||ticket.revision!==args.expectedRevision || !archivedTicket)
+          throw Error('Stale archived Demand');
+        mutations.push({command,args});archivedTicket=false;
+        return undefined as never;
       }
       throw Error('Unexpected native command: '+command);
     });
@@ -316,7 +360,7 @@ test('native Team role picker preserves checked bots and saves ordered IDs only 
     .toEqual(['rev1','rev2']);
 });
 
-test('Team details use native bot inspector and five reference tabs',async({page})=>{
+test('Team details expose native bot inspector and scoped Demand tasks tab',async({page})=>{
   await page.goto('/?bots=sample');
   const host=await mountNativeFixture(page);
   await host.locator('[data-sa-select="team-1"]').click();
@@ -566,12 +610,86 @@ test('review inbox shows pending Council as pending, not as accepted evidence',a
   await expect(host.getByRole('button',{name:'Accept evidence'})).toHaveCount(0);
 });
 
+test('Team tasks board shows only its own native Demands and per-Demand WorkItems',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{withTicket:true,withOtherTeam:true});
+  await host.locator('[data-sa-team-tasks="team-1"]').click();
+  const team=host.getByRole('region',{name:'Team Demands and Tasks'});
+  await expect(team).toBeVisible();
+  await expect(team).toContainText('Fix the native example');
+  await expect(team).not.toContainText('Private demand from another Team');
+  await expect(host.locator('.sa-subtabs').getByRole('button',{name:'Demands & Tasks'}))
+    .toHaveAttribute('aria-current','page');
+  await team.locator('[data-sa-team-demand-tasks="demand-1"]').click();
+  await expect(team.getByRole('region',{name:'Demand task timeline'}))
+    .toContainText('Implement isolated native WorkItem');
+  await expect(team.getByRole('region',{name:'Demand task timeline'}))
+    .toContainText('Worker: Worker');
+  const queries=await page.evaluate(()=>
+    (window as unknown as {saFixtureDemandQueries:Array<Record<string,unknown>>})
+      .saFixtureDemandQueries);
+  expect(queries.some(q=>q.orchestrationId==='team-1' && q.archived===false)).toBe(true);
+  await team.getByRole('button',{name:'Open full Demand timeline'}).click();
+  const details=host.getByRole('region',{name:'Selected native Demand'});
+  await expect(details).toContainText('Fix the native example');
+  await details.getByRole('button',{name:'Back to Team Tasks'}).click();
+  await expect(host.getByRole('region',{name:'Team Demands and Tasks'})).toBeVisible();
+});
+
+test('Delete Demand cancels an active native Ticket and archives it reversibly',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{withTicket:true,enabled:true});
+  await host.locator('[data-sa-team-tasks="team-1"]').click();
+  const team=host.getByRole('region',{name:'Team Demands and Tasks'});
+  await team.getByRole('button',{name:'Delete Demand'}).click();
+  const confirmation=host.getByRole('alertdialog',{name:'Confirm orchestration action'});
+  await expect(confirmation).toContainText('reversible archive');
+  await confirmation.getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(host).toHaveAttribute('aria-busy','false');
+  const first=await page.evaluate(()=>
+    (window as unknown as {saFixtureMutations:Array<{command:string;args:Record<string,unknown>}>})
+      .saFixtureMutations);
+  expect(first.map(x=>x.command)).toEqual([
+    'superagent_stop','superagent_archive_demand',
+  ]);
+  expect(first[0].args).toEqual({ticketId:'demand-1',expectedRevision:2});
+  expect(first[1].args).toEqual({ticketId:'demand-1',expectedRevision:3});
+  await expect(team).not.toContainText('Fix the native example');
+  await team.getByRole('button',{name:'Archived (restore)'}).click();
+  await expect(team.getByRole('button',{name:'Restore Demand'})).toBeVisible();
+  await team.getByRole('button',{name:'Restore Demand'}).click();
+  await host.getByRole('alertdialog',{name:'Confirm orchestration action'})
+    .getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(team).toContainText('Fix the native example');
+  await team.getByRole('button',{name:'Active Demands'}).click();
+  await expect(team).toContainText('Fix the native example');
+  const all=await page.evaluate(()=>
+    (window as unknown as {saFixtureMutations:Array<{command:string}>})
+      .saFixtureMutations.map(x=>x.command));
+  expect(all).toEqual(['superagent_stop','superagent_archive_demand',
+    'superagent_restore_demand']);
+  expect(all).not.toContain('superagent_start_demand');
+});
+
+test('Cancel Demand is available in its Team board, not only the global board',async({page})=>{
+  await page.goto('/?bots=sample');
+  const host=await mountNativeFixture(page,{withTicket:true,enabled:true});
+  await host.locator('[data-sa-team-tasks="team-1"]').click();
+  const team=host.getByRole('region',{name:'Team Demands and Tasks'});
+  await team.getByRole('button',{name:'Cancel Demand'}).click();
+  await host.getByRole('alertdialog',{name:'Confirm orchestration action'})
+    .getByRole('button',{name:'Confirm',exact:true}).click();
+  await expect(team).toContainText('stopped');
+  await expect(team.getByRole('button',{name:'Cancel Demand'})).toHaveCount(0);
+  await expect(team.getByRole('button',{name:'Delete Demand'})).toBeVisible();
+});
+
 test('a native Stop rechecks the exact Ticket revision and records no other effects',async({page})=>{
   await page.goto('/?bots=sample');
   const host=await mountNativeFixture(page,{withTicket:true,enabled:true});
   await host.getByRole('button',{name:'Demands / Runs',exact:true}).click();
   await host.locator('[data-sa-open-demand="demand-1"]').click();
-  await host.getByRole('button',{name:'Stop',exact:true}).click();
+  await host.getByRole('button',{name:'Cancel Demand',exact:true}).click();
   await host.getByRole('alertdialog',{name:'Confirm orchestration action'})
     .getByRole('button',{name:'Confirm',exact:true}).click();
   const calls=await page.evaluate(()=>

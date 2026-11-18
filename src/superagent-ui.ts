@@ -137,11 +137,11 @@ interface NativeSubagentTree {
   nodes:NativeSubagentNode[];
 }
 interface DemandIndex { id: string; orchestrationId: string; objective: string;
-  state: string; revision: number; updatedAt: number; projectId?: string }
+  state: string; revision: number; updatedAt: number; projectId?: string; archived?: boolean }
 interface DemandQuery {
   limit?: number; beforeUpdatedAt?: number; beforeId?: string;
   orchestrationId?: string; stateFilter?: string; searchQuery?: string;
-  projectId?: string;
+  projectId?: string; archived?: boolean;
 }
 interface Preview { wouldCreate: string[]; unchanged: string[]; importedPresetsDisabled: boolean }
 interface ImportResult { created: string[]; unchanged: string[]; backupPath?: string }
@@ -165,7 +165,7 @@ interface CouncilObservation {
   nativePassVerified: boolean; ticketArtifactBound: boolean;
 }
 interface TicketDetails {
-  ticket: Ticket; mandate: Mandate; assignments: Assignment[];
+  ticket: Ticket; archived?: boolean; mandate: Mandate; assignments: Assignment[];
   attemptInsights?: AssignmentInsight[];
   activity: Activity[]; teamSnapshot?: TeamSnapshot | null; council?: CouncilObservation | null;
   finalizationGate?: 'not_pending' | 'native_recheck_required' | 'council_required' | 'effects_unresolved';
@@ -239,6 +239,11 @@ function roleUnavailableForChange(
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
   let bots: Bot[] = [], presets: Config[] = [], tickets: Ticket[] = [];
   let allDemands: DemandIndex[] = [], allDemandsLoaded = false, allDemandsHasMore = false;
+  let teamDemands: DemandIndex[] = [], teamDemandsLoaded = false, teamDemandsHasMore = false;
+  let teamArchived = false, globalArchived = false;
+  let teamDemandLayout: 'board' | 'list' = 'board';
+  let teamPlanTicketId = '', teamPlan: DemandPlanEvidence | null = null, teamPlanLoaded = false;
+  let returnToTeamTasks = false;
   let demandTeamFilter = '', demandStateFilter = '', demandSearch = '', demandSearchDraft = '';
   let demandProjectFilter = '', demandProjectDraft = '';
   let teamSearch = '', teamStatusFilter: 'all' | 'enabled' | 'disabled' = 'all';
@@ -246,7 +251,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let globalDemandLayout: 'board' | 'list' = 'board';
   let selected = '', busy = false, loading = true, error = '', feedback = '', importText = '';
   let workspaceView: 'teams' | 'team' | 'runs' | 'new-demand' | 'run' | 'review' = 'teams';
-  let teamPanel: 'overview' | 'members' | 'execution' | 'sources' | 'portable' = 'overview';
+  let teamPanel: 'overview' | 'demands' | 'members' | 'execution' | 'sources' | 'portable' = 'overview';
   let memberInspectBotId = '';
   let preview: Preview | null = null, inspected: unknown = null;
   let confirm: { message: string; action: () => Promise<void> } | null = null;
@@ -293,8 +298,28 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   const safe = (value: unknown) => escape(String(value ?? ''));
   const fetchDemandPage = (query: DemandQuery) =>
     call<DemandIndex[]>('superagent_all_demands', {
-      query: {...query, ...(demandProjectFilter ? {projectId:demandProjectFilter} : {})},
+      query: {archived:globalArchived, ...query,
+        ...(demandProjectFilter ? {projectId:demandProjectFilter} : {})},
     });
+  async function loadTeamDemandPage(teamId: string, archived: boolean,
+    before?: DemandIndex): Promise<DemandIndex[]> {
+    const rows = await call<DemandIndex[]>('superagent_all_demands', {query:{
+      limit:100, orchestrationId:teamId, archived,
+      ...(before ? {beforeUpdatedAt:before.updatedAt,beforeId:before.id} : {}),
+    }});
+    if (rows.some(row => row.orchestrationId !== teamId || Boolean(row.archived) !== archived)) {
+      throw new Error('Native Team Demand index returned another Team or archive scope.');
+    }
+    return rows;
+  }
+  async function refreshTeamDemands(teamId: string, archived = teamArchived): Promise<void> {
+    if (selected !== teamId) return;
+    teamDemands=[]; teamDemandsLoaded=false; teamDemandsHasMore=false;
+    teamPlanTicketId=''; teamPlan=null; teamPlanLoaded=false;
+    const rows=await loadTeamDemandPage(teamId,archived);
+    if (selected !== teamId || teamArchived !== archived) return;
+    teamDemands=rows; teamDemandsHasMore=rows.length === 100; teamDemandsLoaded=true;
+  }
   function captureFocusedControl(): {
     selector: string; index: number; selectionStart: number | null;
     selectionEnd: number | null; selectionDirection: 'forward' | 'backward' | 'none' | null;
@@ -426,7 +451,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '<small class="sa-last-activity">' + safe(activityTime(item.lastActivityAt)) +
       '</small></div><button type="button" data-sa-select="' + safe(item.id) +
       '" aria-current="' + (item.id === selected) + '">Details ' + icon('chevron') +
-      '</button></li>').join('');
+      '</button><button type="button" data-sa-team-tasks="' + safe(item.id) +
+      '">Team tasks</button></li>').join('');
     const optionsFor = (botId: string) => bots.map(bot => '<option value="' + safe(bot.id) + '"' +
       (bot.paused ? ' disabled' : '') + (bot.id === botId ? ' selected' : '') + '>' + safe(bot.name) +
       (bot.paused ? ' (paused)' : '') + '</option>').join('');
@@ -881,41 +907,103 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               ' · Delivery ' + safe(d.deliveryId) +
               ' · Revision ' + d.policyRevision + '</li>').join('') ||
               '<li>No recorded events.</li>') + '</ol></div>' : '')) + '</section>';
-    // One native read of the bounded cross-Team Demand index powers both
-    // accessible presentations. A board column is not a scheduler state.
-    const demandCard = (demand: DemandIndex) =>
-      '<li class="sa-demand-card"><div><strong>' + safe(demand.objective) +
-      '</strong><small>' + safe(presets.find(item => item.id === demand.orchestrationId)?.name ??
-        'Unknown Team') + ' · ' + safe(demand.state) + ' · Revision ' +
-      demand.revision + ' · Admitted project ' + safe(demand.projectId ?? 'Unknown') +
-      ' · Updated ' + safe(activityTime(demand.updatedAt)) +
-      '</small></div><button type="button" data-sa-open-demand="' + safe(demand.id) +
-      '">Open demand</button>' +
-      (['blocked','failed','interrupted','inconclusive'].includes(demand.state)
-        ? '<button type="button" class="sa-attention-action" data-sa-quick-attention="' +
-          safe(demand.id) + '">Resolve demand</button>' : '') +
-      (!['completed','failed','stopped','interrupted','inconclusive'].includes(demand.state)
-        ? '<button type="button" data-sa-stop-global-demand="' + safe(demand.id) +
-          '">Stop demand</button>' : '') + '</li>';
-    const demandGroups = [
+    // Native Team and cross-Team indices share the same presentation but
+    // always render only entries returned from their own scoped query.
+    const demandCard = (demand:DemandIndex, scope:'team'|'global') => {
+      const terminal=['completed','failed','stopped','interrupted','inconclusive'].includes(demand.state);
+      const archived=Boolean(demand.archived);
+      const showingTasks=scope==='team' && teamPlanTicketId===demand.id;
+      const taskList=showingTasks
+        ? '<div class="sa-team-task-detail" role="region" aria-label="Demand task timeline">' +
+          (!teamPlanLoaded
+            ? '<p role="status">Loading native WorkItems…</p>'
+            : teamPlan && teamPlan.ticketId===demand.id
+              ? '<ol class="sa-team-task-timeline">' +
+                teamPlan.items.map(item => '<li><strong>' + safe(item.key) + ' · ' +
+                  safe(item.objective) + '</strong><small>Worker: ' +
+                  safe(botName(item.workerBotId)) + ' · State: ' + safe(item.state) +
+                  (item.childTicketState ? ' · Native Ticket: ' + safe(item.childTicketState) : '') +
+                  (item.dependsOn.length ? ' · After: ' + safe(item.dependsOn.join(', ')) : '') +
+                  '</small><small>' + safe(workItemProgressHint(item,teamPlan.items)) +
+                  '</small></li>').join('') + '</ol>'
+              : '<p>No native WorkItem plan has been issued for this Demand yet.</p>') +
+          '<button type="button" data-sa-open-demand="' + safe(demand.id) +
+          '">Open full Demand timeline</button></div>'
+        : '';
+      return '<li class="sa-demand-card" data-sa-demand-team="' +
+        safe(demand.orchestrationId) + '"><div><strong>' + safe(demand.objective) +
+        '</strong><small>' + safe(presets.find(item => item.id===demand.orchestrationId)?.name ??
+          'Unknown Team') + ' · ' + safe(demand.state) +
+        (archived ? ' · Archived' : '') + ' · Revision ' + demand.revision +
+        ' · Admitted project ' + safe(demand.projectId ?? 'Unknown') +
+        ' · Updated ' + safe(activityTime(demand.updatedAt)) + '</small></div>' +
+        '<div class="sa-demand-actions">' +
+        '<button type="button" data-sa-open-demand="' + safe(demand.id) +
+        '">Open demand</button>' +
+        (scope==='team' ? '<button type="button" data-sa-team-demand-tasks="' +
+          safe(demand.id) + '" aria-expanded="' + showingTasks +
+          '">Tasks (' + (showingTasks ? 'Hide' : 'View') + ')</button>' : '') +
+        (!archived && ['blocked','failed','interrupted','inconclusive'].includes(demand.state)
+          ? '<button type="button" class="sa-attention-action" data-sa-quick-attention="' +
+            safe(demand.id) + '">Resolve demand</button>' : '') +
+        (archived ? '<button type="button" data-sa-restore-demand="' + safe(demand.id) +
+            '">Restore Demand</button>' :
+          (!terminal ? '<button type="button" data-sa-cancel-demand="' +
+              safe(demand.id) + '">Cancel Demand</button>' : '') +
+          '<button type="button" class="sa-demand-delete" data-sa-archive-demand="' +
+            safe(demand.id) + '">Delete Demand</button>') + '</div>' +
+        taskList + '</li>';
+    };
+    const demandGroups=[
       {label:'Working',states:['queued','running']},
       {label:'Awaiting decision',states:['waiting_approval','waiting_review']},
       {label:'Needs attention',states:['blocked','failed','interrupted','inconclusive']},
       {label:'Finished or stopped',states:['completed','stopped']},
     ];
-    const unmatchedDemands = allDemands.filter(demand =>
-      !demandGroups.some(group => group.states.includes(demand.state)));
-    const demandBoard = '<div class="sa-demand-board" role="group" aria-label="Demand status board">' +
-      demandGroups.concat(unmatchedDemands.length ? [{label:'Other states',states:[]}] : [])
-        .map(group => {
-          const entries = group.states.length ? allDemands.filter(demand =>
-            group.states.includes(demand.state)) : unmatchedDemands;
-          return '<section class="sa-demand-column" aria-label="' + safe(group.label) + ' Demands">' +
-            '<h4>' + safe(group.label) + ' <span class="sa-demand-count">' +
-            entries.length + '</span></h4><ul class="sa-tickets">' +
-            (entries.map(demandCard).join('') || '<li class="sa-empty">No Demands in this state.</li>') +
-            '</ul></section>';
-        }).join('') + '</div>';
+    const renderDemandBoard=(items:DemandIndex[],scope:'team'|'global',title:string)=>{
+      const unmatched=items.filter(item=>!demandGroups.some(group=>group.states.includes(item.state)));
+      return '<div class="sa-demand-board" role="group" aria-label="' + safe(title) + '">' +
+        demandGroups.concat(unmatched.length ? [{label:'Other states',states:[]}] : [])
+          .map(group=>{
+            const entries=group.states.length ? items.filter(item=>group.states.includes(item.state)) : unmatched;
+            return '<section class="sa-demand-column" aria-label="' + safe(group.label) + ' Demands">' +
+              '<h4>' + safe(group.label) + ' <span class="sa-demand-count">' +
+              entries.length + '</span></h4><ul class="sa-tickets">' +
+              (entries.map(item=>demandCard(item,scope)).join('') ||
+                '<li class="sa-empty">No Demands in this state.</li>') +
+              '</ul></section>';
+          }).join('') + '</div>';
+    };
+    const demandBoard=renderDemandBoard(allDemands,'global','Demand status board');
+    const scopedTeamDemands=chosen
+      ? teamDemands.filter(item=>item.orchestrationId===chosen.id && Boolean(item.archived)===teamArchived)
+      : [];
+    const teamDemandsPanel=chosen ? '<section class="sa-pane sa-team-demands" ' +
+      'aria-label="Team Demands and Tasks"><header><div><h3>Demands & Tasks · ' +
+      safe(chosen.name) + '</h3><p>Only work owned by this Team. Expand a Demand to see its ' +
+      'real WorkItems and assigned Workers.</p></div>' +
+      '<button type="button" data-sa-refresh-team-demands>Refresh Team Tasks</button></header>' +
+      '<div class="sa-demand-layout-toggle" role="group" aria-label="Team Demand history">' +
+      '<button type="button" data-sa-team-archived="active" aria-pressed="' +
+        !teamArchived + '">Active Demands</button>' +
+      '<button type="button" data-sa-team-archived="archived" aria-pressed="' +
+        teamArchived + '">Archived (restore)</button></div>' +
+      (!teamDemandsLoaded ? '<p role="status">Loading this Team\'s native Demands…</p>' :
+        '<div class="sa-demand-layout-toggle" role="group" aria-label="Team Demand presentation">' +
+        (['board','list'] as const).map(layout=>
+          '<button type="button" data-sa-team-demand-layout="' + layout +
+          '" aria-pressed="' + (teamDemandLayout===layout) + '">' +
+          (layout==='board' ? 'Board' : 'List') + '</button>').join('') + '</div>' +
+        (teamDemandLayout==='board'
+          ? renderDemandBoard(scopedTeamDemands,'team','Team Demand status board')
+          : '<ul class="sa-tickets sa-global-demand-list">' +
+            (scopedTeamDemands.map(item=>demandCard(item,'team')).join('') ||
+              '<li class="sa-empty">No Demands in this Team.</li>') + '</ul>') +
+        '<p role="status">' + scopedTeamDemands.length + ' Team Demands loaded. ' +
+        'Counts describe only the current page, not the entire Team history.</p>' +
+        (teamDemandsHasMore
+          ? '<button type="button" data-sa-load-older-team-demands>Load older Team Demands</button>'
+          : '')) + '</section>' : '';
     const globalDemands = '<section class="sa-pane sa-global-demands" aria-label="All Demands across Teams">' +
       '<header><h3>All Demands / Runs</h3><button type="button" data-sa-load-all-demands>' +
       (demandTeamFilter ? 'Refresh selected Team' : 'Refresh all Teams') + '</button></header>' +
@@ -924,6 +1012,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       presets.map(item => '<option value="' + safe(item.id) + '"' +
         (demandTeamFilter === item.id ? ' selected' : '') + '>' + safe(item.name) + '</option>').join('') +
       '</select></label>' +
+      '<div class="sa-demand-layout-toggle" role="group" aria-label="Archived Demands filter">' +
+      '<button type="button" data-sa-global-archived="active" aria-pressed="' +
+        !globalArchived + '">Active Demands</button>' +
+      '<button type="button" data-sa-global-archived="archived" aria-pressed="' +
+        globalArchived + '">Archived (restore)</button></div>' +
       '<form data-sa-form="demand-project-filter" role="search" aria-label="Filter native Demands by admitted project">' +
       '<label>Admitted project ID<input type="text" name="projectId" maxlength="128" ' +
       'aria-label="Exact admitted Project ID" data-sa-demand-project-input ' +
@@ -941,7 +1034,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '<label>Search objectives<input type="search" name="searchQuery" aria-label="Search Demands by objective" data-sa-demand-search maxlength="128" ' +
       'placeholder="Literal objective fragment" value="' + safe(demandSearchDraft) + '"></label>' +
       '<button type="submit">Search Demands</button></form>' +
-      '<p>Native Tickets ' + (demandTeamFilter ? 'for this Team' : 'across Teams') +
+      '<p>' + (globalArchived ? 'Archived native Tickets ' : 'Native Tickets ') +
+      (demandTeamFilter ? 'for this Team' : 'across Teams') +
       (demandProjectFilter ? ' admitted to project ' + safe(demandProjectFilter) : '') +
       (demandStateFilter ? ' in state ' + safe(demandStateFilter) : '') +
       (demandSearch ? ' matching objective "' + safe(demandSearch) + '"' : '') +
@@ -955,8 +1049,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           (layout === 'board' ? 'Board' : 'List') + '</button>').join('') + '</div>' +
         (globalDemandLayout === 'board' ? demandBoard :
           '<ul class="sa-tickets sa-global-demand-list">' +
-          (allDemands.map(demandCard).join('') ||
-          '<li class="sa-empty">No native Demands / Runs found.</li>') + '</ul>') +
+          (allDemands.map(demand=>demandCard(demand,'global')).join('') ||
+          '<li class="sa-empty">No native Demands / Runs found in this scope.</li>') + '</ul>') +
         '<p role="status">' + allDemands.length + ' native Demands loaded.</p>' +
         (allDemandsHasMore ? '<button type="button" data-sa-load-older-demands>Load older Demands</button>' : '')) +
       '</section>';
@@ -1048,11 +1142,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '</div></section>'
       : '';
     const active = chosen && inspectedTicket ? '<section class="sa-pane sa-run-detail" aria-label="Selected native Demand">' +
-      '<div class="sa-run-head"><button type="button" data-sa-back-runs>All Demands</button>' +
+      '<div class="sa-run-head"><button type="button" data-sa-back-runs>' +
+        (returnToTeamTasks ? 'Back to Team Tasks' : 'All Demands') + '</button>' +
       '<p class="sa-eyebrow">NATIVE DEMAND / RUN</p><h2>' +
         safe(tickets.find(ticket => ticket.id === inspectedTicket)?.objective ?? 'Loading native Demand') + '</h2>' +
       '<p>Team ' + safe(chosen.name) + ' · ' + safe(tickets.find(ticket => ticket.id === inspectedTicket)?.state ?? 'Loading') +
-        ' · Ticket ' + safe(inspectedTicket) + '</p></div>' +
+        ' · Ticket ' + safe(inspectedTicket) +
+        (ticketDetails?.archived ? ' · Archived' : '') + '</p></div>' +
       attentionPanel +
       '<ol class="sa-run-milestones" aria-label="Native Run lifecycle">' +
         '<li><span>01 · Admission</span><strong>' +
@@ -1092,8 +1188,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               ? ' disabled aria-describedby="sa-finalization-blocked"' : '') +
             '>Accept evidence</button>' +
             '<button type="button" data-sa-reject="' + safe(ticket.id) + '">Reject evidence</button>' : '') +
-        (!['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)
-          ? '<button type="button" data-sa-stop="' + safe(ticket.id) + '">Stop</button>' : '') +
+        (ticketDetails?.ticket.id===ticket.id && !ticketDetails.archived &&
+          !['completed','failed','stopped','interrupted','inconclusive'].includes(ticket.state)
+          ? '<button type="button" data-sa-cancel-demand="' + safe(ticket.id) +
+            '">Cancel Demand</button>' : '') +
+        (ticketDetails?.ticket.id===ticket.id
+          ? (ticketDetails.archived
+            ? '<button type="button" data-sa-restore-demand="' + safe(ticket.id) +
+                '">Restore Demand</button>'
+            : '<button type="button" class="sa-demand-delete" data-sa-archive-demand="' +
+                safe(ticket.id) + '">Delete Demand</button>') : '') +
         '</li>').join('') || '<li class="sa-empty">No tickets yet.</li>') + '</ul>' +
         (rejectingTicket ? '<form data-sa-form="reject"><label>Rejection reason<textarea name="reason" maxlength="500" required></textarea></label>' +
           '<div class="sa-actions"><button type="submit" class="primary-button">Submit rejection</button>' +
@@ -1303,7 +1407,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               : 'Execution policy not configured')
           : 'Load native Team policy') +
         '</dd></dl>' +
-        '<div class="sa-actions"><button type="button" data-sa-view="runs">View runs</button></div>' +
+        '<div class="sa-actions"><button type="button" data-sa-team-tab="demands">' +
+        'View this Team\'s Demands & Tasks</button></div>' +
         '</section></div>'
       : '<section class="sa-pane"><h3>No Teams yet</h3><p>Create a disabled Team from two eligible existing bots. Nothing starts automatically.</p></section>';
     const globalReviewPanel = '<section class="sa-pane sa-cross-team-review" ' +
@@ -1432,6 +1537,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<button type="button" class="sa-enable-toggle" data-sa-enable="' + safe(chosen.id) +
         '" aria-label="' + (chosen.enabled ? 'Disable Team' : 'Enable Team') + '">' +
         (chosen.enabled ? 'Disable Team' : 'Enable Team') + '</button>' +
+        '<button type="button" data-sa-team-tab="demands">' + icon('kanban') +
+        ' Team tasks</button>' +
         '<button type="button" data-sa-team-tab="members">' + icon('settings') +
         ' Configure</button>' +
         '<button class="primary-button" type="button" data-sa-create-demand>' +
@@ -1439,7 +1546,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '</div></div>' +
         '<nav class="sa-subtabs" aria-label="Team details">' +
         ([
-          ['overview','Overview'],['members','Members and roles'],
+          ['overview','Overview'],['demands','Demands & Tasks'],['members','Members and roles'],
           ['execution','Execution and review'],['sources','GitHub sources'],
           ['portable','Import / export'],
         ] as const).map(([id,label]) =>
@@ -1447,6 +1554,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           (teamPanel === id ? 'page' : 'false') + '">' + label + '</button>').join('') +
         '</nav>' +
         (teamPanel === 'overview' ? overview :
+          teamPanel === 'demands' ? teamDemandsPanel :
           teamPanel === 'members' ? teamEditor + teamRoles :
           teamPanel === 'execution' ? strategyPane :
           teamPanel === 'sources' ? '<section class="sa-pane sa-sources-panel">' + sourcePanel + '</section>' :
@@ -1565,6 +1673,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     // Mutations invalidate the cross-Team index. Never show stale global
     // status as if the native Tickets had already been re-read.
     allDemands = []; allDemandsLoaded = false; allDemandsHasMore = false;
+    teamDemands = []; teamDemandsLoaded = false; teamDemandsHasMore = false;
+    teamPlanTicketId=''; teamPlan=null; teamPlanLoaded=false;
     reviewQueue = []; reviewQueueLoaded = false;
     // Keep updated controls hidden until the mutating operation has settled.
     // Exposing them mid-reload would allow silently discarded submissions.
@@ -1626,6 +1736,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         }
       } else {
         teamStrategy = null; roleRoster = null;
+      }
+      if (workspaceView === 'team' && selected) {
+        await refreshTeamDemands(selected);
       }
       // Any native refresh invalidates this non-authoritative, time-bound scan.
       effectiveTeam = null;
@@ -1967,14 +2080,76 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         ?.focus({preventScroll:true});
       return;
     }
+    if (target.dataset.saGlobalArchived) {
+      const next=target.dataset.saGlobalArchived;
+      if (next!=='active' && next!=='archived') return;
+      globalArchived=next==='archived';
+      allDemands=[]; allDemandsLoaded=false; allDemandsHasMore=false;
+      render();
+      host.querySelector<HTMLButtonElement>('[data-sa-load-all-demands]')?.click();
+      return;
+    }
+    if (target.dataset.saTeamDemandLayout) {
+      const layout=target.dataset.saTeamDemandLayout;
+      if (layout!=='board' && layout!=='list') return;
+      teamDemandLayout=layout; render(); return;
+    }
+    if (target.dataset.saTeamArchived) {
+      const next=target.dataset.saTeamArchived;
+      if (!selected || (next!=='active' && next!=='archived')) return;
+      teamArchived=next==='archived';
+      void work(async()=>{await refreshTeamDemands(selected);});
+      return;
+    }
+    if (target.hasAttribute('data-sa-refresh-team-demands')) {
+      if (selected) void work(async()=>{await refreshTeamDemands(selected);});
+      return;
+    }
+    if (target.hasAttribute('data-sa-load-older-team-demands')) {
+      const teamId=selected, archived=teamArchived;
+      const last=teamDemands[teamDemands.length-1];
+      if (!teamId || !teamDemandsLoaded || !teamDemandsHasMore || !last) return;
+      void work(async()=>{
+        const older=await loadTeamDemandPage(teamId,archived,last);
+        if (selected!==teamId || teamArchived!==archived) return;
+        const seen=new Set(teamDemands.map(item=>item.id));
+        teamDemands=[...teamDemands,...older.filter(item=>!seen.has(item.id))];
+        teamDemandsHasMore=older.length===100;
+      });
+      return;
+    }
+    if (target.dataset.saTeamDemandTasks) {
+      const ticketId=target.dataset.saTeamDemandTasks, teamId=selected;
+      const demand=teamDemands.find(item=>item.id===ticketId &&
+        item.orchestrationId===teamId && Boolean(item.archived)===teamArchived);
+      if (!demand || workspaceView!=='team' || teamPanel!=='demands') return;
+      if (teamPlanTicketId===ticketId) {
+        teamPlanTicketId=''; teamPlan=null; teamPlanLoaded=false;render();return;
+      }
+      teamPlanTicketId=ticketId; teamPlan=null; teamPlanLoaded=false;
+      void work(async()=>{
+        const plan=await call<DemandPlanEvidence|null>('superagent_demand_plan',{ticketId});
+        if (selected!==teamId || teamPlanTicketId!==ticketId) return;
+        if (plan?.ticketId && plan.ticketId!==ticketId) {
+          throw new Error('Native WorkItem plan belongs to another Demand.');
+        }
+        teamPlan=plan; teamPlanLoaded=true;
+      });
+      return;
+    }
     if (target.hasAttribute('data-sa-return-team')) {
       workspaceView = 'team'; render(); return;
     }
     if (target.hasAttribute('data-sa-back-runs')) {
-      workspaceView = 'runs'; inspectedTicket = ''; ticketDetails = null;
+      workspaceView = returnToTeamTasks ? 'team' : 'runs';
+      if (returnToTeamTasks) teamPanel='demands';
+      inspectedTicket = ''; ticketDetails = null;
       render();
-      if (!allDemandsLoaded)
+      if (returnToTeamTasks && !teamDemandsLoaded && selected) {
+        void work(async()=>{ await refreshTeamDemands(selected); });
+      } else if (!returnToTeamTasks && !allDemandsLoaded) {
         host.querySelector<HTMLButtonElement>('[data-sa-load-all-demands]')?.click();
+      }
       return;
     }
     if (target.hasAttribute('data-sa-create-demand')) {
@@ -2009,9 +2184,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     }
     if (target.dataset.saTeamTab) {
       const tab = target.dataset.saTeamTab;
-      if (!['overview','members','execution','sources','portable'].includes(tab)) return;
+      if (!['overview','demands','members','execution','sources','portable'].includes(tab)) return;
       workspaceView = 'team';
-      teamPanel = tab as typeof teamPanel; render(); return;
+      teamPanel = tab as typeof teamPanel; render();
+      if (tab==='demands' && !teamDemandsLoaded && selected) {
+        void work(async()=>{await refreshTeamDemands(selected);});
+      }
+      return;
     }
     if (target.dataset.saMemberInspect) {
       if (!current()) return;
@@ -2096,29 +2275,80 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
-    if (target.dataset.saStopGlobalDemand) {
-      const demand = allDemands.find(item => item.id === target.dataset.saStopGlobalDemand);
-      if (!demand || busy || !presets.some(item => item.id === demand.orchestrationId)) return;
-      void work(async () => {
-        // A cross-Team index is observation only. Re-read native ownership and
-        // revision, then commit Stop under the identical revision guard.
-        const snapshot = await call<TicketDetails>('superagent_snapshot',
-          {ticketId:demand.id,limit:1});
-        if (snapshot.ticket.id !== demand.id ||
-            snapshot.ticket.orchestrationId !== demand.orchestrationId ||
-            snapshot.ticket.revision !== demand.revision ||
-            snapshot.ticket.state !== demand.state) {
-          throw new Error('Demand changed since the native page was loaded; refresh before stopping.');
+    // Every destructive-looking action is scoped to the latest native Ticket,
+    // never authorized by an untrusted board row alone.
+    if (target.dataset.saCancelDemand || target.dataset.saArchiveDemand ||
+        target.dataset.saRestoreDemand) {
+      const ticketId=target.dataset.saCancelDemand ||
+        target.dataset.saArchiveDemand || target.dataset.saRestoreDemand || '';
+      const demand=teamDemands.find(item=>item.id===ticketId) ??
+        allDemands.find(item=>item.id===ticketId) ??
+        tickets.find(item=>item.id===ticketId);
+      const action=target.dataset.saCancelDemand ? 'cancel' :
+        target.dataset.saArchiveDemand ? 'archive' : 'restore';
+      if (!demand || busy || loading) return;
+      void work(async()=>{
+        const snapshot=await call<TicketDetails>('superagent_snapshot',
+          {ticketId,limit:1});
+        if (snapshot.ticket.id!==ticketId ||
+            snapshot.ticket.orchestrationId!==demand.orchestrationId ||
+            snapshot.ticket.revision!==demand.revision ||
+            snapshot.ticket.state!==demand.state) {
+          throw new Error('Demand changed; refresh its Team before taking action.');
         }
-        if (['completed','failed','stopped','interrupted','inconclusive']
-          .includes(snapshot.ticket.state)) return;
-        ask('Stop Demand ' + demand.id + ' at revision ' + demand.revision +
-          '? Native Stop revokes its mandate and quarantines pending effects.', async () => {
-          await call('superagent_stop',
-            {ticketId:demand.id,expectedRevision:snapshot.ticket.revision});
-          await reload();
-          feedback = 'Demand ' + demand.id + ' stopped by native revocation. Refresh Demands for current states.';
-        });
+        const archived=Boolean(snapshot.archived);
+        if ((action==='restore') !== archived) {
+          throw new Error('Demand archive status changed; refresh the native board.');
+        }
+        const terminal=['completed','failed','stopped','interrupted','inconclusive']
+          .includes(snapshot.ticket.state);
+        if (action==='cancel' && terminal) {
+          throw new Error('Demand is already terminal. Use Delete Demand to archive it.');
+        }
+        if (action==='cancel') {
+          ask('Cancel Demand '+ticketId+'? This revokes native execution and descendant ' +
+            'sessions. Already applied external effects are not undone.',async()=>{
+            await call<Ticket>('superagent_stop',
+              {ticketId,expectedRevision:snapshot.ticket.revision});
+            await reload();
+            feedback='Demand cancelled. Native history remains available in Team Tasks.';
+          });
+        } else if (action==='archive') {
+          ask('Delete Demand '+ticketId+' from active boards? This is a reversible archive: ' +
+            'native tasks, chats and audit evidence remain. An active Demand will first ' +
+            'be cancelled; uncertain external effects block archiving.',async()=>{
+            let expectedRevision=snapshot.ticket.revision;
+            let cancelled=false;
+            if (!terminal) {
+              const stopped=await call<Ticket>('superagent_stop',
+                {ticketId,expectedRevision});
+              if (stopped.id!==ticketId || stopped.state!=='stopped') {
+                throw new Error('Native cancellation did not settle the selected Demand.');
+              }
+              expectedRevision=stopped.revision;
+              cancelled=true;
+            }
+            try {
+              await call('superagent_archive_demand',{ticketId,expectedRevision});
+            } catch (cause) {
+              await reload();
+              const message=cause instanceof Error ? cause.message : String(cause);
+              throw new Error(cancelled
+                ? 'Demand was cancelled but not archived: '+message
+                : 'Demand could not be archived: '+message);
+            }
+            await reload();
+            feedback='Demand deleted from active boards (archived). Use Archived (restore) to recover it.';
+          });
+        } else {
+          ask('Restore Demand '+ticketId+' to its Team board? Original tasks and ' +
+            'chat history remain unchanged; restoring never restarts execution.',async()=>{
+            await call('superagent_restore_demand',
+              {ticketId,expectedRevision:snapshot.ticket.revision});
+            await reload();
+            feedback='Demand restored to its Team board. No Worker execution was restarted.';
+          });
+        }
       });
       return;
     }
@@ -2130,9 +2360,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       return;
     }
     if (target.dataset.saOpenDemand) {
-      const demand = allDemands.find(item => item.id === target.dataset.saOpenDemand) ??
+      const demand = teamDemands.find(item => item.id === target.dataset.saOpenDemand) ??
+        allDemands.find(item => item.id === target.dataset.saOpenDemand) ??
         reviewQueue.find(item => item.id === target.dataset.saOpenDemand);
       if (!demand || !presets.some(item => item.id === demand.orchestrationId)) return;
+      returnToTeamTasks = workspaceView==='team' && teamPanel==='demands' &&
+        selected===demand.orchestrationId;
       selected = demand.orchestrationId;
       workspaceView = 'run';
       tickets = []; inspectedTicket = ''; ticketDetails = null; threadLinks = [];
@@ -2209,26 +2442,39 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
-    if (target.dataset.saSelect) {
+    if (target.dataset.saSelect || target.dataset.saTeamTasks) {
       if (busy || loading) return;
-      workspaceView = 'team'; teamPanel = 'overview';
-      if (selected === target.dataset.saSelect) { render(); return; }
-      const next = target.dataset.saSelect;
+      const next=target.dataset.saSelect || target.dataset.saTeamTasks || '';
+      workspaceView = 'team';
+      teamPanel = target.dataset.saTeamTasks ? 'demands' : 'overview';
+      returnToTeamTasks = false;
+      if (selected === next) {
+        render();
+        if (teamPanel==='demands' && !teamDemandsLoaded) {
+          void work(async()=>{await refreshTeamDemands(next);});
+        }
+        return;
+      }
       selected = next;
+      teamArchived = false; // A new Team opens its own active work, never another Team's archive.
       tickets = [];
       inspectedTicket = ''; ticketDetails = null; threadLinks = [];
+      teamDemands=[]; teamDemandsLoaded=false; teamDemandsHasMore=false;
+      teamPlanTicketId=''; teamPlan=null; teamPlanLoaded=false;
       inspectedAssignmentId = ''; roleRoster = null; effectiveTeam = null; teamStrategy = null;
       sourcesLoaded = false; sources = []; decisionSourceId = ''; decisions = [];
       sourceIntegrity = null;
       void work(async () => {
-        const [loaded, policy, roster] = await Promise.all([
+        const [loaded, policy, roster, demands] = await Promise.all([
           call<Ticket[]>('superagent_tickets',{ orchestrationId:next, limit:50 }),
           call<StrategyView>('superagent_strategy_get',{orchestrationId:next}),
           call<TeamRoster>('superagent_roster',{orchestrationId:next}),
+          loadTeamDemandPage(next,teamArchived),
         ]);
         if (selected !== next) return;
         tickets = loaded; teamStrategy = policy; roleRoster = roster;
         workerOrder = [...roster.workerBotIds]; reviewerDraft = [...roster.reviewerBotIds];
+        teamDemands=demands; teamDemandsLoaded=true; teamDemandsHasMore=demands.length===100;
       });
       return;
     }
@@ -2579,12 +2825,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       });
       return;
     }
-    if (target.dataset.saStop) {
-      const t = tickets.find(item => item.id === target.dataset.saStop);
-      if (t) ask('Stop the task and revoke its authorization?', async () => {
-        await call('superagent_stop',{ ticketId:t.id, expectedRevision:t.revision }); await reload();
-      });
-    }
+    // Native Cancel/Delete/Restore are handled by the shared revision-guarded
+    // Demand controls above, for both Team boards and the run inspector.
   });
   host.addEventListener('submit', event => {
     const form = event.target;

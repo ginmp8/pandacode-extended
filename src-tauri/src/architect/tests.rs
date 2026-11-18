@@ -3867,7 +3867,7 @@ fn finish_silent(state: &AppState, prepared: &crate::PreparedRun) {
 fn tool_after_text(state: &AppState, sid: &str, text: &str, tool: &str) {
     let store = state.store.lock().unwrap();
     let assistant = std::sync::Mutex::new(text.to_owned());
-    let mut event = crate::AgentEvent { session_id: sid.into(), kind: "tool".into(), text: "Read".into(), request_id: None, data: None, tool: Some(crate::providers::ToolActivity { id: tool.into(), name: "Read".into(), status: "running".into(), input: String::new(), output: String::new(), write_paths: None }) };
+    let mut event = crate::AgentEvent { session_id: sid.into(), kind: "tool".into(), text: "Read".into(), request_id: None, data: None, tool: Some(crate::providers::ToolActivity { id: tool.into(), name: "Read".into(), status: "running".into(), input: String::new(), output: String::new(), write_paths: None, exit_code: None }) };
     crate::save_agent_activity(&store, &assistant, &mut event, None).unwrap();
 }
 

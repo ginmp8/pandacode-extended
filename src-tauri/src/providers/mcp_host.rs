@@ -556,6 +556,7 @@ impl Context {
                 input: input.into(),
                 output: limited(output, TOOL_OUTPUT_LIMIT),
                 write_paths: None,
+                exit_code: None,
             }),
         });
     }

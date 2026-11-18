@@ -615,9 +615,9 @@ pub(super) fn queue_native_test_followups(store:&Store,now:i64)->Result<usize> {
                    WHERE effect.ticket_id=root.id
                      AND effect.state IN ('pending','uncertain'))",
         ).map_err(|e|e.to_string())?;
-        stmt.query_map([now],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))
-            .map_err(|e|e.to_string())?
-            .collect::<rusqlite::Result<Vec<_>>>()
+        let mapped=stmt.query_map([now],|r|Ok((r.get::<_,String>(0)?,r.get::<_,String>(1)?)))
+            .map_err(|e|e.to_string())?;
+        mapped.collect::<rusqlite::Result<Vec<_>>>()
             .map_err(|e|e.to_string())?
     };
     let mut queued=0;

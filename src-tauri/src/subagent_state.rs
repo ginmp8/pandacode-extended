@@ -258,6 +258,7 @@ mod tests {
                 input: "README.md".into(),
                 output: String::new(),
                 write_paths: None,
+                exit_code: None,
             }],
             started_at: 100,
             updated_at: 100,

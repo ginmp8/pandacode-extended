@@ -207,6 +207,7 @@ fn repeated_tool_call_ids_in_automatic_turns_keep_distinct_rows() {
                 input: format!("Run {turn}"),
                 output: format!("{turn} {status}"),
                 write_paths: None,
+                exit_code: None,
             });
             save_agent_activity(&store, &assistant, &mut activity, None).unwrap();
         }

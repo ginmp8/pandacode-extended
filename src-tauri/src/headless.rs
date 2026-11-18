@@ -1688,7 +1688,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                     .ok_or_else(|| format!("--disable-orchestration needs an expected revision.\n\n{}", help()))?;
                 command = Command::DisableOrchestration {
                     orchestration_id: orchestration_id.clone(),
-                    expected_revision: parse_ticket_revision(revision)?,
+                    expected_revision: parse_team_revision(revision)?,
                 };
                 ops += 1;
                 index += 2;
@@ -1707,7 +1707,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 }
                 command = Command::RenameOrchestration {
                     orchestration_id: orchestration_id.clone(),
-                    expected_revision: parse_ticket_revision(revision)?, name: name.clone(),
+                    expected_revision: parse_team_revision(revision)?, name: name.clone(),
                 };
                 ops += 1;
                 index += 3;
@@ -1725,7 +1725,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 }
                 command = Command::SetTeamRoster {
                     orchestration_id: orchestration_id.clone(),
-                    expected_revision: parse_ticket_revision(revision)?,
+                    expected_revision: parse_team_revision(revision)?,
                     roster_file: PathBuf::from(roster_file),
                 };
                 ops += 1;
@@ -1743,7 +1743,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                     .ok_or("Worker attempt limit must be between 1 and 4.")?;
                 command = Command::SetTeamAttemptLimit {
                     orchestration_id: orchestration_id.clone(),
-                    expected_revision: parse_ticket_revision(revision)?,
+                    expected_revision: parse_team_revision(revision)?,
                     limit,
                 };
                 ops += 1;
@@ -1768,7 +1768,7 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 }
                 command = Command::SetTeamStrategy {
                     orchestration_id: orchestration_id.clone(),
-                    expected_revision: parse_ticket_revision(revision)?,
+                    expected_revision: parse_team_revision(revision)?,
                     strategy: strategy.clone(), purpose_file: PathBuf::from(purpose_file),
                 };
                 ops += 1;
@@ -1941,6 +1941,12 @@ fn validate_effect_key(value: &str) -> Result<(), String> {
         return Err("Provide the bounded effect key from nextCursor.".into());
     }
     Ok(())
+}
+
+/// Team policy revisions start at 1; Ticket revisions intentionally start at 0.
+fn parse_team_revision(value: &str) -> Result<i64, String> {
+    value.parse::<i64>().ok().filter(|revision| *revision > 0)
+        .ok_or_else(|| "Provide a positive expected Team policy revision.".into())
 }
 
 fn parse_ticket_revision(value: &str) -> Result<i64, String> {
@@ -2750,6 +2756,29 @@ mod tests {
         assert!(parsed("--sync-bots").is_err());
         assert!(parsed("--sync-bots sources.json --import-bots bots.json").is_err());
         assert!(parsed("--sync-bots sources.json --sign-in").is_err());
+    }
+
+    #[test]
+    fn team_mutations_reject_zero_and_negative_policy_revisions_without_rejecting_new_tickets() {
+        // A new Team has policy revision 1, while new Tickets have revision 0.
+        for invalid in [
+            "--disable-orchestration team_123 0",
+            "--rename-orchestration team_123 0 Renamed",
+            "--set-team-roster team_123 0 roster.json",
+            "--set-team-attempt-limit team_123 0 2",
+            "--set-team-strategy team_123 0 balanced purpose.txt",
+            "--disable-orchestration team_123 -1",
+            "--rename-orchestration team_123 -1 Renamed",
+            "--set-team-roster team_123 -1 roster.json",
+            "--set-team-attempt-limit team_123 -1 2",
+            "--set-team-strategy team_123 -1 balanced purpose.txt",
+        ] {
+            assert!(parsed(invalid).is_err(), "{invalid}");
+        }
+        assert_eq!(parsed("--accept-ticket ticket_123 0"),
+            Ok(Command::AcceptTicket {
+                ticket_id: "ticket_123".into(), expected_revision: 0,
+            }));
     }
 
     #[test]

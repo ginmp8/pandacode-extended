@@ -297,30 +297,67 @@ fn test_effect_live(db:&rusqlite::Connection,job:&Reserved)->bool {
     ).unwrap_or(false)
 }
 
+/// Run test scripts only inside a real, separately confined OS process.
+/// A package manager's offline switch does not restrict its scripts. The
+/// checkout is read-only, HOME and temporary writes are private, the ambient
+/// environment is empty, and the process has no network namespace access.
+/// Until native sandbox adapters exist, non-Linux platforms are unsupported
+/// rather than launching unrestricted host-side commands.
+fn sandboxed_test_command(job:&Reserved)->Result<Command> {
+    #[cfg(target_os="linux")]
+    {
+        if !Path::new("/usr/bin/bwrap").is_file() {
+            return Err("Native test sandbox unavailable: bubblewrap is required.".into());
+        }
+        if !Path::new(&job.checkout).is_absolute() ||
+            !std::fs::canonicalize(&job.checkout)
+                .is_ok_and(|path|path==Path::new(&job.checkout)) {
+            return Err("Native test sandbox requires a canonical checkout.".into());
+        }
+        let mut command=Command::new("/usr/bin/bwrap");
+        command.env_clear();
+        command.args([
+            "--die-with-parent","--unshare-all",
+            "--ro-bind","/usr","/usr",
+            "--symlink","usr/bin","/bin",
+            "--symlink","usr/lib","/lib",
+            "--symlink","usr/lib64","/lib64",
+            "--dir","/workspace","--ro-bind",&job.checkout,"/workspace",
+            "--tmpfs","/tmp","--dir","/home",
+            "--proc","/proc","--dev","/dev",
+            "--clearenv","--setenv","HOME","/tmp",
+            "--setenv","PATH","/usr/bin:/bin",
+            "--setenv","TMPDIR","/tmp",
+            "--setenv","CARGO_NET_OFFLINE","true",
+            "--setenv","CARGO_TARGET_DIR","/tmp/target",
+            "--setenv","npm_config_offline","true",
+            "--chdir","/workspace",
+        ]);
+        match job.command.as_str() {
+            "npm test" if Path::new("/usr/bin/npm").is_file() =>
+                {command.args(["--","/usr/bin/npm","test","--silent"]);},
+            "cargo test" if Path::new("/usr/bin/cargo").is_file() =>
+                {command.args(["--","/usr/bin/cargo","test","--locked","--offline"]);},
+            _=>return Err("The selected native test tool is unsupported in the isolated system runtime.".into()),
+        }
+        Ok(command)
+    }
+    #[cfg(not(target_os="linux"))]
+    {
+        let _=job;
+        Err("No independently confined native test runner is supported on this platform.".into())
+    }
+}
+
 fn execute(job:&Reserved)->Outcome {
     let blank=digest(b"");
     let Some(timeout)=bounded_test_timeout(storage::now(),job.expires) else {
         return Outcome{state:"uncertain",code:None,stdout:blank.clone(),stderr:blank};
     };
-    let mut cmd=match job.command.as_str() {
-        "npm test" if cfg!(windows) =>return Outcome {
-            state:"failed",code:None,stdout:blank.clone(),stderr:blank,
-        },
-        "npm test" => {
-            let mut command=Command::new("npm");
-            command.args(["test","--silent"]);
-            command.env("npm_config_offline","true");
-            command
-        }
-        "cargo test" => {
-            let mut command=Command::new("cargo");
-            command.args(["test","--locked","--offline"]);
-            command.env("CARGO_NET_OFFLINE","true");
-            command
-        }
-        _=>return Outcome{state:"failed",code:None,stdout:blank.clone(),stderr:blank},
+    let Ok(cmd)=sandboxed_test_command(job) else {
+        // Never invoke arbitrary npm/cargo scripts with ambient host rights.
+        return Outcome{state:"failed",code:None,stdout:blank.clone(),stderr:blank};
     };
-    cmd.current_dir(&job.checkout);
     let Ok(read_only)=Store::open_read_only(&job.db_path) else {
         return Outcome{state:"uncertain",code:None,stdout:blank.clone(),stderr:blank};
     };
@@ -406,6 +443,23 @@ mod tests {
         assert_eq!(bounded_test_timeout(now,now+3_000),Some(Duration::from_secs(3)));
         assert_eq!(bounded_test_timeout(now,now+180_000),Some(Duration::from_secs(120)));
         assert_eq!(bounded_test_timeout(i64::MIN,i64::MAX),None);
+    }
+
+    #[test]
+    fn unsupported_or_unconfined_native_process_never_falls_back_to_host_execution() {
+        let job=Reserved {
+            root:"root".into(),command:"sh -c npm test".into(),
+            checkout:"/tmp".into(),manifest:"hash".into(),
+            snapshot:"snapshot".into(),expires:storage::now()+60_000,
+            plan:"plan".into(),db_path:std::path::PathBuf::new(),
+        };
+        assert!(sandboxed_test_command(&job).is_err());
+        #[cfg(not(target_os="linux"))]
+        {
+            let mut valid=job;
+            valid.command="npm test".into();
+            assert!(sandboxed_test_command(&valid).is_err());
+        }
     }
 
     #[test]

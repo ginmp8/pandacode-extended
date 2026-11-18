@@ -2689,6 +2689,9 @@ pub(super) fn status_for_authenticated_children_s3(
         || (required_root > 0 && (latest_round(team) != 2 || stale(team, 2)))
         || children.len() != config.nested_bot_reviewers.len()
         || challenges.len() != children.len()
+        // Discarded unscored root attempts still consume native identities.
+        // Neither worker IDs nor sessions may be replayed into phase two.
+        || !independent_s2_root_identities(team)
         || team.workers.iter().any(|worker| !worker.read_only && unsettled(&worker.status))
     {
         return None;

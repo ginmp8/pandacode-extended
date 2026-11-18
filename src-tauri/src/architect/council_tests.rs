@@ -6471,6 +6471,26 @@ fn nested_m5_s3_admits_native_first_phase_but_denies_premature_approval() {
             "both root phases must have current independent native grants");
         assert!(council::status_for_authenticated_children_s3(&root, &parents, &challenges).is_some(),
             "native S3 structural gate requires all fresh root and child phase-two callbacks");
+        // Discarded, unscored attempts never count as votes, but an old
+        // identity or session must not be recycled in phase two.
+        let first_root = root.workers.iter().find(|worker|
+            worker.council.as_ref().is_some_and(|seat| seat.round == 1))
+            .expect("first-phase root reviewer exists").clone();
+        for rename_worker in [false, true] {
+            let mut replayed = root.clone();
+            let mut discarded = first_root.clone();
+            if rename_worker {
+                discarded.id = "replayed-s3-worker-with-old-session".into();
+            }
+            discarded.abandoned = true;
+            discarded.status = "failed".into();
+            discarded.council.as_mut().unwrap().round = 2;
+            discarded.council.as_mut().unwrap().score = None;
+            replayed.workers.push(discarded);
+            assert!(council::status_for_authenticated_children_s3(
+                &replayed, &parents, &challenges,
+            ).is_none(), "S3 must reject abandoned worker/session identity replay");
+        }
     }
     let (settled, _) = dispatch_state(&state, &sid, started.generation,
         "pandacode_finish_team", json!({"summary":"Both native S3 root and child phases passed"}),

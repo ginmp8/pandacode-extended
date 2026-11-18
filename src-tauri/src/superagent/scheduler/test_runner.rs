@@ -26,6 +26,23 @@ CREATE TABLE IF NOT EXISTS sa_demand_test_runs (
  started_at INTEGER NOT NULL, finished_at INTEGER,
  exit_code INTEGER, stdout_sha256 TEXT, stderr_sha256 TEXT
 );
+-- Finished failures are immutable; a changed source snapshot may be tested
+-- again only twice. Running/uncertain outcomes cannot be replayed.
+CREATE TABLE IF NOT EXISTS sa_demand_test_attempts (
+ ticket_id TEXT NOT NULL REFERENCES sa_demand_test_grants(ticket_id) ON DELETE RESTRICT,
+ attempt INTEGER NOT NULL CHECK(attempt BETWEEN 1 AND 2),
+ plan_sha256 TEXT NOT NULL, snapshot_sha256 TEXT NOT NULL,
+ command TEXT NOT NULL, state TEXT NOT NULL CHECK(state='failed'),
+ started_at INTEGER NOT NULL, finished_at INTEGER NOT NULL,
+ exit_code INTEGER, stdout_sha256 TEXT, stderr_sha256 TEXT,
+ PRIMARY KEY(ticket_id,attempt)
+);
+CREATE TRIGGER IF NOT EXISTS sa_test_attempt_immutable
+ BEFORE UPDATE ON sa_demand_test_attempts
+ BEGIN SELECT RAISE(ABORT,'Test attempt history is immutable'); END;
+CREATE TRIGGER IF NOT EXISTS sa_test_attempt_no_delete
+ BEFORE DELETE ON sa_demand_test_attempts
+ BEGIN SELECT RAISE(ABORT,'Test attempt history is durable'); END;
 "#;
 
 fn digest(bytes:&[u8])->String {format!("{:x}",Sha256::digest(bytes))}
@@ -205,8 +222,6 @@ fn reserve(store:&Store)->Result<Option<Reserved>> {
                AND pinned.team_version=grant.team_version
                AND pinned.policy_revision=grant.policy_revision
                AND pinned.source_kind='native')
-           AND NOT EXISTS(SELECT 1 FROM sa_demand_test_runs
-             WHERE ticket_id=grant.ticket_id)
          ORDER BY plan.created_at LIMIT 16",
     ).map_err(|e|e.to_string())?;
     let rows=stmt.query_map([now],|r|Ok((
@@ -235,30 +250,90 @@ fn reserve(store:&Store)->Result<Option<Reserved>> {
             || manifest_hash(Path::new(&checkout),&command).ok().as_deref()
                 !=Some(manifest.as_str()) {continue;}
         let Ok(snapshot)=snapshot_hash(&store.db,&root,Path::new(&checkout)) else {continue;};
-        let n=store.db.execute(
-            "INSERT INTO sa_demand_test_runs
-             (ticket_id,plan_sha256,snapshot_sha256,command,state,started_at)
-             SELECT grant.ticket_id,?2,?3,grant.command,'running',?4
-             FROM sa_demand_test_grants grant
-             JOIN sa_demand_plans plan ON plan.ticket_id=grant.ticket_id
-             JOIN sa_tickets ticket ON ticket.id=grant.ticket_id
-             JOIN sa_mandates m ON m.ticket_id=ticket.id
-             WHERE grant.ticket_id=?1 AND plan.state='active'
-               AND plan.plan_sha256=?2 AND ticket.state='queued'
-               AND m.revoked=0 AND m.expires_at>?4
-               AND NOT EXISTS(SELECT 1 FROM sa_demand_test_runs WHERE ticket_id=?1)",
-            params![root,plan,snapshot,now],
+        // Keep the old terminal failure immutable before replacing the
+        // current pointer. Reserve, archive and audit under one transaction.
+        let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
+        if !retry_allowed(&tx,&root,&snapshot)? {continue;}
+        let existing:bool=tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sa_demand_test_runs WHERE ticket_id=?1)",
+            [&root],|r|r.get(0),
         ).map_err(|e|e.to_string())?;
+        let n=if existing {
+            let archived:i64=tx.query_row(
+                "SELECT COUNT(*) FROM sa_demand_test_attempts WHERE ticket_id=?1",
+                [&root],|r|r.get(0),
+            ).map_err(|e|e.to_string())?;
+            let history=tx.execute(
+                "INSERT INTO sa_demand_test_attempts
+                 (ticket_id,attempt,plan_sha256,snapshot_sha256,command,state,
+                  started_at,finished_at,exit_code,stdout_sha256,stderr_sha256)
+                 SELECT ticket_id,?2,plan_sha256,snapshot_sha256,command,state,
+                        started_at,finished_at,exit_code,stdout_sha256,stderr_sha256
+                 FROM sa_demand_test_runs
+                 WHERE ticket_id=?1 AND state='failed' AND finished_at IS NOT NULL
+                   AND snapshot_sha256<>?3",
+                params![root,archived+1,snapshot],
+            ).map_err(|e|e.to_string())?;
+            if history!=1 {continue;}
+            tx.execute(
+                "UPDATE sa_demand_test_runs
+                 SET plan_sha256=?2,snapshot_sha256=?3,command=?4,
+                     state='running',started_at=?5,finished_at=NULL,
+                     exit_code=NULL,stdout_sha256=NULL,stderr_sha256=NULL
+                 WHERE ticket_id=?1 AND state='failed'
+                   AND snapshot_sha256<>?3
+                   AND EXISTS(SELECT 1 FROM sa_demand_plans plan
+                     JOIN sa_tickets root ON root.id=plan.ticket_id
+                     JOIN sa_mandates m ON m.ticket_id=root.id
+                     WHERE root.id=?1 AND root.state='queued'
+                       AND root.revision=plan.ticket_revision
+                       AND plan.state='active' AND plan.plan_sha256=?2
+                       AND m.revoked=0 AND m.expires_at>?5)",
+                params![root,plan,snapshot,command,now],
+            ).map_err(|e|e.to_string())?
+        } else {
+            tx.execute(
+                "INSERT INTO sa_demand_test_runs
+                 (ticket_id,plan_sha256,snapshot_sha256,command,state,started_at)
+                 SELECT grant.ticket_id,?2,?3,grant.command,'running',?4
+                 FROM sa_demand_test_grants grant
+                 JOIN sa_demand_plans plan ON plan.ticket_id=grant.ticket_id
+                 JOIN sa_tickets ticket ON ticket.id=grant.ticket_id
+                 JOIN sa_mandates m ON m.ticket_id=ticket.id
+                 WHERE grant.ticket_id=?1 AND plan.state='active'
+                   AND plan.plan_sha256=?2 AND ticket.state='queued'
+                   AND m.revoked=0 AND m.expires_at>?4
+                   AND NOT EXISTS(SELECT 1 FROM sa_demand_test_runs WHERE ticket_id=?1)",
+                params![root,plan,snapshot,now],
+            ).map_err(|e|e.to_string())?
+        };
         if n==1 {
-            store.db.execute(
+            tx.execute(
                 "INSERT INTO sa_audit(ticket_id,kind,detail,at)
                  VALUES(?1,'demand_test_started',?2,?3)",
                 params![root,format!("Native {command}; pinned WorkItems and Git snapshot"),now],
             ).map_err(|e|e.to_string())?;
+            tx.commit().map_err(|e|e.to_string())?;
             return Ok(Some(Reserved{root,command,checkout,manifest,snapshot,expires,plan,db_path:store.path.clone()}));
         }
     }
     Ok(None)
+}
+
+/// Retest only a new proof+Git snapshot after an explicitly failed,
+/// settled test. A running/uncertain effect must be reconciled, not replayed.
+fn retry_allowed(db:&rusqlite::Connection,root:&str,new_snapshot:&str)->Result<bool> {
+    let previous:Option<(String,String)>=db.query_row(
+        "SELECT state,snapshot_sha256 FROM sa_demand_test_runs WHERE ticket_id=?1",
+        [root],|r|Ok((r.get(0)?,r.get(1)?)),
+    ).optional().map_err(|e|e.to_string())?;
+    let Some((state,old_snapshot))=previous else {return Ok(true)};
+    if state!="failed" || old_snapshot==new_snapshot {return Ok(false);}
+    let archived:i64=db.query_row(
+        "SELECT COUNT(*) FROM sa_demand_test_attempts WHERE ticket_id=?1",
+        [root],|r|r.get(0),
+    ).map_err(|e|e.to_string())?;
+    Ok(archived<2)
 }
 
 /// Native mandate deadlines are Unix milliseconds, while process timeouts
@@ -600,6 +675,64 @@ mod tests {
         ).unwrap();
         assert!(required(&db,"root").unwrap());
         assert!(!verified(&db,"root").unwrap());
+    }
+
+    #[test]
+    fn failed_tests_require_new_evidence_and_have_finite_durable_retries() {
+        let db=rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_tickets(id TEXT PRIMARY KEY);
+             INSERT INTO sa_tickets VALUES('demand');
+             CREATE TABLE sa_demand_test_grants(ticket_id TEXT PRIMARY KEY);
+             INSERT INTO sa_demand_test_grants VALUES('demand');",
+        ).unwrap();
+        // Use the same journal and current-result constraints as production.
+        db.execute_batch(
+            "CREATE TABLE sa_demand_test_runs(
+               ticket_id TEXT PRIMARY KEY,plan_sha256 TEXT,snapshot_sha256 TEXT,
+               command TEXT,state TEXT,started_at INTEGER,finished_at INTEGER,
+               exit_code INTEGER,stdout_sha256 TEXT,stderr_sha256 TEXT);
+             CREATE TABLE sa_demand_test_attempts(
+               ticket_id TEXT NOT NULL,attempt INTEGER NOT NULL,
+               plan_sha256 TEXT,snapshot_sha256 TEXT,command TEXT,
+               state TEXT,started_at INTEGER,finished_at INTEGER,
+               exit_code INTEGER,stdout_sha256 TEXT,stderr_sha256 TEXT,
+               PRIMARY KEY(ticket_id,attempt));",
+        ).unwrap();
+        assert!(retry_allowed(&db,"demand","first").unwrap());
+        db.execute(
+            "INSERT INTO sa_demand_test_runs VALUES(
+               'demand','plan','first','npm test','failed',1,2,1,'a','b')",[],
+        ).unwrap();
+        assert!(!retry_allowed(&db,"demand","first").unwrap());
+        assert!(retry_allowed(&db,"demand","second").unwrap());
+        for (attempt,old,new) in [(1,"first","second"),(2,"second","third")] {
+            db.execute(
+                "INSERT INTO sa_demand_test_attempts
+                 SELECT ticket_id,?1,plan_sha256,snapshot_sha256,command,state,
+                        started_at,finished_at,exit_code,stdout_sha256,stderr_sha256
+                 FROM sa_demand_test_runs WHERE ticket_id='demand'",
+                [attempt],
+            ).unwrap();
+            db.execute(
+                "UPDATE sa_demand_test_runs SET snapshot_sha256=?1,
+                    state='failed',started_at=started_at+2,finished_at=finished_at+2
+                 WHERE ticket_id='demand'",
+                [new],
+            ).unwrap();
+            let archived:String=db.query_row(
+                "SELECT snapshot_sha256 FROM sa_demand_test_attempts
+                 WHERE ticket_id='demand' AND attempt=?1",
+                [attempt],|r|r.get(0),
+            ).unwrap();
+            assert_eq!(archived,old);
+            assert!(!retry_allowed(&db,"demand",new).unwrap());
+        }
+        assert!(!retry_allowed(&db,"demand","fourth").unwrap());
+        db.execute(
+            "UPDATE sa_demand_test_runs SET state='uncertain'",[],
+        ).unwrap();
+        assert!(!retry_allowed(&db,"demand","fifth").unwrap());
     }
 
     #[test]

@@ -301,6 +301,9 @@ mod tests {
         // Native Full Access returns no synthetic reviewer tool policy;
         // the provider adapter receives its real task-specific session mode.
         assert!(super::super::read_only_policy(&store,&task).unwrap().is_none());
+        assert!(super::super::native_worker_chat_context(&store,&task).unwrap());
+        assert!(!super::super::native_worker_chat_context(&store,&ordinary.id).unwrap());
+        assert_eq!(super::super::ordinary_turn_check_denial(&store,&task).unwrap(),None);
         assert!(super::super::guard_gateway_inbound(
             &store,"worker",&ticket.id,"local-user",true,
         ).is_ok());
@@ -317,6 +320,8 @@ mod tests {
         assert!(super::super::guard_cloud_attach(&store,&task).is_err());
         assert!(super::super::guard_cloud_attach(&store,&ordinary.id).is_ok());
         super::super::stop(&store,&ticket.id).unwrap();
+        assert!(super::super::native_worker_chat_context(&store,&task).is_err());
+        assert!(super::super::ordinary_turn_check_denial(&store,&task).unwrap().is_some());
         assert!(super::super::guard_gateway_inbound(
             &store,"worker",&ticket.id,"local-user",true,
         ).is_err());

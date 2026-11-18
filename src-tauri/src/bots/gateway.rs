@@ -77,10 +77,9 @@ fn channel_kind(store: &Store, channel_id: &str) -> String {
     }
 }
 
-/// The text a turn receives: the message, plus the brief when the thread has not seen this version.
-/// A native SuperAgent assignment has its own explicit context. It must not
-/// copy unrelated conversation memories, standing goals, MCP references or
-/// cause skill installation to mutate the assigned bot's checkout.
+/// The text a turn receives: the message plus the bot's native brief.
+/// Coordinators remain isolated; admitted Workers use the same native Skills,
+/// saved memories, bot preferences and provider context as ordinary bot chats.
 fn scoped_turn_text(bot: &Bot, kind: &str, text: &str) -> Option<String> {
     (kind == crate::superagent::CHANNEL)
         .then(|| format!("{text}{}", brief::superagent(bot)))
@@ -95,8 +94,12 @@ fn compose(
     sender: &str,
     text: &str,
 ) -> Result<String> {
-    if let Some(scoped) = scoped_turn_text(bot, kind, text) {
-        return Ok(scoped);
+    let native_worker = kind == crate::superagent::CHANNEL
+        && crate::superagent::native_worker_chat_context(store, session_id)?;
+    if !native_worker {
+        if let Some(scoped) = scoped_turn_text(bot, kind, text) {
+            return Ok(scoped);
+        }
     }
     let (skills, skipped) = workspace_skills(app, store, bot, session_id);
     let seen = super::brief_version_of(store, session_id)?;
@@ -117,7 +120,9 @@ fn compose(
     super::mark_briefed(store, session_id, bot.memory_version)?;
     Ok(format!(
         "{text}{}{skills}",
-        brief::compose(bot, &memories, kind, sender)
+        brief::compose(bot, &memories,
+            if native_worker { brief::TASK } else { kind },
+            if native_worker { "" } else { sender })
     ))
 }
 

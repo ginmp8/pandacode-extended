@@ -2868,17 +2868,18 @@ pub(crate) fn has_task_assignment_history(store: &Store, session_id: &str) -> Re
     ).map_err(|error| error.to_string())
 }
 
-/// Turn-end checks run project-defined commands outside the scoped Worker
-/// ToolHost. Do not let a task session borrow that ordinary-chat capability.
-/// A future task test runner must require its own explicit Demand-level grant.
+/// Native Full Access WorkItems use the same turn checks as the bot chat.
+/// Stopped, stale and read-only assignments never borrow this privilege.
 pub(crate) fn ordinary_turn_check_denial(
     store: &Store, session_id: &str,
 ) -> Result<Option<&'static str>> {
-    if has_task_assignment_history(store, session_id)? {
-        Ok(Some("SuperAgent task checks require a separate Demand-authorized test command; ordinary turn-end checks cannot execute for task sessions."))
-    } else {
-        Ok(None)
+    if !has_task_assignment_history(store, session_id)? {return Ok(None);}
+    let full_session = store.session(session_id)
+        .map(|session|session.mode == "full").unwrap_or(false);
+    if full_session && native_worker_chat_context(store, session_id).unwrap_or(false) {
+        return Ok(None);
     }
+    Ok(Some("This SuperAgent session has no active native Full Access Worker permission."))
 }
 
 #[cfg(test)]
@@ -4089,6 +4090,13 @@ pub(crate) fn read_only_policy(
         return Err("policy_unsupported: unassigned SuperAgent conversation.".into());
     }
     Ok(None)
+}
+
+/// True only for a live, independently admitted executor whose native bot
+/// permission mode (full or its existing chat approval mode) is active.
+pub(crate) fn native_worker_chat_context(store: &Store, session_id: &str) -> Result<bool> {
+    if !has_task_assignment_history(store, session_id)? {return Ok(false);}
+    Ok(read_only_policy(store, session_id)?.is_none())
 }
 
 /// Cloud reattachment skips the normal native provider policy preparation.

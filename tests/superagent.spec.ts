@@ -1179,6 +1179,7 @@ test('cross-Team Demands index is native-backed and opens only the original Team
 
 
 test('global Demand Stop checks native ownership/revision before confirmed revocation', async ({page}) => {
+  test.setTimeout(60_000);
   await page.goto('/?bots=sample');
   await page.evaluate(async () => {
     const {mountSuperagent} = await import('/src/superagent-ui.ts');
@@ -1243,6 +1244,11 @@ test('global Demand Stop checks native ownership/revision before confirmed revoc
   expect(trace.filter(item=>item.command==='superagent_stop')).toHaveLength(0);
   await confirm.getByRole('button',{name:'Confirm'}).click();
   await expect(host.getByRole('status').filter({hasText:'run-stop stopped'})).toBeVisible();
+  // The UI must replace the stale cross-Team index with a fresh native
+  // result without an extra operator click; Stop must no longer be offered.
+  await expect(global).toContainText('run-stop');
+  await expect(global).toContainText('stopped');
+  await expect(global.getByRole('button',{name:'Stop demand'})).toHaveCount(0);
   trace=await page.evaluate(()=>
     (window as unknown as {saGlobalStopTrace:{command:string;args?:Record<string,unknown>}[]}).saGlobalStopTrace);
   expect(trace.filter(item=>item.command==='superagent_stop')).toHaveLength(1);

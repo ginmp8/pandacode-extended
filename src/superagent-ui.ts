@@ -1520,10 +1520,31 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           .includes(snapshot.ticket.state)) return;
         ask('Stop Demand ' + demand.id + ' at revision ' + demand.revision +
           '? The native operation revokes its mandate and quarantines pending effects.', async () => {
-          await call('superagent_stop',
+          const stopped = await call<Ticket>('superagent_stop',
             {ticketId:demand.id,expectedRevision:snapshot.ticket.revision});
+          // The mutating operation is only confirmed by its own native Ticket
+          // result. A mismatched reply is not proof that this Demand was stopped.
+          if (stopped.id !== demand.id ||
+              stopped.orchestrationId !== demand.orchestrationId ||
+              stopped.revision !== snapshot.ticket.revision + 1 ||
+              stopped.state !== 'stopped') {
+            await reload();
+            throw new Error('Native Stop returned an inconsistent Ticket identity or revision; inspect the Demand.');
+          }
           await reload();
-          feedback = 'Demand ' + demand.id + ' stopped by native revocation. Refresh Demands for current states.';
+          // Re-read the first page under the *current* filters, rather than
+          // showing a stale Stop control or forcing the user to refresh by hand.
+          // Never infer settlement from the pre-Stop cross-Team index.
+          const loaded = await fetchDemandPage({
+            limit:200, orchestrationId:demandTeamFilter || undefined,
+            stateFilter:demandStateFilter || undefined,
+            searchQuery:demandSearch || undefined,
+            projectId:demandProjectFilter || undefined,
+          });
+          allDemands = loaded;
+          allDemandsLoaded = true;
+          allDemandsHasMore = loaded.length === 200;
+          feedback = 'Demand ' + demand.id + ' stopped by native revocation. Inspect unresolved effects before retry.';
         });
       });
       return;

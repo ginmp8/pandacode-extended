@@ -752,7 +752,7 @@ pub(super) fn duplicate_with_roster(
     configuration(store, &created.id)
 }
 
-fn set(store:&Store,id:&str,expected:i64,input:&RosterInput)->Result<TeamRoster> {
+pub(super) fn set(store:&Store,id:&str,expected:i64,input:&RosterInput)->Result<TeamRoster> {
     let cfg=configuration(store,id)?;
     if cfg.enabled || cfg.policy_revision!=expected {
         return Err("Disable the Team and reload its policy revision before changing members.".into());

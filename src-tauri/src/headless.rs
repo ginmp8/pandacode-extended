@@ -78,6 +78,8 @@ enum Command {
     DisableOrchestration { orchestration_id: String, expected_revision: i64 },
     RenameOrchestration { orchestration_id: String, expected_revision: i64, name: String },
     SetTeamStrategy { orchestration_id: String, expected_revision: i64, strategy: String, purpose_file: PathBuf },
+    SetTeamRoster { orchestration_id: String, expected_revision: i64, roster_file: PathBuf },
+    SetTeamAttemptLimit { orchestration_id: String, expected_revision: i64, limit: i64 },
 }
 
 fn read_bounded_objective(path: &std::path::Path) -> Result<String, String> {
@@ -93,6 +95,18 @@ fn read_bounded_objective(path: &std::path::Path) -> Result<String, String> {
     let objective = std::str::from_utf8(&bytes)
         .map_err(|_| "Objective file must contain UTF-8 text.")?;
     Ok(objective.to_owned())
+}
+
+/// Read a complete, bounded local Team role-selection document. Bot identifiers
+/// are only local references: this never installs a bot or grants execution.
+/// Reuse the existing 16 KiB UTF-8 limit and redact malformed file contents.
+fn read_bounded_roster(path: &std::path::Path)
+    -> Result<crate::superagent::roster::RosterInput, String>
+{
+    let text = read_bounded_objective(path)
+        .map_err(|_| "Cannot read bounded UTF-8 Team roster file.".to_owned())?;
+    serde_json::from_str(&text)
+        .map_err(|_| "Team roster file must contain workerBotIds and reviewerBotIds arrays.".into())
 }
 
 /// `pandacode serve …`: true when the argument was handled; the process then serves until
@@ -602,7 +616,9 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                 | Command::QuarantineTerminalOrphan { .. }
                 | Command::DisableOrchestration { .. }
                 | Command::RenameOrchestration { .. }
-                | Command::SetTeamStrategy { .. });
+                | Command::SetTeamStrategy { .. }
+                | Command::SetTeamRoster { .. }
+                | Command::SetTeamAttemptLimit { .. });
             if native_action {
                 let result = app.path().app_data_dir()
                     .map_err(|e| e.to_string())
@@ -638,6 +654,16 @@ fn serve(command: Command, import: Option<PathBuf>) -> ! {
                             Command::RenameOrchestration { orchestration_id, expected_revision, name } =>
                                 crate::superagent::headless_rename_orchestration(
                                     &database, orchestration_id, *expected_revision, name,
+                                ),
+                            Command::SetTeamRoster { orchestration_id, expected_revision, roster_file } => {
+                                let members = read_bounded_roster(roster_file)?;
+                                crate::superagent::headless_set_team_roster(
+                                    &database, orchestration_id, *expected_revision, &members,
+                                )
+                            }
+                            Command::SetTeamAttemptLimit { orchestration_id, expected_revision, limit } =>
+                                crate::superagent::headless_set_team_attempt_limit(
+                                    &database, orchestration_id, *expected_revision, *limit,
                                 ),
                             Command::SetTeamStrategy { orchestration_id, expected_revision, strategy, purpose_file } => {
                                 let purpose = read_bounded_objective(purpose_file)?;
@@ -1684,6 +1710,43 @@ fn parse(args: &[String]) -> Result<(Command, Option<PathBuf>), String> {
                 ops += 1;
                 index += 3;
             }
+            "--set-team-roster" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or("--set-team-roster needs Team ID, policy revision and roster file.")?;
+                validate_orchestration_id(orchestration_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--set-team-roster needs an expected policy revision.")?;
+                let roster_file = args.get(index + 3)
+                    .ok_or("--set-team-roster needs a local JSON roster file.")?;
+                if roster_file.is_empty() || roster_file.starts_with("--") {
+                    return Err("Provide a local Team roster file path, not another command.".into());
+                }
+                command = Command::SetTeamRoster {
+                    orchestration_id: orchestration_id.clone(),
+                    expected_revision: parse_ticket_revision(revision)?,
+                    roster_file: PathBuf::from(roster_file),
+                };
+                ops += 1;
+                index += 3;
+            }
+            "--set-team-attempt-limit" => {
+                let orchestration_id = args.get(index + 1)
+                    .ok_or("--set-team-attempt-limit needs Team ID, policy revision and limit.")?;
+                validate_orchestration_id(orchestration_id)?;
+                let revision = args.get(index + 2)
+                    .ok_or("--set-team-attempt-limit needs an expected policy revision.")?;
+                let limit = args.get(index + 3)
+                    .and_then(|value| value.parse::<i64>().ok())
+                    .filter(|value| (1..=4).contains(value))
+                    .ok_or("Worker attempt limit must be between 1 and 4.")?;
+                command = Command::SetTeamAttemptLimit {
+                    orchestration_id: orchestration_id.clone(),
+                    expected_revision: parse_ticket_revision(revision)?,
+                    limit,
+                };
+                ops += 1;
+                index += 3;
+            }
             "--set-team-strategy" => {
                 let orchestration_id = args.get(index + 1)
                     .ok_or("--set-team-strategy needs Team ID, revision, strategy and purpose file.")?;
@@ -2012,6 +2075,13 @@ under `xvfb-run -a pandacode serve …` (a display is required to start, none is
                          Explicit local, revision-guarded Team rename only while disabled
                          and all Tickets/effects are settled; does not change bots, roles
                          or task authorization. Quote names with spaces.
+  --set-team-roster <id> <revision> <roster-json-file>
+                         Replace the disabled Team's ordered Workers and optional
+                         Reviewers through the desktop-equivalent native CAS;
+                         no provider launch, new bot or grant. Max 16 KiB JSON.
+  --set-team-attempt-limit <id> <revision> <1..4>
+                         Set future Worker retry budget on a disabled, settled Team;
+                         does not retry an existing Demand.
   --set-team-strategy <id> <revision> <strategy> <purpose-file>
                          Set future Demand strategy and purpose using native revision guards.
                          The Team must be disabled and all Tickets/effects settled.
@@ -2274,6 +2344,39 @@ mod tests {
         assert!(parsed("--list-team-demands team_123 BLOCKED").is_err());
         assert!(parsed("--list-team-demands ../unsafe running").is_err());
         assert!(parsed("--list-team-demands team_123 running --stop-ticket task").is_err());
+        assert_eq!(parsed("--set-team-roster team_123 2 /private/roster.json"),
+            Ok(Command::SetTeamRoster {
+                orchestration_id:"team_123".into(), expected_revision:2,
+                roster_file:PathBuf::from("/private/roster.json"),
+            }));
+        assert_eq!(parsed("--set-team-attempt-limit team_123 2 3"),
+            Ok(Command::SetTeamAttemptLimit {
+                orchestration_id:"team_123".into(), expected_revision:2, limit:3,
+            }));
+        for invalid in [
+            "--set-team-roster", "--set-team-roster ../bad 2 roster.json",
+            "--set-team-roster team_123 0 roster.json",
+            "--set-team-roster team_123 2 --stop-ticket",
+            "--set-team-roster team_123 2 roster.json --stop-ticket ticket",
+            "--set-team-attempt-limit", "--set-team-attempt-limit team_123 2",
+            "--set-team-attempt-limit team_123 2 0",
+            "--set-team-attempt-limit team_123 2 5",
+            "--set-team-attempt-limit team_123 2 nope",
+            "--set-team-attempt-limit team_123 2 2 --stop-ticket ticket",
+        ] { assert!(parsed(invalid).is_err(), "{invalid}"); }
+        let roster_file = std::env::temp_dir().join(format!(
+            "sa-headless-roster-{}", crate::storage::id(),
+        ));
+        std::fs::write(&roster_file,
+            r#"{"workerBotIds":["worker"],"reviewerBotIds":[]}"#).unwrap();
+        assert_eq!(read_bounded_roster(&roster_file).unwrap().worker_bot_ids,
+            vec!["worker".to_string()]);
+        std::fs::write(&roster_file,
+            r#"{"workerBotIds":["worker"],"reviewerBotIds":[],"unexpected":true}"#).unwrap();
+        assert!(read_bounded_roster(&roster_file).is_err());
+        std::fs::write(&roster_file, vec![b'x'; 16 * 1024 + 1]).unwrap();
+        assert!(read_bounded_roster(&roster_file).is_err());
+        std::fs::remove_file(&roster_file).unwrap();
         assert_eq!(parsed("--inspect-team-roster team_123"),
             Ok(Command::InspectTeamRoster{orchestration_id:"team_123".into()}));
         for invalid in [

@@ -1820,6 +1820,47 @@ pub(crate) fn headless_rename_orchestration(
     })).map_err(|e| e.to_string())
 }
 
+/// A local headless operator edits the exact existing Team roster, using the
+/// same revision-guarded, disabled-only transaction as the desktop. Adding a
+/// member never issues a task grant or admits a provider; the current
+/// multi-member execution limitation remains visible to the operator.
+pub(crate) fn headless_set_team_roster(
+    database_path: &std::path::Path, orchestration_id: &str,
+    expected_revision: i64, input: &roster::RosterInput,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let updated = roster::set(&store, orchestration_id, expected_revision, input)?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": updated.orchestration_id,
+        "policyRevision": updated.policy_revision,
+        "workerCount": updated.worker_bot_ids.len(),
+        "reviewerCount": updated.reviewer_bot_ids.len(),
+        "executionReady": updated.execution_ready,
+        "grantIssued": false,
+        "providerDispatched": false,
+    })).map_err(|e| e.to_string())
+}
+
+/// A local headless operator may choose a finite Worker retry budget for
+/// future Demands. The native policy CAS rejects unsettled Tickets and
+/// uncertain external effects; this operation does not retry existing work.
+pub(crate) fn headless_set_team_attempt_limit(
+    database_path: &std::path::Path, orchestration_id: &str,
+    expected_revision: i64, limit: i64,
+) -> Result<String> {
+    let store = open_headless_transition_store(database_path)?;
+    let updated = roster::set_worker_attempt_limit(
+        &store, orchestration_id, expected_revision, limit,
+    )?;
+    serde_json::to_string_pretty(&serde_json::json!({
+        "orchestrationId": updated.orchestration_id,
+        "policyRevision": updated.policy_revision,
+        "maxWorkerAttempts": updated.max_worker_attempts,
+        "grantIssued": false,
+        "providerDispatched": false,
+    })).map_err(|e| e.to_string())
+}
+
 /// Local headless strategy changes reuse the desktop's native Team policy
 /// transaction. A purpose file is read by the CLI, never echoed as a command
 /// argument or treated as authority. Only future Demand snapshots change.
@@ -4728,6 +4769,81 @@ mod tests {
         assert_eq!(list_review_inbox(&reopened, 200).unwrap()
             .into_iter().find(|item| item.id == "historical-review").unwrap().project_id,
             "archived-project");
+    }
+
+    #[test]
+    fn headless_roster_and_attempt_budget_are_native_revisioned_and_restart_durable() {
+        let store = fixture();
+        let config = create_configuration(&store, NewOrchestration {
+            name: "Operator Team".into(), coordinator_bot_id: "router".into(),
+            worker_bot_id: "worker".into(),
+        }).unwrap();
+        store.db.execute(
+            "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
+             VALUES('worker-two','Another worker','project','codex','default','plan',?1,?1)",
+            [storage::now()],
+        ).unwrap();
+        let members = roster::RosterInput {
+            worker_bot_ids: vec!["worker".into(), "worker-two".into()],
+            reviewer_bot_ids: Vec::new(),
+        };
+        let raw = headless_set_team_roster(
+            &store.path, &config.id, config.policy_revision, &members,
+        ).unwrap();
+        let response: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(response["workerCount"], 2);
+        assert_eq!(response["reviewerCount"], 0);
+        assert_eq!(response["executionReady"], false);
+        assert_eq!(response["grantIssued"], false);
+        assert_eq!(response["providerDispatched"], false);
+        assert!(!raw.contains("Another worker"));
+        let revised = response["policyRevision"].as_i64().unwrap();
+        assert_eq!(revised, config.policy_revision + 1);
+        assert!(headless_set_team_roster(
+            &store.path, &config.id, config.policy_revision, &members,
+        ).is_err(), "A stale operator cannot replace the roster");
+        let same = headless_set_team_roster(
+            &store.path, &config.id, revised, &members,
+        ).unwrap();
+        let same: serde_json::Value = serde_json::from_str(&same).unwrap();
+        assert_eq!(same["policyRevision"], revised, "No-op edits must not increment policy");
+
+        let invalid = roster::RosterInput {
+            worker_bot_ids: vec!["worker".into(), "worker".into()],
+            reviewer_bot_ids: Vec::new(),
+        };
+        assert!(headless_set_team_roster(&store.path, &config.id, revised, &invalid).is_err());
+        assert_eq!(roster::read(&store, &config.id).unwrap().policy_revision, revised);
+
+        let budget = headless_set_team_attempt_limit(
+            &store.path, &config.id, revised, 3,
+        ).unwrap();
+        let budget: serde_json::Value = serde_json::from_str(&budget).unwrap();
+        assert_eq!(budget["maxWorkerAttempts"], 3);
+        assert_eq!(budget["grantIssued"], false);
+        assert_eq!(budget["providerDispatched"], false);
+        let latest = budget["policyRevision"].as_i64().unwrap();
+        assert_eq!(latest, revised + 1);
+        assert!(headless_set_team_attempt_limit(
+            &store.path, &config.id, revised, 4,
+        ).is_err(), "Stale budget edits are rejected");
+        assert!(headless_set_team_attempt_limit(
+            &store.path, &config.id, latest, 0,
+        ).is_err(), "Invalid budgets are rejected");
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_tickets", [], |r| r.get::<_, i64>(0),
+        ).unwrap(), 0);
+        assert_eq!(store.db.query_row(
+            "SELECT COUNT(*) FROM sa_mandates", [], |r| r.get::<_, i64>(0),
+        ).unwrap(), 0);
+        let path = store.path.clone();
+        drop(store);
+        let reopened = Store::open_read_only(&path).unwrap();
+        let persisted = roster::read(&reopened, &config.id).unwrap();
+        assert_eq!(persisted.worker_bot_ids, members.worker_bot_ids);
+        assert_eq!(persisted.max_worker_attempts, 3);
+        assert_eq!(persisted.policy_revision, latest);
+        assert!(!configuration(&reopened, &config.id).unwrap().enabled);
     }
 
     #[test]

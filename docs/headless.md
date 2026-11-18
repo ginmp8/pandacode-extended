@@ -212,6 +212,37 @@ the cursor, delete receipts or reclassify historical observations. The inspector
 redacts event bodies, actor filters and task content, uses no provider credentials
 and never runs startup recovery.
 
+### Edit a disabled Team's roster and attempt budget headlessly
+
+The trusted local operator can change an existing Team's ordered Workers,
+optional Reviewers, or retry budget without opening the desktop. These commands
+call the **same native SQLite revision-guarded policy transactions** as the
+desktop editor. First disable the Team and settle all Demands and external
+receipts; inspect the latest revision before every edit:
+
+```sh
+pandacode serve --inspect-team-roster <team-id>
+pandacode serve --set-team-roster <team-id> <expected-policy-revision> /private/roster.json
+pandacode serve --set-team-attempt-limit <team-id> <new-policy-revision> 3
+```
+
+The private local UTF-8 roster file (maximum 16 KiB) must contain a complete
+existing-bot roster using the portable JSON field names, for example:
+
+```json
+{"workerBotIds":["existing-worker-id"],"reviewerBotIds":[]}
+```
+
+The original first Worker must remain first under this version of the native
+roster contract. Additional Workers and Reviewers are permitted as **configuration
+only**: native multi-member dispatch is still unsupported, so the command reports
+`executionReady: false` rather than attempting work. Neither command creates
+bots, grants tools, activates Council, changes old Demand snapshots, starts a
+provider or retries a Ticket. An invalid member, disabled/missing bot, duplicate
+role, stale revision, enabled Team, running/reviewable Demand or unresolved remote
+effect fails the native transaction. Roster output contains counts rather than
+bot profiles; retain the source file in an appropriately private directory.
+
 ### Operator-staged headless Demands
 
 A trusted local operator can persist a blocked, read-only manual Ticket in the

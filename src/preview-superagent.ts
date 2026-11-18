@@ -8,7 +8,7 @@ type StrategyPolicy = {
   priority:string; attemptTimeoutMs:number; tokenCeiling?:number;
   estimatedCostCeilingMinor?:number; subagentDelegationEnabled:boolean;
 };
-type Strategy = {settings:StrategyPolicy;maxConcurrentTasks:number;maxAttemptsPerAssignment:number;executionMode:'off'|'approval'|'full_auto'};
+type Strategy = {settings:StrategyPolicy;maxConcurrentTasks:number;maxAttemptsPerAssignment:number;executionMode:'off'|'approval'|'full'};
 const defaultStrategy = ():Strategy => ({
   settings:{priority:'balanced',attemptTimeoutMs:1_800_000,
     subagentDelegationEnabled:false},
@@ -116,9 +116,9 @@ export async function invokeSuperagent<T>(
           throw Error('Settle Tickets and disable this Team before changing strategy.');
         const validPriority=['balanced','cost','latency','throughput','quality'].includes(request?.priority);
         const mode = request?.executionMode ?? saved.executionMode;
-        if(!['off','approval','full_auto'].includes(mode) ||
-           (request?.executionMode !== undefined && !['approval','full_auto'].includes(request.executionMode)))
-          throw Error('Execution mode must be approval or full_auto.');
+        if(!['off','approval','full'].includes(mode) ||
+           (request?.executionMode !== undefined && !['approval','full'].includes(request.executionMode)))
+          throw Error('Execution mode must be approval or full.');
         if(mode === 'approval' && config.councilRequired)
           throw Error('With Approval requires human acceptance; disable automatic Council finalization.');
         if(!validPriority || !Number.isInteger(request.maxConcurrentTasks) ||

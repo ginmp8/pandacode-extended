@@ -27,7 +27,7 @@ interface StrategySettings {
 }
 interface StrategyView {
   orchestrationId:string; policyRevision:number; teamVersion:number;
-  settings:StrategySettings; executionMode: 'off' | 'approval' | 'full_auto'; maxAttemptsPerAssignment:number; maxConcurrentTasks:number;
+  settings:StrategySettings; executionMode: 'off' | 'approval' | 'full'; maxAttemptsPerAssignment:number; maxConcurrentTasks:number;
   executableParallelWorkers:number; tokenMeteringAvailable:boolean;
   pricedCostMeteringAvailable:boolean; nestedChildAdmissionAvailable:boolean;
   enableBlockers:string[];
@@ -262,7 +262,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let draftPrRepository = '', draftPrHead = '', draftPrBase = '';
   let draftPrError = '', draftPrVerifiedSha = '', draftPrVerifiedRevision = -1;
   let demandObjective = '';
-  // Native manual admission preview only; never a capability grant or Full Auto verdict.
+  // Native manual admission preview only; never a capability grant or Full Access verdict.
   let demandPreflight: {
     teamId:string; policyRevision:number; objective:string; result:NativeDemandPreflight;
   } | null = null;
@@ -270,8 +270,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
   let workWriteItemKey = '', workWritePaths = '';
   let subagentTree:NativeSubagentTree|null = null, subagentTreeLoaded = false;
   let subagentDepth=2, subagentPerParent=2, subagentTotal=8;
-  let initialDemandWritePaths = '';
-  let initialDemandTestCommand = '';
   const guidedBuilder = new GuidedTeamBuilder();
   let rejectingTicket = '', inspectedTicket = '';
   let inspectedAssignmentId = '';
@@ -841,7 +839,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '</li>';
     }).join('');
     const sourcePanel = '<section class="sa-event-sources" aria-label="GitHub event sources">' +
-      '<h4>GitHub event sources</h4><p>Authenticated GitHub Events polling is bounded and read-only in Observe mode. Off and authenticated Observe remain available. Auto requires local confirmation and expires in 24 hours. Full Auto also requires exact project files and a native test command before any provider dispatch. No source grants GitHub comments, pushes, merges or releases.</p>' +
+      '<h4>GitHub event sources</h4><p>Authenticated GitHub Events polling is bounded and read-only in Observe mode. Off and authenticated Observe remain available. Auto requires local confirmation and expires in 24 hours. Full Access uses the existing bot's native permission mode and does not require a second file or test grant. No source grants GitHub comments, pushes, merges or releases.</p>' +
       (!sourcesLoaded ? '<button type="button" data-sa-load-sources>Load sources</button>'
         : '<form data-sa-form="source"><div class="sa-grid">' +
           '<label>Repository (owner/name)<input name="repository" maxlength="200" required></label>' +
@@ -873,23 +871,18 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               ' · Approved files: ' + autoStatus.approvedFileCount +
               ' · Native test: ' + safe(autoStatus.nativeTestCommand || 'none') + '</p>' +
               (autoStatus.grantActive && !autoStatus.enabled
-                ? '<p role="status">Existing source grant cannot execute Full Auto without a current exact file/test mandate. Revoke this source grant, then authorize the complete scope.</p>'
+                ? '<p role="status">The authenticated source grant is not currently runnable. Inspect its native authorization and expiration.</p>'
                 : '') +
               (autoStatus.grantActive
                 ? '<button type="button" data-sa-auto-revoke="' + safe(autoStatus.sourceId) +
                   '">Revoke Auto and stop associated native Tickets</button>'
                 : '<form data-sa-form="auto-authorization">' +
-                  '<p>Confirm the exact source actor and finite admission budget. Full Auto requires specific project files and one native test command; issue content cannot widen them.</p>' +
+                  '<p>Confirm the exact GitHub source, actor and finite intake limit. The chosen Worker uses native Full Access; no additional tool permissions are created.</p>' +
                   '<label>Maximum new Demands per rolling 24h' +
                   '<input name="maxDailyTasks" type="number" min="1" max="20" required value="' +
                   safe(autoDailyLimit) + '"></label>' +
-                  '<label>Approved project files (one exact relative path per line; empty for read-only)' +
-                  '<textarea name="autoAllowedPaths" rows="3" maxlength="4096" placeholder="src/main.rs&#10;src/feature.rs"></textarea></label>' +
-                  '<label>Native test command<select name="autoAllowedTest">' +
-                  '<option value="">No test (read-only only)</option>' +
-                  '<option value="npm test">npm test</option>' +
-                  '<option value="cargo test">cargo test</option></select></label>' +
-                  '<button type="submit" class="primary-button">Review exact Auto authority</button>' +
+                  '<p>The source is admitted under its finite native authorization; Worker tools follow the existing Full Access mode.</p>' +
+                  '<button type="submit" class="primary-button">Authorize GitHub source</button>' +
                   '</form>') +
               '</section>' : '') +
           (sourceIntegrity ? '<section role="region" aria-label="Source integrity">' +
@@ -1019,7 +1012,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       safe(demandObjective) + '</textarea></label>' +
       '<p class="sa-execution-explainer"><strong>Native Team orchestration</strong> · ' +
       (teamStrategy?.orchestrationId === chosen.id
-        ? (teamStrategy.executionMode === 'full_auto' ? 'Full Auto · native Full Access'
+        ? (teamStrategy.executionMode === 'full' ? 'Full Access · native bot permissions'
           : teamStrategy.executionMode === 'approval' ? 'With Approval · human decision'
           : 'Execution policy not configured')
         : 'Inspect the Team execution policy before starting') +
@@ -1030,7 +1023,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         demandPreflight.objective === demandObjective.trim()
         ? '<section class="sa-pane" role="region" aria-label="Native demand preflight">' +
           '<h4>Manual admission preview</h4>' +
-          '<p>Read-only native check for the legacy coordinated manual path. This is not Full Auto readiness, file authorization or a test execution grant.</p>' +
+          '<p>Read-only native check for the legacy coordinated manual path. This is not Full Access readiness, file authorization or a test execution grant.</p>' +
           '<p>Project ' + safe(demandPreflight.result.projectId) +
           ' · Role ' + safe(demandPreflight.result.selectedRole) +
           ' · Bot ' + safe(demandPreflight.result.selectedBotId) +
@@ -1039,34 +1032,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           (demandPreflight.result.eligible
             ? 'No manual admission blocker observed; native admission will recheck.'
             : 'Manual admission not eligible: ' + safe(demandPreflight.result.reason ?? 'No reason reported.')) +
-          '</p><p>WorkItem tool eligibility, exact file paths, Council and Full Auto are not evaluated by this preview.</p></section>'
+          '</p><p>WorkItem tool eligibility, exact file paths, Council and Full Access are not evaluated by this preview.</p></section>'
         : '') +
-      '<label>Optional exact files for this Demand (one project-relative file per line)' +
-        '<textarea name="initialAllowedPaths" rows="3" autocomplete="off" ' +
-        'placeholder="src/feature.ts">' + safe(initialDemandWritePaths) + '</textarea></label>' +
-        '<p>Native local confirmation occurs once before Coordinator planning. ' +
-        'When paths are provided, each write-required WorkItem must select a nonempty subset. ' +
-        'Native validation denies unapproved files; each child receives only its own immutable subset. ' +
-        'Leave blank for read-only planning and ' +
-        'later per-WorkItem authorization. Shell, MCP and GitHub writes stay denied.</p>' +
-      '<label>Optional approved native test command<select name="initialTestCommand" aria-label="Native Demand test command">' +
-        '<option value="">No test process authorized</option>' +
-        '<option value="npm test"' + (initialDemandTestCommand === 'npm test' ? ' selected' : '') +
-          '>npm test (declared package.json script)</option>' +
-        '<option value="cargo test"' + (initialDemandTestCommand === 'cargo test' ? ' selected' : '') +
-          '>cargo test --locked --offline</option></select></label>' +
-      '<p>This one-time test approval is separate from Worker file rights. ' +
-      'The native scheduler executes the selected command after verified WorkItem results. ' +
-      'A project test script executes code; no unrestricted shell or GitHub effects are granted. ' +
-      'A failed or uncertain run cannot be silently replayed.</p>' +
-      (teamStrategy?.executionMode === 'full_auto' && !initialDemandTestCommand
-        ? '<p role="status">Full Auto requires a native test command in the initial authorization.</p>'
-        : '') +
+      '<p class="sa-mode-note">The admitted Worker uses its existing native bot/chat permissions. Full Access does not require separate exact-file or command authorizations.</p>' +
       '<button class="primary-button" type="submit"' +
       (chosen.enabled && teamStrategy?.orchestrationId === chosen.id &&
-        teamStrategy.executionMode !== 'off' &&
-        (teamStrategy.executionMode !== 'full_auto' || initialDemandTestCommand)
-        ? '' : ' disabled') +
+        teamStrategy.executionMode !== 'off' ? '' : ' disabled') +
       '>Start Demand</button></form>' +
       '<p class="sa-mode-note">Native admission checks the Team policy, bot eligibility and every scoped permission before dispatch.</p></section>' : '';
     const active = chosen && inspectedTicket ? '<section class="sa-pane sa-run-detail" aria-label="Selected native Demand">' +
@@ -1188,11 +1159,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             '<label class="sa-mode-option"><input type="radio" name="executionMode" value="approval"' +
               (teamStrategy.executionMode === 'approval' ? ' checked' : '') +
               '><span><strong>With Approval</strong><small>WorkItems pause for native human acceptance. Council automatic finalization must be disabled.</small></span></label>' +
-            '<label class="sa-mode-option"><input type="radio" name="executionMode" value="full_auto"' +
-              (teamStrategy.executionMode === 'full_auto' ? ' checked' : '') +
-              '><span><strong>Full Auto</strong><small>Native Full Access on Worker task sessions; Council is optional and configured independently.</small></span></label>' +
+            '<label class="sa-mode-option"><input type="radio" name="executionMode" value="full"' +
+              (teamStrategy.executionMode === 'full' ? ' checked' : '') +
+              '><span><strong>Full Access</strong><small>Native Full Access on Worker task sessions; Council is optional and configured independently.</small></span></label>' +
             '</fieldset>' +
-            '<p class="sa-mode-note">Full Auto uses existing bot/chat native Full Access for new Workers, without changing other chats. Council is optional. With Approval preserves native tool permissions plus human WorkItem acceptance.</p>' +
+            '<p class="sa-mode-note">Full Access uses existing bot/chat native Full Access for new Workers, without changing other chats. Council is optional. With Approval preserves native tool permissions plus human WorkItem acceptance.</p>' +
             '<label>Optimization priority<select name="priority">' +
             (['balanced','cost','latency','throughput','quality'] as const).map(priority =>
               '<option value="' + priority + '"' +
@@ -1249,7 +1220,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
               '<label><input type="checkbox" name="councilRequired"' +
               (roleRoster.councilRequired ? ' checked disabled' : ' disabled') +
               '> Council review is managed by the selected execution mode</label>' +
-              '<p>Full Auto requires at least two reviewers. With Approval uses human acceptance. Change the mode in Execution and review; each native Ticket retains its frozen reviewers.</p>' +
+              '<p>Council is optional in Full Access. With Approval uses human acceptance. Change the mode in Execution and review; each native Ticket retains its frozen reviewers.</p>' +
               '<button type="button" data-sa-edit-mode>Configure execution mode</button>' +
               '<p>Saving roles appends a future-only Team version. Active Tickets retain their frozen roster, Council policy, mandate and grants. A saved primary identity cannot change after the Team has Ticket history.</p>' +
               '<button class="primary-button" type="submit"' +
@@ -1318,7 +1289,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<dl><dt>Team status</dt><dd>' + (chosen.enabled ? 'Enabled' : 'Off') + '</dd>' +
         '<dt>Execution</dt><dd>' +
         (teamStrategy?.orchestrationId === chosen.id
-          ? (teamStrategy.executionMode === 'full_auto' ? 'Full Auto · native Full Access' :
+          ? (teamStrategy.executionMode === 'full' ? 'Full Access · native bot permissions' :
             teamStrategy.executionMode === 'approval' ? 'With Approval · human acceptance' :
             'Not configured')
           : 'Loading native policy') + '</dd>' +
@@ -1406,7 +1377,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<span class="sa-first-team-icon">' + icon('team') + '</span>' +
         '<h3>Create your first Team</h3>' +
         '<p>Assign a Coordinator, Workers and optional independent Reviewers. ' +
-        'Choose Full Auto or With Approval before enabling the Team.</p>' +
+        'Choose Full Access or With Approval before enabling the Team.</p>' +
         '<p>Creating a Team does not run a task or grant additional permissions.</p>' +
         '<button type="button" class="primary-button" data-sa-builder-open>' +
         icon('plus') + ' New Team</button></section>' +
@@ -1444,13 +1415,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         '<h2>' + safe(chosen.name) + '</h2>' +
         '<span class="sa-team-state">' + (chosen.enabled ? 'Enabled' : 'Off') + '</span>' +
         '<span class="sa-team-state">' +
-        (teamStrategy?.executionMode === 'full_auto' ? 'Full Auto' :
+        (teamStrategy?.executionMode === 'full' ? 'Full Access' :
           teamStrategy?.executionMode === 'approval' ? 'With Approval' : 'Not configured') +
         '</span></div>' +
         '<p>Policy revision ' + chosen.policyRevision + ' · ' +
           (chosen.enabled ? 'Enabled' : 'Off') + ' · ' +
           (teamStrategy?.orchestrationId === chosen.id
-            ? (teamStrategy.executionMode === 'full_auto' ? 'Full Auto' :
+            ? (teamStrategy.executionMode === 'full' ? 'Full Access' :
               teamStrategy.executionMode === 'approval' ? 'With Approval' :
               'Execution mode not configured')
             : 'Loading native policy') + '</p></div>' +
@@ -1505,7 +1476,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<aside class="sa-pane sa-admission-summary"><h3>Before any work starts</h3>' +
           '<dl><dt>Team enabled</dt><dd>' + (chosen?.enabled ? 'Yes' : 'No') + '</dd>' +
           '<dt>Execution</dt><dd>' +
-          (teamStrategy?.executionMode === 'full_auto' ? 'Full Auto' :
+          (teamStrategy?.executionMode === 'full' ? 'Full Access' :
             teamStrategy?.executionMode === 'approval' ? 'With Approval' : 'Not configured') +
           '</dd><dt>Native admission</dt><dd>Required</dd>' +
           '<dt>Permissions</dt><dd>Scoped native grants only</dd>' +
@@ -1789,16 +1760,6 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const replacement = host.querySelector<HTMLInputElement>('[data-sa-team-search]');
       replacement?.focus({preventScroll:true});
       if (replacement && selection !== null) replacement.setSelectionRange(selection, selection);
-      return;
-    }
-    if (target instanceof HTMLSelectElement && target.name === 'initialTestCommand' &&
-        target.closest<HTMLFormElement>('form[data-sa-form="run"]')) {
-      initialDemandTestCommand = target.value;
-      return;
-    }
-    if (target instanceof HTMLTextAreaElement && target.name === 'initialAllowedPaths' &&
-        target.closest<HTMLFormElement>('form[data-sa-form="run"]')) {
-      initialDemandWritePaths = target.value;
       return;
     }
     if (target instanceof HTMLTextAreaElement && target.name === 'objective' &&
@@ -2238,7 +2199,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       if (c && !c.enabled && (teamStrategy?.orchestrationId !== c.id ||
           teamStrategy.executionMode === 'off')) {
         teamPanel = 'execution';
-        error = 'Select and save With Approval or Full Auto before enabling this Team.';
+        error = 'Select and save With Approval or Full Access before enabling this Team.';
         render(); return;
       }
       if (c) ask((c.enabled ? 'Disable ' : 'Enable the configured mode for ') + c.name + '?', async () => {
@@ -2586,20 +2547,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         error='Read-only Auto requires an unchanged Observe issues.opened source and a daily limit from 1 to 20.';
         render(); return;
       }
-      const allowedPaths=String(data.get('autoAllowedPaths') || '')
-        .split(/\r?\n/).map(value => value.trim()).filter(Boolean);
-      const allowedTest=String(data.get('autoAllowedTest') || '');
-      if (allowedPaths.length > 24 || allowedPaths.some(path => path.length > 240) ||
-          !['','npm test','cargo test'].includes(allowedTest) ||
-          ((allowedPaths.length === 0) !== (allowedTest === ''))) {
-        error='Provide up to 24 exact files AND npm test or cargo test, or leave both empty for read-only admission.';
-        render(); return;
-      }
       autoDailyLimit=maxDailyTasks;
       void work(async () => {
         const result=await call<AutoSourceStatus>('superagent_auto_authorize',{
           sourceId:src.id,expectedRevision:src.policyRevision,maxDailyTasks,
-          allowedPaths,allowedTest,
+          allowedPaths:[],allowedTest:'',
         });
         if (result.sourceId!==src.id || !result.enabled || result.maxDailyTasks!==maxDailyTasks) {
           throw new Error('The native Auto grant does not match the inspected source policy.');
@@ -2607,9 +2559,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         autoStatus=result;
         await reload();
         autoStatus=await call<AutoSourceStatus>('superagent_auto_status',{sourceId:src.id});
-        feedback=result.scopeAuthorized
-          ? 'GitHub Auto source authorized with exact files and native test; every Worker still needs a current native grant.'
-          : 'GitHub Auto read-only source admission authorized; file writes still require local consent.';
+        feedback='GitHub source authorized. Worker tools follow the selected native bot permissions.';
       });
       return;
     }
@@ -2875,7 +2825,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         subagentDelegationEnabled:data.has('subagentDelegationEnabled'),
         executionMode:String(data.get('executionMode') ?? ''),
       };
-      if (!['approval','full_auto'].includes(input.executionMode) ||
+      if (!['approval','full'].includes(input.executionMode) ||
           !['balanced','cost','latency','throughput','quality'].includes(input.priority) ||
           !Number.isInteger(input.maxConcurrentTasks) || input.maxConcurrentTasks < 1 || input.maxConcurrentTasks > 8 ||
           !Number.isInteger(input.maxAttemptsPerAssignment) || input.maxAttemptsPerAssignment < 1 ||
@@ -3026,7 +2976,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         guidedBuilder.reset();
         workspaceView = 'teams';
         await reload();
-        feedback = 'Team and ' + (executionMode === 'full_auto' ? 'Full Auto' : 'With Approval') +
+        feedback = 'Team and ' + (executionMode === 'full' ? 'Full Access' : 'With Approval') +
           ' policy saved Off. Enable the Team to start a native Demand.';
       });
       return;
@@ -3044,27 +2994,16 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const selectedConfig = current(), objective = String(data.get('objective') ?? '').trim();
       if (!selectedConfig?.enabled || !objective ||
           teamStrategy?.orchestrationId !== selectedConfig.id ||
-          teamStrategy.executionMode === 'off' ||
-          (teamStrategy.executionMode === 'full_auto' && !initialDemandTestCommand)) return;
+          teamStrategy.executionMode === 'off') return;
       const key = taskKey;
-      initialDemandWritePaths = String(data.get('initialAllowedPaths') ?? '');
-      initialDemandTestCommand = String(data.get('initialTestCommand') ?? '');
-      const initialPaths = initialDemandWritePaths.split(/\r\n?|\n/).filter(Boolean);
-      if (initialPaths.length > 16 || new Set(initialPaths).size !== initialPaths.length) {
-        error = 'Supply at most 16 unique exact project-relative paths.'; render(); return;
-      }
       void work(async () => {
         const admitted = await call<Ticket>('superagent_start_demand',{
           orchestrationId:selectedConfig.id, objective, requestKey:key,
-          ...(initialPaths.length ? {allowedPaths:initialPaths} : {}),
-          ...(initialDemandTestCommand ? {allowedTest:initialDemandTestCommand} : {}),
         });
         if (!admitted.id || admitted.orchestrationId !== selectedConfig.id)
           throw new Error('Native Demand admission returned a mismatched Team or missing Ticket.');
         taskKey = crypto.randomUUID(); demandObjective = '';
         demandPreflight = null;
-        initialDemandWritePaths = '';
-        initialDemandTestCommand = '';
         inspectedTicket = admitted.id;
         workspaceView = 'run';
         await reload();

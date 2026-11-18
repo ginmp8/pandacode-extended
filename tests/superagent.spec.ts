@@ -27,7 +27,7 @@ async function openWorkspace(page: Page): Promise<Locator> {
   return host;
 }
 
-async function completeWizard(host: Locator, name: string, mode: 'approval'|'full_auto' = 'approval') {
+async function completeWizard(host: Locator, name: string, mode: 'approval'|'full' = 'approval') {
   await host.getByRole('button', {name:'New Team', exact:true}).click();
   const builder=host.getByRole('region', {name:'Guided Team Builder'});
   await expect(builder).toContainText('Step 1 of 5');
@@ -38,7 +38,7 @@ async function completeWizard(host: Locator, name: string, mode: 'approval'|'ful
   await builder.getByRole('button', {name:'Next'}).click();
   await expect(builder).toContainText('Skill presence alone does not prove');
   await builder.getByRole('button', {name:'Next'}).click();
-  await builder.getByRole('radio', {name:mode==='full_auto' ? /Full Auto/ : /With Approval/}).check();
+  await builder.getByRole('radio', {name:mode==='full' ? /Full Access/ : /With Approval/}).check();
   return builder;
 }
 
@@ -68,7 +68,7 @@ test('Orchestrations keeps the reference page and five-step wizard layout', asyn
 /** A narrow, revision-guarded fake native service. No provider, file or GitHub
  * effect is performed; every mutation is recorded so incorrect dispatch fails. */
 async function mountNativeFixture(page: Page, options: {
-  reviewers?: number; council?: boolean; mode?: 'approval'|'full_auto'|'off'; enabled?: boolean;
+  reviewers?: number; council?: boolean; mode?: 'approval'|'full'|'off'; enabled?: boolean;
   withTicket?: boolean; ticketState?: string;
 }={}) {
   await page.evaluate(async opts => {
@@ -364,10 +364,10 @@ test('With Approval Team persists its native execution mode and remains Off',asy
   await expect(host.locator('form[data-sa-form="strategy-update"]')).toBeVisible();
 });
 
-test('Full Auto wizard allows zero reviewers and configures native Full Access',async({page})=>{
+test('Full Access wizard allows zero reviewers and configures native Full Access',async({page})=>{
   await page.goto('/?bots=sample');
   const host=await openWorkspace(page);
-  const builder=await completeWizard(host,'Access Team','full_auto');
+  const builder=await completeWizard(host,'Access Team','full');
   await expect(builder.getByRole('checkbox',{name:/Require native Council review/})).not.toBeChecked();
   await expect(builder).toContainText('Council is Off');
   await builder.getByRole('button',{name:'Next'}).click();
@@ -375,7 +375,7 @@ test('Full Auto wizard allows zero reviewers and configures native Full Access',
   await builder.getByRole('button',{name:'Create Team (disabled)'}).click();
   await expect(host.getByRole('region',{name:'Guided Team Builder'})).toHaveCount(0);
   await openTeam(host,'Access Team');
-  await expect(host).toContainText('Full Auto');
+  await expect(host).toContainText('Full Access');
 });
 
 test('an enabled Team admits a Demand through the new screen and opens its native Run',async({page})=>{
@@ -408,20 +408,16 @@ test('Demand preflight reads native manual eligibility without granting or start
   const host=await mountNativeFixture(page,{enabled:true});
   await host.getByRole('button',{name:'Demands / Runs',exact:true}).click();
   await host.getByRole('button',{name:'New Demand'}).click();
-  await expect(host.locator('form[data-sa-form="run"]')).toContainText('each write-required WorkItem must select a nonempty subset');
-  const approvedCommand=host.getByRole('combobox',{name:'Native Demand test command'});
-  await expect(approvedCommand).toHaveValue('');
-  await approvedCommand.selectOption('cargo test');
-  await expect(approvedCommand).toHaveValue('cargo test');
-  await expect(host.locator('form[data-sa-form="run"]'))
-    .toContainText('A failed or uncertain run cannot be silently replayed.');
+  await expect(host.locator('form[data-sa-form="run"]')).toContainText('existing native bot/chat permissions');
+  await expect(host.getByRole('combobox',{name:'Native Demand test command'})).toHaveCount(0);
+  await expect(host.locator('[name="initialAllowedPaths"]')).toHaveCount(0);
   const objective=host.getByRole('textbox',{name:'Task objective'});
   await objective.fill('Make an authorized source change');
   await host.getByRole('button',{name:'Review native preflight'}).click();
   const preview=host.getByRole('region',{name:'Native demand preflight'});
   await expect(preview).toContainText('Manual admission preview');
   await expect(preview).toContainText('Legacy manual runner cannot admit');
-  await expect(preview).toContainText('not Full Auto readiness');
+  await expect(preview).toContainText('not Full Access readiness');
   const evidence=await page.evaluate(()=>({
     reads:(window as unknown as {saFixtureReads:Array<{command:string;args:Record<string,unknown>}>}).saFixtureReads,
     mutations:(window as unknown as {saFixtureMutations:unknown[]}).saFixtureMutations,
@@ -449,27 +445,27 @@ test('Run board separates navigation from task admission and retains Board/List 
   await expect(host.locator('form[data-sa-form="run"]')).toHaveCount(0);
 });
 
-test('native Full Auto mode does not modify Council settings',async({page})=>{
+test('native Full Access mode does not modify Council settings',async({page})=>{
   await page.goto('/?bots=sample');
   const host=await mountNativeFixture(page);
   await openTeam(host,'Native Team');
   await host.locator('.sa-subtabs').getByRole('button',{name:'Execution and review'}).click();
   const form=host.locator('form[data-sa-form="strategy-update"]');
-  await form.getByRole('radio',{name:/Full Auto/}).check();
+  await form.getByRole('radio',{name:/Full Access/}).check();
   await form.getByRole('button',{name:'Save future-Team policy'}).click();
   await expect(host).toHaveAttribute('aria-busy','false');
-  await expect(host).toContainText('Full Auto');
+  await expect(host).toContainText('Full Access');
   const calls=await page.evaluate(()=>
     (window as unknown as {saFixtureMutations:Array<{command:string;args:Record<string,unknown>}>})
       .saFixtureMutations);
   expect(calls.map(entry=>entry.command)).toEqual(['superagent_strategy_update']);
   expect(calls[0].args.expectedRevision).toBe(1);
-  expect((calls[0].args.input as {executionMode:string}).executionMode).toBe('full_auto');
+  expect((calls[0].args.input as {executionMode:string}).executionMode).toBe('full');
 });
 
-test('switching Full Auto back to With Approval leaves independent Council off',async({page})=>{
+test('switching Full Access back to With Approval leaves independent Council off',async({page})=>{
   await page.goto('/?bots=sample');
-  const host=await mountNativeFixture(page,{mode:'full_auto'});
+  const host=await mountNativeFixture(page,{mode:'full'});
   await openTeam(host,'Native Team');
   await host.locator('.sa-subtabs').getByRole('button',{name:'Execution and review'}).click();
   const form=host.locator('form[data-sa-form="strategy-update"]');
@@ -482,19 +478,19 @@ test('switching Full Auto back to With Approval leaves independent Council off',
   await expect(form.getByRole('radio',{name:/With Approval/})).toBeChecked();
 });
 
-test('native Full Auto configuration accepts zero Council reviewers',async({page})=>{
+test('native Full Access configuration accepts zero Council reviewers',async({page})=>{
   await page.goto('/?bots=sample');
   const host=await mountNativeFixture(page,{reviewers:0});
   await openTeam(host,'Native Team');
   await host.locator('.sa-subtabs').getByRole('button',{name:'Execution and review'}).click();
   const form=host.locator('form[data-sa-form="strategy-update"]');
-  await form.getByRole('radio',{name:/Full Auto/}).check();
+  await form.getByRole('radio',{name:/Full Access/}).check();
   await form.getByRole('button',{name:'Save future-Team policy'}).click();
   await expect(host).toHaveAttribute('aria-busy','false');
   const calls=await page.evaluate(()=>
     (window as unknown as {saFixtureMutations:Array<{command:string}>}).saFixtureMutations.map(x=>x.command));
   expect(calls).toEqual(['superagent_strategy_update']);
-  await expect(form.getByRole('radio',{name:/Full Auto/})).toBeChecked();
+  await expect(form.getByRole('radio',{name:/Full Access/})).toBeChecked();
 });
 
 test('native run inspector opens the exact assigned bot conversation',async({page})=>{

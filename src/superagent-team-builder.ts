@@ -22,7 +22,7 @@ export interface TeamBuilderInput {
   workerBotIds: string[];
   reviewerBotIds: string[];
   councilRequired: boolean;
-  executionMode: 'approval' | 'full_auto';
+  executionMode: 'approval' | 'full';
 }
 
 export class GuidedTeamBuilder {
@@ -36,7 +36,7 @@ export class GuidedTeamBuilder {
   private workers: string[] = [];
   private reviewers: string[] = [];
   private councilRequired = false;
-  private executionMode: 'approval' | 'full_auto' = 'approval';
+  private executionMode: 'approval' | 'full' = 'approval';
 
   get isOpen(): boolean { return this.visible; }
 
@@ -144,13 +144,13 @@ export class GuidedTeamBuilder {
       }
       case 'builderExecutionMode':
         if (!(target instanceof HTMLInputElement) ||
-            !['approval','full_auto'].includes(target.value)) return false;
-        this.executionMode = target.value as 'approval' | 'full_auto';
+            !['approval','full'].includes(target.value)) return false;
+        this.executionMode = target.value as 'approval' | 'full';
         if (this.executionMode === 'approval') this.councilRequired = false;
         break;
       case 'builderCouncilRequired':
         if (!(target instanceof HTMLInputElement) || target.type !== 'checkbox') return false;
-        if (this.executionMode !== 'full_auto') return false;
+        if (this.executionMode !== 'full') return false;
         this.councilRequired = target.checked;
         break;
       default: return false;
@@ -291,11 +291,11 @@ export class GuidedTeamBuilder {
         '<label class="sa-mode-option"><input type="radio" name="builderExecutionMode" value="approval"' +
           (this.executionMode === 'approval' ? ' checked' : '') +
           '><span><strong>With Approval</strong><small>Every completed WorkItem waits for an explicit human decision before dependents advance.</small></span></label>' +
-        '<label class="sa-mode-option"><input type="radio" name="builderExecutionMode" value="full_auto"' +
-          (this.executionMode === 'full_auto' ? ' checked' : '') +
-          '><span><strong>Full Auto</strong><small>Use existing native Full Access for new Worker task sessions. Native Council is optional.</small></span></label>' +
+        '<label class="sa-mode-option"><input type="radio" name="builderExecutionMode" value="full"' +
+          (this.executionMode === 'full' ? ' checked' : '') +
+          '><span><strong>Full Access</strong><small>Use existing native Full Access for new Worker task sessions. Native Council is optional.</small></span></label>' +
         '</fieldset>' +
-        (this.executionMode === 'full_auto'
+        (this.executionMode === 'full'
           ? '<label class="sa-council-toggle"><input type="checkbox" name="builderCouncilRequired"' +
             (this.councilRequired ? ' checked' : '') +
             '> Require native Council review (optional)</label>' +
@@ -316,7 +316,7 @@ export class GuidedTeamBuilder {
         '</dd><dt>Reviewers</dt><dd>' +
         (this.reviewers.map(name).map(safe).join(', ') || 'None') + '</dd>' +
         '<dt>Native Council</dt><dd>' + (this.councilRequired ? 'Required' : 'Off') +
-        '</dd><dt>Execution mode</dt><dd>' + (this.executionMode === 'full_auto' ? 'Full Auto' : 'With Approval') +
+        '</dd><dt>Execution mode</dt><dd>' + (this.executionMode === 'full' ? 'Full Access' : 'With Approval') +
         '</dd><dt>Team state</dt><dd>Off until enabled; no task or tool grants</dd></dl>' +
         (problem ? '<p role="alert">' + safe(problem) + '</p>' :
           '<p>Save rechecks all native bot, project and versioned Team guards.</p>') +

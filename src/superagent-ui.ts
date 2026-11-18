@@ -206,7 +206,7 @@ interface AutoSourceStatus {
   maxDailyTasks:number|null; usedLastDay:number;
   expiresAt:number|null; operatorLogin:string|null;
   pending:number; blocked:number;
-  scopeAuthorized:boolean; approvedFileCount:number;
+  grantActive:boolean; scopeAuthorized:boolean; approvedFileCount:number;
   nativeTestCommand:string|null;
 }
 
@@ -872,7 +872,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
                 ? activityTime(autoStatus.expiresAt) : 'Not authorized') +
               ' · Approved files: ' + autoStatus.approvedFileCount +
               ' · Native test: ' + safe(autoStatus.nativeTestCommand || 'none') + '</p>' +
-              (autoStatus.enabled
+              (autoStatus.grantActive && !autoStatus.enabled
+                ? '<p role="status">Existing source grant cannot execute Full Auto without a current exact file/test mandate. Revoke this source grant, then authorize the complete scope.</p>'
+                : '') +
+              (autoStatus.grantActive
                 ? '<button type="button" data-sa-auto-revoke="' + safe(autoStatus.sourceId) +
                   '">Revoke Auto and stop associated native Tickets</button>'
                 : '<form data-sa-form="auto-authorization">' +

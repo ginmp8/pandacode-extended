@@ -75,6 +75,8 @@ interface DeliveryObservation {
   repositoryHeadSha:string|null; worktreeStatusSha256:string|null;
   worktreeDiffSha256:string|null; observedStatusEntries:number|null;
   checkoutObservation:string; sourceAttribution:string;
+  nativeTestRequired:boolean;
+  nativeTestState:'not_authorized'|'authorized_not_run'|'running'|'passed'|'failed'|'uncertain';
   testExecutionVerified:boolean; ciResultVerified:boolean;
   externalDeliveryVerified:boolean; checkedAt:number; readOnly:boolean;
 }
@@ -503,6 +505,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '<dt>Git HEAD (unattributed)</dt><dd><code>' +
             safe(delivery.repositoryHeadSha ?? 'unavailable') + '</code></dd>' +
           '<dt>Source attribution</dt><dd>' + safe(delivery.sourceAttribution) + '</dd>' +
+          '<dt>Native test requirement</dt><dd>' +
+            (delivery.nativeTestRequired ? 'Required by native policy' : 'Not required') + '</dd>' +
+          '<dt>Durable native test state</dt><dd>' +
+            safe(delivery.nativeTestState === 'passed' && !delivery.testExecutionVerified
+              ? 'Previous pass is stale or cannot be verified'
+              : delivery.nativeTestState) + '</dd>' +
           '<dt>Native tests / CI / publication</dt><dd>' +
             (delivery.testExecutionVerified ? 'Tests verified' : 'Tests unverified') + ' · ' +
             (delivery.ciResultVerified ? 'CI verified' : 'CI unverified') + ' · ' +

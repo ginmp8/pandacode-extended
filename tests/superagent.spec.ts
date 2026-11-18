@@ -1465,6 +1465,7 @@ test('native project filter preserves immutable Ticket scope across pages and ot
     (window as unknown as {saProjectQueries:Record<string,unknown>[]}).saProjectQueries=queries;
     const item=(id:string,team:string,at:number)=>({
       id,orchestrationId:team,objective:'Scoped '+id,state:'blocked',
+      projectId:team==='team-a'?'project-a':'project-b',
       revision:0,updatedAt:at,
     });
     mountSuperagent(host,async(command,args)=>{

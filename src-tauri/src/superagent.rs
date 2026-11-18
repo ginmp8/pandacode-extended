@@ -1649,19 +1649,38 @@ pub(crate) fn list_headless_recovery_inbox_page(
                           AND (active.bot_id=o.coordinator_bot_id OR
                                (active.bot_id=t.worker_bot_id
                                 AND assignee.project_id=t.project_id)))))
+             ), page AS (
+               SELECT id,priority,updated_at FROM candidates
+               WHERE ?3 IS NULL OR priority>?3
+                  OR (priority=?3 AND (updated_at<?4
+                      OR (updated_at=?4 AND id<?5)))
+               ORDER BY priority ASC,updated_at DESC,id DESC
+               LIMIT 201
              )
-             SELECT id,priority,updated_at FROM candidates
-             WHERE ?3 IS NULL OR priority>?3
-                OR (priority=?3 AND (updated_at<?4
-                    OR (updated_at=?4 AND id<?5)))
-             ORDER BY priority ASC,updated_at DESC,id DESC
-             LIMIT 201",
+             SELECT page.id,page.priority,page.updated_at,
+               CASE WHEN ?3 IS NULL THEN 1 ELSE EXISTS(
+                 SELECT 1 FROM candidates anchor
+                 WHERE anchor.id=?5 AND anchor.priority=?3 AND anchor.updated_at=?4
+               ) END AS cursor_valid
+             FROM (SELECT 1) singleton LEFT JOIN page ON 1=1
+             ORDER BY page.priority ASC,page.updated_at DESC,page.id DESC",
         ).map_err(|e| e.to_string())?;
         let rows = stmt.query_map(
             params![observed_at,cutoff,before_priority,before_updated_at,before_id,CHANNEL],
-            |row| Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,row.get::<_,i64>(2)?)),
+            |row| Ok((
+                row.get::<_,Option<String>>(0)?,
+                row.get::<_,Option<i64>>(1)?,
+                row.get::<_,Option<i64>>(2)?,
+                row.get::<_,bool>(3)?,
+            )),
         ).map_err(|e| e.to_string())?;
-        rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?
+        let records = rows.collect::<rusqlite::Result<Vec<_>>>().map_err(|e| e.to_string())?;
+        if records.first().is_some_and(|row| !row.3) {
+            return Err("Recovery cursor no longer belongs to a recoverable Ticket; reload inbox.".into());
+        }
+        records.into_iter().filter_map(|(id,priority,updated_at,_)| {
+            Some((id?,priority?,updated_at?))
+        }).collect()
     };
     let mut items = Vec::with_capacity(ids.len().min(200));
     for (id,_,_) in ids.iter().take(200) {
@@ -5023,6 +5042,24 @@ mod tests {
             "reconcile_authoritative_remote_effects");
         assert_eq!(items[1]["ticketId"], blocked.id);
         assert_eq!(items[1]["state"], "blocked");
+        let cursor_at = items[0]["updatedAt"].as_i64().unwrap();
+        let cursor_id = items[0]["ticketId"].as_str().unwrap();
+        let continuation: serde_json::Value = serde_json::from_str(
+            &list_headless_recovery_inbox_page(
+                &store.path, Some(0), Some(cursor_at), Some(cursor_id),
+            ).unwrap(),
+        ).unwrap();
+        assert_eq!(continuation["items"].as_array().unwrap().len(), 1);
+        assert_eq!(continuation["items"][0]["ticketId"], blocked.id);
+        assert!(list_headless_recovery_inbox_page(
+            &store.path, Some(0), Some(cursor_at), Some("forged-ticket"),
+        ).is_err());
+        assert!(list_headless_recovery_inbox_page(
+            &store.path, Some(1), Some(cursor_at), Some(cursor_id),
+        ).is_err());
+        assert!(list_headless_recovery_inbox_page(
+            &store.path, Some(0), Some(cursor_at + 1), Some(cursor_id),
+        ).is_err());
         assert!(!items.iter().any(|item| item["ticketId"] == settled.id));
         assert_eq!(inbox["observationalOnly"], true);
         assert_eq!(inbox["automaticRecoveryPerformed"], false);
@@ -5048,6 +5085,15 @@ mod tests {
         ).unwrap();
         assert_eq!(again["items"].as_array().unwrap().len(), 2);
         assert_eq!(again["items"][0]["ticketId"], running.id);
+        drop(reopened);
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute("UPDATE sa_effect_receipts SET state='applied' WHERE ticket_id=?1",
+            [&running.id]).unwrap();
+        drop(db);
+        // A stale cursor cannot silently skip a Ticket that stopped qualifying.
+        assert!(list_headless_recovery_inbox_page(
+            &path, Some(0), Some(cursor_at), Some(cursor_id),
+        ).is_err());
     }
 
     #[test]

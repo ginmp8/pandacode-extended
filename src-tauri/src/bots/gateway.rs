@@ -16,6 +16,12 @@ fn command_allowed_for_channel(channel_id: &str, command: &Command) -> bool {
     channel_id != crate::superagent::CHANNEL || *command == Command::Message
 }
 
+/// Only admitted Workers may keep native provider approvals; this does not
+/// authorize anything by itself, and cannot turn a bot-wide command into consent.
+fn internal_approval_requires_denial(channel_id: &str, native_worker: bool) -> bool {
+    channel_id == crate::superagent::CHANNEL && !native_worker
+}
+
 /// A message for a bot from the desktop, the web UI or a chat channel.
 #[derive(Debug, Clone)]
 pub(crate) struct Inbound {
@@ -595,11 +601,21 @@ pub(crate) async fn approval_requested(app: &tauri::AppHandle, session_id: &str,
     let state = app.state::<AppState>();
     let found = state.store.lock().ok().and_then(|store| owner_of(&store, session_id).ok().flatten());
     let Some((bot, thread)) = found else { return };
-    // No ambient bot approval rule can expand a SuperAgent read-only mandate.
+    // The internal gateway is not a human approval channel. For a live
+    // admitted Worker, leave native provider approvals in PandaCode's normal
+    // pending-request UI; never auto-deny an existing Ask/Full permission mode.
+    // Coordinators, revoked assignments and orphan sessions still fail closed.
     if thread.channel_id == crate::superagent::CHANNEL {
-        if let Err(error) = answer(app, session_id, request_id, false).await {
-            eprintln!("SuperAgent approval denial failed: {error}");
+        let native_worker = state.store.lock().ok()
+            .and_then(|store| crate::superagent::native_worker_chat_context(&store, session_id).ok())
+            .unwrap_or(false);
+        if internal_approval_requires_denial(&thread.channel_id, native_worker) {
+            if let Err(error) = answer(app, session_id, request_id, false).await {
+                eprintln!("SuperAgent approval denial failed: {error}");
+            }
         }
+        // Never insert a SuperAgent approval in bot-wide chat command state:
+        // native desktop approval uses the original session/request ID.
         return;
     }
     // Allow rules answer without asking; deny rules refuse.
@@ -722,6 +738,22 @@ mod tests {
             assert!(command_allowed_for_channel(super::super::DESKTOP, &command));
         }
         assert!(command_allowed_for_channel("schedule", &Command::Stop));
+    }
+
+    #[test]
+    fn native_full_access_and_approval_workers_keep_original_provider_approval_ui() {
+        let internal = crate::superagent::CHANNEL;
+        // A live admitted Worker uses its native Full/Ask provider policy,
+        // not a second SuperAgent-specific approval denial.
+        assert!(!internal_approval_requires_denial(internal, true));
+        // A Coordinator, stopped Worker, stale callback, or absent admission
+        // cannot inherit a normal bot permission just by using this channel.
+        assert!(internal_approval_requires_denial(internal, false));
+        assert!(!internal_approval_requires_denial(super::super::DESKTOP, false));
+        assert!(!internal_approval_requires_denial("schedule", false));
+        // No internal text, even a purported approval, can act as consent.
+        assert!(!command_allowed_for_channel(internal, &Command::Approve(true, false)));
+        assert!(!command_allowed_for_channel(internal, &Command::Approve(true, true)));
     }
 
     #[test]

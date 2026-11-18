@@ -206,6 +206,8 @@ interface AutoSourceStatus {
   maxDailyTasks:number|null; usedLastDay:number;
   expiresAt:number|null; operatorLogin:string|null;
   pending:number; blocked:number;
+  scopeAuthorized:boolean; approvedFileCount:number;
+  nativeTestCommand:string|null;
 }
 
 interface SourceIntegrity {
@@ -839,7 +841,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '</li>';
     }).join('');
     const sourcePanel = '<section class="sa-event-sources" aria-label="GitHub event sources">' +
-      '<h4>GitHub event sources</h4><p>Authenticated GitHub Events polling is bounded and read-only in Observe mode. Off and authenticated Observe remain available. Read-only Auto for exact issues.opened events requires separate local native confirmation and expires within 24 hours. A source grant never authorizes files, GitHub comments, pushes, merges, or releases.</p>' +
+      '<h4>GitHub event sources</h4><p>Authenticated GitHub Events polling is bounded and read-only in Observe mode. Off and authenticated Observe remain available. Auto requires local confirmation and expires in 24 hours. Full Auto also requires exact project files and a native test command before any provider dispatch. No source grants GitHub comments, pushes, merges or releases.</p>' +
       (!sourcesLoaded ? '<button type="button" data-sa-load-sources>Load sources</button>'
         : '<form data-sa-form="source"><div class="sa-grid">' +
           '<label>Repository (owner/name)<input name="repository" maxlength="200" required></label>' +
@@ -860,23 +862,31 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           (sourceRows || '<li class="sa-empty">No event sources configured.</li>') + '</ul>' +
           (autoStatus && sources.some(src => src.id === autoStatus?.sourceId)
             ? '<section class="sa-pane" role="region" aria-label="Authenticated GitHub Auto policy">' +
-              '<h5>Read-only GitHub Auto grant</h5><p>' +
+              '<h5>GitHub Auto source mandate</h5><p>' +
               safe(autoStatus.repository) + ' · ' + safe(autoStatus.eventKind) +
               ' · Actor ' + safe(autoStatus.actorFilter) +
               ' · Mode ' + safe(autoStatus.mode) +
               '</p><p>Intake in rolling day: ' + autoStatus.usedLastDay +
               ' · Pending: ' + autoStatus.pending + ' · Blocked: ' + autoStatus.blocked +
               ' · Expires: ' + safe(autoStatus.expiresAt
-                ? activityTime(autoStatus.expiresAt) : 'Not authorized') + '</p>' +
+                ? activityTime(autoStatus.expiresAt) : 'Not authorized') +
+              ' · Approved files: ' + autoStatus.approvedFileCount +
+              ' · Native test: ' + safe(autoStatus.nativeTestCommand || 'none') + '</p>' +
               (autoStatus.enabled
                 ? '<button type="button" data-sa-auto-revoke="' + safe(autoStatus.sourceId) +
                   '">Revoke Auto and stop associated native Tickets</button>'
                 : '<form data-sa-form="auto-authorization">' +
-                  '<p>Explicit local-user confirmation authorizes one repository, exact actor, issues.opened, read-only work, and a finite budget. Issue text never grants tools.</p>' +
+                  '<p>Confirm the exact source actor and finite admission budget. Full Auto requires specific project files and one native test command; issue content cannot widen them.</p>' +
                   '<label>Maximum new Demands per rolling 24h' +
                   '<input name="maxDailyTasks" type="number" min="1" max="20" required value="' +
                   safe(autoDailyLimit) + '"></label>' +
-                  '<button type="submit" class="primary-button">Review read-only Auto grant</button>' +
+                  '<label>Approved project files (one exact relative path per line; empty for read-only)' +
+                  '<textarea name="autoAllowedPaths" rows="3" maxlength="4096" placeholder="src/main.rs&#10;src/feature.rs"></textarea></label>' +
+                  '<label>Native test command<select name="autoAllowedTest">' +
+                  '<option value="">No test (read-only only)</option>' +
+                  '<option value="npm test">npm test</option>' +
+                  '<option value="cargo test">cargo test</option></select></label>' +
+                  '<button type="submit" class="primary-button">Review exact Auto authority</button>' +
                   '</form>') +
               '</section>' : '') +
           (sourceIntegrity ? '<section role="region" aria-label="Source integrity">' +
@@ -2581,10 +2591,20 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         error='Read-only Auto requires an unchanged Observe issues.opened source and a daily limit from 1 to 20.';
         render(); return;
       }
+      const allowedPaths=String(data.get('autoAllowedPaths') || '')
+        .split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+      const allowedTest=String(data.get('autoAllowedTest') || '');
+      if (allowedPaths.length > 24 || allowedPaths.some(path => path.length > 240) ||
+          !['','npm test','cargo test'].includes(allowedTest) ||
+          ((allowedPaths.length === 0) !== (allowedTest === ''))) {
+        error='Provide up to 24 exact files AND npm test or cargo test, or leave both empty for read-only admission.';
+        render(); return;
+      }
       autoDailyLimit=maxDailyTasks;
       void work(async () => {
         const result=await call<AutoSourceStatus>('superagent_auto_authorize',{
           sourceId:src.id,expectedRevision:src.policyRevision,maxDailyTasks,
+          allowedPaths,allowedTest,
         });
         if (result.sourceId!==src.id || !result.enabled || result.maxDailyTasks!==maxDailyTasks) {
           throw new Error('The native Auto grant does not match the inspected source policy.');
@@ -2592,7 +2612,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         autoStatus=result;
         await reload();
         autoStatus=await call<AutoSourceStatus>('superagent_auto_status',{sourceId:src.id});
-        feedback='Local GitHub Auto grant authorized for bounded read-only issue intake. Explicit file-write confirmations remain required.';
+        feedback=result.scopeAuthorized
+          ? 'GitHub Auto source authorized with exact files and native test; every Worker still needs a current native grant.'
+          : 'GitHub Auto read-only source admission authorized; file writes still require local consent.';
       });
       return;
     }

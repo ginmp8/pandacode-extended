@@ -506,10 +506,12 @@ pub(super) fn recover_unstarted_children(store: &Store, root: &TeamSnapshot) -> 
         let admitted_unstarted = old_team.status == "running"
             && old_team.workers.len() == choice.child_reviewers
             && old_team.objective == root.objective
-            && old_team.generation == root.generation
+            // Native Pause advances the root generation and turns queued
+            // leaves into stopped seats, without starting any provider work.
+            && old_team.generation <= root.generation
             && old_team.council_since == root.council_since
             && old_team.workers.iter().all(|leaf| {
-                leaf.status == "queued" && !leaf.abandoned
+                matches!(leaf.status.as_str(), "queued" | "stopped") && !leaf.abandoned
                     && leaf.council.as_ref().is_some_and(|seat|
                         seat.round == 1 && seat.score.is_none() && seat.started_at == 0
                         && !seat.closed_by_selection && !seat.reported_severe_finding
@@ -532,7 +534,13 @@ pub(super) fn recover_unstarted_children(store: &Store, root: &TeamSnapshot) -> 
             // All previously issued seats must have real recorded native
             // authority and exact project/cycle/leaf ownership. Do not
             // recover a forged child by merely counting its worker entries.
-            validate_admitted(store, root, choice, &previous, &old_team)
+            // Validate the original native issuance generation, not the
+            // paused root's newer generation. Frozen cycle/policy and all
+            // recorded grants remain unchanged; this is revocation, not a
+            // permission-bearing Resume of the old child.
+            let mut admission_root = root.clone();
+            admission_root.generation = old_team.generation;
+            validate_admitted(store, &admission_root, choice, &previous, &old_team)
                 .map_err(|reason| format!("child_council_recovery_denied: invalid admitted leaf roster ({reason})."))?;
         }
         let claims: i64 = store.db.query_row(

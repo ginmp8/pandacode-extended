@@ -4463,34 +4463,44 @@ fn admitted_but_unlaunched_child_recovery_revokes_old_leaf_sessions_without_reus
         &std::sync::atomic::AtomicBool::new(false),
     ).unwrap();
     assert_eq!(pending["completed"], false);
-    let (old_child, old_leaves, original_cycle, paused_snapshot) = {
+    let (old_child, old_leaves, original_cycle) = {
         let store = state.store.lock().unwrap();
         let root = load(&store, &sid).unwrap().unwrap();
         let old = child_council::inspect(&store, &root).unwrap()[0].child_session_id.clone();
-        let mut child = load(&store, &old).unwrap().unwrap();
+        let child = load(&store, &old).unwrap().unwrap();
         assert_eq!(child.status, "running");
         assert_eq!(child.workers.len(), 2);
         assert!(child.workers.iter().all(|leaf| leaf.status == "queued"
             && leaf.council.as_ref().unwrap().started_at == 0));
-        let leaves = child.workers.iter().map(|leaf| leaf.session_id.clone()).collect::<Vec<_>>();
-        let mut paused = root.clone();
-        paused.status = "paused".into();
-        save(&store, &mut paused).unwrap();
-        store.db.execute("UPDATE sessions SET status='interrupted' WHERE id=?1", [&old]).unwrap();
-        // Even with no model response, an admitted reviewer that actually
-        // started is not safe to discard and silently replace.
+        (old, child.workers.iter().map(|leaf| leaf.session_id.clone())
+            .collect::<Vec<_>>(), root.council_since)
+    };
+    // Exercise the actual native pause transition, including the generation
+    // change and stopped-but-never-launched leaf state.
+    let paused = control_state(&state, &sid, "pause").unwrap();
+    assert!(paused.generation > started.generation);
+    let paused_snapshot = serde_json::to_value(&paused).unwrap();
+    {
+        let store = state.store.lock().unwrap();
+        let mut child = load(&store, &old_child).unwrap().unwrap();
+        assert!(child.workers.iter().all(|leaf| leaf.status == "stopped"));
+        store.db.execute(
+            "UPDATE sessions SET status='interrupted' WHERE id=?1",
+            [&old_child],
+        ).unwrap();
+        // A started reviewer must not be silently replaced, even if it
+        // produced no scored callback before the interruption.
         child.workers[0].status = "running".into();
         child.workers[0].council.as_mut().unwrap().started_at = storage::now();
         save(&store, &mut child).unwrap();
-        (old, leaves, root.council_since, serde_json::to_value(&paused).unwrap())
-    };
+    }
     let denied = control_state(&state, &sid, "recover").unwrap_err();
     assert!(denied.contains("child_council_recovery_denied"), "{denied}");
     assert_eq!(serde_json::to_value(saved(&state, &sid)).unwrap(), paused_snapshot);
     {
         let store = state.store.lock().unwrap();
         let mut child = load(&store, &old_child).unwrap().unwrap();
-        child.workers[0].status = "queued".into();
+        child.workers[0].status = "stopped".into();
         child.workers[0].council.as_mut().unwrap().started_at = 0;
         save(&store, &mut child).unwrap();
     }

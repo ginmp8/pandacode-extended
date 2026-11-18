@@ -1046,10 +1046,10 @@ impl Store {
             Some(crate::superagent::effects::lock_dispatch(path)?)
         };
         let recovery = db.transaction().map_err(|e| e.to_string())?;
-        // Interrupted native test effects are uncertain, never replayed or passed.
-        recovery.execute(
-            "UPDATE sa_demand_test_runs SET state='uncertain' WHERE state='running'", [],
-        ).map_err(|e|e.to_string())?;
+        // Native test processes interrupted on restart are never replayed.
+        // Full Auto roots must also receive one safe terminal decision rather
+        // than remain queued behind an uncertain, unrepeatable test receipt.
+        crate::superagent::scheduler::test_runner::recover_interrupted(&recovery)?;
         // Only rows from before typed coordination existed are eligible for the
         // narrowly scoped legacy display projection. New user copies stay user text.
         Self::record_legacy_prompt_cutoff(&recovery)?;

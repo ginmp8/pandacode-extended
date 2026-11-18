@@ -584,6 +584,27 @@ fn list_all_demands_page_for_project(
         // A deleted or unknown Team must not silently look like an empty board.
         configuration(store, id)?;
     }
+    // A syntactically valid timestamp/ID is not a valid pagination boundary.
+    // Require the anchor to remain visible under the exact native filters;
+    // otherwise a stale or foreign cursor could silently skip real Demands.
+    if let (Some(at), Some(id)) = (before_updated_at, before_id) {
+        let visible: i64 = store.db.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sa_tickets t JOIN sa_orchestrations o
+                    ON o.id=t.orchestration_id
+                WHERE t.id=?1 AND t.updated_at=?2
+                  AND (?3 IS NULL OR t.orchestration_id=?3)
+                  AND (?4 IS NULL OR t.state=?4)
+                  AND (?5 IS NULL OR instr(lower(t.objective),lower(?5)) > 0)
+                  AND (?6 IS NULL OR t.project_id=?6)
+            )",
+            params![id,at,orchestration_id,state_filter,search_query,project_id],
+            |row| row.get(0),
+        ).map_err(|e| e.to_string())?;
+        if visible != 1 {
+            return Err("Demand cursor is stale or outside the current native filters; refresh the index.".into());
+        }
+    }
     let mut stmt = store.db.prepare(
         "SELECT t.id,t.orchestration_id,t.objective,t.state,t.revision,t.updated_at,t.project_id
          FROM sa_tickets t JOIN sa_orchestrations o ON o.id=t.orchestration_id
@@ -4488,6 +4509,24 @@ mod tests {
         let second = page(&store, Some(last.updated_at), Some(&last.id),
             Some(&team.project_id)).unwrap();
         assert_eq!(second.len(), 4);
+        // S2 Demand history must reject forged, stale and cross-project
+        // cursors before they can silently conceal earlier native Tickets.
+        assert!(page(&store, Some(last.updated_at), Some("missing-ticket"),
+            Some(&team.project_id)).is_err());
+        assert!(page(&store, Some(last.updated_at + 1), Some(&last.id),
+            Some(&team.project_id)).is_err());
+        assert!(page(&store, Some(last.updated_at), Some(&last.id),
+            Some("other-native-project")).is_err());
+        store.db.execute(
+            "UPDATE sa_tickets SET state='running' WHERE id=?1", [&last.id],
+        ).unwrap();
+        assert!(page(&store, Some(last.updated_at), Some(&last.id),
+            Some(&team.project_id)).is_err());
+        store.db.execute(
+            "UPDATE sa_tickets SET state='blocked' WHERE id=?1", [&last.id],
+        ).unwrap();
+        assert_eq!(page(&store, Some(last.updated_at), Some(&last.id),
+            Some(&team.project_id)).unwrap().len(), 4);
         let ids: std::collections::HashSet<_> = first.iter().chain(second.iter())
             .map(|entry| entry.id.as_str()).collect();
         assert_eq!(ids.len(), 204, "Filtering before paging must not lose Tickets");
@@ -4503,6 +4542,10 @@ mod tests {
         drop(store);
         let reopened = Store::open_read_only(&path).unwrap();
         assert_eq!(page(&reopened, None, None, Some(&team.project_id)).unwrap().len(), 200);
+        assert_eq!(page(&reopened, Some(last.updated_at), Some(&last.id),
+            Some(&team.project_id)).unwrap().len(), 4);
+        assert!(page(&reopened, Some(last.updated_at), Some("missing-ticket"),
+            Some(&team.project_id)).is_err());
         assert_eq!(page(&reopened, None, None, Some("other-native-project")).unwrap().len(), 1);
     }
 

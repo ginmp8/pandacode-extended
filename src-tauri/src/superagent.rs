@@ -493,7 +493,7 @@ impl OrchestrationInput {
             name: self.name,
             coordinator_bot_id: self.coordinator_bot_id,
             worker_bot_id: self.worker_bot_id,
-        }, worker_bot_ids, reviewer_bot_ids, self.council_required))
+        }, worker_bot_ids, reviewer_bot_ids.clone(), Some(!reviewer_bot_ids.is_empty())))
     }
 }
 
@@ -1019,9 +1019,20 @@ fn load_ticket_team_snapshot(db: &Connection, ticket_id: &str) -> Result<TeamSna
          FROM sa_tickets WHERE id=?1",
         [ticket_id], |r| Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?)),
     ).map_err(|_| "Ticket Team snapshot has no owning Ticket.")?;
+    // A child's Ticket is bound to the selected Worker's native project, not
+    // to the Team's legacy root project. A legacy root remains readable.
+    let pinned_worker_project = snapshot.roles.iter().any(|role| {
+        role.role == "worker" && role.bot_id == ticket_worker_bot_id
+            && role.effective_config.as_ref()
+                .and_then(|profile| profile.get("projectId"))
+                .and_then(serde_json::Value::as_str)
+                == Some(ticket_project_id.as_str())
+    });
+    let legacy_root_project = snapshot.project_id == ticket_project_id
+        && snapshot.worker_bot_ids.first().map(String::as_str)
+            == Some(ticket_worker_bot_id.as_str());
     if ticket_orchestration_id != orchestration_id
-        || snapshot.project_id != ticket_project_id
-        || snapshot.worker_bot_ids.first().map(String::as_str) != Some(ticket_worker_bot_id.as_str())
+        || (!pinned_worker_project && !legacy_root_project)
         || ticket_policy_revision != policy_revision
     {
         return Err("Ticket Team snapshot bindings disagree with its owning Ticket row.".into());
@@ -1068,13 +1079,7 @@ fn load_ticket_team_snapshot(db: &Connection, ticket_id: &str) -> Result<TeamSna
             if role.effective_config_sha256.as_deref() != Some(digest.as_str()) {
                 return Err("Admitted Team role configuration fails its integrity check.".into());
             }
-            if role.role == "worker"
-                && config.get("projectId").and_then(serde_json::Value::as_str)
-                    != Some(snapshot.project_id.as_str())
-            {
-                return Err("Admitted Worker project scope differs from its Ticket.".into());
-            }
-        }
+         }
     }
     Ok(snapshot)
 }
@@ -1221,12 +1226,14 @@ fn create_configuration_roles_with_attempt_policy(
     input: NewOrchestration,
     worker_bot_ids: Vec<String>,
     reviewer_bot_ids: Vec<String>,
-    council_required: bool,
+    _council_required: bool,
     max_attempts_per_assignment: Option<u8>,
 ) -> Result<Orchestration> {
     if max_attempts_per_assignment.is_some_and(|count| !(1..=8).contains(&count)) {
         return Err("Worker attempt limit must be between 1 and 8.".into());
     }
+    // Configured native reviewers always imply a mandatory Council gate.
+    let council_required = !reviewer_bot_ids.is_empty();
     let name = input.name.trim();
     if name.is_empty() || name.len() > 120 || name.chars().any(char::is_control) {
         return Err("Choose an orchestration name of at most 120 characters.".into());
@@ -1246,13 +1253,10 @@ fn create_configuration_roles_with_attempt_policy(
             return Err(issue.into());
         }
     }
-    // Every native bot owns its own project/workspace. A coordinator is a separate
-    // existing bot, not a second profile inside the worker's checkout. Ordered
-    // workers share one execution project; Council reviewers are independent
-    // read-only seats in the native Architect team.
+    // The Team project is a legacy root-planning projection only. Each Worker
+    // retains its own native project and isolated checkout when delegated.
     if coordinator.paused || workers.iter().any(|bot| bot.paused)
         || reviewers.iter().any(|bot| bot.paused)
-        || workers.iter().any(|bot| bot.project_id != workers[0].project_id)
     {
         return Err("Choose active bots and workers from one project scope.".into());
     }
@@ -3275,8 +3279,8 @@ fn manual_preflight(
     } else if let Some(issue) = roster::member_execution_issue(&coordinator)
         .or_else(||roster::member_execution_issue(&worker)) {
         Some(issue.to_owned())
-    } else if roster::has_additional_members(store, config_id)? {
-        Some("Multi-member execution requires native scoped role admission; manual runner is single-worker.".to_owned())
+    } else if !coordinate && roster::has_additional_members(store, config_id)? {
+        Some("Direct manual dispatch requires a scoped Worker; use the Coordinator Demand workflow.".to_owned())
     } else if busy || manual_candidate_occupied(store, &candidate.id, &cfg.project_id, &candidate.project_id)? {
         Some(if coordinate {
             "Coordinator is occupied; this request cannot be admitted yet.".to_owned()
@@ -3510,6 +3514,9 @@ fn admit_role_with_grant_inner(
     if !execution_permitted(config.enabled, crate::feature_controls::get().bots_paused) {
         return Err("Orchestration is disabled or bots are globally paused.".into());
     }
+    if config.council_required != !config.reviewer_bot_ids.is_empty() {
+        return Err("Team reviewers differ from native Council policy; update its roster before admission.".into());
+    }
     // Legacy manual commands remain single-worker. Only an explicitly
     // demand-scoped native call can select a configured additional Worker.
     if roster::has_additional_members(store, config_id)? && selected_worker.is_none() {
@@ -3529,13 +3536,12 @@ fn admit_role_with_grant_inner(
     if authorized_paths.is_some() && worker.provider!="codex" {
         return Err("policy_unsupported: scoped Demand file writes require a native Codex Worker.".into());
     }
-    if config.team_version <= 0 || coordinator.paused || worker.paused
-        || worker.project_id != config.project_id
-    {
-        return Err("A selected bot is paused, missing or outside the worker project scope.".into());
+    if config.team_version <= 0 || coordinator.paused || worker.paused {
+        return Err("A selected bot is paused, missing or outside its native project.".into());
     }
     let candidate = if coordinate { &coordinator } else { &worker };
-    let occupied = manual_candidate_occupied(store, &candidate.id, &config.project_id, &candidate.project_id)?;
+    let execution_project = if coordinate { &config.project_id } else { &worker.project_id };
+    let occupied = manual_candidate_occupied(store, &candidate.id, execution_project, &candidate.project_id)?;
     // Do not create a coordinated ticket without an admitted coordinator.
     // Otherwise a worker retry could bypass missing coordinator evidence.
     if coordinate && (busy || occupied) {
@@ -3575,10 +3581,7 @@ fn admit_role_with_grant_inner(
     )?;
     // Team strategy is pinned from the last immutable config version; a new
     // Ticket must never silently reset its retry/time/resource settings.
-    // Worker Full Access and optional Council review are independent choices.
-    if configured_snapshot.policy.autonomy == "approval" && config.council_required {
-        return Err("With Approval cannot bypass its human acceptance gate.".into());
-    }
+    // Native Council review and With Approval require independent evidence.
     if !matches!(configured_snapshot.policy.autonomy.as_str(), "off" | "approval" | "full" | "full_auto") {
         return Err("Ticket admission rejected an unknown execution policy.".into());
     }
@@ -3592,7 +3595,7 @@ fn admit_role_with_grant_inner(
     let current_coordinator = bots::get(store,&config.coordinator_bot_id)?;
     let current_worker = bots::get(store,chosen_worker)?;
     if current_coordinator.paused || current_worker.paused
-        || current_worker.project_id != config.project_id
+        || (!coordinate && current_worker.project_id != *execution_project)
     {
         return Err("A selected bot changed or became unavailable during Ticket admission.".into());
     }
@@ -3605,14 +3608,14 @@ fn admit_role_with_grant_inner(
     tx.execute(
         "INSERT INTO sa_tickets(id,orchestration_id,request_key,objective,actor,source,project_id,worker_bot_id,policy_revision,state,active_assignment_id,created_at,updated_at)
          VALUES(?1,?2,?3,?4,'local-user','manual',?5,?6,?7,?8,?9,?10,?10)",
-        params![ticket_id,config.id,request_key,objective,config.project_id,current_worker.id,config.policy_revision,
+        params![ticket_id,config.id,request_key,objective,execution_project,current_worker.id,config.policy_revision,
             if blocked { "blocked" } else { "running" }, assignment_id,now],
     ).map_err(|e| e.to_string())?;
     insert_ticket_team_snapshot(&tx,&ticket_id,&team_snapshot,"native")?;
     tx.execute(
         "INSERT INTO sa_mandates(ticket_id,actor,authorization_id,policy_revision,project_id,expires_at,created_at)
          VALUES(?1,'local-user',?2,?3,?4,?5,?6)",
-        params![ticket_id,storage::id(),config.policy_revision,config.project_id,now + 4 * 60 * 60 * 1000,now],
+        params![ticket_id,storage::id(),config.policy_revision,execution_project,now + 4 * 60 * 60 * 1000,now],
     ).map_err(|e| e.to_string())?;
     if let (Some(assignment_id),Some(session_id)) = (&assignment_id,&session_id) {
         tx.execute(
@@ -3633,7 +3636,7 @@ fn admit_role_with_grant_inner(
                 let root=store.workspace_root(&original_session.project_id,Some(session_id))?;
                 write_grants::validate_paths_in_root(&root,paths)?;
                 write_grants::insert_for_assignment(
-                    &tx,&ticket_id,assignment_id,session_id,&config.project_id,
+                    &tx,&ticket_id,assignment_id,session_id,execution_project,
                     &root.to_string_lossy(),0,team_snapshot.policy.policy_revision,paths,now,
                 )?;
                 tx.execute(
@@ -4484,9 +4487,12 @@ fn accept_with_pause(
         return Err("Ticket has unresolved external effects; reconcile them before acceptance.".into());
     }
     let team_snapshot = ticket_team_snapshot(store,ticket_id)?;
-    if team_snapshot.policy.council_required {
-        return Err("Council-required Tickets need the attributed native Council acceptance flow.".into());
-    }
+    let council_verified = if team_snapshot.policy.council_required {
+        if !council_adapter::passed_for_human_accept(store,ticket_id)? {
+            return Err("Configured Council requires its exact verified native review before human approval.".into());
+        }
+        true
+    } else { false };
     let coordinator = bots::get(store, &team_snapshot.coordinator_bot_id)?;
     if !coordinator_plan_current(store, ticket_id, &coordinator.id, &coordinator.project_id)? {
         return Err("Coordinator plan is stale or its original session is unavailable.".into());
@@ -4523,7 +4529,7 @@ fn accept_with_pause(
     // text evidence, a cached passing status, or a missing/removed team.
     // The #126 task-bound request and verified exception workflow must
     // explicitly implement their own authorization and terminal gate.
-    if council_adapter::requires_task_review(
+    if !council_verified && council_adapter::requires_task_review(
         store, ticket_id, worker_evidence_session.as_deref().unwrap_or_default(),
     )? {
         return Err("Native Council review is required; task-bound verified verdict and attributed exception are not available.".into());
@@ -4810,7 +4816,6 @@ fn duplicate_configuration(
     }
     if coordinator.paused || workers.iter().any(|bot| bot.paused)
         || reviewers.iter().any(|bot| bot.paused)
-        || workers.iter().any(|bot| bot.project_id != workers[0].project_id)
     {
         return Err("Source Team members are no longer eligible for one worker project scope.".into());
     }
@@ -4905,14 +4910,14 @@ fn change_enabled(
         return Err("Orchestration policy revision changed; reload before editing.".into());
     }
     if enabled {
+        if current.council_required != !current.reviewer_bot_ids.is_empty() {
+            return Err("Team reviewers differ from native Council policy; update its roster before enabling.".into());
+        }
         // The current native scheduler serializes conflicting physical checkouts.
         // A requested wider hard parallel limit or unmetered cost/token ceiling
         // must fail closed, rather than pretending to enforce an unsupported cap.
         let configured=load_team_version_snapshot(&store.db,orchestration_id,current.team_version)?;
-        // Full Access does not require Council or any reviewer seats.
-        if configured.policy.autonomy == "approval" && current.council_required {
-            return Err("With Approval needs human acceptance; disable automatic Council finalization.".into());
-        }
+        // Configured reviewers and human approval are separate native gates.
         if !matches!(configured.policy.autonomy.as_str(), "off" | "approval" | "full" | "full_auto") {
             return Err("Unrecognized Team execution policy; admission denied.".into());
         }
@@ -4935,8 +4940,7 @@ fn change_enabled(
                 return Err(issue.into());
             }
         }
-        if coordinator.paused || workers.iter().any(|worker| worker.paused
-            || worker.project_id != current.project_id)
+        if coordinator.paused || workers.iter().any(|worker| worker.paused)
             || crate::feature_controls::get().bots_paused
         {
             return Err("Selected bots are paused or a worker scope has changed.".into());
@@ -5086,12 +5090,13 @@ fn update_configuration_roles(
 
 fn update_configuration_roles_with_policy(
     store: &Store, id: &str, expected_revision: i64, input: &NewOrchestration,
-    worker_bot_ids: Vec<String>, reviewer_bot_ids: Vec<String>, council_required: bool,
+    worker_bot_ids: Vec<String>, reviewer_bot_ids: Vec<String>, _council_required: bool,
 ) -> Result<Orchestration> {
     let current = configuration(store, id)?;
     if current.policy_revision != expected_revision {
         return Err("Orchestration policy revision changed; reload before editing.".into());
     }
+    let council_required = !reviewer_bot_ids.is_empty();
     // A versioned Team edit affects future Tickets only. Existing Ticket
     // snapshots, mandates, Council cycles and exact grants remain immutable.
     // Primary identities and checkout cannot change once history exists.
@@ -5109,26 +5114,27 @@ fn update_configuration_roles_with_policy(
     let coordinator = bots::get(store, &input.coordinator_bot_id)?;
     let workers = worker_bot_ids.iter().map(|bot_id| bots::get(store,bot_id)).collect::<Result<Vec<_>>>()?;
     let reviewers = reviewer_bot_ids.iter().map(|bot_id| bots::get(store,bot_id)).collect::<Result<Vec<_>>>()?;
-    let project_id = workers.first().ok_or("A Team needs at least one worker.")?.project_id.clone();
-    if coordinator.paused || workers.iter().any(|bot| bot.paused || bot.project_id != project_id)
+    // The root project is a stable legacy planning projection, not a preferred
+    // Worker or a grant across projects. Each Worker uses its own native scope.
+    let project_id = current.project_id.clone();
+    if coordinator.paused || workers.iter().any(|bot| bot.paused)
         || reviewers.iter().any(|bot| bot.paused)
     {
-        return Err("Paused bots or workers outside one project scope cannot be selected.".into());
+        return Err("Paused Team members cannot be selected.".into());
     }
-    // Historical Tickets always retain their original primary executor and
-    // coordinator ownership. Terminal history may allow future-only role and
-    // name edits, but cannot be silently rebound to another checkout.
+    // Historical Tickets preserve their original immutable role snapshots,
+    // independent of a different first Worker in future Team versions.
     let has_history: bool = store.db.query_row(
         "SELECT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)",
         [id], |row| row.get(0),
     ).map_err(|e| e.to_string())?;
-    let primary_changed = current.coordinator_bot_id != coordinator.id
-        || current.worker_bot_id != worker_bot_ids[0];
+    // Changing Worker list order does not change execution authority.
+    let primary_changed = current.coordinator_bot_id != coordinator.id;
     if has_history && current.project_id != project_id {
         return Err("Historical Tickets prevent changing the Team's checkout project.".into());
     }
     if has_history && primary_changed && current.enabled {
-        return Err("Disable the Team before changing primary roles for future Demands.".into());
+        return Err("Disable the Team before changing its Coordinator for future Demands.".into());
     }
     // A mode switch spans two versioned operations (native Council roles and
     // execution mode). While Off, permit either order so both transitions are
@@ -5199,7 +5205,7 @@ fn update_configuration_roles_with_policy(
            AND COALESCE((SELECT MAX(version) FROM sa_team_versions
                          WHERE orchestration_id=?1),0)=?9
            AND (NOT EXISTS(SELECT 1 FROM sa_tickets WHERE orchestration_id=?1)
-             OR (?10=0 AND coordinator_bot_id=?3 AND worker_bot_id=?4 AND project_id=?5)
+             OR (?10=0 AND coordinator_bot_id=?3 AND project_id=?5)
              OR (?10=1 AND enabled=0 AND project_id=?5
                AND NOT EXISTS(SELECT 1 FROM sa_event_sources WHERE orchestration_id=?1)
                AND NOT EXISTS(SELECT 1 FROM sa_tickets t
@@ -5501,7 +5507,7 @@ fn retry_blocked(
     let worker_ordinal=snapshot.worker_bot_ids.iter().position(|id| id == &worker.id);
     if coordinator.paused || worker.paused
         || worker_ordinal.is_none()
-        || worker.project_id != snapshot.project_id
+        || worker.project_id != mandate(store,ticket_id)?.project_id
         || !snapshot_role_profile_matches(&store.db,&snapshot,"coordinator",0,&coordinator.id)?
         || !snapshot_role_profile_matches(&store.db,&snapshot,"worker",worker_ordinal.unwrap_or(usize::MAX),&worker.id)?
     {
@@ -5512,7 +5518,8 @@ fn retry_blocked(
                 AND project_id=?4 AND allowed_side_effects=0 AND allowed_tools='[]'
                 AND actor=(SELECT actor FROM sa_tickets WHERE id=?1)
          FROM sa_mandates WHERE ticket_id=?1",
-        params![ticket_id,storage::now(),snapshot.policy.policy_revision,snapshot.project_id],
+        params![ticket_id,storage::now(),snapshot.policy.policy_revision,
+            mandate(store,ticket_id)?.project_id],
         |r| r.get(0),
     ).optional().map_err(|e| e.to_string())?.unwrap_or(false);
     if !mandate_ok {

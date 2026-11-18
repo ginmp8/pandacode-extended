@@ -149,7 +149,7 @@ pub(crate) fn read(store: &Store, id: &str) -> Result<TeamRoster> {
         policy_revision: config.policy_revision,
         coordinator_bot_id: config.coordinator_bot_id,
         council_required: config.council_required,
-        execution_ready: config.worker_bot_ids.len() == 1 &&
+        execution_ready: !config.worker_bot_ids.is_empty() &&
             (!config.council_required || config.reviewer_bot_ids.len() >= 2),
         worker_bot_ids: config.worker_bot_ids,
         reviewer_bot_ids: config.reviewer_bot_ids,
@@ -247,13 +247,8 @@ fn effective_team(
         if let Some(issue)=member_execution_issue(&bot) {
             configuration_issues.push(issue.into());
         }
-        // Worker project drift can occur after configuring a reusable Team.
-        // Coordinator projects may differ; Workers own the execution scope.
-        if role == "worker" && bot.project_id != config.project_id {
-            configuration_issues.push(
-                "Worker project differs from the Team execution project: restore its project or reconfigure this disabled Team.".into(),
-            );
-        }
+        // Each Worker is scoped to its native project. A project change after
+        // Demand admission is blocked by immutable profile/version checks.
         for skill in &skills {
             if skill.library_status=="missing" {
                 configuration_issues.push(format!(
@@ -289,7 +284,7 @@ fn effective_team(
     }
     if !roster.execution_ready {
         manual_admission_blockers.push(
-            "Multi-role Team requires native scoped role admission; manual dispatch is unavailable.".into(),
+            "The selected Team does not have a valid Worker/Council roster.".into(),
         );
     }
     if crate::feature_controls::get().bots_paused {
@@ -299,20 +294,14 @@ fn effective_team(
     }
     for member in &members {
         let required_for_admission=member.role=="coordinator"
-            || (member.role=="worker" && member.position==0)
+            || member.role=="worker"
             || (config.council_required && member.role=="reviewer");
         if required_for_admission && member.paused {
             manual_admission_blockers.push(format!(
                 "{} bot is paused; native manual admission is unavailable.",member.role,
             ));
         }
-        if member.role=="worker" && member.position==0
-            && member.project_id!=config.project_id {
-            manual_admission_blockers.push(
-                "Primary Worker project differs from the Team execution project.".into(),
-            );
-        }
-        if required_for_admission {
+         if required_for_admission {
             let bot=bots::get(store,&member.bot_id)?;
             if let Some(issue)=member_execution_issue(&bot) {
                 manual_admission_blockers.push(issue.into());
@@ -361,7 +350,7 @@ pub(super) fn set(store: &Store, id: &str, expected: i64, input: &RosterInput) -
     super::update_configuration_roles_with_policy(
         store, id, expected, &draft,
         input.worker_bot_ids.clone(), input.reviewer_bot_ids.clone(),
-        input.council_required.unwrap_or(current.council_required),
+        !input.reviewer_bot_ids.is_empty(),
     )?;
     read(store, id)
 }
@@ -391,7 +380,7 @@ mod tests {
         store.db.execute(
             "INSERT INTO projects(id,name,path) VALUES('effective-project','Fixture','/tmp/sa-effective')",[],
         ).unwrap();
-        for id in ["lead","worker","another-worker","reviewer"] {
+        for id in ["lead","worker","another-worker","reviewer","reviewer-two"] {
             store.db.execute(
                 "INSERT INTO bots(id,name,project_id,provider,model,mode,created_at,updated_at)
                  VALUES(?1,?1,'effective-project','codex','gpt-default','plan',?2,?2)",
@@ -414,17 +403,17 @@ mod tests {
         assert_eq!(one.members[1].skills[0].library_status,"missing");
         let roster=set(&store,&cfg.id,cfg.policy_revision,&RosterInput {
             worker_bot_ids:vec!["worker".into(),"another-worker".into()],
-            reviewer_bot_ids:vec!["reviewer".into()], council_required:None }).unwrap_err();
+            reviewer_bot_ids:vec!["reviewer".into(),"reviewer-two".into()], council_required:None }).unwrap_err();
         assert!(roster.contains("Paused bots"));
         store.db.execute("UPDATE bots SET paused=0 WHERE id='reviewer'",[]).unwrap();
         let roster=set(&store,&cfg.id,cfg.policy_revision,&RosterInput {
             worker_bot_ids:vec!["worker".into(),"another-worker".into()],
-            reviewer_bot_ids:vec!["reviewer".into()], council_required:None }).unwrap();
+            reviewer_bot_ids:vec!["reviewer".into(),"reviewer-two".into()], council_required:None }).unwrap();
         let library=HashMap::from([("known".to_string(),LibraryStatus{safety:"review_required"})]);
         let view=effective_team(&store,&cfg.id,&library).unwrap();
         assert_eq!(view.policy_revision,roster.policy_revision);
         assert_eq!(view.members.iter().map(|m|m.role.as_str()).collect::<Vec<_>>(),
-            vec!["coordinator","worker","worker","reviewer"]);
+            vec!["coordinator","worker","worker","reviewer","reviewer"]);
         assert_eq!(view.members[1].model,"gpt-default");
         assert_eq!(view.members[1].skills[0].library_status,"installed");
         assert_eq!(view.members[1].skills[0].safety_status,"review_required");
@@ -446,8 +435,8 @@ mod tests {
         let reopened=Store::open_read_only(&path).unwrap();
         let drift=effective_team(&reopened,&cfg.id,&library).unwrap();
         assert_eq!(drift.policy_revision,roster.policy_revision);
-        assert!(drift.members[2].configuration_issues.iter().any(|issue|
-            issue.contains("Worker project differs from the Team execution project")));
+        assert!(drift.members[2].configuration_issues.is_empty(),
+            "Workers from other projects are members without a Team-wide project grant");
         assert!(drift.members[0].configuration_issues.is_empty());
         assert!(!drift.grants_issued);
         store.db.execute("UPDATE bots SET paused=1 WHERE id='reviewer'",[]).unwrap();
@@ -456,9 +445,10 @@ mod tests {
         assert!(paused.members[3].configuration_issues.iter().any(|issue|
             issue.contains("Paused bot")));
         assert!(!paused.grants_issued);
-        assert!(!view.execution_ready);
+        assert!(view.execution_ready,
+            "Multi-worker roster is eligible for the scoped native Demand scheduler");
         assert!(view.manual_admission_blockers.iter().any(|reason|
-            reason.contains("Multi-role Team")));
+            reason.contains("Team is disabled")));
         assert!(!view.grants_issued);
         assert_eq!(store.db.query_row(
             "SELECT COUNT(*) FROM sa_tickets",[],|r|r.get::<_,i64>(0)).unwrap(),0);

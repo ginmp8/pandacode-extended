@@ -1,5 +1,4 @@
 import { escape } from './dom';
-import { botAvatarHtml } from './bot-avatars';
 import { renderBotMultiSelect } from './superagent-multiselect';
 
 /** Local-only wizard state. It cannot grant permissions or run a model. */
@@ -32,10 +31,8 @@ export class GuidedTeamBuilder {
   private template = '';
   private name = '';
   private coordinatorId = '';
-  private primaryWorkerId = '';
   private workers: string[] = [];
   private reviewers: string[] = [];
-  private councilRequired = false;
   private executionMode: 'approval' | 'full' = 'approval';
 
   get isOpen(): boolean { return this.visible; }
@@ -47,15 +44,13 @@ export class GuidedTeamBuilder {
     this.template = '';
     this.name = '';
     this.coordinatorId = '';
-    this.primaryWorkerId = '';
     this.workers = [];
     this.reviewers = [];
-    this.councilRequired = false;
     this.executionMode = 'approval';
   }
 
   private allIds(): string[] {
-    return [this.coordinatorId, this.primaryWorkerId, ...this.workers, ...this.reviewers]
+    return [this.coordinatorId, ...this.workers, ...this.reviewers]
       .filter(Boolean);
   }
 
@@ -64,10 +59,10 @@ export class GuidedTeamBuilder {
       return 'Choose a Team name between 1 and 120 characters.';
     }
     if (throughStep < 2) return null;
-    if (!this.coordinatorId || !this.primaryWorkerId) {
-      return 'Choose an existing Coordinator and primary Worker.';
+    if (!this.coordinatorId || !this.workers.length) {
+      return 'Choose one Coordinator and at least one Worker.';
     }
-    if (this.workers.length > 15 || this.reviewers.length > 8) {
+    if (this.workers.length > 16 || this.reviewers.length > 8) {
       return 'A Team supports at most 16 Workers and eight Reviewers.';
     }
     const members = this.allIds();
@@ -77,11 +72,7 @@ export class GuidedTeamBuilder {
     if (members.some(id => !bots.some(bot => bot.id === id && !bot.paused))) {
       return 'Remove unavailable or paused bots before saving.';
     }
-    const rootProject = bots.find(bot => bot.id === this.primaryWorkerId)?.projectId;
-    if (this.workers.some(id => bots.find(bot => bot.id === id)?.projectId !== rootProject)) {
-      return 'All Workers must share the primary Worker project scope.';
-    }
-    if (throughStep >= 4 && this.councilRequired && this.reviewers.length < 2) {
+    if (this.reviewers.length === 1) {
       return 'Required native Council needs at least two selected Reviewers.';
     }
     return null;
@@ -94,10 +85,11 @@ export class GuidedTeamBuilder {
     return {
       name: this.name.trim(),
       coordinatorBotId: this.coordinatorId,
-      workerBotId: this.primaryWorkerId,
-      workerBotIds: [this.primaryWorkerId, ...this.workers],
+      // Kept only as a legacy storage projection. Every Worker is a peer.
+      workerBotId: this.workers[0],
+      workerBotIds: [...this.workers],
       reviewerBotIds: [...this.reviewers],
-      councilRequired: this.councilRequired,
+      councilRequired: this.reviewers.length > 0,
       executionMode: this.executionMode,
     };
   }
@@ -126,13 +118,12 @@ export class GuidedTeamBuilder {
         break;
       }
       case 'builderCoordinator': this.coordinatorId = target.value; break;
-      case 'builderWorker': this.primaryWorkerId = target.value; break;
       case 'builderWorkers':
       case 'builderReviewers': {
         if (!(target instanceof HTMLInputElement) || target.type !== 'checkbox' ||
             !target.hasAttribute('data-sa-multi-option')) return false;
         const chosen = target.name === 'builderWorkers' ? this.workers : this.reviewers;
-        const limit = target.name === 'builderWorkers' ? 15 : 8;
+        const limit = target.name === 'builderWorkers' ? 16 : 8;
         if (target.checked && !chosen.includes(target.value)) {
           if (chosen.length >= limit) { target.checked = false; return true; }
           chosen.push(target.value);
@@ -146,12 +137,6 @@ export class GuidedTeamBuilder {
         if (!(target instanceof HTMLInputElement) ||
             !['approval','full'].includes(target.value)) return false;
         this.executionMode = target.value as 'approval' | 'full';
-        if (this.executionMode === 'approval') this.councilRequired = false;
-        break;
-      case 'builderCouncilRequired':
-        if (!(target instanceof HTMLInputElement) || target.type !== 'checkbox') return false;
-        if (this.executionMode !== 'full') return false;
-        this.councilRequired = target.checked;
         break;
       default: return false;
     }
@@ -235,42 +220,25 @@ export class GuidedTeamBuilder {
           '>' + value + '</option>').join('') + '</select></label>' +
         '<label>Team name<input name="builderName" maxlength="120" required value="' +
         safe(this.name) + '" placeholder="Scenario-specific Team"></label>' +
-        '<p>One saved Team can accept multiple independent Demands. The primary Worker ' +
-        'determines the execution project. GitHub sources are configured after creation.</p>';
+        '<p>One Team can accept multiple Demands. The Coordinator chooses Workers ' +
+        'from their existing Skills, instructions and native project access.</p>';
     } else if (this.step === 2) {
       content = '<label>Coordinator<select name="builderCoordinator">' +
         selectOptions(this.coordinatorId) + '</select></label>' +
-        '<label>Primary Worker<select name="builderWorker">' +
-        selectOptions(this.primaryWorkerId) + '</select></label>' +
         renderBotMultiSelect({
-          name:'builderWorkers', label:'Additional Workers (up to 15)',
-          bots, selectedIds:this.workers, limit:15,
-          unavailable:bot => {
-            if ([this.coordinatorId,this.primaryWorkerId,...this.reviewers].includes(bot.id))
-              return 'Already assigned';
-            const project = bots.find(candidate => candidate.id === this.primaryWorkerId)?.projectId;
-            return project && bot.projectId !== project ? 'Different Worker project' : '';
-          },
+          name:'builderWorkers', label:'Workers (1 to 16)',
+          bots, selectedIds:this.workers, limit:16,
+          unavailable:bot => [this.coordinatorId,...this.reviewers].includes(bot.id)
+            ? 'Already assigned' : '',
         }) +
-        '<ol aria-label="Configured Worker order">' +
-        this.workers.map((id, index) =>
-          '<li><span class="sa-multi-order-name">' +
-          botAvatarHtml(selectedBot(id)?.avatar ?? '', name(id), 'sa-multi-avatar',
-            selectedBot(id)?.color ?? '') + safe(name(id)) + '</span>' +
-          ' <button type="button" data-sa-builder-move="' + safe(id) +
-          '" data-sa-builder-direction="up"' + (index === 0 ? ' disabled' : '') + '>Up</button>' +
-          ' <button type="button" data-sa-builder-move="' + safe(id) +
-          '" data-sa-builder-direction="down"' +
-          (index === this.workers.length - 1 ? ' disabled' : '') + '>Down</button></li>').join('') +
-        '</ol>' +
         renderBotMultiSelect({
           name:'builderReviewers', label:'Optional Council Reviewers (up to 8)',
           bots, selectedIds:this.reviewers, limit:8,
           unavailable:bot =>
-            [this.coordinatorId,this.primaryWorkerId,...this.workers].includes(bot.id)
+            [this.coordinatorId,...this.workers].includes(bot.id)
               ? 'Already assigned' : '',
         }) +
-        '<p>Native validation enforces active bot identities and one project for all Workers.</p>';
+        '<p>Every Worker retains independent native project and permission checks.</p>';
     } else if (this.step === 3) {
       content = '<p>These are existing bot configurations, not new credentials or grants. ' +
         'Installed, harness-eligible, invoked and evidence-verified are distinct states.</p>' +
@@ -293,16 +261,10 @@ export class GuidedTeamBuilder {
           '><span><strong>With Approval</strong><small>Every completed WorkItem waits for an explicit human decision before dependents advance.</small></span></label>' +
         '<label class="sa-mode-option"><input type="radio" name="builderExecutionMode" value="full"' +
           (this.executionMode === 'full' ? ' checked' : '') +
-          '><span><strong>Full Access</strong><small>Use existing native Full Access for new Worker task sessions. Native Council is optional.</small></span></label>' +
+          '><span><strong>Full Access</strong><small>Use existing native Full Access for new Worker task sessions. Configured Council reviewers always review.</small></span></label>' +
         '</fieldset>' +
-        (this.executionMode === 'full'
-          ? '<label class="sa-council-toggle"><input type="checkbox" name="builderCouncilRequired"' +
-            (this.councilRequired ? ' checked' : '') +
-            '> Require native Council review (optional)</label>' +
-            (this.councilRequired
-              ? '<p>Required Council needs at least two distinct reviewers in Members.</p>'
-              : '<p>Council is Off; Full Access does not require reviewers.</p>')
-          : '<p>Human WorkItem acceptance is required; tool permissions use the bot\'s native chat mode.</p>') +
+        '<p>Configured reviewers are always invoked by native Council. ' +
+        'With Approval additionally requires human acceptance.</p>' +
         '<p>New sessions use native permissions; existing bot models, skills, preferences and chats are unchanged.</p>' +
 
         '<p>Saving a Team leaves it Off until explicitly enabled; no request or permission is created by configuration.</p>';
@@ -310,12 +272,11 @@ export class GuidedTeamBuilder {
       const problem = this.problem(bots, 4);
       content = '<dl><dt>Team</dt><dd>' + safe(this.name.trim()) + '</dd>' +
         '<dt>Coordinator</dt><dd>' + safe(name(this.coordinatorId)) + '</dd>' +
-        '<dt>Project</dt><dd>' + safe(selectedBot(this.primaryWorkerId)?.projectId ?? 'Unknown') +
-        '</dd><dt>Workers</dt><dd>' +
-        [this.primaryWorkerId,...this.workers].map(name).map(safe).join(', ') +
+        '<dt>Workers</dt><dd>' +
+        this.workers.map(name).map(safe).join(', ') +
         '</dd><dt>Reviewers</dt><dd>' +
         (this.reviewers.map(name).map(safe).join(', ') || 'None') + '</dd>' +
-        '<dt>Native Council</dt><dd>' + (this.councilRequired ? 'Required' : 'Off') +
+        '<dt>Native Council</dt><dd>' + (this.reviewers.length ? 'Required' : 'Off') +
         '</dd><dt>Execution mode</dt><dd>' + (this.executionMode === 'full' ? 'Full Access' : 'With Approval') +
         '</dd><dt>Team state</dt><dd>Off until enabled; no task or tool grants</dd></dl>' +
         (problem ? '<p role="alert">' + safe(problem) + '</p>' :

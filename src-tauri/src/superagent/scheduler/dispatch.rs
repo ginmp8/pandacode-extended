@@ -552,7 +552,8 @@ pub(crate) async fn advance(app:&tauri::AppHandle)->Result<usize> {
                     team.team_version!=snapshot.team_version ||
                     !snapshot.worker_bot_ids.contains(&item.worker) ||
                     superagent::active_manual_conflict(
-                        &store,&active,&item.worker,&snapshot.project_id,
+                        &store,&active,&item.worker,
+                        &bots::get(&store,&item.worker)?.project_id,
                     )? {None}
                 else {
                     let native_executor=superagent::is_full_access_autonomy(

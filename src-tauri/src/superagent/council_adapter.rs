@@ -1280,10 +1280,45 @@ fn current_binding_valid(
         && matched_assignment
         && super::assignment_thread_current(store,&request.worker_session_id,&request.ticket_id)?
         && super::coordinator_plan_current(store,&ticket.id,&coordinator.id,&coordinator.project_id)?
-        && worker.project_id == snapshot.project_id
+        && worker.project_id == store.session(&request.worker_session_id)?.project_id
         && native_binding_matches(request,team)
         && request.bound_at.is_some()
         && native_roster_matches(request,team,&snapshot))
+}
+
+/// An approval-mode Demand may be accepted by a human only after a real,
+/// independently verified native Council finalization for its exact Worker
+/// artifact. Historical or stale rounds must never satisfy this gate.
+pub(super) fn passed_for_human_accept(store:&Store,ticket_id:&str)->Result<bool> {
+    let ticket=super::get_ticket(store,ticket_id)?;
+    if ticket.state!="waiting_approval" || ticket.evidence.is_none() {
+        return Ok(false);
+    }
+    let snapshot=super::ticket_team_snapshot(store,ticket_id)?;
+    if !snapshot.policy.council_required || snapshot.policy.autonomy!="approval" {
+        return Ok(false);
+    }
+    let digest=sha256(ticket.evidence.as_deref().unwrap_or_default().as_bytes());
+    let found:bool=store.db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sa_council_finalizations f
+         JOIN sa_council_requests r ON r.id=f.request_id
+         JOIN sa_tickets t ON t.id=f.ticket_id
+         JOIN sa_assignments a ON a.id=f.assignment_id AND a.ticket_id=t.id
+         WHERE t.id=?1 AND t.state='waiting_approval'
+           AND f.ticket_revision=t.revision-1
+           AND f.policy_revision=t.policy_revision
+           AND r.policy_revision=t.policy_revision AND r.ticket_id=t.id
+           AND r.assignment_id=f.assignment_id
+           AND r.worker_session_id=f.worker_session_id
+           AND r.state=f.verdict AND f.verdict IN ('passed','human_accepted')
+           AND f.artifact_sha256=?2 AND r.artifact_sha256=?2
+           AND a.session_id=f.worker_session_id AND a.state='finished'
+           AND a.result=t.evidence
+           AND a.attempt=(SELECT MAX(attempt) FROM sa_assignments
+                          WHERE ticket_id=t.id))",
+        params![ticket_id,digest],|row|row.get(0),
+    ).map_err(|error|error.to_string())?;
+    Ok(found)
 }
 
 fn finalization_exists(store: &Store, request: &RequiredRequest, verdict: &str) -> Result<bool> {
@@ -1351,11 +1386,14 @@ fn persist_finalization(
             if verdict == "passed" { "native-council" } else { "local-user" },
             reason.map(|text| text.trim().chars().take(500).collect::<String>()),now],
     ).map_err(|error| error.to_string())?;
+    let approval_mode = super::ticket_team_snapshot(store,&request.ticket_id)?
+        .policy.autonomy == "approval";
+    let next_state = if approval_mode { "waiting_approval" } else { "completed" };
     let changed = tx.execute(
-        "UPDATE sa_tickets SET state='completed',active_assignment_id=NULL,
+        "UPDATE sa_tickets SET state=?4,active_assignment_id=NULL,
            revision=revision+1,updated_at=?3
          WHERE id=?1 AND state='waiting_review' AND revision=?2 AND evidence IS NOT NULL",
-        params![request.ticket_id,request.ticket_revision,now],
+        params![request.ticket_id,request.ticket_revision,now,next_state],
     ).map_err(|error| error.to_string())?;
     if changed != 1 { return Ok(false); }
     let request_changed = tx.execute(
@@ -1368,8 +1406,10 @@ fn persist_finalization(
             request.workspace_snapshot_id,request.workspace_snapshot_sha256],
     ).map_err(|error| error.to_string())?;
     if request_changed != 1 { return Ok(false); }
-    tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[&request.ticket_id])
-        .map_err(|error| error.to_string())?;
+    if !approval_mode {
+        tx.execute("UPDATE sa_mandates SET revoked=1 WHERE ticket_id=?1",[&request.ticket_id])
+            .map_err(|error| error.to_string())?;
+    }
     tx.execute(
         "INSERT INTO sa_audit(ticket_id,kind,detail,at) VALUES(?1,?2,?3,?4)",
         params![request.ticket_id,if verdict == "passed" { "council_passed" } else { "council_human_accepted" },

@@ -155,10 +155,8 @@ fn update(store: &Store, orchestration_id: &str, expected_revision: i64,
             "full"
         } else { previous.policy.autonomy.as_str() }
     });
-    // Council is an optional review policy, not a Full Access requirement.
-    if execution_mode == "approval" && current.council_required {
-        return Err("With Approval requires human acceptance; disable automatic Council finalization before selecting this mode.".into());
-    }
+    // Tool permissions, native Council review, and human acceptance are separate gates.
+    // Changing execution mode must never silently disable configured reviewers.
     if previous.policy.autonomy == execution_mode && previous.policy.strategy == strategy
         && previous.policy.max_attempts_per_assignment == input.max_attempts_per_assignment
         && previous.policy.max_concurrent_tasks == input.max_concurrent_tasks {

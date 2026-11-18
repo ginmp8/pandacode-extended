@@ -34,7 +34,9 @@ async function completeWizard(host: Locator, name: string, mode: 'approval'|'ful
   await builder.getByRole('textbox', {name:'Team name'}).fill(name);
   await builder.getByRole('button', {name:'Next'}).click();
   await builder.getByRole('combobox', {name:'Coordinator'}).selectOption({label:'Scout'});
-  await builder.getByRole('combobox', {name:'Primary Worker'}).selectOption({label:'Writer'});
+  await builder.locator('details[data-sa-multi="builderWorkers"] summary').click();
+  await builder.locator('details[data-sa-multi="builderWorkers"]').getByRole('checkbox',{name:/Writer/}).check();
+  await builder.locator('details[data-sa-multi="builderWorkers"]').getByRole('button',{name:'Done'}).click();
   await builder.getByRole('button', {name:'Next'}).click();
   await expect(builder).toContainText('Skill presence alone does not prove');
   await builder.getByRole('button', {name:'Next'}).click();
@@ -90,7 +92,7 @@ async function mountNativeFixture(page: Page, options: {
     const cfg={
       id:'team-1',name:'Native Team',coordinatorBotId:'coord',workerBotId:'worker',
       workerBotIds:['worker'],reviewerBotIds:['rev1','rev2'].slice(0,requestedReviewers),
-      councilRequired:opts.council===true,enabled:opts.enabled===true,
+      councilRequired:requestedReviewers>0,enabled:opts.enabled===true,
       policyRevision:1,teamVersion:1,workerCount:1,reviewerCount:requestedReviewers,
       ticketCount:0,runningCount:0,blockedCount:0,
     };
@@ -174,9 +176,10 @@ async function mountNativeFixture(page: Page, options: {
         if(cfg.policyRevision!==args.expectedRevision||cfg.enabled)
           throw Error('Stale native roster policy revision or active Team');
         const input=args.input as {workerBotIds:string[];reviewerBotIds:string[];councilRequired:boolean};
-        if(input.councilRequired && input.reviewerBotIds.length<2)
-          throw Error('Independent Council needs two reviewers');
+        if(input.councilRequired !== (input.reviewerBotIds.length > 0) || input.reviewerBotIds.length === 1)
+          throw Error('Configured Council requires two or more reviewers');
         mutations.push({command,args});
+        cfg.workerBotIds=[...input.workerBotIds];cfg.workerCount=cfg.workerBotIds.length;
         cfg.reviewerBotIds=[...input.reviewerBotIds];cfg.reviewerCount=cfg.reviewerBotIds.length;
         cfg.councilRequired=input.councilRequired;cfg.policyRevision++;cfg.teamVersion++;
         return roster() as never;
@@ -184,8 +187,6 @@ async function mountNativeFixture(page: Page, options: {
       if(command==='superagent_strategy_update'){
         if(cfg.policyRevision!==args.expectedRevision||cfg.enabled)throw Error('Stale Team strategy revision');
         const input=args.input as {executionMode:string};
-        if(input.executionMode==='approval'&&cfg.councilRequired)
-          throw Error('With Approval requires human acceptance');
         mutations.push({command,args});
         mode=input.executionMode as typeof mode;
         cfg.policyRevision++;cfg.teamVersion++;
@@ -241,7 +242,7 @@ async function mountNativeFixture(page: Page, options: {
   return host;
 }
 
-test('Team wizard uses searchable checkbox pickers with native bot images and project guards',async({page})=>{
+test('Team wizard selects peer Workers from multiple projects with native bot images',async({page})=>{
   await page.goto('/?bots=sample');
   const host=await mountNativeFixture(page);
   await host.getByRole('button',{name:'New Team',exact:true}).click();
@@ -249,26 +250,29 @@ test('Team wizard uses searchable checkbox pickers with native bot images and pr
   await wizard.getByRole('textbox',{name:'Team name'}).fill('Image-aware Team');
   await wizard.getByRole('button',{name:'Next'}).click();
   await wizard.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Coordinator'});
-  await wizard.getByRole('combobox',{name:'Primary Worker'}).selectOption({label:'Worker'});
+  await wizard.locator('details[data-sa-multi="builderWorkers"] summary').click();
+  await wizard.locator('details[data-sa-multi="builderWorkers"]').locator('input[data-sa-multi-option][value="worker"]').check();
+  await wizard.locator('details[data-sa-multi="builderWorkers"]').getByRole('button',{name:'Done'}).click();
   const workers=wizard.locator('details[data-sa-multi="builderWorkers"]');
   await expect(workers.locator('select[multiple]')).toHaveCount(0);
   await workers.locator('summary').click();
   await expect(workers.getByRole('checkbox',{name:/Paused Worker/})).toBeDisabled();
-  await expect(workers.getByRole('checkbox',{name:/Other Project Worker/})).toBeDisabled();
-  const search=workers.getByRole('searchbox',{name:/Search Additional Workers/});
+  await expect(workers.getByRole('checkbox',{name:/Other Project Worker/})).toBeEnabled();
+  const search=workers.getByRole('searchbox',{name:/Search Workers/});
   await search.fill('worker two');
   await workers.getByRole('checkbox',{name:/Worker Two/}).check();
   await expect(workers).toHaveAttribute('open','');
   await expect(workers.getByRole('searchbox')).toHaveValue('worker two');
   await expect(workers.locator('.sa-multi-faces img')).toHaveAttribute('src',/^data:image\/png;base64,/);
-  await expect(workers.locator('.sa-multi-count')).toContainText('1 / 15');
+  await expect(workers.locator('.sa-multi-count')).toContainText('2 / 16');
   await workers.getByRole('button',{name:'Done'}).click();
   await expect(workers).not.toHaveAttribute('open','');
   const council=wizard.locator('details[data-sa-multi="builderReviewers"]');
   await council.locator('summary').click();
   await expect(council.getByRole('checkbox',{name:/Worker Two/})).toBeDisabled();
   await council.getByRole('checkbox',{name:/Reviewer One/}).check();
-  await expect(council.locator('.sa-multi-faces svg')).toHaveCount(1);
+  await council.getByRole('checkbox',{name:/Reviewer Two/}).check();
+  await expect(council.locator('.sa-multi-faces svg')).toHaveCount(2);
   await council.getByRole('button',{name:'Done'}).click();
   await wizard.getByRole('button',{name:'Next'}).click();
   await expect(wizard.getByText(/Worker Two/).first()).toBeVisible();
@@ -281,7 +285,7 @@ test('native Team role picker preserves checked bots and saves ordered IDs only 
   await host.locator('.sa-subtabs').getByRole('button',{name:'Members and roles'}).click();
   const load=host.getByRole('button',{name:'Load native members'});
   if (await load.count()) await load.click();
-  const workers=host.locator('details[data-sa-multi="additionalWorkers"]');
+  const workers=host.locator('details[data-sa-multi="workers"]');
   await expect(workers).toBeVisible();
   await workers.locator('summary').click();
   await workers.getByRole('checkbox',{name:/Worker Two/}).check();
@@ -295,7 +299,7 @@ test('native Team role picker preserves checked bots and saves ordered IDs only 
   await expect(council.getByRole('checkbox',{name:/Worker Two/})).toBeDisabled();
   await expect(council.getByRole('checkbox',{name:/Reviewer One/})).toBeChecked();
   await council.getByRole('button',{name:'Done'}).click();
-  await expect(host.locator('.sa-worker-order li')).toContainText(['Worker Two']);
+  await expect(workers.getByRole('checkbox',{name:/Worker Two/})).toBeChecked();
   expect(await page.evaluate(()=>
     (window as unknown as {saFixtureMutations:unknown[]}).saFixtureMutations.length)).toBe(0);
   await host.getByRole('button',{name:'Save configured roles'}).click();
@@ -360,9 +364,11 @@ test('five-step setup validates native bot identities and does not create a task
   await builder.getByRole('textbox',{name:'Team name'}).fill('Evidence-first Team');
   await builder.getByRole('button',{name:'Next'}).click();
   await builder.getByRole('button',{name:'Next'}).click();
-  await expect(builder.getByRole('alert')).toContainText('Choose an existing Coordinator');
+  await expect(builder.getByRole('alert')).toContainText('Choose one Coordinator and at least one Worker');
   await builder.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Scout'});
-  await builder.getByRole('combobox',{name:'Primary Worker'}).selectOption({label:'Writer'});
+  await builder.locator('details[data-sa-multi="builderWorkers"] summary').click();
+  await builder.locator('details[data-sa-multi="builderWorkers"]').getByRole('checkbox',{name:/Writer/}).check();
+  await builder.locator('details[data-sa-multi="builderWorkers"]').getByRole('button',{name:'Done'}).click();
   await builder.getByRole('button',{name:'Next'}).click();
   await expect(builder).toContainText('Skill presence alone does not prove');
   await builder.getByRole('button',{name:'Next'}).click();
@@ -388,8 +394,7 @@ test('Full Access wizard allows zero reviewers and configures native Full Access
   await page.goto('/?bots=sample');
   const host=await openWorkspace(page);
   const builder=await completeWizard(host,'Access Team','full');
-  await expect(builder.getByRole('checkbox',{name:/Require native Council review/})).not.toBeChecked();
-  await expect(builder).toContainText('Council is Off');
+  await expect(builder).toContainText('Configured reviewers are always invoked');
   await builder.getByRole('button',{name:'Next'}).click();
   await expect(builder).toContainText('Step 5 of 5');
   await builder.getByRole('button',{name:'Create Team (disabled)'}).click();
@@ -604,27 +609,28 @@ test('Team details expose the native enable toggle beside Configure on every tab
     args:{orchestrationId:'team-1',expectedRevision:1,enabled:true}}]);
 });
 
-test('Council checkbox and wizard Council checkbox keep controls beside their labels',async({page})=>{
+test('Worker checkbox and Council selection have consistent label alignment',async({page})=>{
   await page.goto('/?bots=sample');
   const host=await mountNativeFixture(page,{mode:'full'});
   await openTeam(host,'Native Team');
   await host.locator('.sa-subtabs').getByRole('button',{name:'Members and roles'}).click();
-  const council=host.locator('label').filter({hasText:'Council review is managed by the selected execution mode'});
-  await expect(council.getByRole('checkbox')).toBeVisible();
-  expect(await council.evaluate(el=>getComputedStyle(el).flexDirection)).toBe('row');
+  const workersPicker=host.locator('details[data-sa-multi="workers"]');
+  await expect(workersPicker).toBeVisible();
   await host.getByRole('button',{name:'Teams',exact:true}).click();
   await host.getByRole('button',{name:'New Team',exact:true}).click();
   const builder=host.getByRole('region',{name:'Guided Team Builder'});
   await builder.getByRole('textbox',{name:'Team name'}).fill('Checkbox alignment Team');
   await builder.getByRole('button',{name:'Next'}).click();
   await builder.getByRole('combobox',{name:'Coordinator'}).selectOption({label:'Coordinator'});
-  await builder.getByRole('combobox',{name:'Primary Worker'}).selectOption({label:'Worker'});
+  await builder.locator('details[data-sa-multi="builderWorkers"] summary').click();
+  await builder.locator('details[data-sa-multi="builderWorkers"]').locator('input[data-sa-multi-option][value="worker"]').check();
+  await builder.locator('details[data-sa-multi="builderWorkers"]').getByRole('button',{name:'Done'}).click();
   await builder.getByRole('button',{name:'Next'}).click();
   await builder.getByRole('button',{name:'Next'}).click();
   await builder.getByRole('radio',{name:/Full Access/}).check();
-  const toggle=builder.locator('label.sa-council-toggle');
-  await expect(toggle.getByRole('checkbox')).toBeVisible();
-  expect(await toggle.evaluate(el=>getComputedStyle(el).flexDirection)).toBe('row');
+  const workers=builder.locator('details[data-sa-multi="builderWorkers"]');
+  await expect(workers).toBeVisible();
+  await expect(builder).toContainText('Configured reviewers are always invoked');
 });
 
 test('Team Builder validation is a highlighted visible warning, not muted footer text',async({page})=>{

@@ -228,14 +228,12 @@ async function issueCommentEffectKey(
 }
 
 function roleUnavailableForChange(
-  bot:Bot, kind:'additionalWorkers'|'reviewers', cfg:Config,
-  bots:Bot[], workerOrder:string[], reviewerDraft:string[],
+  bot:Bot, kind:'workers'|'reviewers', cfg:Config,
+  _bots:Bot[], workerOrder:string[], reviewerDraft:string[],
 ):boolean {
-  if (bot.id === cfg.coordinatorBotId || bot.id === cfg.workerBotId) return true;
+  if (bot.id === cfg.coordinatorBotId) return true;
   if (kind === 'reviewers') return workerOrder.includes(bot.id);
-  if (reviewerDraft.includes(bot.id)) return true;
-  const project = bots.find(candidate => candidate.id === cfg.workerBotId)?.projectId;
-  return Boolean(project && bot.projectId !== project);
+  return reviewerDraft.includes(bot.id);
 }
 
 export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Promise<void> } {
@@ -519,7 +517,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           '</dd></dl><p>Git digests are snapshots, not task-attributed commits or delivery approval.</p>'
         : '<p>Not inspected for this Ticket.</p>') + '</section>';
     const demandPlanPanel = '<section class="sa-pane" role="region" aria-label="Demand WorkItems">' +
-      '<h5>Native dependency plan</h5><p>Each Worker uses its original bot/chat permission mode. Full Access needs no separate file or test permission. Native Council review is optional; human acceptance applies only to With Approval.</p>' +
+      '<h5>Native dependency plan</h5><p>Each Worker uses its original bot/chat permission mode. Full Access needs no separate file or test permission. Configured native Council review is mandatory; With Approval also requires human acceptance.</p>' +
       '<button type="button" data-sa-load-work-plan>Inspect WorkItems</button>' +
       (workPlanLoaded && workPlan?.ticketId === inspectedTicket
         ? '<p role="status">Plan ' + safe(workPlan.state) +
@@ -964,10 +962,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       '</section>';
     const teamEditor = chosen ? '<section class="sa-pane" aria-label="Team identity"><h3>Team identity</h3>' +
       '<form data-sa-form="edit"><label>Team name<input name="name" required maxlength="120" value="' + safe(chosen.name) + '"></label>' +
-      '<div class="sa-grid"><label>Coordinator<select name="coordinatorBotId" required>' +
+      '<label>Coordinator<select name="coordinatorBotId" required>' +
       optionsFor(chosen.coordinatorBotId) + '</select></label>' +
-      '<label>Primary Worker<select name="workerBotId" required>' +
-      optionsFor(chosen.workerBotId) + '</select></label></div>' +
       '<button class="primary-button" type="submit">Save Team identity</button></form>' +
       '<p>Identity changes apply to future Demands only. Existing native bot sessions and approvals remain attached to their original Tickets.</p>' +
       '<div class="sa-actions"><button type="button" data-sa-duplicate="' + safe(chosen.id) +
@@ -1105,12 +1101,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         details + '</section>' : '';
     const roleUnavailable = (bot:Bot, kind:'worker'|'reviewer'):string => {
       if (!chosen) return 'No Team selected';
-      if (bot.id === chosen.coordinatorBotId || bot.id === chosen.workerBotId) return 'Already assigned';
-      if (kind === 'worker') {
-        if (reviewerDraft.includes(bot.id)) return 'Council reviewer';
-        const project = bots.find(candidate => candidate.id === chosen.workerBotId)?.projectId;
-        if (project && bot.projectId !== project) return 'Different Worker project';
-      } else if (workerOrder.includes(bot.id)) return 'Assigned Worker';
+      if (bot.id === chosen.coordinatorBotId) return 'Already assigned';
+      if (kind === 'worker' && reviewerDraft.includes(bot.id)) return 'Council reviewer';
+      if (kind === 'reviewer' && workerOrder.includes(bot.id)) return 'Assigned Worker';
       return '';
     };
     const effectivePolicy = chosen && effectiveTeam &&
@@ -1168,12 +1161,12 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
             '<fieldset class="sa-mode-choices"><legend>Execution mode</legend>' +
             '<label class="sa-mode-option"><input type="radio" name="executionMode" value="approval"' +
               (teamStrategy.executionMode === 'approval' ? ' checked' : '') +
-              '><span><strong>With Approval</strong><small>WorkItems pause for native human acceptance. Council automatic finalization must be disabled.</small></span></label>' +
+              '><span><strong>With Approval</strong><small>WorkItems require human acceptance. Configured Council reviews are also mandatory.</small></span></label>' +
             '<label class="sa-mode-option"><input type="radio" name="executionMode" value="full"' +
               (teamStrategy.executionMode === 'full' ? ' checked' : '') +
-              '><span><strong>Full Access</strong><small>Native Full Access on Worker task sessions; Council is optional and configured independently.</small></span></label>' +
+              '><span><strong>Full Access</strong><small>Native Full Access on Worker task sessions; configured Council reviewers always review.</small></span></label>' +
             '</fieldset>' +
-            '<p class="sa-mode-note">Full Access uses existing bot/chat native Full Access for new Workers, without changing other chats. Council is optional. With Approval preserves native tool permissions plus human WorkItem acceptance.</p>' +
+            '<p class="sa-mode-note">Full Access uses existing bot/chat native Full Access for new Workers, without changing other chats. No selected reviewers means Council Off. With Approval also requires human acceptance.</p>' +
             '<label>Optimization priority<select name="priority">' +
             (['balanced','cost','latency','throughput','quality'] as const).map(priority =>
               '<option value="' + priority + '"' +
@@ -1202,37 +1195,23 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         (!roleRoster || roleRoster.orchestrationId !== chosen.id
           ? '<button type="button" data-sa-role-load>Load native members</button>'
           : '<p>Coordinator: ' + safe(botName(roleRoster.coordinatorBotId)) +
-            ' · Primary Worker: ' + safe(botName(roleRoster.workerBotIds[0])) +
+            ' · Workers: ' + safe(roleRoster.workerBotIds.length) +
             ' · Policy revision ' + roleRoster.policyRevision + '</p>' +
             '<form data-sa-form="roster">' +
               renderBotMultiSelect({
-                name:'additionalWorkers', label:'Additional Workers (up to 15)',
-                bots, selectedIds:workerOrder, limit:15, disabled:chosen.enabled,
+                name:'workers', label:'Workers (1 to 16)',
+                bots, selectedIds:workerOrder, limit:16, disabled:chosen.enabled,
                 unavailable:bot => roleUnavailable(bot,'worker'),
               }) +
-              '<ol class="sa-worker-order" aria-label="Additional Worker order">' +
-              workerOrder.map((id,index) => '<li><span class="sa-multi-order-name">' +
-                (index + 2) + '. ' + botAvatarHtml(bots.find(bot => bot.id === id)?.avatar ?? '',
-                  botName(id), 'sa-multi-avatar', bots.find(bot => bot.id === id)?.color ?? '') +
-                safe(botName(id)) +
-                '</span><button type="button" data-sa-worker-move="' + safe(id) +
-                '" data-sa-direction="up" aria-label="Move ' + safe(botName(id)) +
-                ' up"' + (index === 0 || chosen.enabled ? ' disabled' : '') + '>Up</button>' +
-                '<button type="button" data-sa-worker-move="' + safe(id) +
-                '" data-sa-direction="down" aria-label="Move ' + safe(botName(id)) +
-                ' down"' + (index === workerOrder.length - 1 || chosen.enabled ? ' disabled' : '') +
-                '>Down</button></li>').join('') + '</ol>' +
               renderBotMultiSelect({
                 name:'reviewers', label:'Optional Council Reviewers (up to 8)',
                 bots, selectedIds:reviewerDraft, limit:8, disabled:chosen.enabled,
                 unavailable:bot => roleUnavailable(bot,'reviewer'),
               }) +
-              '<label><input type="checkbox" name="councilRequired"' +
-              (roleRoster.councilRequired ? ' checked disabled' : ' disabled') +
-              '> Council review is managed by the selected execution mode</label>' +
-              '<p>Council is optional in Full Access. With Approval uses human acceptance. Change the mode in Execution and review; each native Ticket retains its frozen reviewers.</p>' +
+              '<p>Configured reviewers always participate in native Council review. ' +
+              'With Approval additionally requires human acceptance. Zero reviewers disables Council.</p>' +
               '<button type="button" data-sa-edit-mode>Configure execution mode</button>' +
-              '<p>Saving roles appends a future-only Team version. Active Tickets retain their frozen roster, Council policy, mandate and grants. A saved primary identity cannot change after the Team has Ticket history.</p>' +
+              '<p>Saving roles appends a future-only Team version. Active Tickets retain their frozen roster, Council policy, mandate and grants. Existing Tickets retain their frozen role snapshots.</p>' +
               '<button class="primary-button" type="submit"' +
                 '>Save configured roles</button></form>' +
               '<p role="status">Native role configuration is saved per Team version. ' +
@@ -1313,8 +1292,8 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           : 'Loading native policy') + '</dd>' +
         '<dt>Council review</dt><dd>' +
         (chosen.councilRequired ? 'Required' : 'Off (optional)') + '</dd>' +
-        '<dt>Project</dt><dd>' +
-        safe(bots.find(bot => bot.id === chosen.workerBotId)?.projectId ?? 'Unavailable') +
+        '<dt>Worker projects</dt><dd>' +
+        safe([...new Set(memberWorkers.map(id => bots.find(bot => bot.id === id)?.projectId ?? 'Unknown'))].join(', ')) +
         '</dd><dt>Worker tool policy</dt><dd>' +
         (teamStrategy?.orchestrationId === chosen.id
           ? (teamStrategy.executionMode === 'full'
@@ -1626,7 +1605,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       await refreshTicketDetails();
       if (roleRoster && selected) {
         roleRoster = await call<TeamRoster>('superagent_roster',{orchestrationId:selected});
-        workerOrder = roleRoster.workerBotIds.slice(1);
+        workerOrder = [...roleRoster.workerBotIds];
         reviewerDraft = [...roleRoster.reviewerBotIds];
       }
       // Policy and roster always come from the native revisioned Team; no
@@ -1640,7 +1619,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         if (currentConfig && policy.policyRevision === currentConfig.policyRevision &&
             roster.policyRevision === currentConfig.policyRevision) {
           teamStrategy = policy; roleRoster = roster;
-          workerOrder = roster.workerBotIds.slice(1);
+          workerOrder = [...roster.workerBotIds];
           reviewerDraft = [...roster.reviewerBotIds];
         } else {
           teamStrategy = null; roleRoster = null;
@@ -1692,9 +1671,9 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       const cfg = current();
       if (busy || !roleRoster || roleRoster.orchestrationId !== selected || !cfg || cfg.enabled) return;
       const kind = target.dataset.saMultiScope;
-      if (kind !== 'additionalWorkers' && kind !== 'reviewers') return;
-      const list = kind === 'additionalWorkers' ? workerOrder : reviewerDraft;
-      const limit = kind === 'additionalWorkers' ? 15 : 8;
+      if (kind !== 'workers' && kind !== 'reviewers') return;
+      const list = kind === 'workers' ? workerOrder : reviewerDraft;
+      const limit = kind === 'workers' ? 16 : 8;
       const bot = bots.find(candidate => candidate.id === target.value);
       if (target.checked && (!bot || bot.paused ||
           roleUnavailableForChange(bot, kind, cfg, bots, workerOrder, reviewerDraft) ||
@@ -1859,10 +1838,10 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
       }
       return;
     }
-    if (target.dataset.saMultiClear === 'additionalWorkers' ||
+    if (target.dataset.saMultiClear === 'workers' ||
         target.dataset.saMultiClear === 'reviewers') {
       if (busy || !roleRoster || roleRoster.orchestrationId !== selected || current()?.enabled) return;
-      if (target.dataset.saMultiClear === 'additionalWorkers') workerOrder = [];
+      if (target.dataset.saMultiClear === 'workers') workerOrder = [];
       else reviewerDraft = [];
       render();
       return;
@@ -2176,7 +2155,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
           throw new Error('Native Team policy changed while opening the Demand; reload.');
         }
         tickets=loaded; teamStrategy=policy; roleRoster=roster;
-        workerOrder=roster.workerBotIds.slice(1); reviewerDraft=[...roster.reviewerBotIds];
+        workerOrder=[...roster.workerBotIds]; reviewerDraft=[...roster.reviewerBotIds];
         // The global index can include an older Ticket outside the Team's
         // latest-50 page. Resolve it through the native immutable Ticket
         // identity and verify its Team before exposing any approval controls.
@@ -2197,7 +2176,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (target.hasAttribute('data-sa-role-load')) {
       if (selected) void work(async () => {
         roleRoster=await call<TeamRoster>('superagent_roster',{orchestrationId:selected});
-        workerOrder=roleRoster.workerBotIds.slice(1);
+        workerOrder=[...roleRoster.workerBotIds];
         reviewerDraft=[...roleRoster.reviewerBotIds];
       });
       return;
@@ -2249,7 +2228,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         ]);
         if (selected !== next) return;
         tickets = loaded; teamStrategy = policy; roleRoster = roster;
-        workerOrder = roster.workerBotIds.slice(1); reviewerDraft = [...roster.reviewerBotIds];
+        workerOrder = [...roster.workerBotIds]; reviewerDraft = [...roster.reviewerBotIds];
       });
       return;
     }
@@ -2918,10 +2897,7 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
         error = 'The native roster is stale. Refresh this Team before updating its execution mode.';
         render(); return;
       }
-      if (input.executionMode === 'approval' && roster.councilRequired) {
-        error = 'Disable required Council in Members before selecting With Approval.';
-        teamPanel = 'members'; render(); return;
-      }
+      // Council review and human acceptance remain independent native gates.
       void work(async () => {
         const expectedRevision = loaded.policyRevision;
         try {
@@ -2949,11 +2925,11 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (form.dataset.saForm === 'roster') {
       const cfg=current();
       if (!cfg || !roleRoster || roleRoster.orchestrationId!==cfg.id) return;
-      const workerBotIds=[cfg.workerBotId,...workerOrder];
+      const workerBotIds=[...workerOrder];
       const reviewerBotIds=[...reviewerDraft];
       // Freeze the visible policy before async work; reload may clear the
       // selected roster while the native compare-and-swap request is pending.
-      const councilRequired = roleRoster.councilRequired;
+      const councilRequired = reviewerBotIds.length > 0;
       void work(async () => {
         roleRoster=await call<TeamRoster>('superagent_roster_update',{
           orchestrationId:cfg.id, expectedRevision:cfg.policyRevision,
@@ -3009,17 +2985,13 @@ export function mountSuperagent(host: HTMLElement, call: Call): { refresh(): Pro
     if (form.dataset.saForm === 'edit') {
       const existing = current();
       if (!existing) return;
-      // A name/primary edit must not discard additional saved role identities.
+      // Identity edits preserve all peer Workers; roster edits own membership.
       // Native compare-and-swap appends the future-only policy version.
       const input = {
         name:String(data.get('name') ?? '').trim(),
         coordinatorBotId:String(data.get('coordinatorBotId') ?? ''),
-        workerBotId:String(data.get('workerBotId') ?? ''),
-        workerBotIds:[
-          String(data.get('workerBotId') ?? ''),
-          ...(existing.workerBotIds ?? [existing.workerBotId]).slice(1)
-            .filter(id => id !== String(data.get('workerBotId') ?? '')),
-        ],
+        workerBotId:existing.workerBotId, // backward-compatible projection
+        workerBotIds:[...(existing.workerBotIds ?? [existing.workerBotId])],
         reviewerBotIds:[...(existing.reviewerBotIds ?? [])],
         councilRequired:existing.councilRequired === true,
       };

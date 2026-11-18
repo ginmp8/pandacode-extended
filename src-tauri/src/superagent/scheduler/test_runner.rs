@@ -21,6 +21,7 @@ CREATE TRIGGER IF NOT EXISTS sa_test_grant_no_delete BEFORE DELETE ON sa_demand_
 CREATE TABLE IF NOT EXISTS sa_demand_test_runs (
  ticket_id TEXT PRIMARY KEY REFERENCES sa_demand_test_grants(ticket_id) ON DELETE RESTRICT,
  plan_sha256 TEXT NOT NULL, snapshot_sha256 TEXT NOT NULL,
+ worker_proofs_sha256 TEXT NOT NULL DEFAULT '',
  command TEXT NOT NULL, state TEXT NOT NULL
    CHECK(state IN ('running','passed','failed','uncertain')),
  started_at INTEGER NOT NULL, finished_at INTEGER,
@@ -32,6 +33,7 @@ CREATE TABLE IF NOT EXISTS sa_demand_test_attempts (
  ticket_id TEXT NOT NULL REFERENCES sa_demand_test_grants(ticket_id) ON DELETE RESTRICT,
  attempt INTEGER NOT NULL CHECK(attempt BETWEEN 1 AND 2),
  plan_sha256 TEXT NOT NULL, snapshot_sha256 TEXT NOT NULL,
+ worker_proofs_sha256 TEXT NOT NULL DEFAULT '',
  command TEXT NOT NULL, state TEXT NOT NULL CHECK(state='failed'),
  started_at INTEGER NOT NULL, finished_at INTEGER NOT NULL,
  exit_code INTEGER, stdout_sha256 TEXT, stderr_sha256 TEXT,
@@ -156,6 +158,55 @@ pub(super) fn required(db:&rusqlite::Connection,root:&str)->Result<bool> {
     ).map_err(|e|e.to_string())
 }
 
+/// Stable identity of fresh, fully accepted native Worker corrections.
+/// Unrelated Git mutations cannot change this digest or spend retry budget.
+fn worker_proofs_hash(db:&rusqlite::Connection,root:&str)->Result<String> {
+    let expected:i64=db.query_row(
+        "SELECT COUNT(*) FROM sa_work_items WHERE ticket_id=?1",
+        [root],|r|r.get(0),
+    ).map_err(|e|e.to_string())?;
+    let mut stmt=db.prepare(
+        "SELECT item.id,proof.assignment_id,proof.evidence_sha256,child.evidence
+         FROM sa_work_items item
+         JOIN sa_tickets child ON child.id=item.child_ticket_id
+         JOIN sa_work_item_evidence_receipts proof
+           ON proof.item_id=item.id AND proof.child_ticket_id=child.id
+         JOIN sa_assignments latest ON latest.id=proof.assignment_id
+         WHERE item.ticket_id=?1 AND item.state='completed'
+           AND child.state='completed'
+           AND latest.ticket_id=child.id AND latest.state='finished'
+           AND latest.result=child.evidence
+           AND latest.attempt=(SELECT MAX(a.attempt) FROM sa_assignments a
+             WHERE a.ticket_id=child.id)
+           AND proof.reviewed_at>=latest.updated_at
+           AND (item.requires_write=0 OR EXISTS(
+              SELECT 1 FROM sa_worker_write_receipts write
+              WHERE write.ticket_id=child.id
+                AND write.assignment_id=latest.id AND write.state='applied'))
+         ORDER BY item.ordinal,item.id",
+    ).map_err(|e|e.to_string())?;
+    let rows=stmt.query_map([root],|r|Ok((
+        r.get::<_,String>(0)?,r.get::<_,String>(1)?,
+        r.get::<_,String>(2)?,r.get::<_,String>(3)?,
+    ))).map_err(|e|e.to_string())?;
+    let receipts=rows.collect::<rusqlite::Result<Vec<_>>>()
+        .map_err(|e|e.to_string())?;
+    if expected==0 || receipts.len() as i64!=expected {
+        return Err("Current independently approved Worker proofs are required.".into());
+    }
+    let mut sha=Sha256::new();
+    for (item,assignment,evidence,output) in receipts {
+        if digest(output.as_bytes())!=evidence {
+            return Err("Worker approval no longer matches its latest output.".into());
+        }
+        for field in [&item,&assignment,&evidence] {
+            sha.update((field.len() as u64).to_le_bytes());
+            sha.update(field.as_bytes());
+        }
+    }
+    Ok(format!("{:x}",sha.finalize()))
+}
+
 fn snapshot_hash(db:&rusqlite::Connection,root:&str,checkout:&Path)->Result<String> {
     let mut stmt=db.prepare(
         "SELECT item.id,proof.assignment_id,proof.evidence_sha256
@@ -187,20 +238,23 @@ fn snapshot_hash(db:&rusqlite::Connection,root:&str,checkout:&Path)->Result<Stri
 
 /// True only for an executed passing test against the current plan/checkout.
 pub(in crate::superagent) fn verified(db:&rusqlite::Connection,root:&str)->Result<bool> {
-    let row:Option<(String,String,String,String,String,String,String)>=db.query_row(
+    let row:Option<(String,String,String,String,String,String,String,String)>=db.query_row(
         "SELECT grant.checkout_root,grant.command,grant.manifest_sha256,
-           run.plan_sha256,run.snapshot_sha256,plan.plan_sha256,run.state
+           run.plan_sha256,run.snapshot_sha256,plan.plan_sha256,run.state,
+           run.worker_proofs_sha256
          FROM sa_demand_test_grants grant
          JOIN sa_demand_plans plan ON plan.ticket_id=grant.ticket_id
          JOIN sa_demand_test_runs run ON run.ticket_id=grant.ticket_id
          WHERE grant.ticket_id=?1",
-        [root],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,r.get(4)?,r.get(5)?,r.get(6)?)),
+        [root],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?,r.get(3)?,
+            r.get(4)?,r.get(5)?,r.get(6)?,r.get(7)?)),
     ).optional().map_err(|e|e.to_string())?;
-    let Some((checkout,command,hash,plan,snapshot,current,state))=row else {return Ok(false)};
+    let Some((checkout,command,hash,plan,snapshot,current,state,worker_proofs))=row else {return Ok(false)};
     if state!="passed" || plan!=current {return Ok(false);}
     let path=Path::new(&checkout);
     if !std::fs::canonicalize(path).is_ok_and(|p|p==path) {return Ok(false);}
     Ok(manifest_hash(path,&command).ok().as_deref()==Some(hash.as_str())
+        && worker_proofs_hash(db,root).ok().as_deref()==Some(worker_proofs.as_str())
         && snapshot_hash(db,root,path).ok().as_deref()==Some(snapshot.as_str()))
 }
 
@@ -266,10 +320,12 @@ fn reserve(store:&Store)->Result<Option<Reserved>> {
             || manifest_hash(Path::new(&checkout),&command).ok().as_deref()
                 !=Some(manifest.as_str()) {continue;}
         let Ok(snapshot)=snapshot_hash(&store.db,&root,Path::new(&checkout)) else {continue;};
+        let Ok(worker_proofs)=worker_proofs_hash(&store.db,&root) else {continue;};
         // Keep the old terminal failure immutable before replacing the
         // current pointer. Reserve, archive and audit under one transaction.
         let tx=store.db.unchecked_transaction().map_err(|e|e.to_string())?;
-        if !retry_allowed(&tx,&root,&snapshot)? {continue;}
+        if worker_proofs_hash(&tx,&root).ok().as_deref()!=Some(worker_proofs.as_str())
+            || !retry_allowed(&tx,&root,&snapshot,&worker_proofs)? {continue;}
         let existing:bool=tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM sa_demand_test_runs WHERE ticket_id=?1)",
             [&root],|r|r.get(0),
@@ -281,23 +337,25 @@ fn reserve(store:&Store)->Result<Option<Reserved>> {
             ).map_err(|e|e.to_string())?;
             let history=tx.execute(
                 "INSERT INTO sa_demand_test_attempts
-                 (ticket_id,attempt,plan_sha256,snapshot_sha256,command,state,
-                  started_at,finished_at,exit_code,stdout_sha256,stderr_sha256)
-                 SELECT ticket_id,?2,plan_sha256,snapshot_sha256,command,state,
+                 (ticket_id,attempt,plan_sha256,snapshot_sha256,worker_proofs_sha256,
+                  command,state,started_at,finished_at,exit_code,stdout_sha256,stderr_sha256)
+                 SELECT ticket_id,?2,plan_sha256,snapshot_sha256,worker_proofs_sha256,command,state,
                         started_at,finished_at,exit_code,stdout_sha256,stderr_sha256
                  FROM sa_demand_test_runs
                  WHERE ticket_id=?1 AND state='failed' AND finished_at IS NOT NULL
-                   AND snapshot_sha256<>?3",
-                params![root,archived+1,snapshot],
+                   AND snapshot_sha256<>?3 AND worker_proofs_sha256<>?4
+                   AND length(worker_proofs_sha256)=64",
+                params![root,archived+1,snapshot,worker_proofs],
             ).map_err(|e|e.to_string())?;
             if history!=1 {continue;}
             tx.execute(
                 "UPDATE sa_demand_test_runs
                  SET plan_sha256=?2,snapshot_sha256=?3,command=?4,
+                     worker_proofs_sha256=?6,
                      state='running',started_at=?5,finished_at=NULL,
                      exit_code=NULL,stdout_sha256=NULL,stderr_sha256=NULL
                  WHERE ticket_id=?1 AND state='failed'
-                   AND snapshot_sha256<>?3
+                   AND snapshot_sha256<>?3 AND worker_proofs_sha256<>?6
                    AND EXISTS(SELECT 1 FROM sa_demand_plans plan
                      JOIN sa_tickets root ON root.id=plan.ticket_id
                      JOIN sa_mandates m ON m.ticket_id=root.id
@@ -305,13 +363,14 @@ fn reserve(store:&Store)->Result<Option<Reserved>> {
                        AND root.revision=plan.ticket_revision
                        AND plan.state='active' AND plan.plan_sha256=?2
                        AND m.revoked=0 AND m.expires_at>?5)",
-                params![root,plan,snapshot,command,now],
+                params![root,plan,snapshot,command,now,worker_proofs],
             ).map_err(|e|e.to_string())?
         } else {
             tx.execute(
                 "INSERT INTO sa_demand_test_runs
-                 (ticket_id,plan_sha256,snapshot_sha256,command,state,started_at)
-                 SELECT grant.ticket_id,?2,?3,grant.command,'running',?4
+                 (ticket_id,plan_sha256,snapshot_sha256,worker_proofs_sha256,
+                  command,state,started_at)
+                 SELECT grant.ticket_id,?2,?3,?5,grant.command,'running',?4
                  FROM sa_demand_test_grants grant
                  JOIN sa_demand_plans plan ON plan.ticket_id=grant.ticket_id
                  JOIN sa_tickets ticket ON ticket.id=grant.ticket_id
@@ -320,7 +379,7 @@ fn reserve(store:&Store)->Result<Option<Reserved>> {
                    AND plan.plan_sha256=?2 AND ticket.state='queued'
                    AND m.revoked=0 AND m.expires_at>?4
                    AND NOT EXISTS(SELECT 1 FROM sa_demand_test_runs WHERE ticket_id=?1)",
-                params![root,plan,snapshot,now],
+                params![root,plan,snapshot,now,worker_proofs],
             ).map_err(|e|e.to_string())?
         };
         if n==1 {
@@ -338,13 +397,19 @@ fn reserve(store:&Store)->Result<Option<Reserved>> {
 
 /// Retest only a new proof+Git snapshot after an explicitly failed,
 /// settled test. A running/uncertain effect must be reconciled, not replayed.
-fn retry_allowed(db:&rusqlite::Connection,root:&str,new_snapshot:&str)->Result<bool> {
-    let previous:Option<(String,String)>=db.query_row(
-        "SELECT state,snapshot_sha256 FROM sa_demand_test_runs WHERE ticket_id=?1",
-        [root],|r|Ok((r.get(0)?,r.get(1)?)),
+fn retry_allowed(db:&rusqlite::Connection,root:&str,new_snapshot:&str,
+    new_worker_proofs:&str)->Result<bool> {
+    let previous:Option<(String,String,String)>=db.query_row(
+        "SELECT state,snapshot_sha256,worker_proofs_sha256
+         FROM sa_demand_test_runs WHERE ticket_id=?1",
+        [root],|r|Ok((r.get(0)?,r.get(1)?,r.get(2)?)),
     ).optional().map_err(|e|e.to_string())?;
-    let Some((state,old_snapshot))=previous else {return Ok(true)};
-    if state!="failed" || old_snapshot==new_snapshot {return Ok(false);}
+    let Some((state,old_snapshot,old_worker_proofs))=previous else {return Ok(true)};
+    if state!="failed" || old_snapshot==new_snapshot
+        || old_worker_proofs==new_worker_proofs
+        || old_worker_proofs.len()!=64 || new_worker_proofs.len()!=64 {
+        return Ok(false);
+    }
     let archived:i64=db.query_row(
         "SELECT COUNT(*) FROM sa_demand_test_attempts WHERE ticket_id=?1",
         [root],|r|r.get(0),
@@ -706,7 +771,7 @@ mod tests {
         db.execute_batch(
             "CREATE TABLE sa_demand_test_runs(
                ticket_id TEXT PRIMARY KEY,plan_sha256 TEXT,snapshot_sha256 TEXT,
-               command TEXT,state TEXT,started_at INTEGER,finished_at INTEGER,
+               worker_proofs_sha256 TEXT,command TEXT,state TEXT,started_at INTEGER,finished_at INTEGER,
                exit_code INTEGER,stdout_sha256 TEXT,stderr_sha256 TEXT);
              CREATE TABLE sa_demand_test_attempts(
                ticket_id TEXT NOT NULL,attempt INTEGER NOT NULL,
@@ -715,26 +780,26 @@ mod tests {
                exit_code INTEGER,stdout_sha256 TEXT,stderr_sha256 TEXT,
                PRIMARY KEY(ticket_id,attempt));",
         ).unwrap();
-        assert!(retry_allowed(&db,"demand","first").unwrap());
+        assert!(retry_allowed(&db,"demand","first",&"a".repeat(64)).unwrap());
         db.execute(
             "INSERT INTO sa_demand_test_runs VALUES(
-               'demand','plan','first','npm test','failed',1,2,1,'a','b')",[],
+               'demand','plan','first',?1,'npm test','failed',1,2,1,'a','b')",["a".repeat(64)],
         ).unwrap();
         assert!(!retry_allowed(&db,"demand","first").unwrap());
-        assert!(retry_allowed(&db,"demand","second").unwrap());
+        assert!(retry_allowed(&db,"demand","second",&"b".repeat(64)).unwrap());
         for (attempt,old,new) in [(1,"first","second"),(2,"second","third")] {
             db.execute(
                 "INSERT INTO sa_demand_test_attempts
-                 SELECT ticket_id,?1,plan_sha256,snapshot_sha256,command,state,
+                 SELECT ticket_id,?1,plan_sha256,snapshot_sha256,worker_proofs_sha256,command,state,
                         started_at,finished_at,exit_code,stdout_sha256,stderr_sha256
                  FROM sa_demand_test_runs WHERE ticket_id='demand'",
                 [attempt],
             ).unwrap();
             db.execute(
-                "UPDATE sa_demand_test_runs SET snapshot_sha256=?1,
+                "UPDATE sa_demand_test_runs SET snapshot_sha256=?1,worker_proofs_sha256=?2,
                     state='failed',started_at=started_at+2,finished_at=finished_at+2
                  WHERE ticket_id='demand'",
-                [new],
+                params![new,format!("{}",(b'a'+attempt as u8) as char).repeat(64)],
             ).unwrap();
             let archived:String=db.query_row(
                 "SELECT snapshot_sha256 FROM sa_demand_test_attempts
@@ -742,13 +807,34 @@ mod tests {
                 [attempt],|r|r.get(0),
             ).unwrap();
             assert_eq!(archived,old);
-            assert!(!retry_allowed(&db,"demand",new).unwrap());
+            assert!(!retry_allowed(&db,"demand",new,&format!("{}",(b'a'+attempt as u8) as char).repeat(64)).unwrap());
         }
-        assert!(!retry_allowed(&db,"demand","fourth").unwrap());
+        assert!(!retry_allowed(&db,"demand","fourth",&"d".repeat(64)).unwrap());
         db.execute(
             "UPDATE sa_demand_test_runs SET state='uncertain'",[],
         ).unwrap();
-        assert!(!retry_allowed(&db,"demand","fifth").unwrap());
+        assert!(!retry_allowed(&db,"demand","fifth",&"e".repeat(64)).unwrap());
+    }
+
+    #[test]
+    fn unrelated_git_changes_cannot_spend_a_worker_repair_attempt() {
+        let db=rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch(
+            "CREATE TABLE sa_demand_test_runs(
+                ticket_id TEXT PRIMARY KEY,state TEXT,snapshot_sha256 TEXT,
+                worker_proofs_sha256 TEXT);
+             CREATE TABLE sa_demand_test_attempts(ticket_id TEXT);
+             INSERT INTO sa_demand_test_runs VALUES(
+                 'root','failed','original','aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');",
+        ).unwrap();
+        let worker_a="a".repeat(64);
+        let worker_b="b".repeat(64);
+        assert!(!retry_allowed(&db,"root","changed-git-only",&worker_a).unwrap());
+        assert!(retry_allowed(&db,"root","changed-with-new-worker",&worker_b).unwrap());
+        db.execute("UPDATE sa_demand_test_runs SET state='uncertain'",[]).unwrap();
+        assert!(!retry_allowed(&db,"root","changed-with-new-worker",&worker_b).unwrap());
+        db.execute("UPDATE sa_demand_test_runs SET state='passed'",[]).unwrap();
+        assert!(!retry_allowed(&db,"root","changed-with-new-worker",&worker_b).unwrap());
     }
 
     #[test]
